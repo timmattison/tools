@@ -103,6 +103,28 @@ fn reports_the_status_of_a_run_that_finished() {
 }
 
 #[test]
+fn the_status_is_absent_until_the_run_ends() {
+    // Nothing reads the pipe while the stream waits, so a wait before the
+    // output closes stops forever once the pipe is full. The status stays
+    // absent until the run ends.
+    let script = block(4_500);
+    let mut stream = SampleStream::from_command(stand_in(&script, 7)).expect("a stream");
+
+    assert_eq!(
+        stream.exit_status(),
+        None,
+        "a stream with output still to read must report no status"
+    );
+
+    assert_eq!(stream.by_ref().count(), 1);
+    assert_eq!(
+        stream.exit_status().expect("a status").code(),
+        Some(7),
+        "the status must be available once the output closed"
+    );
+}
+
+#[test]
 fn the_status_is_the_same_however_often_it_is_asked_for() {
     let mut stream = SampleStream::from_command(stand_in("", 3)).expect("a stream");
     assert_eq!(stream.by_ref().count(), 0);
