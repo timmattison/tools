@@ -98,7 +98,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       measured P-cluster frequency against the DVFS table of the chip is the ground truth. This tool samples both
       once a second, optionally makes its own full P-core load, and reports how far the clock decayed from its
       early peak. `--load` makes the load, `--duration` sets how long, up to 86400 seconds, and `--json` prints
-      one object per sample.
+      one object per sample and then one final object that carries the verdict.
       Needs `sudo`, because `powermetrics` does.
     - To install: `cargo install --git https://github.com/timmattison/tools thermal-watch`
 - htmlboard

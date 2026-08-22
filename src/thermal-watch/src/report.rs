@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use serde::ser::{Serialize, SerializeMap, Serializer};
+use serde::Serialize;
 
 use crate::dvfs::DvfsTable;
 use crate::mhz::Mhz;
@@ -69,7 +69,13 @@ pub const DECAY_TOLERANCE: f64 = 0.05;
 pub const MINIMUM_BUSY_SAMPLES: usize = 5;
 
 /// What the run showed.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// In JSON, each variant becomes an `outcome` key that names it in lower snake
+/// case, and the data of the variant sits beside that key rather than under it.
+/// [`Outcome::Throttled`] adds `decay`, [`Outcome::NotEnoughData`] adds
+/// `busy_samples`, and the other two add nothing.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Outcome {
     /// The P-cluster was never busy for long enough to judge.
     NotEnoughData {
@@ -88,9 +94,12 @@ pub enum Outcome {
 }
 
 /// The measured summary of one run.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Verdict {
-    /// What the run showed.
+    /// What the run showed. In JSON it becomes an `outcome` key beside the
+    /// measurements, together with the data the outcome carries. See
+    /// [`Outcome`].
+    #[serde(flatten)]
     pub outcome: Outcome,
     /// The peak clock the P-cluster reached while busy.
     pub peak: Mhz,
@@ -116,20 +125,18 @@ pub struct Verdict {
 ///
 /// Build one with [`verdict_line`]. The field is private, so the shape has one
 /// entrance and the printed stream cannot drift from what the tests hold.
-#[derive(Debug)]
+///
+/// ```text
+/// {"verdict":{"outcome":"throttled","decay":0.244,"peak":4500,"early_mean":4500,
+///  "late_mean":3400,"late_ratio_of_max":0.754,"peak_power_mw":48500,
+///  "worst_pressure":"nominal"}}
+/// ```
+///
+/// The tool prints it on one line. It is broken here to fit the page.
+#[derive(Debug, Serialize)]
 pub struct VerdictLine<'a> {
     /// The verdict this line carries.
-    #[allow(
-        dead_code,
-        reason = "the stub does not read it yet; the real shape comes next"
-    )]
     verdict: &'a Verdict,
-}
-
-impl Serialize for VerdictLine<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_map(Some(0))?.end()
-    }
 }
 
 /// Wrap a verdict in the shape the JSON mode prints it. See [`VerdictLine`].

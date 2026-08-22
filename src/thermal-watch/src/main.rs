@@ -11,7 +11,9 @@ use thermal_watch::dvfs::DvfsTable;
 use thermal_watch::load::{performance_core_count, Load};
 use thermal_watch::powermetrics::{SampleStream, SAMPLERS};
 use thermal_watch::render::sample_line;
-use thermal_watch::report::{judge, Outcome, Verdict, BUSY_THRESHOLD_PCT, HOLD_RATIO};
+use thermal_watch::report::{
+    judge, verdict_line, Outcome, Verdict, BUSY_THRESHOLD_PCT, HOLD_RATIO,
+};
 
 /// How often `powermetrics` reports a sample.
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -48,7 +50,8 @@ struct Args {
     #[clap(long, default_value_t = 300)]
     duration: u64,
 
-    /// Print one JSON object for each sample instead of a live display
+    /// Print one JSON object for each sample and then one final object that
+    /// carries the verdict, instead of a live display
     #[clap(long)]
     json: bool,
 }
@@ -111,8 +114,15 @@ fn main() -> Result<()> {
         load.stop();
     }
 
-    if !args.json {
-        report(&judge(&samples, &table), args.load, &mut out)?;
+    // Both modes end with the verdict. A machine-readable run that stopped at
+    // the last sample gave the measurements and never the answer, and left its
+    // reader to rebuild the judgement from the numbers.
+    let verdict = judge(&samples, &table);
+    if args.json {
+        writeln!(out, "{}", serde_json::to_string(&verdict_line(&verdict))?)?;
+        out.flush()?;
+    } else {
+        report(&verdict, args.load, &mut out)?;
     }
     Ok(())
 }

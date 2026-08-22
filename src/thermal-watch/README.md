@@ -38,16 +38,19 @@ verdict is built on.
 sudo thermal-watch --load                 # make a 5-minute load and watch it
 sudo thermal-watch --load --duration 900  # 15 minutes, the interesting case
 sudo thermal-watch                        # watch a build you started
-sudo thermal-watch --json                 # one JSON object for each sample
+sudo thermal-watch --json                 # one object for each sample, then the verdict
 ```
 
 | Option | What it does |
 | --- | --- |
 | `--load` | Make a full P-core load instead of watching one you started. |
 | `--duration <SECONDS>` | How long to watch. The default is 300. The maximum is 86400, which is one day. |
-| `--json` | Print one JSON object for each sample instead of the live display. |
+| `--json` | Print one JSON object for each sample, and then one final object that carries the verdict, instead of the live display. |
 
 ## Reading the output
+
+Both modes end with the verdict. The live display writes it as a report, and
+the `--json` mode writes it as one final object.
 
 Each line of the live display carries the time from the start, a bar of the
 clock against the peak of the chip, the clock itself, how busy the P-cluster
@@ -62,17 +65,38 @@ Making a full P-core load for 900s. Press Ctrl-C to stop early.
 04:31  ██████████████████▎      3.44 GHz ( 76% of max)  busy  99.9%  cpu  27.1W  Nominal
 ```
 
-The run ends with one of four verdicts:
+The run ends with one of four verdicts. Each mode names them in its own way:
+the report prints the name in the first column, and the JSON `outcome` key
+holds the name in the second.
 
-| Verdict | What it means |
-| --- | --- |
-| `HeldClock` | The clock held near the peak for the whole run. No throttling. |
-| `Throttled` | The clock started near the peak and then decreased. This is thermal throttling, or a power limit. |
-| `NeverReachedPeak` | The clock was low from the first sample on. It never decayed, so this is not heat — look for another load on the machine. |
-| `NotEnoughData` | The P-cluster was never busy for long enough to judge. |
+| Verdict | In JSON | What it means |
+| --- | --- | --- |
+| `HeldClock` | `held_clock` | The clock held near the peak for the whole run. No throttling. |
+| `Throttled` | `throttled` | The clock started near the peak and then decreased. This is thermal throttling, or a power limit. |
+| `NeverReachedPeak` | `never_reached_peak` | The clock was low from the first sample on. It never decayed, so this is not heat — look for another load on the machine. |
+| `NotEnoughData` | `not_enough_data` | The P-cluster was never busy for long enough to judge. |
 
 A `Throttled` verdict beside a `Nominal` pressure level is the normal case, not
 a contradiction. The report says so.
+
+### The JSON mode
+
+`--json` prints the same run as line-delimited JSON. Each sample is one object.
+The last line is one more object, and it carries the verdict of the run.
+
+```text
+{"at_seconds":7.0,"p_freq":4500,"p_active_pct":99.9,"e_freq":1020,"cpu_power_mw":38200,"gpu_power_mw":0,"pressure":"nominal"}
+{"verdict":{"outcome":"throttled","decay":0.244,"peak":4500,"early_mean":4500,"late_mean":3400,"late_ratio_of_max":0.754,"peak_power_mw":48500,"worst_pressure":"nominal"}}
+```
+
+A reader tells the two kinds of line apart by one key: a sample carries
+`at_seconds` and no `verdict`, and the verdict carries `verdict` and no
+`at_seconds`.
+
+The data of the outcome sits beside `outcome`, not under it. `throttled` adds
+`decay`, which is the share of the early mean that was lost. `not_enough_data`
+adds `busy_samples`, which is the count of busy samples the run collected. The
+other two outcomes add nothing.
 
 ## Why the IO Registry, and not `ioreg`
 
