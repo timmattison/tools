@@ -7,20 +7,6 @@
 //! reason this module classifies the keys itself: it is the one part of the
 //! live run that can stop a run that the user asked to stop.
 
-// The run loop reads the headless screen of this module. The live table waits
-// for the caller that chooses between the two screens, and that caller joins
-// in the next step of this work. One attribute stands here, and not one
-// attribute for each item of the table, because those items are dead for one
-// reason: no caller. The expectation fails once that caller stands, which
-// takes this attribute back off.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the caller that picks the live table joins this module in the next step of this work"
-    )
-)]
-
 use crate::record::{NameRecord, RoundRecord};
 use crate::stats::HopTable;
 use crate::ui;
@@ -156,8 +142,16 @@ pub(crate) trait Keys {
 }
 
 /// The key source of a run that reads no key.
+///
+/// No run of the tool builds this source. A run that draws the table holds a
+/// terminal and reads the keys of it, and a run that holds no terminal draws no
+/// table and takes no key source at all. The source is therefore a part of a
+/// test build and no part of a build that ships, and the tests of a turn that
+/// took no key are what read it.
+#[cfg(test)]
 pub(crate) struct NoKeys;
 
+#[cfg(test)]
 impl Keys for NoKeys {
     fn presses(&mut self) -> Vec<Command> {
         Vec::new()
@@ -175,10 +169,6 @@ impl Keys for NoKeys {
 /// the keys of the terminal of `cargo test` takes the keys of the reader who
 /// started it. The pseudo terminal of a later step of this work is what drives
 /// this source.
-#[expect(
-    dead_code,
-    reason = "the caller that picks the live table joins this module in the next step of this work"
-)]
 pub(crate) struct Keyboard;
 
 impl Keys for Keyboard {
@@ -674,10 +664,6 @@ fn restore_panic_hook(previous: PanicHook) {
 /// takes the terminal of the reader who started it. The pseudo terminal of a
 /// later step of this work is what drives the guard. The panic hook of the
 /// guard holds no terminal, and the tests above drive that hook on its own.
-#[expect(
-    dead_code,
-    reason = "the caller that picks the live table joins this module in the next step of this work"
-)]
 pub(crate) struct TerminalGuard {
     /// The panic hook that stood before [`TerminalGuard::enter`] wrapped it.
     ///
@@ -706,10 +692,6 @@ impl TerminalGuard {
     /// the alternate screen. A terminal that refused the second of the two
     /// comes all the way back before the fault answers, so a run that stops
     /// here leaves no terminal in raw mode.
-    #[expect(
-        dead_code,
-        reason = "the caller that picks the live table joins this module in the next step of this work"
-    )]
     pub(crate) fn enter() -> std::io::Result<Self> {
         enable_raw_mode()?;
         if let Err(fault) = execute!(std::io::stdout(), EnterAlternateScreen, Hide) {
