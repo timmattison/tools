@@ -1204,6 +1204,25 @@ mod tests {
     }
 
     #[test]
+    fn a_headless_screen_shows_no_name() {
+        // A name belongs to a row of a table, and a headless run draws no
+        // table. The name record reaches the recorded file whatever the screen
+        // does, so a replay of that file names every address that a lookup
+        // answered.
+        let clock = FakeClock::new();
+        let mut screen = headless(&clock);
+        screen.round(&a_whole_path_round());
+        screen.sink.clear();
+
+        screen.names(&[name(ROUTER, ROUTER_NAME)]);
+        assert!(
+            screen.sink.is_empty(),
+            "the names that arrived print nothing: {:?}",
+            printed(&screen.sink)
+        );
+    }
+
+    #[test]
     fn the_q_key_asks_for_a_quit() {
         assert_eq!(classify(press(KeyCode::Char('q'))), Some(Command::Quit));
     }
