@@ -17,6 +17,8 @@ use crate::snapshot::build_snapshot;
 mod age;
 mod bar;
 mod git;
+/// Cutting a child process's byte chunks into lines that are safe to paint.
+mod lines;
 mod push;
 mod render;
 mod repo;
@@ -44,7 +46,12 @@ mod watch;
                   branch after a confirmation that names what it will do — a branch not yet on \
                   the remote is confirmed as creating one. A push whose branch stopped being \
                   checked out between the question and the answer is refused, not redirected. \
-                  p never force-pushes."
+                  p never force-pushes.\n\n\
+                  While a push runs, a notice reports how long it has taken, and up to six rows \
+                  under it carry the newest output from git and from any pre-push hook. Each row \
+                  arrives as the hook writes it, so a hook that builds and tests a workspace \
+                  shows its progress rather than leaving the screen frozen. A push that fails \
+                  shows the last lines of what was said, which is where a hook puts its reason."
 )]
 struct Cli {
     /// Render once and exit instead of entering the live watch loop. This is

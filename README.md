@@ -461,19 +461,33 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       the remote and refspec. The remote for a new branch is `remote.pushDefault` if set, else the
       only remote whatever it is called, else `origin` — and gsw refuses rather than guess when a
       repository has several remotes and none of them settles it. `p` never force-pushes.
+    - While the push runs, gsw shows what it says. A `Pushing… (1m12s)` notice reports how long
+      the push has taken. Up to six rows under it carry the newest output from git and from any
+      `pre-push` hook. The rows are indented and dimmed, because they are another program speaking
+      inside gsw's frame. Each row arrives as the hook writes it, not when the hook finishes — so
+      a hook that builds and tests a workspace shows its progress rather than leaving the screen
+      frozen. A hook that prints faster than the screen can be read does not hold the frame
+      either: the pane repaints about four times a second for as long as output keeps coming,
+      rather than once when it stops. A short pane drops the oldest rows and keeps the notice.
+      Tabs become spaces and color escapes are removed, so no row can wrap the pane or repaint
+      gsw's own colors. A progress bar that redraws itself with a carriage return shows its newest
+      state on one row, rather than every state pasted together.
     - The push runs off the render thread, so the countdown, the ages, and resizes keep working
       while it is in flight, and a second `p` cannot start an overlapping push. git's own error
       text is shown under the frame in red (up to three rows, `hint:` advice dropped first, and
       fewer rows still on a pane too short to spare three — the frame always keeps a row) and
-      stays there until you press a key. A push that succeeds re-walks the repository immediately,
-      so the ahead/behind arrows match what just happened. Nothing the push runs can prompt at the
-      terminal — it would be reading the same keystrokes gsw is. The push is started detached from
-      the terminal — its own session on Unix, no inherited console on Windows — so nothing in its
-      process tree can reach the keyboard gsw is reading, not git, not ssh, and not anything below
-      them: an HTTPS remote that wants a password, a passphrase-protected key with no agent, and an
-      unknown host key all fail fast and say so under the frame instead of hanging behind a
-      question gsw never drew. Credential helpers and a GUI askpass still work — neither needs the
-      terminal.
+      stays there until you press a key. Those are the **last** three lines, not the first: a
+      `pre-push` hook prints its whole run before it fails and git adds its verdict after, so the
+      reason a push failed is at the end of what was said. A plain rejection reads the same either
+      way, because git writes exactly three non-hint lines for one. A push that succeeds re-walks
+      the repository immediately, so the ahead/behind arrows match what just happened. Nothing the
+      push runs can prompt at the terminal — it would be reading the same keystrokes gsw is. The
+      push is started detached from the terminal — its own session on Unix, no inherited console
+      on Windows — so nothing in its process tree can reach the keyboard gsw is reading, not git,
+      not ssh, and not anything below them: an HTTPS remote that wants a password, a
+      passphrase-protected key with no agent, and an unknown host key all fail fast and say so
+      under the frame instead of hanging behind a question gsw never drew. Credential helpers and
+      a GUI askpass still work — neither needs the terminal.
     - Everything gsw says itself goes away on its own: `Pushed 3 commits to origin/my-branch
       (12s ago)` counts up in place, fades toward black as it goes, and takes itself off the
       screen after a minute — the frame gets the row back with no key pressed. Refusals

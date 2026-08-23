@@ -333,7 +333,34 @@ pub(crate) fn next_tick(freshest_age: Duration) -> Option<Duration> {
 /// it renders — the debounce / coalescing window. A burst of writes (a `git
 /// commit` touching many `.git/` files, an editor's save-and-rename dance)
 /// arrives inside this window and collapses into a single repaint.
+///
+/// A quiet channel is the only thing that ends the drain for every event but
+/// one. [`Event::PushOutput`] is the exception, and [`PUSH_DRAIN_BUDGET`] says
+/// why.
 const DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// How long the drain goes on absorbing a running push's output before it
+/// leaves and paints, whatever is still queued behind it.
+///
+/// [`DEBOUNCE`] ends a drain on a channel that has gone quiet, which is the
+/// right rule for a filesystem burst: a burst is finite, and its end is what
+/// says the repository has settled. A push's output is neither. A pre-push
+/// hook that builds and tests a workspace prints far faster than one line per
+/// [`DEBOUNCE`], for minutes on end, so a drain with no deadline of its own
+/// would absorb the whole build and paint once when it finished — the window
+/// empty and the `Pushing…` age frozen throughout, which is precisely the
+/// frozen screen the output window exists to answer.
+///
+/// The accepted cost is one repaint per 250 ms while a push is streaming, and
+/// only while one is: the deadline is armed by the first
+/// [`Event::PushOutput`] of a wake and the clock is not read at all on a wake
+/// that sees none, so a filesystem burst still coalesces byte for byte as it
+/// did before this constant existed. 250 ms is above the ~100 ms at which a
+/// screen stops reading as live and far below the point at which a reader
+/// would call it stuck, and it is deliberately longer than [`DEBOUNCE`]: a
+/// budget shorter than the debounce window would repaint on lines a single
+/// window could have carried together.
+const PUSH_DRAIN_BUDGET: Duration = Duration::from_millis(250);
 
 /// Whether a filesystem change may walk git right now, or must wait out the
 /// adaptive cooldown. Returned by [`WalkSchedule::on_change`].
@@ -608,7 +635,23 @@ enum Event {
     PushConfirmed,
     /// The user declined the push at the prompt (`n`, Esc, or `q`).
     PushCancelled,
+    /// A running push wrote a line. Carried one line at a time rather than as
+    /// a batch at the end, because the point of it is to arrive early: a
+    /// pre-push hook can hold the push for minutes, and a batch would land
+    /// when the wait it explains is already over.
+    ///
+    /// Arriving early is only half of it — the loop must also *leave* its
+    /// debounce drain to paint what arrived, and this is the only event that
+    /// can go on producing for the length of the push. [`PUSH_DRAIN_BUDGET`]
+    /// is what stops the drain re-batching what the runner deliberately did
+    /// not.
+    PushOutput(String),
     /// A push that was running has finished, either way.
+    ///
+    /// Always arrives after the last [`Event::PushOutput`] of the same push.
+    /// The runner joins its reader threads before it reports, so every line is
+    /// already on this channel by the time the outcome is sent — which is what
+    /// keeps a late line from reopening a window the outcome just closed.
     PushFinished(crate::push::PushOutcome),
     /// A key press with no other meaning. Clears a status message if one is on
     /// screen and does nothing otherwise, which is what keeps a push error up
@@ -793,10 +836,21 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 // without one — this is the type's `Option` being honored, not
                 // a case the user can reach.
                 if let Some(workdir) = workdir.clone() {
-                    let tx = push_tx.clone();
-                    crate::push::spawn(command, workdir, move |outcome| {
-                        let _ = tx.send(Event::PushFinished(outcome));
-                    });
+                    // Two senders on the one channel, so a line and the
+                    // outcome re-enter the loop the same way every other event
+                    // does — applied between frames rather than during one.
+                    let line_tx = push_tx.clone();
+                    let finish_tx = push_tx.clone();
+                    crate::push::spawn(
+                        command,
+                        workdir,
+                        move |line| {
+                            let _ = line_tx.send(Event::PushOutput(line));
+                        },
+                        move |outcome| {
+                            let _ = finish_tx.send(Event::PushFinished(outcome));
+                        },
+                    );
                 }
             },
         },
@@ -1058,10 +1112,11 @@ where
         // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing.
         Event::PushConfirmed => {
-            if let Some(command) = ui.confirm() {
+            if let Some(command) = ui.confirm(clock()) {
                 start_push(command);
             }
         }
+        Event::PushOutput(line) => ui.output_line(line),
         Event::PushCancelled => ui.cancel(),
         Event::Dismiss => ui.dismiss(),
         Event::PushFinished(outcome) => {
@@ -1220,12 +1275,23 @@ where
         };
 
         // Coalesce a filesystem burst: keep draining until the channel stays
-        // quiet for a full `debounce`. A tick has no burst behind it.
+        // quiet for a full `debounce` — or, once a running push has streamed a
+        // line into this drain, until `PUSH_DRAIN_BUDGET` has passed since it
+        // did. A burst ends on its own, so a quiet channel is the signal that
+        // it has; a push's output need not end for minutes, so it gets a
+        // deadline instead of a signal. A tick has no burst behind it.
         let mut quitting = false;
         if !woke_for_timeout {
+            // Armed by the first line of push output this drain sees, and left
+            // `None` otherwise — so a drain with no push behind it reads the
+            // clock exactly as many times as it did before this deadline
+            // existed, and filesystem coalescing is unchanged.
+            let mut drain_until: Option<Instant> = None;
             loop {
                 match rx.recv_timeout(debounce) {
                     Ok(event) => {
+                        // Asked before `absorb`, which takes the event by value.
+                        let streamed = matches!(event, Event::PushOutput(_));
                         if absorb(
                             event,
                             &mut pending,
@@ -1243,6 +1309,13 @@ where
                             // it goes away.
                             quitting = true;
                             break;
+                        }
+                        if streamed {
+                            let due = *drain_until
+                                .get_or_insert_with(|| (hooks.clock)() + PUSH_DRAIN_BUDGET);
+                            if (hooks.clock)() >= due {
+                                break;
+                            }
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => break,
@@ -2731,7 +2804,7 @@ mod tests {
     /// reads the clock several times per iteration, so a stepping clock is what
     /// lets a test cross a scheduled deadline without sleeping — deterministic
     /// and parallel-safe, unlike a real timer.
-    fn stepping_clock(base: Instant, step: Duration) -> impl Fn() -> Instant {
+    pub(super) fn stepping_clock(base: Instant, step: Duration) -> impl Fn() -> Instant {
         let reads = std::cell::Cell::new(0_u32);
         move || {
             let n = reads.get();
@@ -4080,7 +4153,7 @@ mod tests {
 
 #[cfg(test)]
 mod push_loop_tests {
-    use super::tests::{frame, timer_off, TEST_DEBOUNCE, TEST_DIMS};
+    use super::tests::{frame, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS};
     use super::*;
     use crate::push::PushOutcome;
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -4124,7 +4197,7 @@ mod push_loop_tests {
     fn pushed_ui(at: Instant) -> PushUi {
         let mut ui = PushUi::new(false);
         ui.request(&pushable_snapshot(), TEST_DIMS, at);
-        ui.confirm();
+        ui.confirm(at);
         ui.finished(
             crate::push::PushOutcome {
                 success: true,
@@ -4142,6 +4215,12 @@ mod push_loop_tests {
         collects: usize,
         pushes: Vec<PushCommand>,
         frame_heights: Vec<usize>,
+        /// Every screen the loop actually painted, in order. The last of them
+        /// is what the returned `displayed` holds; the list is what a test
+        /// about *when* the screen moved needs, because a loop that paints the
+        /// right thing once at the end and a loop that paints it as it happens
+        /// leave the same final screen behind.
+        paints: Vec<String>,
     }
 
     /// Run the loop over a pre-loaded event queue and report what it did.
@@ -4172,10 +4251,30 @@ mod push_loop_tests {
 
     /// The shared body: pre-load the queue, run the loop against `dims`, and
     /// report the last painted screen plus what the hooks saw.
+    ///
+    /// The clock is frozen, so nothing on screen ages between paints and every
+    /// assertion is about the queued events alone.
     fn run_loop_with(
         events: Vec<Event>,
         dims: Dimensions,
         render_frame: fn(Dimensions) -> String,
+    ) -> (String, Seen) {
+        let base = Instant::now();
+        run_loop_clocked(events, dims, render_frame, move || base)
+    }
+
+    /// [`run_loop_with`] with the loop's clock supplied by the caller.
+    ///
+    /// Split out because one test is about a *deadline* rather than about
+    /// events, and a clock that steps on every read is what crosses a deadline
+    /// without sleeping. `clock` is read once up front for the cache's
+    /// collection time, so a frozen clock lands on exactly the instant this
+    /// helper used before the split.
+    fn run_loop_clocked<Clock: Fn() -> Instant>(
+        events: Vec<Event>,
+        dims: Dimensions,
+        render_frame: fn(Dimensions) -> String,
+        clock: Clock,
     ) -> (String, Seen) {
         let (tx, rx) = mpsc::channel();
         for event in events {
@@ -4183,7 +4282,7 @@ mod push_loop_tests {
         }
         let seen = RefCell::new(Seen::default());
         let mut displayed = String::new();
-        let base = Instant::now();
+        let base = clock();
 
         event_loop(
             &rx,
@@ -4205,8 +4304,11 @@ mod push_loop_tests {
                     frame(&render_frame(frame_dims))
                 },
                 dimensions: move || dims,
-                paint: |_output: &str| Ok(()),
-                clock: move || base,
+                paint: |output: &str| {
+                    seen.borrow_mut().paints.push(output.to_string());
+                    Ok(())
+                },
+                clock,
                 next_tick: timer_off,
                 start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
             },
@@ -4541,17 +4643,97 @@ mod push_loop_tests {
     }
 
     #[test]
-    fn an_overlay_that_does_not_fit_drops_its_last_lines() {
-        // git leads with the part worth reading — `To <remote>`, then the
-        // rejection — so a message that has to lose rows loses them off the
-        // bottom.
+    fn a_line_from_a_running_push_reaches_the_screen() {
+        // The runner reports on its own reader threads, and this is the hop
+        // that turns a reported line into a painted row. Without it the window
+        // is a state nothing ever fills.
+        let (displayed, _) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushOutput("Compiling gsw v0.1.0".to_string()),
+            Event::Quit,
+        ]);
+
+        let painted = strip_ansi(&displayed);
+        assert!(
+            painted.contains("Compiling gsw v0.1.0"),
+            "the reported line must reach the pane, got {painted:?}",
+        );
+    }
+
+    /// How far the flood test's clock jumps on every read. Short enough that
+    /// several lines land inside one drain budget — a deadline that fired on
+    /// the first line would prove far less than this test claims — and long
+    /// enough that the whole flood cannot fit inside one.
+    const FLOOD_STEP: Duration = Duration::from_millis(50);
+
+    /// How many lines the flood queues behind the confirmation. More than any
+    /// one drain budget can swallow at [`FLOOD_STEP`], so a loop that only
+    /// leaves the drain on a quiet channel paints exactly once.
+    const FLOOD_LINES: usize = 20;
+
+    #[test]
+    fn a_flooding_push_paints_while_it_floods() {
+        // Why the window exists at all: a pre-push hook that builds and tests
+        // a workspace prints faster than one line per debounce window, and the
+        // drain ends only on a channel that goes quiet. Every line absorbed
+        // before the loop leaves the drain is a line nobody sees until the
+        // flood is over — the notice's age frozen with it — which is exactly
+        // the frozen screen this feature was supposed to answer.
+        //
+        // The clock steps on every read, so the drain's deadline is crossed
+        // without sleeping: deterministic, and parallel-safe.
+        let mut events = vec![key(KeyCode::Char('p')), key(KeyCode::Char('y'))];
+        events.extend(
+            (1..=FLOOD_LINES).map(|line| Event::PushOutput(format!("Compiling crate {line}"))),
+        );
+        events.push(Event::Quit);
+
+        let (_, seen) = run_loop_clocked(
+            events,
+            TEST_DIMS,
+            |_frame_dims| "FRAME".to_string(),
+            stepping_clock(Instant::now(), FLOOD_STEP),
+        );
+
+        assert!(
+            seen.paints.len() > 1,
+            "a flooding push must paint while it floods, not once when it stops; \
+             {FLOOD_LINES} lines produced {} painted screen(s)",
+            seen.paints.len(),
+        );
+        let first = strip_ansi(seen.paints.first().expect("at least one paint"));
+        assert!(
+            first.contains("Compiling crate 1"),
+            "the first paint must carry the head of the flood, got {first:?}",
+        );
+        assert!(
+            !first.contains(&format!("Compiling crate {FLOOD_LINES}")),
+            "the first paint must land while the flood is still running, got {first:?}",
+        );
+    }
+
+    #[test]
+    fn an_overlay_that_does_not_fit_drops_its_first_lines() {
+        // A failure's reason is the last thing said about it, so a message
+        // that has to lose rows loses them off the top. `To <remote>` names a
+        // remote the frame above already shows, which makes it the row the
+        // clip can most afford.
+        //
+        // The same rule is stated against `PushUi` directly in
+        // `a_message_taller_than_the_pane_keeps_the_rows_the_frame_can_spare`.
+        // This one is here because the loop divides the pane, and a division
+        // that disagreed with the overlay would scroll the screen.
         let (displayed, _) = run_loop_in_pane(a_three_row_failure(), SHORT_PANE);
         let painted = strip_ansi(&displayed);
-        assert!(painted.contains("To /tmp/origin"), "got {painted:?}");
+        assert!(
+            painted.contains("error: failed to push some refs"),
+            "the verdict must survive the clip, got {painted:?}",
+        );
         assert!(painted.contains("! [rejected]"), "got {painted:?}");
         assert!(
-            !painted.contains("error: failed to push some refs"),
-            "the tail must be the part that is dropped, got {painted:?}",
+            !painted.contains("To /tmp/origin"),
+            "the head must be the part that is dropped, got {painted:?}",
         );
     }
 

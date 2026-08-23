@@ -8,6 +8,7 @@
 //! [`spawn`], starts a process: the push itself, and the read of HEAD that
 //! checks the repository is still on the branch the confirmation named.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ use std::time::{Duration, Instant};
 use colored::{ColoredString, Colorize};
 
 use crate::age::{format_age_detailed, scale_rgb};
+use crate::lines::LineSplitter;
 use crate::render::{truncate_right, Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
 use crate::watch::{Dimensions, InputMode};
@@ -24,12 +26,25 @@ use crate::watch::{Dimensions, InputMode};
 /// A rejected push can produce a dozen lines of hints, and the frame below is
 /// what the user is actually watching. Three rows is enough for git's
 /// `To <remote>` / `! [rejected] …` / `error: failed to push …` triple, which
-/// is the part that says what went wrong.
+/// is the part that says what went wrong — and enough, when a pre-push hook
+/// failed instead, for the line that failed and git's verdict on it.
 ///
 /// A ceiling, not a promise: a pane with fewer than four rows cannot spare
 /// three and still show a frame, so [`PushUi::overlay`] clips the message
 /// further. This is the most the user will ever see, not the least.
 const MAX_STATUS_ROWS: usize = 3;
+
+/// Most rows of a running push's own output the window under the frame will
+/// ever show.
+///
+/// A pre-push hook that builds and tests a workspace prints hundreds of lines,
+/// and the six that matter are the six that just arrived. Six is also small
+/// enough that the frame — the thing watch mode is for — keeps most of a short
+/// pane while a push runs.
+///
+/// A ceiling, not a promise: [`PushUi::overlay`] shows fewer in a pane that
+/// cannot spare six, and drops the oldest rather than the newest when it does.
+const MAX_PUSH_OUTPUT_ROWS: usize = 6;
 
 /// Git's prefix for advice lines. They follow the real error and explain
 /// general remedies, so they are the first thing to drop when the message has
@@ -250,11 +265,12 @@ pub(crate) fn prompt_for(
 /// Takes the whole [`PushCommand`] by value, so the branch the confirmation
 /// named crosses onto the thread with the arguments and [`run_push`] can still
 /// refuse a repository that moved on in the meantime.
-pub(crate) fn spawn<F>(command: PushCommand, workdir: PathBuf, on_finish: F)
+pub(crate) fn spawn<L, F>(command: PushCommand, workdir: PathBuf, on_line: L, on_finish: F)
 where
+    L: Fn(String) + Send + Sync + 'static,
     F: FnOnce(PushOutcome) + Send + 'static,
 {
-    std::thread::spawn(move || on_finish(run_push(&command, &workdir)));
+    std::thread::spawn(move || on_finish(run_push(&command, &workdir, &on_line)));
 }
 
 /// What a refused push tells the user to do. Pressing `p` again re-resolves the
@@ -301,7 +317,11 @@ const RETRY_ADVICE: &str = "press p again";
 /// - **Both streams are captured**, which also suppresses git's progress meter:
 ///   it renders only to a terminal, so a pipe removes the carriage-return
 ///   redraws that would otherwise arrive as unreadable status rows.
-fn run_push(command: &PushCommand, workdir: &Path) -> PushOutcome {
+fn run_push(
+    command: &PushCommand,
+    workdir: &Path,
+    on_line: &(dyn Fn(String) + Sync),
+) -> PushOutcome {
     // `None` means git could not be run at all, which the push below reports in
     // git's own terms. Refusing here instead would blame a branch change that
     // did not happen — and a git that cannot start cannot push either.
@@ -322,12 +342,13 @@ fn run_push(command: &PushCommand, workdir: &Path) -> PushOutcome {
         .args(command.args())
         .current_dir(workdir)
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0");
     detach_from_terminal(&mut child);
-    let result = child.output();
 
-    let output = match result {
-        Ok(output) => output,
+    let mut child = match child.spawn() {
+        Ok(child) => child,
         // git is missing, or not executable. Rare, and worth saying plainly:
         // every other failure here is git's own words, and this one would
         // otherwise arrive as an empty message.
@@ -339,29 +360,151 @@ fn run_push(command: &PushCommand, workdir: &Path) -> PushOutcome {
         }
     };
 
-    // stderr first: `git push` reports what it did — `To <remote>`, the ref
-    // updates, and every rejection — on stderr, and writes to stdout only under
-    // flags gsw does not pass. Leading with it puts the useful lines at the
-    // head, which is the part a status message has room for — at most
-    // [`MAX_STATUS_ROWS`], and fewer on a short pane.
-    let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    // Carriage returns are how a progress meter redraws in place. Capturing
-    // both streams already suppresses it, so this is for anything else that
-    // emits CRLF: left in, a stray `\r` would send the cursor to column zero
-    // mid-row and scramble the frame under it.
-    let mut text = text.replace('\r', "");
+    // Taken out of the handle so each pipe is owned by the thread that drains
+    // it, which leaves `child` free to be waited on below.
+    let child_stdout = child.stdout.take();
+    let child_stderr = child.stderr.take();
 
-    let success = output.status.success();
+    // Every line both pipes carried, in the order it was read, as one string
+    // with a newline between each line and the one before it.
+    //
+    // **Arrival order, not stream order.** Grouping the text by stream buries
+    // whatever the quieter pipe said last in the middle of the louder pipe's
+    // output, and on a failed push that is exactly git's `error: failed to
+    // push some refs` — written on stderr after a hook has filled stdout. The
+    // user's own terminal merges the two in write order, and this is the same
+    // account of the same push.
+    //
+    // **One growing string, not one `String` per line.** A pre-push hook that
+    // builds and tests a workspace prints hundreds of thousands of lines, and
+    // a vector of them is a heap allocation each — then one more copy of the
+    // whole push to join them at the end, for a record that [`failure_lines`]
+    // reads three lines of and a successful push reads none of. Appending in
+    // place costs the amortized growth of a single buffer instead, and the
+    // text it holds is what `join("\n")` produced, byte for byte: the
+    // separator goes *between* lines, so there is no trailing newline and a
+    // push that said nothing leaves the empty string behind. Bounding the
+    // record is the other way to spend less, and it is [`PushUi`]'s decision
+    // to make rather than this function's — see [`PushOutcome`].
+    //
+    // The flag beside the text is what the text alone cannot say. "The buffer
+    // is still empty" is not the same question as "no line has landed yet": a
+    // line can *be* empty — an `echo ""` in a hook keeps its row, by
+    // [`LineSplitter`]'s rule — and asking the buffer would swallow the
+    // newline that belongs after such a first line.
+    let collected = std::sync::Mutex::new((String::new(), false));
+    let record = |line: String| {
+        {
+            // The guard lives and dies inside this block, so it is released
+            // before the callback below runs. A reader therefore holds the lock
+            // for an append onto a string and never across the caller's work.
+            let mut collected = collected
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (text, any_line_recorded) = &mut *collected;
+            if *any_line_recorded {
+                text.push('\n');
+            }
+            *any_line_recorded = true;
+            text.push_str(&line);
+        }
+        on_line(line);
+    };
+
+    // One thread per pipe, and both must run at once. A pipe holds a fixed
+    // number of bytes, so a reader that waits its turn lets the other pipe
+    // fill, and a child blocked writing into a full pipe never exits — which
+    // is the deadlock a single-threaded read of two streams always eventually
+    // finds. Scoped threads because `record` is borrowed, not owned: it is
+    // `Sync`, so both threads can call it, and the scope is what proves to the
+    // compiler that neither outlives the borrow. The scope joins both readers
+    // before it returns, which is what makes the wait below safe.
+    std::thread::scope(|scope| {
+        scope.spawn(|| drain(child_stderr, &record));
+        scope.spawn(|| drain(child_stdout, &record));
+    });
+
+    // Waited on only after both pipes reach end of file, which they do when
+    // the child closes them at exit. Reversing the two would be the same
+    // deadlock by another door on a child that outputs more than a pipe holds.
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            return PushOutcome {
+                success: false,
+                output: format!("cannot wait for git: {error}"),
+            }
+        }
+    };
+
+    // Both readers are joined, so the lock has nothing left to protect and the
+    // text is taken out of it whole rather than copied out of it.
+    let (mut text, _) = collected
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let success = status.success();
     if !success && text.trim().is_empty() {
         // A failure with nothing to show would render as a blank row, which
         // reads as success. The exit status is all git left us.
-        text = format!("git push failed ({})", output.status);
+        text = format!("git push failed ({status})");
     }
 
     PushOutcome {
         success,
         output: text,
+    }
+}
+
+/// Read one of the child's pipes to the end, reporting each line as it lands.
+///
+/// Every line goes to `report` and nowhere else, so the caller's record of the
+/// stream and the window's view of it are the same sequence in the same order.
+/// A drain that also returned its own text would be a second account of one
+/// pipe, and joining two such accounts is what put git's verdict in the middle
+/// of a hook's output rather than at the end of the push.
+///
+/// `report` **must not panic.** It is called on this thread, inside a
+/// [`std::thread::scope`], and a scope whose thread panicked panics in turn
+/// when it ends — carrying the panic out of [`run_push`], off the push thread,
+/// and past the `on_finish` that tells the monitor a push is over. The one
+/// production caller sends on a channel and ignores the result, which cannot
+/// panic.
+///
+/// `stream` is an `Option` because [`std::process::Child`]'s handles are, and a
+/// missing pipe is treated as an empty one: it cannot happen for a child
+/// configured with [`Stdio::piped`], and inventing an error message for it
+/// would put words in git's mouth.
+///
+/// A read error ends the drain with what was read so far. The child is on the
+/// other end of a pipe that is about to close anyway, and the exit status —
+/// which is what decides success — is read from the child itself.
+fn drain(stream: Option<impl std::io::Read>, report: &(dyn Fn(String) + Sync)) {
+    let Some(mut stream) = stream else {
+        return;
+    };
+
+    let mut splitter = LineSplitter::new();
+    let mut buffer = [0_u8; 8192];
+
+    loop {
+        match stream.read(&mut buffer) {
+            // End of file: the child closed this pipe.
+            Ok(0) => break,
+            Ok(read) => {
+                for line in splitter.feed(&buffer[..read]) {
+                    report(line);
+                }
+            }
+            // A signal arrived mid-read. Nothing was lost and nothing is wrong.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+
+    // A hook that exits without a trailing newline still said something.
+    if let Some(line) = splitter.finish() {
+        report(line);
     }
 }
 
@@ -491,9 +634,14 @@ fn current_branch(workdir: &Path) -> Option<String> {
 
 /// How a finished `git push` came out.
 ///
-/// `output` is git's own stdout and stderr, kept whole: choosing which of it to
-/// show is [`PushUi`]'s job, and a runner that pre-digested it would decide the
-/// wording from a place with no idea how many rows are free.
+/// `output` is everything the child said on both pipes, in the order it was
+/// read, kept whole: choosing which of it to show is [`PushUi`]'s job, and a
+/// runner that pre-digested it would decide the wording from a place with no
+/// idea how many rows are free.
+///
+/// The order is load-bearing. [`failure_lines`] shows the last lines, and on a
+/// failed pre-push hook the last line is git's verdict on stderr — which comes
+/// after a hook that wrote to stdout, and only after.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PushOutcome {
     /// Whether `git push` exited zero.
@@ -545,8 +693,22 @@ enum State {
         command: PushCommand,
         success_message: String,
     },
-    /// `git push` is running.
-    Running { success_message: String },
+    /// `git push` is running, and this is what it has said so far.
+    Running {
+        success_message: String,
+        /// When the push started, against the watch loop's injected clock. The
+        /// notice reports the age from it, so a hook that takes minutes looks
+        /// like a push in progress rather than like a hang.
+        started_at: Instant,
+        /// The most recent output lines, oldest first, capped at
+        /// [`MAX_PUSH_OUTPUT_ROWS`].
+        ///
+        /// A queue rather than a `Vec` because both ends move: a line arrives
+        /// at the back and, once the window is full, one leaves the front. A
+        /// `Vec` would pay for a shift of the whole buffer per line of a hook
+        /// that prints thousands.
+        recent: VecDeque<String>,
+    },
 }
 
 /// How long a [`State::Status`] message stays under the frame, and how it is
@@ -620,13 +782,17 @@ impl PushUi {
     /// repaint of the whole pane.
     pub(crate) fn next_tick(&self) -> Option<Duration> {
         match &self.state {
+            // A running push ages the same way a fading message does, and for
+            // the same reason: the notice reports its own age, and an age only
+            // advances on a frame that is drawn. A hook that is quiet for a
+            // minute gives the loop no other reason to draw one, so a notice
+            // without this would freeze and read as a hang.
             State::Status {
                 life: Life::Fading { .. },
                 ..
-            } => Some(STATUS_CADENCE),
-            State::Idle | State::Status { .. } | State::Asking { .. } | State::Running { .. } => {
-                None
             }
+            | State::Running { .. } => Some(STATUS_CADENCE),
+            State::Idle | State::Status { .. } | State::Asking { .. } => None,
         }
     }
 
@@ -705,7 +871,7 @@ impl PushUi {
     /// Moving to [`State::Running`] as it hands the command over is what makes
     /// a second `y` — one that raced the mode change — return `None` rather than
     /// start an overlapping push.
-    pub(crate) fn confirm(&mut self) -> Option<PushCommand> {
+    pub(crate) fn confirm(&mut self, now: Instant) -> Option<PushCommand> {
         let State::Asking {
             command,
             success_message,
@@ -714,8 +880,31 @@ impl PushUi {
         else {
             return None;
         };
-        self.state = State::Running { success_message };
+        self.state = State::Running {
+            success_message,
+            started_at: now,
+            recent: VecDeque::new(),
+        };
         Some(command)
+    }
+
+    /// Handle one line of a running push's output.
+    ///
+    /// Ignored in every other state. The reader threads are joined before the
+    /// outcome is sent, so a line cannot really arrive after the push
+    /// finished — but a window that a late line could reopen would paint over
+    /// the error the user is reading, and the rule costs nothing to state.
+    pub(crate) fn output_line(&mut self, line: String) {
+        let State::Running { recent, .. } = &mut self.state else {
+            return;
+        };
+        recent.push_back(line);
+        // A hook can print thousands of lines, and every one of them costs
+        // memory until the push ends. Trimming on arrival bounds that at the
+        // window's own size rather than at the hook's output.
+        while recent.len() > MAX_PUSH_OUTPUT_ROWS {
+            recent.pop_front();
+        }
     }
 
     /// Drop a message that has outlived [`STATUS_LIFETIME`].
@@ -757,7 +946,9 @@ impl PushUi {
     /// [`Life`] for why those are one decision.
     pub(crate) fn finished(&mut self, outcome: PushOutcome, now: Instant) {
         let success_message = match std::mem::replace(&mut self.state, State::Idle) {
-            State::Running { success_message } => success_message,
+            State::Running {
+                success_message, ..
+            } => success_message,
             // A finish with no push running: nothing to report against, so
             // leave the screen as it is rather than inventing a message.
             other => {
@@ -800,9 +991,15 @@ impl PushUi {
     /// ever wraps or scrolls the pane it was measured to fill, so each line is
     /// truncated to `dims.width` by display column (UTF-8 safe), and the
     /// overlay as a whole is capped at one row short of `dims.height`. The
-    /// frame therefore always keeps a row of its own, and a message too tall
-    /// for what is left loses its last lines — [`failure_lines`] puts git's
-    /// most useful output first, so the head is the part worth keeping.
+    /// frame therefore always keeps a row of its own.
+    ///
+    /// **Which rows a too-tall message loses is decided by the state, not by
+    /// that cap.** The cap drops from the end, and for both of the states that
+    /// can outgrow a pane the end is the part worth keeping: a failure's
+    /// reason is its last line (see [`failure_lines`]) and a running push's
+    /// newest output is its last row. Each arm therefore sizes itself against
+    /// [`Overlay::rows_to_spare`] before returning, and the cap below is left
+    /// as the backstop it is everywhere else.
     ///
     /// That second clamp is why this takes `&mut self`. In a pane with no row
     /// to spare it cuts a status down to nothing, which costs the user a
@@ -853,17 +1050,51 @@ impl PushUi {
                     line
                 }]
             }
-            State::Running { .. } => vec![truncate_right(RUNNING_NOTICE, width)],
+            State::Running {
+                started_at, recent, ..
+            } => {
+                let elapsed = now.saturating_duration_since(*started_at);
+                let notice = format!("{RUNNING_NOTICE} ({})", format_age_detailed(elapsed));
+                let mut rows = vec![truncate_right(&notice, width)];
+
+                // The window is sized here rather than left to the clamp at
+                // the end of this function. That clamp takes rows off the
+                // *end* of the list, which for a window built oldest-first
+                // under a notice would drop the newest lines — the only ones
+                // worth the rows — exactly in the pane with fewest to give.
+                // Sizing first puts the loss at the other end, and leaves the
+                // clamp as the backstop it is everywhere else.
+                let spare = Overlay::rows_to_spare(dims).saturating_sub(rows.len());
+                let show = recent.len().min(spare);
+                rows.extend(recent.iter().skip(recent.len() - show).map(|line| {
+                    // Indented and dimmed, because these rows are somebody
+                    // else's words inside gsw's frame. Colored after the
+                    // truncation, so the escapes cost the user no columns.
+                    truncate_right(&format!("{WINDOW_INDENT}{line}"), width)
+                        .dimmed()
+                        .to_string()
+                }));
+                rows
+            }
             State::Status { lines, life } => {
                 let elapsed = life.elapsed(now);
+                // Which rows go when the pane cannot hold them all, decided
+                // here rather than by the clamp at the end of this function.
+                // That clamp drops from the end, and the end is where a
+                // failure's reason is — see [`failure_lines`]. The running
+                // window sizes itself first for the same reason.
+                let dropped = lines.len().saturating_sub(Overlay::rows_to_spare(dims));
                 // The age goes on the last row, which for every message that
                 // has one is the only row: a success and a refusal are one
                 // sentence each, and git's several-line error text is the one
-                // kind that never ages.
+                // kind that never ages. Numbered before the drop above, so the
+                // row that carries it is the message's last and not merely the
+                // last one that fitted.
                 let last = lines.len().saturating_sub(1);
                 lines
                     .iter()
                     .enumerate()
+                    .skip(dropped)
                     .map(|(row, line)| match elapsed {
                         // Appended *before* the truncation, so the age is part
                         // of what the pane has to fit rather than something
@@ -992,6 +1223,13 @@ impl Overlay {
 /// risk and loses the sentence.
 const CONFIRM_HINT: &str = "[y/Enter = push, n/Esc = cancel]";
 
+/// What the window's rows are indented by.
+///
+/// The indent and the dim together say these rows are the child process
+/// speaking rather than gsw, which matters because the notice above them and
+/// the frame below them are both gsw's own words.
+const WINDOW_INDENT: &str = "  ";
+
 /// What a running push says while the network round trip is in flight.
 const RUNNING_NOTICE: &str = "Pushing…";
 
@@ -1069,28 +1307,42 @@ const SILENT_FAILURE: &str = "git push failed";
 
 /// Pick the lines of a failed push's output worth the rows they cost.
 ///
-/// git leads with the useful part — `To <remote>`, `! [rejected] …`,
-/// `error: failed to push …` — and follows with `hint:` advice that repeats in
-/// every rejection. So the hints are dropped first, and only if that leaves
-/// nothing are they let back in: a message the user cannot read beats a blank
-/// row that reads as success.
+/// **The last of them, not the first.** A push git refuses on its own writes
+/// exactly three non-hint lines — `To <remote>`, `! [rejected] …`,
+/// `error: failed to push …` — so for that failure the head and the tail are
+/// the same three and the choice does not arise. It arises the moment a
+/// repository has a pre-push hook: the hook prints its whole run, fails, and
+/// git adds its verdict after, so the reason sits at the end behind a banner
+/// that would otherwise take every row.
+///
+/// Hints are dropped first either way. They follow the real error, so under a
+/// tail rule they are the lines that would crowd it out. Only if dropping them
+/// leaves nothing are they let back in: a message the user cannot act on beats
+/// a blank row that reads as success.
 fn failure_lines(output: &str) -> Vec<String> {
     let meaningful = |line: &&str| !line.trim().is_empty();
-    let mut lines: Vec<String> = output
-        .lines()
-        .filter(meaningful)
-        .filter(|line| !line.trim_start().starts_with(HINT_PREFIX))
-        .take(MAX_STATUS_ROWS)
-        .map(|line| line.trim_end().to_string())
-        .collect();
+    let last = |lines: Vec<String>| -> Vec<String> {
+        let dropped = lines.len().saturating_sub(MAX_STATUS_ROWS);
+        lines.into_iter().skip(dropped).collect()
+    };
 
-    if lines.is_empty() {
-        lines = output
+    let mut lines = last(
+        output
             .lines()
             .filter(meaningful)
-            .take(MAX_STATUS_ROWS)
+            .filter(|line| !line.trim_start().starts_with(HINT_PREFIX))
             .map(|line| line.trim_end().to_string())
-            .collect();
+            .collect(),
+    );
+
+    if lines.is_empty() {
+        lines = last(
+            output
+                .lines()
+                .filter(meaningful)
+                .map(|line| line.trim_end().to_string())
+                .collect(),
+        );
     }
     if lines.is_empty() {
         lines.push(SILENT_FAILURE.to_string());
@@ -1442,27 +1694,19 @@ mod ui_tests {
     ///
     /// The escapes have to be stripped rather than assumed absent.
     /// `colored` decides whether to emit them from process-global state that
-    /// other tests in this binary toggle (`colored::control::set_override`), so
-    /// a raw `UnicodeWidthStr::width` counts escape bytes as columns in some
-    /// runs and not others — the assertion would pass or fail depending on test
-    /// order. Columns on screen are also the thing under test: the overlay
-    /// colors *after* truncating, so the escapes cost the user nothing.
+    /// other tests in this binary toggle, so a raw `UnicodeWidthStr::width`
+    /// counts escape bytes as columns in some runs and not others — the
+    /// assertion would pass or fail depending on test order. Columns on screen
+    /// are also the thing under test: the overlay colors *after* truncating,
+    /// so the escapes cost the user nothing.
+    ///
+    /// Stripped by `testcolor`, which is the workspace's one stripper. This
+    /// used to skip from an escape to the next ASCII letter, which is right
+    /// for the CSI sequences `colored` emits and wrong for the rest — and the
+    /// window under a running push paints whatever a hook wrote, which is not
+    /// a set of sequences anyone here chooses.
     fn visible_width(line: &str) -> usize {
-        let mut visible = String::new();
-        let mut chars = line.chars();
-        while let Some(c) = chars.next() {
-            if c == '\u{1b}' {
-                // A CSI sequence runs until a letter terminates it.
-                for tail in chars.by_ref() {
-                    if tail.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            } else {
-                visible.push(c);
-            }
-        }
-        unicode_width::UnicodeWidthStr::width(visible.as_str())
+        unicode_width::UnicodeWidthStr::width(testcolor::strip_ansi(line).as_str())
     }
 
     /// The instant every test starts from.
@@ -1493,6 +1737,184 @@ mod ui_tests {
         let mut ui = PushUi::new(false);
         ui.request(&snapshot(None), tall_pane(80), t0());
         ui
+    }
+
+    /// A UI with a push already running, confirmed at `now`.
+    fn pushing(now: Instant) -> PushUi {
+        let mut ui = PushUi::new(false);
+        ui.request(&snapshot(None), tall_pane(80), now);
+        ui.confirm(now)
+            .expect("the confirmation must hand over a command");
+        ui
+    }
+
+    /// What `ui` paints, as the glyphs a user reads.
+    ///
+    /// The escapes are forced on and then taken back out, so the assertion
+    /// covers the painted output rather than a plain render no terminal would
+    /// produce. `colored` decides at format time, from process-global state
+    /// that other tests in this binary toggle, so reading `text()` raw would
+    /// compare different bytes depending on whether the run had a terminal.
+    fn painted(ui: &mut PushUi, dims: Dimensions, now: Instant) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            ui.overlay(dims, now).text()
+        }))
+    }
+
+    #[test]
+    fn a_line_reported_while_pushing_appears_under_the_notice() {
+        // The whole feature: a long pre-push hook leaves the user watching a
+        // frozen "Pushing…" with no way to tell work from a hang.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.output_line("Compiling gsw v0.1.0".to_string());
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the notice must stay above the window, got {text:?}",
+        );
+        assert!(
+            text.contains("Compiling gsw v0.1.0"),
+            "the hook's line must reach the screen, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn the_window_keeps_the_newest_lines_and_drops_the_oldest() {
+        // A hook that builds a workspace prints hundreds of lines. The window
+        // is six rows, and the six worth having are the six that just arrived.
+        let now = t0();
+        let mut ui = pushing(now);
+        for step in 0..MAX_PUSH_OUTPUT_ROWS + 4 {
+            ui.output_line(format!("line {step}"));
+        }
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(
+            text.lines().count(),
+            MAX_PUSH_OUTPUT_ROWS + 1,
+            "the notice plus a full window, got {text:?}",
+        );
+        assert!(
+            text.contains("line 9") && text.contains("line 4"),
+            "the newest six must be on screen, got {text:?}",
+        );
+        assert!(
+            !text.contains("line 0") && !text.contains("line 3"),
+            "the lines the window outgrew must be gone, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_short_pane_keeps_the_notice_and_drops_the_oldest_window_rows() {
+        // The overlay's clamp takes rows off the end of the list, so a window
+        // built oldest-first with the notice on top loses its newest lines
+        // exactly when it has fewest to spare. Sizing the window before the
+        // clamp is what puts the loss at the other end.
+        let now = t0();
+        let mut ui = pushing(now);
+        for step in 0..MAX_PUSH_OUTPUT_ROWS {
+            ui.output_line(format!("line {step}"));
+        }
+
+        // Four rows, one of which the frame always keeps.
+        let dims = Dimensions {
+            width: 80,
+            height: 4,
+        };
+        let text = painted(&mut ui, dims, now);
+        assert_eq!(
+            text.lines().count(),
+            3,
+            "the overlay gets every row but the frame's, got {text:?}",
+        );
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the row that says a push is running must survive, got {text:?}",
+        );
+        assert!(
+            text.contains("line 5"),
+            "the newest line must survive, got {text:?}",
+        );
+        assert!(
+            !text.contains("line 0"),
+            "the oldest lines are what a short pane loses, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn the_notice_says_how_long_the_push_has_been_running() {
+        // A hook that takes minutes is the case this feature exists for, and a
+        // notice that never changes is indistinguishable from a hang.
+        let now = t0();
+        let mut ui = pushing(now);
+
+        let text = painted(&mut ui, tall_pane(80), now + Duration::from_secs(72));
+        assert!(
+            text.contains("1m12s"),
+            "the notice must report its own age, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_running_push_keeps_the_loop_waking() {
+        // The age above only advances on a frame that is drawn, and a hook
+        // that is quiet for a minute gives the loop no other reason to draw
+        // one.
+        let ui = pushing(t0());
+        assert_eq!(ui.next_tick(), Some(STATUS_CADENCE));
+    }
+
+    #[test]
+    fn a_window_row_is_truncated_to_the_pane_width() {
+        // gsw's standing rule: nothing it paints wraps the pane it was
+        // measured to fill. A hook's line is the one text here nobody chose
+        // the length of.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.output_line("x".repeat(200));
+
+        let overlay = testcolor::with_forced_ansi(|| ui.overlay(tall_pane(40), now).text());
+        for line in overlay.lines() {
+            assert!(
+                visible_width(line) <= 40,
+                "a row is {} columns wide in a 40-column pane: {line:?}",
+                visible_width(line),
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_reported_when_no_push_is_running_changes_nothing() {
+        let mut ui = PushUi::new(false);
+        ui.output_line("stray".to_string());
+
+        assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 0);
+        assert_eq!(ui.mode(), InputMode::Normal);
+    }
+
+    #[test]
+    fn the_window_closes_when_the_push_finishes() {
+        // The outcome replaces the window. Leaving the hook's last rows under
+        // a success message would spend the frame's rows on news twice over.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.output_line("Compiling gsw v0.1.0".to_string());
+
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            !text.contains("Compiling gsw v0.1.0"),
+            "the window must close with the push, got {text:?}",
+        );
     }
 
     #[test]
@@ -1548,7 +1970,7 @@ mod ui_tests {
     #[test]
     fn confirming_hands_back_the_command_and_switches_to_pushing() {
         let mut ui = asking();
-        let command = ui.confirm().expect("a question on screen must confirm");
+        let command = ui.confirm(t0()).expect("a question on screen must confirm");
         assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
         assert_eq!(
             command.branch(),
@@ -1569,7 +1991,7 @@ mod ui_tests {
         // on screen there is no command to run, and inventing one would push
         // without asking.
         let mut ui = PushUi::new(false);
-        assert_eq!(ui.confirm(), None);
+        assert_eq!(ui.confirm(t0()), None);
         assert_eq!(ui.mode(), InputMode::Normal);
     }
 
@@ -1578,8 +2000,12 @@ mod ui_tests {
         // The second `y` arrives after the mode has already moved to Pushing.
         // It must not produce a second command.
         let mut ui = asking();
-        assert!(ui.confirm().is_some());
-        assert_eq!(ui.confirm(), None, "a second confirm must not push again");
+        assert!(ui.confirm(t0()).is_some());
+        assert_eq!(
+            ui.confirm(t0()),
+            None,
+            "a second confirm must not push again"
+        );
     }
 
     #[test]
@@ -1599,7 +2025,7 @@ mod ui_tests {
         // The wording comes from the plan, so a create reports itself as a
         // create rather than as a generic success.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: true,
@@ -1618,7 +2044,7 @@ mod ui_tests {
     fn a_successful_update_counts_what_it_pushed() {
         let mut ui = PushUi::new(false);
         ui.request(&snapshot(tracked(3)), tall_pane(80), t0());
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: true,
@@ -1637,7 +2063,7 @@ mod ui_tests {
         // The whole point of the feature's error path: git's own words, not a
         // gsw paraphrase.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -1661,7 +2087,7 @@ mod ui_tests {
         // git follows a rejection with several `hint:` lines. They must not
         // crowd out the error itself when only three rows are free.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -1688,11 +2114,52 @@ mod ui_tests {
     }
 
     #[test]
+    fn a_failed_push_shows_the_last_lines_rather_than_the_first() {
+        // A pre-push hook that runs a test suite prints its whole run before
+        // it fails, and git adds its own verdict after that. The reason is
+        // therefore at the end, and three rows spent on the hook's opening
+        // banner say nothing at all — which is what the head rule gave every
+        // repository that has a hook.
+        //
+        // A plain rejection is unaffected: git writes exactly three non-hint
+        // lines there, so the head and the tail are the same three.
+        let mut ui = asking();
+        ui.confirm(t0());
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "Running clippy\n\
+                     Compiling gsw v0.1.0\n\
+                     Compiling repo-guards v0.1.0\n\
+                     test push::window ... FAILED\n\
+                     error: test failed\n\
+                     error: failed to push some refs\n"
+                    .to_string(),
+            },
+            t0(),
+        );
+
+        let overlay = ui.overlay(tall_pane(120), t0()).text();
+        assert!(
+            overlay.contains("error: failed to push some refs"),
+            "git's own verdict is the last line and must survive, got {overlay:?}",
+        );
+        assert!(
+            overlay.contains("test push::window ... FAILED"),
+            "the failing test is what names the reason, got {overlay:?}",
+        );
+        assert!(
+            !overlay.contains("Compiling"),
+            "the opening banner is what the rows come from, got {overlay:?}",
+        );
+    }
+
+    #[test]
     fn a_failed_push_never_takes_more_than_three_rows() {
         // The frame below is what the user is watching. A wall of git output
         // must not push it off the screen.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         let output = (1..=20)
             .map(|n| format!("error: line {n}\n"))
             .collect::<String>();
@@ -1716,7 +2183,7 @@ mod ui_tests {
         // fill the pane exactly, so every row the overlay takes is a row the
         // frame gave up, and the last one is not the frame's to give.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -1735,12 +2202,17 @@ mod ui_tests {
             t0(),
         );
         assert_eq!(overlay.rows(), 2, "the frame keeps the third row");
-        // git leads with the part worth reading, so the tail is what goes.
+        // The reason a push failed is the last thing said about it, so the
+        // head is what goes. `To /tmp/origin` names a remote the frame above
+        // already shows, and it is the line the clip can most afford to lose.
         let text = overlay.text();
-        assert!(text.contains("To /tmp/origin"), "got {text:?}");
         assert!(
-            !text.contains("error: failed to push some refs"),
-            "the last line is the one to drop, got {text:?}",
+            text.contains("error: failed to push some refs"),
+            "the verdict must survive the clip, got {text:?}",
+        );
+        assert!(
+            !text.contains("To /tmp/origin"),
+            "the first line is the one to drop, got {text:?}",
         );
     }
 
@@ -1783,7 +2255,7 @@ mod ui_tests {
             "a question that was never drawn must not leave the keys meaning push",
         );
         assert_eq!(
-            ui.confirm(),
+            ui.confirm(t0()),
             None,
             "Enter must not start a push nobody was asked about",
         );
@@ -1811,7 +2283,7 @@ mod ui_tests {
             "a question the pane cannot hold must not switch the key table",
         );
         assert_eq!(
-            ui.confirm(),
+            ui.confirm(t0()),
             None,
             "there must be no question waiting for a `y` that never saw one",
         );
@@ -1823,7 +2295,7 @@ mod ui_tests {
         // text either leaves a blank strip under the frame or paints past the
         // bottom of the pane.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -1867,7 +2339,7 @@ mod ui_tests {
     /// A UI reporting the outcome of a push it asked about and ran.
     fn reporting(outcome: PushOutcome) -> PushUi {
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(outcome, t0());
         ui
     }
@@ -1906,7 +2378,7 @@ mod ui_tests {
         };
         let running = {
             let mut ui = asking();
-            ui.confirm();
+            ui.confirm(t0());
             ui
         };
         vec![
@@ -2028,7 +2500,7 @@ mod ui_tests {
         // A push that fails with no output at all must not leave a blank row
         // that reads as success.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -2048,7 +2520,7 @@ mod ui_tests {
         // Tim's requirement: an error must survive every decay tick and
         // repaint, and go away only when the user has pressed something.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -2074,7 +2546,7 @@ mod ui_tests {
         ui.dismiss();
         assert_eq!(ui.mode(), InputMode::Confirm, "a stray key must not cancel");
 
-        ui.confirm();
+        ui.confirm(t0());
         ui.dismiss();
         assert_eq!(
             ui.mode(),
@@ -2086,7 +2558,7 @@ mod ui_tests {
     #[test]
     fn a_running_push_says_so() {
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         let overlay = ui.overlay(tall_pane(80), t0()).text();
         assert!(
             overlay.to_lowercase().contains("push"),
@@ -2137,7 +2609,7 @@ mod ui_tests {
         // Pressing `p` while an old error is on screen must ask the new
         // question, not stack a second row under the first.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -2170,7 +2642,7 @@ mod ui_tests {
     fn pushed_with(truecolor: bool, at: Instant) -> PushUi {
         let mut ui = PushUi::new(truecolor);
         ui.request(&snapshot(tracked(3)), tall_pane(80), at);
-        ui.confirm();
+        ui.confirm(at);
         ui.finished(
             PushOutcome {
                 success: true,
@@ -2270,7 +2742,7 @@ mod ui_tests {
         // while they are looking at another pane is worse than a row spent.
         let start = t0();
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -2483,12 +2955,14 @@ mod ui_tests {
             "a question waiting for an answer"
         );
 
-        let mut running = asking();
-        running.confirm();
-        assert_eq!(running.next_tick(), None, "a push in flight");
+        // A push in flight is deliberately absent from this list. It used to
+        // be here, and it belonged here while the running notice was the fixed
+        // words "Pushing…": nothing about it changed with the clock. The
+        // notice now reports how long the push has been running, so it does,
+        // and `a_running_push_keeps_the_loop_waking` states the other half.
 
         let mut failed = asking();
-        failed.confirm();
+        failed.confirm(t0());
         failed.finished(
             PushOutcome {
                 success: false,
@@ -2555,6 +3029,12 @@ mod run_tests {
         PushCommand::new("feature", args.iter().map(|s| (*s).to_string()).collect())
     }
 
+    /// [`run_push`] for a test that does not care what arrived while it ran,
+    /// which is every test here but the streaming one.
+    fn run_quiet(command: &PushCommand, workdir: &Path) -> PushOutcome {
+        run_push(command, workdir, &|_| {})
+    }
+
     /// Whether `origin` has a `feature` branch, read from the origin itself.
     fn origin_has_feature(origin: &Path) -> bool {
         Command::new("git")
@@ -2577,7 +3057,7 @@ mod run_tests {
             "the fixture must start without the branch",
         );
 
-        let outcome = run_push(
+        let outcome = run_quiet(
             &confirmed(&["push", "-u", "origin", "feature"]),
             clone.path(),
         );
@@ -2610,7 +3090,7 @@ mod run_tests {
         std::fs::write(p.join("feature.txt"), "more work\n").expect("write feature.txt");
         git(p, &["commit", "-q", "-am", "more work"]);
 
-        let outcome = run_push(&confirmed(&["push"]), p);
+        let outcome = run_quiet(&confirmed(&["push"]), p);
         assert!(outcome.success, "push failed: {}", outcome.output);
 
         let subject = Command::new("git")
@@ -2636,7 +3116,7 @@ mod run_tests {
         git(p, &["push", "-q", "-u", "origin", "feature"]);
         git(p, &["commit", "-q", "--amend", "-m", "rewritten"]);
 
-        let outcome = run_push(&confirmed(&["push"]), p);
+        let outcome = run_quiet(&confirmed(&["push"]), p);
         assert!(!outcome.success, "a diverged push must fail");
         assert!(
             outcome.output.contains("rejected"),
@@ -2648,7 +3128,7 @@ mod run_tests {
     #[test]
     fn a_push_to_a_remote_that_does_not_exist_reports_it() {
         let (_origin, clone) = clone_with_feature_branch();
-        let outcome = run_push(
+        let outcome = run_quiet(
             &confirmed(&["push", "no-such-remote", "feature"]),
             clone.path(),
         );
@@ -2665,7 +3145,7 @@ mod run_tests {
         // unsuccessful outcome never arrives with an empty message, because a
         // blank status row reads as success.
         let (_origin, clone) = clone_with_feature_branch();
-        let outcome = run_push(&confirmed(&["push", "--no-such-flag"]), clone.path());
+        let outcome = run_quiet(&confirmed(&["push", "--no-such-flag"]), clone.path());
         assert!(!outcome.success);
         assert!(!failure_lines(&outcome.output).is_empty());
         assert!(!outcome.output.trim().is_empty());
@@ -2677,7 +3157,7 @@ mod run_tests {
         // would read the same keystrokes the event reader is reading, behind a
         // question gsw did not draw. It must fail fast instead of waiting.
         let (_origin, clone) = clone_with_feature_branch();
-        let outcome = run_push(
+        let outcome = run_quiet(
             &confirmed(&["push", "https://user@127.0.0.1:1/nope.git", "feature"]),
             clone.path(),
         );
@@ -2796,7 +3276,7 @@ mod run_tests {
                 &["remote", "add", "tty-probe", "ssh://127.0.0.1/nope.git"],
             );
 
-            let outcome = run_push(&confirmed(&["push", "tty-probe", "feature"]), p);
+            let outcome = run_quiet(&confirmed(&["push", "tty-probe", "feature"]), p);
             assert!(
                 !outcome.success,
                 "the fake ssh connects to nothing, so the push must fail: {}",
@@ -2861,7 +3341,7 @@ mod run_tests {
         let before_other = tip(origin.path(), "other");
         let before_feature = tip(origin.path(), "feature");
 
-        let outcome = run_push(&command, p);
+        let outcome = run_quiet(&command, p);
 
         assert!(
             !outcome.success,
@@ -2907,7 +3387,7 @@ mod run_tests {
         );
         git(p, &["checkout", "-q", "main"]);
 
-        let outcome = run_push(&command, p);
+        let outcome = run_quiet(&command, p);
 
         assert!(
             !outcome.success,
@@ -2941,7 +3421,7 @@ mod run_tests {
         let command = confirmed(&["push", "-u", "origin", "feature"]);
         git(p, &["checkout", "-q", "--detach"]);
 
-        let outcome = run_push(&command, p);
+        let outcome = run_quiet(&command, p);
 
         assert!(!outcome.success, "got {:?}", outcome.output);
         assert!(
@@ -2955,6 +3435,224 @@ mod run_tests {
         );
     }
 
+    /// The runner reports a hook's output while the hook is still running.
+    ///
+    /// Unix-only for the hook's execute bit, which is what makes git run it at
+    /// all. The rule under test is not Unix-specific — a pipe read returns what
+    /// the writer flushed on every platform — but a test that cannot make an
+    /// executable hook cannot ask the question.
+    #[cfg(unix)]
+    mod streaming_tests {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
+
+        /// What the hook writes before it waits to hear that the line arrived.
+        const FIRST_LINE: &str = "hook-said-this-first";
+
+        /// What the hook writes only once it has heard, so its presence proves
+        /// the runner reported the first line while the child was still alive.
+        const SECOND_LINE: &str = "hook-said-this-second";
+
+        /// Install `body` as the repository's pre-push hook.
+        ///
+        /// `core.hooksPath` is stated rather than inherited: a developer with
+        /// one set globally would otherwise run their own hooks here, and the
+        /// test would pass or fail on a machine's configuration.
+        fn write_hook(workdir: &Path, body: &str) {
+            git(workdir, &["config", "core.hooksPath", ".git/hooks"]);
+            let hook = workdir.join(".git").join("hooks").join("pre-push");
+            std::fs::create_dir_all(hook.parent().expect("the hook has a parent"))
+                .expect("create the hooks directory");
+            std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write the pre-push hook");
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+                .expect("make the hook executable");
+        }
+
+        /// Longest the hook waits to be told, in units of its own poll.
+        /// Bounded so a runner that reports nothing until the child exits
+        /// fails this test in a few seconds instead of deadlocking it: the
+        /// runner would be waiting for a hook that is waiting for the runner.
+        const GATE_POLLS: u32 = 100;
+
+        #[test]
+        fn the_runner_reports_a_line_while_the_push_is_still_running() {
+            // This is the whole feature. A pre-push hook that runs a test suite
+            // holds the push for minutes, and output that arrives only when the
+            // child exits is output that arrives when nobody needs it any more.
+            let (_origin, clone) = clone_with_feature_branch();
+            let p = clone.path();
+
+            // Inside the git dir rather than the worktree, so the gate cannot
+            // appear as an untracked file in the repository under test.
+            let gate = p.join(".git").join("gate");
+            write_hook(
+                p,
+                &format!(
+                    r#"echo "{FIRST_LINE}"
+i=0
+while [ $i -lt {GATE_POLLS} ]; do
+    [ -f "{gate}" ] && break
+    sleep 0.2
+    i=$((i + 1))
+done
+if [ ! -f "{gate}" ]; then
+    echo "the runner reported no line while the hook was running" >&2
+    exit 1
+fi
+echo "{SECOND_LINE}"
+"#,
+                    gate = gate.display(),
+                ),
+            );
+
+            let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&seen);
+            let gate_path = gate;
+            let outcome = run_push(
+                &confirmed(&["push", "-u", "origin", "feature"]),
+                p,
+                &move |line: String| {
+                    if line == FIRST_LINE {
+                        std::fs::write(&gate_path, b"open").expect("open the gate");
+                    }
+                    recorded
+                        .lock()
+                        .expect("the record lock is never poisoned")
+                        .push(line);
+                },
+            );
+
+            // The hook itself makes the assertion: it exits non-zero when it
+            // was never told, so a runner that buffers to the end fails here
+            // with the hook's own words.
+            assert!(outcome.success, "push failed: {}", outcome.output);
+
+            let seen = seen.lock().expect("the record lock is never poisoned");
+            assert!(
+                seen.iter().any(|line| line == FIRST_LINE),
+                "the first line must reach the reporter, got {seen:?}",
+            );
+            assert!(
+                seen.iter().any(|line| line == SECOND_LINE),
+                "the line written after the gate opened must reach it too, got {seen:?}",
+            );
+        }
+
+        #[test]
+        fn a_failed_push_shows_the_last_thing_said_across_both_pipes() {
+            // The runner reads two pipes. Joining their text by stream puts
+            // the whole of one after the whole of the other, so the last three
+            // lines are the tail of one pipe alone and whatever the other said
+            // last is nowhere in them.
+            //
+            // That is the ordinary failure. A hook prints its progress on
+            // stdout and fails, and git writes `error: failed to push some
+            // refs` on stderr after everything — so grouping by stream buries
+            // the one line that says the push did not happen, behind a hook's
+            // banner that says nothing about it.
+            //
+            // The gate makes the order a fact rather than a race: the hook
+            // does not exit until the runner has reported its last stdout
+            // line, so git's stderr cannot be read before them.
+            let (_origin, clone) = clone_with_feature_branch();
+            let p = clone.path();
+            let gate = p.join(".git").join("gate");
+            write_hook(
+                p,
+                &format!(
+                    r#"for i in 1 2 3 4; do echo "hook stdout $i"; done
+i=0
+while [ $i -lt {GATE_POLLS} ]; do
+    [ -f "{gate}" ] && break
+    sleep 0.2
+    i=$((i + 1))
+done
+exit 1"#,
+                    gate = gate.display(),
+                ),
+            );
+
+            let gate_path = gate;
+            let outcome = run_push(
+                &confirmed(&["push", "-u", "origin", "feature"]),
+                p,
+                &move |line: String| {
+                    if line == "hook stdout 4" {
+                        std::fs::write(&gate_path, b"open").expect("open the gate");
+                    }
+                },
+            );
+
+            assert!(
+                !outcome.success,
+                "the hook exits non-zero, so the push must fail",
+            );
+            let shown = failure_lines(&outcome.output);
+            assert!(
+                shown.iter().any(|line| line.contains("error:")),
+                "git's verdict is the last thing said and must survive, got {shown:?}",
+            );
+        }
+
+        /// What [`spawn`] delivered, in the order the channel carried it.
+        enum Report {
+            Line(String),
+            Done(PushOutcome),
+        }
+
+        #[test]
+        fn spawn_reports_every_line_before_the_outcome() {
+            // The watch loop applies events in the order they arrive, and the
+            // outcome closes the window. A line that landed after it would
+            // reopen the window over the message the user is meant to read.
+            //
+            // This passes as written, because `run_push` joins both reader
+            // threads before it returns and `spawn` reports the outcome after
+            // that. The test is here to keep it true: the two are separated by
+            // a thread boundary, and nothing else states the order.
+            let (_origin, clone) = clone_with_feature_branch();
+            let p = clone.path();
+            write_hook(p, "for i in 1 2 3; do echo \"line-$i\"; done");
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let line_tx = tx.clone();
+            spawn(
+                confirmed(&["push", "-u", "origin", "feature"]),
+                p.to_path_buf(),
+                move |line| {
+                    let _ = line_tx.send(Report::Line(line));
+                },
+                move |outcome| {
+                    let _ = tx.send(Report::Done(outcome));
+                },
+            );
+
+            // Stops at the outcome, so a line that arrived after it is a line
+            // this never records — which is what the assertions below catch.
+            let mut lines = Vec::new();
+            loop {
+                match rx
+                    .recv_timeout(Duration::from_secs(60))
+                    .expect("the callbacks must fire")
+                {
+                    Report::Line(line) => lines.push(line),
+                    Report::Done(outcome) => {
+                        assert!(outcome.success, "push failed: {}", outcome.output);
+                        break;
+                    }
+                }
+            }
+
+            for expected in ["line-1", "line-2", "line-3"] {
+                assert!(
+                    lines.iter().any(|line| line == expected),
+                    "{expected} must arrive before the outcome, got {lines:?}",
+                );
+            }
+        }
+    }
+
     #[test]
     fn spawn_delivers_the_outcome_off_the_calling_thread() {
         // The loop learns a push finished only through this callback, so a
@@ -2966,6 +3664,8 @@ mod run_tests {
         spawn(
             confirmed(&["push", "-u", "origin", "feature"]),
             clone.path().to_path_buf(),
+            // This test is about the outcome hop, not the line hop.
+            |_line| {},
             move |outcome| {
                 let _ = tx.send(outcome);
             },
