@@ -21,7 +21,64 @@
     )
 )]
 
+use std::net::IpAddr;
+use std::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// What the header line of the frame names.
+///
+/// The line stands above the table, and it holds what every row of the table
+/// has in common: what the run probed, where it probed from, how many rounds it
+/// folded, how often it probed, and which file holds the record. A reader who
+/// asks "what am I looking at" reads this one line, and a reader who asks "how
+/// is hop 7 doing" reads the table below it. The split is what keeps the table
+/// to one column for each number it prints.
+///
+/// Every field that a replay can fail to fill is an `Option`. A recorded file
+/// whose `run` record is absent — a file that a run was still writing when the
+/// machine stopped — names no destination, no address, no source, and no
+/// interval. The line then writes one word in the place of each of them, and
+/// the replay goes on to print the rounds that the file did record. A replay
+/// that refused such a file would throw those rounds away.
+pub(crate) struct Header<'a> {
+    /// The destination as the command line named it. A run whose `run` record
+    /// is absent names none.
+    pub(crate) destination: Option<&'a str>,
+    /// The address that the destination resolved to.
+    pub(crate) address: Option<IpAddr>,
+    /// The source address of the run.
+    pub(crate) source: Option<IpAddr>,
+    /// The number of rounds that the run recorded.
+    pub(crate) rounds: usize,
+    /// The period of one round.
+    pub(crate) interval: Option<Duration>,
+    /// The name of the recorded file, without its directory.
+    ///
+    /// The directory holds the columns that the table needs for its numbers,
+    /// and it says nothing about the run: the user just named the file to the
+    /// `replay` command, so the user knows where it stands.
+    pub(crate) file: &'a str,
+    /// The size of that file, in bytes. A file whose size did not read holds
+    /// none.
+    pub(crate) bytes: Option<u64>,
+}
+
+impl Header<'_> {
+    /// The one line that stands above the table.
+    ///
+    /// This slice is the red one: it writes no line, and the tests below state
+    /// the line that the green slice writes.
+    pub(crate) fn line(&self) -> String {
+        String::new()
+    }
+}
+
+/// Writes the size of the recorded file.
+///
+/// This slice is the red one: it writes no size.
+fn render_size(_bytes: u64) -> String {
+    String::new()
+}
 
 /// The number of terminal columns that the text occupies.
 ///
@@ -172,7 +229,263 @@ fn bar_at(part: f64) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::{display_width, sparkline, truncate_to_width};
+    use super::{display_width, render_size, sparkline, truncate_to_width, Header};
+    use crate::testing::address;
+    use std::time::Duration;
+
+    /// The start of the header line: one space, the name of the tool, and two
+    /// more spaces.
+    ///
+    /// The test spells the text, and the module spells it again. That is on
+    /// purpose, as it is for the bars of the sparkline: a test that read the
+    /// constant of the module would agree with every start the module ever
+    /// holds, and the start is a part of the line that a reader of the table
+    /// sees.
+    const HEADER_START: &str = " krt  ";
+
+    /// The text between two fields of the header line.
+    const FIELD_SEPARATOR: &str = "   ";
+
+    /// The name of the recorded file of every header below.
+    const FILE: &str = "1.2.3.4-example.com.jsonl";
+
+    /// The size of that file, in bytes.
+    ///
+    /// 2 200 000 / 1024 is 2148.4, and / 1024 again is 2.0980, which one
+    /// decimal place writes as `2.1`.
+    const FILE_BYTES: u64 = 2_200_000;
+
+    /// The header line of a run that filled every field, character for
+    /// character.
+    const WHOLE_LINE: &str = " krt  example.com → 93.184.216.34   src 1.2.3.4   round 142   1s   1.2.3.4-example.com.jsonl (2.1 MB)";
+
+    /// The header of a run that filled every field of the line.
+    fn whole_header() -> Header<'static> {
+        Header {
+            destination: Some("example.com"),
+            address: Some(address("93.184.216.34")),
+            source: Some(address("1.2.3.4")),
+            rounds: 142,
+            interval: Some(Duration::from_secs(1)),
+            file: FILE,
+            bytes: Some(FILE_BYTES),
+        }
+    }
+
+    /// The fields of a header line, without the name of the tool.
+    ///
+    /// The split reads the separator, so a line that holds the wrong number of
+    /// spaces gives the wrong number of fields, and a test that asserts on one
+    /// field says which field it read.
+    fn fields(line: &str) -> Vec<&str> {
+        line.strip_prefix(HEADER_START)
+            .unwrap_or(line)
+            .split(FIELD_SEPARATOR)
+            .collect()
+    }
+
+    /// The field of a header line at an index, or an empty text when the line
+    /// holds no such field.
+    ///
+    /// A line of the wrong number of fields must fail the assertion of the test
+    /// that reads one of them, and must not stop that test with an index. The
+    /// reader of the failure then sees the field the test wanted beside the
+    /// text the line gave.
+    fn field(line: &str, index: usize) -> &str {
+        fields(line).get(index).copied().unwrap_or_default()
+    }
+
+    #[test]
+    fn the_header_line_names_the_target_the_source_the_rounds_the_interval_and_the_file() {
+        assert_eq!(
+            whole_header().line(),
+            WHOLE_LINE,
+            "the header line of a whole run reads as the module documentation draws it"
+        );
+    }
+
+    #[test]
+    fn a_run_whose_record_is_absent_names_no_target_no_source_and_no_interval() {
+        let header = Header {
+            destination: None,
+            address: None,
+            source: None,
+            rounds: 0,
+            interval: None,
+            file: FILE,
+            bytes: Some(FILE_BYTES),
+        };
+        assert_eq!(
+            header.line(),
+            " krt  unknown   src unknown   round 0   unknown   1.2.3.4-example.com.jsonl (2.1 MB)",
+            "a file that holds no `run` record still names its rounds and its file"
+        );
+    }
+
+    #[test]
+    fn half_a_target_names_no_target() {
+        for header in [
+            Header {
+                address: None,
+                ..whole_header()
+            },
+            Header {
+                destination: None,
+                ..whole_header()
+            },
+        ] {
+            let line = header.line();
+            assert_eq!(
+                field(&line, 0),
+                "unknown",
+                "a target of one half names nothing: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_name_of_the_tool_stands_two_spaces_before_the_first_field() {
+        let line = whole_header().line();
+        assert!(
+            line.starts_with(HEADER_START),
+            "the line starts with one space, the name of the tool, and two more: {line}"
+        );
+        assert!(
+            !line.starts_with(" krt   "),
+            "two spaces stand after the name of the tool, and not three: {line}"
+        );
+    }
+
+    #[test]
+    fn three_spaces_stand_between_the_fields() {
+        let line = whole_header().line();
+        assert_eq!(
+            fields(&line),
+            [
+                "example.com → 93.184.216.34",
+                "src 1.2.3.4",
+                "round 142",
+                "1s",
+                "1.2.3.4-example.com.jsonl (2.1 MB)",
+            ],
+            "the separator holds three spaces, so the five fields split on it"
+        );
+    }
+
+    #[test]
+    fn a_count_of_one_round_keeps_the_word_of_the_label() {
+        // `round` is the label of a field, and not the noun of a sentence, so
+        // it stays the same word for every count.
+        let header = Header {
+            rounds: 1,
+            ..whole_header()
+        };
+        let line = header.line();
+        assert_eq!(field(&line, 2), "round 1", "one round reads `round 1`");
+    }
+
+    #[test]
+    fn the_interval_reads_as_the_duration_of_a_command_line() {
+        let header = Header {
+            interval: Some(Duration::from_millis(500)),
+            ..whole_header()
+        };
+        let line = header.line();
+        assert_eq!(
+            field(&line, 3),
+            "500ms",
+            "the interval reads as the text the user typed"
+        );
+    }
+
+    #[test]
+    fn a_file_whose_size_is_absent_reads_one_word() {
+        let header = Header {
+            bytes: None,
+            ..whole_header()
+        };
+        let line = header.line();
+        assert_eq!(
+            field(&line, 4),
+            "1.2.3.4-example.com.jsonl (unknown)",
+            "a file that did not measure still names itself"
+        );
+    }
+
+    #[test]
+    fn a_size_below_one_step_reads_as_whole_bytes() {
+        assert_eq!(render_size(0), "0 B", "an empty file holds no byte");
+        assert_eq!(
+            render_size(842),
+            "842 B",
+            "a file of 842 bytes is 842 bytes, and `0.8 KB` says less about it"
+        );
+        assert_eq!(
+            render_size(1023),
+            "1023 B",
+            "the largest size below one step keeps its bytes"
+        );
+    }
+
+    #[test]
+    fn one_step_reads_one_decimal_place() {
+        assert_eq!(
+            render_size(1024),
+            "1.0 KB",
+            "the first size of the second unit reads as one of it"
+        );
+    }
+
+    #[test]
+    fn a_size_reads_in_the_largest_unit_that_holds_it() {
+        // 2 200 000 / 1024 is 2148.4, and / 1024 again is 2.0980.
+        assert_eq!(
+            render_size(FILE_BYTES),
+            "2.1 MB",
+            "two steps of 1024 leave a number at or above one"
+        );
+        assert_eq!(
+            render_size(1024_u64.pow(3)),
+            "1.0 GB",
+            "three steps of 1024 read as gigabytes"
+        );
+        assert_eq!(
+            render_size(1024_u64.pow(4)),
+            "1.0 TB",
+            "four steps of 1024 read as terabytes"
+        );
+    }
+
+    #[test]
+    fn a_size_past_the_largest_unit_stays_in_it() {
+        assert_eq!(
+            render_size(5 * 1024_u64.pow(5)),
+            "5120.0 TB",
+            "five petabytes read as 5120 terabytes, because the scale stops at terabytes"
+        );
+        assert_eq!(
+            render_size(u64::MAX),
+            "16777216.0 TB",
+            "the largest size that a `u64` holds reads in terabytes as well"
+        );
+    }
+
+    #[test]
+    fn a_size_that_the_print_would_round_up_steps_to_the_next_unit() {
+        // 1 048 575 / 1024 is 1023.999, which one decimal place writes as
+        // `1024.0`. `1024.0 KB` writes one megabyte in kilobytes.
+        assert_eq!(
+            render_size(1024 * 1024 - 1),
+            "1.0 MB",
+            "a size that rounds up to a whole unit reads in that unit"
+        );
+        // 1 047 950 / 1024 is 1023.38, which stays below the round.
+        assert_eq!(
+            render_size(1_047_950),
+            "1023.4 KB",
+            "a size that rounds to less than a whole unit keeps its unit"
+        );
+    }
 
     /// A name of wide glyphs. Each of the eight characters takes two columns,
     /// so the name takes 16 columns and 24 bytes.
