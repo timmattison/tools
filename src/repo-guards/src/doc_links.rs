@@ -264,7 +264,7 @@ const COMPILER_ARTIFACT: &str = "compiler-artifact";
 /// The key naming the package a record belongs to.
 const PACKAGE_ID: &str = "package_id";
 
-/// The key holding a record's target, and the key holding a target's kinds.
+/// The key holding a record's target.
 const TARGET: &str = "target";
 
 /// The key holding a target's or a package's name.
