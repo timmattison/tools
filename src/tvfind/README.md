@@ -88,6 +88,10 @@ invisible to a port scan yet plainly present in the neighbour table. When nmap's
 each neighbour that answered nothing and reports the ones registered to a
 television maker.
 
+This report needs the `arp` command as well as that database. When either one
+is missing, `tvfind` prints one line that names it. See
+[Installation](#installation).
+
 **A host that answered any probe is never in this list**, whatever the probe
 found there. A completed TCP handshake proves that the device has power, and a
 device with power is not powered off. The rule matters most for the devices the
@@ -148,5 +152,10 @@ cargo install --git https://github.com/timmattison/tools tvfind
 ```
 
 The powered-off report additionally requires `nmap` (for its OUI database) and
-`arp`. Both are optional — without them the scan still runs, it just cannot
-account for sets that are switched off.
+`arp`. Both are optional. Without them the scan still runs, but it cannot
+account for sets that are switched off. `tvfind` names the tool that is missing
+in one line, so the report never disappears without a reason.
+
+Most Linux distributions now ship iproute2 and do not install `net-tools`, which
+is the package that supplies `arp`. macOS and the BSDs supply `arp` with the
+system, so an absence there is a question of the `PATH`.

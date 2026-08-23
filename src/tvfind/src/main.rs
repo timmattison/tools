@@ -12,6 +12,7 @@ mod scan;
 mod vendor;
 
 use std::collections::HashSet;
+use std::env;
 use std::fs;
 use std::net::Ipv4Addr;
 use std::process::Command;
@@ -29,6 +30,9 @@ use scan::{probe, Probe, PROBE_PORTS};
 /// Probes in flight at once. High enough to sweep a /23 in seconds, low enough
 /// to stay well inside the open-file limit.
 const MAX_CONCURRENT_PROBES: usize = 256;
+
+/// Name `std::env::consts::OS` gives Linux.
+const LINUX_OS: &str = "linux";
 
 /// Find smart TVs on the local network
 #[derive(Parser, Debug)]
@@ -98,8 +102,11 @@ fn powered_off_heading(vendor_filter: &str) -> String {
 /// other system supplies `arp` itself, thus an absence there is a question of
 /// the PATH.
 fn missing_arp_hint(os: &str) -> &'static str {
-    let _ = os;
-    todo!("a missing arp command still returns in silence")
+    if os == LINUX_OS {
+        "(install net-tools to get arp and also spot TVs that are powered off)"
+    } else {
+        "(put arp on the PATH to also spot TVs that are powered off)"
+    }
 }
 
 /// What one sweep of the subnet found.
@@ -188,10 +195,13 @@ fn report_tvs(tvs: &[Tv]) {
 /// addresses that proved to be televisions. A host that answered has power, so
 /// it is never powered off, whatever the probe found there.
 ///
-/// Every step here is best-effort: without `arp` or nmap's OUI database there
-/// is simply nothing extra to say, which is not a reason to fail the scan.
+/// Every step here is best-effort. A missing `arp` command and a missing OUI
+/// database are not reasons to fail the scan. Each one prints one line that
+/// names the tool, because a report that does not appear looks the same as a
+/// network with no powered-off sets.
 fn report_powered_off(answered: &HashSet<Ipv4Addr>, vendor_filter: &str) {
     let Some(arp_output) = arp_table() else {
+        eprintln!("{}", missing_arp_hint(env::consts::OS));
         return;
     };
     let Some(db) = oui_database() else {
