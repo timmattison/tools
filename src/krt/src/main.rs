@@ -941,9 +941,13 @@ fn deadline_of(limit: Option<Duration>) -> Option<Instant> {
 /// Names why a run stopped, for the line that a trace prints when it stops.
 fn stop_reason(reason: EndReason) -> &'static str {
     match reason {
-        EndReason::Quit | EndReason::Duration | EndReason::Rounds | EndReason::Error => {
-            "the run stopped"
-        }
+        EndReason::Quit => "the user stopped the run",
+        EndReason::Duration => "the time limit stopped the run",
+        EndReason::Rounds => "the round limit stopped the run",
+        // A fault leaves the run through an error, and `main` writes that
+        // reason to standard error in the place of this line. The words are
+        // here so the table of the reasons stays complete.
+        EndReason::Error => "a fault stopped the run",
     }
 }
 
