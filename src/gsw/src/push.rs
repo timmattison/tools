@@ -742,13 +742,17 @@ impl PushUi {
     /// repaint of the whole pane.
     pub(crate) fn next_tick(&self) -> Option<Duration> {
         match &self.state {
+            // A running push ages the same way a fading message does, and for
+            // the same reason: the notice reports its own age, and an age only
+            // advances on a frame that is drawn. A hook that is quiet for a
+            // minute gives the loop no other reason to draw one, so a notice
+            // without this would freeze and read as a hang.
             State::Status {
                 life: Life::Fading { .. },
                 ..
-            } => Some(STATUS_CADENCE),
-            State::Idle | State::Status { .. } | State::Asking { .. } | State::Running { .. } => {
-                None
             }
+            | State::Running { .. } => Some(STATUS_CADENCE),
+            State::Idle | State::Status { .. } | State::Asking { .. } => None,
         }
     }
 
@@ -851,7 +855,16 @@ impl PushUi {
     /// finished — but a window that a late line could reopen would paint over
     /// the error the user is reading, and the rule costs nothing to state.
     pub(crate) fn output_line(&mut self, line: String) {
-        let _ = line;
+        let State::Running { recent, .. } = &mut self.state else {
+            return;
+        };
+        recent.push_back(line);
+        // A hook can print thousands of lines, and every one of them costs
+        // memory until the push ends. Trimming on arrival bounds that at the
+        // window's own size rather than at the hook's output.
+        while recent.len() > MAX_PUSH_OUTPUT_ROWS {
+            recent.pop_front();
+        }
     }
 
     /// Drop a message that has outlived [`STATUS_LIFETIME`].
@@ -991,7 +1004,32 @@ impl PushUi {
                     line
                 }]
             }
-            State::Running { .. } => vec![truncate_right(RUNNING_NOTICE, width)],
+            State::Running {
+                started_at, recent, ..
+            } => {
+                let elapsed = now.saturating_duration_since(*started_at);
+                let notice = format!("{RUNNING_NOTICE} ({})", format_age_detailed(elapsed));
+                let mut rows = vec![truncate_right(&notice, width)];
+
+                // The window is sized here rather than left to the clamp at
+                // the end of this function. That clamp takes rows off the
+                // *end* of the list, which for a window built oldest-first
+                // under a notice would drop the newest lines — the only ones
+                // worth the rows — exactly in the pane with fewest to give.
+                // Sizing first puts the loss at the other end, and leaves the
+                // clamp as the backstop it is everywhere else.
+                let spare = Overlay::rows_to_spare(dims).saturating_sub(rows.len());
+                let show = recent.len().min(spare);
+                rows.extend(recent.iter().skip(recent.len() - show).map(|line| {
+                    // Indented and dimmed, because these rows are somebody
+                    // else's words inside gsw's frame. Colored after the
+                    // truncation, so the escapes cost the user no columns.
+                    truncate_right(&format!("{WINDOW_INDENT}{line}"), width)
+                        .dimmed()
+                        .to_string()
+                }));
+                rows
+            }
             State::Status { lines, life } => {
                 let elapsed = life.elapsed(now);
                 // The age goes on the last row, which for every message that
@@ -1129,6 +1167,13 @@ impl Overlay {
 /// is looking at the sentence saying so. Off the screen, the binding keeps the
 /// risk and loses the sentence.
 const CONFIRM_HINT: &str = "[y/Enter = push, n/Esc = cancel]";
+
+/// What the window's rows are indented by.
+///
+/// The indent and the dim together say these rows are the child process
+/// speaking rather than gsw, which matters because the notice above them and
+/// the frame below them are both gsw's own words.
+const WINDOW_INDENT: &str = "  ";
 
 /// What a running push says while the network round trip is in flight.
 const RUNNING_NOTICE: &str = "Pushing…";
@@ -2797,9 +2842,11 @@ mod ui_tests {
             "a question waiting for an answer"
         );
 
-        let mut running = asking();
-        running.confirm(t0());
-        assert_eq!(running.next_tick(), None, "a push in flight");
+        // A push in flight is deliberately absent from this list. It used to
+        // be here, and it belonged here while the running notice was the fixed
+        // words "Pushing…": nothing about it changed with the clock. The
+        // notice now reports how long the push has been running, so it does,
+        // and `a_running_push_keeps_the_loop_waking` states the other half.
 
         let mut failed = asking();
         failed.confirm(t0());
