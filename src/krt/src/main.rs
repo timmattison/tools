@@ -1171,7 +1171,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         name_grace: name_grace(),
     };
     let mut namer = names::Namer::new(resolver, start.run.clone());
-    let mut status = std::io::stdout();
+    let mut screen = live::Headless::new(std::io::stdout(), live::SystemClock);
     let outcome = run::record(
         &start,
         &rounds,
@@ -1179,7 +1179,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         &|| user_stopped(&flag),
         &mut namer,
         &mut writer,
-        &mut status,
+        &mut screen,
     )
     .map_err(|error| {
         let code = match error {
