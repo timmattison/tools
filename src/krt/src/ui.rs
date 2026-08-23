@@ -72,9 +72,102 @@ pub(crate) fn truncate_to_width(text: &str, width: usize) -> String {
     kept
 }
 
+/// The number of bars that the sparkline draws with.
+const LEVEL_COUNT: usize = 8;
+
+/// The bars of the sparkline, lowest first.
+///
+/// There is no ASCII fallback, and `CLAUDE.md` asks for it that way. A fallback
+/// of `.:|#` characters would draw a second, coarser picture of the same
+/// numbers, so a reader of one terminal and a reader of another would argue
+/// over a hop that the two pictures disagree about. Every terminal that this
+/// tool draws a table on prints these eight glyphs, and each of them takes one
+/// column, so the Recent column holds one sample for each column it is wide.
+const BARS: [char; LEVEL_COUNT] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// The count of the bars, as the arithmetic of the scale reads it.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the count of the bars is 8, and an `f64` holds every whole number below 2^53"
+)]
+const LEVELS: f64 = LEVEL_COUNT as f64;
+
 /// The recent round-trip times of one key, as a bar for each of them.
-pub(crate) fn sparkline(_samples: impl ExactSizeIterator<Item = f64>, _width: usize) -> String {
-    String::new()
+///
+/// The bar shows the last `width` samples. A key that holds more samples than
+/// that drops its oldest ones, because the column is as wide as the terminal
+/// gives it and the most recent samples are the ones that say what the hop is
+/// doing now.
+///
+/// The scale runs from the smallest to the largest sample **of the shown
+/// window**, and not of the whole history: the smallest takes `▁` and the
+/// largest takes `█`. A scale over the whole history would flatten the window
+/// of a hop that was once slow and is not slow now, and that window is the part
+/// a reader is looking at.
+///
+/// A window whose samples are all equal draws `▁` for each of them. Nothing
+/// varies, and a flat line at the floor says that. The alternative, a flat line
+/// at the top, would draw the quietest hop of the path as the loudest one.
+///
+/// A key with no sample, and a `width` of zero, each draw an empty string.
+///
+/// A sample that is not a finite number — `f64::NAN`, or an infinity — draws
+/// the lowest bar, and the scale does not read it at all. Such a sample does
+/// not compare, so a scale that took it would carry a limit that no bar can
+/// stand on, and every bar of the key would then read the same. One bad sample
+/// would hide the whole history of the hop, which is a worse answer than one
+/// bar that reads low.
+pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = f64>, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    // The iterator states its length before it gives a sample, so the oldest
+    // samples go away as the iterator runs. The window is therefore the only
+    // copy that this function makes, and the history of the key stays where it
+    // is.
+    let skipped = samples.len().saturating_sub(width);
+    let shown: Vec<f64> = samples.skip(skipped).collect();
+
+    // The scale reads only the samples that compare.
+    let mut lowest = f64::INFINITY;
+    let mut highest = f64::NEG_INFINITY;
+    for sample in shown.iter().copied().filter(|sample| sample.is_finite()) {
+        lowest = lowest.min(sample);
+        highest = highest.max(sample);
+    }
+    let span = highest - lowest;
+
+    shown
+        .iter()
+        .map(|&sample| {
+            // A window of one sample, and a window whose samples are all equal,
+            // each give a span of zero. A window that holds no sample which
+            // compares gives a span below zero, because the two limits stayed
+            // at the infinities that the fold started them at. Neither window
+            // divides.
+            if span <= 0.0 || !sample.is_finite() {
+                BARS[0]
+            } else {
+                bar_at((sample - lowest) / span)
+            }
+        })
+        .collect()
+}
+
+/// The bar of one sample, at its part of the span of the window.
+///
+/// The part of the largest sample is 1, so a multiply by the count of the bars
+/// gives one past the last of them. The limit below puts that sample on the
+/// highest bar, which is where the largest sample of a window belongs.
+fn bar_at(part: f64) -> char {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the cast of a float to an integer saturates in Rust: a number below zero and a number that is not a number each give 0, and a number too large gives `usize::MAX`. The limit below then holds the result inside the array, so no part reads past the last bar"
+    )]
+    let level = (part * LEVELS) as usize;
+    BARS[level.min(LEVEL_COUNT - 1)]
 }
 
 #[cfg(test)]
@@ -315,7 +408,11 @@ mod tests {
 
     #[test]
     fn no_sample_draws_nothing() {
-        assert_eq!(bar(&[], 9), "", "a key with no round-trip time draws no bar");
+        assert_eq!(
+            bar(&[], 9),
+            "",
+            "a key with no round-trip time draws no bar"
+        );
     }
 
     #[test]
