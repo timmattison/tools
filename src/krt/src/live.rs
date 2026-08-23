@@ -574,10 +574,17 @@ fn restore_terminal() {
 /// terminal reads no message at all, and a raw terminal is what stays in front
 /// of them. The hook therefore puts the terminal back first, and the message of
 /// the panic then lands on the screen that the reader keeps.
+///
+/// The hook chains, and it puts the terminal back in front of that chain. The
+/// hook of the machine prints the message of a panic, and a test binary holds a
+/// hook that collects one. A hook that replaced either of them takes the report
+/// of every panic away from the reader who needs it most.
 fn install_panic_hook() -> PanicHook {
     let previous: PanicHook = Arc::from(std::panic::take_hook());
-    std::panic::set_hook(Box::new(move |_info| {
+    let chained = Arc::clone(&previous);
+    std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
+        (*chained)(info);
     }));
     previous
 }
