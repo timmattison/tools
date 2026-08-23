@@ -63,8 +63,33 @@ impl LineSplitter {
     /// bytes are held until one arrives, which is what makes a line split
     /// across two reads come back whole.
     pub(crate) fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
-        let _ = chunk;
-        Vec::new()
+        let mut lines = Vec::new();
+        for &byte in chunk {
+            if self.pending_cr {
+                self.pending_cr = false;
+                if byte == b'\n' {
+                    // `\r\n`: one terminator wearing two bytes. Ending the line
+                    // here is also what keeps the `\r` out of it, which matters
+                    // because a stray one would send the cursor to column zero
+                    // in the middle of a painted frame.
+                    lines.push(self.take_line());
+                    continue;
+                }
+                // A bare `\r`: the writer went back to column zero and is
+                // about to print over what it drew, so what it drew never
+                // becomes a line. The byte that told us falls through to the
+                // match below and starts the replacement.
+                self.partial.clear();
+            }
+            match byte {
+                // Undecided until the next byte arrives, which can be in the
+                // next chunk or never.
+                b'\r' => self.pending_cr = true,
+                b'\n' => lines.push(self.take_line()),
+                _ => self.partial.push(byte),
+            }
+        }
+        lines
     }
 
     /// The unterminated remainder, once the stream has ended.
@@ -74,8 +99,130 @@ impl LineSplitter {
     /// `None` when the stream ended on a terminator, so a caller never paints a
     /// blank row for output that was already complete.
     pub(crate) fn finish(&mut self) -> Option<String> {
-        None
+        if self.partial.is_empty() {
+            return None;
+        }
+        // `pending_cr` is deliberately not consulted. A bare `\r` moves the
+        // cursor without erasing, so a stream that stops right after one
+        // leaves its text on the screen — nothing came along to draw over it.
+        let line = self.take_line();
+        // A remainder that sanitizes away was never a line: a trailing color
+        // reset, a bell. Reporting it would cost the caller a blank row.
+        if line.is_empty() {
+            None
+        } else {
+            Some(line)
+        }
     }
+
+    /// Decode and sanitize the buffered bytes, and empty the buffer.
+    ///
+    /// The one place a line becomes text, which is what lets the byte rules
+    /// above and the column rules below be stated separately and still meet
+    /// exactly once.
+    fn take_line(&mut self) -> String {
+        let raw = String::from_utf8_lossy(&self.partial).into_owned();
+        self.partial.clear();
+        sanitize(&raw)
+    }
+}
+
+/// The byte that starts every escape sequence.
+const ESC: char = '\u{1b}';
+
+/// Where [`sanitize`] is in an escape sequence.
+///
+/// A state machine rather than a search for a closing byte, because the two
+/// sequence families end differently: a CSI ends at the first byte in its final
+/// range, and an OSC runs to a bell or to a two-character string terminator. A
+/// rule written for one leaks the other's payload into the frame as text.
+enum Scan {
+    /// Ordinary text, and the only state that writes anything out.
+    Text,
+    /// An `ESC` was seen and its second character decides what follows.
+    Escape,
+    /// Inside `ESC [ … final`, the color and cursor sequences.
+    Csi,
+    /// Inside `ESC ] …`, an operating system command such as a title set.
+    Osc,
+    /// Inside an OSC, on an `ESC` that can be half of its terminator.
+    OscEscape,
+}
+
+/// Make one decoded line safe to paint in a frame measured in display columns.
+///
+/// Two removals and one substitution, all for the same reason: gsw lays the
+/// frame out to fill the pane exactly, so a row that measures shorter than it
+/// draws pushes the frame's bottom row off the screen, and a row that carries
+/// escape sequences repaints gsw's own colors in the hook's.
+///
+/// - **Tabs become spaces**, out to the next [`TAB_WIDTH`] stop. One character
+///   and up to eight columns is the widest gap between what a row measures and
+///   what it draws, and a hook that prints a table prints one per row.
+/// - **Escape sequences go**, both families. Nothing gsw shows from a child
+///   process is worth letting that child address the terminal directly.
+/// - **Remaining control characters go.** A bell would ring on every repaint,
+///   and a backspace would eat the column to its left.
+fn sanitize(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    // Display columns written so far, which is what a tab stop is counted in.
+    // Not characters: a full-width `日` is one character and two columns, and
+    // counting it as one would put the stop in the wrong place.
+    let mut column = 0usize;
+    let mut scan = Scan::Text;
+
+    for ch in raw.chars() {
+        scan = match scan {
+            Scan::Text => match ch {
+                ESC => Scan::Escape,
+                '\t' => {
+                    let pad = TAB_WIDTH - (column % TAB_WIDTH);
+                    for _ in 0..pad {
+                        out.push(' ');
+                    }
+                    column += pad;
+                    Scan::Text
+                }
+                // Covers C0, DEL, and C1. `\t` is one of them and is handled
+                // above; `\n` and `\r` are terminators and never arrive here.
+                _ if ch.is_control() => Scan::Text,
+                _ => {
+                    out.push(ch);
+                    // Zero for a combining mark, which is the right answer: it
+                    // draws on top of the character before it.
+                    column += ch.width().unwrap_or(0);
+                    Scan::Text
+                }
+            },
+            Scan::Escape => match ch {
+                '[' => Scan::Csi,
+                ']' => Scan::Osc,
+                // A two-character escape. Both characters are already dropped.
+                _ => Scan::Text,
+            },
+            // A CSI ends at its first byte in `@` through `~`; everything
+            // before that is parameters and is dropped with it.
+            Scan::Csi => {
+                if ('\u{40}'..='\u{7e}').contains(&ch) {
+                    Scan::Text
+                } else {
+                    Scan::Csi
+                }
+            }
+            Scan::Osc => match ch {
+                '\u{07}' => Scan::Text,
+                ESC => Scan::OscEscape,
+                _ => Scan::Osc,
+            },
+            Scan::OscEscape => match ch {
+                '\\' => Scan::Text,
+                // Not a terminator after all, so the command runs on.
+                _ => Scan::Osc,
+            },
+        };
+    }
+
+    out
 }
 
 #[cfg(test)]
