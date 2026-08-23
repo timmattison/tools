@@ -26,14 +26,17 @@ use crate::stats::HopTable;
 use crate::ui;
 use crate::ui::render_duration;
 use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
-use crossterm::cursor::MoveTo;
+use crossterm::cursor::{MoveTo, Show};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::queue;
-use crossterm::terminal::{Clear, ClearType};
+use crossterm::terminal::{disable_raw_mode, Clear, ClearType, LeaveAlternateScreen};
+use crossterm::{execute, queue};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// What one key press asks for.
@@ -530,11 +533,60 @@ impl<W: Write, C: Clock> Screen for Headless<W, C> {
     }
 }
 
+/// A panic hook, of the kind that [`std::panic::take_hook`] answers.
+///
+/// The hook stands in an [`Arc`], because two holders read the one hook: the
+/// hook that a live run installs chains to it, and the guard of that run puts
+/// it back.
+type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send>;
+
+/// The number of times that this process put the terminal back.
+///
+/// A test holds no terminal, so it reads nothing of what a restoration writes.
+/// This count is what such a test reads in the place of that, and it says
+/// whether the panic hook of a live run still stands. Only the tests of that
+/// hook read the count, and they hold one lock while they do, so no two
+/// readers of it race. The count is a part of a test build and no part of a
+/// build that ships.
+#[cfg(test)]
+static RESTORATIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Puts the terminal back the way it stood before a live run took it.
+///
+/// Each step stands on its own, and a step that fails leaves the steps after it
+/// alone: a terminal that took one part of the entry and refused the next one
+/// must come all the way back anyway. The function also runs two times on the
+/// path of a panic, because the hook of the panic runs it and the unwind then
+/// drops the guard, and each of those two runs is safe.
+fn restore_terminal() {
+    #[cfg(test)]
+    RESTORATIONS.fetch_add(1, Ordering::SeqCst);
+    drop(disable_raw_mode());
+    drop(execute!(std::io::stdout(), Show, LeaveAlternateScreen));
+}
+
+/// Installs the hook that puts the terminal back before a panic message prints,
+/// and answers the hook that stood before it.
+///
+/// A live run holds the terminal in raw mode on the alternate screen. A panic
+/// of such a run prints its message on that alternate screen, and the process
+/// then dies and takes the alternate screen away with it. The reader of that
+/// terminal reads no message at all, and a raw terminal is what stays in front
+/// of them. The hook therefore puts the terminal back first, and the message of
+/// the panic then lands on the screen that the reader keeps.
+fn install_panic_hook() -> PanicHook {
+    let previous: PanicHook = Arc::from(std::panic::take_hook());
+    std::panic::set_hook(Box::new(move |_info| {
+        restore_terminal();
+    }));
+    previous
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, status_line, Clock, Command, Headless, Keys, NoKeys, RunFacts, Screen,
-        SystemClock, Table,
+        classify, install_panic_hook, status_line, Clock, Command, Headless, Keys, NoKeys,
+        PanicHook, RunFacts, Screen, SystemClock, Table,
     };
     use crate::record::{NameRecord, RoundRecord, RunId};
     use crate::testing::{address, round, FakeKeys};
@@ -544,6 +596,8 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     /// Builds the press of a key that no modifier holds.
@@ -1265,5 +1319,130 @@ mod tests {
     #[test]
     fn a_key_that_carries_no_letter_asks_for_nothing() {
         assert_eq!(classify(press(KeyCode::Enter)), None);
+    }
+
+    /// The lock of every test that changes the panic hook.
+    ///
+    /// The panic hook is one setting of the whole process, and `cargo test`
+    /// runs the tests of one binary on many threads. A test that set the hook
+    /// while another test held it takes the hook of that test away, and that
+    /// test then reads the answer of a hook it never installed. The lock keeps
+    /// the tests below apart from each other, and it keeps each of them apart
+    /// from a second run of itself. The count of the restorations reads true
+    /// under the same lock, for the same reason.
+    static HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+    /// The message of the panic that each test of the hook raises.
+    const THE_TEST_PANIC: &str = "the panic that a test of the hook raises";
+
+    /// Holds the panic hook of the process while one test changes it.
+    ///
+    /// The guard takes the lock of the hook, and it takes the hook that stood
+    /// in front of the test. The drop puts that hook back and lets the lock go
+    /// after it.
+    ///
+    /// Each test below reads its answers into locals and drops this guard
+    /// before it asserts on them. `std::panic::set_hook` refuses a thread that
+    /// is panicking, and it refuses with a panic of its own, which aborts the
+    /// process and takes the report of every other test with it. A failed
+    /// assertion of a test that still held the guard is such a thread.
+    struct HookGuard {
+        /// The hook that stood before the test. An `Option`, so the drop moves
+        /// the hook out of it.
+        previous: Option<PanicHook>,
+        /// The lock, which the drop lets go last of all.
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl HookGuard {
+        /// Takes the lock, and the hook that stands now.
+        ///
+        /// A poisoned lock still guards. The state under it is the panic hook
+        /// of the process, and this guard puts a whole hook back whatever the
+        /// test in front of it did.
+        fn take() -> Self {
+            let lock = HOOK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+            Self {
+                previous: Some(Arc::from(std::panic::take_hook())),
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            // The panic that no test asked for reaches this drop while the
+            // thread panics, and a hook that goes back there aborts the
+            // process. The hook of the test stands on for that run, which
+            // costs the report of a panic and keeps the report of every test.
+            if std::thread::panicking() {
+                return;
+            }
+            if let Some(previous) = self.previous.take() {
+                std::panic::set_hook(Box::new(move |info| (*previous)(info)));
+            }
+        }
+    }
+
+    /// What the hook of a test read.
+    struct Marked {
+        /// Whether the hook read a panic.
+        read: Arc<AtomicBool>,
+        /// Whether the terminal came back before the hook read that panic.
+        restored_first: Arc<AtomicBool>,
+    }
+
+    /// The number of times that this process put the terminal back.
+    fn restorations() -> usize {
+        super::RESTORATIONS.load(Ordering::SeqCst)
+    }
+
+    /// Installs the hook of a test, and answers what that hook reads.
+    ///
+    /// The hook prints nothing. Each test below raises a panic on purpose, and
+    /// the hook of the machine prints the message of every panic it reads, so a
+    /// test that left that hook standing writes the message of a panic that the
+    /// test asked for.
+    fn mark() -> Marked {
+        let read = Arc::new(AtomicBool::new(false));
+        let restored_first = Arc::new(AtomicBool::new(false));
+        let read_in_hook = Arc::clone(&read);
+        let restored_in_hook = Arc::clone(&restored_first);
+        let before = restorations();
+        std::panic::set_hook(Box::new(move |_info| {
+            restored_in_hook.store(restorations() > before, Ordering::SeqCst);
+            read_in_hook.store(true, Ordering::SeqCst);
+        }));
+        Marked {
+            read,
+            restored_first,
+        }
+    }
+
+    #[test]
+    fn the_panic_hook_of_a_live_run_chains_to_the_hook_it_replaced() {
+        // A hook that replaced the hook of the process takes the report of
+        // every panic away from the reader of it. The hook of a live run
+        // therefore puts the terminal back and hands the panic on.
+        let hooks = HookGuard::take();
+        let marked = mark();
+
+        // The guard of the test puts a whole hook back, so the answer of the
+        // installation goes nowhere here. The test below reads that answer.
+        drop(install_panic_hook());
+        let outcome = std::panic::catch_unwind(|| panic!("{THE_TEST_PANIC}"));
+        let read = marked.read.load(Ordering::SeqCst);
+        let restored_first = marked.restored_first.load(Ordering::SeqCst);
+        drop(hooks);
+
+        assert!(outcome.is_err(), "the body of the test raised its panic");
+        assert!(
+            read,
+            "the hook of a live run chains to the hook that stood before it"
+        );
+        assert!(
+            restored_first,
+            "and it puts the terminal back first, so the message of the panic lands on the screen that the reader keeps"
+        );
     }
 }
