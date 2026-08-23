@@ -85,7 +85,11 @@ All tools in this repository that display progress bars **should** use the `term
 ### Why
 
 The `termbar` library provides:
-- Terminal width detection with fallback
+- Terminal width detection with fallback. `TerminalWidth` reads the terminal
+  through the `termsize` crate, so a terminal that carries no window reports no
+  width and the fallback stands. Such a terminal answers the `TIOCGWINSZ` ioctl
+  with zero columns, and the ioctl succeeds, so a caller that reads the raw
+  answer lays a progress bar out at no columns. `script -q /dev/null` makes one.
 - Progress bar width calculation that adapts to terminal size
 - Pre-built progress bar styles (copy, verify, batch, hash)
 - Escape function for template braces in filenames

@@ -7309,8 +7309,8 @@ dependencies = [
 name = "termbar"
 version = "0.1.0"
 dependencies = [
- "crossterm",
  "indicatif",
+ "termsize",
  "thiserror 2.0.20",
  "tokio",
  "unicode-width",

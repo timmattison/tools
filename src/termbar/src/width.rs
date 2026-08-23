@@ -16,9 +16,14 @@ impl TerminalWidth {
     ///
     /// Returns the terminal width in columns if it can be detected,
     /// otherwise returns `None`.
+    ///
+    /// A terminal that carries no window is a terminal that cannot be detected.
+    /// It answers the `TIOCGWINSZ` ioctl with zero columns and zero rows, and
+    /// the ioctl succeeds. `termsize` gives `None` for that answer, and the
+    /// documentation of that crate says why.
     #[must_use]
     pub fn get() -> Option<u16> {
-        Self::columns_of(crossterm::terminal::size().map(|(w, _)| w).ok())
+        Self::columns_of(termsize::controlling_columns())
     }
 
     /// Get the current terminal width with a fallback.
@@ -31,7 +36,7 @@ impl TerminalWidth {
     /// * `fallback` - The value to return if terminal width cannot be detected.
     #[must_use]
     pub fn get_or(fallback: u16) -> u16 {
-        Self::columns_or(crossterm::terminal::size().map(|(w, _)| w).ok(), fallback)
+        Self::columns_or(termsize::controlling_columns(), fallback)
     }
 
     /// Get the current terminal width with the default fallback.
@@ -49,9 +54,18 @@ impl TerminalWidth {
     /// names the answer of a terminal without a terminal to name it with.
     /// [`get`](Self::get) reads the terminal and hands the answer here.
     ///
-    /// `None` is a run that measured no terminal.
+    /// `None` is a run that measured no terminal, and it stays `None`. A width
+    /// of zero becomes `None` as well, because no character of a line prints
+    /// into no column. A caller that gets `None` reaches the fallback it
+    /// named, and a caller that gets a zero draws a progress bar into nothing.
+    ///
+    /// `termsize` already gives `None` for a width of zero, so no zero reaches
+    /// this function through [`get`](Self::get). The rule stays here because
+    /// this function is where `termbar` states what it reports, and the test of
+    /// the rule is what keeps it true if the probe of [`get`](Self::get) ever
+    /// changes.
     fn columns_of(answer: Option<u16>) -> Option<u16> {
-        answer
+        answer.filter(|columns| *columns > 0)
     }
 
     /// The width to report with a fallback, from the answer that the terminal
@@ -87,6 +101,11 @@ impl TerminalWidthWatcher {
     /// Initializes the watcher with the current terminal width.
     /// The watcher does not automatically listen for resize events;
     /// use [`with_sigwinch_channel`](Self::with_sigwinch_channel) for automatic resize detection.
+    ///
+    /// The watcher reads the terminal through
+    /// [`TerminalWidth::get_or_default`], both here and on every resize, so a
+    /// terminal that reports no size gives [`DEFAULT_TERMINAL_WIDTH`] to every
+    /// subscriber.
     #[must_use]
     pub fn new() -> Self {
         let initial_width = TerminalWidth::get_or_default();
