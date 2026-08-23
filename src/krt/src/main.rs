@@ -1156,6 +1156,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
     let limits = run::Limits {
         rounds: config.rounds,
         deadline: deadline_of(config.duration),
+        name_grace: run::NAME_GRACE,
     };
     let mut namer = names::Namer::new(resolver, start.run.clone());
     let mut status = std::io::stdout();

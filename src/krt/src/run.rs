@@ -37,6 +37,17 @@ use std::time::{Duration, Instant};
 /// because the wait ends after this time and the loop takes another turn.
 const POLL: Duration = Duration::from_millis(100);
 
+/// The longest that a run waits, after its last round, for the names that its
+/// lookups have not given yet.
+///
+/// The value is a trade. A warm system resolver answers in milliseconds, so the
+/// common short run pays about that much and not this whole time. The wait ends
+/// at the moment that no address waits, so a long run whose addresses settled
+/// many rounds ago pays nothing at all. And a hop whose name server answers
+/// nothing holds its lookup open for longer than any bounded value, so a larger
+/// value catches that name no better than this one does.
+pub(crate) const NAME_GRACE: Duration = Duration::from_secs(2);
+
 /// The limits that stop a run.
 #[derive(Debug)]
 pub(crate) struct Limits {
@@ -45,6 +56,9 @@ pub(crate) struct Limits {
     pub(crate) rounds: Option<u64>,
     /// The moment that stops the run. No moment runs until the user stops it.
     pub(crate) deadline: Option<Instant>,
+    /// The longest that the run waits, after its last round, for the names that
+    /// its lookups have not given yet.
+    pub(crate) name_grace: Duration,
 }
 
 /// What a run produced.
@@ -340,10 +354,18 @@ mod tests {
     /// The status line of a round that answered one hop and reached nothing.
     const A_LOST_ROUND_LINE: &str = "round 2  1 hop  never reached  1004ms";
 
+    /// The grace that every test run gives its names.
+    ///
+    /// The fake resolver of a test answers at once, so no test waits for a
+    /// lookup. The run still asks one last time before it closes, whatever this
+    /// value, so a name that arrived after the last round still lands.
+    const NO_GRACE: Duration = Duration::ZERO;
+
     /// The limits of a run that stops on nothing.
     const NO_LIMIT: Limits = Limits {
         rounds: None,
         deadline: None,
+        name_grace: NO_GRACE,
     };
 
     /// The number of turns that a run takes before the user stops it.
@@ -351,6 +373,13 @@ mod tests {
     /// The loop asks the stop closure once at the top of each turn, so the
     /// third question follows the second turn.
     const STOP_AFTER: u64 = 2;
+
+    /// The number of turns that a run takes before the user stops it right
+    /// after its one round.
+    ///
+    /// The second question follows the first turn, so the run stops on the turn
+    /// that comes straight after the round it recorded.
+    const STOP_AFTER_ONE_TURN: u64 = 1;
 
     /// The fault of a sink that takes no more records.
     const THE_SINK_IS_FULL: &str = "the sink takes no more records";
@@ -489,6 +518,7 @@ mod tests {
         Limits {
             rounds: Some(rounds),
             deadline: None,
+            name_grace: NO_GRACE,
         }
     }
 
@@ -501,6 +531,7 @@ mod tests {
                     .checked_sub(Duration::from_secs(1))
                     .expect("the clock must stand one second after the start of the process"),
             ),
+            name_grace: NO_GRACE,
         }
     }
 
@@ -1185,6 +1216,68 @@ mod tests {
             FIRST_HOP_NAME,
             "the record holds the name that arrived"
         );
+    }
+
+    /// The first ask of an address starts its lookup, so the name of the one
+    /// round of a one round run arrives on the turn that stops the run. The run
+    /// asks one last time before it closes, so the name still reaches the file.
+    #[test]
+    fn a_run_that_stops_after_its_last_round_still_writes_the_name_that_arrived() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[Lookup::Pending, named(FIRST_HOP_NAME)])]);
+        let ran = ran_with(
+            "name-drain-rounds",
+            &a_stream(&rounds_of(&[1])),
+            &after_rounds(1),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        assert_eq!(
+            kinds_of(&ran.recording),
+            ["run", "round", "name", "end"],
+            "the name that arrived after the last round stands before the end"
+        );
+        assert_eq!(
+            names_of(&ran.recording)[0].host,
+            FIRST_HOP_NAME,
+            "the record holds the name that arrived"
+        );
+        assert_eq!(outcome_of(&ran).reason, EndReason::Rounds);
+        assert_eq!(outcome_of(&ran).rounds, 1);
+    }
+
+    /// A run that the user stops takes the same last ask, so a name that
+    /// arrives on the stopping turn reaches the file.
+    #[test]
+    fn a_run_that_the_user_stops_still_writes_the_name_that_arrived() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[Lookup::Pending, named(FIRST_HOP_NAME)])]);
+        // The sender stands for the whole run, so the loop stops on the user
+        // and reads no closed channel.
+        let (_sender, stream) = a_held_stream(&rounds_of(&[1]));
+        let asked = Cell::new(0_u64);
+        let stop = || {
+            let asked_before = asked.get();
+            asked.set(asked_before + 1);
+            asked_before >= STOP_AFTER_ONE_TURN
+        };
+        let ran = ran_with(
+            "name-drain-quit",
+            &stream,
+            &NO_LIMIT,
+            &stop,
+            &mut a_namer(&resolver),
+        );
+        assert_eq!(
+            kinds_of(&ran.recording),
+            ["run", "round", "name", "end"],
+            "the name that arrived on the stopping turn stands before the end"
+        );
+        assert_eq!(
+            names_of(&ran.recording)[0].host,
+            FIRST_HOP_NAME,
+            "the record holds the name that arrived"
+        );
+        assert_eq!(outcome_of(&ran).reason, EndReason::Quit);
+        assert_eq!(outcome_of(&ran).rounds, 1);
     }
 
     // The status line of one round. A later slice replaces this line with the

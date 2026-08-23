@@ -123,6 +123,18 @@ impl Namer {
 
         records
     }
+
+    /// Answers whether any address still waits for its lookup.
+    ///
+    /// The first ask of an address starts the lookup of that address, so a name
+    /// arrives on a later turn than the round that first reported it. A run that
+    /// is about to close reads this to learn whether a name is still on its way.
+    ///
+    /// The answer is `false` when every address that the run saw carries a name
+    /// or carries none, and `false` also before the run sees its first address.
+    pub(crate) fn waits(&self) -> bool {
+        !self.waiting.is_empty()
+    }
 }
 
 #[cfg(test)]
