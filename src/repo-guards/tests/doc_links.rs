@@ -44,6 +44,53 @@ const LINK_TO_NOWHERE: &str = "\
 pub fn thing() {}
 ";
 
+/// A library whose one link names two items at once.
+///
+/// This is the second spelling of the same lint. Rustdoc writes "`trace` is
+/// both a function and a module" rather than "unresolved link to …", so a guard
+/// that matched the words instead of the code would be blind to it. `krt` holds
+/// this exact shape today.
+const AMBIGUOUS_LINK: &str = "\
+/// Calls [`trace`] first.
+pub fn thing() {}
+
+/// A function named the same as the module.
+pub fn trace() {}
+
+/// A module named the same as the function.
+pub mod trace {}
+";
+
+/// A library whose every intra-doc link resolves, and which still raises four
+/// other rustdoc lints.
+///
+/// The four are the four this workspace emits today: `rustdoc::bare_urls` from
+/// the bare URL in the crate header, `rustdoc::redundant_explicit_links` from
+/// the link that repeats its own target, `rustdoc::invalid_html_tags` from the
+/// unclosed `<div>`, and `rustdoc::private_intra_doc_links` from the public
+/// item that links to a private one.
+///
+/// The last of those matters most. It *is* an intra-doc link, and it resolves —
+/// rustdoc simply cannot render a page for the private target. A guard that
+/// reported every rustdoc warning, or every warning whose text mentions a link,
+/// would report all four and be permanently red on this repository.
+const ALL_LINKS_RESOLVE: &str = "\
+//! Crate docs.
+//!
+//! see https://example.com
+
+/// Calls [`thing`] first, and [`thing`](thing) again.
+///
+/// The prose holds a <div> that rustdoc reads as markup.
+pub fn other() {}
+
+/// The thing. It uses [`hidden`].
+pub fn thing() {}
+
+/// A private helper.
+fn hidden() {}
+";
+
 /// Build a fixture crate in its own temp dir and return the dir.
 ///
 /// The `TempDir` is returned rather than its path, so the caller holds it for
@@ -106,4 +153,49 @@ fn unresolved_intra_doc_link_is_reported() {
         "the report must name the file, relative to the workspace root"
     );
     assert_eq!(link.line(), 1, "the report must name the line");
+}
+
+/// A link that names two items at once is unresolved too, and rustdoc says so
+/// under the same lint code in entirely different words.
+///
+/// This test guards the change the next commit makes. Narrowing the filter from
+/// "every rustdoc lint" to one lint code is the right narrowing; narrowing it to
+/// the words "unresolved link" is the wrong one, and only this fixture tells the
+/// two apart.
+#[test]
+fn a_link_that_names_two_items_is_reported() {
+    let dir = fixture(AMBIGUOUS_LINK);
+
+    let scan = scan(&dir);
+
+    assert_eq!(
+        scan.broken().len(),
+        1,
+        "an ambiguous link is an unresolved link; got:\n{scan}"
+    );
+    assert!(
+        scan.broken()[0].message().contains("both a function"),
+        "the report must carry rustdoc's own words, got: {}",
+        scan.broken()[0].message()
+    );
+}
+
+/// The other half of the rule: a rustdoc warning that is not this lint is not a
+/// finding.
+///
+/// This workspace raises `rustdoc::private_intra_doc_links`,
+/// `rustdoc::bare_urls`, `rustdoc::redundant_explicit_links`, and
+/// `rustdoc::invalid_html_tags` today. A guard that reported every rustdoc
+/// warning would be red on the day it landed and would stay red, so it would be
+/// switched off, and the workspace would be back where it started.
+#[test]
+fn other_rustdoc_warnings_are_not_findings() {
+    let dir = fixture(ALL_LINKS_RESOLVE);
+
+    let scan = scan(&dir);
+
+    assert!(
+        scan.is_clean(),
+        "only unresolved links are findings; got:\n{scan}"
+    );
 }
