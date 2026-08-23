@@ -7370,6 +7370,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "termsize"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "terminal_size",
+]
+
+[[package]]
 name = "termwiz"
 version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
