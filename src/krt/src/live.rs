@@ -9,7 +9,11 @@
 
 use crate::record::{NameRecord, RoundRecord};
 use crate::stats::HopTable;
+use crate::ui;
+use crossterm::cursor::MoveTo;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::queue;
+use crossterm::terminal::{Clear, ClearType};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::net::IpAddr;
@@ -208,6 +212,71 @@ impl<W: Write, K: Keys> Table<W, K> {
             width,
         }
     }
+
+    /// The lines of one frame of this table.
+    ///
+    /// The frame stands apart from the draw that puts it on the screen, so a
+    /// reader of the lines reads the glyphs of the table and no control
+    /// sequence of a terminal.
+    ///
+    /// A table of the raw addresses hands the frame the empty map that stands
+    /// beside the names. The frame names an address that its map holds none of
+    /// by the address itself, so one empty map turns every host of the table
+    /// back into the number that answered.
+    fn frame_lines(&self) -> Vec<String> {
+        let frame = ui::Frame {
+            header: ui::Header {
+                destination: Some(&self.facts.destination),
+                address: Some(self.facts.address),
+                source: Some(self.facts.source),
+                rounds: self.rounds,
+                interval: Some(self.facts.interval),
+                file: &self.file,
+                // The file grows with every round, so the size comes off the
+                // file at the moment of the draw. A file that the run cannot
+                // measure still folds, and the header then names the file and
+                // no size.
+                bytes: std::fs::metadata(&self.facts.path)
+                    .ok()
+                    .map(|data| data.len()),
+            },
+            table: &self.table,
+            names: if self.named {
+                &self.names
+            } else {
+                &self.nameless
+            },
+            destination: Some(self.facts.address),
+        };
+        frame.lines(self.width)
+    }
+
+    /// Puts one frame on the screen, over the frame that stands there.
+    ///
+    /// A frame that does not print stops nothing. The recording is the purpose
+    /// of the tool, and the frame is one view of it, so a run whose terminal
+    /// goes away loses the display and keeps the recording.
+    fn draw(&mut self) {
+        let lines = self.frame_lines();
+        drop(self.paint(&lines));
+    }
+
+    /// Writes the lines of one frame.
+    ///
+    /// The clear comes first, so a frame of fewer lines than the frame before
+    /// it leaves none of the older lines on the screen.
+    ///
+    /// # Errors
+    ///
+    /// Answers the fault that the sink raised. The caller of this function
+    /// drops that fault, for the reason that [`Table::draw`] states.
+    fn paint(&mut self, lines: &[String]) -> std::io::Result<()> {
+        queue!(self.sink, Clear(ClearType::All), MoveTo(0, 0))?;
+        for line in lines {
+            write!(self.sink, "{line}{LINE_END}")?;
+        }
+        self.sink.flush()
+    }
 }
 
 impl<W: Write, K: Keys> Screen for Table<W, K> {
@@ -215,7 +284,11 @@ impl<W: Write, K: Keys> Screen for Table<W, K> {
         false
     }
 
-    fn round(&mut self, _round: &RoundRecord) {}
+    fn round(&mut self, round: &RoundRecord) {
+        self.table.observe(round);
+        self.rounds += 1;
+        self.draw();
+    }
 
     fn names(&mut self, _names: &[NameRecord]) {}
 }
