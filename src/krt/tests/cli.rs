@@ -86,6 +86,15 @@ const AN_IPV4_ADDRESS: &str = "1.2.3.4";
 /// The loopback address of ip version 4. Every machine holds a route to it.
 const LOOPBACK: &str = "127.0.0.1";
 
+/// The flag that names the address the probes leave from.
+///
+/// A run that names no source asks a public service for the address that the
+/// internet sees, and that request reaches the internet. The search takes the
+/// address of this flag at its first step, so it asks no service and opens no
+/// socket. Every test that drives a whole trace therefore names this flag, and
+/// a test that forgets it reaches the internet without saying so.
+const FLAG_SOURCE: &str = "--source";
+
 /// The flag that asks for ip version 6.
 const FLAG_VERSION_6: &str = "-6";
 
@@ -303,12 +312,23 @@ fn temp_path(name: &str) -> PathBuf {
     env::temp_dir().join(format!("{name}-{}-{moment}", process::id()))
 }
 
+/// A recorded file that will not open stops the run, and the run makes no
+/// directory of its own.
+///
+/// `FLAG_SOURCE` is not incidental to what this test covers. It is what keeps
+/// the test offline: the destination is the loopback, so the probes of this
+/// trace leave from the loopback, and the flag hands the search that address at
+/// its first step. Without the flag the run asks a public service for the
+/// address that the internet sees, and every `cargo test` then reaches the
+/// internet.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_recorded_file_that_will_not_open_stops_the_run() {
     let missing = temp_path("krt-no-such-directory");
     let path = missing.join(A_RECORDED_FILE);
     let result = run(&[
+        LOOPBACK,
+        FLAG_SOURCE,
         LOOPBACK,
         "--output",
         path.to_str().expect("the temporary path must be text"),
@@ -331,11 +351,21 @@ fn a_recorded_file_that_will_not_open_stops_the_run() {
     );
 }
 
+/// A TTL that `krt` takes and the tracer refuses stops the run.
+///
+/// `FLAG_SOURCE` is not incidental to what this test covers. It is what keeps
+/// the test offline: the destination is the loopback, so the probes of this
+/// trace leave from the loopback, and the flag hands the search that address at
+/// its first step. Without the flag the run asks a public service for the
+/// address that the internet sees, and every `cargo test` then reaches the
+/// internet.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_ttl_above_what_the_tracer_takes_stops_the_run() {
     let path = temp_path("krt-ttl-above-the-limit");
     let result = run(&[
+        LOOPBACK,
+        FLAG_SOURCE,
         LOOPBACK,
         "--max-ttl",
         TTL_ABOVE_THE_TRACER,
