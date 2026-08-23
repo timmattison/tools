@@ -2753,7 +2753,7 @@ mod tests {
     /// reads the clock several times per iteration, so a stepping clock is what
     /// lets a test cross a scheduled deadline without sleeping — deterministic
     /// and parallel-safe, unlike a real timer.
-    fn stepping_clock(base: Instant, step: Duration) -> impl Fn() -> Instant {
+    pub(super) fn stepping_clock(base: Instant, step: Duration) -> impl Fn() -> Instant {
         let reads = std::cell::Cell::new(0_u32);
         move || {
             let n = reads.get();
@@ -4102,7 +4102,7 @@ mod tests {
 
 #[cfg(test)]
 mod push_loop_tests {
-    use super::tests::{frame, timer_off, TEST_DEBOUNCE, TEST_DIMS};
+    use super::tests::{frame, stepping_clock, timer_off, TEST_DEBOUNCE, TEST_DIMS};
     use super::*;
     use crate::push::PushOutcome;
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -4164,6 +4164,12 @@ mod push_loop_tests {
         collects: usize,
         pushes: Vec<PushCommand>,
         frame_heights: Vec<usize>,
+        /// Every screen the loop actually painted, in order. The last of them
+        /// is what the returned `displayed` holds; the list is what a test
+        /// about *when* the screen moved needs, because a loop that paints the
+        /// right thing once at the end and a loop that paints it as it happens
+        /// leave the same final screen behind.
+        paints: Vec<String>,
     }
 
     /// Run the loop over a pre-loaded event queue and report what it did.
@@ -4194,10 +4200,30 @@ mod push_loop_tests {
 
     /// The shared body: pre-load the queue, run the loop against `dims`, and
     /// report the last painted screen plus what the hooks saw.
+    ///
+    /// The clock is frozen, so nothing on screen ages between paints and every
+    /// assertion is about the queued events alone.
     fn run_loop_with(
         events: Vec<Event>,
         dims: Dimensions,
         render_frame: fn(Dimensions) -> String,
+    ) -> (String, Seen) {
+        let base = Instant::now();
+        run_loop_clocked(events, dims, render_frame, move || base)
+    }
+
+    /// [`run_loop_with`] with the loop's clock supplied by the caller.
+    ///
+    /// Split out because one test is about a *deadline* rather than about
+    /// events, and a clock that steps on every read is what crosses a deadline
+    /// without sleeping. `clock` is read once up front for the cache's
+    /// collection time, so a frozen clock lands on exactly the instant this
+    /// helper used before the split.
+    fn run_loop_clocked<Clock: Fn() -> Instant>(
+        events: Vec<Event>,
+        dims: Dimensions,
+        render_frame: fn(Dimensions) -> String,
+        clock: Clock,
     ) -> (String, Seen) {
         let (tx, rx) = mpsc::channel();
         for event in events {
@@ -4205,7 +4231,7 @@ mod push_loop_tests {
         }
         let seen = RefCell::new(Seen::default());
         let mut displayed = String::new();
-        let base = Instant::now();
+        let base = clock();
 
         event_loop(
             &rx,
@@ -4227,8 +4253,11 @@ mod push_loop_tests {
                     frame(&render_frame(frame_dims))
                 },
                 dimensions: move || dims,
-                paint: |_output: &str| Ok(()),
-                clock: move || base,
+                paint: |output: &str| {
+                    seen.borrow_mut().paints.push(output.to_string());
+                    Ok(())
+                },
+                clock,
                 next_tick: timer_off,
                 start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
             },
@@ -4578,6 +4607,58 @@ mod push_loop_tests {
         assert!(
             painted.contains("Compiling gsw v0.1.0"),
             "the reported line must reach the pane, got {painted:?}",
+        );
+    }
+
+    /// How far the flood test's clock jumps on every read. Short enough that
+    /// several lines land inside one drain budget — a deadline that fired on
+    /// the first line would prove far less than this test claims — and long
+    /// enough that the whole flood cannot fit inside one.
+    const FLOOD_STEP: Duration = Duration::from_millis(50);
+
+    /// How many lines the flood queues behind the confirmation. More than any
+    /// one drain budget can swallow at [`FLOOD_STEP`], so a loop that only
+    /// leaves the drain on a quiet channel paints exactly once.
+    const FLOOD_LINES: usize = 20;
+
+    #[test]
+    fn a_flooding_push_paints_while_it_floods() {
+        // Why the window exists at all: a pre-push hook that builds and tests
+        // a workspace prints faster than one line per debounce window, and the
+        // drain ends only on a channel that goes quiet. Every line absorbed
+        // before the loop leaves the drain is a line nobody sees until the
+        // flood is over — the notice's age frozen with it — which is exactly
+        // the frozen screen this feature was supposed to answer.
+        //
+        // The clock steps on every read, so the drain's deadline is crossed
+        // without sleeping: deterministic, and parallel-safe.
+        let mut events = vec![key(KeyCode::Char('p')), key(KeyCode::Char('y'))];
+        events.extend(
+            (1..=FLOOD_LINES).map(|line| Event::PushOutput(format!("Compiling crate {line}"))),
+        );
+        events.push(Event::Quit);
+
+        let (_, seen) = run_loop_clocked(
+            events,
+            TEST_DIMS,
+            |_frame_dims| "FRAME".to_string(),
+            stepping_clock(Instant::now(), FLOOD_STEP),
+        );
+
+        assert!(
+            seen.paints.len() > 1,
+            "a flooding push must paint while it floods, not once when it stops; \
+             {FLOOD_LINES} lines produced {} painted screen(s)",
+            seen.paints.len(),
+        );
+        let first = strip_ansi(seen.paints.first().expect("at least one paint"));
+        assert!(
+            first.contains("Compiling crate 1"),
+            "the first paint must carry the head of the flood, got {first:?}",
+        );
+        assert!(
+            !first.contains(&format!("Compiling crate {FLOOD_LINES}")),
+            "the first paint must land while the flood is still running, got {first:?}",
         );
     }
 
