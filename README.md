@@ -635,7 +635,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - The table takes the width of the terminal, and the `Host` column absorbs the change. A terminal
     too narrow for every column drops columns, first dropped first: `Recent`, `StDev`, `Max`, `Min`,
     `Last`, `Sent`, `Loss%`. The `TTL`, the `Host`, and the `Avg` never drop. A replay whose output
-    goes to a pipe or to a file prints the whole table, because such a run has no terminal to ask.
+    goes to a pipe or to a file prints the whole table, because such a run has no terminal to ask. A
+    replay under a terminal that carries no window prints the whole table too, because such a
+    terminal reports a width of zero, and zero columns measure no window.
   - A host too wide for the `Host` column loses the tail of its name, and it keeps its `★` and its
     `(+N)`. A name with its address fills that column of a run that resolves names, and the two
     marks say what no other column of the row says.

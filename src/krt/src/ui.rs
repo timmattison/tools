@@ -61,12 +61,14 @@
 //! more, and a frame of no columns tells a reader nothing.
 //!
 //! The terminal says how wide the frame is, and a run whose standard output is
-//! a pipe or a file has no terminal to ask. Such a run draws at the nominal
-//! width, which is every column of the table with a Host column of 30. A reader
-//! who redirects a replay asked for the whole table, and a frame cut to the
-//! window that the run started in would drop columns into a file that nothing
-//! ever gets back. It also makes the output of one recorded file one text on
-//! every machine, which is what a test of the binary reads.
+//! a pipe or a file has no terminal to ask. A terminal that carries no window
+//! says nothing either: it reports a width of zero, which measures no window at
+//! all. Each of those runs draws at the nominal width, which is every column of
+//! the table with a Host column of 30. A reader who redirects a replay asked for
+//! the whole table, and a frame cut to the window that the run started in would
+//! drop columns into a file that nothing ever gets back. It also makes the
+//! output of one recorded file one text on every machine, which is what a test
+//! of the binary reads.
 //!
 //! The address rows of one TTL line their Share% up under the Loss% of the row
 //! above them, digit for digit. The drawing this table came from puts those
@@ -96,7 +98,6 @@
 use crate::stats::{Address, HopStats, TtlRow};
 use crate::{ROUND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE, UNKNOWN};
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::terminal;
 use ratatui::layout::{Alignment, Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::text::Text;
@@ -824,14 +825,20 @@ const HOST_NOMINAL: u16 = 30;
 /// and it answers with the nominal frame, for the reason that the module
 /// documentation states above.
 ///
-/// A terminal that reports no size answers with the nominal frame as well. That
-/// frame then stands too wide or too narrow for the one window, and the
-/// terminal clips it, where a frame of no columns would say nothing at all.
+/// A terminal that reports no size answers with the nominal frame as well. Two
+/// terminals report no size: one that the probe failed to read, and one that
+/// carries no window. The second answers the `TIOCGWINSZ` ioctl with zero
+/// columns, and that ioctl succeeds; a pseudo-terminal that nobody ever sized is
+/// such a terminal, and `script -q /dev/null` makes one. `termsize` gives `None`
+/// for both, which is why the probe of this function is `termsize` and not the
+/// raw call. The nominal frame then stands too wide or too narrow for the one
+/// window, and the terminal clips it, where a frame of no columns would drop
+/// every column that drops and cut the Host column to its floor.
 pub(crate) fn frame_columns() -> u16 {
     if !std::io::stdout().is_terminal() {
         return frame_columns_of(None);
     }
-    frame_columns_of(terminal::size().ok().map(|(columns, _)| columns))
+    frame_columns_of(termsize::controlling_columns())
 }
 
 /// The number of terminal columns that a frame draws in, from the answer that
@@ -840,9 +847,19 @@ pub(crate) fn frame_columns() -> u16 {
 /// The read of the terminal stands apart from this decision, so a test names
 /// the answer of a terminal without a terminal to name it with.
 ///
-/// `None` is a run that measured no terminal, and it draws the nominal frame.
+/// `None` is a run that measured no terminal, and it draws the nominal frame. A
+/// width of zero draws the nominal frame as well, because no character of a row
+/// prints into no column.
+///
+/// `termsize` already gives `None` for a width of zero, so no zero reaches this
+/// function through [`frame_columns`]. The rule stays here because this function
+/// is where `krt` states what it draws at, and the test of the rule is what
+/// keeps it true if the probe of [`frame_columns`] ever changes.
 fn frame_columns_of(answer: Option<u16>) -> u16 {
-    answer.unwrap_or_else(|| frame_width(0, HOST_NOMINAL))
+    match answer {
+        Some(columns) if columns > 0 => columns,
+        _ => frame_width(0, HOST_NOMINAL),
+    }
 }
 
 /// The columns that a terminal width holds, and the width of each of them.
