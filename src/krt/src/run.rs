@@ -147,9 +147,15 @@ pub(crate) fn record<W: Write>(
                 // first reported its address, because the first ask of an
                 // address starts the lookup of that address.
                 write_names(writer, namer.names(&round.hops, Utc::now()))?;
+                // The recording comes first. The round reaches the file before
+                // it reaches the screen, so a screen that fails loses one frame
+                // and no record, and the file of a run whose display the user
+                // held holds every round of it. The record takes a copy of the
+                // round, because the screen reads the round after the write.
                 writer
-                    .write(&Record::Round(round))
+                    .write(&Record::Round(round.clone()))
                     .map_err(RunError::Write)?;
+                screen.round(&round);
                 recorded += 1;
             }
             // No round arrived inside the wait. The loop takes another turn, so
