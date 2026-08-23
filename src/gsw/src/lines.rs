@@ -25,6 +25,13 @@
 //! screen. An ANSI escape is several characters and zero columns, and left in
 //! it would repaint gsw's own frame in the hook's colors. Both are resolved
 //! here, at the one place a line becomes text.
+//!
+//! **A row erased is not a row said.** A hook that clears the row it is about
+//! to reuse sends bytes that draw nothing, and once the escapes are gone the
+//! empty string is all that is left of them. The window is six rows tall, so
+//! passing that on would spend a row on output no reader could ever have seen.
+//! A line that sanitizes away is therefore dropped — while a line that was
+//! blank before it got here, from an `echo ""`, keeps its row.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -61,7 +68,9 @@ impl LineSplitter {
     ///
     /// Returns an empty vector for a chunk that carried no terminator: those
     /// bytes are held until one arrives, which is what makes a line split
-    /// across two reads come back whole.
+    /// across two reads come back whole. A terminator whose line sanitizes
+    /// away completes no line either, by the rule [`LineSplitter::take_line`]
+    /// carries, so what comes back is not one line per terminator.
     pub(crate) fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
         let mut lines = Vec::new();
         for &byte in chunk {
@@ -72,7 +81,7 @@ impl LineSplitter {
                     // here is also what keeps the `\r` out of it, which matters
                     // because a stray one would send the cursor to column zero
                     // in the middle of a painted frame.
-                    lines.push(self.take_line());
+                    lines.extend(self.take_line());
                     continue;
                 }
                 // A bare `\r`: the writer went back to column zero and is
@@ -85,7 +94,7 @@ impl LineSplitter {
                 // Undecided until the next byte arrives, which can be in the
                 // next chunk or never.
                 b'\r' => self.pending_cr = true,
-                b'\n' => lines.push(self.take_line()),
+                b'\n' => lines.extend(self.take_line()),
                 _ => self.partial.push(byte),
             }
         }
@@ -97,22 +106,20 @@ impl LineSplitter {
     /// A process that exits without a final newline still said something, and
     /// dropping it would lose the last line of every hook that ends that way.
     /// `None` when the stream ended on a terminator, so a caller never paints a
-    /// blank row for output that was already complete.
+    /// blank row for output that was already complete — and `None` again when
+    /// the remainder sanitizes away, which is [`LineSplitter::take_line`]'s
+    /// rule and applies to every line rather than only to this one.
     pub(crate) fn finish(&mut self) -> Option<String> {
+        // The one thing this rules out that `take_line` does not: an empty
+        // buffer is a stream that ended on a terminator, not a blank line
+        // somebody printed, and it owes the caller no row.
         if self.partial.is_empty() {
             return None;
         }
         // `pending_cr` is deliberately not consulted. A bare `\r` moves the
         // cursor without erasing, so a stream that stops right after one
         // leaves its text on the screen — nothing came along to draw over it.
-        let line = self.take_line();
-        // A remainder that sanitizes away was never a line: a trailing color
-        // reset, a bell. Reporting it would cost the caller a blank row.
-        if line.is_empty() {
-            None
-        } else {
-            Some(line)
-        }
+        self.take_line()
     }
 
     /// Decode and sanitize the buffered bytes, and empty the buffer.
@@ -120,10 +127,22 @@ impl LineSplitter {
     /// The one place a line becomes text, which is what lets the byte rules
     /// above and the column rules below be stated separately and still meet
     /// exactly once.
-    fn take_line(&mut self) -> String {
+    ///
+    /// `None` for buffered bytes that sanitize away — a lone color reset, a
+    /// bell, an erase of the row the hook is about to reuse. Those bytes were
+    /// never a line, and reporting the empty string they leave behind would
+    /// cost the caller a row of a window six rows tall. An *empty* buffer is a
+    /// different thing and comes back as `Some("")`: a hook that ran
+    /// `echo ""` said something, and it said it blank.
+    fn take_line(&mut self) -> Option<String> {
         let raw = String::from_utf8_lossy(&self.partial).into_owned();
         self.partial.clear();
-        sanitize(&raw)
+        let line = sanitize(&raw);
+        if line.is_empty() && !raw.is_empty() {
+            None
+        } else {
+            Some(line)
+        }
     }
 }
 
