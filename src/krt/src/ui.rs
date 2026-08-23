@@ -828,11 +828,21 @@ const HOST_NOMINAL: u16 = 30;
 /// frame then stands too wide or too narrow for the one window, and the
 /// terminal clips it, where a frame of no columns would say nothing at all.
 pub(crate) fn frame_columns() -> u16 {
-    let nominal = frame_width(0, HOST_NOMINAL);
     if !std::io::stdout().is_terminal() {
-        return nominal;
+        return frame_columns_of(None);
     }
-    terminal::size().map_or(nominal, |(columns, _)| columns)
+    frame_columns_of(terminal::size().ok().map(|(columns, _)| columns))
+}
+
+/// The number of terminal columns that a frame draws in, from the answer that
+/// the terminal gave.
+///
+/// The read of the terminal stands apart from this decision, so a test names
+/// the answer of a terminal without a terminal to name it with.
+///
+/// `None` is a run that measured no terminal, and it draws the nominal frame.
+fn frame_columns_of(answer: Option<u16>) -> u16 {
+    answer.unwrap_or_else(|| frame_width(0, HOST_NOMINAL))
 }
 
 /// The columns that a terminal width holds, and the width of each of them.
@@ -1231,7 +1241,8 @@ fn read_line(buffer: &Buffer, line: u16, width: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_width, render_duration, render_size, sparkline, truncate_to_width, Frame, Header,
+        display_width, frame_columns_of, render_duration, render_size, sparkline,
+        truncate_to_width, Frame, Header,
     };
     use crate::record::RoundRecord;
     use crate::stats::HopTable;
@@ -1913,6 +1924,33 @@ mod tests {
     /// the module would agree with every width the module ever holds, and this
     /// width is the one a reader of a full-size terminal sees.
     const NOMINAL_WIDTH: u16 = 97;
+
+    #[test]
+    fn a_run_that_measured_no_terminal_draws_the_nominal_frame() {
+        assert_eq!(
+            frame_columns_of(None),
+            NOMINAL_WIDTH,
+            "a run with no terminal to ask holds no width of a window, and a reader who redirects a replay asked for the whole table"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_reports_no_columns_draws_the_nominal_frame() {
+        assert_eq!(
+            frame_columns_of(Some(0)),
+            NOMINAL_WIDTH,
+            "a terminal that carries no window reports zero columns, and a frame of no columns drops every column that drops and says nothing at all"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_reports_a_width_draws_at_that_width() {
+        assert_eq!(
+            frame_columns_of(Some(WIDE_TERMINAL)),
+            WIDE_TERMINAL,
+            "a terminal that measured a window fills that window and no more"
+        );
+    }
 
     /// The terminal column that the Host column starts in.
     ///
