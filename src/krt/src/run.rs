@@ -26,8 +26,6 @@ use crate::names::Namer;
 use crate::record::{
     EndReason, EndRecord, NameRecord, Record, RoundRecord, RunId, RunRecord, Writer,
 };
-use crate::ui::render_duration;
-use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
 use chrono::Utc;
 use std::io::Write;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -141,7 +139,7 @@ pub(crate) fn record<W: Write, S: Write>(
         }
         match rounds.recv_timeout(wait(limits.deadline)) {
             Ok(round) => {
-                let line = status_line(&round);
+                let line = crate::live::status_line(&round);
                 // The names that arrived stand before the round of the same
                 // turn. A name always lands on a later turn than the round that
                 // first reported its address, because the first ask of an
@@ -228,31 +226,6 @@ fn drain_names<W: Write>(
         }
         std::thread::sleep(left.min(POLL));
     }
-}
-
-/// Writes the one line that a run prints for one round.
-///
-/// The line holds the number of the round, the number of hops that answered,
-/// whether the round reached the target, and the time that the round took. Two
-/// spaces separate the fields, as they do in the closing line of the run.
-///
-/// A hop that did not answer is absent from the record, so the count is the
-/// number of hops that answered and not the length of the path.
-///
-/// A later slice replaces this line with the live table.
-fn status_line(round: &RoundRecord) -> String {
-    let reached = if round.reached {
-        REACHED
-    } else {
-        NEVER_REACHED
-    };
-    [
-        format!("{ROUND} {}", round.seq),
-        counted(round.hops.len(), HOP),
-        reached.to_owned(),
-        render_duration(Duration::from_millis(round.dur_ms)),
-    ]
-    .join(SUMMARY_SEPARATOR)
 }
 
 /// Why the run stops at the top of this turn. A run that goes on stops for
@@ -390,12 +363,6 @@ mod tests {
     /// The status line of the first round of a run that answered the whole path.
     const A_WHOLE_PATH_LINE: &str = "round 1  2 hops  reached  1s";
 
-    /// The number of the round that answered one hop.
-    const LOST_ROUND_SEQ: u64 = 2;
-
-    /// The status line of a round that answered one hop and reached nothing.
-    const A_LOST_ROUND_LINE: &str = "round 2  1 hop  never reached  1004ms";
-
     /// The grace that every test run gives its names.
     ///
     /// The fake resolver of a test answers at once, so no test waits for a
@@ -500,24 +467,6 @@ mod tests {
                     icmp: ECHO_REPLY.to_owned(),
                 },
             ],
-        }
-    }
-
-    /// One round that answered one hop and reached nothing.
-    fn a_lost_round(seq: u64) -> RoundRecord {
-        RoundRecord {
-            run: RunId::from(RUN),
-            seq,
-            ts: moment(ROUND_START),
-            dur_ms: LOST_ROUND_MS,
-            ttl_range: TtlRange::new(FIRST_TTL, TARGET_TTL).expect("the test range must hold"),
-            reached: false,
-            hops: vec![Hop {
-                ttl: FIRST_TTL,
-                addr: address(FIRST_HOP),
-                rtt_ms: FIRST_HOP_RTT_MS,
-                icmp: TIME_EXCEEDED.to_owned(),
-            }],
         }
     }
 
@@ -1343,36 +1292,12 @@ mod tests {
         assert_eq!(outcome_of(&ran).rounds, 1);
     }
 
-    // The status line of one round. A later slice replaces this line with the
-    // live table.
+    // The status lines that the loop prints. The line of one round is the work
+    // of `live::status_line`, and the tests of that line stand beside it.
 
     /// The status lines that a run printed, without the newline of each one.
     fn lines_of(ran: &Ran) -> Vec<&str> {
         ran.status.lines().collect()
-    }
-
-    #[test]
-    fn a_round_that_answered_two_hops_and_reached_the_target_prints_one_line() {
-        let ran = ran(
-            "status-reached",
-            &rounds_of(&[1]),
-            &after_rounds(1),
-            &|| false,
-        );
-        assert_eq!(ran.status, format!("{A_WHOLE_PATH_LINE}\n"));
-    }
-
-    /// One hop keeps the singular name, and a round that reached nothing says
-    /// so.
-    #[test]
-    fn a_round_that_answered_one_hop_and_reached_nothing_prints_the_singular_name() {
-        let ran = ran(
-            "status-lost",
-            &[a_lost_round(LOST_ROUND_SEQ)],
-            &after_rounds(1),
-            &|| false,
-        );
-        assert_eq!(ran.status, format!("{A_LOST_ROUND_LINE}\n"));
     }
 
     #[test]

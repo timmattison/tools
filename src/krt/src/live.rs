@@ -23,6 +23,8 @@
 use crate::record::{NameRecord, RoundRecord};
 use crate::stats::HopTable;
 use crate::ui;
+use crate::ui::render_duration;
+use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
 use crossterm::cursor::MoveTo;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::queue;
@@ -408,10 +410,36 @@ impl<W: Write, K: Keys> Screen for Table<W, K> {
     }
 }
 
+/// Writes the one line that a run of no live table prints for one round.
+///
+/// The line holds the number of the round, the number of hops that answered,
+/// whether the round reached the target, and the time that the round took. Two
+/// spaces separate the fields, as they do in the closing line of the run.
+///
+/// A hop that did not answer is absent from the record, so the count is the
+/// number of hops that answered and not the length of the path.
+///
+/// This line is the whole picture that a headless run gives of one round. A run
+/// that holds a terminal draws the table above in the place of it.
+pub(crate) fn status_line(round: &RoundRecord) -> String {
+    let reached = if round.reached {
+        REACHED
+    } else {
+        NEVER_REACHED
+    };
+    [
+        format!("{ROUND} {}", round.seq),
+        counted(round.hops.len(), HOP),
+        reached.to_owned(),
+        render_duration(Duration::from_millis(round.dur_ms)),
+    ]
+    .join(SUMMARY_SEPARATOR)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{classify, Command, Keys, NoKeys, RunFacts, Screen, Table};
-    use crate::record::{NameRecord, RunId};
+    use super::{classify, status_line, Command, Keys, NoKeys, RunFacts, Screen, Table};
+    use crate::record::{NameRecord, RoundRecord, RunId};
     use crate::testing::{address, round};
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -650,8 +678,49 @@ mod tests {
     }
 
     /// One round of one TTL, which the router answered.
-    fn one_round() -> crate::record::RoundRecord {
+    fn one_round() -> RoundRecord {
         round(TTL, TTL, &[(TTL, ROUTER, RTT)])
+    }
+
+    /// The TTL that the destination answered at.
+    const TARGET_TTL: u8 = 2;
+
+    /// The round-trip time of the answer of the destination, in milliseconds.
+    const TARGET_RTT: f64 = 4.56;
+
+    /// The number of a round that answered one hop and reached nothing.
+    const LOST_ROUND_SEQ: u64 = 2;
+
+    /// The time that such a round took, in milliseconds.
+    const LOST_ROUND_MS: u64 = 1004;
+
+    /// The status line of the first round of a run that answered the whole
+    /// path.
+    const A_WHOLE_PATH_LINE: &str = "round 1  2 hops  reached  1s";
+
+    /// The status line of a round that answered one hop and reached nothing.
+    const A_LOST_ROUND_LINE: &str = "round 2  1 hop  never reached  1004ms";
+
+    /// One round that answered two hops and reached the target.
+    fn a_whole_path_round() -> RoundRecord {
+        let mut record = round(
+            TTL,
+            TARGET_TTL,
+            &[
+                (TTL, ROUTER, RTT),
+                (TARGET_TTL, DESTINATION_ADDRESS, TARGET_RTT),
+            ],
+        );
+        record.reached = true;
+        record
+    }
+
+    /// One round that answered one hop and reached nothing.
+    fn a_lost_round() -> RoundRecord {
+        let mut record = round(TTL, TARGET_TTL, &[(TTL, ROUTER, RTT)]);
+        record.seq = LOST_ROUND_SEQ;
+        record.dur_ms = LOST_ROUND_MS;
+        record
     }
 
     /// The record of one name that a lookup answered.
@@ -887,6 +956,18 @@ mod tests {
                 .is_some_and(|line| line.ends_with(&size_of(SECOND_BYTES))),
             "and the next draw names the size that the file holds then: {second:?}"
         );
+    }
+
+    #[test]
+    fn a_round_that_answered_two_hops_and_reached_the_target_prints_one_line() {
+        assert_eq!(status_line(&a_whole_path_round()), A_WHOLE_PATH_LINE);
+    }
+
+    /// One hop keeps the singular name, and a round that reached nothing says
+    /// so.
+    #[test]
+    fn a_round_that_answered_one_hop_and_reached_nothing_prints_the_singular_name() {
+        assert_eq!(status_line(&a_lost_round()), A_LOST_ROUND_LINE);
     }
 
     #[test]
