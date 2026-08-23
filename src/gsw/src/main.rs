@@ -17,6 +17,8 @@ use crate::snapshot::build_snapshot;
 mod age;
 mod bar;
 mod git;
+/// Cutting a child process's byte chunks into lines that are safe to paint.
+mod lines;
 mod push;
 mod render;
 mod repo;
