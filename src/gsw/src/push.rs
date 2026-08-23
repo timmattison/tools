@@ -976,7 +976,7 @@ impl PushUi {
 
     /// What the push feature shows in a pane of `dims`: the lines that fit
     /// there, how many rows the frame must give up to make room for them
-    /// ([`Overlay::rows`]), and how many rows the frame keeps
+    /// (`Overlay::rows`), and how many rows the frame keeps
     /// ([`Overlay::frame_rows`]).
     ///
     /// All three come out of this one call because they are one decision — how
@@ -1147,7 +1147,7 @@ impl PushUi {
 /// The frame's height is carried here for the same reason. The pane is divided
 /// once, and both halves of that division are read off the same value, so the
 /// caller cannot re-derive one of them and land somewhere else. It used to
-/// subtract [`Overlay::rows`] from the pane height itself, in another module —
+/// subtract `Overlay::rows` from the pane height itself, in another module —
 /// two expressions that had to agree by inspection, about arithmetic that has
 /// already produced two review findings.
 pub(crate) struct Overlay {
@@ -1202,7 +1202,7 @@ impl Overlay {
         self.frame_rows
     }
 
-    /// The text to paint under the frame: exactly [`Overlay::rows`] lines, and
+    /// The text to paint under the frame: exactly `Overlay::rows` lines, and
     /// empty when there are none.
     pub(crate) fn text(&self) -> String {
         self.lines.join("\n")

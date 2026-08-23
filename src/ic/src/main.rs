@@ -2582,7 +2582,7 @@ fn comm_basename(comm: &str) -> &str {
 /// about how this session is viewed.
 ///
 /// `ps_args_output` is the output of `ps -eo pid=,args=`. A client is a
-/// process whose argv[0] basename is exactly `zellij` and that has the session
+/// process whose `argv[0]` basename is exactly `zellij` and that has the session
 /// name as a complete argument. The forms `zellij a NAME`, `zellij attach
 /// NAME`, `zellij -s NAME`, and `zellij --session NAME` all match. The server
 /// process (`zellij --server /path/.../NAME`) does not match, because the

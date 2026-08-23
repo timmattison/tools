@@ -964,7 +964,7 @@ fn unspecified_of(target: IpAddr) -> IpAddr {
 ///
 /// This function reads the outcome of the search and never makes it, and it
 /// hands the warning back and never prints it. A test therefore drives each of
-/// the three outcomes, and it reaches no network. [`trace`] makes the search
+/// the three outcomes, and it reaches no network. [`trace()`] makes the search
 /// and writes the line.
 fn source_from(
     found: std::io::Result<source::Discovery>,
