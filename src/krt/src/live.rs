@@ -271,9 +271,10 @@ impl<W: Write, K: Keys> Table<W, K> {
     fn apply(&mut self, command: Command) {
         match command {
             Command::Pause => self.paused = !self.paused,
+            Command::Names => self.named = !self.named,
             // Each command below takes an arm of this table with the test of
             // that command.
-            Command::Quit | Command::Names | Command::Reset | Command::Help => {}
+            Command::Quit | Command::Reset | Command::Help => {}
         }
     }
 
@@ -326,7 +327,16 @@ impl<W: Write, K: Keys> Screen for Table<W, K> {
         }
     }
 
-    fn names(&mut self, _names: &[NameRecord]) {}
+    fn names(&mut self, names: &[NameRecord]) {
+        for name in names {
+            // The map is keyed by the address, and not by the hop, because one
+            // address answers at any number of TTLs.
+            self.names.insert(name.addr, name.host.clone());
+        }
+        if !self.paused {
+            self.draw();
+        }
+    }
 }
 
 #[cfg(test)]
