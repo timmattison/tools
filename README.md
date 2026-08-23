@@ -599,7 +599,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     multipath mode, and the address family.
   - The `replay` command reads a file that an earlier run wrote, and it takes no destination and no
     flag of a probe. `--run` picks which run in that file to read, and the last run of the file is
-    the default. A recorded file holds one JSON record on each line.
+    the default. A recorded file holds one JSON record on each line. A file that holds more than
+    one run names the run of the table on standard error, so standard output stays the table alone.
   - A run probes every hop once per round and appends one record for each round to the file. The
     file opens in append mode, so one source and one destination keep one file across many runs,
     and the `run` field separates the runs inside it. The run flushes after every record, so a
@@ -620,7 +621,22 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     time. Each of the two writes the record that closes the run. On macOS and Linux, Ctrl-C also
     stops the run at once and writes that record. Windows gets that key with the table that a
     later build adds.
-  - This build prints one status line for each round. A later build adds the aggregate table.
+  - `krt replay` prints one table of the path. A header line names the destination, the address it
+    resolved to, the source, the count of the rounds, the period of one round, and the recorded
+    file with its size. Under it stands one row for each TTL, with the columns `TTL`, `Host`,
+    `Loss%`, `Sent`, `Last`, `Min`, `Avg`, `Max`, `StDev`, and `Recent`. The `Recent` column draws
+    the last round-trip times of the hop as a bar for each of them.
+  - The marks of the table each say one thing. A `★` behind a host marks the row that answered from
+    the destination, and a run that never reached the destination holds no such row. A `(+N)` behind
+    a host says that N more routers answered at that TTL, and one address row then stands under the
+    row of the TTL for each of them, opened by a `├` and closed by a `└`. An address row holds the
+    share of the answers of its TTL that the one router took, and a `▹` behind that percentage says
+    that it is a share and not a loss. A `???` in the Host column is a TTL that never answered.
+  - The table takes the width of the terminal, and the `Host` column absorbs the change. A terminal
+    too narrow for every column drops columns, first dropped first: `Recent`, `StDev`, `Max`, `Min`,
+    `Last`, `Sent`, `Loss%`. The `TTL`, the `Host`, and the `Avg` never drop. A replay whose output
+    goes to a pipe or to a file prints the whole table, because such a run has no terminal to ask.
+  - A live run still prints one status line for each round. A later build gives it the table.
   - macOS sends the probes without privileges. Linux needs `CAP_NET_RAW`, and Windows needs an
     elevated prompt. A platform that needs privileges and does not hold them prints the remedy and
     stops, and `krt` never falls back to a degraded trace without saying so.

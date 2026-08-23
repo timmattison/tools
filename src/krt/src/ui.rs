@@ -50,6 +50,14 @@
 //! floor of the Host column, and the terminal clips it. Nothing narrower says
 //! more, and a frame of no columns tells a reader nothing.
 //!
+//! The terminal says how wide the frame is, and a run whose standard output is
+//! a pipe or a file has no terminal to ask. Such a run draws at the nominal
+//! width, which is every column of the table with a Host column of 30. A reader
+//! who redirects a replay asked for the whole table, and a frame cut to the
+//! window that the run started in would drop columns into a file that nothing
+//! ever gets back. It also makes the output of one recorded file one text on
+//! every machine, which is what a test of the binary reads.
+//!
 //! The address rows of one TTL line their Share% up under the Loss% of the row
 //! above them, digit for digit. The drawing this table came from puts those
 //! digits one column further right, and that is the one place where the render
@@ -75,22 +83,16 @@
 //! each name a period of time, and a second writer of a duration would print
 //! `1s` in one of those three places and `1000ms` in another.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the render of the table is the reader of these helpers, and that render arrives in a later slice of issue #370, so the tests of this module read them today"
-    )
-)]
-
 use crate::stats::{Address, HopStats, TtlRow};
 use crate::{ROUND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE, UNKNOWN};
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::terminal;
 use ratatui::layout::{Alignment, Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::text::Text;
 use ratatui::widgets::{Cell, Row, Table, Widget};
 use std::collections::BTreeMap;
+use std::io::IsTerminal;
 use std::net::IpAddr;
 use std::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -107,7 +109,7 @@ const HEADER_START: &str = " krt  ";
 
 /// The text between two fields of the header line.
 ///
-/// Three spaces, and not the two of a summary line. Two of these fields hold a
+/// Three spaces, and not the two of a status line. Two of these fields hold a
 /// space of their own — `src 1.2.3.4` and `round 142` each do — so a narrower
 /// gap would read as one sentence, and a reader would have to know the words to
 /// find where one field stops.
@@ -116,9 +118,9 @@ const FIELD_SEPARATOR: &str = "   ";
 /// The glyph between a destination and the address that it resolved to.
 ///
 /// The destination is what the user typed, and the address is what the resolver
-/// answered. The arrow says which is which. The summary line of a replay writes
-/// the same pair as `name (address)`, because that line names a run, where this
-/// one heads the table of the path to that address.
+/// answered. The arrow says which is which. A row of the table writes the same
+/// pair as `name (address)`, because a row names one router of the path, where
+/// this line heads the whole path to that one address.
 const RESOLVES_TO: &str = " → ";
 
 /// The name of the field that holds the source address of the run.
@@ -795,6 +797,32 @@ fn total_width(slots: &[Slot]) -> u16 {
 /// how wide the frame is, and [`Layout::at`] says what the columns then take.
 fn frame_width(dropped: usize, host: u16) -> u16 {
     total_width(&standing_slots(dropped, host))
+}
+
+/// The number of columns of the Host column of a frame that no terminal
+/// measured.
+///
+/// Thirty columns hold `ae-1.core.example.net`, which is the shape of the name
+/// that a router of a backbone carries. The frame is then 97 columns wide, and
+/// both numbers come out of the drawing that this table stands on.
+const HOST_NOMINAL: u16 = 30;
+
+/// The number of terminal columns that a frame draws in.
+///
+/// A terminal answers with its own width, so the table fills the window and no
+/// more. Standard output that is a pipe or a file holds no width to ask for,
+/// and it answers with the nominal frame, for the reason that the module
+/// documentation states above.
+///
+/// A terminal that reports no size answers with the nominal frame as well. That
+/// frame then stands too wide or too narrow for the one window, and the
+/// terminal clips it, where a frame of no columns would say nothing at all.
+pub(crate) fn frame_columns() -> u16 {
+    let nominal = frame_width(0, HOST_NOMINAL);
+    if !std::io::stdout().is_terminal() {
+        return nominal;
+    }
+    terminal::size().map_or(nominal, |(columns, _)| columns)
 }
 
 /// The columns that a terminal width holds, and the width of each of them.

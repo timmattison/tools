@@ -140,7 +140,7 @@ pub(crate) fn record<W: Write, S: Write>(
 ///
 /// The line holds the number of the round, the number of hops that answered,
 /// whether the round reached the target, and the time that the round took. Two
-/// spaces separate the fields, as they do in the summary line of a replay.
+/// spaces separate the fields, as they do in the closing line of the run.
 ///
 /// A hop that did not answer is absent from the record, so the count is the
 /// number of hops that answered and not the length of the path.

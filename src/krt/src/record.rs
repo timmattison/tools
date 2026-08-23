@@ -634,13 +634,6 @@ impl<'a> Run<'a> {
     }
 
     /// The names that the run read.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "a replay shows the name of each hop beside its address, and the names arrive in a later slice of issue #371"
-        )
-    )]
     pub(crate) fn names(&self) -> &[&'a NameRecord] {
         &self.names
     }
@@ -655,7 +648,7 @@ impl<'a> Run<'a> {
         not(test),
         expect(
             dead_code,
-            reason = "the table that a replay prints shows why the run stopped, and the table arrives in a later slice of issue #370"
+            reason = "no line of the table that a replay prints names why the run stopped: the header line holds what every row of the table has in common, and the reason a run stopped belongs to the run and not to a hop. The tests of this module are the one reader of the record"
         )
     )]
     pub(crate) fn end(&self) -> Option<&'a EndRecord> {

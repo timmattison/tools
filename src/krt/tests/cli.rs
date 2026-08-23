@@ -11,8 +11,8 @@
 //! The rest of the file covers the resolved configuration. A command line that
 //! names a destination prints the block and exits with success. A command line
 //! that contradicts itself prints the reason on standard error and exits with a
-//! failure. The `replay` command prints one summary line and the aggregate of
-//! the run in the place of the block, and `tests/replay.rs` covers those lines.
+//! failure. The `replay` command prints the table of the run it folded in the
+//! place of the block, and `tests/replay.rs` covers that table.
 
 // Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
