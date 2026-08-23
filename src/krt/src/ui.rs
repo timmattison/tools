@@ -2248,6 +2248,291 @@ mod tests {
         );
     }
 
+    /// The least terminal width that holds each set of columns, and the
+    /// headings that stand there.
+    ///
+    /// The sets run from the widest to the narrowest one, and the width of each
+    /// row is the least width that holds its set: one column less drops the
+    /// next column of the order, which is the set of the row below.
+    ///
+    /// The test spells the widths, and the module derives them from the widths
+    /// of its columns. The two are on purpose, as they are for the nominal
+    /// width above: a test that read the constants of the module would agree
+    /// with every set of widths the module ever holds. The frame without the
+    /// Host column takes 67, 56, 49, 42, 35, 28, 22, and 13 columns, and the
+    /// floor of the Host column adds 12 to each of them.
+    const COLUMN_SETS: [(u16, &[&str]); 8] = [
+        (
+            79,
+            &[
+                "TTL", "Host", "Loss%", "Sent", "Last", "Min", "Avg", "Max", "StDev", "Recent",
+            ],
+        ),
+        (
+            68,
+            &[
+                "TTL", "Host", "Loss%", "Sent", "Last", "Min", "Avg", "Max", "StDev",
+            ],
+        ),
+        (
+            61,
+            &["TTL", "Host", "Loss%", "Sent", "Last", "Min", "Avg", "Max"],
+        ),
+        (54, &["TTL", "Host", "Loss%", "Sent", "Last", "Min", "Avg"]),
+        (47, &["TTL", "Host", "Loss%", "Sent", "Last", "Avg"]),
+        (40, &["TTL", "Host", "Loss%", "Sent", "Avg"]),
+        (34, &["TTL", "Host", "Loss%", "Avg"]),
+        (25, &["TTL", "Host", "Avg"]),
+    ];
+
+    /// A terminal one column too narrow for the last set of columns.
+    const BELOW_THE_LAST_SET: u16 = 24;
+
+    /// The narrowest terminal that a test below reads.
+    const ONE_COLUMN: u16 = 1;
+
+    /// A terminal that holds every column but the sparkline and the deviation.
+    const TWO_DROPPED: u16 = 67;
+
+    /// A terminal that holds every column but the sparkline, the deviation, and
+    /// the largest time.
+    const THREE_DROPPED: u16 = 60;
+
+    /// A host name longer than the Host column of every width the tests below
+    /// read, and one that holds no space.
+    ///
+    /// The cut of such a name fills the column exactly, so the field that
+    /// starts in the first column of the Host column is as wide as the column
+    /// is. A name that held a space would read as two fields, and a name
+    /// shorter than the column would measure itself and not the column.
+    const LONG_NAME: &str = "core1.router.example.net.example.org";
+
+    /// The heading of every column that a column header holds.
+    fn headings_of(line: &str) -> Vec<String> {
+        fields_with_columns(line)
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect()
+    }
+
+    /// The heading of every column of the golden frame at a terminal width.
+    fn headings(width: u16) -> Vec<String> {
+        headings_of(line(&golden_lines(width), COLUMN_HEADER_LINE))
+    }
+
+    /// The number of columns that the Host column takes at a terminal width.
+    ///
+    /// The one row of the frame names a host longer than the column, so the cut
+    /// host fills the column and the field measures the column itself.
+    fn host_columns(width: u16) -> usize {
+        let table = table_of(&[round(1, 1, &[(1, FIRST_HOP, 1.0)])]);
+        let names = names_of(&[(FIRST_HOP, LONG_NAME)]);
+        let lines = lines_of(&table, &names, None, width);
+        let row = line(&lines, COLUMN_HEADER_LINE + 1);
+        let host = fields_with_columns(row)
+            .into_iter()
+            .find(|(column, _)| *column == HOST_START)
+            .map_or(0, |(_, text)| display_width(&text));
+        assert!(
+            host < display_width(LONG_NAME),
+            "the cut host must stop inside the name, or the field measures the name: {row}"
+        );
+        host
+    }
+
+    /// The terminal column that each field behind the percentage of a line ends
+    /// in.
+    ///
+    /// Every column behind the percentage holds its text to the right, so two
+    /// lines whose columns stand in the same place end their fields in the same
+    /// columns however long the numbers of either line are.
+    fn ends_behind_the_percent(line: &str) -> Vec<usize> {
+        let end = percent_end(line);
+        fields_with_columns(line)
+            .into_iter()
+            .filter(|(column, _)| *column >= end)
+            .map(|(column, text)| column + display_width(&text))
+            .collect()
+    }
+
+    /// The value that stands under one heading of the column header.
+    ///
+    /// The lookup reads the columns of the two lines, and not the order of
+    /// their fields. A row that read its cells from a second list would shift
+    /// the cells of every column behind a dropped one, and a lookup by order
+    /// would read the shifted row as the right one. A column of numbers holds
+    /// its text to the right, so its heading and its cell end in the same
+    /// column, and the Host column holds its text to the left, so the two start
+    /// in the same column.
+    fn value_under(header: &str, row: &str, heading: &str) -> Option<String> {
+        let (start, width) = fields_with_columns(header)
+            .into_iter()
+            .find(|(_, text)| text == heading)
+            .map(|(column, text)| (column, display_width(&text)))?;
+        let end = start + width;
+        fields_with_columns(row)
+            .into_iter()
+            .find(|(column, text)| *column == start || column + display_width(text) == end)
+            .map(|(_, text)| text)
+    }
+
+    #[test]
+    fn the_columns_drop_in_the_order_of_the_module_documentation() {
+        for (index, &(width, standing)) in COLUMN_SETS.iter().enumerate() {
+            assert_eq!(
+                headings(width),
+                standing,
+                "a terminal of {width} columns holds every column of its set"
+            );
+            // One column less drops the next column of the order. The last set
+            // drops nothing: the TTL and the host name the hop, and the average
+            // says how slow it is.
+            let narrower = COLUMN_SETS
+                .get(index + 1)
+                .map_or(standing, |&(_, next)| next);
+            assert_eq!(
+                headings(width - 1),
+                narrower,
+                "a terminal of {} columns drops the next column of the order",
+                width - 1
+            );
+        }
+    }
+
+    #[test]
+    fn no_column_drops_while_the_terminal_holds_the_frame() {
+        let (least, whole) = COLUMN_SETS[0];
+        for width in [least, NOMINAL_WIDTH, WIDE_TERMINAL] {
+            assert_eq!(
+                headings(width),
+                whole,
+                "a terminal of {width} columns holds every column of the table"
+            );
+        }
+        assert_eq!(
+            host_columns(least),
+            HOST_MIN,
+            "the least width that holds every column stands the Host column on its floor"
+        );
+    }
+
+    #[test]
+    fn the_host_column_takes_the_columns_that_a_dropped_column_released() {
+        // The last set drops no column, so the width below it releases nothing.
+        for &(width, _) in COLUMN_SETS.iter().take(COLUMN_SETS.len() - 1) {
+            let floor = host_columns(width);
+            let after_the_drop = host_columns(width - 1);
+            assert_eq!(
+                floor, HOST_MIN,
+                "the least width of a set stands the Host column on its floor"
+            );
+            assert!(
+                after_the_drop > floor,
+                "a terminal of {} columns dropped a column, so the Host column takes what it released: {after_the_drop} columns against {floor}",
+                width - 1
+            );
+        }
+    }
+
+    #[test]
+    fn a_terminal_below_the_last_set_renders_at_the_floor() {
+        let (least, last_set) = COLUMN_SETS[COLUMN_SETS.len() - 1];
+        for width in [BELOW_THE_LAST_SET, ONE_COLUMN] {
+            assert_eq!(
+                headings(width),
+                last_set,
+                "a terminal of {width} columns keeps the TTL, the host, and the average"
+            );
+            assert_eq!(
+                host_columns(width),
+                HOST_MIN,
+                "a terminal of {width} columns stands the Host column on its floor"
+            );
+        }
+        let lines = golden_lines(BELOW_THE_LAST_SET);
+        let header = line(&lines, COLUMN_HEADER_LINE);
+        assert_eq!(
+            display_width(header),
+            usize::from(least),
+            "the frame at the floor takes the least width of the last set"
+        );
+        assert!(
+            display_width(header) > usize::from(BELOW_THE_LAST_SET),
+            "the terminal clips the frame, and a frame of no columns says nothing"
+        );
+    }
+
+    #[test]
+    fn the_columns_that_stand_line_up_under_the_column_header() {
+        let lines = golden_lines(THREE_DROPPED);
+        let header = line(&lines, COLUMN_HEADER_LINE);
+        let ttl_row = line(&lines, SHARED_TTL_LINE);
+        assert_eq!(
+            headings_of(header),
+            ["TTL", "Host", "Loss%", "Sent", "Last", "Min", "Avg"],
+            "a terminal of {THREE_DROPPED} columns drops the sparkline, the deviation, and the largest time"
+        );
+        for other in [
+            header,
+            line(&lines, SHARED_TTL_LINE + 1),
+            line(&lines, SHARED_TTL_LINE + 2),
+        ] {
+            assert_eq!(
+                percent_end(other),
+                percent_end(ttl_row),
+                "the percentage of {other} must end where the percentage of {ttl_row} ends"
+            );
+            assert_eq!(
+                ends_behind_the_percent(other),
+                ends_behind_the_percent(ttl_row),
+                "the columns behind the percentage of {other} must stand under the columns of {ttl_row}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dropped_column_takes_its_cells_with_it() {
+        // Three rounds probe TTL 1, and the router answers each of them, at
+        // 10.0, 40.0, and 20.0. The loss is 0 / 3 = 0.0 percent. The last
+        // answer is 20.0, the smallest is 10.0, and the largest is 40.0. The
+        // mean is 70 / 3 = 23.33, which one decimal place writes as 23.3. The
+        // distances from the mean are -13.33, 16.67, and -3.33, whose squares
+        // sum to 466.67, so the variance is 466.67 / 3 = 155.56 and the
+        // deviation is 12.47, which prints as 12.5. No two of those numbers are
+        // the same, so a cell that landed in the column beside its own fails
+        // the test.
+        let table = table_of(&[
+            round(1, 1, &[(1, BARE_HOP, 10.0)]),
+            round(1, 1, &[(1, BARE_HOP, 40.0)]),
+            round(1, 1, &[(1, BARE_HOP, 20.0)]),
+        ]);
+        let names = BTreeMap::new();
+        let lines = lines_of(&table, &names, None, TWO_DROPPED);
+        let header = line(&lines, COLUMN_HEADER_LINE);
+        let row = line(&lines, COLUMN_HEADER_LINE + 1);
+        assert_eq!(
+            headings_of(header),
+            ["TTL", "Host", "Loss%", "Sent", "Last", "Min", "Avg", "Max"],
+            "a terminal of {TWO_DROPPED} columns drops the sparkline and the deviation"
+        );
+        for (heading, value) in [
+            ("TTL", "1"),
+            ("Host", BARE_HOP),
+            ("Loss%", "0.0%"),
+            ("Sent", "3"),
+            ("Last", "20.0"),
+            ("Min", "10.0"),
+            ("Avg", "23.3"),
+            ("Max", "40.0"),
+        ] {
+            assert_eq!(
+                value_under(header, row, heading).as_deref(),
+                Some(value),
+                "the cell under {heading} holds the number that {heading} names: {row}"
+            );
+        }
+    }
+
     #[test]
     fn a_ttl_that_no_round_probed_prints_no_loss() {
         // The round probes TTL 1 and TTL 2, and a hop answers at TTL 5. The
