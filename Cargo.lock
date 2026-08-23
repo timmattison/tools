@@ -4565,6 +4565,7 @@ dependencies = [
  "clap",
  "crossterm",
  "mockito",
+ "portable-pty",
  "ratatui",
  "reqwest",
  "serde",
