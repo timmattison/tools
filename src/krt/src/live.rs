@@ -398,7 +398,7 @@ impl<W: Write, K: Keys> Screen for Table<W, K> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, Command, Keys, RunFacts, Screen, Table};
+    use super::{classify, Command, Keys, NoKeys, RunFacts, Screen, Table};
     use crate::record::{NameRecord, RunId};
     use crate::testing::{address, round};
     use chrono::Utc;
@@ -766,6 +766,24 @@ mod tests {
             "a turn that took no key asks for no stop of the run"
         );
         assert!(screen.poll(), "the quit key asks for the stop of the run");
+    }
+
+    #[test]
+    fn a_turn_that_took_no_key_draws_nothing() {
+        // The run loop polls ten times each second. A poll that drew every
+        // turn would clear the screen and paint it again ten times each
+        // second, and the table would flicker for nothing.
+        let mut screen = table_at(temp_path("no-key"), NoKeys);
+        screen.round(&one_round());
+        let drawn = screen.sink.len();
+
+        screen.poll();
+        assert_eq!(
+            screen.sink.len(),
+            drawn,
+            "a turn of no key leaves the frame that stands: {:?}",
+            painted(&screen.sink)
+        );
     }
 
     #[test]
