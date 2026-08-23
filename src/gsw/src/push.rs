@@ -366,7 +366,8 @@ fn run_push(
     let child_stdout = child.stdout.take();
     let child_stderr = child.stderr.take();
 
-    // Every line both pipes carried, in the order it was read.
+    // Every line both pipes carried, in the order it was read, as one string
+    // with a newline between each line and the one before it.
     //
     // **Arrival order, not stream order.** Grouping the text by stream buries
     // whatever the quieter pipe said last in the middle of the louder pipe's
@@ -374,15 +375,40 @@ fn run_push(
     // push some refs` — written on stderr after a hook has filled stdout. The
     // user's own terminal merges the two in write order, and this is the same
     // account of the same push.
-    let collected = std::sync::Mutex::new(Vec::<String>::new());
+    //
+    // **One growing string, not one `String` per line.** A pre-push hook that
+    // builds and tests a workspace prints hundreds of thousands of lines, and
+    // a vector of them is a heap allocation each — then one more copy of the
+    // whole push to join them at the end, for a record that [`failure_lines`]
+    // reads three lines of and a successful push reads none of. Appending in
+    // place costs the amortized growth of a single buffer instead, and the
+    // text it holds is what `join("\n")` produced, byte for byte: the
+    // separator goes *between* lines, so there is no trailing newline and a
+    // push that said nothing leaves the empty string behind. Bounding the
+    // record is the other way to spend less, and it is [`PushUi`]'s decision
+    // to make rather than this function's — see [`PushOutcome`].
+    //
+    // The flag beside the text is what the text alone cannot say. "The buffer
+    // is still empty" is not the same question as "no line has landed yet": a
+    // line can *be* empty — an `echo ""` in a hook keeps its row, by
+    // [`LineSplitter`]'s rule — and asking the buffer would swallow the
+    // newline that belongs after such a first line.
+    let collected = std::sync::Mutex::new((String::new(), false));
     let record = |line: String| {
-        // The guard is a temporary of this statement, so it is released before
-        // the callback below runs. A reader therefore holds the lock for a
-        // push onto a vector and never across the caller's work.
-        collected
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(line.clone());
+        {
+            // The guard lives and dies inside this block, so it is released
+            // before the callback below runs. A reader therefore holds the lock
+            // for an append onto a string and never across the caller's work.
+            let mut collected = collected
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (text, any_line_recorded) = &mut *collected;
+            if *any_line_recorded {
+                text.push('\n');
+            }
+            *any_line_recorded = true;
+            text.push_str(&line);
+        }
         on_line(line);
     };
 
@@ -412,10 +438,11 @@ fn run_push(
         }
     };
 
-    let mut text = collected
+    // Both readers are joined, so the lock has nothing left to protect and the
+    // text is taken out of it whole rather than copied out of it.
+    let (mut text, _) = collected
         .into_inner()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .join("\n");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let success = status.success();
     if !success && text.trim().is_empty() {
