@@ -168,7 +168,7 @@ fn sanitize(raw: &str) -> String {
     // Display columns written so far, which is what a tab stop is counted in.
     // Not characters: a full-width `日` is one character and two columns, and
     // counting it as one would put the stop in the wrong place.
-    let mut column = 0usize;
+    let mut column = 0_usize;
     let mut scan = Scan::Text;
 
     for ch in raw.chars() {

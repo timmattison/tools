@@ -1655,27 +1655,19 @@ mod ui_tests {
     ///
     /// The escapes have to be stripped rather than assumed absent.
     /// `colored` decides whether to emit them from process-global state that
-    /// other tests in this binary toggle (`colored::control::set_override`), so
-    /// a raw `UnicodeWidthStr::width` counts escape bytes as columns in some
-    /// runs and not others — the assertion would pass or fail depending on test
-    /// order. Columns on screen are also the thing under test: the overlay
-    /// colors *after* truncating, so the escapes cost the user nothing.
+    /// other tests in this binary toggle, so a raw `UnicodeWidthStr::width`
+    /// counts escape bytes as columns in some runs and not others — the
+    /// assertion would pass or fail depending on test order. Columns on screen
+    /// are also the thing under test: the overlay colors *after* truncating,
+    /// so the escapes cost the user nothing.
+    ///
+    /// Stripped by `testcolor`, which is the workspace's one stripper. This
+    /// used to skip from an escape to the next ASCII letter, which is right
+    /// for the CSI sequences `colored` emits and wrong for the rest — and the
+    /// window under a running push paints whatever a hook wrote, which is not
+    /// a set of sequences anyone here chooses.
     fn visible_width(line: &str) -> usize {
-        let mut visible = String::new();
-        let mut chars = line.chars();
-        while let Some(c) = chars.next() {
-            if c == '\u{1b}' {
-                // A CSI sequence runs until a letter terminates it.
-                for tail in chars.by_ref() {
-                    if tail.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            } else {
-                visible.push(c);
-            }
-        }
-        unicode_width::UnicodeWidthStr::width(visible.as_str())
+        unicode_width::UnicodeWidthStr::width(testcolor::strip_ansi(line).as_str())
     }
 
     /// The instant every test starts from.
@@ -1725,7 +1717,9 @@ mod ui_tests {
     /// that other tests in this binary toggle, so reading `text()` raw would
     /// compare different bytes depending on whether the run had a terminal.
     fn painted(ui: &mut PushUi, dims: Dimensions, now: Instant) -> String {
-        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| ui.overlay(dims, now).text()))
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            ui.overlay(dims, now).text()
+        }))
     }
 
     #[test]
@@ -1968,7 +1962,11 @@ mod ui_tests {
         // It must not produce a second command.
         let mut ui = asking();
         assert!(ui.confirm(t0()).is_some());
-        assert_eq!(ui.confirm(t0()), None, "a second confirm must not push again");
+        assert_eq!(
+            ui.confirm(t0()),
+            None,
+            "a second confirm must not push again"
+        );
     }
 
     #[test]
@@ -3427,8 +3425,7 @@ mod run_tests {
             let hook = workdir.join(".git").join("hooks").join("pre-push");
             std::fs::create_dir_all(hook.parent().expect("the hook has a parent"))
                 .expect("create the hooks directory");
-            std::fs::write(&hook, format!("#!/bin/sh\n{body}\n"))
-                .expect("write the pre-push hook");
+            std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write the pre-push hook");
             std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
                 .expect("make the hook executable");
         }
@@ -3472,7 +3469,7 @@ echo "{SECOND_LINE}"
 
             let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
             let recorded = Arc::clone(&seen);
-            let gate_path = gate.clone();
+            let gate_path = gate;
             let outcome = run_push(
                 &confirmed(&["push", "-u", "origin", "feature"]),
                 p,
@@ -3480,7 +3477,10 @@ echo "{SECOND_LINE}"
                     if line == FIRST_LINE {
                         std::fs::write(&gate_path, b"open").expect("open the gate");
                     }
-                    recorded.lock().expect("the record lock is never poisoned").push(line);
+                    recorded
+                        .lock()
+                        .expect("the record lock is never poisoned")
+                        .push(line);
                 },
             );
 
