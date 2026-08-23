@@ -25,4 +25,31 @@ disallowed-methods = [
     { path = "colored::control::unset_override", reason = "testcolor::with_forced_ansi puts the override back on its own, on the panic path as well" },
     { path = "colored::control::ShouldColorize::set_override", reason = "the singleton reaches the same global state as the free function; call testcolor::with_forced_ansi instead" },
     { path = "colored::control::ShouldColorize::unset_override", reason = "the singleton reaches the same global state as the free function; testcolor::with_forced_ansi puts the override back on its own" },
+    # A terminal answers the `TIOCGWINSZ` ioctl with the columns and the rows of
+    # its window, and a terminal that carries no window answers that same ioctl
+    # with two zeros. The ioctl succeeds either way, so neither crate below
+    # calls the zero an error. `crossterm` hands it straight back as
+    # `Ok((0, 0))`, and every caller that reads the answer then takes zero
+    # columns as the width of a window and draws into nothing. `krt` printed a
+    # table of three columns under such a terminal, where the same replay
+    # through a pipe printed ten, and no line of the output said why. A
+    # pseudo-terminal that nobody ever sized is such a terminal, and
+    # `script -q /dev/null` makes one.
+    #
+    # `terminal_size` refuses a zero on Unix today and does not refuse one on
+    # Windows, where it subtracts the edges of the console rectangle and puts no
+    # limit under the difference. So the two crates disagree with each other,
+    # and one of them disagrees with itself between two platforms. A caller
+    # cannot know which of the four answers it holds without reading the source
+    # of both crates.
+    #
+    # `termsize` is the one entrance, and it states the one rule: a size whose
+    # columns or whose rows are zero is no answer. It keeps the two probes
+    # apart, because they read different file descriptors — `controlling_size`
+    # reads `/dev/tty` and `stdout_size` reads standard output — and a caller
+    # that measures one of them must not get the other. That crate holds the
+    # only two calls this ban allows, and each of them says so at the call site
+    # with an `#[allow]` and a reason.
+    { path = "crossterm::terminal::size", reason = "call termsize::controlling_size or termsize::controlling_columns instead; a terminal that carries no window answers this call with Ok((0, 0)), and zero columns is not a width" },
+    { path = "terminal_size::terminal_size", reason = "call termsize::stdout_size or termsize::stdout_columns instead; this call hands a zero back on Windows, and zero columns is not a width" },
 ]
