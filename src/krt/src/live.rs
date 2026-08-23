@@ -1490,4 +1490,64 @@ mod tests {
             "and the hook of the live run puts back no terminal, because that hook no longer stands"
         );
     }
+
+    /// Puts a hook back on the way out, as the guard of a live run does.
+    struct Restorer {
+        /// The hook to put back. An `Option`, so the drop moves it out.
+        previous: Option<PanicHook>,
+        /// Whether the restoration raised a panic of its own.
+        refused: Arc<AtomicBool>,
+    }
+
+    impl Drop for Restorer {
+        fn drop(&mut self) {
+            let Some(previous) = self.previous.take() else {
+                return;
+            };
+            // This drop runs while the thread panics, and a panic of the
+            // restoration on that path ends the whole process. The catch holds
+            // such a panic long enough for the test to read that it happened.
+            // The test asserts that there is nothing to catch.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                restore_panic_hook(previous);
+            }));
+            self.refused.store(outcome.is_err(), Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_live_run_that_panics_puts_back_no_hook_and_the_process_lives() {
+        // `std::panic::set_hook` refuses a thread that panics, and it refuses
+        // with a panic of its own. A second panic on the path of a first one
+        // aborts the process. The guard of a live run reaches its drop on the
+        // path of every panic of that run, so a restoration that reads the
+        // thread of no such panic turns each of them into an abort. The hook
+        // of the live run already put the terminal back by then, and the
+        // message of the panic is what the reader waits for.
+        let hooks = HookGuard::take();
+        let marked = mark();
+        let refused = Arc::new(AtomicBool::new(false));
+        let refused_in_run = Arc::clone(&refused);
+
+        let outcome = std::panic::catch_unwind(move || {
+            let _restorer = Restorer {
+                previous: Some(install_panic_hook()),
+                refused: refused_in_run,
+            };
+            panic!("{THE_TEST_PANIC}");
+        });
+        let read = marked.read.load(Ordering::SeqCst);
+        let refused_now = refused.load(Ordering::SeqCst);
+        drop(hooks);
+
+        assert!(outcome.is_err(), "the body of the test raised its panic");
+        assert!(
+            read,
+            "the hook of the live run read that panic and handed it on"
+        );
+        assert!(
+            !refused_now,
+            "and the restoration of the hook raises no panic of its own on the path of a panic"
+        );
+    }
 }
