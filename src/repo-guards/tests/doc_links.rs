@@ -17,8 +17,10 @@
 //! Nothing is keyed on a fixed path under the temp dir, the repo, or the home
 //! dir.
 
+use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use repo_guards::doc_links;
 use tempfile::TempDir;
@@ -36,6 +38,20 @@ const FIXTURE_MANIFEST: &str = "\
 name = \"fixture\"
 version = \"0.1.0\"
 edition = \"2021\"
+";
+
+/// A fixture manifest that turns documentation off for the one target the
+/// crate has. Cargo builds it happily and documents nothing at all.
+const DOCUMENTS_NOTHING_MANIFEST: &str = "\
+[workspace]
+
+[package]
+name = \"fixture\"
+version = \"0.1.0\"
+edition = \"2021\"
+
+[lib]
+doc = false
 ";
 
 /// A library whose doc comment links to an item that does not exist.
@@ -101,13 +117,17 @@ fn fixture(lib_rs: &str) -> TempDir {
 
 /// Build a fixture crate from `files`, each a path relative to the crate root,
 /// in its own temp dir.
+fn fixture_files(files: &[(&str, &str)]) -> TempDir {
+    fixture_with_manifest(FIXTURE_MANIFEST, files)
+}
+
+/// Build a fixture crate with a manifest of the caller's choosing.
 ///
 /// The `TempDir` is returned rather than its path, so the caller holds it for
 /// the length of the test and the fixture is removed afterwards.
-fn fixture_files(files: &[(&str, &str)]) -> TempDir {
+fn fixture_with_manifest(manifest: &str, files: &[(&str, &str)]) -> TempDir {
     let dir = TempDir::new().expect("create fixture crate dir");
-    fs::write(dir.path().join("Cargo.toml"), FIXTURE_MANIFEST)
-        .expect("write fixture crate manifest");
+    fs::write(dir.path().join("Cargo.toml"), manifest).expect("write fixture crate manifest");
     for (relative, contents) in files {
         let path = dir.path().join(relative);
         let parent = path.parent().expect("a fixture file has a parent dir");
@@ -268,5 +288,152 @@ fn a_failed_build_refuses_even_when_it_found_a_broken_link() {
     assert!(
         matches!(&error, doc_links::DocLinksError::DocBuildFailed { .. }),
         "a partial build must be a refusal however much it found, got: {error}"
+    );
+}
+
+/// Absolute, canonical path to this repository's root, derived from the crate
+/// being compiled rather than from the working directory, which `cargo test`
+/// does not pin.
+fn repo_root() -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    fs::canonicalize(&root)
+        .unwrap_or_else(|e| panic!("cannot canonicalize {}: {e}", root.display()))
+}
+
+/// The name of every workspace member `cargo metadata` reports for `repo_root`.
+///
+/// Every step fails loudly. A parity test that skipped when cargo could not be
+/// started, or compared against a set it quietly failed to parse, would be an
+/// instance of the very defect it exists to catch.
+fn cargo_workspace_members(repo_root: &Path) -> BTreeSet<String> {
+    let output = Command::new(env!("CARGO"))
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(repo_root)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "cannot run `cargo metadata` in {}: {e}",
+                repo_root.display()
+            )
+        });
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "`cargo metadata` in {} exited with {}:\n{stderr}",
+        repo_root.display(),
+        output.status
+    );
+
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!("cannot parse the output of `cargo metadata` as JSON: {e}\nstderr:\n{stderr}")
+    });
+
+    let members: BTreeSet<&str> = metadata
+        .get("workspace_members")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("`cargo metadata` returned no `workspace_members` array"))
+        .iter()
+        .map(|id| {
+            id.as_str()
+                .unwrap_or_else(|| panic!("a workspace member id is not a string: {id}"))
+        })
+        .collect();
+
+    metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("`cargo metadata` returned no `packages` array"))
+        .iter()
+        .filter(|package| {
+            package
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| members.contains(id))
+        })
+        .map(|package| {
+            package
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("a package in `cargo metadata` has no `name`"))
+                .to_owned()
+        })
+        .collect()
+}
+
+/// The set of packages the scan documented must equal the set of workspace
+/// members cargo reports.
+///
+/// Every other test here asks what the guard *concludes* about a link. This one
+/// asks the prior question, which a verdict cannot: whether the guard read every
+/// crate there is. A member the documentation build never reached contributes no
+/// diagnostics, so its links are reported as resolved for the same reason a
+/// crate with no links is — and the scan says "clean" in both cases, in the same
+/// words.
+///
+/// The answer comes from the toolchain rather than from a list in this file. A
+/// hardcoded list would go stale the moment somebody adds a member, and it would
+/// go stale silently, in the direction that reports clean. A member added later
+/// is therefore either scanned or shows up here as a set difference, with nobody
+/// needing to notice.
+#[test]
+fn the_scan_documents_exactly_the_workspace_members_cargo_reports() {
+    let repo_root = repo_root();
+    let scan = doc_links::audit(&repo_root).expect("scan the workspace");
+
+    let cargo = cargo_workspace_members(&repo_root);
+    assert!(
+        !cargo.is_empty(),
+        "`cargo metadata` reported no workspace members for {}; every package the \
+         scan documented would then look invented and every real gap would vanish, \
+         so an empty cargo side is a broken test rather than a verdict",
+        repo_root.display()
+    );
+
+    let documented = scan.documented();
+    let missed: Vec<&String> = cargo
+        .iter()
+        .filter(|name| !documented.contains(*name))
+        .collect();
+    assert!(
+        missed.is_empty(),
+        "the documentation build never documented {} workspace member(s): {missed:?}\n\
+         This is the false-green direction. A crate the build does not reach reports \
+         no diagnostics, so its links are called resolved on the strength of the \
+         crates that were read.",
+        missed.len()
+    );
+
+    let invented: Vec<&String> = documented
+        .iter()
+        .filter(|name| !cargo.contains(*name))
+        .collect();
+    assert!(
+        invented.is_empty(),
+        "the scan reports {} package(s) cargo does not list as workspace members: {invented:?}\n\
+         This direction is loud rather than silent, but it is the same drift: a guard \
+         wrong about which crates it read is not to be trusted about what it found.",
+        invented.len()
+    );
+}
+
+/// A build that documents nothing is a refusal, not a clean verdict.
+///
+/// `doc = false` is the smallest way to write it, and it is not hypothetical: a
+/// member that turns documentation off drops out of the scanned set while the
+/// build still exits zero and the scan still prints "every intra-doc link
+/// resolves".
+#[test]
+fn a_build_that_documents_nothing_refuses() {
+    let dir = fixture_with_manifest(
+        DOCUMENTS_NOTHING_MANIFEST,
+        &[("src/lib.rs", ALL_LINKS_RESOLVE)],
+    );
+
+    let error = must_refuse(&dir);
+
+    assert!(
+        matches!(&error, doc_links::DocLinksError::NothingDocumented { .. }),
+        "a build that documented no package must be a refusal, got: {error}"
     );
 }

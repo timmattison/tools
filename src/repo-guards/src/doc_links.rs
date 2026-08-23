@@ -256,6 +256,16 @@ pub enum DocLinksError {
         dir: PathBuf,
     },
 
+    /// The documentation build documented no workspace package at all.
+    #[error(
+        "`cargo doc` in {} documented no workspace package; refusing to report every link resolved across nothing",
+        dir.display()
+    )]
+    NothingDocumented {
+        /// The directory cargo ran in.
+        dir: PathBuf,
+    },
+
     /// A diagnostic names a package that is not a workspace member.
     ///
     /// `cargo doc --no-deps` documents workspace members only, so rustdoc can
