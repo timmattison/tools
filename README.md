@@ -591,8 +591,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     and the `run` field separates the runs inside it. The run flushes after every record, so a
     `kill -9` loses at most one round.
   - The default name of the file is `SOURCE-DESTINATION.jsonl` in the working directory, and
-    `--output` overrides it. The default name carries the address of the machine, so a file you
-    share carries it too.
+    `--output` overrides it. `krt` finds SOURCE in three steps, and the first step that gives an
+    address wins. `--source` names the address, and it asks nothing and opens nothing. A run that
+    names no source asks `https://api.ipify.org` once at startup, with a timeout of 3 seconds. A
+    run that reads no address there takes the address of the local interface that reaches the
+    destination, and it prints one warning line that says why. The last step opens a socket and
+    sends no packet, so a captive network and an air-gapped network both still record.
+  - The default name therefore carries the public address of the machine, and a file you share
+    carries it too. `--source` avoids the lookup, and `--output` avoids the name.
   - `--rounds` stops the run after that many rounds, and `--duration` stops it after that much
     time. Each of the two writes the record that closes the run. On macOS and Linux, Ctrl-C also
     stops the run at once and writes that record. Windows gets that key with the table that a

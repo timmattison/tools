@@ -302,7 +302,8 @@ struct Cli {
     #[arg(long)]
     no_dns: bool,
 
-    /// Override the source label in the derived filename.
+    /// Override the source label in the derived filename. Skip the lookup of
+    /// the public address.
     #[arg(long, value_name = "IP")]
     source: Option<IpAddr>,
 
