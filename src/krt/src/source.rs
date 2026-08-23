@@ -194,19 +194,75 @@ const PUBLIC_TIMEOUT: Duration = Duration::from_secs(3);
 ///
 /// A service that answers with a page of HTML, and not with an address, writes
 /// that whole page to the warning line of the run without this limit. Sixty
-/// characters name the service and the trouble, and they fit one line.
+/// characters name the service and the trouble.
+///
+/// These sixty characters are the characters of one line, because [`shorten`]
+/// makes the answer one line before it counts them. A count of the characters
+/// of the raw answer bounds no line: the first sixty characters of a page of
+/// HTML hold three line breaks, so the warning breaks across lines and
+/// [`PUBLIC_FALLBACK`] stands on a line of its own, away from the reason.
 const ANSWER_LIMIT: usize = 60;
 
 /// The character that marks an answer that the message cut.
 const ELLIPSIS: &str = "…";
 
-/// The start of an answer, short enough for one line of a warning.
+/// The character that stands in the place of every run of whitespace.
+const SPACE: char = ' ';
+
+/// The answer as one line, with no character that paints a terminal.
+///
+/// The answer is the text of a remote service, and the warning line goes
+/// straight to the standard error of the user. Two kinds of character
+/// therefore leave the answer here.
+///
+/// Every run of whitespace becomes one space. The line break is the character
+/// that matters most: a page of HTML holds three of them inside its first
+/// sixty characters, so an answer that keeps them breaks the warning across
+/// lines. One space also spends less of [`ANSWER_LIMIT`] than a run of padding
+/// does, so the limit buys words and not whitespace.
+///
+/// Every other control character goes. A line break is a control character and
+/// a whitespace character both, and the rule of the whitespace wins, so a line
+/// break becomes a space and not nothing. The escape character starts every
+/// sequence that paints a terminal, and this walk drops that character alone.
+/// The parameter letters of such a sequence stay as ordinary text. The warning
+/// therefore paints nothing, and the reader still sees what arrived.
+///
+/// The result starts with no space and ends with no space.
+///
+/// The walk reads characters and never bytes, so a character of more than one
+/// byte survives whole. `char::is_whitespace` reads the whole Unicode table,
+/// as [`sanitize`] in this file does, so a space such as U+3000 IDEOGRAPHIC
+/// SPACE collapses as an ASCII space does.
+fn one_line(answer: &str) -> String {
+    let mut cleaned = String::new();
+    let mut space_is_due = false;
+    for character in answer.chars() {
+        if character.is_whitespace() {
+            space_is_due = !cleaned.is_empty();
+        } else if !character.is_control() {
+            if space_is_due {
+                cleaned.push(SPACE);
+                space_is_due = false;
+            }
+            cleaned.push(character);
+        }
+    }
+    cleaned
+}
+
+/// The start of an answer, as one line of a warning.
+///
+/// The answer becomes one line first, and the cut comes second, so
+/// [`ANSWER_LIMIT`] counts the characters of one line and the ellipsis marks a
+/// cut of the cleaned text. [`one_line`] says what the clean takes out.
 ///
 /// The walk reads characters and never bytes, so a character of more than one
 /// byte survives whole. An answer that the walk cut ends with an ellipsis, so a
 /// reader sees that more of it exists.
 fn shorten(answer: &str) -> String {
-    let mut characters = answer.chars();
+    let cleaned = one_line(answer);
+    let mut characters = cleaned.chars();
     let start: String = characters.by_ref().take(ANSWER_LIMIT).collect();
     if characters.next().is_some() {
         format!("{start}{ELLIPSIS}")
@@ -234,7 +290,10 @@ enum PublicError {
     /// The answer is not an address.
     #[error("the public address service answered with text that is not an address: {answer}")]
     Answer {
-        /// The start of the text that the service answered.
+        /// The start of the text that the service answered, as one line.
+        ///
+        /// [`shorten`] makes that one line, so the message of this variant
+        /// stays on the one warning line of the run and paints no terminal.
         answer: String,
     },
     /// The answer is an address of the family that the target is not of.
