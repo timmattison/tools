@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -586,8 +586,15 @@ fn render_duration(duration: Duration) -> String {
 ///
 /// The `auto` family takes the first address that the resolver named, whatever
 /// its version.
-fn pick_address(found: &[SocketAddr], _family: AddressFamily) -> Option<IpAddr> {
-    found.first().map(|found| found.ip())
+fn pick_address(found: &[SocketAddr], family: AddressFamily) -> Option<IpAddr> {
+    found
+        .iter()
+        .map(SocketAddr::ip)
+        .find(|address| match family {
+            AddressFamily::Auto => true,
+            AddressFamily::Version4 => address.is_ipv4(),
+            AddressFamily::Version6 => address.is_ipv6(),
+        })
 }
 
 /// Writes the reason that a destination names no address to probe.
@@ -683,7 +690,9 @@ fn host_name() -> String {
 /// A system that reports no name, and a system that reports an empty one, both
 /// leave the run without a name, so the record carries one word in its place.
 fn host_name_or(reported: Option<String>) -> String {
-    reported.unwrap_or_default()
+    reported
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| UNKNOWN.to_owned())
 }
 
 /// The signals that stop a run.
@@ -746,8 +755,8 @@ fn stop_flag() -> std::io::Result<Arc<AtomicBool>> {
     dead_code,
     reason = "the run loop asks the question once per turn, and main starts the run loop in a later slice of issue #367"
 )]
-fn user_stopped(_flag: &AtomicBool) -> bool {
-    false
+fn user_stopped(flag: &AtomicBool) -> bool {
+    flag.load(Ordering::Relaxed)
 }
 
 /// Writes a count and the name of what it counts.
@@ -2110,10 +2119,7 @@ resolved configuration:
     /// An empty name is no name, so it takes the same word as an absent one.
     #[test]
     fn a_machine_that_reports_an_empty_name_carries_one_word() {
-        assert_eq!(
-            host_name_or(Some(AN_EMPTY_HOST_NAME.to_owned())),
-            UNKNOWN
-        );
+        assert_eq!(host_name_or(Some(AN_EMPTY_HOST_NAME.to_owned())), UNKNOWN);
     }
 
     #[test]
