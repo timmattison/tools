@@ -67,10 +67,8 @@ pub(crate) trait Resolver {
 pub(crate) struct NoLookups;
 
 impl Resolver for NoLookups {
-    fn lookup(&self, addr: IpAddr) -> Lookup {
-        todo!(
-            "the answer of the resolver that looks nothing up arrives with the green step: {addr}"
-        )
+    fn lookup(&self, _addr: IpAddr) -> Lookup {
+        Lookup::Nameless
     }
 }
 
@@ -105,7 +103,12 @@ impl Namer {
         )
     )]
     pub(crate) fn new(resolver: Box<dyn Resolver>, run: RunId) -> Self {
-        todo!("the namer of one run arrives with the green step: {run}")
+        Self {
+            resolver,
+            run,
+            waiting: BTreeSet::new(),
+            settled: HashSet::new(),
+        }
     }
 
     /// Reads the addresses that a round reported, asks the resolver about every
@@ -125,10 +128,42 @@ impl Namer {
         )
     )]
     pub(crate) fn names(&mut self, hops: &[Hop], now: DateTime<Utc>) -> Vec<NameRecord> {
-        todo!(
-            "the records of one turn arrive with the green step: {} hops at {now}",
-            hops.len()
-        )
+        // An address that settled needs no further ask, so no round puts it
+        // back into the set of the addresses that wait. One address arrives at
+        // many TTLs of one round and in many rounds of one run, and the two
+        // sets together hold one entry for it.
+        for hop in hops {
+            if !self.settled.contains(&hop.addr) {
+                self.waiting.insert(hop.addr);
+            }
+        }
+
+        let mut records = Vec::new();
+        let mut settled_now = Vec::new();
+        for addr in &self.waiting {
+            match self.resolver.lookup(*addr) {
+                Lookup::Named(host) => {
+                    records.push(NameRecord {
+                        run: self.run.clone(),
+                        ts: now,
+                        addr: *addr,
+                        host,
+                    });
+                    settled_now.push(*addr);
+                }
+                Lookup::Nameless => settled_now.push(*addr),
+                Lookup::Pending => {}
+            }
+        }
+
+        // The loop above reads the set of the addresses that wait, so the moves
+        // between the two sets come after it.
+        for addr in settled_now {
+            self.waiting.remove(&addr);
+            self.settled.insert(addr);
+        }
+
+        records
     }
 }
 
