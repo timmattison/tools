@@ -151,10 +151,12 @@ const ESC: char = '\u{1b}';
 
 /// Where [`sanitize`] is in an escape sequence.
 ///
-/// A state machine rather than a search for a closing byte, because the two
-/// sequence families end differently: a CSI ends at the first byte in its final
-/// range, and an OSC runs to a bell or to a two-character string terminator. A
-/// rule written for one leaks the other's payload into the frame as text.
+/// A state machine rather than a search for a closing byte, because a sequence
+/// ends in one of three ways and the shortest of them is not a prefix of the
+/// others: a two-character escape ends at its second character, a CSI ends at
+/// the first byte in its final range, and a control string runs to a bell or to
+/// a two-character string terminator. A rule written for one leaks the others'
+/// payloads into the frame as text.
 enum Scan {
     /// Ordinary text, and the only state that writes anything out.
     Text,
@@ -162,10 +164,14 @@ enum Scan {
     Escape,
     /// Inside `ESC [ … final`, the color and cursor sequences.
     Csi,
-    /// Inside `ESC ] …`, an operating system command such as a title set.
-    Osc,
-    /// Inside an OSC, on an `ESC` that can be half of its terminator.
-    OscEscape,
+    /// Inside a control string: `ESC ]` (OSC, a title set), `ESC P` (DCS, a
+    /// sixel image or a tmux passthrough), `ESC X` (SOS), `ESC ^` (PM) or
+    /// `ESC _` (APC). Named for the ECMA-48 category rather than for OSC,
+    /// which is only the most common of the five, because all five carry a
+    /// free-form payload to the same string terminator and so are one state.
+    ControlString,
+    /// Inside a control string, on an `ESC` that can be half of its terminator.
+    ControlStringEscape,
 }
 
 /// Make one decoded line safe to paint in a frame measured in display columns.
@@ -178,8 +184,9 @@ enum Scan {
 /// - **Tabs become spaces**, out to the next [`TAB_WIDTH`] stop. One character
 ///   and up to eight columns is the widest gap between what a row measures and
 ///   what it draws, and a hook that prints a table prints one per row.
-/// - **Escape sequences go**, both families. Nothing gsw shows from a child
-///   process is worth letting that child address the terminal directly.
+/// - **Escape sequences go**, every family: the two-character escapes, the CSI
+///   sequences, and the control strings. Nothing gsw shows from a child process
+///   is worth letting that child address the terminal directly.
 /// - **Remaining control characters go.** A bell would ring on every repaint,
 ///   and a backspace would eat the column to its left.
 fn sanitize(raw: &str) -> String {
@@ -215,7 +222,11 @@ fn sanitize(raw: &str) -> String {
             },
             Scan::Escape => match ch {
                 '[' => Scan::Csi,
-                ']' => Scan::Osc,
+                // The five introducers that open a control string. Read as
+                // two-character escapes they would drop the introducer and
+                // then print the payload, which is how a sixel image or a
+                // tmux passthrough arrives as a row of garbage.
+                ']' | 'P' | 'X' | '^' | '_' => Scan::ControlString,
                 // A two-character escape. Both characters are already dropped.
                 _ => Scan::Text,
             },
@@ -228,15 +239,18 @@ fn sanitize(raw: &str) -> String {
                     Scan::Csi
                 }
             }
-            Scan::Osc => match ch {
+            // A control string ends at a bell or at `ESC \`, whichever the
+            // writer chose. Its payload is free-form, so nothing between the
+            // introducer and the terminator can be read as text.
+            Scan::ControlString => match ch {
                 '\u{07}' => Scan::Text,
-                ESC => Scan::OscEscape,
-                _ => Scan::Osc,
+                ESC => Scan::ControlStringEscape,
+                _ => Scan::ControlString,
             },
-            Scan::OscEscape => match ch {
+            Scan::ControlStringEscape => match ch {
                 '\\' => Scan::Text,
-                // Not a terminator after all, so the command runs on.
-                _ => Scan::Osc,
+                // Not a terminator after all, so the string runs on.
+                _ => Scan::ControlString,
             },
         };
     }
