@@ -145,6 +145,63 @@ const REACHED: &str = "reached";
 /// The last field of a summary line, when no round reached the target.
 const NEVER_REACHED: &str = "never reached";
 
+/// The text that starts the line of one TTL of the aggregate.
+const TTL_INDENT: &str = "  ";
+
+/// The text that starts the line of one address of a TTL.
+///
+/// The line of an address stands under the line of its TTL, so a reader tells
+/// the two apart by the width of the indent alone.
+const ADDRESS_INDENT: &str = "      ";
+
+/// The name of the field that holds the loss of one TTL, as a percentage.
+const LOSS: &str = "loss";
+
+/// The name of the field that holds the share of one address, as a percentage.
+///
+/// A TTL carries a loss and an address carries a share, and the two words
+/// differ because the two measures differ. Two routers that split the traffic
+/// of one TTL evenly each answer half of the probes of that TTL, and a loss per
+/// address would report 50 percent for a pair that loses nothing.
+const SHARE: &str = "share";
+
+/// The name of the field that counts the probes of one TTL.
+const SENT: &str = "sent";
+
+/// The name of the field that counts the answers.
+const RECV: &str = "recv";
+
+/// The name of the field that holds the most recent round-trip time.
+const LAST: &str = "last";
+
+/// The name of the field that holds the smallest round-trip time.
+const MIN: &str = "min";
+
+/// The name of the field that holds the mean round-trip time.
+const AVG: &str = "avg";
+
+/// The name of the field that holds the largest round-trip time.
+const MAX: &str = "max";
+
+/// The name of the field that holds the standard deviation of the round-trip
+/// times.
+const STDDEV: &str = "stddev";
+
+/// The name of the field that holds the jitter.
+const JITTER: &str = "jitter";
+
+/// The host of a TTL that never answered.
+const NO_HOST: &str = "???";
+
+/// The value of a number that the run holds none of.
+const NO_NUMBER: &str = "-";
+
+/// The sign that ends a percentage.
+const PERCENT_SIGN: &str = "%";
+
+/// The number of decimal places of every round-trip time and every percentage.
+const DECIMALS: usize = 1;
+
 /// The reason of a file that holds no run.
 ///
 /// A file that holds no run at all stops the message here. A `--run` that names
@@ -811,6 +868,19 @@ fn summarize(run: &Run<'_>) -> String {
     .join(SUMMARY_SEPARATOR)
 }
 
+/// The lines that a replay prints for the aggregate of one run.
+///
+/// One line holds one TTL of the path, in TTL order. A TTL that saw more than
+/// one address adds one line for each of those addresses, under the line of
+/// the TTL. Two spaces separate the fields, as they do on the summary line.
+///
+/// The design puts the fold in `stats.rs` and the render in `ui.rs`. This
+/// slice builds no `ui.rs`, so the render lives here. A later slice replaces
+/// these lines with the aggregate table.
+fn aggregate_lines(_table: &stats::HopTable) -> Vec<String> {
+    Vec::new()
+}
+
 /// Writes the reason of a file that holds no run to fold.
 ///
 /// A `--run` that names a run the file does not hold adds that identifier and
@@ -864,7 +934,16 @@ fn replay(path: &Path, wanted: Option<&str>) -> Replay {
         None => recording.last_run(),
     };
     let outcome = match found {
-        Some(run) => Ok(summarize(&run)),
+        Some(run) => {
+            let mut table = stats::HopTable::new();
+            for round in run.rounds() {
+                table.observe(round);
+            }
+            Ok(Folded {
+                summary: summarize(&run),
+                aggregate: aggregate_lines(&table),
+            })
+        }
         None => Err(no_run_message(path, wanted, &recording.run_ids())),
     };
     Replay { warning, outcome }
@@ -874,8 +953,19 @@ fn replay(path: &Path, wanted: Option<&str>) -> Replay {
 struct Replay {
     /// The warning about the file, when the file holds a cut final line.
     warning: Option<String>,
-    /// The one line that names the run, or the reason that no run folds.
-    outcome: Result<String, String>,
+    /// What the replay folded, or the reason that no run folds.
+    outcome: Result<Folded, String>,
+}
+
+/// What a replay folded out of one run.
+///
+/// The summary and the aggregate travel together, so one replay reads the file
+/// once and every line of the answer comes from the same run.
+struct Folded {
+    /// The one line that names the run.
+    summary: String,
+    /// The lines of the aggregate of the run.
+    aggregate: Vec<String>,
 }
 
 /// The fault that stopped a trace, and the code that names its kind.
@@ -1109,7 +1199,13 @@ fn main() {
         eprintln!("{PROGRAM}: {warning}");
     }
     match result.outcome {
-        Ok(summary) => println!("{summary}"),
+        Ok(folded) => {
+            // The summary names the run, and the aggregate stands under it.
+            println!("{}", folded.summary);
+            for line in folded.aggregate {
+                println!("{line}");
+            }
+        }
         Err(reason) => {
             eprintln!("{PROGRAM}: {reason}");
             std::process::exit(EXIT_FAILURE);
@@ -1120,13 +1216,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        closing_line, host_name_or, parse_duration, pick_address, render_duration, resolve_target,
-        source_from, stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason, Family,
-        Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, RESOLVE_PORT,
-        SOURCE_FALLBACK, UNKNOWN,
+        aggregate_lines, closing_line, host_name_or, parse_duration, pick_address, render_duration,
+        resolve_target, source_from, stop_reason, user_stopped, AddressFamily, Cli, Command,
+        EndReason, Family, Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind,
+        SourceLabel, ADDRESS_INDENT, PERCENT_SIGN, RESOLVE_PORT, SHARE, SOURCE_FALLBACK,
+        SUMMARY_SEPARATOR, UNKNOWN,
     };
+    use crate::record::{Hop, RoundRecord, RunId, TtlRange};
     use crate::run::Outcome;
     use crate::source::Discovery;
+    use crate::stats::HopTable;
+    use chrono::{DateTime, Utc};
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -2525,5 +2625,176 @@ resolved configuration:
             warning.contains(SOURCE_FALLBACK),
             "the warning names what the run recorded in its place: {warning}"
         );
+    }
+
+    /// The identifier of the run of every round of an aggregate test.
+    const AGGREGATE_RUN: &str = "2026-08-20T00:00:00.000Z";
+
+    /// The moment of every round of an aggregate test.
+    const AGGREGATE_MOMENT: &str = "2026-08-20T00:00:01.000Z";
+
+    /// The time that every round of an aggregate test took, in milliseconds.
+    const AGGREGATE_DURATION: u64 = 1000;
+
+    /// The name of the ICMP message of every hop of an aggregate test.
+    const TIME_EXCEEDED: &str = "time_exceeded";
+
+    /// The address of the router that answers first at a TTL.
+    const ONE_ROUTER: &str = "10.0.0.1";
+
+    /// The address of the other router of a TTL that two of them answer at.
+    const ANOTHER_ROUTER: &str = "10.0.0.2";
+
+    /// The whole of a percentage, for the sum of the shares of one TTL.
+    const WHOLE_PERCENT: f64 = 100.0;
+
+    /// The largest difference that a comparison of two percentages admits.
+    ///
+    /// The two shares of this test are 33.3 and 66.7, which sum to exactly 100
+    /// in decimal. A read of each printed decimal into a number with a
+    /// fraction loses a little. The sum then misses the whole by about 1e-14,
+    /// and this tolerance covers that loss. A pair of shares that rounds the
+    /// other way misses the whole by a tenth, and this test names no such
+    /// pair.
+    const PERCENT_TOLERANCE: f64 = 1e-9;
+
+    /// One round that probed the TTLs of the range, and that the named hops
+    /// answered.
+    ///
+    /// Each hop is a TTL, the address that answered at it, and the round-trip
+    /// time of that answer.
+    fn round(first: u8, last: u8, hops: &[(u8, &str, f64)]) -> RoundRecord {
+        RoundRecord {
+            run: RunId::from(AGGREGATE_RUN),
+            seq: 1,
+            ts: DateTime::parse_from_rfc3339(AGGREGATE_MOMENT)
+                .expect("the test moment must parse")
+                .with_timezone(&Utc),
+            dur_ms: AGGREGATE_DURATION,
+            ttl_range: TtlRange::new(first, last).expect("the test range must hold"),
+            reached: false,
+            hops: hops
+                .iter()
+                .map(|(ttl, addr, rtt_ms)| Hop {
+                    ttl: *ttl,
+                    addr: address(addr),
+                    rtt_ms: *rtt_ms,
+                    icmp: TIME_EXCEEDED.to_owned(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The lines of the aggregate of every round, in one table.
+    fn lines_of(rounds: &[RoundRecord]) -> Vec<String> {
+        let mut table = HopTable::new();
+        for round in rounds {
+            table.observe(round);
+        }
+        aggregate_lines(&table)
+    }
+
+    /// Reads the share that one address line printed.
+    fn share_of(line: &str) -> f64 {
+        let prefix = format!("{SHARE} ");
+        let field = line
+            .split(SUMMARY_SEPARATOR)
+            .find_map(|field| field.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("an address line holds a share field: {line}"));
+        field
+            .strip_suffix(PERCENT_SIGN)
+            .unwrap_or_else(|| panic!("a share ends with the percent sign: {line}"))
+            .parse()
+            .unwrap_or_else(|_| panic!("a share reads as a number: {line}"))
+    }
+
+    /// A TTL that answered every round loses nothing.
+    ///
+    /// The two answers are 10.0 and 20.0. The sum is 30.0, so the mean is
+    /// 30 / 2 = 15.0. The distances from the mean are -5.0 and 5.0, and the
+    /// squares of them sum to 50.0. The population variance is 50 / 2 = 25.0,
+    /// so the standard deviation is 5.0. The jitter is the absolute difference
+    /// of the last two answers, which is 10.0.
+    #[test]
+    fn a_ttl_that_answered_every_round_prints_no_loss_and_every_number() {
+        let lines = lines_of(&[
+            round(1, 1, &[(1, ONE_ROUTER, 10.0)]),
+            round(1, 1, &[(1, ONE_ROUTER, 20.0)]),
+        ]);
+        assert_eq!(
+            lines,
+            ["  1  10.0.0.1  loss 0.0%  sent 2  recv 2  last 20.0  min 10.0  avg 15.0  max 20.0  stddev 5.0  jitter 10.0"]
+        );
+    }
+
+    /// A TTL that never answered names no host and holds no number.
+    ///
+    /// Both rounds probed TTL 2 and neither one answered at it, so the loss is
+    /// 2 / 2 * 100 = 100.0 percent.
+    #[test]
+    fn a_ttl_that_never_answered_prints_no_host_and_no_number() {
+        let lines = lines_of(&[
+            round(1, 2, &[(1, ONE_ROUTER, 10.0)]),
+            round(1, 2, &[(1, ONE_ROUTER, 20.0)]),
+        ]);
+        assert_eq!(lines.len(), 2, "two TTLs took a probe: {lines:?}");
+        assert_eq!(
+            lines[1],
+            "  2  ???  loss 100.0%  sent 2  recv 0  last -  min -  avg -  max -  stddev -  jitter -"
+        );
+    }
+
+    /// One address is the host of the TTL line, so it takes no line of its own.
+    #[test]
+    fn a_ttl_of_one_address_prints_no_address_line() {
+        let lines = lines_of(&[round(1, 1, &[(1, ONE_ROUTER, 10.0)])]);
+        assert_eq!(lines.len(), 1, "one TTL is one line: {lines:?}");
+        assert!(
+            !lines[0].starts_with(ADDRESS_INDENT),
+            "the one line is the line of the TTL: {lines:?}"
+        );
+    }
+
+    /// A TTL that two routers answer at names both of them.
+    ///
+    /// The first router answers one round of the three, and the second router
+    /// answers the other two. The shares are therefore 1 / 3 * 100 = 33.3 and
+    /// 2 / 3 * 100 = 66.7 percent, to one decimal place.
+    ///
+    /// The three answers of the TTL are 10.0, 20.0, and 30.0. The sum is 60.0,
+    /// so the mean is 60 / 3 = 20.0. The distances from the mean are -10.0,
+    /// 0.0, and 10.0, and the squares of them sum to 200.0. The population
+    /// variance is 200 / 3 = 66.667, so the standard deviation is 8.165, which
+    /// prints as 8.2.
+    ///
+    /// The second router answered 20.0 and 30.0. The mean of the two is 25.0,
+    /// the distances are -5.0 and 5.0, and the squares sum to 50.0. The
+    /// variance is 50 / 2 = 25.0, so the standard deviation is 5.0.
+    #[test]
+    fn a_ttl_of_two_addresses_prints_one_line_for_each_of_them() {
+        let lines = lines_of(&[
+            round(1, 1, &[(1, ONE_ROUTER, 10.0)]),
+            round(1, 1, &[(1, ANOTHER_ROUTER, 20.0)]),
+            round(1, 1, &[(1, ANOTHER_ROUTER, 30.0)]),
+        ]);
+        assert_eq!(
+            lines,
+            [
+                "  1  10.0.0.1 (+1)  loss 0.0%  sent 3  recv 3  last 30.0  min 10.0  avg 20.0  max 30.0  stddev 8.2  jitter 10.0",
+                "      10.0.0.1  share 33.3%  recv 1  last 10.0  min 10.0  avg 10.0  max 10.0  stddev 0.0  jitter -",
+                "      10.0.0.2  share 66.7%  recv 2  last 30.0  min 20.0  avg 25.0  max 30.0  stddev 5.0  jitter 10.0",
+            ]
+        );
+        let total = share_of(&lines[1]) + share_of(&lines[2]);
+        assert!(
+            (total - WHOLE_PERCENT).abs() < PERCENT_TOLERANCE,
+            "the printed shares of one TTL sum to {WHOLE_PERCENT}, and they sum to {total}"
+        );
+    }
+
+    /// A run that folded nothing prints nothing.
+    #[test]
+    fn an_empty_table_prints_no_line() {
+        assert!(aggregate_lines(&HopTable::new()).is_empty());
     }
 }

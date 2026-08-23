@@ -1,8 +1,13 @@
 //! Black-box coverage for `krt replay`, driving the real binary.
 //!
-//! A replay reads a recorded file and prints one summary line for one run. The
-//! tests read the line that the binary printed, so they cover the whole path
-//! from the command line to standard output.
+//! A replay reads a recorded file, prints one summary line for one run, and
+//! prints the aggregate numbers of that run under it. The tests read the lines
+//! that the binary printed, so they cover the whole path from the command line
+//! to standard output.
+//!
+//! Every number of an expected constant is computed by hand, and the
+//! arithmetic stands beside the constant. A constant that copies what the
+//! binary printed proves nothing.
 //!
 //! The committed fixture holds two runs. It covers the default selection of the
 //! last run, and the selection of the other run by `--run`. Every other file is
@@ -47,16 +52,49 @@ const SECOND_RUN: &str = "2026-08-19T09:30:00.000Z";
 /// An identifier that the fixture does not hold.
 const ABSENT_RUN: &str = "1999-01-01T00:00:00.000Z";
 
-/// The summary of the first run of the fixture.
+/// What a replay prints for the first run of the fixture.
 ///
-/// The run makes two rounds. The first round answers at TTL 1 and TTL 3, and
-/// the second round answers at TTL 1, so two TTLs answered in all.
-const FIRST_RUN_SUMMARY: &str =
-    "2026-08-18T12:00:00.123Z  example.com (93.184.216.34)  2 rounds  2 hops  reached\n";
+/// The run makes two rounds. Both rounds carry the TTL range 1 to 3, so every
+/// one of those three TTLs took two probes. The first round answers at TTL 1
+/// from 192.168.1.1 at 1.23, and at TTL 3 from 93.184.216.34 at 24.1. The
+/// second round answers at TTL 1 from 192.168.1.1 at 1.41. Two TTLs answered
+/// in all.
+///
+/// TTL 1 answered both probes, so it loses nothing. The two answers are 1.23
+/// and 1.41. The sum is 2.64, so the mean is 2.64 / 2 = 1.32, which prints as
+/// 1.3. The distances from the mean are -0.09 and 0.09, and the squares of
+/// them sum to 0.0162. The population variance is 0.0162 / 2 = 0.0081, so the
+/// standard deviation is 0.09, which prints as 0.1. The jitter is the absolute
+/// difference of the last two answers, 1.41 - 1.23 = 0.18, which prints as
+/// 0.2.
+///
+/// TTL 2 answered no probe of the two, so its loss is 2 / 2 * 100 = 100.0
+/// percent, it names no host, and it holds no number.
+///
+/// TTL 3 answered one probe of the two, so its loss is 1 / 2 * 100 = 50.0
+/// percent. One answer is its own smallest, mean, and largest time, and the
+/// population standard deviation of one sample is 0.0. One sample names no
+/// last two answers, so it holds no jitter.
+const FIRST_RUN_OUTPUT: &str = "\
+2026-08-18T12:00:00.123Z  example.com (93.184.216.34)  2 rounds  2 hops  reached
+  1  192.168.1.1  loss 0.0%  sent 2  recv 2  last 1.4  min 1.2  avg 1.3  max 1.4  stddev 0.1  jitter 0.2
+  2  ???  loss 100.0%  sent 2  recv 0  last -  min -  avg -  max -  stddev -  jitter -
+  3  93.184.216.34  loss 50.0%  sent 2  recv 1  last 24.1  min 24.1  avg 24.1  max 24.1  stddev 0.0  jitter -
+";
 
-/// The summary of the second run of the fixture.
-const SECOND_RUN_SUMMARY: &str =
-    "2026-08-19T09:30:00.000Z  example.org (93.184.216.35)  1 round  2 hops  reached\n";
+/// What a replay prints for the second run of the fixture.
+///
+/// The run makes one round of the TTL range 1 to 2, and it answers at both
+/// TTLs. TTL 1 answers from 10.0.0.1 at 0.87, which prints as 0.9, and TTL 2
+/// answers from 93.184.216.35 at 12.5. Each TTL took one probe and answered
+/// it, so each one loses nothing. One answer is its own smallest, mean, and
+/// largest time, the population standard deviation of one sample is 0.0, and
+/// one sample holds no jitter.
+const SECOND_RUN_OUTPUT: &str = "\
+2026-08-19T09:30:00.000Z  example.org (93.184.216.35)  1 round  2 hops  reached
+  1  10.0.0.1  loss 0.0%  sent 1  recv 1  last 0.9  min 0.9  avg 0.9  max 0.9  stddev 0.0  jitter -
+  2  93.184.216.35  loss 0.0%  sent 1  recv 1  last 12.5  min 12.5  avg 12.5  max 12.5  stddev 0.0  jitter -
+";
 
 /// The `run` line of every file that a test builds.
 const BUILT_RUN_LINE: &str = r#"{"type":"run","run":"2026-08-20T00:00:00.000Z","krt":"0.1.0 (abc1234, clean)","source":{"addr":"1.2.3.4","kind":"public"},"target":{"arg":"example.net","addr":"198.51.100.7","family":"ipv4"},"config":{"interval_ms":1000,"protocol":"icmp","first_ttl":1,"max_ttl":30,"multipath":"classic","privilege":"unprivileged","dns":true},"host":"tims-mac"}"#;
@@ -65,6 +103,20 @@ const BUILT_RUN_LINE: &str = r#"{"type":"run","run":"2026-08-20T00:00:00.000Z","
 ///
 /// Two TTLs answered, and the round reached the target.
 const BUILT_ROUND_LINE: &str = r#"{"type":"round","run":"2026-08-20T00:00:00.000Z","seq":1,"ts":"2026-08-20T00:00:01.000Z","dur_ms":1000,"ttl_range":[1,2],"reached":true,"hops":[{"ttl":1,"addr":"10.0.0.1","rtt_ms":0.5,"icmp":"time_exceeded"},{"ttl":2,"addr":"198.51.100.7","rtt_ms":9.5,"icmp":"echo_reply"}]}"#;
+
+/// The aggregate of a built file that holds the one round.
+///
+/// The round carries the TTL range 1 to 2, so each of the two TTLs took one
+/// probe. Both TTLs answered, so neither one loses anything. One answer is its
+/// own smallest, mean, and largest time, the population standard deviation of
+/// one sample is 0.0, and one sample names no last two answers, so it holds no
+/// jitter.
+// A backslash at the end of a line of a string literal takes the newline and
+// every space that follows it, so a text whose first line is indented starts on
+// the line of the opening quotation mark.
+const BUILT_AGGREGATE: &str = "  1  10.0.0.1  loss 0.0%  sent 1  recv 1  last 0.5  min 0.5  avg 0.5  max 0.5  stddev 0.0  jitter -
+  2  198.51.100.7  loss 0.0%  sent 1  recv 1  last 9.5  min 9.5  avg 9.5  max 9.5  stddev 0.0  jitter -
+";
 
 /// The summary of a built file that holds the `run` record.
 const BUILT_SUMMARY: &str =
@@ -79,9 +131,80 @@ const BUILT_SUMMARY_WITHOUT_A_TARGET: &str =
 /// One TTL answered, so the summary of this round holds the singular `1 hop`.
 const BUILT_MISSED_ROUND_LINE: &str = r#"{"type":"round","run":"2026-08-20T00:00:00.000Z","seq":1,"ts":"2026-08-20T00:00:01.000Z","dur_ms":1000,"ttl_range":[1,2],"reached":false,"hops":[{"ttl":1,"addr":"10.0.0.1","rtt_ms":0.5,"icmp":"time_exceeded"}]}"#;
 
-/// The summary of a built file whose run did not reach the target.
-const BUILT_SUMMARY_NEVER_REACHED: &str =
-    "2026-08-20T00:00:00.000Z  example.net (198.51.100.7)  1 round  1 hop  never reached\n";
+/// What a replay prints for a built file whose run did not reach the target.
+///
+/// The round carries the TTL range 1 to 2, so each of the two TTLs took one
+/// probe. TTL 1 answered its probe, so it loses nothing. TTL 2 answered no
+/// probe of the one, so its loss is 1 / 1 * 100 = 100.0 percent, it names no
+/// host, and it holds no number.
+const BUILT_OUTPUT_NEVER_REACHED: &str = "\
+2026-08-20T00:00:00.000Z  example.net (198.51.100.7)  1 round  1 hop  never reached
+  1  10.0.0.1  loss 0.0%  sent 1  recv 1  last 0.5  min 0.5  avg 0.5  max 0.5  stddev 0.0  jitter -
+  2  ???  loss 100.0%  sent 1  recv 0  last -  min -  avg -  max -  stddev -  jitter -
+";
+
+/// The `round` lines of a run whose TTL 1 two routers answer at.
+///
+/// The first router answers round one at 1.0. The second router answers round
+/// two at 2.0 and round three at 3.0. TTL 2 answers every round at 10.0.
+const BUILT_SPLIT_ROUND_LINES: [&str; 3] = [
+    r#"{"type":"round","run":"2026-08-20T00:00:00.000Z","seq":1,"ts":"2026-08-20T00:00:01.000Z","dur_ms":1000,"ttl_range":[1,2],"reached":true,"hops":[{"ttl":1,"addr":"10.0.0.1","rtt_ms":1.0,"icmp":"time_exceeded"},{"ttl":2,"addr":"198.51.100.7","rtt_ms":10.0,"icmp":"echo_reply"}]}"#,
+    r#"{"type":"round","run":"2026-08-20T00:00:00.000Z","seq":2,"ts":"2026-08-20T00:00:02.000Z","dur_ms":1000,"ttl_range":[1,2],"reached":true,"hops":[{"ttl":1,"addr":"10.0.0.2","rtt_ms":2.0,"icmp":"time_exceeded"},{"ttl":2,"addr":"198.51.100.7","rtt_ms":10.0,"icmp":"echo_reply"}]}"#,
+    r#"{"type":"round","run":"2026-08-20T00:00:00.000Z","seq":3,"ts":"2026-08-20T00:00:03.000Z","dur_ms":1000,"ttl_range":[1,2],"reached":true,"hops":[{"ttl":1,"addr":"10.0.0.2","rtt_ms":3.0,"icmp":"time_exceeded"},{"ttl":2,"addr":"198.51.100.7","rtt_ms":10.0,"icmp":"echo_reply"}]}"#,
+];
+
+/// What a replay prints for the file of the split TTL.
+///
+/// Every one of the three rounds carries the TTL range 1 to 2, so each of the
+/// two TTLs took three probes, and every probe answered. Neither TTL loses
+/// anything.
+///
+/// TTL 1 saw two addresses, so its host field names the first one and the
+/// count of the other one. The three answers of the TTL are 1.0, 2.0, and 3.0.
+/// The sum is 6.0, so the mean is 6 / 3 = 2.0. The distances from the mean are
+/// -1.0, 0.0, and 1.0, and the squares of them sum to 2.0. The population
+/// variance is 2 / 3 = 0.667, so the standard deviation is 0.816, which prints
+/// as 0.8. The jitter is 3.0 - 2.0 = 1.0.
+///
+/// The first router answered one of the three answers of TTL 1, so its share
+/// is 1 / 3 * 100 = 33.3 percent. The second router answered the other two, so
+/// its share is 2 / 3 * 100 = 66.7 percent. The two answers of the second
+/// router are 2.0 and 3.0. The mean of them is 5 / 2 = 2.5, the distances are
+/// -0.5 and 0.5, and the squares sum to 0.5. The variance is 0.5 / 2 = 0.25,
+/// so the standard deviation is 0.5.
+///
+/// TTL 2 saw one address, so it takes no address line. Its three answers are
+/// all 10.0, so the mean is 10.0 and the standard deviation is 0.0. The jitter
+/// is 10.0 - 10.0 = 0.0.
+const BUILT_SPLIT_OUTPUT: &str = "\
+2026-08-20T00:00:00.000Z  example.net (198.51.100.7)  3 rounds  2 hops  reached
+  1  10.0.0.1 (+1)  loss 0.0%  sent 3  recv 3  last 3.0  min 1.0  avg 2.0  max 3.0  stddev 0.8  jitter 1.0
+      10.0.0.1  share 33.3%  recv 1  last 1.0  min 1.0  avg 1.0  max 1.0  stddev 0.0  jitter -
+      10.0.0.2  share 66.7%  recv 2  last 3.0  min 2.0  avg 2.5  max 3.0  stddev 0.5  jitter 1.0
+  2  198.51.100.7  loss 0.0%  sent 3  recv 3  last 10.0  min 10.0  avg 10.0  max 10.0  stddev 0.0  jitter 0.0
+";
+
+/// The text between two fields of a line that a replay prints.
+const FIELD_SEPARATOR: &str = "  ";
+
+/// The name of the field that holds the share of one address.
+const SHARE: &str = "share";
+
+/// The sign that ends a percentage.
+const PERCENT_SIGN: &str = "%";
+
+/// The whole of a percentage, which the shares of one TTL sum to.
+const WHOLE_PERCENT: f64 = 100.0;
+
+/// The largest difference that a comparison of two percentages admits.
+///
+/// The two shares of this test are 33.3 and 66.7, which sum to exactly 100
+/// in decimal. A read of each printed decimal into a number with a
+/// fraction loses a little. The sum then misses the whole by about 1e-14,
+/// and this tolerance covers that loss. A pair of shares that rounds the
+/// other way misses the whole by a tenth, and this test names no such
+/// pair.
+const PERCENT_TOLERANCE: f64 = 1e-9;
 
 /// The start of a `round` line that a `kill -9` cut short.
 const CUT_CHUNK: &str = r#"{"type":"round""#;
@@ -217,10 +340,24 @@ fn file_of(lines: &[&str]) -> String {
     text
 }
 
+/// Reads the share that one address line printed.
+fn share_of(line: &str) -> f64 {
+    let prefix = format!("{SHARE} ");
+    let field = line
+        .split(FIELD_SEPARATOR)
+        .find_map(|field| field.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("an address line holds a share field: {line}"));
+    field
+        .strip_suffix(PERCENT_SIGN)
+        .unwrap_or_else(|| panic!("a share ends with the percent sign: {line}"))
+        .parse()
+        .unwrap_or_else(|_| panic!("a share reads as a number: {line}"))
+}
+
 #[test]
-fn a_replay_prints_the_summary_of_the_last_run() {
+fn a_replay_prints_the_summary_and_the_aggregate_of_the_last_run() {
     let result = success(&[REPLAY, FIXTURE]);
-    assert_eq!(result.stdout, SECOND_RUN_SUMMARY);
+    assert_eq!(result.stdout, SECOND_RUN_OUTPUT);
     assert_eq!(
         result.stderr, "",
         "a whole file writes nothing to standard error"
@@ -228,12 +365,39 @@ fn a_replay_prints_the_summary_of_the_last_run() {
 }
 
 #[test]
-fn a_named_run_prints_the_summary_of_that_run() {
+fn a_named_run_prints_the_summary_and_the_aggregate_of_that_run() {
     let result = success(&[REPLAY, FIXTURE, RUN_FLAG, FIRST_RUN]);
-    assert_eq!(result.stdout, FIRST_RUN_SUMMARY);
+    assert_eq!(result.stdout, FIRST_RUN_OUTPUT);
     assert_eq!(
         result.stderr, "",
         "a whole file writes nothing to standard error"
+    );
+}
+
+/// A TTL that two routers answer at names both of them, and the two shares of
+/// that TTL sum to the whole.
+///
+/// A share per address is the measure that a TTL of two routers needs. A loss
+/// per address would report 50 percent for a pair that splits the traffic
+/// evenly and loses nothing.
+#[test]
+fn a_ttl_that_two_routers_answer_at_prints_one_line_for_each_of_them() {
+    let mut lines = vec![BUILT_RUN_LINE];
+    lines.extend(BUILT_SPLIT_ROUND_LINES);
+    let file = TempFile::new("split", &file_of(&lines));
+    let path = file.arg();
+    let result = success(&[REPLAY, path.as_str()]);
+    assert_eq!(result.stdout, BUILT_SPLIT_OUTPUT);
+    assert_eq!(
+        result.stderr, "",
+        "a whole file writes nothing to standard error"
+    );
+
+    let printed: Vec<&str> = result.stdout.lines().collect();
+    let total = share_of(printed[2]) + share_of(printed[3]);
+    assert!(
+        (total - WHOLE_PERCENT).abs() < PERCENT_TOLERANCE,
+        "the printed shares of one TTL sum to {WHOLE_PERCENT}, and they sum to {total}"
     );
 }
 
@@ -291,7 +455,7 @@ fn a_final_line_that_is_cut_short_warns_and_still_prints_the_summary() {
     let file = TempFile::new("cut", &text);
     let path = file.arg();
     let result = success(&[REPLAY, path.as_str()]);
-    assert_eq!(result.stdout, BUILT_SUMMARY);
+    assert_eq!(result.stdout, format!("{BUILT_SUMMARY}{BUILT_AGGREGATE}"));
     assert!(
         result.stderr.contains(path.as_str()),
         "the warning names the path: {}",
@@ -310,7 +474,10 @@ fn a_file_without_a_run_record_prints_no_target() {
     let file = TempFile::new("no-run-record", &file_of(&[BUILT_ROUND_LINE]));
     let path = file.arg();
     let result = success(&[REPLAY, path.as_str()]);
-    assert_eq!(result.stdout, BUILT_SUMMARY_WITHOUT_A_TARGET);
+    assert_eq!(
+        result.stdout,
+        format!("{BUILT_SUMMARY_WITHOUT_A_TARGET}{BUILT_AGGREGATE}")
+    );
     assert_eq!(
         result.stderr, "",
         "a whole file writes nothing to standard error"
@@ -324,7 +491,7 @@ fn a_run_that_did_not_reach_the_target_says_so() {
     let file = TempFile::new("missed", &text);
     let path = file.arg();
     let result = success(&[REPLAY, path.as_str()]);
-    assert_eq!(result.stdout, BUILT_SUMMARY_NEVER_REACHED);
+    assert_eq!(result.stdout, BUILT_OUTPUT_NEVER_REACHED);
     assert_eq!(
         result.stderr, "",
         "a whole file writes nothing to standard error"
