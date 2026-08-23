@@ -4,9 +4,9 @@
 //! A command line that names a destination prints the configuration that it
 //! resolved, opens the recorded file, starts the tracer, and appends one record
 //! for each round until a limit stops the run. It prints one status line for
-//! each round. The `replay` command reads a recorded file and prints one
-//! summary line for one run of it. A later slice replaces the status lines with
-//! the live table.
+//! each round. The `replay` command reads a recorded file, prints one summary
+//! line for one run of it, and prints the aggregate numbers of that run under
+//! it. A later slice replaces the status lines with the live table.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -522,7 +522,7 @@ impl Cli {
 /// The block names no `replay` and no `run`. `main` prints the block only when
 /// the command line names no `replay`, and `resolve` fills the run only inside
 /// a `replay`, so neither field can reach the block with a value. A replay
-/// prints its own summary line in the place of the block.
+/// prints its own summary line and aggregate in the place of the block.
 impl fmt::Display for ResolvedConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let path_or = |path: Option<&PathBuf>, absent: &str| {
@@ -2353,8 +2353,8 @@ resolved configuration:
     ///
     /// `main` prints the block only when the command line names no `replay`,
     /// and `resolve` fills the run only inside a `replay`, so neither field can
-    /// reach the block with a value. A replay prints its own summary line in
-    /// the place of the block.
+    /// reach the block with a value. A replay prints its own summary line and
+    /// aggregate in the place of the block.
     #[test]
     fn the_block_names_neither_the_replay_nor_the_run() {
         let config = resolve(&[
