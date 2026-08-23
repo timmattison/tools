@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// What one key press asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,9 +436,30 @@ pub(crate) fn status_line(round: &RoundRecord) -> String {
     .join(SUMMARY_SEPARATOR)
 }
 
+/// The clock that times the lines of a run which draws no table.
+///
+/// Such a run writes one line each minute. A test of that minute must not wait
+/// one, so the clock comes from the caller and a test hands the screen a clock
+/// that it moves by hand.
+pub(crate) trait Clock {
+    /// The moment now.
+    fn now(&self) -> Instant;
+}
+
+/// The clock of a run, which reads the clock of the machine.
+pub(crate) struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        todo!("the clock of a run reads the clock of the machine")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{classify, status_line, Command, Keys, NoKeys, RunFacts, Screen, Table};
+    use super::{
+        classify, status_line, Clock, Command, Keys, NoKeys, RunFacts, Screen, SystemClock, Table,
+    };
     use crate::record::{NameRecord, RoundRecord, RunId};
     use crate::testing::{address, round};
     use chrono::Utc;
@@ -446,7 +467,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     /// Builds the press of a key that no modifier holds.
     fn press(code: KeyCode) -> KeyEvent {
@@ -955,6 +976,17 @@ mod tests {
                 .first()
                 .is_some_and(|line| line.ends_with(&size_of(SECOND_BYTES))),
             "and the next draw names the size that the file holds then: {second:?}"
+        );
+    }
+
+    #[test]
+    fn the_clock_of_a_run_reads_the_moment_now() {
+        let before = Instant::now();
+        let read = SystemClock.now();
+        let after = Instant::now();
+        assert!(
+            read >= before && read <= after,
+            "the clock of a run reads the clock of the machine"
         );
     }
 
