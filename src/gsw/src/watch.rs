@@ -333,7 +333,34 @@ pub(crate) fn next_tick(freshest_age: Duration) -> Option<Duration> {
 /// it renders — the debounce / coalescing window. A burst of writes (a `git
 /// commit` touching many `.git/` files, an editor's save-and-rename dance)
 /// arrives inside this window and collapses into a single repaint.
+///
+/// A quiet channel is the only thing that ends the drain for every event but
+/// one. [`Event::PushOutput`] is the exception, and [`PUSH_DRAIN_BUDGET`] says
+/// why.
 const DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// How long the drain goes on absorbing a running push's output before it
+/// leaves and paints, whatever is still queued behind it.
+///
+/// [`DEBOUNCE`] ends a drain on a channel that has gone quiet, which is the
+/// right rule for a filesystem burst: a burst is finite, and its end is what
+/// says the repository has settled. A push's output is neither. A pre-push
+/// hook that builds and tests a workspace prints far faster than one line per
+/// [`DEBOUNCE`], for minutes on end, so a drain with no deadline of its own
+/// would absorb the whole build and paint once when it finished — the window
+/// empty and the `Pushing…` age frozen throughout, which is precisely the
+/// frozen screen the output window exists to answer.
+///
+/// The accepted cost is one repaint per 250 ms while a push is streaming, and
+/// only while one is: the deadline is armed by the first
+/// [`Event::PushOutput`] of a wake and the clock is not read at all on a wake
+/// that sees none, so a filesystem burst still coalesces byte for byte as it
+/// did before this constant existed. 250 ms is above the ~100 ms at which a
+/// screen stops reading as live and far below the point at which a reader
+/// would call it stuck, and it is deliberately longer than [`DEBOUNCE`]: a
+/// budget shorter than the debounce window would repaint on lines a single
+/// window could have carried together.
+const PUSH_DRAIN_BUDGET: Duration = Duration::from_millis(250);
 
 /// Whether a filesystem change may walk git right now, or must wait out the
 /// adaptive cooldown. Returned by [`WalkSchedule::on_change`].
@@ -612,6 +639,12 @@ enum Event {
     /// a batch at the end, because the point of it is to arrive early: a
     /// pre-push hook can hold the push for minutes, and a batch would land
     /// when the wait it explains is already over.
+    ///
+    /// Arriving early is only half of it — the loop must also *leave* its
+    /// debounce drain to paint what arrived, and this is the only event that
+    /// can go on producing for the length of the push. [`PUSH_DRAIN_BUDGET`]
+    /// is what stops the drain re-batching what the runner deliberately did
+    /// not.
     PushOutput(String),
     /// A push that was running has finished, either way.
     ///
@@ -1242,12 +1275,23 @@ where
         };
 
         // Coalesce a filesystem burst: keep draining until the channel stays
-        // quiet for a full `debounce`. A tick has no burst behind it.
+        // quiet for a full `debounce` — or, once a running push has streamed a
+        // line into this drain, until `PUSH_DRAIN_BUDGET` has passed since it
+        // did. A burst ends on its own, so a quiet channel is the signal that
+        // it has; a push's output need not end for minutes, so it gets a
+        // deadline instead of a signal. A tick has no burst behind it.
         let mut quitting = false;
         if !woke_for_timeout {
+            // Armed by the first line of push output this drain sees, and left
+            // `None` otherwise — so a drain with no push behind it reads the
+            // clock exactly as many times as it did before this deadline
+            // existed, and filesystem coalescing is unchanged.
+            let mut drain_until: Option<Instant> = None;
             loop {
                 match rx.recv_timeout(debounce) {
                     Ok(event) => {
+                        // Asked before `absorb`, which takes the event by value.
+                        let streamed = matches!(event, Event::PushOutput(_));
                         if absorb(
                             event,
                             &mut pending,
@@ -1265,6 +1309,13 @@ where
                             // it goes away.
                             quitting = true;
                             break;
+                        }
+                        if streamed {
+                            let due = *drain_until
+                                .get_or_insert_with(|| (hooks.clock)() + PUSH_DRAIN_BUDGET);
+                            if (hooks.clock)() >= due {
+                                break;
+                            }
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => break,

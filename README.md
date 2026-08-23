@@ -466,7 +466,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       `pre-push` hook. The rows are indented and dimmed, because they are another program
       speaking inside gsw's frame. Each row arrives as the hook writes it, not when the hook
       finishes — so a hook that builds and tests a workspace shows its progress rather than
-      leaving the screen frozen. A short pane drops the oldest rows and keeps the notice. Tabs
+      leaving the screen frozen. A hook that prints faster than the screen can be read does not
+      hold the frame either: the pane repaints about four times a second for as long as output
+      keeps coming, rather than once when it stops. A short pane drops the oldest rows and keeps
+      the notice. Tabs
       become spaces and color escapes are removed, so no row can wrap the pane or repaint gsw's
       own colors. A progress bar that redraws itself with a carriage return shows its newest
       state on one row, rather than every state pasted together.
