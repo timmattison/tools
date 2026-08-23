@@ -502,22 +502,34 @@ impl crate::names::Resolver for SystemNames {
 /// # Errors
 ///
 /// Returns the reason when the resolver does not start.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the command line of the slice that follows picks this resolver from `--no-dns`; the tests of this module are the one reader today"
-    )
-)]
 pub(crate) fn resolver() -> std::io::Result<Box<dyn crate::names::Resolver>> {
     let names = DnsResolver::start(trippy_dns::Config::default())?;
     Ok(Box::new(SystemNames { names }))
 }
 
 /// Reads what one reverse lookup holds now, in the words that `krt` owns.
+///
+/// An address that carries more than one name takes the first name of the
+/// answer, because one record of the schema holds one name. The iterator of
+/// that crate gives its first name again at every step, so this conversion
+/// reads one name from it and collects nothing.
+///
+/// A lookup that timed out settles the address, and it does not wait. The
+/// resolver puts a timed-out address back into its queue on every ask, and the
+/// run loop asks ten times a second, so an address that waited on a timeout
+/// would probe a name server that does not answer, without end. The design of
+/// `krt` says that a failed lookup stops no run, and that the display shows the
+/// raw address of such a hop. One ask for each address of one run is the
+/// bounded reading of that rule.
 fn to_lookup(entry: &DnsEntry) -> Lookup {
-    let _ = entry;
-    todo!("the reading of one reverse lookup arrives with the green step")
+    match entry {
+        DnsEntry::Pending(_) => Lookup::Pending,
+        DnsEntry::Resolved(_) => entry
+            .hostnames()
+            .next()
+            .map_or(Lookup::Nameless, |host| Lookup::Named(host.to_owned())),
+        DnsEntry::NotFound(_) | DnsEntry::Failed(_) | DnsEntry::Timeout(_) => Lookup::Nameless,
+    }
 }
 
 #[cfg(test)]

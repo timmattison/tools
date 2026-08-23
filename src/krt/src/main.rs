@@ -1030,6 +1030,30 @@ fn closing_line(outcome: &run::Outcome, path: &Path) -> String {
     .join(SUMMARY_SEPARATOR)
 }
 
+/// The reverse resolver of one run.
+///
+/// `--no-dns` gives the resolver that looks nothing up, so no lookup of such a
+/// run leaves the machine. Every other run takes the system resolver of the
+/// platform.
+///
+/// A resolver that does not start stops the run, and that is a decision. The
+/// start of the system resolver fails when the platform gives it no thread, and
+/// the tracer of the same run needs threads of its own, so a run that cannot
+/// start a resolver cannot record either. A fatal start also keeps the `dns`
+/// field of the `run` record true by construction: a run that reaches the loop
+/// holds the resolver that the user asked for.
+///
+/// # Errors
+///
+/// Returns the reason when the system resolver does not start.
+fn resolver_of(reverse_dns: bool) -> std::io::Result<Box<dyn names::Resolver>> {
+    if reverse_dns {
+        trace::resolver()
+    } else {
+        Ok(Box::new(names::NoLookups))
+    }
+}
+
 /// Records one trace, from the destination of the command line to the record
 /// that closes the run.
 ///
@@ -1037,8 +1061,10 @@ fn closing_line(outcome: &run::Outcome, path: &Path) -> String {
 /// run before the next one spends anything. The resolution comes first, because
 /// it needs no privilege and touches no file. The privilege gate comes next, so
 /// a platform that cannot probe says so before the run makes a file. The
-/// recorded file opens before the tracer starts, so no probe leaves the machine
-/// for a run that cannot record it.
+/// reverse resolver starts after the gate and before the recorded file opens,
+/// so a run that cannot start its resolver makes no file and prints no path.
+/// The recorded file opens before the tracer starts, so no probe leaves the
+/// machine for a run that cannot record it.
 ///
 /// # Errors
 ///
@@ -1052,6 +1078,15 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         .map_err(|error| TraceFailure::new(&error, EXIT_FAILURE))?;
     let privilege = trace::acquire_privilege()
         .map_err(|error| TraceFailure::new(&error, EXIT_NO_PRIVILEGES))?;
+    // The resolver starts here, before the run makes a file and before it
+    // prints the path of that file, so no message of a run that stops misleads
+    // a reader.
+    let resolver = resolver_of(config.reverse_dns).map_err(|error| {
+        TraceFailure::new(
+            &format!("the reverse resolver did not start: {error}"),
+            EXIT_FAILURE,
+        )
+    })?;
 
     // The search runs here, and it runs once. The warning of a fallback
     // therefore reaches standard error once a run and never once a round, and
@@ -1107,9 +1142,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         rounds: config.rounds,
         deadline: deadline_of(config.duration),
     };
-    // Every run of this slice looks nothing up. The slice that follows reads
-    // `--no-dns` and picks the resolver of the run from it.
-    let mut namer = names::Namer::new(Box::new(names::NoLookups), start.run.clone());
+    let mut namer = names::Namer::new(resolver, start.run.clone());
     let mut status = std::io::stdout();
     let outcome = run::record(
         &start,

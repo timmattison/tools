@@ -17,13 +17,6 @@ use std::collections::{BTreeSet, HashSet};
 use std::net::IpAddr;
 
 /// What a reverse lookup of one address holds now.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the binary of this slice looks nothing up, so it builds `Nameless` alone. The resolver of the slice that follows builds `Named` and `Pending`, and the tests of this module build them today"
-    )
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Lookup {
     /// The lookup finished, and the address carries this name.
