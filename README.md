@@ -631,10 +631,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - A run resolves the name of each address it sees through the system resolver of the platform.
     The file takes one `name` record for each name, and one record for each address at most,
     however many rounds that address answers in. An address that resolves to no name keeps its raw
-    address, and the file holds no record for it. A lookup holds up no round, and a run waits up to
-    2 seconds after its last round for the names that its lookups have not given yet. `--no-dns`
-    skips every lookup, so the file then holds no `name` record and the `run` record says
-    `"dns":false`.
+    address, and the file holds no record for it. A lookup holds up no round, and a run waits after
+    its last round for the names that its lookups have not given yet. That wait ends the moment
+    that every lookup settles, and its ceiling is the timeout of the system resolver, which is 5
+    seconds. `--no-dns` skips every lookup, so the file then holds no `name` record and the `run`
+    record says `"dns":false`.
   - `krt replay` prints one table of the path. A header line names the destination, the address it
     resolved to, the source, the count of the rounds, the period of one round, and the recorded
     file with its size. Under it stands one row for each TTL, with the columns `TTL`, `Host`,

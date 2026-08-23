@@ -39,17 +39,6 @@ use std::time::{Duration, Instant};
 /// because the wait ends after this time and the loop takes another turn.
 const POLL: Duration = Duration::from_millis(100);
 
-/// The longest that a run waits, after its last round, for the names that its
-/// lookups have not given yet.
-///
-/// The value is a trade. A warm system resolver answers in milliseconds, so the
-/// common short run pays about that much and not this whole time. The wait ends
-/// at the moment that no address waits, so a long run whose addresses settled
-/// many rounds ago pays nothing at all. And a hop whose name server answers
-/// nothing holds its lookup open for longer than any bounded value, so a larger
-/// value catches that name no better than this one does.
-pub(crate) const NAME_GRACE: Duration = Duration::from_secs(2);
-
 /// The limits that stop a run.
 #[derive(Debug)]
 pub(crate) struct Limits {
@@ -60,6 +49,12 @@ pub(crate) struct Limits {
     pub(crate) deadline: Option<Instant>,
     /// The longest that the run waits, after its last round, for the names that
     /// its lookups have not given yet.
+    ///
+    /// The wait ends at the moment that every lookup settles, so a run whose
+    /// addresses already gave their names pays nothing here. The ceiling of the
+    /// value is the timeout of the resolver, because every lookup settles when
+    /// that time runs out. A grace of that length therefore outlives every
+    /// lookup that can still answer.
     pub(crate) name_grace: Duration,
 }
 

@@ -1055,8 +1055,14 @@ fn resolver_of(reverse_dns: bool) -> std::io::Result<Box<dyn names::Resolver>> {
 }
 
 /// The grace that a run gives its names after its last round.
+///
+/// The grace is the timeout of the reverse resolver. Every lookup settles when
+/// that time runs out, so this grace outlives every lookup that can still
+/// answer, and a hop whose name server answers slowly still takes a `name`
+/// record. The wait ends at the moment that no address waits, so a run whose
+/// addresses settled pays none of it.
 fn name_grace() -> Duration {
-    run::NAME_GRACE
+    trace::resolver_timeout()
 }
 
 /// Reads the configuration that one run records, out of the command line that
