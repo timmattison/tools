@@ -10,8 +10,34 @@
 //! a character, so every cell of the table keeps its column and every name
 //! stays a string.
 //!
-//! A later slice prints the table on these helpers, and states there the
+//! The table stands on those helpers. It holds nine columns: the TTL, the
+//! host, one column that carries the percentage with its mark and its count,
+//! the five round-trip times, and the sparkline. The percentage, the mark, and
+//! the count are one column and not three, because no gap stands between them:
+//! the mark says whether the percentage is a loss or a share, so a gap in front
+//! of it would read as a column of its own. The Host column is the one column
+//! that absorbs a change of the terminal width, and a later slice states the
 //! order in which the columns drop as the terminal gets narrow.
+//!
+//! The address rows of one TTL line their Share% up under the Loss% of the row
+//! above them, digit for digit. The drawing this table came from puts those
+//! digits one column further right, and that is the one place where the render
+//! and the drawing part company. An address row stands under its TTL row so a
+//! reader compares the two by column, and a percentage one column off its own
+//! heading defeats the whole reason for the row. Do not "correct" it back.
+//!
+//! A TTL that answered from more addresses than it tracks closes its set of
+//! address rows with one more row, whose host is the word `others`. That row
+//! carries the count of those answers and the share they took, and no time at
+//! all: `stats.rs` keeps no times for an answer that holds no tracked address.
+//! A render that dropped the row would leave the printed shares of the TTL
+//! short of the whole, and nothing on the screen would say why.
+//!
+//! The render draws through `ratatui`, into a buffer that no terminal ever
+//! sees, and reads the lines back out of it. A `ratatui` buffer keeps the style
+//! of a cell beside the symbol of that cell and never inside it, so the lines
+//! that come back hold glyphs alone. No test of this render therefore needs
+//! `testcolor`, and this crate takes no `colored` dependency.
 //!
 //! The module also writes the one duration text of the crate. The resolved
 //! configuration, the status line of a round, and the header line of the frame
@@ -26,7 +52,13 @@
     )
 )]
 
+use crate::stats::{Address, HopStats, TtlRow};
 use crate::{ROUND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE, UNKNOWN};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Alignment, Constraint, Rect};
+use ratatui::style::Style;
+use ratatui::text::Text;
+use ratatui::widgets::{Cell, Row, Table, Widget};
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -368,12 +400,341 @@ fn bar_at(part: f64) -> char {
     BARS[level.min(LEVEL_COUNT - 1)]
 }
 
+/// The number of columns of the TTL column.
+///
+/// A TTL is a number of three digits at most, and the fourth column is the one
+/// space that holds the whole block one column in from the left edge of the
+/// terminal, as the header line above it stands.
+const TTL_WIDTH: u16 = 4;
+
+/// The fewest columns that the Host column ever takes.
+///
+/// A host cut to fewer columns than this names no router: `ae-1.core.exam` is
+/// already a guess, and half of that is a shape. A terminal too narrow to hold
+/// the frame at this floor gets the frame at the floor anyway, and it clips the
+/// rest. A frame that shrank the column further would print a table that reads
+/// as though the path had changed.
+const HOST_MIN: u16 = 12;
+
+/// The number of columns that a percentage takes.
+///
+/// `100.0%` is the longest one the table prints, and it fills the six.
+const PERCENT_WIDTH: u16 = 6;
+
+/// The number of columns of the mark that tells a share from a loss.
+const MARK_WIDTH: u16 = 1;
+
+/// The number of columns that a count of probes or of answers takes.
+const SENT_WIDTH: u16 = 6;
+
+/// The number of columns of the one column that carries a percentage, its mark,
+/// and its count.
+///
+/// The three stand next to each other with no gap, so the table holds them as
+/// one column and not as three.
+const COUNTS_WIDTH: u16 = PERCENT_WIDTH + MARK_WIDTH + SENT_WIDTH;
+
+/// The number of columns that one round-trip time takes.
+///
+/// `999.9` fills them. A hop slower than one second loses its leading digits,
+/// and every such hop is one a reader already reads as broken from the loss
+/// beside it.
+const TIME_WIDTH: u16 = 5;
+
+/// The number of columns of the table that hold a round-trip time: `Last`,
+/// `Min`, `Avg`, `Max`, and `StDev`.
+///
+/// There is no `Jitter` column. The jitter reads the last two answers alone, so
+/// it moves with every round and it says nothing over a folded run that the
+/// deviation does not say better.
+const TIME_COLUMNS: usize = 5;
+
+/// The number of columns of the sparkline.
+const RECENT_WIDTH: u16 = 9;
+
+/// The number of columns between two columns of the table.
+///
+/// Two, and not one. Every column but the Host one holds a number, and a
+/// number that stands one column from the number beside it reads as one longer
+/// number.
+const COLUMN_SPACING: u16 = 2;
+
+/// The width of every column of the table but the Host one, in the order the
+/// columns stand.
+///
+/// The Host column absorbs every change of the terminal width, so it is the one
+/// column whose width this list does not hold. Everything else about the layout
+/// derives from here, so a column that changes its width moves the frame with
+/// it and no line of this module spells the width of the whole frame.
+const FIXED_WIDTHS: [u16; 8] = [
+    TTL_WIDTH,
+    COUNTS_WIDTH,
+    TIME_WIDTH,
+    TIME_WIDTH,
+    TIME_WIDTH,
+    TIME_WIDTH,
+    TIME_WIDTH,
+    RECENT_WIDTH,
+];
+
+/// The number of columns that the frame takes with a Host column of `host`
+/// columns.
+///
+/// The Host column stands first here and the fixed ones follow it, so each of
+/// the fixed columns adds its width and the one gap in front of it. The count
+/// of the gaps is therefore the count of those columns, and no line of this
+/// module counts them by hand.
+///
+/// The nominal frame is 97 columns wide, which leaves the Host column 30 of
+/// them. Neither number stands in this module as a constant: the terminal says
+/// how wide the frame is, and [`host_width`] says what the Host column then
+/// takes.
+const fn frame_width(host: u16) -> u16 {
+    let mut total = host;
+    let mut index = 0;
+    while index < FIXED_WIDTHS.len() {
+        total += FIXED_WIDTHS[index] + COLUMN_SPACING;
+        index += 1;
+    }
+    total
+}
+
+/// The number of columns that the frame takes, without the Host column.
+const WIDTH_WITHOUT_HOST: u16 = frame_width(0);
+
+/// The number of lines that stand above the table: the header line, and the
+/// blank line under it.
+const HEADER_LINES: u16 = 2;
+
+/// The number of lines of the column header.
+const COLUMN_HEADER_LINES: u16 = 1;
+
+/// The host of a TTL that never answered.
+const NO_HOST: &str = "???";
+
+/// The value of a number that the run holds none of.
+const NO_NUMBER: &str = "-";
+
+/// The sign that ends a percentage.
+const PERCENT_SIGN: &str = "%";
+
+/// The number of decimal places of every round-trip time and every percentage.
+const DECIMALS: usize = 1;
+
+/// The whole of a percentage.
+const PERCENT: f64 = 100.0;
+
+/// The mark of a TTL row.
+///
+/// One space. The percentage of a TTL row is a loss, and the column header
+/// above it says `Loss%`, so the row needs no mark of its own.
+const LOSS_MARK: &str = " ";
+
+/// The mark of an address row.
+///
+/// The percentage of an address row is a share of the answers of its TTL, and
+/// not a loss. The glyph points at the row above, where the whole that the
+/// share is a part of stands.
+const SHARE_MARK: &str = "▹";
+
+/// The start of the Host column of an address row that another one follows.
+const BRANCH: &str = "├ ";
+
+/// The start of the Host column of the last address row of a TTL.
+const LAST_BRANCH: &str = "└ ";
+
+/// The host of the row that stands for the answers of a TTL that no tracked
+/// address holds.
+const OTHERS: &str = "others";
+
+/// The mark of the row that answered from the destination.
+const DESTINATION_MARK: &str = "★";
+
+/// The heading of the TTL column.
+const TTL_HEADER: &str = "TTL";
+
+/// The heading of the Host column.
+const HOST_HEADER: &str = "Host";
+
+/// The heading of the percentage that a TTL row prints.
+const LOSS_HEADER: &str = "Loss%";
+
+/// The heading of the count that a TTL row prints.
+const SENT_HEADER: &str = "Sent";
+
+/// The heading of the five round-trip time columns, in the order they stand.
+const TIME_HEADERS: [&str; TIME_COLUMNS] = ["Last", "Min", "Avg", "Max", "StDev"];
+
+/// The heading of the sparkline column.
+const RECENT_HEADER: &str = "Recent";
+
+/// Reads a count as the number that a percentage divides.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "an `f64` holds every whole number below 2^53, and a probe run counts one answer for one TTL of one round, so no count of a run reaches that point"
+)]
+fn count_as_f64(count: u64) -> f64 {
+    count as f64
+}
+
+/// Reads a number of terminal columns as a width of the buffer.
+///
+/// A terminal is never as wide as `u16::MAX` columns, and a text that somehow
+/// were takes the whole buffer and loses nothing that a reader would see.
+fn buffer_columns(text: &str) -> u16 {
+    u16::try_from(display_width(text)).unwrap_or(u16::MAX)
+}
+
+/// Writes one round-trip time, to `DECIMALS` decimal places.
+///
+/// A key that holds no such time takes one word in its place. A TTL that
+/// answered no probe holds none of the times.
+fn render_time(value: Option<f64>) -> String {
+    value.map_or_else(
+        || NO_NUMBER.to_owned(),
+        |value| format!("{value:.DECIMALS$}"),
+    )
+}
+
+/// Writes one percentage, to `DECIMALS` decimal places.
+fn render_percent(value: f64) -> String {
+    format!("{value:.DECIMALS$}{PERCENT_SIGN}")
+}
+
+/// The one column that carries a percentage, its mark, and its count.
+///
+/// The percentage takes the columns in front of the mark and the count takes
+/// the columns behind it, so the digits of a share land under the digits of the
+/// loss of the row above it however long either number is.
+fn counts_text(percent: &str, mark: &str, count: &str) -> String {
+    format!(
+        "{percent:>percent_width$}{mark}{count:>count_width$}",
+        percent_width = usize::from(PERCENT_WIDTH),
+        count_width = usize::from(SENT_WIDTH),
+    )
+}
+
+/// The width of the Host column at a terminal width.
+///
+/// Every other column holds a number whose widest print the run already knows,
+/// so the Host column is the one that takes what is left. A terminal too narrow
+/// to hold the frame at the floor of that column gets the frame at the floor,
+/// and the terminal clips the rest: a table that is one column too wide still
+/// reads, and a table whose hosts are three characters long does not.
+fn host_width(width: u16) -> u16 {
+    width.saturating_sub(WIDTH_WITHOUT_HOST).max(HOST_MIN)
+}
+
+/// The width of every column of the table, in the order the columns stand.
+fn column_widths(host: u16) -> [Constraint; FIXED_WIDTHS.len() + 1] {
+    [
+        Constraint::Length(TTL_WIDTH),
+        Constraint::Length(host),
+        Constraint::Length(COUNTS_WIDTH),
+        Constraint::Length(TIME_WIDTH),
+        Constraint::Length(TIME_WIDTH),
+        Constraint::Length(TIME_WIDTH),
+        Constraint::Length(TIME_WIDTH),
+        Constraint::Length(TIME_WIDTH),
+        Constraint::Length(RECENT_WIDTH),
+    ]
+}
+
+/// One cell of the table, with its text held to one side of its column.
+fn cell(text: String, alignment: Alignment) -> Cell<'static> {
+    Cell::from(Text::from(text).alignment(alignment))
+}
+
+/// The text of every column of one row of the table.
+///
+/// The row is text alone. The widths and the alignments belong to the columns,
+/// so a row that carried them would state the layout once for each row of the
+/// path.
+struct RowText {
+    /// The TTL of the row. An address row names none.
+    ttl: String,
+    /// The host of the row, already cut to the Host column.
+    host: String,
+    /// The percentage, the mark, and the count, as the one column they share.
+    counts: String,
+    /// The five round-trip times, in the order the columns stand.
+    times: [String; TIME_COLUMNS],
+    /// The sparkline of the recent round-trip times.
+    recent: String,
+}
+
+impl RowText {
+    /// The row that the table renders.
+    ///
+    /// The TTL and the times hold to the right of their columns, because a
+    /// reader of a column of numbers compares the last digit of one against the
+    /// last digit of the next. The host and the sparkline hold to the left,
+    /// because both of them read from their first character. The counts column
+    /// aligns itself: its text fills the column exactly.
+    fn into_row(self) -> Row<'static> {
+        let mut cells = Vec::with_capacity(FIXED_WIDTHS.len() + 1);
+        cells.push(cell(self.ttl, Alignment::Right));
+        cells.push(cell(self.host, Alignment::Left));
+        cells.push(cell(self.counts, Alignment::Left));
+        cells.extend(
+            self.times
+                .into_iter()
+                .map(|time| cell(time, Alignment::Right)),
+        );
+        cells.push(cell(self.recent, Alignment::Left));
+        Row::new(cells)
+    }
+}
+
+/// The row of headings that stands above the rows of the path.
+fn column_header() -> Row<'static> {
+    RowText {
+        ttl: TTL_HEADER.to_owned(),
+        host: HOST_HEADER.to_owned(),
+        counts: counts_text(LOSS_HEADER, LOSS_MARK, SENT_HEADER),
+        times: TIME_HEADERS.map(str::to_owned),
+        recent: RECENT_HEADER.to_owned(),
+    }
+    .into_row()
+}
+
+/// The five round-trip times of one key, in the order the columns stand.
+fn time_texts(stats: &HopStats) -> [String; TIME_COLUMNS] {
+    [
+        stats.last(),
+        stats.min(),
+        stats.avg(),
+        stats.max(),
+        stats.stddev(),
+    ]
+    .map(render_time)
+}
+
+/// The number of routers that answered at one TTL, as the table counts them.
+///
+/// The routers that the row tracks, and one more for the answers of the rest.
+/// The count of the routers behind that bound is a count the fold does not
+/// keep, and cannot keep in a bounded amount of memory, so the answers of all
+/// of them stand as one participant of the TTL.
+fn participants(row: &TtlRow) -> usize {
+    row.addresses().len() + usize::from(row.untracked() > 0)
+}
+
+/// The share of the answers of a TTL that no tracked address holds.
+///
+/// The divisor is never zero. A row counts an untracked answer only after it
+/// folded that same answer into the statistics of the TTL, so a row with an
+/// untracked answer holds an answer.
+fn untracked_share(row: &TtlRow) -> f64 {
+    count_as_f64(row.untracked()) / count_as_f64(row.stats().recv()) * PERCENT
+}
+
 /// One rendered view of one folded run.
 ///
 /// The frame holds what a reader needs and nothing that the reader must give
-/// back: the header line names the run, the table folds it, and the two maps
-/// name the addresses. A caller builds one of these and asks for the lines at
-/// the width of its terminal.
+/// back: the header line names the run, the table folds it, and the map of
+/// names says what each address is called. A caller builds one of these and
+/// asks for the lines at the width of its terminal.
 pub(crate) struct Frame<'a> {
     /// What the line above the table names.
     pub(crate) header: Header<'a>,
@@ -388,10 +749,205 @@ pub(crate) struct Frame<'a> {
 
 impl Frame<'_> {
     /// The lines of the frame at a terminal width.
+    ///
+    /// The header line stands first, one blank line stands under it, and the
+    /// table stands under that. The header line is no part of the table and it
+    /// never gets cut: a long file name would lose the size that stands behind
+    /// it, and that size is what tells a reader whether the run recorded
+    /// anything at all. The buffer is therefore as wide as the wider of the two.
+    ///
+    /// Every line drops its trailing spaces. A terminal prints them as nothing.
     pub(crate) fn lines(&self, width: u16) -> Vec<String> {
-        let _ = width;
-        Vec::new()
+        let header_line = self.header.line();
+        let host = host_width(width);
+        let table_width = frame_width(host);
+        let rows = self.rows(host);
+        // A path holds 255 TTLs at most, and one TTL holds a bounded number of
+        // rows, so the height of the frame stays far below the limit. The
+        // arithmetic below says so anyway: a height that ran over would be a
+        // panic in a debug build, over a number no run reaches.
+        let height = u16::try_from(rows.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(HEADER_LINES + COLUMN_HEADER_LINES);
+        let buffer_width = table_width.max(buffer_columns(&header_line));
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, buffer_width, height));
+        buffer.set_string(0, 0, &header_line, Style::default());
+        let table = Table::new(rows.into_iter().map(RowText::into_row), column_widths(host))
+            .header(column_header())
+            .column_spacing(COLUMN_SPACING);
+        Widget::render(
+            &table,
+            Rect::new(0, HEADER_LINES, table_width, height - HEADER_LINES),
+            &mut buffer,
+        );
+
+        (0..height)
+            .map(|line| read_line(&buffer, line, buffer_width))
+            .collect()
     }
+
+    /// Every row of the table, in TTL order.
+    ///
+    /// One row for each TTL of the path, and one row for each participant of a
+    /// TTL that more than one of them answered at.
+    fn rows(&self, host: u16) -> Vec<RowText> {
+        let mut rows = Vec::new();
+        for row in self.table.rows() {
+            rows.push(self.ttl_row(row, host));
+            rows.extend(self.address_rows(row, host));
+        }
+        rows
+    }
+
+    /// The row of one TTL of the path.
+    ///
+    /// The host names the router that answered first, so a path that flaps
+    /// keeps the name a reader already read. The count behind it says how many
+    /// more routers answered there, and the star says that one of them is the
+    /// destination.
+    fn ttl_row(&self, row: &TtlRow, host: u16) -> RowText {
+        let named = row
+            .addresses()
+            .next()
+            .map_or_else(|| NO_HOST.to_owned(), |first| self.host_of(first.addr()));
+        let others = participants(row).saturating_sub(1);
+        let more = if others > 0 {
+            format!(" (+{others})")
+        } else {
+            String::new()
+        };
+        let star = if self.holds_the_destination(row) {
+            format!(" {DESTINATION_MARK}")
+        } else {
+            String::new()
+        };
+        let host_text = format!("{named}{more}{star}");
+        RowText {
+            ttl: row.ttl().to_string(),
+            host: truncate_to_width(&host_text, usize::from(host)),
+            counts: counts_text(
+                &row.loss()
+                    .map_or_else(|| NO_NUMBER.to_owned(), render_percent),
+                LOSS_MARK,
+                &row.sent().to_string(),
+            ),
+            times: time_texts(row.stats()),
+            recent: sparkline(row.stats().recent(), usize::from(RECENT_WIDTH)),
+        }
+    }
+
+    /// The rows of the routers that answered at one TTL.
+    ///
+    /// A TTL of one participant takes none of them: that one router is already
+    /// the host of the row of the TTL, and a second line of the same numbers
+    /// tells a reader nothing.
+    ///
+    /// The last row of the set closes it with a different glyph, so a reader
+    /// finds where the routers of one TTL stop without counting the rows
+    /// against the count in the host above them.
+    fn address_rows(&self, row: &TtlRow, host: u16) -> Vec<RowText> {
+        if participants(row) < 2 {
+            return Vec::new();
+        }
+        let mut rows: Vec<RowText> = row.addresses().map(|held| self.address_row(held)).collect();
+        if row.untracked() > 0 {
+            rows.push(others_row(row));
+        }
+        let last = rows.len().saturating_sub(1);
+        for (index, address_row) in rows.iter_mut().enumerate() {
+            let branch = if index == last { LAST_BRANCH } else { BRANCH };
+            address_row.host =
+                truncate_to_width(&format!("{branch}{}", address_row.host), usize::from(host));
+        }
+        rows
+    }
+
+    /// The row of one router that answered at a TTL.
+    ///
+    /// The count is the answers of that one router, and not a count of probes:
+    /// a probe reaches a TTL and not a router, so whichever router answers
+    /// takes that answer.
+    fn address_row(&self, address: Address<'_>) -> RowText {
+        RowText {
+            ttl: String::new(),
+            host: self.host_of(address.addr()),
+            counts: counts_text(
+                &render_percent(address.share()),
+                SHARE_MARK,
+                &address.stats().recv().to_string(),
+            ),
+            times: time_texts(address.stats()),
+            recent: sparkline(address.stats().recent(), usize::from(RECENT_WIDTH)),
+        }
+    }
+
+    /// The host of one address: the name that a `name` record gave it with the
+    /// address beside it, or the address alone.
+    ///
+    /// The address stays beside the name because a name is what a resolver said
+    /// and an address is what answered. A reader who chases a slow hop needs
+    /// the number that reaches it.
+    fn host_of(&self, addr: IpAddr) -> String {
+        self.names
+            .get(&addr)
+            .map_or_else(|| addr.to_string(), |name| format!("{name} ({addr})"))
+    }
+
+    /// Whether one TTL answered from the destination.
+    ///
+    /// Every router the row tracks counts, and not the first one alone: a path
+    /// that reaches its target through a load balancer answers the last TTL
+    /// from the target second as often as it answers from it first.
+    fn holds_the_destination(&self, row: &TtlRow) -> bool {
+        let Some(destination) = self.destination else {
+            return false;
+        };
+        row.addresses().any(|held| held.addr() == destination)
+    }
+}
+
+/// The row that stands for the answers of a TTL that no tracked address holds.
+///
+/// Every time column of it holds one word, because the fold keeps no time for
+/// such an answer: the answers came from routers the row has no entry for, and
+/// an entry is where the times live. The share is what the row is for. Without
+/// it, the printed shares of a crowded TTL sum to less than the whole and
+/// nothing on the screen says where the rest went.
+fn others_row(row: &TtlRow) -> RowText {
+    RowText {
+        ttl: String::new(),
+        host: OTHERS.to_owned(),
+        counts: counts_text(
+            &render_percent(untracked_share(row)),
+            SHARE_MARK,
+            &row.untracked().to_string(),
+        ),
+        times: TIME_HEADERS.map(|_| NO_NUMBER.to_owned()),
+        recent: String::new(),
+    }
+}
+
+/// One row of the buffer, as the text that a terminal prints for it.
+///
+/// A wide glyph fills its first cell and hides the cells under the columns
+/// behind it, and a hidden cell reports the one space that the empty buffer
+/// left there. The walk therefore steps over as many cells as the symbol is
+/// wide, or the line would grow one column for every wide glyph of it and a
+/// Japanese host name would push the numbers of its own row to the right.
+fn read_line(buffer: &Buffer, line: u16, width: u16) -> String {
+    let mut text = String::new();
+    let mut column = 0;
+    while column < width {
+        let symbol = buffer
+            .cell((column, line))
+            .map_or(" ", ratatui::buffer::Cell::symbol);
+        text.push_str(symbol);
+        // A symbol that prints nothing still holds its cell, so the walk moves
+        // on by one and never stands still.
+        column += buffer_columns(symbol).max(1);
+    }
+    text.trim_end_matches(' ').to_owned()
 }
 
 #[cfg(test)]
@@ -1296,15 +1852,13 @@ mod tests {
         for character in line.chars() {
             if character == ' ' {
                 inside = false;
-            } else {
-                if inside {
-                    if let Some(field) = fields.last_mut() {
-                        field.1.push(character);
-                    }
-                } else {
-                    fields.push((column, character.to_string()));
-                    inside = true;
+            } else if inside {
+                if let Some(field) = fields.last_mut() {
+                    field.1.push(character);
                 }
+            } else {
+                fields.push((column, character.to_string()));
+                inside = true;
             }
             column += UnicodeWidthChar::width(character).unwrap_or(0);
         }
