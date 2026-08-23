@@ -381,6 +381,28 @@ mod tests {
     }
 
     #[test]
+    fn a_control_string_sequence_is_removed() {
+        // Four more introducers open a run of payload that ends at a string
+        // terminator rather than at a CSI final byte: DCS (`ESC P`, which
+        // carries sixel images and tmux passthrough), SOS (`ESC X`), PM
+        // (`ESC ^`) and APC (`ESC _`). Read as two-character escapes, each
+        // drops its own introducer and then prints its payload — a whole
+        // sixel image arrives as a row of garbage in a window six rows tall.
+        for introducer in ['P', 'X', '^', '_'] {
+            // Both terminators, because a rule written for one and not the
+            // other leaks every payload that happens to end the other way.
+            for terminator in ["\u{07}", "\u{1b}\\"] {
+                let input = format!("\u{1b}{introducer}payload{terminator}said");
+                assert_eq!(
+                    split_all(input.as_bytes()),
+                    vec!["said"],
+                    "ESC {introducer} runs to {terminator:?} and takes its payload with it",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn other_control_characters_are_removed() {
         // A bell would ring once per painted frame, and a backspace would eat
         // the column to its left.
