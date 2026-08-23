@@ -16,6 +16,23 @@
 //! [`audit`] closes that hole: it runs the documentation build, reads the
 //! diagnostics rustdoc emits, and reports every unresolved link.
 //!
+//! # Key on the lint code, never on the words
+//!
+//! A finding is a diagnostic whose lint code is
+//! `rustdoc::broken_intra_doc_links`, and nothing else. The
+//! lint speaks in two registers: "unresolved link to `run`" when the item is
+//! not there, and "`trace` is both a function and a module" when the link names
+//! two items at once. A matcher built from the first sentence reports clean for
+//! the second, and a guard that reports clean for the wrong reason is
+//! indistinguishable from a guard doing real work.
+//!
+//! The other direction costs as much. Rustdoc raises four more documentation
+//! lints in this workspace today, and one of them —
+//! `rustdoc::private_intra_doc_links` — is *about a link that resolves*. A
+//! guard that reported every rustdoc warning, or every warning whose text
+//! mentions a link, would be red from the day it landed and would be switched
+//! off within the week.
+//!
 //! # The environment is scrubbed, not inherited
 //!
 //! The guard removes `RUSTDOCFLAGS`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTDOCFLAGS`,
@@ -83,8 +100,20 @@ const SCRUBBED_VARS: [&str; 5] = [
 /// `CARGO_BUILD_TARGET_DIR` and `CARGO_BUILD_RUSTDOCFLAGS` among others.
 const SCRUBBED_PREFIX: &str = "CARGO_BUILD_";
 
-/// Every documentation lint carries a code under this prefix.
-const RUSTDOC_LINT_PREFIX: &str = "rustdoc::";
+/// The one lint this guard reports.
+///
+/// The guard keys on this code and never on the words of the diagnostic. The
+/// lint speaks in two registers — "unresolved link to `run`" for a link to an
+/// item that is not there, and "`trace` is both a function and a module" for a
+/// link that names two items at once — and a matcher built from the first
+/// sentence would be silently blind to the second.
+///
+/// Rustdoc raises four other documentation lints in this workspace today
+/// (`rustdoc::private_intra_doc_links`, `rustdoc::bare_urls`,
+/// `rustdoc::redundant_explicit_links`, `rustdoc::invalid_html_tags`). None of
+/// them is an unresolved link, and a guard that reported them all would be red
+/// from the day it landed, so it would be switched off.
+const BROKEN_INTRA_DOC_LINKS: &str = "rustdoc::broken_intra_doc_links";
 
 /// The key naming what kind of record a line of cargo output is.
 const REASON: &str = "reason";
@@ -503,7 +532,7 @@ fn broken_links(
         else {
             continue;
         };
-        if !code.starts_with(RUSTDOC_LINT_PREFIX) {
+        if code != BROKEN_INTRA_DOC_LINKS {
             continue;
         }
 
