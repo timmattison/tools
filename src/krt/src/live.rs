@@ -589,11 +589,17 @@ fn install_panic_hook() -> PanicHook {
     previous
 }
 
+/// Puts a hook back.
+fn restore_panic_hook(previous: PanicHook) {
+    drop(previous);
+    drop(std::panic::take_hook());
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, install_panic_hook, status_line, Clock, Command, Headless, Keys, NoKeys,
-        PanicHook, RunFacts, Screen, SystemClock, Table,
+        classify, install_panic_hook, restore_panic_hook, status_line, Clock, Command, Headless,
+        Keys, NoKeys, PanicHook, RunFacts, Screen, SystemClock, Table,
     };
     use crate::record::{NameRecord, RoundRecord, RunId};
     use crate::testing::{address, round, FakeKeys};
@@ -1450,6 +1456,34 @@ mod tests {
         assert!(
             restored_first,
             "and it puts the terminal back first, so the message of the panic lands on the screen that the reader keeps"
+        );
+    }
+
+    #[test]
+    fn a_live_run_puts_back_the_hook_that_stood_before_it() {
+        // The panic hook is one setting of the whole process. A live run that
+        // ended and left its own hook standing puts a terminal back for every
+        // panic of every part of the process that follows it, and no part of
+        // that process holds a terminal.
+        let hooks = HookGuard::take();
+        let marked = mark();
+
+        let previous = install_panic_hook();
+        restore_panic_hook(previous);
+        let before = restorations();
+        let outcome = std::panic::catch_unwind(|| panic!("{THE_TEST_PANIC}"));
+        let read = marked.read.load(Ordering::SeqCst);
+        let after = restorations();
+        drop(hooks);
+
+        assert!(outcome.is_err(), "the body of the test raised its panic");
+        assert!(
+            read,
+            "the hook that stood in front of the live run reads the panic on its own"
+        );
+        assert_eq!(
+            after, before,
+            "and the hook of the live run puts back no terminal, because that hook no longer stands"
         );
     }
 }
