@@ -23,7 +23,10 @@
     reason = "each unwrap here is an assertion about the harness, not an unhandled error: the spawn of the freshly built binary, and the decode of the output that binary wrote. A failure of either one is a broken harness, and a panic names it at once"
 )]
 
-use std::process::Command;
+use std::path::PathBuf;
+use std::process::{self, Command};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, fs};
 
 /// The text before the commit hash of the build string.
 const BUILD_STRING_PREFIX: &str = "krt 0.1.0 (";
@@ -42,6 +45,33 @@ const STATUS_WORDS: [&str; 3] = ["clean", "dirty", UNKNOWN];
 
 /// The name of the command that folds a recorded file.
 const REPLAY: &str = "replay";
+
+/// The exit code of a run that stopped before it recorded anything.
+const EXIT_FAILURE: i32 = 1;
+
+/// The exit code of a run whose recorded file did not take a record.
+const EXIT_WRITE_FAILED: i32 = 3;
+
+/// The exit code of a run whose tracer stopped.
+const EXIT_TRACER_FAILED: i32 = 4;
+
+/// A literal address of ip version 4.
+///
+/// A literal address resolves inside the machine and asks no name server, so a
+/// test that names one runs offline.
+const AN_IPV4_ADDRESS: &str = "1.2.3.4";
+
+/// The loopback address of ip version 4. Every machine holds a route to it.
+const LOOPBACK: &str = "127.0.0.1";
+
+/// The flag that asks for ip version 6.
+const FLAG_VERSION_6: &str = "-6";
+
+/// The name of ip version 6, as the message of a refusal writes it.
+const IPV6_IN_THE_MESSAGE: &str = "ipv6";
+
+/// A last TTL that `krt` takes and the tracer refuses. The tracer stops at 254.
+const TTL_ABOVE_THE_TRACER: &str = "255";
 
 /// A recorded file that no test makes.
 ///
@@ -110,17 +140,21 @@ fn version_flags_report_the_build_string() {
     assert_flag_prints_the_build_string("-V");
 }
 
-/// The block that `krt example.com` prints, with every default.
-const DEFAULT_BLOCK: &str = "\
+/// The block that `krt 1.2.3.4 -6` prints before it stops.
+///
+/// A trace prints the block that names what it will do, and then it acts. This
+/// destination names no address of ip version 6, so the run stops at the
+/// resolution, and the block is the whole of standard output.
+const IPV6_REFUSAL_BLOCK: &str = "\
 resolved configuration:
-  destination:    example.com
+  destination:    1.2.3.4
   output:         derived at run time
   interval:       1s
   first ttl:      1
   max ttl:        30
   protocol:       icmp
   multipath:      classic
-  address family: auto
+  address family: ipv6
   reverse dns:    on
   source:         discovered at run time
   display:        table
@@ -132,6 +166,9 @@ resolved configuration:
 struct Run {
     /// True when the binary exited with success.
     success: bool,
+    /// The code that the binary exited with. A binary that a signal stopped
+    /// carries none.
+    code: Option<i32>,
     /// The text the binary wrote to standard output.
     stdout: String,
     /// The text the binary wrote to standard error.
@@ -143,6 +180,7 @@ fn run(arguments: &[&str]) -> Run {
     let output = krt().args(arguments).output().unwrap();
     Run {
         success: output.status.success(),
+        code: output.status.code(),
         stdout: String::from_utf8(output.stdout).unwrap(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
@@ -161,17 +199,95 @@ fn failure(arguments: &[&str]) -> String {
 }
 
 #[test]
-fn a_destination_prints_the_resolved_configuration() {
-    let result = run(&["example.com"]);
-    assert!(
-        result.success,
-        "`krt example.com` must exit with success; stderr: {}",
+fn a_destination_that_names_no_address_of_the_family_prints_the_block_and_stops() {
+    let result = run(&[AN_IPV4_ADDRESS, FLAG_VERSION_6]);
+    assert_eq!(
+        result.code,
+        Some(EXIT_FAILURE),
+        "the run stops at the resolution; stderr: {}",
         result.stderr
     );
-    assert_eq!(result.stdout, DEFAULT_BLOCK);
+    assert_eq!(result.stdout, IPV6_REFUSAL_BLOCK);
+    assert!(
+        result.stderr.contains(IPV6_IN_THE_MESSAGE),
+        "the message names the version that the run asked for: {}",
+        result.stderr
+    );
+    assert!(
+        result.stderr.contains(AN_IPV4_ADDRESS),
+        "the message names the destination: {}",
+        result.stderr
+    );
+}
+
+// macOS is the platform that sends probes without privileges, so it is the
+// platform where a trace reaches the two faults below. Linux and Windows stop
+// every trace at the privilege gate first, with a different code, so the same
+// test there would cover the gate and not the fault it names. The unit tests of
+// `src/krt/src/trace.rs` cover that gate on every platform.
+
+/// A path under the temporary directory of the machine.
+///
+/// The name keys on the process and on the moment, so two copies of one test
+/// that run at the same time never share a file. `CLAUDE.md` demands it.
+fn temp_path(name: &str) -> PathBuf {
+    let moment = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock must sit after the epoch")
+        .as_nanos();
+    env::temp_dir().join(format!("{name}-{}-{moment}", process::id()))
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_recorded_file_that_will_not_open_stops_the_run() {
+    let missing = temp_path("krt-no-such-directory");
+    let path = missing.join(A_RECORDED_FILE);
+    let result = run(&[
+        LOOPBACK,
+        "--output",
+        path.to_str().expect("the temporary path must be text"),
+    ]);
     assert_eq!(
-        result.stderr, "",
-        "a good command line writes nothing to standard error"
+        result.code,
+        Some(EXIT_WRITE_FAILED),
+        "a recorded file that will not open stops the run; stderr: {}",
+        result.stderr
+    );
+    assert!(
+        result.stderr.contains(A_RECORDED_FILE),
+        "the message names the file: {}",
+        result.stderr
+    );
+    assert!(
+        !missing.exists(),
+        "the run makes no directory of its own: {}",
+        missing.display()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_ttl_above_what_the_tracer_takes_stops_the_run() {
+    let path = temp_path("krt-ttl-above-the-limit");
+    let result = run(&[
+        LOOPBACK,
+        "--max-ttl",
+        TTL_ABOVE_THE_TRACER,
+        "--output",
+        path.to_str().expect("the temporary path must be text"),
+    ]);
+    let _ = fs::remove_file(&path);
+    assert_eq!(
+        result.code,
+        Some(EXIT_TRACER_FAILED),
+        "a tracer that refuses the configuration stops the run; stderr: {}",
+        result.stderr
+    );
+    assert!(
+        result.stderr.contains(TTL_ABOVE_THE_TRACER),
+        "the message names the ttl: {}",
+        result.stderr
     );
 }
 
