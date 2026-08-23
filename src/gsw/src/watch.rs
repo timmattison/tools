@@ -1066,7 +1066,7 @@ where
         // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing.
         Event::PushConfirmed => {
-            if let Some(command) = ui.confirm() {
+            if let Some(command) = ui.confirm(clock()) {
                 start_push(command);
             }
         }
@@ -4132,7 +4132,7 @@ mod push_loop_tests {
     fn pushed_ui(at: Instant) -> PushUi {
         let mut ui = PushUi::new(false);
         ui.request(&pushable_snapshot(), TEST_DIMS, at);
-        ui.confirm();
+        ui.confirm(at);
         ui.finished(
             crate::push::PushOutcome {
                 success: true,

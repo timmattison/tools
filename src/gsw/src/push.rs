@@ -8,6 +8,7 @@
 //! [`spawn`], starts a process: the push itself, and the read of HEAD that
 //! checks the repository is still on the branch the confirmation named.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -31,6 +32,18 @@ use crate::watch::{Dimensions, InputMode};
 /// three and still show a frame, so [`PushUi::overlay`] clips the message
 /// further. This is the most the user will ever see, not the least.
 const MAX_STATUS_ROWS: usize = 3;
+
+/// Most rows of a running push's own output the window under the frame will
+/// ever show.
+///
+/// A pre-push hook that builds and tests a workspace prints hundreds of lines,
+/// and the six that matter are the six that just arrived. Six is also small
+/// enough that the frame — the thing watch mode is for — keeps most of a short
+/// pane while a push runs.
+///
+/// A ceiling, not a promise: [`PushUi::overlay`] shows fewer in a pane that
+/// cannot spare six, and drops the oldest rather than the newest when it does.
+const MAX_PUSH_OUTPUT_ROWS: usize = 6;
 
 /// Git's prefix for advice lines. They follow the real error and explain
 /// general remedies, so they are the first thing to drop when the message has
@@ -431,7 +444,7 @@ fn drain(stream: Option<impl std::io::Read>, on_line: &(dyn Fn(String) + Sync)) 
     let mut splitter = LineSplitter::new();
     let mut collected = String::new();
     let mut buffer = [0_u8; 8192];
-    let mut report = |line: String, collected: &mut String| {
+    let report = |line: String, collected: &mut String| {
         collected.push_str(&line);
         collected.push('\n');
         on_line(line);
@@ -640,8 +653,22 @@ enum State {
         command: PushCommand,
         success_message: String,
     },
-    /// `git push` is running.
-    Running { success_message: String },
+    /// `git push` is running, and this is what it has said so far.
+    Running {
+        success_message: String,
+        /// When the push started, against the watch loop's injected clock. The
+        /// notice reports the age from it, so a hook that takes minutes looks
+        /// like a push in progress rather than like a hang.
+        started_at: Instant,
+        /// The most recent output lines, oldest first, capped at
+        /// [`MAX_PUSH_OUTPUT_ROWS`].
+        ///
+        /// A queue rather than a `Vec` because both ends move: a line arrives
+        /// at the back and, once the window is full, one leaves the front. A
+        /// `Vec` would pay for a shift of the whole buffer per line of a hook
+        /// that prints thousands.
+        recent: VecDeque<String>,
+    },
 }
 
 /// How long a [`State::Status`] message stays under the frame, and how it is
@@ -800,7 +827,7 @@ impl PushUi {
     /// Moving to [`State::Running`] as it hands the command over is what makes
     /// a second `y` — one that raced the mode change — return `None` rather than
     /// start an overlapping push.
-    pub(crate) fn confirm(&mut self) -> Option<PushCommand> {
+    pub(crate) fn confirm(&mut self, now: Instant) -> Option<PushCommand> {
         let State::Asking {
             command,
             success_message,
@@ -809,8 +836,22 @@ impl PushUi {
         else {
             return None;
         };
-        self.state = State::Running { success_message };
+        self.state = State::Running {
+            success_message,
+            started_at: now,
+            recent: VecDeque::new(),
+        };
         Some(command)
+    }
+
+    /// Handle one line of a running push's output.
+    ///
+    /// Ignored in every other state. The reader threads are joined before the
+    /// outcome is sent, so a line cannot really arrive after the push
+    /// finished — but a window that a late line could reopen would paint over
+    /// the error the user is reading, and the rule costs nothing to state.
+    pub(crate) fn output_line(&mut self, line: String) {
+        let _ = line;
     }
 
     /// Drop a message that has outlived [`STATUS_LIFETIME`].
@@ -852,7 +893,9 @@ impl PushUi {
     /// [`Life`] for why those are one decision.
     pub(crate) fn finished(&mut self, outcome: PushOutcome, now: Instant) {
         let success_message = match std::mem::replace(&mut self.state, State::Idle) {
-            State::Running { success_message } => success_message,
+            State::Running {
+                success_message, ..
+            } => success_message,
             // A finish with no push running: nothing to report against, so
             // leave the screen as it is rather than inventing a message.
             other => {
@@ -1590,6 +1633,182 @@ mod ui_tests {
         ui
     }
 
+    /// A UI with a push already running, confirmed at `now`.
+    fn pushing(now: Instant) -> PushUi {
+        let mut ui = PushUi::new(false);
+        ui.request(&snapshot(None), tall_pane(80), now);
+        ui.confirm(now)
+            .expect("the confirmation must hand over a command");
+        ui
+    }
+
+    /// What `ui` paints, as the glyphs a user reads.
+    ///
+    /// The escapes are forced on and then taken back out, so the assertion
+    /// covers the painted output rather than a plain render no terminal would
+    /// produce. `colored` decides at format time, from process-global state
+    /// that other tests in this binary toggle, so reading `text()` raw would
+    /// compare different bytes depending on whether the run had a terminal.
+    fn painted(ui: &mut PushUi, dims: Dimensions, now: Instant) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| ui.overlay(dims, now).text()))
+    }
+
+    #[test]
+    fn a_line_reported_while_pushing_appears_under_the_notice() {
+        // The whole feature: a long pre-push hook leaves the user watching a
+        // frozen "Pushing…" with no way to tell work from a hang.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.output_line("Compiling gsw v0.1.0".to_string());
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the notice must stay above the window, got {text:?}",
+        );
+        assert!(
+            text.contains("Compiling gsw v0.1.0"),
+            "the hook's line must reach the screen, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn the_window_keeps_the_newest_lines_and_drops_the_oldest() {
+        // A hook that builds a workspace prints hundreds of lines. The window
+        // is six rows, and the six worth having are the six that just arrived.
+        let now = t0();
+        let mut ui = pushing(now);
+        for step in 0..MAX_PUSH_OUTPUT_ROWS + 4 {
+            ui.output_line(format!("line {step}"));
+        }
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(
+            text.lines().count(),
+            MAX_PUSH_OUTPUT_ROWS + 1,
+            "the notice plus a full window, got {text:?}",
+        );
+        assert!(
+            text.contains("line 9") && text.contains("line 4"),
+            "the newest six must be on screen, got {text:?}",
+        );
+        assert!(
+            !text.contains("line 0") && !text.contains("line 3"),
+            "the lines the window outgrew must be gone, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_short_pane_keeps_the_notice_and_drops_the_oldest_window_rows() {
+        // The overlay's clamp takes rows off the end of the list, so a window
+        // built oldest-first with the notice on top loses its newest lines
+        // exactly when it has fewest to spare. Sizing the window before the
+        // clamp is what puts the loss at the other end.
+        let now = t0();
+        let mut ui = pushing(now);
+        for step in 0..MAX_PUSH_OUTPUT_ROWS {
+            ui.output_line(format!("line {step}"));
+        }
+
+        // Four rows, one of which the frame always keeps.
+        let dims = Dimensions {
+            width: 80,
+            height: 4,
+        };
+        let text = painted(&mut ui, dims, now);
+        assert_eq!(
+            text.lines().count(),
+            3,
+            "the overlay gets every row but the frame's, got {text:?}",
+        );
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the row that says a push is running must survive, got {text:?}",
+        );
+        assert!(
+            text.contains("line 5"),
+            "the newest line must survive, got {text:?}",
+        );
+        assert!(
+            !text.contains("line 0"),
+            "the oldest lines are what a short pane loses, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn the_notice_says_how_long_the_push_has_been_running() {
+        // A hook that takes minutes is the case this feature exists for, and a
+        // notice that never changes is indistinguishable from a hang.
+        let now = t0();
+        let mut ui = pushing(now);
+
+        let text = painted(&mut ui, tall_pane(80), now + Duration::from_secs(72));
+        assert!(
+            text.contains("1m12s"),
+            "the notice must report its own age, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_running_push_keeps_the_loop_waking() {
+        // The age above only advances on a frame that is drawn, and a hook
+        // that is quiet for a minute gives the loop no other reason to draw
+        // one.
+        let ui = pushing(t0());
+        assert_eq!(ui.next_tick(), Some(STATUS_CADENCE));
+    }
+
+    #[test]
+    fn a_window_row_is_truncated_to_the_pane_width() {
+        // gsw's standing rule: nothing it paints wraps the pane it was
+        // measured to fill. A hook's line is the one text here nobody chose
+        // the length of.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.output_line("x".repeat(200));
+
+        let overlay = testcolor::with_forced_ansi(|| ui.overlay(tall_pane(40), now).text());
+        for line in overlay.lines() {
+            assert!(
+                visible_width(line) <= 40,
+                "a row is {} columns wide in a 40-column pane: {line:?}",
+                visible_width(line),
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_reported_when_no_push_is_running_changes_nothing() {
+        let mut ui = PushUi::new(false);
+        ui.output_line("stray".to_string());
+
+        assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 0);
+        assert_eq!(ui.mode(), InputMode::Normal);
+    }
+
+    #[test]
+    fn the_window_closes_when_the_push_finishes() {
+        // The outcome replaces the window. Leaving the hook's last rows under
+        // a success message would spend the frame's rows on news twice over.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.output_line("Compiling gsw v0.1.0".to_string());
+
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            !text.contains("Compiling gsw v0.1.0"),
+            "the window must close with the push, got {text:?}",
+        );
+    }
+
     #[test]
     fn a_fresh_ui_shows_nothing_and_leaves_the_keys_alone() {
         let mut ui = PushUi::new(false);
@@ -1643,7 +1862,7 @@ mod ui_tests {
     #[test]
     fn confirming_hands_back_the_command_and_switches_to_pushing() {
         let mut ui = asking();
-        let command = ui.confirm().expect("a question on screen must confirm");
+        let command = ui.confirm(t0()).expect("a question on screen must confirm");
         assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
         assert_eq!(
             command.branch(),
@@ -1664,7 +1883,7 @@ mod ui_tests {
         // on screen there is no command to run, and inventing one would push
         // without asking.
         let mut ui = PushUi::new(false);
-        assert_eq!(ui.confirm(), None);
+        assert_eq!(ui.confirm(t0()), None);
         assert_eq!(ui.mode(), InputMode::Normal);
     }
 
@@ -1673,8 +1892,8 @@ mod ui_tests {
         // The second `y` arrives after the mode has already moved to Pushing.
         // It must not produce a second command.
         let mut ui = asking();
-        assert!(ui.confirm().is_some());
-        assert_eq!(ui.confirm(), None, "a second confirm must not push again");
+        assert!(ui.confirm(t0()).is_some());
+        assert_eq!(ui.confirm(t0()), None, "a second confirm must not push again");
     }
 
     #[test]
@@ -1694,7 +1913,7 @@ mod ui_tests {
         // The wording comes from the plan, so a create reports itself as a
         // create rather than as a generic success.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: true,
@@ -1713,7 +1932,7 @@ mod ui_tests {
     fn a_successful_update_counts_what_it_pushed() {
         let mut ui = PushUi::new(false);
         ui.request(&snapshot(tracked(3)), tall_pane(80), t0());
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: true,
@@ -1732,7 +1951,7 @@ mod ui_tests {
         // The whole point of the feature's error path: git's own words, not a
         // gsw paraphrase.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -1756,7 +1975,7 @@ mod ui_tests {
         // git follows a rejection with several `hint:` lines. They must not
         // crowd out the error itself when only three rows are free.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -1787,7 +2006,7 @@ mod ui_tests {
         // The frame below is what the user is watching. A wall of git output
         // must not push it off the screen.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         let output = (1..=20)
             .map(|n| format!("error: line {n}\n"))
             .collect::<String>();
@@ -1811,7 +2030,7 @@ mod ui_tests {
         // fill the pane exactly, so every row the overlay takes is a row the
         // frame gave up, and the last one is not the frame's to give.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -1878,7 +2097,7 @@ mod ui_tests {
             "a question that was never drawn must not leave the keys meaning push",
         );
         assert_eq!(
-            ui.confirm(),
+            ui.confirm(t0()),
             None,
             "Enter must not start a push nobody was asked about",
         );
@@ -1906,7 +2125,7 @@ mod ui_tests {
             "a question the pane cannot hold must not switch the key table",
         );
         assert_eq!(
-            ui.confirm(),
+            ui.confirm(t0()),
             None,
             "there must be no question waiting for a `y` that never saw one",
         );
@@ -1918,7 +2137,7 @@ mod ui_tests {
         // text either leaves a blank strip under the frame or paints past the
         // bottom of the pane.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -1962,7 +2181,7 @@ mod ui_tests {
     /// A UI reporting the outcome of a push it asked about and ran.
     fn reporting(outcome: PushOutcome) -> PushUi {
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(outcome, t0());
         ui
     }
@@ -2001,7 +2220,7 @@ mod ui_tests {
         };
         let running = {
             let mut ui = asking();
-            ui.confirm();
+            ui.confirm(t0());
             ui
         };
         vec![
@@ -2123,7 +2342,7 @@ mod ui_tests {
         // A push that fails with no output at all must not leave a blank row
         // that reads as success.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -2143,7 +2362,7 @@ mod ui_tests {
         // Tim's requirement: an error must survive every decay tick and
         // repaint, and go away only when the user has pressed something.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -2169,7 +2388,7 @@ mod ui_tests {
         ui.dismiss();
         assert_eq!(ui.mode(), InputMode::Confirm, "a stray key must not cancel");
 
-        ui.confirm();
+        ui.confirm(t0());
         ui.dismiss();
         assert_eq!(
             ui.mode(),
@@ -2181,7 +2400,7 @@ mod ui_tests {
     #[test]
     fn a_running_push_says_so() {
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         let overlay = ui.overlay(tall_pane(80), t0()).text();
         assert!(
             overlay.to_lowercase().contains("push"),
@@ -2232,7 +2451,7 @@ mod ui_tests {
         // Pressing `p` while an old error is on screen must ask the new
         // question, not stack a second row under the first.
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -2265,7 +2484,7 @@ mod ui_tests {
     fn pushed_with(truecolor: bool, at: Instant) -> PushUi {
         let mut ui = PushUi::new(truecolor);
         ui.request(&snapshot(tracked(3)), tall_pane(80), at);
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: true,
@@ -2365,7 +2584,7 @@ mod ui_tests {
         // while they are looking at another pane is worse than a row spent.
         let start = t0();
         let mut ui = asking();
-        ui.confirm();
+        ui.confirm(t0());
         ui.finished(
             PushOutcome {
                 success: false,
@@ -2579,11 +2798,11 @@ mod ui_tests {
         );
 
         let mut running = asking();
-        running.confirm();
+        running.confirm(t0());
         assert_eq!(running.next_tick(), None, "a push in flight");
 
         let mut failed = asking();
-        failed.confirm();
+        failed.confirm(t0());
         failed.finished(
             PushOutcome {
                 success: false,
