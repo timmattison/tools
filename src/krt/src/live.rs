@@ -480,8 +480,12 @@ impl<W: Write, C: Clock> Screen for Headless<W, C> {
         todo!("a headless screen reads no key")
     }
 
-    fn round(&mut self, _round: &RoundRecord) {
-        todo!("a headless screen writes the status line of a round")
+    fn round(&mut self, round: &RoundRecord) {
+        // A line that does not print stops nothing. The recording is the
+        // purpose of the tool, and the line is one view of it, so a reader who
+        // closes the pipe of the display loses the display and keeps the
+        // recording.
+        drop(writeln!(self.sink, "{}", status_line(round)));
     }
 
     fn names(&mut self, _names: &[NameRecord]) {
