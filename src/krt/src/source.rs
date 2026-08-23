@@ -1,14 +1,21 @@
 //! Where the probes leave from, and what the recorded file is called.
 //!
+//! The search for the source holds three steps, and the first one that gives an
+//! address wins: the address that the user named, the address that one public
+//! service answers with, and the address of the local interface that reaches
+//! the target. The last step reaches no network, so a machine on a captive
+//! network still records.
+//!
 //! The name of a recorded file holds the source address and the destination, so
 //! one source and one destination keep one file across many runs. Both halves
 //! of the name lose every character that a file name must not hold on macOS, on
 //! Linux, or on Windows. The `--output` flag names a file of its own, and it
 //! wins over the derived name.
 //!
-//! The derived name carries the address that the probes leave from. A file that
-//! the user gives to another person carries that address too. `--output`
-//! avoids this.
+//! The derived name carries the address that the probes leave from, and that is
+//! the public address of the machine on most runs. A file that the user gives
+//! to another person therefore names the network of the user, and not only an
+//! address of a private range that every home shares. `--output` avoids this.
 
 use crate::record::{SourceKind, SourceLabel};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
@@ -140,10 +147,6 @@ fn egress_address(target: IpAddr) -> std::io::Result<IpAddr> {
 /// so the answer needs no parser of a format and the request needs no key of an
 /// account. A service that goes away, or that starts to limit the rate of a
 /// caller, costs this one line to change.
-#[allow(
-    dead_code,
-    reason = "discover() reads this in the next slice of issue #368"
-)]
 const PUBLIC_SERVICE: &str = "https://api.ipify.org";
 
 /// How long the lookup of the public address waits before it gives up.
@@ -156,10 +159,6 @@ const PUBLIC_SERVICE: &str = "https://api.ipify.org";
 /// The client gives this much time to the request and this much again to the
 /// read of the answer, so a service that answers the headers and then stops
 /// costs twice this at the most.
-#[allow(
-    dead_code,
-    reason = "discover() reads this in the next slice of issue #368"
-)]
 const PUBLIC_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How many characters of an answer that is not an address the message holds.
@@ -233,10 +232,6 @@ enum PublicError {
 /// request does not complete inside the timeout, when the service answers with
 /// the status of an error, and when the answer does not read as text. Returns
 /// [`PublicError::Answer`] when the answer is not an address.
-#[allow(
-    dead_code,
-    reason = "discover() calls this in the next slice of issue #368; the tests of this module cover it now"
-)]
 fn public_address(service: &str, timeout: Duration) -> Result<IpAddr, PublicError> {
     let answer = reqwest::blocking::Client::builder()
         .timeout(timeout)
@@ -274,47 +269,67 @@ pub(crate) struct Discovery {
 
 /// Finds the address that the probes leave from, and how krt found it.
 ///
-/// The address that the user named wins, and it opens no socket. Every other
-/// run reads the address of the interface that reaches the target.
+/// The search holds three steps, and the first one that gives an address wins.
+/// The address that the user named wins over both of the others, and it asks no
+/// service and opens no socket. A run that names no source asks the public
+/// address service once. A run that reads no address there records the address
+/// of the interface that reaches the target, and it carries the note that says
+/// why.
 ///
-/// The design puts one HTTPS request to a public address service between those
-/// two steps. A later slice adds it.
+/// The last step is what keeps a run recording: a machine on a captive network,
+/// and a machine on a network with no route out, both reach the local egress
+/// address.
 ///
 /// # Errors
 ///
-/// Returns the reason when the socket of the egress address does not open, when
-/// the operating system finds no route to the target, and when the local
-/// address does not read. A run that names a source raises none of these,
-/// because it opens no socket.
+/// Returns the reason when the public lookup gives no address **and** the
+/// socket of the egress address then also fails: the socket does not open, the
+/// operating system finds no route to the target, or the local address does not
+/// read. A run that names a source raises none of these, and neither does a run
+/// that reads a public address, because neither one opens a socket.
 pub(crate) fn discover(named: Option<IpAddr>, target: IpAddr) -> std::io::Result<Discovery> {
     discover_at(named, target, PUBLIC_SERVICE, PUBLIC_TIMEOUT)
 }
 
 /// Finds the source address against the service and the timeout of the caller.
 ///
+/// [`discover`] names the service and the timeout of a run. A test names a
+/// service of its own, which runs on this machine, so no test of this module
+/// reaches the service that `PUBLIC_SERVICE` names.
+///
 /// # Errors
 ///
-/// Returns the reason when the socket of the egress address does not open.
+/// Returns the reason when the public lookup gives no address and the socket of
+/// the egress address then also fails.
 fn discover_at(
     named: Option<IpAddr>,
     target: IpAddr,
     service: &str,
     timeout: Duration,
 ) -> std::io::Result<Discovery> {
-    match named {
-        Some(addr) => Ok(Discovery {
+    if let Some(addr) = named {
+        return Ok(Discovery {
             label: SourceLabel {
                 addr,
                 kind: SourceKind::Override,
             },
             note: None,
+        });
+    }
+    match public_address(service, timeout) {
+        Ok(addr) => Ok(Discovery {
+            label: SourceLabel {
+                addr,
+                kind: SourceKind::Public,
+            },
+            note: None,
         }),
-        None => Ok(Discovery {
+        Err(error) => Ok(Discovery {
             label: SourceLabel {
                 addr: egress_address(target)?,
                 kind: SourceKind::Local,
             },
-            note: None,
+            note: Some(format!("{error}. {PUBLIC_FALLBACK}")),
         }),
     }
 }
