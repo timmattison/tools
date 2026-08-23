@@ -624,6 +624,14 @@ fn restore_terminal() {
 /// hook of the machine prints the message of a panic, and a test binary holds a
 /// hook that collects one. A hook that replaced either of them takes the report
 /// of every panic away from the reader who needs it most.
+///
+/// # Panics
+///
+/// Panics on a thread that is already panicking, because
+/// `std::panic::take_hook` refuses such a thread. The guard of a live run takes
+/// the terminal at the start of that run, where no panic of the run stands.
+/// [`restore_panic_hook`] reads the thread for the same rule, because the drop
+/// of that guard does stand on the path of a panic.
 fn install_panic_hook() -> PanicHook {
     let previous: PanicHook = Arc::from(std::panic::take_hook());
     let chained = Arc::clone(&previous);
