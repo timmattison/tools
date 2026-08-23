@@ -15,13 +15,124 @@
 //!
 //! [`audit`] closes that hole: it runs the documentation build, reads the
 //! diagnostics rustdoc emits, and reports every unresolved link.
+//!
+//! # The environment is scrubbed, not inherited
+//!
+//! The guard removes `RUSTDOCFLAGS`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTDOCFLAGS`,
+//! `CARGO_ENCODED_RUSTFLAGS`, `CARGO_TARGET_DIR`, and every `CARGO_BUILD_*`
+//! variable before it starts cargo. It keeps `PATH`, `HOME`, `CARGO_HOME`, and
+//! `RUSTUP_*`. Two of those removals carry the reason.
+//!
+//! An ambient `RUSTDOCFLAGS=-Dwarnings` turns a reportable warning into a
+//! non-zero exit, which the guard reads as a refusal. The verdict would then
+//! depend on the shell the operator happened to run the tests from, and the
+//! same tree would be clean for one person and unreadable for the next.
+//!
+//! An ambient `CARGO_TARGET_DIR` moves the cache the warm-run cost depends on,
+//! and lets two runs of the guard share one target directory. Two fixtures that
+//! share a target directory are two tests that can block or corrupt each other.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
+use serde_json::Value;
 use thiserror::Error;
+
+/// The variable cargo sets to its own path for the processes it starts. Read
+/// before the child environment is scrubbed, so the guard runs the same cargo
+/// that runs the tests.
+const CARGO_ENV: &str = "CARGO";
+
+/// What to start when nothing names a cargo.
+const CARGO_FALLBACK: &str = "cargo";
+
+/// The documentation build, spelled once.
+///
+/// `--no-deps` keeps rustdoc on this workspace's own packages. `--workspace`
+/// reaches every member, so a member added later is scanned without anybody
+/// editing this list.
+const DOC_ARGS: [&str; 4] = ["doc", "--workspace", "--no-deps", "--message-format=json"];
+
+/// The member query, spelled once. `--no-deps` keeps the answer to this
+/// workspace's own packages.
+const METADATA_ARGS: [&str; 4] = ["metadata", "--no-deps", "--format-version", "1"];
+
+/// How the documentation build is named in a refusal.
+const DOC_COMMAND: &str = "cargo doc";
+
+/// How the member query is named in a refusal.
+const METADATA_COMMAND: &str = "cargo metadata";
+
+/// Environment variables the guard removes before it starts cargo. See the
+/// module header for the reason.
+const SCRUBBED_VARS: [&str; 5] = [
+    "CARGO_ENCODED_RUSTDOCFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_TARGET_DIR",
+    "RUSTDOCFLAGS",
+    "RUSTFLAGS",
+];
+
+/// Every variable whose name starts with this is removed too. `CARGO_BUILD_*`
+/// is the environment spelling of the `[build]` config table, and it holds
+/// `CARGO_BUILD_TARGET_DIR` and `CARGO_BUILD_RUSTDOCFLAGS` among others.
+const SCRUBBED_PREFIX: &str = "CARGO_BUILD_";
+
+/// Every documentation lint carries a code under this prefix.
+const RUSTDOC_LINT_PREFIX: &str = "rustdoc::";
+
+/// The key naming what kind of record a line of cargo output is.
+const REASON: &str = "reason";
+
+/// The record kind that carries a compiler or rustdoc diagnostic.
+const COMPILER_MESSAGE: &str = "compiler-message";
+
+/// The key naming the package a record belongs to.
+const PACKAGE_ID: &str = "package_id";
+
+/// The key holding a record's target, and the key holding a target's kinds.
+const TARGET: &str = "target";
+
+/// The key holding a target's or a package's name.
+const NAME: &str = "name";
+
+/// The key holding a target's kinds. Cargo writes an array.
+const KIND: &str = "kind";
+
+/// The key holding a diagnostic — and, inside it, the diagnostic's own text.
+const MESSAGE: &str = "message";
+
+/// The key holding a diagnostic's lint code — and, inside it, the code itself.
+const CODE: &str = "code";
+
+/// The key holding a diagnostic's source locations.
+const SPANS: &str = "spans";
+
+/// The key marking the span a diagnostic points at.
+const IS_PRIMARY: &str = "is_primary";
+
+/// The key holding a span's file, relative to the workspace root.
+const FILE_NAME: &str = "file_name";
+
+/// The key holding a span's first line, counted from one.
+const LINE_START: &str = "line_start";
+
+/// The `cargo metadata` key listing every package.
+const PACKAGES: &str = "packages";
+
+/// The `cargo metadata` key listing the identifiers of the workspace members.
+const WORKSPACE_MEMBERS: &str = "workspace_members";
+
+/// The key holding a package's identifier.
+const ID: &str = "id";
+
+/// How much of an offending line a refusal quotes.
+const QUOTED_CHARS: usize = 400;
 
 /// Everything that can stop the scan from reaching a verdict.
 ///
@@ -251,14 +362,288 @@ impl fmt::Display for DocScan {
 
 /// Scan the documentation build of the workspace rooted at `workspace_root`.
 ///
+/// The guard asks `cargo metadata` which packages the workspace holds, runs
+/// `cargo doc --workspace --no-deps` with a scrubbed environment, and reads the
+/// JSON Lines cargo writes to its output stream.
+///
 /// # Errors
 ///
 /// Returns [`DocLinksError`] — never a clean [`DocScan`] — when the build
-/// cannot be read with confidence.
+/// cannot be read with confidence: cargo cannot be started
+/// ([`Spawn`](DocLinksError::Spawn)), `cargo metadata` fails
+/// ([`MetadataFailed`](DocLinksError::MetadataFailed)) or reports no members
+/// ([`NoWorkspaceMembers`](DocLinksError::NoWorkspaceMembers)), a line of cargo
+/// output is not JSON ([`Json`](DocLinksError::Json)) or lacks a field the
+/// guard reads ([`MissingField`](DocLinksError::MissingField)), or a diagnostic
+/// names a package the workspace does not hold
+/// ([`UnknownPackage`](DocLinksError::UnknownPackage)).
 pub fn audit(workspace_root: &Path) -> Result<DocScan, DocLinksError> {
-    let _ = workspace_root;
+    let cargo = cargo_program();
+    let names = workspace_package_names(&cargo, workspace_root)?;
+    let output = run(&cargo, workspace_root, &DOC_ARGS)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
     Ok(DocScan {
-        broken: Vec::new(),
+        broken: broken_links(&stdout, &names)?,
         documented: BTreeSet::new(),
     })
+}
+
+/// The cargo to start: the one that started this process, when there is one.
+///
+/// Read here, before [`run`] scrubs the child environment, so a run under
+/// `cargo test` uses the same toolchain as the run itself.
+fn cargo_program() -> OsString {
+    env::var_os(CARGO_ENV).unwrap_or_else(|| OsString::from(CARGO_FALLBACK))
+}
+
+/// Start cargo in `dir` with a scrubbed environment and collect its output.
+///
+/// The scrub is the whole reason this is one function: every cargo the guard
+/// starts goes through it, so no call site can inherit a flag that changes the
+/// verdict. See the module header.
+fn run(program: &OsStr, dir: &Path, args: &[&str]) -> Result<Output, DocLinksError> {
+    let mut command = Command::new(program);
+    command.current_dir(dir).args(args);
+
+    for name in SCRUBBED_VARS {
+        command.env_remove(name);
+    }
+    for (name, _) in env::vars_os() {
+        if name.to_string_lossy().starts_with(SCRUBBED_PREFIX) {
+            command.env_remove(&name);
+        }
+    }
+
+    command.output().map_err(|source| DocLinksError::Spawn {
+        program: program.to_string_lossy().into_owned(),
+        dir: dir.to_path_buf(),
+        source,
+    })
+}
+
+/// Every workspace member of `dir`, as a map from package identifier to package
+/// name.
+///
+/// The identifier is what every cargo record carries, and the name is what a
+/// reader recognises, so the join happens here once. A package name parsed out
+/// of the identifier would be a second model of a format cargo owns: the
+/// identifier reads `path+file:///…/src/aa#0.1.0` when the directory and the
+/// package agree on a name, and `path+file:///…/p4#fixture@0.1.0` when they do
+/// not.
+fn workspace_package_names(
+    program: &OsStr,
+    dir: &Path,
+) -> Result<BTreeMap<String, String>, DocLinksError> {
+    let output = run(program, dir, &METADATA_ARGS)?;
+    if !output.status.success() {
+        return Err(DocLinksError::MetadataFailed {
+            dir: dir.to_path_buf(),
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let metadata: Value = serde_json::from_str(&text).map_err(|source| DocLinksError::Json {
+        command: METADATA_COMMAND,
+        line: elide(&text),
+        source,
+    })?;
+
+    let mut members = BTreeSet::new();
+    for member in array_field(&metadata, WORKSPACE_MEMBERS, METADATA_COMMAND, &text)? {
+        members.insert(as_text(member, WORKSPACE_MEMBERS, METADATA_COMMAND, &text)?);
+    }
+
+    let mut names = BTreeMap::new();
+    for package in array_field(&metadata, PACKAGES, METADATA_COMMAND, &text)? {
+        let id = text_field(package, ID, METADATA_COMMAND, &text)?;
+        if !members.contains(id) {
+            continue;
+        }
+        let name = text_field(package, NAME, METADATA_COMMAND, &text)?;
+        names.insert(id.to_owned(), name.to_owned());
+    }
+
+    if names.is_empty() {
+        return Err(DocLinksError::NoWorkspaceMembers {
+            dir: dir.to_path_buf(),
+        });
+    }
+    Ok(names)
+}
+
+/// Every link rustdoc could not resolve, read out of the JSON Lines `cargo doc`
+/// wrote.
+fn broken_links(
+    stdout: &str,
+    names: &BTreeMap<String, String>,
+) -> Result<Vec<BrokenLink>, DocLinksError> {
+    let mut broken = Vec::new();
+
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: Value = serde_json::from_str(line).map_err(|source| DocLinksError::Json {
+            command: DOC_COMMAND,
+            line: elide(line),
+            source,
+        })?;
+
+        if text_field(&record, REASON, DOC_COMMAND, line)? != COMPILER_MESSAGE {
+            continue;
+        }
+        let message = field(&record, MESSAGE, DOC_COMMAND, line)?;
+        let Some(code) = message
+            .get(CODE)
+            .and_then(|code| code.get(CODE))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if !code.starts_with(RUSTDOC_LINT_PREFIX) {
+            continue;
+        }
+
+        broken.push(broken_link(&record, message, names, line)?);
+    }
+
+    Ok(broken)
+}
+
+/// Read one diagnostic into a [`BrokenLink`].
+fn broken_link(
+    record: &Value,
+    message: &Value,
+    names: &BTreeMap<String, String>,
+    line: &str,
+) -> Result<BrokenLink, DocLinksError> {
+    let package_id = text_field(record, PACKAGE_ID, DOC_COMMAND, line)?;
+    let package = names
+        .get(package_id)
+        .ok_or_else(|| DocLinksError::UnknownPackage {
+            package_id: package_id.to_owned(),
+        })?;
+
+    let target = field(record, TARGET, DOC_COMMAND, line)?;
+    let kinds = array_field(target, KIND, DOC_COMMAND, line)?;
+    let kind = kinds.first().ok_or_else(|| DocLinksError::MissingField {
+        command: DOC_COMMAND,
+        field: KIND,
+        record: elide(line),
+    })?;
+
+    let span = primary_span(message, line)?;
+
+    Ok(BrokenLink {
+        package: package.clone(),
+        target_name: text_field(target, NAME, DOC_COMMAND, line)?.to_owned(),
+        target_kind: as_text(kind, KIND, DOC_COMMAND, line)?.to_owned(),
+        message: text_field(message, MESSAGE, DOC_COMMAND, line)?.to_owned(),
+        file: PathBuf::from(text_field(span, FILE_NAME, DOC_COMMAND, line)?),
+        line: number_field(span, LINE_START, DOC_COMMAND, line)?,
+    })
+}
+
+/// The span a diagnostic points at, or the first one it carries.
+///
+/// A diagnostic with no span at all is a refusal rather than a link with no
+/// location: a report that cannot say where the link is cannot be acted on.
+fn primary_span<'a>(message: &'a Value, line: &str) -> Result<&'a Value, DocLinksError> {
+    let spans = array_field(message, SPANS, DOC_COMMAND, line)?;
+    spans
+        .iter()
+        .find(|span| span.get(IS_PRIMARY).and_then(Value::as_bool) == Some(true))
+        .or_else(|| spans.first())
+        .ok_or_else(|| DocLinksError::MissingField {
+            command: DOC_COMMAND,
+            field: SPANS,
+            record: elide(line),
+        })
+}
+
+/// One field of a record, or a refusal naming the field and quoting the record.
+fn field<'a>(
+    record: &'a Value,
+    key: &'static str,
+    command: &'static str,
+    source: &str,
+) -> Result<&'a Value, DocLinksError> {
+    record.get(key).ok_or_else(|| DocLinksError::MissingField {
+        command,
+        field: key,
+        record: elide(source),
+    })
+}
+
+/// One string field of a record.
+fn text_field<'a>(
+    record: &'a Value,
+    key: &'static str,
+    command: &'static str,
+    source: &str,
+) -> Result<&'a str, DocLinksError> {
+    as_text(field(record, key, command, source)?, key, command, source)
+}
+
+/// One array field of a record.
+fn array_field<'a>(
+    record: &'a Value,
+    key: &'static str,
+    command: &'static str,
+    source: &str,
+) -> Result<&'a Vec<Value>, DocLinksError> {
+    field(record, key, command, source)?
+        .as_array()
+        .ok_or_else(|| DocLinksError::MissingField {
+            command,
+            field: key,
+            record: elide(source),
+        })
+}
+
+/// One unsigned-integer field of a record.
+fn number_field(
+    record: &Value,
+    key: &'static str,
+    command: &'static str,
+    source: &str,
+) -> Result<u64, DocLinksError> {
+    field(record, key, command, source)?
+        .as_u64()
+        .ok_or_else(|| DocLinksError::MissingField {
+            command,
+            field: key,
+            record: elide(source),
+        })
+}
+
+/// A JSON value as a string, or a refusal.
+fn as_text<'a>(
+    value: &'a Value,
+    key: &'static str,
+    command: &'static str,
+    source: &str,
+) -> Result<&'a str, DocLinksError> {
+    value.as_str().ok_or_else(|| DocLinksError::MissingField {
+        command,
+        field: key,
+        record: elide(source),
+    })
+}
+
+/// The first [`QUOTED_CHARS`] characters of `text`, with a marker when more
+/// follow.
+///
+/// Counted in characters rather than bytes. A cargo record carries source text,
+/// and source text in this repository holds multi-byte characters, so a byte
+/// slice would panic on the record it was written to quote.
+fn elide(text: &str) -> String {
+    let mut quoted: String = text.chars().take(QUOTED_CHARS).collect();
+    if text.chars().nth(QUOTED_CHARS).is_some() {
+        quoted.push('…');
+    }
+    quoted
 }
