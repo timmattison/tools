@@ -18,9 +18,13 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use repo_guards::trippy_wall::{self, Report, TrippyWallError};
 use tempfile::TempDir;
+
+/// The package the wall protects, as `cargo metadata` names it.
+const KRT_PACKAGE: &str = "krt";
 
 /// The module the fixtures let through, which is the module the real guard
 /// lets through.
@@ -398,21 +402,20 @@ fn canonical(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|e| panic!("cannot canonicalize {}: {e}", path.display()))
 }
 
-/// The two constants [`trippy_wall::audit`] holds — the source directory it
-/// reads, and the module it lets through — are pinned here against a repository
+/// The table [`trippy_wall::audit`] holds — the directories of `krt` it reads,
+/// and the module each one lets through — is pinned here against a repository
 /// built for the purpose.
 ///
-/// Every other fixture calls `audit_sources` and passes both of them in, so a
-/// wrong constant inside `audit` would change nothing that those tests see.
-/// `src/krt/src/trace.rs` does not exist yet, so the live repository cannot pin
-/// them either: a guard that let `tracer.rs` through, or that read
-/// `src/krt/source`, would report the same clean verdict it reports today.
+/// Every other fixture calls `audit_sources` and passes a directory and a
+/// module in, so a wrong entry inside `audit` would change nothing that those
+/// tests see.
 #[test]
 fn the_repository_audit_reads_krt_and_lets_the_tracer_through() {
     let dir = tree(&[
         ("src/krt/src/main.rs", PLAIN),
         ("src/krt/src/trace.rs", &EVERY_FORM.join("\n")),
         ("src/krt/src/record.rs", USE_DECLARATION),
+        ("src/krt/tests/cli.rs", PLAIN),
     ]);
 
     let report = trippy_wall::audit(dir.path()).expect("the audit reaches a verdict");
@@ -422,7 +425,61 @@ fn the_repository_audit_reads_krt_and_lets_the_tracer_through() {
         one_offender("src/krt/src/record.rs", &["trippy_core::Builder"]),
         "the audit must read the sources of krt, and let trace.rs alone"
     );
-    assert_eq!(report.files_examined(), 3);
+    assert_eq!(
+        report.files_examined(),
+        4,
+        "the integration tests of krt are read like every other file"
+    );
+}
+
+/// An integration test of `krt` is not the tracer, so a trippy type in one is
+/// an offender.
+///
+/// `trippy-core` is an ordinary `[dependencies]` entry, so every target of the
+/// package can name a trippy type — the integration tests included. A wall that
+/// reads `src/` alone keeps a smaller promise than the one it makes: the rule
+/// is that no *file* of `krt` except `trace.rs` names a trippy type, not that
+/// no *module* does.
+#[test]
+fn a_trippy_type_in_an_integration_test_of_krt_is_an_offender() {
+    let dir = tree(&[
+        ("src/krt/src/main.rs", PLAIN),
+        ("src/krt/src/trace.rs", &EVERY_FORM.join("\n")),
+        ("src/krt/tests/cli.rs", USE_DECLARATION),
+    ]);
+
+    let report = trippy_wall::audit(dir.path()).expect("the audit reaches a verdict");
+
+    assert_eq!(
+        offenders(&dir, &report),
+        one_offender("src/krt/tests/cli.rs", &["trippy_core::Builder"]),
+        "an integration test that names a trippy type breaks on the same upgrade every \
+         other file would"
+    );
+}
+
+/// The tracer is one file in one directory, not a file name that opens the wall
+/// wherever it is written.
+///
+/// `src/krt/tests/trace.rs` is an integration test called `trace`, which cargo
+/// builds like any other. A wall that let a file through on its name alone
+/// would let this one through, and the exemption would read as a coincidence of
+/// naming rather than as a decision.
+#[test]
+fn a_test_named_like_the_tracer_is_still_an_offender() {
+    let dir = tree(&[
+        ("src/krt/src/main.rs", PLAIN),
+        ("src/krt/src/trace.rs", &EVERY_FORM.join("\n")),
+        ("src/krt/tests/trace.rs", USE_DECLARATION),
+    ]);
+
+    let report = trippy_wall::audit(dir.path()).expect("the audit reaches a verdict");
+
+    assert_eq!(
+        offenders(&dir, &report),
+        one_offender("src/krt/tests/trace.rs", &["trippy_core::Builder"]),
+        "the wall lets one file through, and that file lives in the source directory"
+    );
 }
 
 #[test]
@@ -436,24 +493,60 @@ fn no_module_of_krt_names_a_trippy_type() {
     assert!(report.is_compliant(), "{report}");
 }
 
-/// The set of files the guard reads must equal the set that is on disk.
+/// Every target root cargo builds for `krt` must be a file the guard read.
 ///
 /// Every other test here asks what the guard *concludes* about a file. This one
-/// asks the prior question, which a verdict cannot: whether the guard found
-/// every file there is. A perfect matcher pointed at the wrong directory
-/// reports clean with the same silence as a broken matcher, so the file set is
-/// enumerated a second time, by a different means, and the two are compared.
+/// asks the prior question, which a verdict cannot: whether the guard looked
+/// where the code is. A perfect matcher pointed at three of four directories
+/// reports clean with the same silence as a broken matcher.
+///
+/// The guard keeps its own cheap directory walk, because a guard that shells
+/// out to cargo on every run is a guard nobody keeps in a test suite. So the
+/// true set is asked of `cargo metadata` here instead, exactly as the sibling
+/// guards `target_lints` and `tool_index` do. A target kind nobody taught the
+/// guard about — a bench, an example, a second test directory — then shows up
+/// as a set difference rather than as a clean report.
+#[test]
+fn every_target_root_of_krt_is_a_file_the_guard_read() {
+    let root = repo_root();
+    let report = trippy_wall::audit(&root).expect("the audit reaches a verdict");
+
+    let read: BTreeSet<PathBuf> = report.files().iter().map(|file| canonical(file)).collect();
+    let target_roots = cargo_target_roots_of_krt(&root);
+
+    let missed: BTreeSet<PathBuf> = target_roots.difference(&read).cloned().collect();
+    assert!(
+        missed.is_empty(),
+        "cargo builds {} target root(s) of krt that the guard never read:\n{}\n\
+         Every one of them can name a trippy type, because trippy-core is an ordinary \
+         dependency of the package. A file the guard does not open cannot be reported as \
+         naming one, so krt comes back clean on the strength of the files that were read.",
+        missed.len(),
+        render_paths(&missed, &root)
+    );
+}
+
+/// The set of files the guard reads must equal the set that is on disk.
+///
+/// A target root is one file, and cargo names only that one. The modules beside
+/// it are the rest of the directory, so the comparison set here is every Rust
+/// source in the directory of every root cargo reports — enumerated with a
+/// glob, rather than with the guard's own directory walk, so the two answers
+/// are independent. Both halves are derived from `cargo metadata`: a directory
+/// the guard reads and cargo builds nothing from, and a directory cargo builds
+/// from and the guard never opens, are both a difference of these two sets.
 #[test]
 fn the_guard_reads_exactly_the_krt_sources_on_disk() {
     let root = repo_root();
     let report = trippy_wall::audit(&root).expect("the audit reaches a verdict");
 
     let read: BTreeSet<PathBuf> = report.files().iter().map(|file| canonical(file)).collect();
-    let on_disk = globbed_krt_sources(&root);
+    let on_disk = rust_sources_beside(&cargo_target_roots_of_krt(&root));
 
     assert!(
         !on_disk.is_empty(),
-        "the glob found no source under src/krt/src, so the comparison would prove nothing"
+        "the glob found no source beside a target root of krt, so the comparison would \
+         prove nothing"
     );
     assert_eq!(
         read, on_disk,
@@ -463,22 +556,127 @@ fn the_guard_reads_exactly_the_krt_sources_on_disk() {
     );
 }
 
-/// Every Rust source under `src/krt/src`, found with a glob rather than with
-/// the guard's own directory walk.
+/// The `src_path` of every target `cargo metadata` reports for `krt`,
+/// canonicalized.
 ///
-/// The repo root is escaped before it is joined, so a checkout whose path holds
-/// a glob metacharacter still matches itself.
-fn globbed_krt_sources(repo_root: &Path) -> BTreeSet<PathBuf> {
-    let root = repo_root
-        .to_str()
-        .unwrap_or_else(|| panic!("{} is not valid UTF-8", repo_root.display()));
-    let pattern = format!("{}/src/krt/src/**/*.rs", glob::Pattern::escape(root));
+/// This is the *ground truth* the guard is measured against. Asking cargo is
+/// what turns "the guard found nothing wrong" into a claim about the files that
+/// exist, rather than about the files the guard happened to look for.
+///
+/// `--no-deps` keeps the answer to this workspace's own packages, and is
+/// deliberately not paired with `--offline`: resolution is skipped either way,
+/// and `--offline` only adds a way for a cold cache to fail.
+///
+/// Every step here fails loudly. A parity test that skipped when cargo could
+/// not be spawned, or compared against a set it quietly failed to parse, would
+/// be an instance of the very defect it exists to catch: a check that reports
+/// clean because it never looked.
+fn cargo_target_roots_of_krt(repo_root: &Path) -> BTreeSet<PathBuf> {
+    let output = Command::new(env!("CARGO"))
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(repo_root)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "cannot run `cargo metadata` in {}: {e}",
+                repo_root.display()
+            )
+        });
 
-    glob::glob(&pattern)
-        .unwrap_or_else(|e| panic!("`{pattern}` is not a valid glob: {e}"))
-        .map(|entry| {
-            let path = entry.unwrap_or_else(|e| panic!("cannot read a match of `{pattern}`: {e}"));
-            canonical(&path)
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "`cargo metadata` in {} exited with {}:\n{stderr}",
+        repo_root.display(),
+        output.status
+    );
+
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!("cannot parse the output of `cargo metadata` as JSON: {e}\nstderr:\n{stderr}")
+    });
+
+    let packages = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| {
+            panic!("`cargo metadata` returned no `packages` array\nstderr:\n{stderr}")
+        });
+
+    let krt = packages
+        .iter()
+        .find(|package| {
+            package.get("name").and_then(serde_json::Value::as_str) == Some(KRT_PACKAGE)
         })
-        .collect()
+        .unwrap_or_else(|| {
+            panic!(
+                "`cargo metadata` reports no package named {KRT_PACKAGE}; the wall guards a \
+                    package that is no longer in this workspace"
+            )
+        });
+
+    let roots: BTreeSet<PathBuf> = krt
+        .get("targets")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("the package {KRT_PACKAGE} has no `targets` array: {krt}"))
+        .iter()
+        .map(|target| {
+            let src_path = target
+                .get("src_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("a target of {KRT_PACKAGE} has no `src_path`: {target}"));
+            canonical(Path::new(src_path))
+        })
+        .collect();
+
+    assert!(
+        !roots.is_empty(),
+        "`cargo metadata` reports no target at all for {KRT_PACKAGE}, so the comparison \
+         would prove nothing"
+    );
+    roots
+}
+
+/// Every Rust source in the directory of every root, at any depth, found with a
+/// glob rather than with the guard's own directory walk.
+///
+/// Each directory is escaped before it is joined, so a checkout whose path holds
+/// a glob metacharacter still matches itself.
+fn rust_sources_beside(roots: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+    let directories: BTreeSet<&Path> = roots
+        .iter()
+        .map(|root| {
+            root.parent()
+                .unwrap_or_else(|| panic!("the target root {} has no directory", root.display()))
+        })
+        .collect();
+
+    let mut sources = BTreeSet::new();
+    for directory in directories {
+        let text = directory
+            .to_str()
+            .unwrap_or_else(|| panic!("{} is not valid UTF-8", directory.display()));
+        let pattern = format!("{}/**/*.rs", glob::Pattern::escape(text));
+        for entry in
+            glob::glob(&pattern).unwrap_or_else(|e| panic!("`{pattern}` is not a valid glob: {e}"))
+        {
+            let path = entry.unwrap_or_else(|e| panic!("cannot read a match of `{pattern}`: {e}"));
+            sources.insert(canonical(&path));
+        }
+    }
+    sources
+}
+
+/// Render a set of absolute paths as one indented repo-relative path per line,
+/// so a failure reads as a list of files rather than as two sets to diff by eye.
+fn render_paths(paths: &BTreeSet<PathBuf>, repo_root: &Path) -> String {
+    paths
+        .iter()
+        .map(|path| {
+            format!(
+                "    {}",
+                path.strip_prefix(repo_root).unwrap_or(path).display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
