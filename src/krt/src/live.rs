@@ -522,7 +522,10 @@ impl<W: Write, C: Clock> Screen for Headless<W, C> {
     }
 
     fn names(&mut self, _names: &[NameRecord]) {
-        todo!("a headless screen shows no name")
+        // A name belongs to a row of a table, and this screen draws no table.
+        // The run writes every name record to the recorded file before it
+        // reaches this call, so a replay of that file names each address that
+        // a lookup answered.
     }
 }
 
