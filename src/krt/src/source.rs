@@ -700,6 +700,49 @@ mod tests {
     /// the answer and not all of it.
     const LONG_ANSWER_LENGTH: usize = ANSWER_LIMIT * 4;
 
+    /// An answer shaped like the start of a page of HTML.
+    ///
+    /// A service that has broken answers such a page. The page holds three
+    /// line breaks inside its first sixty characters, so a message that counts
+    /// characters and keeps the line breaks writes a warning of four lines,
+    /// and `PUBLIC_FALLBACK` then stands on a line of its own, away from the
+    /// reason that it belongs to.
+    const HTML_ANSWER: &str = "<!DOCTYPE html>\n<html>\n<head>\n<title>Gateway</title>";
+
+    /// The line break that the answer of HTML holds.
+    const LINE_BREAK: char = '\n';
+
+    /// The first two lines of the answer of HTML, joined by one space.
+    ///
+    /// The collapse of the whitespace joins the lines of the answer and drops
+    /// none of them, so the message holds the words of more than one line.
+    const HTML_JOINED: &str = "<!DOCTYPE html> <html>";
+
+    /// The escape character, which starts every sequence that paints a
+    /// terminal.
+    const ESCAPE: char = '\u{1b}';
+
+    /// An answer that holds a sequence which clears the screen of a reader.
+    ///
+    /// The warning line goes to standard error, so a sequence that arrives in
+    /// the answer paints the terminal of the user. `ESC [ 2 J` clears the
+    /// screen.
+    const ANSWER_WITH_A_SEQUENCE: &str = "\u{1b}[2Jgone";
+
+    /// What the answer with a sequence leaves in the message.
+    ///
+    /// The clean drops the escape character alone. The parameter letters of
+    /// the sequence stay as ordinary text, so the terminal keeps its screen
+    /// and the reader still sees what arrived.
+    const SEQUENCE_AS_TEXT: &str = "[2Jgone";
+
+    /// An answer that holds a run of several whitespace characters.
+    ///
+    /// The run holds a line break, a tab, and three spaces, and it stands
+    /// between the two halves of `NOT_AN_ADDRESS`, so the cleaned answer is
+    /// that text.
+    const ANSWER_WITH_A_RUN: &str = "the service\n\t   moved";
+
     /// Reads a mock service that answers one GET of its root with a status and
     /// a body, for a target that the caller names.
     ///
@@ -823,6 +866,71 @@ mod tests {
         assert!(
             message.chars().count() < body.chars().count(),
             "the message is shorter than the answer: {message}"
+        );
+    }
+
+    /// A service that answers with a page of HTML gives a message of one line.
+    ///
+    /// The message becomes the warning line that the run writes to standard
+    /// error. A message that keeps the line breaks of the page breaks that
+    /// warning across lines, and `PUBLIC_FALLBACK` then stands on a line of
+    /// its own, away from the reason that it belongs to. A limit that counts
+    /// characters bounds no line, because the first sixty characters of such a
+    /// page hold three line breaks.
+    ///
+    /// The collapse of the whitespace joins the lines and drops none of them,
+    /// so the message still holds the words of more than one line of the page.
+    #[test]
+    fn an_answer_that_holds_line_breaks_gives_a_message_of_one_line() {
+        let error =
+            answer_of(OK, HTML_ANSWER, TARGET).expect_err("a page of HTML is not an address");
+        let message = error.to_string();
+        assert!(
+            !message.contains(LINE_BREAK),
+            "the message holds no line break: {message:?}"
+        );
+        assert!(
+            message.contains(HTML_JOINED),
+            "the message holds the words of more than one line: {message:?}"
+        );
+    }
+
+    /// A service that answers with a sequence which paints a terminal gives a
+    /// message that holds no escape character.
+    ///
+    /// The warning line goes straight to standard error, and the answer is the
+    /// text of a remote service. A message that keeps the escape character
+    /// lets that service clear the screen of the user, move the cursor, and
+    /// hide what the run wrote.
+    #[test]
+    fn an_answer_that_holds_the_escape_character_gives_a_message_without_it() {
+        let error = answer_of(OK, ANSWER_WITH_A_SEQUENCE, TARGET)
+            .expect_err("a sequence that paints a terminal is not an address");
+        let message = error.to_string();
+        assert!(
+            !message.contains(ESCAPE),
+            "the message holds no escape character: {message:?}"
+        );
+        assert!(
+            message.ends_with(SEQUENCE_AS_TEXT),
+            "the message keeps the letters of the sequence as text: {message:?}"
+        );
+    }
+
+    /// A service that answers with a run of whitespace gives a message that
+    /// holds one space in its place.
+    ///
+    /// `ANSWER_LIMIT` is the whole budget of the warning line. A message that
+    /// keeps a run of whitespace spends that budget on padding, and not on the
+    /// words that name the trouble.
+    #[test]
+    fn an_answer_that_holds_a_run_of_whitespace_gives_a_message_with_one_space() {
+        let error = answer_of(OK, ANSWER_WITH_A_RUN, TARGET)
+            .expect_err("the text of the answer is not an address");
+        let message = error.to_string();
+        assert!(
+            message.ends_with(NOT_AN_ADDRESS),
+            "the run of whitespace became one space: {message:?}"
         );
     }
 
