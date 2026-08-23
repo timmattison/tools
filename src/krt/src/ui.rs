@@ -1094,8 +1094,9 @@ impl Frame<'_> {
     /// The row of one TTL of the path.
     ///
     /// The host names the router that answered first, so a path that flaps
-    /// keeps the name a reader already read. The count behind it says how many
-    /// more routers answered there, and the star says that one of them is the
+    /// keeps the name a reader already read. The count behind it is the
+    /// participants of the TTL minus that one, which is also the address rows
+    /// of the TTL minus that one, and the star says that one of them is the
     /// destination. A row that answered from one router alone carries no
     /// count, and a row that answered from no destination carries no star.
     ///

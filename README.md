@@ -628,10 +628,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the last round-trip times of the hop as a bar for each of them.
   - The marks of the table each say one thing. A `★` behind a host marks the row that answered from
     the destination, and a run that never reached the destination holds no such row. A `(+N)` behind
-    a host says that N more routers answered at that TTL, and one address row then stands under the
-    row of the TTL for each of them, opened by a `├` and closed by a `└`. An address row holds the
-    share of the answers of its TTL that the one router took, and a `▹` behind that percentage says
-    that it is a share and not a loss. A `???` in the Host column is a TTL that never answered.
+    a host says that more than one router answered at that TTL. The host of the row names the first
+    router, and one address row then stands under the row of the TTL for each router that the table
+    tracks, the named one included. A TTL that answered from more routers than the table tracks adds
+    one last address row, whose host is the word `others`, and that row holds the answers of every
+    router behind the bound. N is the count of the address rows of the TTL, minus one, so a `(+1)`
+    stands above two address rows. The first address row opens with a `├` and the last one closes
+    with a `└`. An address row holds the share of the answers of its TTL that the row took, and a
+    `▹` behind that percentage says that it is a share and not a loss. A `???` in the Host column is
+    a TTL that never answered.
   - The table takes the width of the terminal, and the `Host` column absorbs the change. A terminal
     too narrow for every column drops columns, first dropped first: `Recent`, `StDev`, `Max`, `Min`,
     `Last`, `Sent`, `Loss%`. The `TTL`, the `Host`, and the `Avg` never drop. A replay whose output
