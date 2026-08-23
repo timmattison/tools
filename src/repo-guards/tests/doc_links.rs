@@ -235,7 +235,10 @@ fn unresolved_intra_doc_link_is_reported() {
 /// reported "every intra-doc link resolves" over every one of them.
 #[test]
 fn a_bin_that_shares_its_name_with_the_lib_beside_it_is_read() {
-    let dir = fixture_files(&[("src/lib.rs", RESOLVING_LIB), ("src/main.rs", COLLIDING_BIN)]);
+    let dir = fixture_files(&[
+        ("src/lib.rs", RESOLVING_LIB),
+        ("src/main.rs", COLLIDING_BIN),
+    ]);
 
     let scan = scan(&dir);
 
