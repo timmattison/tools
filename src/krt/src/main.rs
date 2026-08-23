@@ -1090,13 +1090,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        host_name_or, parse_duration, pick_address, render_duration, resolve_target, user_stopped,
-        AddressFamily, Cli, Command, Family, Multipath, Protocol, ResolveError, ResolvedConfig,
-        RESOLVE_PORT, UNKNOWN,
+        closing_line, host_name_or, parse_duration, pick_address, render_duration, resolve_target,
+        stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason, Family, Multipath,
+        Protocol, ResolveError, ResolvedConfig, RESOLVE_PORT, UNKNOWN,
     };
+    use crate::run::Outcome;
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::path::Path;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -2164,6 +2166,65 @@ resolved configuration:
     fn resolve_failure(destination: &str, family: AddressFamily) -> ResolveError {
         resolve_target(destination, family)
             .expect_err("the destination must name no address to probe")
+    }
+
+    /// Every reason that closes a run, for the table of the closing words.
+    const EVERY_END_REASON: [EndReason; 4] = [
+        EndReason::Quit,
+        EndReason::Duration,
+        EndReason::Rounds,
+        EndReason::Error,
+    ];
+
+    #[test]
+    fn each_reason_that_closes_a_run_carries_its_own_words() {
+        assert_eq!(stop_reason(EndReason::Quit), "the user stopped the run");
+        assert_eq!(
+            stop_reason(EndReason::Duration),
+            "the time limit stopped the run"
+        );
+        assert_eq!(
+            stop_reason(EndReason::Rounds),
+            "the round limit stopped the run"
+        );
+        assert_eq!(stop_reason(EndReason::Error), "a fault stopped the run");
+    }
+
+    /// A word that two reasons share leaves a reader unable to tell them apart,
+    /// so the table gives each reason its own.
+    #[test]
+    fn no_two_reasons_share_their_words() {
+        let mut words: Vec<&str> = EVERY_END_REASON.iter().copied().map(stop_reason).collect();
+        words.sort_unstable();
+        let count = words.len();
+        words.dedup();
+        assert_eq!(words.len(), count, "each reason carries its own words");
+    }
+
+    #[test]
+    fn the_closing_line_names_the_rounds_the_file_and_the_reason() {
+        let outcome = Outcome {
+            rounds: 3,
+            reason: EndReason::Rounds,
+        };
+        assert_eq!(
+            closing_line(&outcome, Path::new("1.2.3.4-example.com.jsonl")),
+            "recorded 3 rounds  1.2.3.4-example.com.jsonl  the round limit stopped the run"
+        );
+    }
+
+    /// One round keeps the singular name, as every other count of this tool
+    /// does.
+    #[test]
+    fn the_closing_line_of_one_round_keeps_the_singular_name() {
+        let outcome = Outcome {
+            rounds: 1,
+            reason: EndReason::Quit,
+        };
+        assert_eq!(
+            closing_line(&outcome, Path::new("trace.jsonl")),
+            "recorded 1 round  trace.jsonl  the user stopped the run"
+        );
     }
 
     #[test]
