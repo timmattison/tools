@@ -308,8 +308,8 @@ impl<W: Write, K: Keys> Table<W, K> {
         lines
     }
 
-    /// Acts on one command.
-    fn apply(&mut self, command: Command) {
+    /// Acts on one command, and answers whether that command stops the run.
+    fn apply(&mut self, command: Command) -> bool {
         match command {
             Command::Pause => self.paused = !self.paused,
             Command::Names => self.named = !self.named,
@@ -322,9 +322,13 @@ impl<W: Write, K: Keys> Table<W, K> {
                 self.rounds = 0;
             }
             Command::Help => self.help = !self.help,
-            // The stop takes an arm of this table with the test of it.
-            Command::Quit => {}
+            // No field of the table holds the stop. The run loop owns it,
+            // because the loop is what closes the recorded file with its `end`
+            // record, and a display that stopped the process itself would
+            // leave the file without that record.
+            Command::Quit => return true,
         }
+        false
     }
 
     /// Puts one frame on the screen, over the frame that stands there.
@@ -357,15 +361,19 @@ impl<W: Write, K: Keys> Table<W, K> {
 
 impl<W: Write, K: Keys> Screen for Table<W, K> {
     fn poll(&mut self) -> bool {
+        let mut quit = false;
         for command in self.keys.presses() {
-            self.apply(command);
+            // Every command of the turn acts, and the loop does not stop at
+            // the stop: a turn that took `p` and then `q` holds the table and
+            // stops the run.
+            quit = self.apply(command) || quit;
         }
         // The draw stands outside the loop, and it draws while the table holds
         // as well: a table that took the key of the pause must put the mark of
         // that pause on the screen, and no round draws it while the table
         // holds.
         self.draw();
-        false
+        quit
     }
 
     fn round(&mut self, round: &RoundRecord) {
