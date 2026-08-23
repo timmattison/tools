@@ -163,6 +163,11 @@ mod tests {
     }
 
     /// Bind an ephemeral port so concurrent runs of this suite never collide.
+    ///
+    /// The caller must hold the listener for the full test. The operating
+    /// system releases the port as soon as the listener goes out of scope, and
+    /// a different test in this binary then binds it. Use [`CLOSED_PORT`] to
+    /// test a port that nothing listens on.
     fn ephemeral_port() -> (std::net::TcpListener, u16) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("should bind");
         let port = listener
@@ -171,6 +176,16 @@ mod tests {
             .port();
         (listener, port)
     }
+
+    /// A port that nothing listens on, in every concurrent run of this suite.
+    ///
+    /// Port 0 is not a valid destination port, so no process listens on it and
+    /// no test claims it. A released ephemeral port gives a different result:
+    /// each mockito server in this binary binds a port from the same range, and
+    /// the tests run on many threads. A server that takes the released port
+    /// between the release and the connect makes the port read as open. That
+    /// failure comes from thread timing, not from the code under test.
+    const CLOSED_PORT: u16 = 0;
 
     #[tokio::test]
     async fn sees_a_port_that_is_being_listened_on() {
@@ -181,10 +196,7 @@ mod tests {
 
     #[tokio::test]
     async fn sees_a_port_with_nothing_behind_it_as_closed() {
-        let (listener, port) = ephemeral_port();
-        drop(listener);
-
-        assert!(!is_port_open(Ipv4Addr::LOCALHOST, port).await);
+        assert!(!is_port_open(Ipv4Addr::LOCALHOST, CLOSED_PORT).await);
     }
 
     #[tokio::test]
@@ -461,10 +473,13 @@ mod tests {
 
     #[tokio::test]
     async fn records_a_closed_port_as_a_host_that_did_not_answer() {
-        let (listener, port) = ephemeral_port();
-        drop(listener);
-
-        let found = probe(&Client::new(), Ipv4Addr::LOCALHOST, port, Platform::RokuTv).await;
+        let found = probe(
+            &Client::new(),
+            Ipv4Addr::LOCALHOST,
+            CLOSED_PORT,
+            Platform::RokuTv,
+        )
+        .await;
 
         assert!(!found.answered);
         assert_eq!(found.tv, None);
