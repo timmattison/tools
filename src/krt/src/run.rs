@@ -132,7 +132,10 @@ pub(crate) fn record<W: Write>(
         .map_err(RunError::Write)?;
     let mut recorded: u64 = 0;
     loop {
-        if let Some(reason) = stopped(recorded, limits, stop) {
+        // The ask of the screen draws it, so one turn asks one time. The answer
+        // then travels to the decision as a value.
+        let asked = screen.poll();
+        if let Some(reason) = stopped(recorded, limits, stop, asked) {
             drain_names(writer, namer, limits.name_grace)?;
             close(writer, &start.run, recorded, reason)?;
             return Ok(Outcome {
@@ -234,9 +237,19 @@ fn drain_names<W: Write>(
 /// Why the run stops at the top of this turn. A run that goes on stops for
 /// nothing.
 ///
-/// The user comes first, then the number of rounds, then the moment.
-fn stopped(recorded: u64, limits: &Limits, stop: &dyn Fn() -> bool) -> Option<EndReason> {
-    if stop() {
+/// `asked` is what the screen of this turn answered. The ask of a screen draws
+/// it, so the turn asks one time and hands the answer here as a value.
+///
+/// The user comes first, then the number of rounds, then the moment. The screen
+/// and the stop flag are two doors of the same user: the key of a live table and
+/// the signal of a headless run both give [`EndReason::Quit`].
+fn stopped(
+    recorded: u64,
+    limits: &Limits,
+    stop: &dyn Fn() -> bool,
+    asked: bool,
+) -> Option<EndReason> {
+    if asked || stop() {
         return Some(EndReason::Quit);
     }
     if limits.rounds.is_some_and(|limit| recorded >= limit) {
