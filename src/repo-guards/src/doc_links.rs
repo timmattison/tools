@@ -33,6 +33,19 @@
 //! mentions a link, would be red from the day it landed and would be switched
 //! off within the week.
 //!
+//! # Refuse rather than shrink
+//!
+//! Everything that could quietly reduce what the scan covered is a refusal
+//! rather than a clean verdict. See [`DocLinksError`].
+//!
+//! The sharpest of those is a failed documentation build. The guard refuses on
+//! **every** non-zero exit, not only on one that found nothing. A unit that
+//! fails to document takes every unit downstream of it with it, so the list of
+//! links is short by an amount nobody can measure. "3 broken links" printed
+//! over forty crates that were never read is indistinguishable from a guard
+//! doing real work — and it is worse than silence, because it looks like a
+//! finished answer.
+//!
 //! # The environment is scrubbed, not inherited
 //!
 //! The guard removes `RUSTDOCFLAGS`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTDOCFLAGS`,
@@ -417,7 +430,8 @@ impl fmt::Display for DocScan {
 ///
 /// Returns [`DocLinksError`] — never a clean [`DocScan`] — when the build
 /// cannot be read with confidence: cargo cannot be started
-/// ([`Spawn`](DocLinksError::Spawn)), `cargo metadata` fails
+/// ([`Spawn`](DocLinksError::Spawn)), the documentation build exits non-zero
+/// ([`DocBuildFailed`](DocLinksError::DocBuildFailed)), `cargo metadata` fails
 /// ([`MetadataFailed`](DocLinksError::MetadataFailed)) or reports no members
 /// ([`NoWorkspaceMembers`](DocLinksError::NoWorkspaceMembers)), a line of cargo
 /// output is not JSON ([`Json`](DocLinksError::Json)) or lacks a field the
@@ -428,6 +442,13 @@ pub fn audit(workspace_root: &Path) -> Result<DocScan, DocLinksError> {
     let cargo = cargo_program();
     let names = workspace_package_names(&cargo, workspace_root)?;
     let output = run(&cargo, workspace_root, &DOC_ARGS)?;
+    if !output.status.success() {
+        return Err(DocLinksError::DocBuildFailed {
+            dir: workspace_root.to_path_buf(),
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     Ok(DocScan {
