@@ -8,7 +8,9 @@
 //! and nothing else, so a test drives it without a network and without a
 //! privilege.
 
-use std::collections::VecDeque;
+use crate::record;
+use std::collections::{BTreeMap, VecDeque};
+use std::net::IpAddr;
 
 /// The number of round-trip times that one key keeps.
 #[cfg_attr(
@@ -211,9 +213,270 @@ impl HopStats {
     }
 }
 
+/// The aggregate view of every hop seen so far, keyed and ordered by TTL.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+    )
+)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HopTable {
+    /// One row for each TTL that a round probed, and for each TTL that a hop
+    /// answered at. The map holds the rows in TTL order.
+    rows: BTreeMap<u8, TtlRow>,
+}
+
+impl HopTable {
+    /// Builds a table that holds no row.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Folds one more round into the table.
+    ///
+    /// Every TTL that the round probed takes one more probe, whether it
+    /// answered or not, so the loss of a TTL counts the rounds that reached it.
+    /// Every hop of the round then folds its round-trip time twice: once into
+    /// the statistics of the TTL, and once into the statistics of the address
+    /// that answered.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn observe(&mut self, round: &record::RoundRecord) {
+        todo!(
+            "the fold of one round arrives with the green step: round {}",
+            round.seq
+        )
+    }
+
+    /// Every TTL row, in TTL order.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn rows(&self) -> impl ExactSizeIterator<Item = &TtlRow> {
+        self.rows.values()
+    }
+
+    /// The row of one TTL. A TTL the table never saw gives `None`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn row(&self, ttl: u8) -> Option<&TtlRow> {
+        self.rows.get(&ttl)
+    }
+}
+
+/// One hop position on the path, over every answer it gave.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+    )
+)]
+#[derive(Debug, Clone)]
+pub(crate) struct TtlRow {
+    /// The TTL of the row.
+    ttl: u8,
+    /// The number of rounds whose range covered this TTL.
+    sent: u64,
+    /// The statistics over every answer at this TTL.
+    stats: HopStats,
+    /// Every address that answered at this TTL, in the order the TTL first saw
+    /// them, each with the statistics of its own answers.
+    ///
+    /// One TTL sees a handful of routers, so a scan of the whole list costs
+    /// less than a map that keeps the order beside the keys.
+    addresses: Vec<(IpAddr, HopStats)>,
+}
+
+impl TtlRow {
+    /// Builds the row of one TTL, before any round reaches it.
+    fn new(ttl: u8) -> Self {
+        Self {
+            ttl,
+            sent: 0,
+            stats: HopStats::default(),
+            addresses: Vec::new(),
+        }
+    }
+
+    /// The statistics of one address of this row. The entry of an address that
+    /// this row never saw is made here.
+    fn address_mut(&mut self, addr: IpAddr) -> &mut HopStats {
+        let found = self.addresses.iter().position(|(held, _)| *held == addr);
+        let index = match found {
+            Some(index) => index,
+            None => {
+                self.addresses.push((addr, HopStats::default()));
+                self.addresses.len() - 1
+            }
+        };
+        &mut self.addresses[index].1
+    }
+
+    /// The TTL of the row.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn ttl(&self) -> u8 {
+        self.ttl
+    }
+
+    /// The rounds whose `ttl_range` covered this TTL.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn sent(&self) -> u64 {
+        self.sent
+    }
+
+    /// The statistics over every answer at this TTL, whichever address gave it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn stats(&self) -> &HopStats {
+        &self.stats
+    }
+
+    /// The loss of this position, as a percentage. A TTL that no round probed
+    /// gives `None`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn loss(&self) -> Option<f64> {
+        todo!(
+            "the loss of one position arrives with the green step: ttl {}",
+            self.ttl
+        )
+    }
+
+    /// Every address that answered at this TTL, in the order the TTL first saw
+    /// them, each with the share of the answers it took.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn addresses(&self) -> impl ExactSizeIterator<Item = Address<'_>> {
+        let answers = self.stats.recv();
+        self.addresses.iter().map(move |(addr, stats)| Address {
+            addr: *addr,
+            stats,
+            answers,
+        })
+    }
+}
+
+/// One router that answered at a TTL, and the share of that TTL's answers it
+/// took.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+    )
+)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Address<'a> {
+    /// The address that answered.
+    addr: IpAddr,
+    /// The statistics over the answers of this address.
+    stats: &'a HopStats,
+    /// The number of answers of the whole TTL, from every address of it.
+    answers: u64,
+}
+
+impl Address<'_> {
+    /// The address that answered.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn addr(&self) -> IpAddr {
+        self.addr
+    }
+
+    /// The statistics over the answers of this address.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn stats(&self) -> &HopStats {
+        self.stats
+    }
+
+    /// The share of the answers of the TTL that this address took, as a
+    /// percentage.
+    ///
+    /// The divisor is never zero. This entry exists because the address
+    /// answered at the TTL, so the TTL holds one answer at least.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
+    pub(crate) fn share(&self) -> f64 {
+        todo!(
+            "the share of one address arrives with the green step: {}",
+            self.addr
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{HopStats, RECENT_CAPACITY};
+    use super::{HopStats, HopTable, TtlRow, RECENT_CAPACITY};
+    use crate::record::{Hop, RoundRecord, RunId, TtlRange};
+    use chrono::{DateTime, Utc};
+    use std::net::IpAddr;
 
     /// The largest difference that a comparison of two round-trip times admits.
     ///
@@ -379,5 +642,227 @@ mod tests {
         );
         let expected: Vec<f64> = samples[samples.len() - RECENT_CAPACITY..].to_vec();
         assert_eq!(history, expected, "the history keeps the last samples");
+    }
+
+    /// The identifier of the run that every test round belongs to.
+    const RUN: &str = "2026-08-18T12:00:00.000Z";
+
+    /// The moment of every test round.
+    const MOMENT: &str = "2026-08-18T12:00:01.000Z";
+
+    /// The time that every test round took, in milliseconds.
+    const ROUND_DURATION: u64 = 1000;
+
+    /// The name of the ICMP message of every test hop.
+    const TIME_EXCEEDED: &str = "time_exceeded";
+
+    /// The address of the first router of the test path.
+    const FIRST_HOP: &str = "192.168.1.1";
+
+    /// The address of one of the two routers that answer at one TTL.
+    const LEFT_ROUTER: &str = "10.0.0.1";
+
+    /// The address of the other of the two routers that answer at one TTL.
+    const RIGHT_ROUTER: &str = "10.0.0.2";
+
+    /// The address of the target of the test path.
+    const TARGET: &str = "93.184.216.34";
+
+    /// The round-trip time of a hop that a test does not read.
+    const ANY_RTT: f64 = 1.5;
+
+    /// Reads an address that a test names.
+    fn address(text: &str) -> IpAddr {
+        text.parse().expect("the test address must parse")
+    }
+
+    /// One round that probed the TTLs of the range, and that the named hops
+    /// answered.
+    ///
+    /// Each hop is a TTL, the address that answered at it, and the round-trip
+    /// time of that answer.
+    fn round(first: u8, last: u8, hops: &[(u8, &str, f64)]) -> RoundRecord {
+        RoundRecord {
+            run: RunId::from(RUN),
+            seq: 1,
+            ts: DateTime::parse_from_rfc3339(MOMENT)
+                .expect("the test moment must parse")
+                .with_timezone(&Utc),
+            dur_ms: ROUND_DURATION,
+            ttl_range: TtlRange::new(first, last).expect("the test range must hold"),
+            reached: false,
+            hops: hops
+                .iter()
+                .map(|(ttl, addr, rtt_ms)| Hop {
+                    ttl: *ttl,
+                    addr: address(addr),
+                    rtt_ms: *rtt_ms,
+                    icmp: TIME_EXCEEDED.to_owned(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Folds every round into one table.
+    fn table_of(rounds: &[RoundRecord]) -> HopTable {
+        let mut table = HopTable::new();
+        for round in rounds {
+            table.observe(round);
+        }
+        table
+    }
+
+    /// The row of one TTL that the table must hold.
+    fn row_of(table: &HopTable, ttl: u8) -> &TtlRow {
+        table
+            .row(ttl)
+            .unwrap_or_else(|| panic!("the table must hold the row of ttl {ttl}"))
+    }
+
+    /// The TTL of every row of the table, in the order the table gives them.
+    fn ttls_of(table: &HopTable) -> Vec<u8> {
+        table.rows().map(TtlRow::ttl).collect()
+    }
+
+    #[test]
+    fn the_probes_of_a_ttl_count_the_rounds_that_covered_it() {
+        // Round one covers TTL 1 to 3, round two covers TTL 1 to 5, and round
+        // three covers TTL 2 to 4. TTL 1 is therefore in two rounds, TTL 2 and
+        // TTL 3 are in three, TTL 4 is in two, and TTL 5 is in one.
+        let table = table_of(&[round(1, 3, &[]), round(1, 5, &[]), round(2, 4, &[])]);
+        for (ttl, sent) in [(1, 2), (2, 3), (3, 3), (4, 2), (5, 1)] {
+            assert_eq!(row_of(&table, ttl).sent(), sent, "the probes of ttl {ttl}");
+        }
+        assert!(
+            table.row(6).is_none(),
+            "no round probed ttl 6, so the table holds no row of it"
+        );
+    }
+
+    /// A run whose target moves closer shrinks the range of its rounds. A TTL
+    /// that falls outside the new range takes no probe, so its loss stays where
+    /// the earlier rounds left it.
+    #[test]
+    fn a_ttl_outside_the_range_of_a_round_takes_no_probe_from_it() {
+        let table = table_of(&[
+            round(1, 5, &[(5, TARGET, ANY_RTT)]),
+            round(1, 3, &[(3, FIRST_HOP, ANY_RTT)]),
+        ]);
+        let five = row_of(&table, 5);
+        assert_eq!(five.sent(), 1, "one round of the two covered ttl 5");
+        assert_eq!(five.stats().recv(), 1, "ttl 5 answered its one probe");
+        holds(five.loss(), 0.0, "loss of ttl 5");
+    }
+
+    #[test]
+    fn a_ttl_that_never_answers_reaches_a_loss_of_one_hundred_percent() {
+        let table = table_of(&[
+            round(1, 3, &[(1, FIRST_HOP, ANY_RTT)]),
+            round(1, 3, &[(1, FIRST_HOP, ANY_RTT)]),
+        ]);
+        let two = row_of(&table, 2);
+        assert_eq!(two.sent(), 2, "both rounds probed ttl 2");
+        assert_eq!(two.stats().recv(), 0, "ttl 2 answered no probe");
+        holds(two.loss(), 100.0, "loss of ttl 2");
+    }
+
+    #[test]
+    fn a_ttl_that_answers_nine_rounds_of_ten_reaches_a_loss_of_ten_percent() {
+        let mut rounds: Vec<RoundRecord> = (0..9)
+            .map(|_| round(1, 1, &[(1, FIRST_HOP, ANY_RTT)]))
+            .collect();
+        rounds.push(round(1, 1, &[]));
+        let table = table_of(&rounds);
+        let one = row_of(&table, 1);
+        assert_eq!(one.sent(), 10, "ten rounds probed ttl 1");
+        assert_eq!(one.stats().recv(), 9, "nine rounds of the ten answered");
+        // One round of the ten answered nothing, so the loss is
+        // 1 / 10 * 100 = 10.0 percent.
+        holds(one.loss(), 10.0, "loss of ttl 1");
+    }
+
+    #[test]
+    fn two_addresses_at_one_ttl_share_the_answers_of_that_ttl() {
+        // The left router answers three of the four rounds, and the right
+        // router answers the other one. The shares are therefore
+        // 3 / 4 * 100 = 75.0 and 1 / 4 * 100 = 25.0.
+        let table = table_of(&[
+            round(1, 2, &[(2, LEFT_ROUTER, 10.0)]),
+            round(1, 2, &[(2, RIGHT_ROUTER, 20.0)]),
+            round(1, 2, &[(2, LEFT_ROUTER, 30.0)]),
+            round(1, 2, &[(2, LEFT_ROUTER, 50.0)]),
+        ]);
+        let two = row_of(&table, 2);
+        assert_eq!(
+            two.stats().recv(),
+            4,
+            "the row of the ttl holds every answer of it"
+        );
+        holds(two.stats().avg(), 27.5, "mean of ttl 2");
+
+        let addresses: Vec<_> = two.addresses().collect();
+        assert_eq!(addresses.len(), 2, "two routers answered at ttl 2");
+        assert_eq!(
+            addresses[0].addr(),
+            address(LEFT_ROUTER),
+            "the left router answered first"
+        );
+        assert_eq!(
+            addresses[1].addr(),
+            address(RIGHT_ROUTER),
+            "the right router answered second"
+        );
+        assert_eq!(addresses[0].stats().recv(), 3, "the left router answered 3");
+        assert_eq!(
+            addresses[1].stats().recv(),
+            1,
+            "the right router answered 1"
+        );
+        assert_eq!(
+            addresses[0].stats().recv() + addresses[1].stats().recv(),
+            two.stats().recv(),
+            "every answer of the ttl belongs to one address of it"
+        );
+        holds(Some(addresses[0].share()), 75.0, "share of the left router");
+        holds(
+            Some(addresses[1].share()),
+            25.0,
+            "share of the right router",
+        );
+        let total: f64 = two.addresses().map(|address| address.share()).sum();
+        holds(Some(total), 100.0, "sum of the shares of ttl 2");
+    }
+
+    #[test]
+    fn a_ttl_that_stops_answering_keeps_its_history_and_loses_the_later_rounds() {
+        // Three rounds answer with 10, 20, and 30, and two more rounds probe
+        // the TTL and get nothing. The sum is 60, so the mean is 60 / 3 = 20.0.
+        // Two probes of the five got no answer, so the loss is
+        // 2 / 5 * 100 = 40.0 percent.
+        let table = table_of(&[
+            round(1, 1, &[(1, FIRST_HOP, 10.0)]),
+            round(1, 1, &[(1, FIRST_HOP, 20.0)]),
+            round(1, 1, &[(1, FIRST_HOP, 30.0)]),
+            round(1, 1, &[]),
+            round(1, 1, &[]),
+        ]);
+        let one = row_of(&table, 1);
+        assert_eq!(one.sent(), 5, "five rounds probed ttl 1");
+        assert_eq!(one.stats().recv(), 3, "three rounds of the five answered");
+        holds(one.stats().min(), 10.0, "smallest time of ttl 1");
+        holds(one.stats().avg(), 20.0, "mean of ttl 1");
+        holds(one.stats().max(), 30.0, "largest time of ttl 1");
+        holds(one.stats().last(), 30.0, "last time of ttl 1");
+        holds(one.loss(), 40.0, "loss of ttl 1");
+    }
+
+    #[test]
+    fn the_rows_come_back_in_ttl_order() {
+        let table = table_of(&[
+            round(3, 3, &[(3, TARGET, ANY_RTT)]),
+            round(1, 2, &[(2, FIRST_HOP, ANY_RTT)]),
+        ]);
+        assert_eq!(table.rows().len(), 3, "the table holds three rows");
+        assert_eq!(ttls_of(&table), [1, 2, 3], "the rows run in ttl order");
     }
 }
