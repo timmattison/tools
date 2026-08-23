@@ -16,6 +16,7 @@ sysinfo.workspace = true
 thiserror.workspace = true
 trippy-core.workspace = true
 trippy-privilege.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 mockito.workspace = true

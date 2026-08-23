@@ -21,13 +21,15 @@
     )
 )]
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 /// The number of terminal columns that the text occupies.
 ///
 /// A wide glyph, as one of the Japanese or the emoji ones, takes two columns.
 /// Every other printable character takes one, and a character that prints
 /// nothing takes none.
-pub(crate) fn display_width(_text: &str) -> usize {
-    0
+pub(crate) fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
 }
 
 /// The text, cut to at most `width` terminal columns.
@@ -48,8 +50,26 @@ pub(crate) fn display_width(_text: &str) -> usize {
 /// `ae-1.core.example.net` is the domain that every router of that network
 /// shares, and the head is the one part that tells the routers apart. The
 /// helper would therefore keep the part that says the least.
-pub(crate) fn truncate_to_width(_text: &str, _width: usize) -> String {
-    String::new()
+pub(crate) fn truncate_to_width(text: &str, width: usize) -> String {
+    if display_width(text) <= width {
+        return text.to_string();
+    }
+    let mut kept = String::new();
+    let mut taken = 0;
+    for character in text.chars() {
+        // A character that prints nothing takes no column, and it stays with
+        // the character it belongs to.
+        let columns = UnicodeWidthChar::width(character).unwrap_or(0);
+        if taken + columns > width {
+            // The loop stops here, and it does not look for a narrow character
+            // behind this one. A cut that kept a later character would print a
+            // name that the path never held.
+            break;
+        }
+        taken += columns;
+        kept.push(character);
+    }
+    kept
 }
 
 #[cfg(test)]
