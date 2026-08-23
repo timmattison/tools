@@ -27,7 +27,7 @@ use crate::ui;
 use crate::ui::render_duration;
 use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
 use crossterm::cursor::{MoveTo, Show};
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, Clear, ClearType, LeaveAlternateScreen};
 use crossterm::{execute, queue};
 use std::collections::BTreeMap;
@@ -159,6 +159,49 @@ pub(crate) struct NoKeys;
 impl Keys for NoKeys {
     fn presses(&mut self) -> Vec<Command> {
         Vec::new()
+    }
+}
+
+/// The key source of a run that holds a terminal.
+///
+/// The source takes every key event that already arrived, and it waits for
+/// none. The run loop asks ten times each second, and an ask that waited for a
+/// key holds the recording where it stands until the user presses one.
+///
+/// No test of this file builds this source. `crossterm` reads the keys of a
+/// terminal, and `cargo test` hands the test binary a pipe. A source that read
+/// the keys of the terminal of `cargo test` takes the keys of the reader who
+/// started it. The pseudo terminal of a later step of this work is what drives
+/// this source.
+#[expect(
+    dead_code,
+    reason = "the caller that picks the live table joins this module in the next step of this work"
+)]
+pub(crate) struct Keyboard;
+
+impl Keys for Keyboard {
+    fn presses(&mut self) -> Vec<Command> {
+        let mut commands = Vec::new();
+        // A poll of no time answers whether an event stands ready now, and it
+        // waits for no event to arrive.
+        //
+        // A poll that fails, and a read that fails, end the gathering and leave
+        // the commands that the gathering already holds. A terminal that will
+        // not answer is no reason to stop the recording, which is the purpose
+        // of the tool.
+        while event::poll(Duration::ZERO).unwrap_or(false) {
+            let Ok(arrived) = event::read() else {
+                break;
+            };
+            // A resize of the window and a paste of text arrive at this same
+            // reader, and neither of them is a key. The gathering goes on past
+            // each of them, because the events behind one of them still hold
+            // the keys of the user.
+            if let Event::Key(key) = arrived {
+                commands.extend(classify(key));
+            }
+        }
+        commands
     }
 }
 
