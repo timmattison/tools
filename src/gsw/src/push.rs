@@ -2642,7 +2642,7 @@ mod ui_tests {
     fn pushed_with(truecolor: bool, at: Instant) -> PushUi {
         let mut ui = PushUi::new(truecolor);
         ui.request(&snapshot(tracked(3)), tall_pane(80), at);
-        ui.confirm(t0());
+        ui.confirm(at);
         ui.finished(
             PushOutcome {
                 success: true,
