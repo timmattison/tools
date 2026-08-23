@@ -215,6 +215,30 @@ mod tests {
         );
     }
 
+    /// A URL that carries a query string is a plain destination to read.
+    ///
+    /// Windows refuses a file name that holds a question mark, so a name that
+    /// keeps one opens no file there.
+    #[test]
+    fn a_destination_that_holds_a_query_string_derives_a_legal_name() {
+        assert_eq!(
+            name_of(SOURCE, "https://example.com/p?q=1"),
+            "1.2.3.4-https---example.com-p-q=1.jsonl"
+        );
+    }
+
+    /// Windows reserves six characters that no path of POSIX refuses.
+    ///
+    /// A name that keeps one of them opens no file on Windows, and the run
+    /// stops at the first write.
+    #[test]
+    fn a_destination_that_holds_the_characters_windows_reserves_derives_a_legal_name() {
+        assert_eq!(
+            name_of(SOURCE, r#"a?b*c<d>e"f|g"#),
+            "1.2.3.4-a-b-c-d-e-f-g.jsonl"
+        );
+    }
+
     #[test]
     fn a_destination_that_holds_a_space_derives_a_legal_name() {
         assert_eq!(name_of(SOURCE, "example com"), "1.2.3.4-example-com.jsonl");
