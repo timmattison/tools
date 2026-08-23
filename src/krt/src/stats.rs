@@ -2,11 +2,17 @@
 //!
 //! A round record names the TTLs that the round probed, and it holds one hop
 //! for each TTL that answered. This module folds those rounds into one row for
-//! each TTL, and one entry for each address that answered at a TTL. Every row
-//! carries the count of the probes, the count of the answers, and the
-//! statistics of the round trip times. The fold reads the records of the run
+//! each TTL, and one entry for each of the first `TRACKED_ADDRESSES` addresses
+//! that answered at a TTL. Every row carries the count of the probes, the count
+//! of the answers, the statistics of the round trip times, and the count of the
+//! answers that no tracked address holds. The fold reads the records of the run
 //! and nothing else, so a test drives it without a network and without a
 //! privilege.
+//!
+//! Every part of the fold holds a bounded amount of memory, so a run of any
+//! length over a path of any shape holds the same amount: one row for each TTL
+//! of the path, `TRACKED_ADDRESSES` entries for each row, and
+//! `RECENT_CAPACITY` round-trip times for each entry.
 
 use crate::record;
 use std::collections::{BTreeMap, VecDeque};
@@ -170,9 +176,14 @@ impl HopTable {
     ///
     /// Every TTL that the round probed takes one more probe, whether it
     /// answered or not, so the loss of a TTL counts the rounds that reached it.
-    /// Every hop of the round then folds its round-trip time twice: once into
-    /// the statistics of the TTL, and once into the statistics of the address
-    /// that answered.
+    /// Every hop of the round then folds its round-trip time into the
+    /// statistics of its TTL, and into the statistics of the address that
+    /// answered when the row of that TTL tracks the address.
+    ///
+    /// The statistics of the TTL take every answer, whether the row tracks the
+    /// address or not, so the bound of `TRACKED_ADDRESSES` takes no answer away
+    /// from the numbers of the TTL. An answer that no tracked address holds
+    /// counts in [`TtlRow::untracked`].
     pub(crate) fn observe(&mut self, round: &record::RoundRecord) {
         for ttl in round.ttl_range.first()..=round.ttl_range.last() {
             self.row_mut(ttl).sent += 1;
@@ -180,7 +191,9 @@ impl HopTable {
         for hop in &round.hops {
             let row = self.row_mut(hop.ttl);
             row.stats.observe(hop.rtt_ms);
-            row.address_mut(hop.addr).observe(hop.rtt_ms);
+            if let Some(stats) = row.address_mut(hop.addr) {
+                stats.observe(hop.rtt_ms);
+            }
         }
     }
 
@@ -217,11 +230,13 @@ pub(crate) struct TtlRow {
     sent: u64,
     /// The statistics over every answer at this TTL.
     stats: HopStats,
-    /// Every address that answered at this TTL, in the order the TTL first saw
-    /// them, each with the statistics of its own answers.
+    /// The first `TRACKED_ADDRESSES` addresses that answered at this TTL, in
+    /// the order the TTL saw them, each with the statistics of its own answers.
     ///
     /// One TTL sees a handful of routers, so a scan of the whole list costs
-    /// less than a map that keeps the order beside the keys.
+    /// less than a map that keeps the order beside the keys. The bound holds
+    /// that scan short over a path where the count of the routers is no handful
+    /// at all.
     addresses: Vec<(IpAddr, HopStats)>,
     /// The number of answers of this TTL that no tracked address holds.
     ///
@@ -244,18 +259,32 @@ impl TtlRow {
     }
 
     /// The statistics of one address of this row. The entry of an address that
-    /// this row never saw is made here.
-    fn address_mut(&mut self, addr: IpAddr) -> &mut HopStats {
+    /// this row never saw is made here, while the row holds fewer than
+    /// `TRACKED_ADDRESSES` of them.
+    ///
+    /// An address that is new to a row that holds that many gives `None`: the
+    /// answer counts as an untracked one of the row, and it takes no entry.
+    fn address_mut(&mut self, addr: IpAddr) -> Option<&mut HopStats> {
         let found = self.addresses.iter().position(|(held, _)| *held == addr);
-        let index = if let Some(index) = found {
-            index
-        } else {
-            // The address is new to this TTL, so its entry goes at the end.
-            // The order of the list then stays the order of the first answers.
-            self.addresses.push((addr, HopStats::default()));
-            self.addresses.len() - 1
+        let index = match found {
+            Some(index) => index,
+            None if self.addresses.len() < TRACKED_ADDRESSES => {
+                // The address is new to this TTL, so its entry goes at the end.
+                // The order of the list then stays the order of the first answers.
+                self.addresses.push((addr, HopStats::default()));
+                self.addresses.len() - 1
+            }
+            None => {
+                // The list is full, so this answer counts here and takes no
+                // entry of its own. The count is of the answers, because a
+                // count of the addresses that gave them needs a set of every
+                // one of those addresses, and that set is what grows without
+                // limit.
+                self.untracked += 1;
+                return None;
+            }
         };
-        &mut self.addresses[index].1
+        Some(&mut self.addresses[index].1)
     }
 
     /// The TTL of the row.
@@ -279,7 +308,7 @@ impl TtlRow {
     /// every later answer here, so the answers of the tracked addresses and
     /// this count together account for every answer of the row.
     pub(crate) fn untracked(&self) -> u64 {
-        todo!("the count of the untracked answers arrives with the green step")
+        self.untracked
     }
 
     /// The loss of this position, as a percentage. A TTL that no round probed
@@ -295,8 +324,12 @@ impl TtlRow {
         Some(count_as_f64(lost) / count_as_f64(self.sent) * PERCENT)
     }
 
-    /// Every address that answered at this TTL, in the order the TTL first saw
-    /// them, each with the share of the answers it took.
+    /// The addresses that this TTL tracks, in the order the TTL saw them, each
+    /// with the share of the answers it took.
+    ///
+    /// A TTL that answered from more than `TRACKED_ADDRESSES` addresses tracks
+    /// the ones it saw first, and [`TtlRow::untracked`] counts the answers of
+    /// the rest.
     pub(crate) fn addresses(&self) -> impl ExactSizeIterator<Item = Address<'_>> {
         let answers = self.stats.recv();
         self.addresses.iter().map(move |(addr, stats)| Address {
@@ -315,7 +348,8 @@ pub(crate) struct Address<'a> {
     addr: IpAddr,
     /// The statistics over the answers of this address.
     stats: &'a HopStats,
-    /// The number of answers of the whole TTL, from every address of it.
+    /// The number of answers of the whole TTL, whichever address gave them and
+    /// whether the row tracks that address or not.
     answers: u64,
 }
 
@@ -332,6 +366,11 @@ impl Address<'_> {
 
     /// The share of the answers of the TTL that this address took, as a
     /// percentage.
+    ///
+    /// The shares of one TTL sum to the whole while the TTL tracks every
+    /// address that answered at it. A TTL that answered from more addresses
+    /// than it tracks leaves the rest of the whole to the answers that
+    /// [`TtlRow::untracked`] counts.
     ///
     /// The divisor is never zero. This entry exists because the address
     /// answered at the TTL, so the TTL holds one answer at least.

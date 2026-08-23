@@ -193,7 +193,8 @@ const SHARE: &str = "share";
 /// The sign that ends a percentage.
 const PERCENT_SIGN: &str = "%";
 
-/// The whole of a percentage, which the shares of one TTL sum to.
+/// The whole of a percentage, which the shares of one TTL sum to while that
+/// TTL tracks every address that answered at it.
 const WHOLE_PERCENT: f64 = 100.0;
 
 /// The largest difference that a comparison of two percentages admits.

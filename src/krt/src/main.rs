@@ -913,10 +913,10 @@ fn time_fields(stats: &stats::HopStats) -> [String; 6] {
 /// The host field of the line of one TTL.
 ///
 /// The field names the address that the TTL first answered from. A TTL that
-/// answered from more addresses adds the count of the other ones, so the line
-/// of a TTL stays one line however many routers answer at it. The line of each
-/// address then carries the numbers of that address. A TTL that never answered
-/// names no host.
+/// answered from more addresses adds the count of the other ones it tracks, so
+/// the line of a TTL stays one line however many routers answer at it. The line
+/// of each address then carries the numbers of that address. A TTL that never
+/// answered names no host.
 fn host_of(row: &stats::TtlRow) -> String {
     let others = row.addresses().len().saturating_sub(1);
     let Some(first) = row.addresses().next() else {
@@ -933,6 +933,12 @@ fn host_of(row: &stats::TtlRow) -> String {
 /// The line holds the TTL, the host, the loss, the count of the probes, the
 /// count of the answers, and the six round-trip times. A TTL that no round
 /// probed holds no loss, and the field then takes the word of an absent number.
+///
+/// A TTL that answered from more addresses than it tracks ends the line with
+/// the count of the answers that no tracked address holds. The shares of the
+/// printed addresses of such a TTL sum to less than the whole, and this field
+/// is what names the rest of it. A TTL that tracks every address that answered
+/// prints no such field, so the line of that TTL reads as it always did.
 fn ttl_line(row: &stats::TtlRow) -> String {
     let loss = row
         .loss()
@@ -945,6 +951,9 @@ fn ttl_line(row: &stats::TtlRow) -> String {
         format!("{RECV} {}", row.stats().recv()),
     ];
     fields.extend(time_fields(row.stats()));
+    if row.untracked() > 0 {
+        fields.push(format!("{UNTRACKED} {}", row.untracked()));
+    }
     format!("{TTL_INDENT}{}", fields.join(SUMMARY_SEPARATOR))
 }
 
@@ -955,6 +964,9 @@ fn ttl_line(row: &stats::TtlRow) -> String {
 /// them. The line carries no count of the probes, because a probe reaches a
 /// TTL and not a router: the run asks the TTL, and whichever router answers
 /// takes that answer.
+///
+/// An address that its TTL does not track takes no line, and the `UNTRACKED`
+/// field of the line of that TTL counts the answers of every such address.
 fn address_line(address: stats::Address<'_>) -> String {
     let mut fields = vec![
         address.addr().to_string(),
@@ -968,8 +980,9 @@ fn address_line(address: stats::Address<'_>) -> String {
 /// The lines that a replay prints for the aggregate of one run.
 ///
 /// One line holds one TTL of the path, in TTL order. A TTL that saw more than
-/// one address adds one line for each of those addresses, under the line of
-/// the TTL. Two spaces separate the fields, as they do on the summary line.
+/// one address adds one line for each of the addresses it tracks, under the
+/// line of the TTL, so a TTL of any number of routers prints a bounded number
+/// of lines. Two spaces separate the fields, as they do on the summary line.
 ///
 /// The design puts the fold in `stats.rs` and the render in `ui.rs`. This
 /// slice builds no `ui.rs`, so the render lives here. A later slice replaces
@@ -2751,7 +2764,8 @@ resolved configuration:
     /// The address of the other router of a TTL that two of them answer at.
     const ANOTHER_ROUTER: &str = "10.0.0.2";
 
-    /// The whole of a percentage, for the sum of the shares of one TTL.
+    /// The whole of a percentage, for the sum of the shares of one TTL that
+    /// tracks every address that answered at it.
     const WHOLE_PERCENT: f64 = 100.0;
 
     /// The largest difference that a comparison of two percentages admits.
