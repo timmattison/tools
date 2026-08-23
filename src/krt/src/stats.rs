@@ -207,18 +207,6 @@ impl HopTable {
     pub(crate) fn rows(&self) -> impl ExactSizeIterator<Item = &TtlRow> {
         self.rows.values()
     }
-
-    /// The row of one TTL. A TTL the table never saw gives `None`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the render walks every row in TTL order, so the tests of this module are the one reader of the row of one TTL today"
-        )
-    )]
-    pub(crate) fn row(&self, ttl: u8) -> Option<&TtlRow> {
-        self.rows.get(&ttl)
-    }
 }
 
 /// One hop position on the path, over every answer it gave.
@@ -574,7 +562,8 @@ mod tests {
     /// The row of one TTL that the table must hold.
     fn row_of(table: &HopTable, ttl: u8) -> &TtlRow {
         table
-            .row(ttl)
+            .rows()
+            .find(|row| row.ttl() == ttl)
             .unwrap_or_else(|| panic!("the table must hold the row of ttl {ttl}"))
     }
 
@@ -593,7 +582,7 @@ mod tests {
             assert_eq!(row_of(&table, ttl).sent(), sent, "the probes of ttl {ttl}");
         }
         assert!(
-            table.row(6).is_none(),
+            table.rows().all(|row| row.ttl() != 6),
             "no round probed ttl 6, so the table holds no row of it"
         );
     }
