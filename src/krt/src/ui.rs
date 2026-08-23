@@ -2284,6 +2284,98 @@ mod tests {
     /// The gap between two columns of the table, as a text.
     const COLUMN_SPACES: &str = "  ";
 
+    /// A name of the destination that fills more than the Host column.
+    ///
+    /// The name takes 23 columns, and the address of the golden target adds
+    /// ` (93.184.216.34)`, which takes 16 more. The two of them therefore take
+    /// 23 + 16 = 39 of the 30 columns that the Host column holds, and the star
+    /// wants 2 more.
+    const LONG_DESTINATION_NAME: &str = "edge-01.lax.example.com";
+
+    /// A name of a router that fills more than the Host column.
+    ///
+    /// The name takes 25 columns, and the address of the left router adds
+    /// ` (203.0.113.8)`, which takes 14 more. The two of them therefore take
+    /// 25 + 14 = 39 of the 30 columns, and the count wants 5 more.
+    const LONG_ROUTER_NAME: &str = "ae-1.core.lax.example.net";
+
+    /// The tail of the row of a TTL that folded two rounds, and that two
+    /// routers answered at.
+    ///
+    /// The TTL answered both rounds, so the loss is 0 / 2 = 0.0 percent. The
+    /// samples are 10.0 and 30.0, so the last is 30.0, the smallest is 10.0,
+    /// the mean is 40 / 2 = 20.0, and the largest is 30.0. Each sample stands
+    /// 10.0 from the mean, so the deviation is 10.0. The window of the
+    /// sparkline runs from 10.0 to 30.0, so the first sample takes the lowest
+    /// bar and the second takes the highest.
+    const TWO_ROUND_TAIL: &str = "  0.0%      2   30.0   10.0   20.0   30.0   10.0  ▁█";
+
+    #[test]
+    fn a_cut_host_keeps_the_star_of_the_destination() {
+        // One round probes one TTL, and the destination answers it at 1.0. The
+        // host wants 39 columns for the name and the address, and 2 more for
+        // the star, of the 30 that the Host column holds.
+        //
+        // The star stands behind the cut, so the name gives up the columns
+        // that the star takes: 30 - 2 = 28 columns of the name and the address
+        // stay, which is the 23 of the name and the ` (93.` behind it.
+        let table = table_of(&[round(1, 1, &[(1, TARGET, 1.0)])]);
+        let names = names_of(&[(TARGET, LONG_DESTINATION_NAME)]);
+        let lines = lines_of(&table, &names, Some(address(TARGET)), NOMINAL_WIDTH);
+        let row = line(&lines, COLUMN_HEADER_LINE + 1);
+        let cut = "edge-01.lax.example.com (93. ★";
+        assert_eq!(
+            display_width(cut),
+            HOST_WIDTH,
+            "the cut host of the destination fills the Host column and no more"
+        );
+        assert_eq!(
+            row,
+            format!("   1  {cut}{COLUMN_SPACES}{ONE_ROUND_TAIL}"),
+            "the star of the destination stands behind the cut name"
+        );
+        assert_eq!(
+            display_width(&host_column(row, HOST_WIDTH)),
+            HOST_WIDTH,
+            "the printed cell of the host fills the Host column and no more"
+        );
+    }
+
+    #[test]
+    fn a_cut_host_keeps_the_count_of_the_routers_behind_it() {
+        // Two rounds probe one TTL, and a different router answers each of
+        // them, so the row names the first of the two and counts the other
+        // one. The host wants 39 columns for the name and the address, and 5
+        // more for the count, of the 30 that the Host column holds.
+        //
+        // The count stands behind the cut, so the name gives up the columns
+        // that the count takes: 30 - 5 = 25 columns of the name and the
+        // address stay, which is the name alone.
+        let table = table_of(&[
+            round(1, 1, &[(1, LEFT_ROUTER, 10.0)]),
+            round(1, 1, &[(1, RIGHT_ROUTER, 30.0)]),
+        ]);
+        let names = names_of(&[(LEFT_ROUTER, LONG_ROUTER_NAME)]);
+        let lines = lines_of(&table, &names, None, NOMINAL_WIDTH);
+        let row = line(&lines, COLUMN_HEADER_LINE + 1);
+        let cut = "ae-1.core.lax.example.net (+1)";
+        assert_eq!(
+            display_width(cut),
+            HOST_WIDTH,
+            "the cut host of the TTL fills the Host column and no more"
+        );
+        assert_eq!(
+            row,
+            format!("   1  {cut}{COLUMN_SPACES}{TWO_ROUND_TAIL}"),
+            "the count of the other routers stands behind the cut name"
+        );
+        assert_eq!(
+            display_width(&host_column(row, HOST_WIDTH)),
+            HOST_WIDTH,
+            "the printed cell of the host fills the Host column and no more"
+        );
+    }
+
     #[test]
     fn the_star_marks_the_row_of_the_destination_and_no_other_row() {
         let lines = golden_lines(NOMINAL_WIDTH);
