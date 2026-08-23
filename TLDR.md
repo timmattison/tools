@@ -68,6 +68,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `thermal-watch` | Shows whether an Apple Silicon Mac decreases its clock under sustained load, measuring the P-cluster frequency against the DVFS table of the chip rather than trusting the thermal pressure level. |
 | `tsm` | Terminal Session Manager — records every shell command to JSONL logs you can search and replay. |
 | `tubeboard` | Extracts the video ID from a YouTube URL on the clipboard. |
+| `tvfind` | Finds smart TVs on the local network. Probes the Roku and Chromecast ports directly, reports vendor, model, room name and firmware, and flags sets that are powered off. |
 | `unescapeboard` | Unescapes one level of `\"`-style escaping in clipboard text. |
 | `update-aws-credentials` | Writes AWS SSO clipboard credentials into your AWS config file. |
 | `uuidplz` | Prints a random v4 UUID, or a repeatable v5 UUID seeded from a string, a file's contents, or stdin. |
