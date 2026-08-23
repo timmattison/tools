@@ -78,6 +78,30 @@ pub fn subnet_from(address: Ipv4Addr, netmask: Ipv4Addr) -> String {
     format!("{network}/{}", mask.count_ones())
 }
 
+/// The CIDR to scan, chosen from the interfaces the operating system reports.
+///
+/// `interfaces` arrives in the order the operating system gives, and that order
+/// is not a ranking. `tvfind` takes the first IPv4 interface that is not
+/// loopback and whose netmask leaves room for a neighbour. It skips an
+/// interface that holds one or two addresses, because a VPN presents such an
+/// interface and a scan of it reaches nothing.
+///
+/// Returns `None` if no interface qualifies.
+#[must_use]
+pub fn subnet_of(interfaces: &[get_if_addrs::Interface]) -> Option<String> {
+    let _ = interfaces;
+    todo!("the subnet is not yet chosen by the room an interface leaves for a neighbour")
+}
+
+/// Why the interfaces of this machine gave no subnet to scan.
+///
+/// The message names each interface that was skipped for a single-address
+/// netmask. That is the case a user cannot see from the outside.
+fn no_subnet_reason(interfaces: &[get_if_addrs::Interface]) -> String {
+    let _ = interfaces;
+    todo!("the error does not yet report an interface that was skipped")
+}
+
 /// The CIDR of the first non-loopback IPv4 interface on this machine.
 ///
 /// # Errors
@@ -199,6 +223,104 @@ mod tests {
         assert!(
             hosts_in(&cidr).is_ok(),
             "local_subnet produced an unscannable CIDR: {cidr}"
+        );
+    }
+
+    /// One IPv4 interface, in the shape `get_if_addrs` reports.
+    fn ipv4_interface(name: &str, ip: [u8; 4], netmask: [u8; 4]) -> get_if_addrs::Interface {
+        get_if_addrs::Interface {
+            name: name.to_owned(),
+            addr: get_if_addrs::IfAddr::V4(get_if_addrs::Ifv4Addr {
+                ip: Ipv4Addr::from(ip),
+                netmask: Ipv4Addr::from(netmask),
+                broadcast: None,
+            }),
+        }
+    }
+
+    /// The wired LAN of this machine, a `/23`.
+    fn en0() -> get_if_addrs::Interface {
+        ipv4_interface("en0", [192, 168, 0, 128], [255, 255, 254, 0])
+    }
+
+    /// A second adapter on the same LAN.
+    fn en1() -> get_if_addrs::Interface {
+        ipv4_interface("en1", [192, 168, 1, 131], [255, 255, 254, 0])
+    }
+
+    /// A Tailscale interface. Its netmask holds one address: itself.
+    fn utun2() -> get_if_addrs::Interface {
+        ipv4_interface("utun2", [100, 122, 91, 17], [255, 255, 255, 255])
+    }
+
+    #[test]
+    fn takes_the_lan_when_a_vpn_interface_follows_it() {
+        // The order `get_if_addrs` gave on this machine.
+        assert_eq!(
+            subnet_of(&[en0(), utun2(), en1()]).as_deref(),
+            Some("192.168.0.0/23")
+        );
+    }
+
+    #[test]
+    fn takes_the_lan_when_a_vpn_interface_comes_first() {
+        // The operating system owns the enumeration order and can give this one
+        // instead. It made the scan report `100.122.91.17/32 (1 host)`.
+        assert_eq!(
+            subnet_of(&[utun2(), en0(), en1()]).as_deref(),
+            Some("192.168.0.0/23")
+        );
+    }
+
+    #[test]
+    fn skips_a_point_to_point_slash_31() {
+        // A /31 holds this machine and the far end of a link. A television is
+        // not the far end of a point-to-point link.
+        let ppp0 = ipv4_interface("ppp0", [10, 8, 0, 1], [255, 255, 255, 254]);
+
+        assert_eq!(subnet_of(&[ppp0, en0()]).as_deref(), Some("192.168.0.0/23"));
+    }
+
+    #[test]
+    fn skips_the_loopback_interface() {
+        let lo0 = ipv4_interface("lo0", [127, 0, 0, 1], [255, 0, 0, 0]);
+
+        assert_eq!(subnet_of(&[lo0, en0()]).as_deref(), Some("192.168.0.0/23"));
+    }
+
+    #[test]
+    fn reports_no_subnet_when_every_interface_holds_a_single_address() {
+        let utun4 = ipv4_interface("utun4", [10, 3, 5, 9], [255, 255, 255, 255]);
+
+        assert_eq!(subnet_of(&[utun2(), utun4]), None);
+    }
+
+    #[test]
+    fn tells_the_user_to_pass_subnet_when_no_interface_qualifies() {
+        let reason = no_subnet_reason(&[utun2()]);
+
+        assert!(
+            reason.contains("--subnet"),
+            "the error must name the flag that gets past it, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn names_the_single_address_interface_it_skipped() {
+        let reason = no_subnet_reason(&[utun2()]);
+
+        assert!(
+            reason.contains("utun2"),
+            "the error must name the interface it skipped, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn separates_a_skipped_interface_from_no_interface_at_all() {
+        assert_ne!(
+            no_subnet_reason(&[]),
+            no_subnet_reason(&[utun2()]),
+            "an interface that was skipped must change what the user is told"
         );
     }
 }
