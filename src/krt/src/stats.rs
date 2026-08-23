@@ -365,13 +365,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     fn a_key_with_no_sample_holds_no_statistic() {
         let stats = HopStats::default();
         assert_eq!(stats.recv(), 0, "no sample is no answer");
@@ -385,13 +378,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     fn the_statistics_of_a_known_sample_set_are_the_hand_computed_ones() {
         let stats = stats_of(&FOUR_SAMPLES);
         assert_eq!(stats.recv(), 4, "the fold took four samples");
@@ -402,13 +388,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     fn the_deviation_of_a_known_sample_set_is_the_population_one() {
         let stats = stats_of(&EIGHT_SAMPLES);
         assert_eq!(stats.recv(), 8, "the fold took eight samples");
@@ -417,13 +396,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     fn one_sample_holds_a_deviation_of_zero() {
         let stats = stats_of(&[12.5]);
         assert_eq!(stats.recv(), 1, "the fold took one sample");
@@ -431,13 +403,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     fn the_jitter_is_the_absolute_difference_of_the_last_two_samples() {
         holds(stats_of(&[10.0, 15.0]).jitter(), 5.0, "jitter of a rise");
         holds(stats_of(&[15.0, 10.0]).jitter(), 5.0, "jitter of a fall");
@@ -449,13 +414,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     fn one_sample_holds_no_jitter() {
         let stats = stats_of(&[12.5]);
         assert_eq!(
@@ -466,13 +424,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     fn the_history_holds_the_last_sixty_samples_in_order() {
         let samples: Vec<f64> = (1..=MANY).map(f64::from).collect();
         let stats = stats_of(&samples);
