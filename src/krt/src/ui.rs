@@ -27,6 +27,7 @@
 )]
 
 use crate::{ROUND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE, UNKNOWN};
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -367,13 +368,44 @@ fn bar_at(part: f64) -> char {
     BARS[level.min(LEVEL_COUNT - 1)]
 }
 
+/// One rendered view of one folded run.
+///
+/// The frame holds what a reader needs and nothing that the reader must give
+/// back: the header line names the run, the table folds it, and the two maps
+/// name the addresses. A caller builds one of these and asks for the lines at
+/// the width of its terminal.
+pub(crate) struct Frame<'a> {
+    /// What the line above the table names.
+    pub(crate) header: Header<'a>,
+    /// The folded aggregate of the run.
+    pub(crate) table: &'a crate::stats::HopTable,
+    /// The host name of each address that a `name` record named.
+    pub(crate) names: &'a BTreeMap<IpAddr, String>,
+    /// The address of the destination. The row that answered from it takes the
+    /// star.
+    pub(crate) destination: Option<IpAddr>,
+}
+
+impl Frame<'_> {
+    /// The lines of the frame at a terminal width.
+    pub(crate) fn lines(&self, width: u16) -> Vec<String> {
+        let _ = width;
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        display_width, render_duration, render_size, sparkline, truncate_to_width, Header,
+        display_width, render_duration, render_size, sparkline, truncate_to_width, Frame, Header,
     };
-    use crate::testing::address;
+    use crate::record::RoundRecord;
+    use crate::stats::HopTable;
+    use crate::testing::{address, round};
+    use std::collections::BTreeMap;
+    use std::net::IpAddr;
     use std::time::Duration;
+    use unicode_width::UnicodeWidthChar;
 
     /// The start of the header line: one space, the name of the tool, and two
     /// more spaces.
@@ -1037,5 +1069,643 @@ mod tests {
                 history.len()
             );
         }
+    }
+
+    /// The width that the measured layout of the module documentation stands
+    /// on.
+    ///
+    /// The test spells the number, and the module derives it from the widths of
+    /// its columns. The two are on purpose: a test that read the constant of
+    /// the module would agree with every width the module ever holds, and this
+    /// width is the one a reader of a full-size terminal sees.
+    const NOMINAL_WIDTH: u16 = 97;
+
+    /// The terminal column that the Host column starts in.
+    ///
+    /// Four columns of TTL, and two of the gap behind it.
+    const HOST_START: usize = 6;
+
+    /// The number of columns between two columns of the table.
+    const COLUMN_SPACING: usize = 2;
+
+    /// The width of the Host column at the nominal width of the frame.
+    const HOST_WIDTH: usize = 30;
+
+    /// The number of fields that stand behind the Sent column: the five
+    /// round-trip times and the sparkline.
+    const TAIL_FIELDS: usize = 6;
+
+    /// The address of the first router of the golden path.
+    const FIRST_HOP: &str = "192.168.1.1";
+
+    /// The address of the one router of the golden path that no name record
+    /// named.
+    const BARE_HOP: &str = "10.0.0.1";
+
+    /// The address that answers first at the one TTL of the golden path that
+    /// two routers answer at.
+    const LEFT_ROUTER: &str = "203.0.113.8";
+
+    /// The address that answers second at that TTL.
+    const RIGHT_ROUTER: &str = "203.0.113.9";
+
+    /// The address of the destination of the golden path.
+    const TARGET: &str = "93.184.216.34";
+
+    /// The line of the frame that holds the column header.
+    const COLUMN_HEADER_LINE: usize = 2;
+
+    /// The line of the golden frame that holds the TTL that never answered.
+    const SILENT_TTL_LINE: usize = 4;
+
+    /// The line of the golden frame that holds the TTL of one bare address.
+    const BARE_TTL_LINE: usize = 5;
+
+    /// The line of the golden frame that holds the TTL of two routers.
+    ///
+    /// The two address rows of that TTL stand under it, in the two lines that
+    /// follow.
+    const SHARED_TTL_LINE: usize = 6;
+
+    /// The whole golden frame, line for line.
+    ///
+    /// The rounds of [`golden_table`] state the arithmetic of every number
+    /// here. The frame holds a named host, a TTL that never answered, a bare
+    /// address, a TTL of two routers with an address row for each of them, the
+    /// star of the destination, and a sparkline.
+    const GOLDEN_FRAME: [&str; 10] = [
+        " krt  example.com → 93.184.216.34   src 1.2.3.4   round 4   1s   1.2.3.4-example.com.jsonl (2.1 MB)",
+        "",
+        " TTL  Host                             Loss%   Sent   Last    Min    Avg    Max  StDev  Recent",
+        "   1  router.lan (192.168.1.1)          0.0%      4    5.0    1.0    3.0    5.0    2.0  ▁▁██",
+        "   2  ???                             100.0%      4      -      -      -      -      -",
+        "   3  10.0.0.1                         50.0%      4   12.0    8.0   10.0   12.0    2.0  ▁█",
+        "   4  ae1.net (203.0.113.8) (+1)        0.0%      4   70.0   10.0   40.0   70.0   22.4  ▁▆▃█",
+        "      ├ ae1.net (203.0.113.8)          50.0%▹     2   30.0   10.0   20.0   30.0   10.0  ▁█",
+        "      └ 203.0.113.9                    50.0%▹     2   70.0   50.0   60.0   70.0   10.0  ▁█",
+        "   5  example.com (93.184.216.34) ★     0.0%      4   60.0   40.0   50.0   60.0   10.0  ▁▁██",
+    ];
+
+    /// Folds every round into one table.
+    fn table_of(rounds: &[RoundRecord]) -> HopTable {
+        let mut table = HopTable::new();
+        for record in rounds {
+            table.observe(record);
+        }
+        table
+    }
+
+    /// The header of every frame that the tests below render.
+    ///
+    /// Four rounds, so the header line of the golden frame reads `round 4`.
+    fn golden_header() -> Header<'static> {
+        Header {
+            rounds: 4,
+            ..whole_header()
+        }
+    }
+
+    /// The folded run of the golden frame.
+    ///
+    /// Four rounds probe TTL 1 to TTL 5. The numbers of every row follow.
+    ///
+    /// TTL 1 answers each round, from `192.168.1.1`, at 1.0, 1.0, 5.0, and 5.0.
+    /// The loss is 0 / 4 = 0.0 percent. The mean is 12 / 4 = 3.0. The distances
+    /// from the mean are -2, -2, 2, and 2, whose squares sum to 16, so the
+    /// variance is 16 / 4 = 4.0 and the deviation is 2.0. The window of the
+    /// sparkline runs from 1.0 to 5.0, so the two smallest samples take the
+    /// lowest bar and the two largest take the highest.
+    ///
+    /// TTL 2 answers no round. The loss is 4 / 4 = 100.0 percent, and every
+    /// statistic of it holds no value.
+    ///
+    /// TTL 3 answers two of the four rounds, from `10.0.0.1`, at 8.0 and 12.0.
+    /// The loss is 2 / 4 = 50.0 percent. The mean is 20 / 2 = 10.0, the
+    /// distances are -2 and 2, whose squares sum to 8, so the variance is
+    /// 8 / 2 = 4.0 and the deviation is 2.0.
+    ///
+    /// TTL 4 answers each round, from two routers. `203.0.113.8` answers the
+    /// first and the third round at 10.0 and 30.0, and `203.0.113.9` answers
+    /// the second and the fourth at 50.0 and 70.0. Each of them therefore took
+    /// 2 / 4 = 50.0 percent of the answers of the TTL. The mean of the TTL is
+    /// 160 / 4 = 40.0, the distances are -30, 10, -10, and 30, whose squares
+    /// sum to 2000, so the variance is 2000 / 4 = 500 and the deviation is the
+    /// square root of 500, which is 22.36 and prints as 22.4. The mean of the
+    /// left router is 40 / 2 = 20.0 and the mean of the right one is
+    /// 120 / 2 = 60.0, and each of them stands 10.0 from both of its samples,
+    /// so each deviation is 10.0.
+    ///
+    /// TTL 5 answers each round, from the destination, at 40.0, 40.0, 60.0, and
+    /// 60.0. The mean is 200 / 4 = 50.0, and each sample stands 10.0 from it,
+    /// so the deviation is 10.0.
+    fn golden_table() -> HopTable {
+        table_of(&[
+            round(
+                1,
+                5,
+                &[
+                    (1, FIRST_HOP, 1.0),
+                    (3, BARE_HOP, 8.0),
+                    (4, LEFT_ROUTER, 10.0),
+                    (5, TARGET, 40.0),
+                ],
+            ),
+            round(
+                1,
+                5,
+                &[
+                    (1, FIRST_HOP, 1.0),
+                    (4, RIGHT_ROUTER, 50.0),
+                    (5, TARGET, 40.0),
+                ],
+            ),
+            round(
+                1,
+                5,
+                &[
+                    (1, FIRST_HOP, 5.0),
+                    (3, BARE_HOP, 12.0),
+                    (4, LEFT_ROUTER, 30.0),
+                    (5, TARGET, 60.0),
+                ],
+            ),
+            round(
+                1,
+                5,
+                &[
+                    (1, FIRST_HOP, 5.0),
+                    (4, RIGHT_ROUTER, 70.0),
+                    (5, TARGET, 60.0),
+                ],
+            ),
+        ])
+    }
+
+    /// The names that the `name` records of the golden run gave.
+    ///
+    /// `10.0.0.1` and `203.0.113.9` carry no name, so the two of them print
+    /// their address alone.
+    fn golden_names() -> BTreeMap<IpAddr, String> {
+        names_of(&[
+            (FIRST_HOP, "router.lan"),
+            (LEFT_ROUTER, "ae1.net"),
+            (TARGET, "example.com"),
+        ])
+    }
+
+    /// One name for each address that a test names.
+    fn names_of(names: &[(&str, &str)]) -> BTreeMap<IpAddr, String> {
+        names
+            .iter()
+            .map(|(addr, name)| (address(addr), (*name).to_owned()))
+            .collect()
+    }
+
+    /// The lines of a frame over one table, at a width.
+    fn lines_of(
+        table: &HopTable,
+        names: &BTreeMap<IpAddr, String>,
+        destination: Option<IpAddr>,
+        width: u16,
+    ) -> Vec<String> {
+        Frame {
+            header: golden_header(),
+            table,
+            names,
+            destination,
+        }
+        .lines(width)
+    }
+
+    /// The lines of the golden frame at a width.
+    fn golden_lines(width: u16) -> Vec<String> {
+        let table = golden_table();
+        let names = golden_names();
+        lines_of(&table, &names, Some(address(TARGET)), width)
+    }
+
+    /// Every run of text of a line that holds no space, with the terminal
+    /// column it starts in.
+    ///
+    /// The columns of the table are the measure of the frame, and a test that
+    /// counted the characters of a line would read a wide glyph as one column.
+    fn fields_with_columns(line: &str) -> Vec<(usize, String)> {
+        let mut fields: Vec<(usize, String)> = Vec::new();
+        let mut column = 0;
+        let mut inside = false;
+        for character in line.chars() {
+            if character == ' ' {
+                inside = false;
+            } else {
+                if inside {
+                    if let Some(field) = fields.last_mut() {
+                        field.1.push(character);
+                    }
+                } else {
+                    fields.push((column, character.to_string()));
+                    inside = true;
+                }
+            }
+            column += UnicodeWidthChar::width(character).unwrap_or(0);
+        }
+        fields
+    }
+
+    /// The terminal column that each field of a line starts in.
+    fn columns_of(line: &str) -> Vec<usize> {
+        fields_with_columns(line)
+            .into_iter()
+            .map(|(column, _)| column)
+            .collect()
+    }
+
+    /// The terminal column that the six fields behind the Sent column start in.
+    fn tail_columns(line: &str) -> Vec<usize> {
+        let columns = columns_of(line);
+        assert!(
+            columns.len() >= TAIL_FIELDS,
+            "the line must hold the five times and the sparkline: {line}"
+        );
+        columns[columns.len() - TAIL_FIELDS..].to_vec()
+    }
+
+    /// The terminal column that one named field of a line starts in, or none
+    /// when the line holds no such field.
+    ///
+    /// A frame that holds the wrong line must fail the assertion of the test
+    /// that measures it, and must not stop that test with a panic. The reader
+    /// of the failure then sees the column the test wanted beside the answer
+    /// the frame gave.
+    fn field_start(line: &str, wanted: &str) -> Option<usize> {
+        fields_with_columns(line)
+            .into_iter()
+            .find(|(_, text)| text == wanted)
+            .map(|(column, _)| column)
+    }
+
+    /// The line of a frame at an index, or an empty text when the frame holds
+    /// no such line.
+    fn line(lines: &[String], index: usize) -> &str {
+        lines.get(index).map_or("", String::as_str)
+    }
+
+    /// The lines of a frame from an index, or none when the frame is shorter
+    /// than that.
+    fn lines_from(lines: &[String], index: usize) -> &[String] {
+        lines.get(index..).unwrap_or_default()
+    }
+
+    /// The terminal column just behind the percent sign of a line.
+    ///
+    /// The Loss% of a TTL row and the Share% of an address row both end here,
+    /// which is what puts the digits of the one under the digits of the other.
+    fn percent_end(line: &str) -> usize {
+        let mut column = 0;
+        for character in line.chars() {
+            column += UnicodeWidthChar::width(character).unwrap_or(0);
+            if character == '%' {
+                return column;
+            }
+        }
+        panic!("the line must hold a percentage: {line}")
+    }
+
+    /// The text that the Host column of a line holds, without its padding.
+    fn host_column(line: &str, host_width: usize) -> String {
+        let mut text = String::new();
+        let mut column = 0;
+        for character in line.chars() {
+            let width = UnicodeWidthChar::width(character).unwrap_or(0);
+            if column >= HOST_START && column + width <= HOST_START + host_width {
+                text.push(character);
+            }
+            column += width;
+        }
+        text.trim_end().to_owned()
+    }
+
+    #[test]
+    fn the_frame_reads_as_the_layout_of_the_module_documentation_draws_it() {
+        assert_eq!(
+            golden_lines(NOMINAL_WIDTH),
+            GOLDEN_FRAME,
+            "the frame of a folded run reads as the module documentation draws it"
+        );
+    }
+
+    #[test]
+    fn an_address_row_lines_its_numbers_up_under_the_numbers_of_its_ttl() {
+        let lines = golden_lines(NOMINAL_WIDTH);
+        assert_eq!(
+            lines.len(),
+            GOLDEN_FRAME.len(),
+            "the golden frame holds one line for each row of the folded path"
+        );
+        let ttl_row = line(&lines, SHARED_TTL_LINE);
+        for offset in 1..=2 {
+            let address_row = line(&lines, SHARED_TTL_LINE + offset);
+            assert_eq!(
+                percent_end(address_row),
+                percent_end(ttl_row),
+                "the share of {address_row} must end where the loss of {ttl_row} ends"
+            );
+            assert_eq!(
+                tail_columns(address_row),
+                tail_columns(ttl_row),
+                "the times of {address_row} must stand under the times of {ttl_row}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_that_folded_no_round_prints_the_column_header_and_no_row() {
+        let table = HopTable::new();
+        let names = BTreeMap::new();
+        let lines = lines_of(&table, &names, None, NOMINAL_WIDTH);
+        assert_eq!(
+            lines,
+            [
+                GOLDEN_FRAME[0],
+                GOLDEN_FRAME[1],
+                GOLDEN_FRAME[COLUMN_HEADER_LINE],
+            ],
+            "a run that folded no round still names itself and its columns"
+        );
+    }
+
+    /// A host name of wide glyphs, one round long.
+    const ONE_ROUND_TAIL: &str = "  0.0%      1    1.0    1.0    1.0    1.0    0.0  ▁";
+
+    #[test]
+    fn a_long_host_cuts_on_a_character_and_holds_the_column_behind_it() {
+        // One round probes one TTL, and the router answers it at 1.0. The loss
+        // is 0 / 1 = 0.0 percent, every time is 1.0, and one sample deviates
+        // from itself by 0.0.
+        //
+        // Each name below is longer than the 30 columns of the Host column, so
+        // each of them loses its tail. The Japanese name takes 22 of those
+        // columns in 11 glyphs, and ` (192.16` takes the other 8. The nine
+        // emoji take 18 columns, and ` (192.168.1.` takes the other 12. The
+        // accented name is 23 characters of one column each, and ` (192.1`
+        // takes the other 7: a cut by bytes would stop inside the `é`.
+        let table = table_of(&[round(1, 1, &[(1, FIRST_HOP, 1.0)])]);
+        let cases = [
+            ("日本語のホスト名前一覧", "日本語のホスト名前一覧 (192.16"),
+            ("🎉🎊🎁🎉🎊🎁🎉🎊🎁", "🎉🎊🎁🎉🎊🎁🎉🎊🎁 (192.168.1."),
+            ("café-router.example.lan", "café-router.example.lan (192.1"),
+        ];
+        let mut starts = Vec::new();
+        for (name, cut) in cases {
+            let names = names_of(&[(FIRST_HOP, name)]);
+            let lines = lines_of(&table, &names, None, NOMINAL_WIDTH);
+            let row = line(&lines, COLUMN_HEADER_LINE + 1);
+            assert_eq!(
+                row,
+                format!("   1  {cut}{COLUMN_SPACES}{ONE_ROUND_TAIL}"),
+                "the host of {name} cuts on a character"
+            );
+            assert_eq!(
+                display_width(cut),
+                HOST_WIDTH,
+                "the cut host of {name} fills the Host column and no more"
+            );
+            starts.push(field_start(row, "0.0%"));
+        }
+        assert_eq!(
+            starts,
+            vec![starts[0]; cases.len()],
+            "the column behind the Host one starts in the same place for every name"
+        );
+    }
+
+    /// The gap between two columns of the table, as a text.
+    const COLUMN_SPACES: &str = "  ";
+
+    #[test]
+    fn the_star_marks_the_row_of_the_destination_and_no_other_row() {
+        let lines = golden_lines(NOMINAL_WIDTH);
+        let starred: Vec<&str> = lines
+            .iter()
+            .filter(|text| text.contains('★'))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            starred,
+            [line(&lines, GOLDEN_FRAME.len() - 1)],
+            "the last TTL of the golden path answered from the destination"
+        );
+    }
+
+    #[test]
+    fn the_star_reads_every_address_of_a_row_and_not_the_first_one_alone() {
+        // The right router of TTL 4 answered second, so a check of the first
+        // tracked address alone would leave the row unmarked.
+        let table = golden_table();
+        let names = golden_names();
+        let lines = lines_of(&table, &names, Some(address(RIGHT_ROUTER)), NOMINAL_WIDTH);
+        assert_eq!(
+            host_column(line(&lines, SHARED_TTL_LINE), HOST_WIDTH),
+            "ae1.net (203.0.113.8) (+1) ★",
+            "the row of a TTL that answered from the destination takes the star"
+        );
+        let starred = lines.iter().filter(|text| text.contains('★')).count();
+        assert_eq!(starred, 1, "one row of the path holds the destination");
+    }
+
+    #[test]
+    fn a_frame_that_names_no_destination_marks_no_row() {
+        let table = golden_table();
+        let names = golden_names();
+        let lines = lines_of(&table, &names, None, NOMINAL_WIDTH);
+        assert_eq!(
+            lines.len(),
+            GOLDEN_FRAME.len(),
+            "the frame still holds one line for each row of the folded path"
+        );
+        assert!(
+            !lines.iter().any(|text| text.contains('★')),
+            "a replay that never resolved a destination marks no row"
+        );
+    }
+
+    #[test]
+    fn a_ttl_of_three_routers_counts_two_more_participants() {
+        // Three rounds probe TTL 1, and a different router answers each of
+        // them. The row therefore tracks three addresses, and the two behind
+        // the first one are the count that the host of the row carries.
+        let table = table_of(&[
+            round(1, 1, &[(1, "10.0.0.1", 10.0)]),
+            round(1, 1, &[(1, "10.0.0.2", 20.0)]),
+            round(1, 1, &[(1, "10.0.0.3", 30.0)]),
+        ]);
+        let names = BTreeMap::new();
+        let lines = lines_of(&table, &names, None, NOMINAL_WIDTH);
+        assert_eq!(
+            host_column(line(&lines, COLUMN_HEADER_LINE + 1), HOST_WIDTH),
+            "10.0.0.1 (+2)",
+            "the host of the row names the first router and counts the other two"
+        );
+        let hosts: Vec<String> = lines_from(&lines, COLUMN_HEADER_LINE + 2)
+            .iter()
+            .map(|text| host_column(text, HOST_WIDTH))
+            .collect();
+        assert_eq!(
+            hosts,
+            ["├ 10.0.0.1", "├ 10.0.0.2", "└ 10.0.0.3"],
+            "the last address row of the TTL closes the set"
+        );
+    }
+
+    /// The number of addresses that one TTL keeps an entry for.
+    ///
+    /// The bound lives in `stats.rs`, and the test states it again: the row of
+    /// the `others` line stands for the answers past this count, so a reader of
+    /// the test reads what the count is.
+    const TRACKED_ADDRESSES: usize = 32;
+
+    /// The number of routers that answer at the crowded TTL of the test below.
+    const CROWDED_ROUTERS: usize = 40;
+
+    /// The round-trip time of every answer of that TTL.
+    const CROWDED_RTT: f64 = 1.5;
+
+    #[test]
+    fn the_answers_that_no_tracked_address_holds_take_the_last_address_row() {
+        // Forty rounds probe TTL 1, and a different router answers each of
+        // them at 1.5. The row tracks the first 32 of those routers, so each of
+        // them took 1 / 40 = 2.5 percent of the answers, and the other
+        // 40 - 32 = 8 answers took 8 / 40 = 20.0 percent. The two counts sum to
+        // the whole: 32 * 2.5 + 20.0 = 100.0.
+        let rounds: Vec<RoundRecord> = (1..=CROWDED_ROUTERS)
+            .map(|host| round(1, 1, &[(1, format!("10.0.0.{host}").as_str(), CROWDED_RTT)]))
+            .collect();
+        let table = table_of(&rounds);
+        let names = BTreeMap::new();
+        let lines = lines_of(&table, &names, None, NOMINAL_WIDTH);
+        let address_rows = lines_from(&lines, COLUMN_HEADER_LINE + 2);
+        assert_eq!(
+            address_rows.len(),
+            TRACKED_ADDRESSES + 1,
+            "one row for each tracked router, and one for the answers of the rest"
+        );
+        assert_eq!(
+            host_column(line(&lines, COLUMN_HEADER_LINE + 1), HOST_WIDTH),
+            "10.0.0.1 (+32)",
+            "the answers that no tracked address holds count as one more participant"
+        );
+        assert_eq!(
+            address_rows.last().map_or("", String::as_str),
+            "      └ others                         20.0%▹     8      -      -      -      -      -",
+            "the row of the untracked answers stands last, and it holds no time"
+        );
+        let printed: f64 = address_rows.iter().map(|text| share_of(text)).sum();
+        assert!(
+            (printed - 100.0).abs() < 1e-9,
+            "the printed shares of the TTL sum to the whole, and they sum to {printed}"
+        );
+    }
+
+    /// The share that one address row prints, as a number.
+    fn share_of(line: &str) -> f64 {
+        let field = fields_with_columns(line)
+            .into_iter()
+            .map(|(_, text)| text)
+            .find(|text| text.ends_with("%▹"))
+            .unwrap_or_else(|| panic!("the address row must hold a share: {line}"));
+        field
+            .trim_end_matches('▹')
+            .trim_end_matches('%')
+            .parse()
+            .unwrap_or_else(|_| panic!("the share of {line} must read as a number"))
+    }
+
+    /// A terminal wider than the nominal one.
+    const WIDE_TERMINAL: u16 = 120;
+
+    /// The columns that the Host column takes at that width.
+    ///
+    /// The frame without the Host column is 67 columns wide, so the Host column
+    /// takes the other 120 - 67 = 53.
+    const WIDE_HOST: usize = 53;
+
+    /// A terminal too narrow for the frame at the floor of the Host column.
+    const NARROW_TERMINAL: u16 = 70;
+
+    /// The floor of the Host column.
+    const HOST_MIN: usize = 12;
+
+    #[test]
+    fn the_host_column_absorbs_a_change_of_the_terminal_width() {
+        let nominal = golden_lines(NOMINAL_WIDTH);
+        let wide = golden_lines(WIDE_TERMINAL);
+        assert_eq!(
+            field_start(line(&wide, SILENT_TTL_LINE), "100.0%"),
+            Some(HOST_START + WIDE_HOST + COLUMN_SPACING),
+            "the Host column takes every column that the wider terminal added"
+        );
+        let grew = WIDE_HOST - HOST_WIDTH;
+        let before = columns_of(line(&nominal, BARE_TTL_LINE));
+        let after = columns_of(line(&wide, BARE_TTL_LINE));
+        assert_eq!(
+            before.len(),
+            BARE_TTL_FIELDS,
+            "the row of a TTL of one bare address holds {BARE_TTL_FIELDS} fields"
+        );
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "the wider frame holds the same fields"
+        );
+        // The TTL column and the Host column keep their place, and every column
+        // behind the Host one moves by what the Host column took.
+        let moved: Vec<usize> = before
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                if index < HELD_COLUMNS {
+                    *column
+                } else {
+                    column + grew
+                }
+            })
+            .collect();
+        assert_eq!(
+            after, moved,
+            "the Host column is the one column that absorbs the change"
+        );
+    }
+
+    /// The number of fields that the row of a TTL of one bare address holds:
+    /// the TTL, the host, the loss, the count of the probes, the five times,
+    /// and the sparkline.
+    const BARE_TTL_FIELDS: usize = 10;
+
+    /// The number of fields of such a row that a wider terminal does not move:
+    /// the TTL and the host.
+    const HELD_COLUMNS: usize = 2;
+
+    #[test]
+    fn the_host_column_stops_at_its_floor() {
+        let narrow = golden_lines(NARROW_TERMINAL);
+        assert_eq!(
+            field_start(line(&narrow, SILENT_TTL_LINE), "100.0%"),
+            Some(HOST_START + HOST_MIN + COLUMN_SPACING),
+            "a terminal too narrow for the frame renders at the floor of the Host column"
+        );
+    }
+
+    #[test]
+    fn a_ttl_that_no_round_probed_prints_no_loss() {
+        // The round probes TTL 1 and TTL 2, and a hop answers at TTL 5. The
+        // row of TTL 5 therefore holds one answer and no probe, and a loss over
+        // no probe is no number at all.
+        let table = table_of(&[round(1, 2, &[(5, BARE_HOP, 1.0)])]);
+        let names = BTreeMap::new();
+        let lines = lines_of(&table, &names, None, NOMINAL_WIDTH);
+        assert_eq!(
+            lines.last().map_or("", String::as_str),
+            "   5  10.0.0.1                             -      0    1.0    1.0    1.0    1.0    0.0  ▁",
+            "a TTL that no round probed prints one word in the place of its loss"
+        );
     }
 }
