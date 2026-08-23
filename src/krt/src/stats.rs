@@ -12,6 +12,12 @@ use crate::record;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::IpAddr;
 
+/// The whole of a percentage.
+///
+/// The loss and the share are both a part of a whole, and both of them report
+/// that part as a percentage.
+const PERCENT: f64 = 100.0;
+
 /// The number of round-trip times that one key keeps.
 #[cfg_attr(
     not(test),
@@ -256,10 +262,20 @@ impl HopTable {
         )
     )]
     pub(crate) fn observe(&mut self, round: &record::RoundRecord) {
-        todo!(
-            "the fold of one round arrives with the green step: round {}",
-            round.seq
-        )
+        for ttl in round.ttl_range.first()..=round.ttl_range.last() {
+            self.row_mut(ttl).sent += 1;
+        }
+        for hop in &round.hops {
+            let row = self.row_mut(hop.ttl);
+            row.stats.observe(hop.rtt_ms);
+            row.address_mut(hop.addr).observe(hop.rtt_ms);
+        }
+    }
+
+    /// The row of one TTL. The row of a TTL that the table never saw is made
+    /// here.
+    fn row_mut(&mut self, ttl: u8) -> &mut TtlRow {
+        self.rows.entry(ttl).or_insert_with(|| TtlRow::new(ttl))
     }
 
     /// Every TTL row, in TTL order.
@@ -313,6 +329,13 @@ pub(crate) struct TtlRow {
 
 impl TtlRow {
     /// Builds the row of one TTL, before any round reaches it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
     fn new(ttl: u8) -> Self {
         Self {
             ttl,
@@ -324,14 +347,22 @@ impl TtlRow {
 
     /// The statistics of one address of this row. The entry of an address that
     /// this row never saw is made here.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+        )
+    )]
     fn address_mut(&mut self, addr: IpAddr) -> &mut HopStats {
         let found = self.addresses.iter().position(|(held, _)| *held == addr);
-        let index = match found {
-            Some(index) => index,
-            None => {
-                self.addresses.push((addr, HopStats::default()));
-                self.addresses.len() - 1
-            }
+        let index = if let Some(index) = found {
+            index
+        } else {
+            // The address is new to this TTL, so its entry goes at the end.
+            // The order of the list then stays the order of the first answers.
+            self.addresses.push((addr, HopStats::default()));
+            self.addresses.len() - 1
         };
         &mut self.addresses[index].1
     }
@@ -382,10 +413,14 @@ impl TtlRow {
         )
     )]
     pub(crate) fn loss(&self) -> Option<f64> {
-        todo!(
-            "the loss of one position arrives with the green step: ttl {}",
-            self.ttl
-        )
+        if self.sent == 0 {
+            return None;
+        }
+        // A TTL that answered more times than it was probed floors at no loss.
+        // No fold of a well formed file reaches that state, and a percentage
+        // below zero would read as a defect of the tool.
+        let lost = self.sent.saturating_sub(self.stats.recv());
+        Some(count_as_f64(lost) / count_as_f64(self.sent) * PERCENT)
     }
 
     /// Every address that answered at this TTL, in the order the TTL first saw
@@ -464,10 +499,7 @@ impl Address<'_> {
         )
     )]
     pub(crate) fn share(&self) -> f64 {
-        todo!(
-            "the share of one address arrives with the green step: {}",
-            self.addr
-        )
+        count_as_f64(self.stats.recv()) / count_as_f64(self.answers) * PERCENT
     }
 }
 
