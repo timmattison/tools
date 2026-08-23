@@ -18,4 +18,5 @@
 // intra-doc link inside those headers.
 pub mod target_lints;
 pub mod tool_index;
+pub mod trippy_wall;
 pub mod workspace_lints;

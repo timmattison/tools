@@ -4,15 +4,16 @@
 //! record, and every record carries the identifier of the run it belongs to.
 //! This module builds the records, the two functions that turn a record into
 //! one line and back, the reader that loads a whole file, and the writer that
-//! appends to one. The `replay` command reads through this module. The writer
-//! waits for the tracer, which arrives in a later slice.
+//! appends to one. The `replay` command reads through this module. The run loop
+//! writes the `run` record, one `round` record for each round, and the `end`
+//! record through the writer, and every write flushes.
 
 use crate::{Multipath, Protocol};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write as _};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -78,18 +79,17 @@ pub(crate) struct RunId(String);
 
 impl RunId {
     /// Builds the identifier of the run that starts at this moment.
-    #[allow(
-        dead_code,
-        reason = "the tracer opens a new run and builds its identifier, and the tracer arrives in a later slice of issue #366"
-    )]
     pub(crate) fn at(start: DateTime<Utc>) -> Self {
         Self(format_millis(start))
     }
 
     /// Reads the identifier as text.
-    #[allow(
-        dead_code,
-        reason = "the replay writes the identifier through `Display`, so the tests of this module are the one reader of the text today"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay writes the identifier through `Display`, so the tests of this module are the one reader of the text today"
+        )
     )]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
@@ -134,10 +134,6 @@ impl Record {
     /// # Errors
     ///
     /// Returns the reason when the record does not become JSON.
-    #[allow(
-        dead_code,
-        reason = "the writer is the one caller, and the tracer that runs the writer arrives in a later slice of issue #366"
-    )]
     pub(crate) fn to_line(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
@@ -335,28 +331,54 @@ impl TtlRange {
         Ok(Self { first, last })
     }
 
+    /// The TTLs that a round probed, from the first TTL upward.
+    ///
+    /// A last TTL below the first names no TTL that the round probed, so the
+    /// range closes at the first TTL.
+    ///
+    /// This constructor never fails, and [`TtlRange::new`] does. A round that
+    /// answered nothing reports a last TTL of zero, and the conversion of a
+    /// round has already clamped that case away, so a `Result` there would
+    /// carry an arm that no input reaches. A reader of a recorded file still
+    /// needs the refusal, because a file states the two numbers on its own.
+    pub(crate) fn from_first(first: u8, last: u8) -> Self {
+        Self {
+            first,
+            last: last.max(first),
+        }
+    }
+
     /// The first TTL of the round.
-    #[allow(
-        dead_code,
-        reason = "the aggregate table shows a row for every TTL that the round probed, and the table arrives in a later slice of issue #366"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the aggregate fold builds a row for every TTL that the round probed, and the fold arrives in a later slice of issue #369"
+        )
     )]
     pub(crate) fn first(self) -> u8 {
         self.first
     }
 
     /// The last TTL of the round.
-    #[allow(
-        dead_code,
-        reason = "the aggregate table shows a row for every TTL that the round probed, and the table arrives in a later slice of issue #366"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the aggregate fold builds a row for every TTL that the round probed, and the fold arrives in a later slice of issue #369"
+        )
     )]
     pub(crate) fn last(self) -> u8 {
         self.last
     }
 
     /// True when the round probed this TTL.
-    #[allow(
-        dead_code,
-        reason = "the aggregate table asks whether a round probed a TTL, to part a hop that did not answer from a hop the round never probed, and the table arrives in a later slice of issue #366"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the aggregate fold asks whether a round probed a TTL, to part a hop that did not answer from a hop the round never probed, and the fold arrives in a later slice of issue #369"
+        )
     )]
     pub(crate) fn contains(self, ttl: u8) -> bool {
         (self.first..=self.last).contains(&ttl)
@@ -502,9 +524,12 @@ impl Recording {
     }
 
     /// Every record that the file holds.
-    #[allow(
-        dead_code,
-        reason = "the replay reads one run, so the tests of this module are the one reader of the whole file today"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay reads one run, so the tests of this module are the one reader of the whole file today"
+        )
     )]
     pub(crate) fn records(&self) -> &[Record] {
         &self.records
@@ -573,18 +598,24 @@ pub(crate) struct Truncated {
 
 impl Truncated {
     /// The number of the line that was cut short.
-    #[allow(
-        dead_code,
-        reason = "the replay writes the whole warning through `Display`, so the tests of this module are the one reader of the two numbers today"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay writes the whole warning through `Display`, so the tests of this module are the one reader of the two numbers today"
+        )
     )]
     pub(crate) fn line(self) -> usize {
         self.line
     }
 
     /// The number of bytes that the cut line holds.
-    #[allow(
-        dead_code,
-        reason = "the replay writes the whole warning through `Display`, so the tests of this module are the one reader of the two numbers today"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the replay writes the whole warning through `Display`, so the tests of this module are the one reader of the two numbers today"
+        )
     )]
     pub(crate) fn bytes(self) -> usize {
         self.bytes
@@ -629,9 +660,12 @@ impl<'a> Run<'a> {
     }
 
     /// The names that the run read.
-    #[allow(
-        dead_code,
-        reason = "the aggregate table shows the name of each hop, and the table arrives in a later slice of issue #366"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a replay shows the name of each hop beside its address, and the names arrive in a later slice of issue #371"
+        )
     )]
     pub(crate) fn names(&self) -> &[&'a NameRecord] {
         &self.names
@@ -643,9 +677,12 @@ impl<'a> Run<'a> {
     }
 
     /// The record that closed the run. A run that still goes holds none.
-    #[allow(
-        dead_code,
-        reason = "the aggregate table shows why the run stopped, and the table arrives in a later slice of issue #366"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the table that a replay prints shows why the run stopped, and the table arrives in a later slice of issue #370"
+        )
     )]
     pub(crate) fn end(&self) -> Option<&'a EndRecord> {
         self.end
@@ -698,20 +735,16 @@ pub(crate) enum ReadError {
 /// process, and the operating system keeps the bytes that the process already
 /// gave it. An `fsync` guards against a power loss, which is a different fault,
 /// and not the fault that this guarantee names.
-#[allow(
-    dead_code,
-    reason = "the tracer records each round through this writer, and the tracer arrives in a later slice of issue #366"
-)]
-pub(crate) struct Writer {
-    /// The open file, in append mode.
-    file: BufWriter<File>,
+///
+/// The sink of a run is the open file, and that is the sink a caller takes when
+/// it names none.
+pub(crate) struct Writer<W: Write = BufWriter<File>> {
+    /// The sink that takes every record. A run writes to the open file, in
+    /// append mode.
+    sink: W,
 }
 
-#[allow(
-    dead_code,
-    reason = "the tracer records each round through this writer, and the tracer arrives in a later slice of issue #366"
-)]
-impl Writer {
+impl Writer<BufWriter<File>> {
     /// Opens the file for appending, and makes the file when it is absent.
     ///
     /// # Errors
@@ -720,8 +753,22 @@ impl Writer {
     pub(crate) fn append(path: &Path) -> std::io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
-            file: BufWriter::new(file),
+            sink: BufWriter::new(file),
         })
+    }
+}
+
+impl<W: Write> Writer<W> {
+    /// Sends every record to this sink.
+    ///
+    /// A run writes to a file, and a file fails a write only when the disk
+    /// fills or the device goes away. A test drives the writer through a sink
+    /// that fails on demand, so it covers the fault that a file rarely gives.
+    ///
+    /// No run builds a writer this way, so the build of the tool holds none.
+    #[cfg(test)]
+    pub(crate) fn to_sink(sink: W) -> Self {
+        Self { sink }
     }
 
     /// Appends one record and one newline, then flushes.
@@ -732,9 +779,9 @@ impl Writer {
     /// fails, and when the flush fails.
     pub(crate) fn write(&mut self, record: &Record) -> std::io::Result<()> {
         let line = record.to_line().map_err(std::io::Error::other)?;
-        self.file.write_all(line.as_bytes())?;
-        self.file.write_all(&[NEWLINE])?;
-        self.file.flush()
+        self.sink.write_all(line.as_bytes())?;
+        self.sink.write_all(&[NEWLINE])?;
+        self.sink.flush()
     }
 }
 
@@ -1033,6 +1080,23 @@ mod tests {
         }
         assert_eq!(range.first(), 1);
         assert_eq!(range.last(), 30);
+    }
+
+    #[test]
+    fn a_range_from_the_first_ttl_spans_to_the_last_one() {
+        let range = TtlRange::from_first(1, 14);
+        assert_eq!(range.first(), 1);
+        assert_eq!(range.last(), 14);
+    }
+
+    /// A round that answered nothing reports a last TTL of zero, which runs
+    /// below every first TTL. Such a range names no TTL that the round probed,
+    /// so it closes at the first TTL.
+    #[test]
+    fn a_range_whose_last_ttl_runs_below_the_first_one_closes_at_the_first_one() {
+        let range = TtlRange::from_first(3, 1);
+        assert_eq!(range.first(), 3);
+        assert_eq!(range.last(), 3);
     }
 
     #[test]

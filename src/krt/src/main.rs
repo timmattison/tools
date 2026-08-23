@@ -1,32 +1,65 @@
 //! `krt` (Knights of the Round Trip) records the network path to a
 //! destination, hop by hop.
 //!
-//! No tracer exists yet, so a command line that names a destination prints the
-//! configuration that it resolved. The `replay` command reads a recorded file
-//! and prints one summary line for one run of it. Later slices add the tracer
-//! and the table.
+//! A command line that names a destination prints the configuration that it
+//! resolved, opens the recorded file, starts the tracer, and appends one record
+//! for each round until a limit stops the run. It prints one status line for
+//! each round. The `replay` command reads a recorded file and prints one
+//! summary line for one run of it. A later slice replaces the status lines with
+//! the live table.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
 mod record;
+mod run;
+mod source;
+mod trace;
 
 use buildinfo::version_string;
+use chrono::Utc;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use record::{Recording, Run, RunId};
+use record::{
+    EndReason, Family, Recording, Run, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// The name that starts every message that `krt` writes to standard error.
 const PROGRAM: &str = "krt";
 
 /// The exit code of a failure.
 const EXIT_FAILURE: i32 = 1;
+
+/// The exit code of a platform that needs raw socket privileges and does not
+/// hold them.
+const EXIT_NO_PRIVILEGES: i32 = 2;
+
+/// The exit code of a run whose recorded file did not take a record.
+///
+/// The recording is the whole purpose of the tool. A run that cannot record
+/// stops, because a run that keeps a display while it silently records nothing
+/// is worse than a run that stops.
+const EXIT_WRITE_FAILED: i32 = 3;
+
+/// The exit code of a run whose tracer stopped, or never started.
+const EXIT_TRACER_FAILED: i32 = 4;
+
+/// What a trace prints before it probes, ahead of the path of its file.
+const RECORDING_TO: &str = "recording to";
+
+/// What a trace prints when it stops, ahead of the count of its rounds.
+const RECORDED: &str = "recorded";
+
+/// What the warning of an unread source address says after the reason.
+const SOURCE_FALLBACK: &str = "The run records the unspecified address of the family in its place.";
 
 /// The accepted units of a duration.
 const DURATION_UNITS: &str = "the unit must be `ms`, `s`, `m`, or `h`";
@@ -79,8 +112,25 @@ const SOURCE_DISCOVERED: &str = "discovered at run time";
 /// The text between two fields of a summary line.
 const SUMMARY_SEPARATOR: &str = "  ";
 
-/// The target field of a run whose `run` record is absent.
-const TARGET_UNKNOWN: &str = "unknown";
+/// The value of a field that `krt` cannot fill.
+///
+/// A replay of a run whose `run` record is absent names no target, and a
+/// machine that reports no name leaves the run without a host. Both fields
+/// carry this word in the place of the value.
+const UNKNOWN: &str = "unknown";
+
+/// The port of a resolution.
+///
+/// The resolver takes a host and a port together, and it gives back socket
+/// addresses. A trace of `krt` probes no port of the destination, so this
+/// number takes no part in the answer.
+const RESOLVE_PORT: u16 = 0;
+
+/// The flag that asks for ip version 4.
+const FLAG_VERSION_4: &str = "-4";
+
+/// The flag that asks for ip version 6.
+const FLAG_VERSION_6: &str = "-6";
 
 /// The name of one round of a run, in a summary line.
 const ROUND: &str = "round";
@@ -173,11 +223,11 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 
 /// Knights of the Round Trip: record the network path to a destination.
 ///
-/// `krt` probes every hop to the destination once per round, and it records
-/// each round in a file. The `replay` command reads a file that an earlier run
-/// wrote, so it takes no destination and no flag of a probe. This build prints
-/// the configuration that a trace resolved, because no tracer exists yet, and
-/// it prints one summary line for a replay.
+/// A trace resolves the destination, opens the recorded file, and probes every
+/// hop to the destination once per round. It appends one record for each round,
+/// and it prints one status line for that round. The `replay` command reads a
+/// file that an earlier run wrote, so it takes no destination and no flag of a
+/// probe.
 #[derive(Parser, Debug)]
 // `args_conflicts_with_subcommands` rejects a flag of a probe beside a command,
 // because a replay probes nothing. `subcommand_negates_reqs` lifts the demand
@@ -294,8 +344,9 @@ enum Command {
 
 /// The configuration of one run, after the command line resolves.
 ///
-/// Every field holds a resolved value and not a flag, so a later slice reads
-/// the behavior of the run and never reads the switch that made it.
+/// Every field holds a resolved value and not a flag, so a reader of the
+/// configuration reads the behavior of the run and never reads the switch that
+/// made it.
 #[derive(Debug)]
 struct ResolvedConfig {
     /// The host or the address to trace. A replay traces nothing, so the
@@ -336,9 +387,8 @@ impl Cli {
     ///
     /// The two flags of the address family collapse into one value, and the
     /// `--no-dns` switch becomes the behavior it controls. The `replay` command
-    /// becomes the recorded file and the run to fold, so every later slice
-    /// reads one flat configuration and never reads the shape of the command
-    /// line.
+    /// becomes the recorded file and the run to fold, so every reader takes one
+    /// flat configuration and never reads the shape of the command line.
     ///
     /// # Errors
     ///
@@ -552,6 +602,163 @@ fn render_duration(duration: Duration) -> String {
     format!("{seconds}s")
 }
 
+/// Picks the address of the version that the run asked for.
+///
+/// The `auto` family takes the first address that the resolver named, whatever
+/// its version.
+fn pick_address(found: &[SocketAddr], family: AddressFamily) -> Option<IpAddr> {
+    found
+        .iter()
+        .map(SocketAddr::ip)
+        .find(|address| match family {
+            AddressFamily::Auto => true,
+            AddressFamily::Version4 => address.is_ipv4(),
+            AddressFamily::Version6 => address.is_ipv6(),
+        })
+}
+
+/// Writes the reason that a destination names no address to probe.
+///
+/// A run that asked for one version names that version and the flag that asks
+/// for it, so the user reads one line and corrects the command line. A run that
+/// asked for no version takes an address of either version, so no flag of the
+/// command line changed the answer, and the message names none.
+fn no_address_message(destination: &str, family: AddressFamily) -> String {
+    let flag = match family {
+        AddressFamily::Auto => {
+            return format!(
+                "`{destination}` names no address: name a destination that resolves to one"
+            );
+        }
+        AddressFamily::Version4 => FLAG_VERSION_4,
+        AddressFamily::Version6 => FLAG_VERSION_6,
+    };
+    format!(
+        "`{destination}` names no {family} address: drop `{flag}`, or name a destination that holds one"
+    )
+}
+
+/// Why a destination names no address to probe.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+enum ResolveError {
+    /// The resolver refused the destination.
+    #[error("`{destination}` does not resolve: {reason}")]
+    Lookup {
+        /// The destination as the user typed it.
+        destination: String,
+        /// The reason that the resolver gave.
+        reason: String,
+    },
+    /// The destination names no address of the version that the run asked for.
+    #[error("{}", no_address_message(destination, *family))]
+    NoAddress {
+        /// The destination as the user typed it.
+        destination: String,
+        /// The IP version that the run asked for.
+        family: AddressFamily,
+    },
+}
+
+/// Reads the address that a destination names.
+///
+/// The destination is a host name or a literal address, and the answer carries
+/// the destination as the user typed it, the address, and the version of that
+/// address.
+///
+/// # Errors
+///
+/// Returns [`ResolveError::Lookup`] when the resolver refuses the destination.
+/// Returns [`ResolveError::NoAddress`] when the destination names no address of
+/// the version that the run asked for.
+fn resolve_target(destination: &str, family: AddressFamily) -> Result<Target, ResolveError> {
+    let found: Vec<SocketAddr> = (destination, RESOLVE_PORT)
+        .to_socket_addrs()
+        .map_err(|error| ResolveError::Lookup {
+            destination: destination.to_owned(),
+            reason: error.to_string(),
+        })?
+        .collect();
+    let addr = pick_address(&found, family).ok_or_else(|| ResolveError::NoAddress {
+        destination: destination.to_owned(),
+        family,
+    })?;
+    Ok(Target {
+        arg: destination.to_owned(),
+        addr,
+        family: match addr {
+            IpAddr::V4(_) => Family::Ipv4,
+            IpAddr::V6(_) => Family::Ipv6,
+        },
+    })
+}
+
+/// The name of the machine that makes a run.
+fn host_name() -> String {
+    host_name_or(sysinfo::System::host_name())
+}
+
+/// The name of the machine, from what the system reported.
+///
+/// A system that reports no name, and a system that reports an empty one, both
+/// leave the run without a name, so the record carries one word in its place.
+fn host_name_or(reported: Option<String>) -> String {
+    reported
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| UNKNOWN.to_owned())
+}
+
+/// The signals that stop a run.
+///
+/// SIGINT is the Ctrl-C of the terminal, and SIGTERM is the polite kill.
+/// SIGKILL is the one signal that no program handles, and `krt` does not
+/// pretend otherwise.
+#[cfg(unix)]
+const TERMINATION_SIGNALS: [std::os::raw::c_int; 2] =
+    [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM];
+
+// No test calls `stop_flag`. The registration changes the whole process, so a
+// test that called it would take the Ctrl-C of `cargo test` away from the test
+// runner. `user_stopped` carries the behavior that a test drives.
+
+/// A flag that a termination signal sets.
+///
+/// The run loop reads the flag once per turn of its loop. A run that the user
+/// stops therefore writes the record that closes it and flushes the file. A run
+/// that registers no handler loses that record, because the signal ends the
+/// process where it stands.
+///
+/// # Errors
+///
+/// Returns the reason when the platform refuses the registration.
+#[cfg(unix)]
+fn stop_flag() -> std::io::Result<Arc<AtomicBool>> {
+    let flag = Arc::new(AtomicBool::new(false));
+    for signal in TERMINATION_SIGNALS {
+        signal_hook::flag::register(signal, Arc::clone(&flag))?;
+    }
+    Ok(flag)
+}
+
+/// A flag that a termination signal sets.
+///
+/// This platform registers no handler, so nothing sets the flag. The user of
+/// this platform stops a run through the key handler of the table, and the
+/// table arrives in a later slice of issue #372.
+///
+/// # Errors
+///
+/// Returns no reason. The result holds the shape of the unix build, so one call
+/// site serves both platforms.
+#[cfg(not(unix))]
+fn stop_flag() -> std::io::Result<Arc<AtomicBool>> {
+    Ok(Arc::new(AtomicBool::new(false)))
+}
+
+/// Answers whether the user stopped the run.
+fn user_stopped(flag: &AtomicBool) -> bool {
+    flag.load(Ordering::Relaxed)
+}
+
 /// Writes a count and the name of what it counts.
 ///
 /// One of a thing keeps the singular name, and every other count adds one `s`.
@@ -578,7 +785,7 @@ fn counted(count: usize, name: &str) -> String {
 /// replaces this line with the aggregate table.
 fn summarize(run: &Run<'_>) -> String {
     let target = run.start().map_or_else(
-        || TARGET_UNKNOWN.to_owned(),
+        || UNKNOWN.to_owned(),
         |start| format!("{} ({})", start.target.arg, start.target.addr),
     );
     let ttls: BTreeSet<u8> = run
@@ -669,6 +876,186 @@ struct Replay {
     outcome: Result<String, String>,
 }
 
+/// The fault that stopped a trace, and the code that names its kind.
+struct TraceFailure {
+    /// The reason, as the user reads it.
+    reason: String,
+    /// The exit code of that kind of fault.
+    code: i32,
+}
+
+impl TraceFailure {
+    /// Builds the fault from a reason and the code of its kind.
+    fn new(reason: &dyn fmt::Display, code: i32) -> Self {
+        Self {
+            reason: reason.to_string(),
+            code,
+        }
+    }
+}
+
+/// The unspecified address of the family of an address.
+fn unspecified_of(target: IpAddr) -> IpAddr {
+    match target {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    }
+}
+
+/// The address that the probes leave from.
+///
+/// A machine that names no route to the target still records. The discovery of
+/// the source therefore stops no run: a fault leaves the unspecified address of
+/// the family of the target in the record, and one warning names the fault. A
+/// captive network and a network with no route out both still record.
+fn source_of(named: Option<IpAddr>, target: IpAddr) -> SourceLabel {
+    match source::discover(named, target) {
+        Ok(label) => label,
+        Err(error) => {
+            eprintln!("{PROGRAM}: the source address did not read: {error}. {SOURCE_FALLBACK}");
+            SourceLabel {
+                addr: unspecified_of(target),
+                kind: SourceKind::Local,
+            }
+        }
+    }
+}
+
+/// The period of one round in milliseconds, for the record that opens a run.
+///
+/// A period too large for the field takes the largest number the field holds.
+/// No command line reaches that period, because `parse_duration` stops well
+/// below it.
+fn interval_millis(interval: Duration) -> u64 {
+    u64::try_from(interval.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The moment that the time limit of a run falls due.
+///
+/// A limit too large to add to the clock leaves the run without a moment, so
+/// the run goes until the user stops it. No command line reaches that limit.
+fn deadline_of(limit: Option<Duration>) -> Option<Instant> {
+    limit.and_then(|limit| Instant::now().checked_add(limit))
+}
+
+/// Names why a run stopped, for the line that a trace prints when it stops.
+fn stop_reason(reason: EndReason) -> &'static str {
+    match reason {
+        EndReason::Quit => "the user stopped the run",
+        EndReason::Duration => "the time limit stopped the run",
+        EndReason::Rounds => "the round limit stopped the run",
+        // A fault leaves the run through an error, and `main` writes that
+        // reason to standard error in the place of this line. The words are
+        // here so the table of the reasons stays complete.
+        EndReason::Error => "a fault stopped the run",
+    }
+}
+
+/// Writes the one line that a trace prints when it stops.
+///
+/// The line holds the number of rounds that the run recorded, the file that
+/// holds them, and why the run stopped. Two spaces separate the fields, as they
+/// do on the summary line of a replay.
+fn closing_line(outcome: &run::Outcome, path: &Path) -> String {
+    let rounds = usize::try_from(outcome.rounds).unwrap_or(usize::MAX);
+    [
+        format!("{RECORDED} {}", counted(rounds, ROUND)),
+        path.display().to_string(),
+        stop_reason(outcome.reason).to_owned(),
+    ]
+    .join(SUMMARY_SEPARATOR)
+}
+
+/// Records one trace, from the destination of the command line to the record
+/// that closes the run.
+///
+/// The order of the steps is the order of their cost, and each one stops the
+/// run before the next one spends anything. The resolution comes first, because
+/// it needs no privilege and touches no file. The privilege gate comes next, so
+/// a platform that cannot probe says so before the run makes a file. The
+/// recorded file opens before the tracer starts, so no probe leaves the machine
+/// for a run that cannot record it.
+///
+/// # Errors
+///
+/// Returns the reason and the exit code of the fault that stopped the run.
+fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
+    // The parser makes the destination required outside a command, so a trace
+    // always names one.
+    let destination = config.destination.as_deref().unwrap_or_default();
+
+    let target = resolve_target(destination, config.address_family)
+        .map_err(|error| TraceFailure::new(&error, EXIT_FAILURE))?;
+    let privilege = trace::acquire_privilege()
+        .map_err(|error| TraceFailure::new(&error, EXIT_NO_PRIVILEGES))?;
+
+    let source = source_of(config.source, target.addr);
+    let path = source::output_path(config.output.as_deref(), source.addr, destination);
+    let mut writer = record::Writer::append(&path).map_err(|error| {
+        TraceFailure::new(&format!("{}: {error}", path.display()), EXIT_WRITE_FAILED)
+    })?;
+    println!("{RECORDING_TO} {}", path.display());
+
+    let run = RunId::at(Utc::now());
+    let rounds = trace::spawn(&trace::TraceConfig {
+        target: target.addr,
+        run: run.clone(),
+        interval: config.interval,
+        first_ttl: config.first_ttl,
+        max_ttl: config.max_ttl,
+        protocol: config.protocol,
+        multipath: config.multipath,
+        privilege,
+    })
+    .map_err(|error| TraceFailure::new(&error, EXIT_TRACER_FAILED))?;
+
+    let start = RunRecord {
+        run,
+        krt: version_string!().to_owned(),
+        source,
+        target,
+        config: RunConfig {
+            interval_ms: interval_millis(config.interval),
+            protocol: config.protocol,
+            first_ttl: config.first_ttl,
+            max_ttl: config.max_ttl,
+            multipath: config.multipath,
+            privilege,
+            dns: config.reverse_dns,
+        },
+        host: host_name(),
+    };
+
+    let flag = stop_flag().map_err(|error| {
+        TraceFailure::new(
+            &format!("the stop signal did not register: {error}"),
+            EXIT_FAILURE,
+        )
+    })?;
+    let limits = run::Limits {
+        rounds: config.rounds,
+        deadline: deadline_of(config.duration),
+    };
+    let mut status = std::io::stdout();
+    let outcome = run::record(
+        &start,
+        &rounds,
+        &limits,
+        &|| user_stopped(&flag),
+        &mut writer,
+        &mut status,
+    )
+    .map_err(|error| {
+        let code = match error {
+            run::RunError::Write(_) => EXIT_WRITE_FAILED,
+            run::RunError::Tracer { .. } => EXIT_TRACER_FAILED,
+        };
+        TraceFailure::new(&error, code)
+    })?;
+    println!("{}", closing_line(&outcome, &path));
+    Ok(outcome)
+}
+
 fn main() {
     // The parse handles `--version`, `-V`, and `--help` on its own. A
     // contradiction between two flags leaves the parser, so `clap` writes it to
@@ -681,8 +1068,12 @@ fn main() {
             .exit(),
     };
     let Some(path) = config.replay.as_deref() else {
-        // No tracer exists yet, so a trace prints what it resolved.
+        // The block names what the run will do, and then the run does it.
         print!("{config}");
+        if let Err(failure) = trace(&config) {
+            eprintln!("{PROGRAM}: {}", failure.reason);
+            std::process::exit(failure.code);
+        }
         return;
     };
     // The warning comes before the outcome, so a reader of standard error sees
@@ -703,13 +1094,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_duration, render_duration, AddressFamily, Cli, Command, Multipath, Protocol,
-        ResolvedConfig,
+        closing_line, host_name_or, parse_duration, pick_address, render_duration, resolve_target,
+        stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason, Family, Multipath,
+        Protocol, ResolveError, ResolvedConfig, RESOLVE_PORT, UNKNOWN,
     };
+    use crate::run::Outcome;
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser};
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     /// The accepted units, as `parse_duration` names them for an unknown unit.
@@ -1727,5 +2122,256 @@ resolved configuration:
                 "the block holds no `{absent}`: {block}"
             );
         }
+    }
+
+    /// A literal address of ip version 4, for a test of the resolution.
+    const AN_IPV4_ADDRESS: &str = "1.2.3.4";
+
+    /// The loopback address of ip version 6, for a test of the resolution.
+    const AN_IPV6_ADDRESS: &str = "::1";
+
+    /// An address of ip version 6 that no machine holds, for a test of the
+    /// resolution. The block `2001:db8::/32` is the block of the documents.
+    const ANOTHER_IPV6_ADDRESS: &str = "2001:db8::1";
+
+    /// A destination that holds no label, for a test of the resolution.
+    const NO_LABEL: &str = "";
+
+    /// The name that a machine reports, for a test of the host name.
+    const A_HOST_NAME: &str = "tims-mac";
+
+    /// The name that a machine reports when it holds none.
+    const AN_EMPTY_HOST_NAME: &str = "";
+
+    /// Every family of the address, for a test that walks all three.
+    const EVERY_FAMILY: [AddressFamily; 3] = [
+        AddressFamily::Auto,
+        AddressFamily::Version4,
+        AddressFamily::Version6,
+    ];
+
+    /// Reads a literal address that a test names.
+    ///
+    /// Every test of the resolution names a literal address. `to_socket_addrs`
+    /// reads a literal address inside the machine and asks no resolver, so
+    /// every such test runs offline. A host name in the place of a literal
+    /// reaches a name server, and the test then answers for the network of the
+    /// machine and not for this code.
+    fn address(text: &str) -> IpAddr {
+        text.parse().expect("the test address must parse")
+    }
+
+    /// Builds the socket address of one literal address that a test names.
+    fn socket(text: &str) -> SocketAddr {
+        SocketAddr::new(address(text), RESOLVE_PORT)
+    }
+
+    /// Reads the fault of a destination that names no address to probe.
+    fn resolve_failure(destination: &str, family: AddressFamily) -> ResolveError {
+        resolve_target(destination, family)
+            .expect_err("the destination must name no address to probe")
+    }
+
+    /// Every reason that closes a run, for the table of the closing words.
+    const EVERY_END_REASON: [EndReason; 4] = [
+        EndReason::Quit,
+        EndReason::Duration,
+        EndReason::Rounds,
+        EndReason::Error,
+    ];
+
+    #[test]
+    fn each_reason_that_closes_a_run_carries_its_own_words() {
+        assert_eq!(stop_reason(EndReason::Quit), "the user stopped the run");
+        assert_eq!(
+            stop_reason(EndReason::Duration),
+            "the time limit stopped the run"
+        );
+        assert_eq!(
+            stop_reason(EndReason::Rounds),
+            "the round limit stopped the run"
+        );
+        assert_eq!(stop_reason(EndReason::Error), "a fault stopped the run");
+    }
+
+    /// A word that two reasons share leaves a reader unable to tell them apart,
+    /// so the table gives each reason its own.
+    #[test]
+    fn no_two_reasons_share_their_words() {
+        let mut words: Vec<&str> = EVERY_END_REASON.iter().copied().map(stop_reason).collect();
+        words.sort_unstable();
+        let count = words.len();
+        words.dedup();
+        assert_eq!(words.len(), count, "each reason carries its own words");
+    }
+
+    #[test]
+    fn the_closing_line_names_the_rounds_the_file_and_the_reason() {
+        let outcome = Outcome {
+            rounds: 3,
+            reason: EndReason::Rounds,
+        };
+        assert_eq!(
+            closing_line(&outcome, Path::new("1.2.3.4-example.com.jsonl")),
+            "recorded 3 rounds  1.2.3.4-example.com.jsonl  the round limit stopped the run"
+        );
+    }
+
+    /// One round keeps the singular name, as every other count of this tool
+    /// does.
+    #[test]
+    fn the_closing_line_of_one_round_keeps_the_singular_name() {
+        let outcome = Outcome {
+            rounds: 1,
+            reason: EndReason::Quit,
+        };
+        assert_eq!(
+            closing_line(&outcome, Path::new("trace.jsonl")),
+            "recorded 1 round  trace.jsonl  the user stopped the run"
+        );
+    }
+
+    #[test]
+    fn the_auto_family_takes_the_first_address_that_the_resolver_named() {
+        let found = [socket(AN_IPV6_ADDRESS), socket(AN_IPV4_ADDRESS)];
+        assert_eq!(
+            pick_address(&found, AddressFamily::Auto),
+            Some(address(AN_IPV6_ADDRESS))
+        );
+    }
+
+    #[test]
+    fn ip_version_4_takes_the_first_address_of_that_version() {
+        let found = [socket(AN_IPV6_ADDRESS), socket(AN_IPV4_ADDRESS)];
+        assert_eq!(
+            pick_address(&found, AddressFamily::Version4),
+            Some(address(AN_IPV4_ADDRESS))
+        );
+    }
+
+    #[test]
+    fn ip_version_6_takes_the_first_address_of_that_version() {
+        let found = [socket(AN_IPV4_ADDRESS), socket(AN_IPV6_ADDRESS)];
+        assert_eq!(
+            pick_address(&found, AddressFamily::Version6),
+            Some(address(AN_IPV6_ADDRESS))
+        );
+    }
+
+    #[test]
+    fn ip_version_4_takes_no_address_of_a_list_of_ip_version_6_only() {
+        let found = [socket(AN_IPV6_ADDRESS), socket(ANOTHER_IPV6_ADDRESS)];
+        assert_eq!(pick_address(&found, AddressFamily::Version4), None);
+    }
+
+    #[test]
+    fn ip_version_6_takes_no_address_of_a_list_of_ip_version_4_only() {
+        let found = [socket(AN_IPV4_ADDRESS), socket("5.6.7.8")];
+        assert_eq!(pick_address(&found, AddressFamily::Version6), None);
+    }
+
+    #[test]
+    fn every_family_takes_no_address_of_an_empty_list() {
+        for family in EVERY_FAMILY {
+            assert_eq!(pick_address(&[], family), None, "the `{family}` family");
+        }
+    }
+
+    #[test]
+    fn a_literal_address_of_ip_version_4_resolves_to_itself() {
+        let target = resolve_target(AN_IPV4_ADDRESS, AddressFamily::Auto)
+            .expect("a literal address must resolve");
+        assert_eq!(target.arg, AN_IPV4_ADDRESS);
+        assert_eq!(target.addr, address(AN_IPV4_ADDRESS));
+        assert_eq!(target.family, Family::Ipv4);
+    }
+
+    #[test]
+    fn a_literal_address_of_ip_version_6_resolves_to_itself() {
+        let target = resolve_target(AN_IPV6_ADDRESS, AddressFamily::Auto)
+            .expect("a literal address must resolve");
+        assert_eq!(target.addr, address(AN_IPV6_ADDRESS));
+        assert_eq!(target.family, Family::Ipv6);
+    }
+
+    #[test]
+    fn a_literal_address_of_ip_version_6_resolves_under_the_flag_of_ip_version_6() {
+        let target = resolve_target(ANOTHER_IPV6_ADDRESS, AddressFamily::Version6)
+            .expect("a literal address must resolve");
+        assert_eq!(target.addr, address(ANOTHER_IPV6_ADDRESS));
+        assert_eq!(target.family, Family::Ipv6);
+    }
+
+    #[test]
+    fn an_address_of_ip_version_4_names_no_address_under_the_flag_of_ip_version_6() {
+        let error = resolve_failure(AN_IPV4_ADDRESS, AddressFamily::Version6);
+        assert_eq!(
+            error,
+            ResolveError::NoAddress {
+                destination: AN_IPV4_ADDRESS.to_owned(),
+                family: AddressFamily::Version6,
+            }
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&AddressFamily::Version6.to_string()),
+            "the message names ip version 6: {message}"
+        );
+        assert!(
+            message.contains(AN_IPV4_ADDRESS),
+            "the message names the destination: {message}"
+        );
+    }
+
+    #[test]
+    fn an_address_of_ip_version_6_names_no_address_under_the_flag_of_ip_version_4() {
+        assert_eq!(
+            resolve_failure(AN_IPV6_ADDRESS, AddressFamily::Version4),
+            ResolveError::NoAddress {
+                destination: AN_IPV6_ADDRESS.to_owned(),
+                family: AddressFamily::Version4,
+            }
+        );
+    }
+
+    /// A destination that holds no label never reaches a name server, because
+    /// the resolver of the machine refuses it. The test is therefore offline,
+    /// as every other test of the resolution is.
+    #[test]
+    fn a_destination_that_holds_no_label_does_not_resolve() {
+        let error = resolve_failure(NO_LABEL, AddressFamily::Auto);
+        assert!(
+            matches!(error, ResolveError::Lookup { .. }),
+            "the resolver refused the destination: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("`{NO_LABEL}`")),
+            "the message names the destination: {message}"
+        );
+    }
+
+    #[test]
+    fn a_machine_that_reports_a_name_carries_that_name() {
+        assert_eq!(host_name_or(Some(A_HOST_NAME.to_owned())), A_HOST_NAME);
+    }
+
+    #[test]
+    fn a_machine_that_reports_no_name_carries_one_word() {
+        assert_eq!(host_name_or(None), UNKNOWN);
+    }
+
+    /// An empty name is no name, so it takes the same word as an absent one.
+    #[test]
+    fn a_machine_that_reports_an_empty_name_carries_one_word() {
+        assert_eq!(host_name_or(Some(AN_EMPTY_HOST_NAME.to_owned())), UNKNOWN);
+    }
+
+    #[test]
+    fn a_flag_that_a_signal_set_stops_the_run() {
+        let flag = AtomicBool::new(false);
+        assert!(!user_stopped(&flag), "a clear flag leaves the run going");
+        flag.store(true, Ordering::SeqCst);
+        assert!(user_stopped(&flag), "a set flag stops the run");
     }
 }

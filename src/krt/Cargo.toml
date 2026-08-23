@@ -10,7 +10,11 @@ chrono.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
+sysinfo.workspace = true
 thiserror.workspace = true
+trippy-core.workspace = true
+trippy-privilege.workspace = true
 
 [lints]
 workspace = true
