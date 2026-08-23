@@ -2,8 +2,9 @@
 //!
 //! The name of a recorded file holds the source address and the destination, so
 //! one source and one destination keep one file across many runs. Both halves
-//! of the name lose every character that a file name must not hold. The
-//! `--output` flag names a file of its own, and it wins over the derived name.
+//! of the name lose every character that a file name must not hold on macOS, on
+//! Linux, or on Windows. The `--output` flag names a file of its own, and it
+//! wins over the derived name.
 //!
 //! The derived name carries the address that the probes leave from. A file that
 //! the user gives to another person carries that address too. `--output`
@@ -28,16 +29,25 @@ const HYPHEN: char = '-';
 /// forward slash parts two names of a path, and a backward slash does the same
 /// on Windows.
 ///
+/// Windows reserves six more characters. A question mark and a star are
+/// wildcards. An angle bracket of each side redirects the input or the output
+/// of a command. A quotation mark encloses a name that holds a space. A
+/// vertical bar joins two commands.
+///
+/// The list holds the characters of every platform, and not the characters of
+/// one. A destination such as `https://example.com/p?q=1` therefore derives a
+/// name that opens a file on Windows as it does on macOS and on Linux.
+///
 /// Whitespace becomes a hyphen too, and this list does not hold it.
 /// `char::is_whitespace` reads the whole Unicode table, and no list of a few
 /// characters holds as much.
-const FORBIDDEN: [char; 3] = [':', '/', '\\'];
+const FORBIDDEN: [char; 9] = [':', '/', '\\', '?', '*', '<', '>', '"', '|'];
 
 /// Replaces every character that a file name must not hold.
 ///
-/// A colon, a forward slash, a backward slash, and a space each become one
-/// hyphen. Every other character stays, so a destination that holds Japanese
-/// characters keeps them.
+/// Each character of `FORBIDDEN` becomes one hyphen, and a space does the same.
+/// Every other character stays, so a destination that holds Japanese characters
+/// keeps them.
 ///
 /// The walk reads characters and never bytes, so a character of more than one
 /// byte survives whole. `char::is_whitespace` reads the Unicode table, so a
@@ -59,7 +69,9 @@ fn sanitize(text: &str) -> String {
 ///
 /// The name is `SOURCE-DESTINATION.jsonl`, and both halves lose the characters
 /// that a file name must not hold. A source of IP version 6 therefore gives a
-/// name such as `2001-db8--1-example.com.jsonl`.
+/// name such as `2001-db8--1-example.com.jsonl`, and a destination that holds a
+/// URL with a query string gives a name such as
+/// `1.2.3.4-https---example.com-p-q=1.jsonl`.
 fn derive_name(source: IpAddr, destination: &str) -> String {
     format!(
         "{}{HYPHEN}{}.{EXTENSION}",
