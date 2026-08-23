@@ -402,6 +402,9 @@ mod tests {
     /// the whole of it.
     const ONE_ROUND_HEADER: &str = " krt  example.com → 93.184.216.34   src 1.2.3.4   round 1   1s   ";
 
+    /// The start of the header line of a table that folded no round.
+    const NO_ROUND_HEADER: &str = " krt  example.com → 93.184.216.34   src 1.2.3.4   round 0   1s   ";
+
     /// The row of a table that folded one round of one TTL.
     ///
     /// The round answers at TTL 1 from 10.0.0.1 at 0.87, which one decimal
@@ -629,6 +632,34 @@ mod tests {
         assert!(
             again.iter().any(|line| line.contains(NAMED_ROUTER)),
             "a second press puts the names back, so the table keeps them: {again:?}"
+        );
+    }
+
+    #[test]
+    fn the_reset_key_empties_the_table_and_zeroes_the_counter_of_the_display() {
+        let mut screen = table(&[&[Command::Reset]]);
+        screen.round(&one_round());
+
+        screen.sink.clear();
+        screen.poll();
+        let empty = painted(&screen.sink);
+        assert!(
+            empty
+                .first()
+                .is_some_and(|line| line.starts_with(NO_ROUND_HEADER)),
+            "the header line then counts no round: {empty:?}"
+        );
+        assert!(
+            !empty.iter().any(|line| line.contains(ROUTER)),
+            "and no row of the path stands under it: {empty:?}"
+        );
+
+        screen.sink.clear();
+        screen.round(&one_round());
+        let first = painted(&screen.sink);
+        assert!(
+            first.iter().any(|line| line == ONE_ROUND_ROW),
+            "the round that follows the reset counts as the first round: {first:?}"
         );
     }
 
