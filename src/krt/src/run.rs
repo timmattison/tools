@@ -1453,4 +1453,54 @@ mod tests {
         );
         assert_eq!(ran.screen.seqs(), [7, 3, 9]);
     }
+
+    /// A live table names the host of a row, so every name that the run writes
+    /// reaches the screen as well as the file.
+    #[test]
+    fn a_name_that_arrives_reaches_the_screen() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[named(FIRST_HOP_NAME)])]);
+        let ran = ran_with(
+            "screen-name",
+            &a_stream(&rounds_of(&[1])),
+            &after_rounds(1),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        let names = &ran.screen.names;
+        assert_eq!(names.len(), 1, "the run showed one name: {names:?}");
+        assert_eq!(
+            names[0].addr,
+            address(FIRST_HOP),
+            "the name that reached the screen names the address of the hop"
+        );
+        assert_eq!(
+            names[0].host, FIRST_HOP_NAME,
+            "and it holds the name that the lookup gave"
+        );
+    }
+
+    /// The last ask of a run runs while that run closes, and the display of a
+    /// run that closes shows nothing more. The name still reaches the file, so
+    /// a replay of that file names the address.
+    #[test]
+    fn the_names_that_a_run_writes_while_it_closes_reach_no_screen() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[Lookup::Pending, named(FIRST_HOP_NAME)])]);
+        let ran = ran_with(
+            "screen-name-drain",
+            &a_stream(&rounds_of(&[1])),
+            &after_rounds(1),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        assert_eq!(
+            kinds_of(&ran.recording),
+            ["run", "round", "name", "end"],
+            "the name that arrived after the last round reached the file"
+        );
+        assert!(
+            ran.screen.names.is_empty(),
+            "and it reached no screen: {:?}",
+            ran.screen.names
+        );
+    }
 }
