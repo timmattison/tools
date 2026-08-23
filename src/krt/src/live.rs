@@ -595,7 +595,17 @@ fn install_panic_hook() -> PanicHook {
 /// the live run that installed it. The hook of a live run puts a terminal back,
 /// and no part of the process that follows that run holds one, so a hook that
 /// outlived its run acts on a panic that it knows nothing about.
+///
+/// A thread that panics puts no hook back. `std::panic::set_hook` refuses such
+/// a thread, and it refuses with a panic of its own, which aborts the process
+/// on the spot. The guard of a live run reaches this call on the path of every
+/// panic of that run, and the hook of the live run already put the terminal
+/// back by then. That hook therefore stands on for the little of the process
+/// that is left, and the message of the panic reaches the reader.
 fn restore_panic_hook(previous: PanicHook) {
+    if std::thread::panicking() {
+        return;
+    }
     std::panic::set_hook(Box::new(move |info| (*previous)(info)));
 }
 
