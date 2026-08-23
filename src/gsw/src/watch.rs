@@ -803,13 +803,16 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 // without one — this is the type's `Option` being honored, not
                 // a case the user can reach.
                 if let Some(workdir) = workdir.clone() {
-                    let tx = push_tx.clone();
+                    // Two senders on the one channel, so a line and the
+                    // outcome re-enter the loop the same way every other event
+                    // does — applied between frames rather than during one.
+                    let line_tx = push_tx.clone();
                     let finish_tx = push_tx.clone();
                     crate::push::spawn(
                         command,
                         workdir,
-                        move |_line| {
-                            let _ = &tx;
+                        move |line| {
+                            let _ = line_tx.send(Event::PushOutput(line));
                         },
                         move |outcome| {
                             let _ = finish_tx.send(Event::PushFinished(outcome));
@@ -1080,7 +1083,7 @@ where
                 start_push(command);
             }
         }
-        Event::PushOutput(_line) => {}
+        Event::PushOutput(line) => ui.output_line(line),
         Event::PushCancelled => ui.cancel(),
         Event::Dismiss => ui.dismiss(),
         Event::PushFinished(outcome) => {
