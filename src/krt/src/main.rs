@@ -1089,6 +1089,25 @@ fn run_config(config: &ResolvedConfig, privilege: record::Privilege) -> RunConfi
     }
 }
 
+/// The screen that a run shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Display {
+    /// The live table of the path, which holds the terminal and reads its keys.
+    Table,
+    /// One status line each minute, and no table.
+    Headless,
+}
+
+/// The screen that a run shows, from the `--headless` flag and from whether
+/// standard output is a terminal.
+fn display_of(headless: bool, _is_terminal: bool) -> Display {
+    if headless {
+        Display::Headless
+    } else {
+        Display::Table
+    }
+}
+
 /// Records one trace, from the destination of the command line to the record
 /// that closes the run.
 ///
@@ -1240,9 +1259,9 @@ fn main() {
 mod tests {
     use super::{
         closing_line, host_name_or, name_grace, parse_duration, pick_address, resolve_target,
-        run_config, source_from, stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason,
-        Family, Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel,
-        RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
+        display_of, run_config, source_from, stop_reason, user_stopped, AddressFamily, Cli, Command,
+        Display, EndReason, Family, Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind,
+        SourceLabel, RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
     };
     use crate::record::{Privilege, RunConfig};
     use crate::run::Outcome;
@@ -2126,6 +2145,34 @@ resolved configuration:
         let cli = parse(&["krt", "example.com", "--no-dns", "--headless"]);
         assert!(cli.no_dns);
         assert!(cli.headless);
+    }
+
+    #[test]
+    fn a_run_shows_the_table_only_under_a_terminal_that_the_headless_flag_left_alone() {
+        assert_eq!(
+            display_of(false, true),
+            Display::Table,
+            "a run that holds a terminal and took no flag draws the live table"
+        );
+        assert_eq!(
+            display_of(true, true),
+            Display::Headless,
+            "the flag takes the table off a run that does hold a terminal"
+        );
+        // A run whose standard output is a pipe or a file has no terminal to
+        // hold, no key to read, and no screen to clear. A table there writes
+        // one whole frame into that file for each round, where one line each
+        // minute says the same thing in four lines an hour.
+        assert_eq!(
+            display_of(false, false),
+            Display::Headless,
+            "a run that holds no terminal draws no table"
+        );
+        assert_eq!(
+            display_of(true, false),
+            Display::Headless,
+            "and the flag leaves such a run where it stands"
+        );
     }
 
     #[test]
