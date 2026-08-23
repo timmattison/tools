@@ -10,14 +10,45 @@
 //! a character, so every cell of the table keeps its column and every name
 //! stays a string.
 //!
-//! The table stands on those helpers. It holds nine columns: the TTL, the
-//! host, one column that carries the percentage with its mark and its count,
-//! the five round-trip times, and the sparkline. The percentage, the mark, and
-//! the count are one column and not three, because no gap stands between them:
-//! the mark says whether the percentage is a loss or a share, so a gap in front
-//! of it would read as a column of its own. The Host column is the one column
-//! that absorbs a change of the terminal width, and a later slice states the
-//! order in which the columns drop as the terminal gets narrow.
+//! The table stands on those helpers. It holds nine columns at a terminal wide
+//! enough for every one of them: the TTL, the host, one column that carries the
+//! percentage with its mark and its count, the five round-trip times, and the
+//! sparkline. The percentage, the mark, and the count are one column and not
+//! three, because no gap stands between them: the mark says whether the
+//! percentage is a loss or a share, so a gap in front of it would read as a
+//! column of its own. The Host column is the one column that absorbs a change
+//! of the terminal width.
+//!
+//! A terminal too narrow for the frame at the floor of the Host column drops
+//! columns, one at a time, until the frame fits. The order, first dropped
+//! first: `Recent`, `StDev`, `Max`, `Min`, `Last`, `Sent`, `Loss%`. It runs
+//! from the column that says the least about one hop to the column that says
+//! the most, so each drop gives up the cheapest column that stands. The TTL,
+//! the Host, and the Avg never drop. The TTL and the host name the hop, and the
+//! average is the one number that answers "how slow is this hop", which is the
+//! question this tool exists to answer. A reader who lost every other column
+//! still reads which hop is slow.
+//!
+//! The count of the probes goes away one step in front of the percentage, and
+//! the two of them share one column with the mark between them. A column that
+//! lost its count keeps the percentage and the mark. A column that lost the
+//! percentage as well goes away whole, and the mark goes with it: the mark says
+//! that a percentage is a share and not a loss, so it marks nothing where no
+//! percentage stands. The tree glyph of the Host column still tells an address
+//! row from a TTL row, so nothing goes away that a reader needs.
+//!
+//! The widths of the columns, the headings, and the cells of every row come out
+//! of one list of columns, and not out of three lists that a reader must keep
+//! in step. A column that leaves the list therefore takes its heading and its
+//! cells with it. Three lists would agree at every width but one, and at that
+//! width every cell behind the dropped column would land under the heading of
+//! the column in front of it: a table that reads as though the run measured
+//! something else. A frame of one width tells a reader nothing about that,
+//! which is why the list is one list and not a rule to obey.
+//!
+//! A terminal too narrow even for the last set of columns gets the frame at the
+//! floor of the Host column, and the terminal clips it. Nothing narrower says
+//! more, and a frame of no columns tells a reader nothing.
 //!
 //! The address rows of one TTL line their Share% up under the Loss% of the row
 //! above them, digit for digit. The drawing this table came from puts those
@@ -427,12 +458,19 @@ const MARK_WIDTH: u16 = 1;
 /// The number of columns that a count of probes or of answers takes.
 const SENT_WIDTH: u16 = 6;
 
+/// The number of columns of the column that carries a percentage and its mark,
+/// after a narrow terminal dropped the count behind them.
+///
+/// The two stand next to each other with no gap, so the table holds them as one
+/// column and not as two.
+const MARKED_PERCENT_WIDTH: u16 = PERCENT_WIDTH + MARK_WIDTH;
+
 /// The number of columns of the one column that carries a percentage, its mark,
 /// and its count.
 ///
 /// The three stand next to each other with no gap, so the table holds them as
 /// one column and not as three.
-const COUNTS_WIDTH: u16 = PERCENT_WIDTH + MARK_WIDTH + SENT_WIDTH;
+const COUNTS_WIDTH: u16 = MARKED_PERCENT_WIDTH + SENT_WIDTH;
 
 /// The number of columns that one round-trip time takes.
 ///
@@ -458,49 +496,6 @@ const RECENT_WIDTH: u16 = 9;
 /// number that stands one column from the number beside it reads as one longer
 /// number.
 const COLUMN_SPACING: u16 = 2;
-
-/// The width of every column of the table but the Host one, in the order the
-/// columns stand.
-///
-/// The Host column absorbs every change of the terminal width, so it is the one
-/// column whose width this list does not hold. Everything else about the layout
-/// derives from here, so a column that changes its width moves the frame with
-/// it and no line of this module spells the width of the whole frame.
-const FIXED_WIDTHS: [u16; 8] = [
-    TTL_WIDTH,
-    COUNTS_WIDTH,
-    TIME_WIDTH,
-    TIME_WIDTH,
-    TIME_WIDTH,
-    TIME_WIDTH,
-    TIME_WIDTH,
-    RECENT_WIDTH,
-];
-
-/// The number of columns that the frame takes with a Host column of `host`
-/// columns.
-///
-/// The Host column stands first here and the fixed ones follow it, so each of
-/// the fixed columns adds its width and the one gap in front of it. The count
-/// of the gaps is therefore the count of those columns, and no line of this
-/// module counts them by hand.
-///
-/// The nominal frame is 97 columns wide, which leaves the Host column 30 of
-/// them. Neither number stands in this module as a constant: the terminal says
-/// how wide the frame is, and [`host_width`] says what the Host column then
-/// takes.
-const fn frame_width(host: u16) -> u16 {
-    let mut total = host;
-    let mut index = 0;
-    while index < FIXED_WIDTHS.len() {
-        total += FIXED_WIDTHS[index] + COLUMN_SPACING;
-        index += 1;
-    }
-    total
-}
-
-/// The number of columns that the frame takes, without the Host column.
-const WIDTH_WITHOUT_HOST: u16 = frame_width(0);
 
 /// The number of lines that stand above the table: the header line, and the
 /// blank line under it.
@@ -562,11 +557,55 @@ const LOSS_HEADER: &str = "Loss%";
 /// The heading of the count that a TTL row prints.
 const SENT_HEADER: &str = "Sent";
 
+/// The heading of the round-trip time of the most recent answer.
+const LAST_HEADER: &str = "Last";
+
+/// The heading of the shortest round-trip time.
+const MIN_HEADER: &str = "Min";
+
+/// The heading of the mean round-trip time.
+const AVG_HEADER: &str = "Avg";
+
+/// The heading of the longest round-trip time.
+const MAX_HEADER: &str = "Max";
+
+/// The heading of the deviation of the round-trip times.
+const STDEV_HEADER: &str = "StDev";
+
 /// The heading of the five round-trip time columns, in the order they stand.
-const TIME_HEADERS: [&str; TIME_COLUMNS] = ["Last", "Min", "Avg", "Max", "StDev"];
+const TIME_HEADERS: [&str; TIME_COLUMNS] = [
+    LAST_HEADER,
+    MIN_HEADER,
+    AVG_HEADER,
+    MAX_HEADER,
+    STDEV_HEADER,
+];
 
 /// The heading of the sparkline column.
 const RECENT_HEADER: &str = "Recent";
+
+/// The number of columns that a narrow terminal drops.
+const DROPPABLE_COLUMNS: usize = 7;
+
+/// The columns that a narrow terminal drops, first dropped first.
+///
+/// A heading names each of them, because the heading is what a reader of the
+/// table sees of a column and no two headings read the same. The order runs
+/// from the column that says the least about one hop to the column that says
+/// the most, so every drop gives up the cheapest column that stands.
+///
+/// The TTL, the Host, and the Avg stand nowhere in this list, and that absence
+/// is how the module says that no terminal drops them: the TTL and the host
+/// name the hop, and the average says how slow that hop is.
+const DROP_ORDER: [&str; DROPPABLE_COLUMNS] = [
+    RECENT_HEADER,
+    STDEV_HEADER,
+    MAX_HEADER,
+    MIN_HEADER,
+    LAST_HEADER,
+    SENT_HEADER,
+    LOSS_HEADER,
+];
 
 /// Reads a count as the number that a percentage divides.
 #[expect(
@@ -605,39 +644,232 @@ fn render_percent(value: f64) -> String {
 ///
 /// The percentage takes the columns in front of the mark and the count takes
 /// the columns behind it, so the digits of a share land under the digits of the
-/// loss of the row above it however long either number is.
-fn counts_text(percent: &str, mark: &str, count: &str) -> String {
+/// loss of the row above it however long either number is. A terminal that
+/// dropped the count gives none, and the column then ends at the mark.
+fn counts_text(percent: &str, mark: &str, count: Option<&str>) -> String {
+    let count = count.map_or_else(String::new, |count| {
+        format!(
+            "{count:>count_width$}",
+            count_width = usize::from(SENT_WIDTH)
+        )
+    });
     format!(
-        "{percent:>percent_width$}{mark}{count:>count_width$}",
+        "{percent:>percent_width$}{mark}{count}",
         percent_width = usize::from(PERCENT_WIDTH),
-        count_width = usize::from(SENT_WIDTH),
     )
 }
 
-/// The width of the Host column at a terminal width.
+/// One column of the table, as the render draws it.
 ///
-/// Every other column holds a number whose widest print the run already knows,
-/// so the Host column is the one that takes what is left. A terminal too narrow
-/// to hold the frame at the floor of that column gets the frame at the floor,
-/// and the terminal clips the rest: a table that is one column too wide still
-/// reads, and a table whose hosts are three characters long does not.
-fn host_width(width: u16) -> u16 {
-    width.saturating_sub(WIDTH_WITHOUT_HOST).max(HOST_MIN)
+/// The slot carries the width of the column, the side of the column that its
+/// text holds to, and the field of a row that fills it. The constraints of the
+/// table, the headings, and the cells of every row therefore come out of one
+/// list of these: a column that leaves the list takes its cells with it, and no
+/// cell of a row can land under the heading of another column.
+#[derive(Clone, Copy)]
+struct Slot {
+    /// The number of terminal columns that the column takes.
+    width: u16,
+    /// The side of the column that its text holds to.
+    alignment: Alignment,
+    /// The field of a row that fills the column.
+    field: Field,
 }
 
-/// The width of every column of the table, in the order the columns stand.
-fn column_widths(host: u16) -> [Constraint; FIXED_WIDTHS.len() + 1] {
-    [
-        Constraint::Length(TTL_WIDTH),
-        Constraint::Length(host),
-        Constraint::Length(COUNTS_WIDTH),
-        Constraint::Length(TIME_WIDTH),
-        Constraint::Length(TIME_WIDTH),
-        Constraint::Length(TIME_WIDTH),
-        Constraint::Length(TIME_WIDTH),
-        Constraint::Length(TIME_WIDTH),
-        Constraint::Length(RECENT_WIDTH),
-    ]
+/// The field of a row that one column of the table draws.
+#[derive(Clone, Copy)]
+enum Field {
+    /// The TTL of the row.
+    Ttl,
+    /// The router that answered.
+    Host,
+    /// The percentage with its mark, and the count of the probes or of the
+    /// answers behind them while that count stands.
+    Counts {
+        /// Whether the count stands.
+        sent: bool,
+    },
+    /// One round-trip time, at the place it stands among the times.
+    Time(usize),
+    /// The sparkline of the recent round-trip times.
+    Recent,
+}
+
+impl Field {
+    /// The text that the field takes out of one row.
+    ///
+    /// A time reads the place it stands among the times, and
+    /// [`standing_slots`] takes that place from [`TIME_HEADERS`]. The times of
+    /// a row stand in the order of that same list, so the heading of a time and
+    /// the number under it always name the same statistic.
+    fn text(self, row: &RowText) -> String {
+        match self {
+            Self::Ttl => row.ttl.clone(),
+            Self::Host => row.host.clone(),
+            Self::Counts { sent } => {
+                counts_text(&row.percent, row.mark, sent.then_some(row.sent.as_str()))
+            }
+            Self::Time(index) => row.times[index].clone(),
+            Self::Recent => row.recent.clone(),
+        }
+    }
+}
+
+/// The columns that stand after the first `dropped` columns of [`DROP_ORDER`]
+/// went away, in the order the columns stand.
+///
+/// The Host column takes the width the caller gives it. Every other column
+/// knows the widest text it ever prints, so its width is a constant of this
+/// module.
+fn standing_slots(dropped: usize, host: u16) -> Vec<Slot> {
+    let gone = DROP_ORDER.get(..dropped).unwrap_or(&DROP_ORDER);
+    let holds = |heading: &str| !gone.contains(&heading);
+    let mut slots = vec![
+        Slot {
+            width: TTL_WIDTH,
+            alignment: Alignment::Right,
+            field: Field::Ttl,
+        },
+        Slot {
+            width: host,
+            alignment: Alignment::Left,
+            field: Field::Host,
+        },
+    ];
+    if holds(LOSS_HEADER) {
+        // The count goes away one step in front of the percentage, so this
+        // column loses six of its columns before it goes away whole.
+        let sent = holds(SENT_HEADER);
+        slots.push(Slot {
+            width: if sent {
+                COUNTS_WIDTH
+            } else {
+                MARKED_PERCENT_WIDTH
+            },
+            alignment: Alignment::Left,
+            field: Field::Counts { sent },
+        });
+    }
+    for (index, heading) in TIME_HEADERS.iter().enumerate() {
+        if holds(heading) {
+            slots.push(Slot {
+                width: TIME_WIDTH,
+                alignment: Alignment::Right,
+                field: Field::Time(index),
+            });
+        }
+    }
+    if holds(RECENT_HEADER) {
+        slots.push(Slot {
+            width: RECENT_WIDTH,
+            alignment: Alignment::Left,
+            field: Field::Recent,
+        });
+    }
+    slots
+}
+
+/// The number of columns that a set of columns takes, with the gaps between
+/// them.
+///
+/// One gap stands between two columns, so a set of one column holds no gap and
+/// an empty set holds none either.
+fn total_width(slots: &[Slot]) -> u16 {
+    let gaps = u16::try_from(slots.len().saturating_sub(1)).unwrap_or(u16::MAX);
+    slots
+        .iter()
+        .fold(gaps.saturating_mul(COLUMN_SPACING), |total, slot| {
+            total.saturating_add(slot.width)
+        })
+}
+
+/// The number of columns that the frame takes with a Host column of `host`
+/// columns, after `dropped` columns of the order went away.
+///
+/// The width reads the same list of columns that the render draws, so a column
+/// that changes its width, or that goes away, moves the frame with it. No line
+/// of this module counts the columns or the gaps by hand.
+///
+/// The nominal frame is 97 columns wide, which leaves the Host column 30 of
+/// them. Neither number stands in this module as a constant: the terminal says
+/// how wide the frame is, and [`Layout::at`] says what the columns then take.
+fn frame_width(dropped: usize, host: u16) -> u16 {
+    total_width(&standing_slots(dropped, host))
+}
+
+/// The columns that a terminal width holds, and the width of each of them.
+///
+/// The layout is the one answer to "what does this terminal hold". The widths
+/// of the columns, the headings, and the cells of every row all read it, so no
+/// two of the three can disagree about which columns stand.
+struct Layout {
+    /// The columns that stand, in the order they stand.
+    slots: Vec<Slot>,
+    /// The number of columns of the Host column.
+    host: u16,
+}
+
+impl Layout {
+    /// The layout of the frame at a terminal width.
+    ///
+    /// The columns go away in the order of [`DROP_ORDER`], one at a time, while
+    /// the frame at the floor of the Host column is wider than the terminal.
+    /// The Host column then takes every column that the rest of the frame
+    /// leaves, and never less than that floor: every other column holds a
+    /// number whose widest print the run already knows.
+    ///
+    /// A terminal too narrow even for the last set of columns gets the frame at
+    /// the floor, and the terminal clips it. A table that is one column too
+    /// wide still reads, a table whose hosts are three characters long does
+    /// not, and a table of no columns says nothing at all.
+    fn at(width: u16) -> Self {
+        let mut dropped = 0;
+        while dropped < DROPPABLE_COLUMNS && frame_width(dropped, HOST_MIN) > width {
+            dropped += 1;
+        }
+        let host = width.saturating_sub(frame_width(dropped, 0)).max(HOST_MIN);
+        Self {
+            slots: standing_slots(dropped, host),
+            host,
+        }
+    }
+
+    /// The number of columns that the frame takes.
+    fn width(&self) -> u16 {
+        total_width(&self.slots)
+    }
+
+    /// The number of columns of the Host column.
+    ///
+    /// Every row cuts its host to it. A row that cut to the terminal width
+    /// instead would print a name over the column behind it.
+    fn host(&self) -> u16 {
+        self.host
+    }
+
+    /// The width of every column that stands, in the order the columns stand.
+    fn constraints(&self) -> Vec<Constraint> {
+        self.slots
+            .iter()
+            .map(|slot| Constraint::Length(slot.width))
+            .collect()
+    }
+
+    /// The row that the table draws for one set of texts.
+    ///
+    /// The TTL and the times hold to the right of their columns, because a
+    /// reader of a column of numbers compares the last digit of one against the
+    /// last digit of the next. The host and the sparkline hold to the left,
+    /// because both of them read from their first character. The counts column
+    /// aligns itself: its text fills the column exactly.
+    fn row(&self, text: &RowText) -> Row<'static> {
+        Row::new(
+            self.slots
+                .iter()
+                .map(|slot| cell(slot.field.text(text), slot.alignment))
+                .collect::<Vec<Cell<'static>>>(),
+        )
+    }
 }
 
 /// One cell of the table, with its text held to one side of its column.
@@ -647,55 +879,44 @@ fn cell(text: String, alignment: Alignment) -> Cell<'static> {
 
 /// The text of every column of one row of the table.
 ///
-/// The row is text alone. The widths and the alignments belong to the columns,
-/// so a row that carried them would state the layout once for each row of the
-/// path.
+/// The row is text alone, and it holds the text of every column that the table
+/// ever draws. The widths and the alignments belong to the columns, so a row
+/// that carried them would state the layout once for each row of the path, and
+/// the [`Layout`] says which of these fields a terminal holds. Nothing of a row
+/// changes with the width of the terminal but the cut of its host.
 struct RowText {
     /// The TTL of the row. An address row names none.
     ttl: String,
     /// The host of the row, already cut to the Host column.
     host: String,
-    /// The percentage, the mark, and the count, as the one column they share.
-    counts: String,
+    /// The percentage of the row: the loss of a TTL, or the share of one router
+    /// of that TTL.
+    percent: String,
+    /// The mark that tells a share from a loss.
+    mark: &'static str,
+    /// The count of the probes of a TTL, or of the answers of one router.
+    sent: String,
     /// The five round-trip times, in the order the columns stand.
     times: [String; TIME_COLUMNS],
     /// The sparkline of the recent round-trip times.
     recent: String,
 }
 
-impl RowText {
-    /// The row that the table renders.
-    ///
-    /// The TTL and the times hold to the right of their columns, because a
-    /// reader of a column of numbers compares the last digit of one against the
-    /// last digit of the next. The host and the sparkline hold to the left,
-    /// because both of them read from their first character. The counts column
-    /// aligns itself: its text fills the column exactly.
-    fn into_row(self) -> Row<'static> {
-        let mut cells = Vec::with_capacity(FIXED_WIDTHS.len() + 1);
-        cells.push(cell(self.ttl, Alignment::Right));
-        cells.push(cell(self.host, Alignment::Left));
-        cells.push(cell(self.counts, Alignment::Left));
-        cells.extend(
-            self.times
-                .into_iter()
-                .map(|time| cell(time, Alignment::Right)),
-        );
-        cells.push(cell(self.recent, Alignment::Left));
-        Row::new(cells)
-    }
-}
-
-/// The row of headings that stands above the rows of the path.
-fn column_header() -> Row<'static> {
+/// The headings that stand above the rows of the path.
+///
+/// The headings are a row like every other row, and the [`Layout`] draws them
+/// with the list of columns that draws every row. A heading can therefore never
+/// stand over the cells of another column.
+fn column_header() -> RowText {
     RowText {
         ttl: TTL_HEADER.to_owned(),
         host: HOST_HEADER.to_owned(),
-        counts: counts_text(LOSS_HEADER, LOSS_MARK, SENT_HEADER),
+        percent: LOSS_HEADER.to_owned(),
+        mark: LOSS_MARK,
+        sent: SENT_HEADER.to_owned(),
         times: TIME_HEADERS.map(str::to_owned),
         recent: RECENT_HEADER.to_owned(),
     }
-    .into_row()
 }
 
 /// The five round-trip times of one key, in the order the columns stand.
@@ -756,12 +977,17 @@ impl Frame<'_> {
     /// it, and that size is what tells a reader whether the run recorded
     /// anything at all. The buffer is therefore as wide as the wider of the two.
     ///
+    /// A terminal too narrow for the whole table drops columns, in the order
+    /// the module documentation states. The [`Layout`] holds that answer, and
+    /// the header line, the widths, the headings, and the rows all read the one
+    /// layout.
+    ///
     /// Every line drops its trailing spaces. A terminal prints them as nothing.
     pub(crate) fn lines(&self, width: u16) -> Vec<String> {
         let header_line = self.header.line();
-        let host = host_width(width);
-        let table_width = frame_width(host);
-        let rows = self.rows(host);
+        let layout = Layout::at(width);
+        let table_width = layout.width();
+        let rows = self.rows(layout.host());
         // A path holds 255 TTLs at most, and one TTL holds a bounded number of
         // rows, so the height of the frame stays far below the limit. The
         // arithmetic below says so anyway: a height that ran over would be a
@@ -773,8 +999,8 @@ impl Frame<'_> {
 
         let mut buffer = Buffer::empty(Rect::new(0, 0, buffer_width, height));
         buffer.set_string(0, 0, &header_line, Style::default());
-        let table = Table::new(rows.into_iter().map(RowText::into_row), column_widths(host))
-            .header(column_header())
+        let table = Table::new(rows.iter().map(|row| layout.row(row)), layout.constraints())
+            .header(layout.row(&column_header()))
             .column_spacing(COLUMN_SPACING);
         Widget::render(
             &table,
@@ -826,12 +1052,11 @@ impl Frame<'_> {
         RowText {
             ttl: row.ttl().to_string(),
             host: truncate_to_width(&host_text, usize::from(host)),
-            counts: counts_text(
-                &row.loss()
-                    .map_or_else(|| NO_NUMBER.to_owned(), render_percent),
-                LOSS_MARK,
-                &row.sent().to_string(),
-            ),
+            percent: row
+                .loss()
+                .map_or_else(|| NO_NUMBER.to_owned(), render_percent),
+            mark: LOSS_MARK,
+            sent: row.sent().to_string(),
             times: time_texts(row.stats()),
             recent: sparkline(row.stats().recent(), usize::from(RECENT_WIDTH)),
         }
@@ -872,11 +1097,9 @@ impl Frame<'_> {
         RowText {
             ttl: String::new(),
             host: self.host_of(address.addr()),
-            counts: counts_text(
-                &render_percent(address.share()),
-                SHARE_MARK,
-                &address.stats().recv().to_string(),
-            ),
+            percent: render_percent(address.share()),
+            mark: SHARE_MARK,
+            sent: address.stats().recv().to_string(),
             times: time_texts(address.stats()),
             recent: sparkline(address.stats().recent(), usize::from(RECENT_WIDTH)),
         }
@@ -918,11 +1141,9 @@ fn others_row(row: &TtlRow) -> RowText {
     RowText {
         ttl: String::new(),
         host: OTHERS.to_owned(),
-        counts: counts_text(
-            &render_percent(untracked_share(row)),
-            SHARE_MARK,
-            &row.untracked().to_string(),
-        ),
+        percent: render_percent(untracked_share(row)),
+        mark: SHARE_MARK,
+        sent: row.untracked().to_string(),
         times: TIME_HEADERS.map(|_| NO_NUMBER.to_owned()),
         recent: String::new(),
     }
@@ -2182,8 +2403,8 @@ mod tests {
     /// takes the other 120 - 67 = 53.
     const WIDE_HOST: usize = 53;
 
-    /// A terminal too narrow for the frame at the floor of the Host column.
-    const NARROW_TERMINAL: u16 = 70;
+    /// A terminal far too narrow for the last set of columns.
+    const NARROW_TERMINAL: u16 = 20;
 
     /// The floor of the Host column.
     const HOST_MIN: usize = 12;
@@ -2240,11 +2461,26 @@ mod tests {
 
     #[test]
     fn the_host_column_stops_at_its_floor() {
-        let narrow = golden_lines(NARROW_TERMINAL);
+        // The Host column takes what the rest of the frame leaves it, and a
+        // terminal that leaves it less than the floor gets the floor. No width
+        // cuts it below that: a host of three characters names no router, and
+        // the columns of the table go away instead.
+        for width in 0..=NOMINAL_WIDTH {
+            assert!(
+                host_columns(width) >= HOST_MIN,
+                "a terminal of {width} columns cut the Host column to {} columns",
+                host_columns(width)
+            );
+        }
         assert_eq!(
-            field_start(line(&narrow, SILENT_TTL_LINE), "100.0%"),
-            Some(HOST_START + HOST_MIN + COLUMN_SPACING),
-            "a terminal too narrow for the frame renders at the floor of the Host column"
+            host_columns(NARROW_TERMINAL),
+            HOST_MIN,
+            "a terminal too narrow for the last set of columns gets the frame at the floor"
+        );
+        let narrow = golden_lines(NARROW_TERMINAL);
+        assert!(
+            display_width(line(&narrow, COLUMN_HEADER_LINE)) > usize::from(NARROW_TERMINAL),
+            "the frame at the floor is wider than the terminal, and the terminal clips it"
         );
     }
 
