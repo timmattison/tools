@@ -461,6 +461,28 @@ mod tests {
         round(TTL, TTL, &[(TTL, ROUTER, RTT)])
     }
 
+    /// The word that a table which holds where it stands writes under its
+    /// table.
+    ///
+    /// The test spells the word, and the module spells it again. That is on
+    /// purpose: a test that read the constant of the module would agree with
+    /// every word the module ever holds, and this word is what a reader of the
+    /// screen sees.
+    const PAUSED: &str = "paused";
+
+    /// The last `count` lines of a frame, or every line of a frame that holds
+    /// fewer than that.
+    ///
+    /// A frame of too few lines must fail the assertion of the test that reads
+    /// the end of it, and must not stop that test with an index.
+    fn last_lines(lines: &[String], count: usize) -> Vec<&str> {
+        lines
+            .iter()
+            .skip(lines.len().saturating_sub(count))
+            .map(String::as_str)
+            .collect()
+    }
+
     #[test]
     fn one_round_reaches_the_sink_as_a_row_of_the_table() {
         let mut screen = table(&[]);
@@ -475,6 +497,31 @@ mod tests {
         assert!(
             lines.iter().any(|line| line == ONE_ROUND_ROW),
             "the row of the TTL stands under that header: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_pause_holds_the_table_and_the_frame_of_it_names_the_pause() {
+        let mut screen = table(&[&[Command::Pause]]);
+        screen.round(&one_round());
+        screen.sink.clear();
+
+        // A poll draws while the table holds as well, so the mark of the pause
+        // reaches the screen of a run that no round moves.
+        screen.poll();
+        let held = painted(&screen.sink);
+        assert_eq!(
+            last_lines(&held, 2),
+            ["", PAUSED],
+            "one blank line and the word of the pause close the frame: {held:?}"
+        );
+
+        screen.sink.clear();
+        screen.round(&one_round());
+        assert!(
+            screen.sink.is_empty(),
+            "a round of a table that holds draws nothing: {:?}",
+            painted(&screen.sink)
         );
     }
 
