@@ -902,39 +902,40 @@ fn unspecified_of(target: IpAddr) -> IpAddr {
     }
 }
 
-/// The address that the probes leave from.
-///
-/// A machine that names no route to the target still records. The discovery of
-/// the source therefore stops no run: a fault leaves the unspecified address of
-/// the family of the target in the record, and one warning names the fault. A
-/// captive network and a network with no route out both still record.
-fn source_of(named: Option<IpAddr>, target: IpAddr) -> SourceLabel {
-    match source::discover(named, target) {
-        Ok(discovery) => discovery.label,
-        Err(error) => {
-            eprintln!("{PROGRAM}: the source address did not read: {error}. {SOURCE_FALLBACK}");
-            SourceLabel {
-                addr: unspecified_of(target),
-                kind: SourceKind::Local,
-            }
-        }
-    }
-}
-
 /// The label that the record carries, and the one line that standard error
-/// takes.
+/// takes before the display starts.
+///
+/// A machine that names no route to the target still records. The search for
+/// the source therefore stops no run: a search that read no address at all
+/// leaves the unspecified address of the family of the target in the record,
+/// and the warning names the fault. A machine on a captive network, and a
+/// machine on a network with no route out, both still record. The first one
+/// carries the warning that the search wrote, and the second one carries the
+/// warning that this function writes.
+///
+/// The search runs once a run, so the warning prints once a run and never once
+/// a round.
+///
+/// This function reads the outcome of the search and never makes it, and it
+/// hands the warning back and never prints it. A test therefore drives each of
+/// the three outcomes, and it reaches no network. [`trace`] makes the search
+/// and writes the line.
 fn source_from(
     found: std::io::Result<source::Discovery>,
     target: IpAddr,
 ) -> (SourceLabel, Option<String>) {
-    let _ = found;
-    (
-        SourceLabel {
-            addr: target,
-            kind: SourceKind::Local,
-        },
-        None,
-    )
+    match found {
+        Ok(discovery) => (discovery.label, discovery.note),
+        Err(error) => (
+            SourceLabel {
+                addr: unspecified_of(target),
+                kind: SourceKind::Local,
+            },
+            Some(format!(
+                "the source address did not read: {error}. {SOURCE_FALLBACK}"
+            )),
+        ),
+    }
 }
 
 /// The period of one round in milliseconds, for the record that opens a run.
@@ -1005,7 +1006,14 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
     let privilege = trace::acquire_privilege()
         .map_err(|error| TraceFailure::new(&error, EXIT_NO_PRIVILEGES))?;
 
-    let source = source_of(config.source, target.addr);
+    // The search runs here, and it runs once. The warning of a fallback
+    // therefore reaches standard error once a run and never once a round, and
+    // it lands before the recorded file opens and before the display starts, so
+    // no line of the display covers it.
+    let (source, warning) = source_from(source::discover(config.source, target.addr), target.addr);
+    if let Some(warning) = warning {
+        eprintln!("{PROGRAM}: {warning}");
+    }
     let path = source::output_path(config.output.as_deref(), source.addr, destination);
     let mut writer = record::Writer::append(&path).map_err(|error| {
         TraceFailure::new(&format!("{}: {error}", path.display()), EXIT_WRITE_FAILED)

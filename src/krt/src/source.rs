@@ -260,10 +260,6 @@ pub(crate) struct Discovery {
     ///
     /// `main` writes it to standard error before the display starts. A search
     /// that needed no fallback carries none.
-    #[allow(
-        dead_code,
-        reason = "main() writes this line in the next slice of issue #368"
-    )]
     pub(crate) note: Option<String>,
 }
 
