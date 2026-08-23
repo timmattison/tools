@@ -1,4 +1,4 @@
-//! The one reader of the terminal size.
+//! The one reader of the terminal size, which takes a zero as no answer.
 //!
 //! Two crates of this workspace read the size of a terminal, and each of them
 //! reads a different file descriptor and answers in a shape of its own. A tool
@@ -6,6 +6,35 @@
 //! crate to call, what that crate measures, and what the answer of that crate
 //! means. This crate is the one entrance, and it holds those answers in one
 //! place.
+//!
+//! # A zero is not a width
+//!
+//! A terminal answers the `TIOCGWINSZ` ioctl with the number of columns and
+//! the number of rows of its window. A terminal that carries no window answers
+//! that same ioctl with zero columns and zero rows, and the ioctl succeeds. A
+//! pseudo-terminal that nobody ever sized is such a terminal, and
+//! `script -q /dev/null` makes one.
+//!
+//! `crossterm` hands that zero back as a success: it answers `Ok((0, 0))`.
+//! Every caller that reads the answer therefore takes the zero as the width of
+//! a window. `krt` shows what a caller then does with it. A replay under such
+//! a terminal printed a table of three columns, where the same replay through
+//! a pipe printed ten: the table dropped column after column to fit a window
+//! of no columns, and no line of the output said why.
+//!
+//! `terminal_size` refuses a zero on Unix today, and it does not refuse one on
+//! Windows, where it subtracts the left edge of the console rectangle from the
+//! right one and puts no limit under the difference. So the two crates
+//! disagree with each other, and one of them disagrees with itself between two
+//! platforms. A caller that wants to know which of the four answers it holds
+//! has to read the source of both crates.
+//!
+//! This crate states the one rule instead. A size whose columns or whose rows
+//! are zero is no answer, and every function here gives `None` for it. A
+//! caller that already falls back on `None` gets its fallback, and a caller
+//! that has no fallback gets the error path it already carries. That is the
+//! whole of the behavior, and it is why the ban in `clippy.toml` sends every
+//! caller here.
 //!
 //! # Why two probes stand here
 //!
@@ -26,12 +55,27 @@
 //! which file descriptor a caller measures, and no line of the call site would
 //! say so.
 
-/// The size that a probe read.
+/// The size that a probe read, when that size is a window a caller prints
+/// into.
 ///
 /// Both probes hand their answer to this one function, so one rule about what
-/// counts as a size binds both of them. The rule today takes every answer that
-/// a probe gives.
+/// counts as a size binds both of them. The rule is that a zero is no answer.
+/// A window of no columns holds no character of a line, and a window of no
+/// rows holds no line at all, so neither number is a measure of anything. Both
+/// numbers come out of the one ioctl as well, so a zero in either of them says
+/// that the terminal reported no window, and the number beside the zero is
+/// then no more trustworthy than the zero is.
+///
+/// The rule lives in one private function, and not in each probe, for two
+/// reasons. The two probes then answer the same question about their answers,
+/// which is what makes the contract of this crate one sentence. And a test
+/// reaches this function with a pair of numbers, where a test of a probe needs
+/// a terminal of a size it cannot ask for.
 fn measured(size: (u16, u16)) -> Option<(u16, u16)> {
+    let (columns, rows) = size;
+    if columns == 0 || rows == 0 {
+        return None;
+    }
     Some(size)
 }
 
@@ -41,10 +85,11 @@ fn measured(size: (u16, u16)) -> Option<(u16, u16)> {
 /// fails. A run whose standard output is a pipe therefore still measures the
 /// window that started it.
 ///
-/// The answer is `None` when the process holds no terminal to measure. The
-/// reason that the probe failed goes away with the answer, because a caller
-/// has one thing to do with a failed probe, which is to fall back to a width
-/// of its own choosing.
+/// The answer is `None` when the process holds no terminal to measure, and
+/// when the terminal it measured reported a zero. The documentation of this
+/// module says why a zero is no answer. The reason that the probe failed goes
+/// away with the answer, because a caller has one thing to do with a failed
+/// probe, which is to fall back to a width of its own choosing.
 #[must_use]
 pub fn controlling_size() -> Option<(u16, u16)> {
     #[allow(
@@ -72,7 +117,9 @@ pub fn controlling_columns() -> Option<u16> {
 /// input when standard output is no terminal, so a run that writes its text to
 /// a file and its complaints to a window still measures that window.
 ///
-/// The answer is `None` when none of the three is a terminal.
+/// The answer is `None` when none of the three is a terminal, and when the
+/// terminal it measured reported a zero. The documentation of this module says
+/// why a zero is no answer.
 #[must_use]
 pub fn stdout_size() -> Option<(u16, u16)> {
     #[allow(
