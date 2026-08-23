@@ -593,9 +593,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - The default name of the file is `SOURCE-DESTINATION.jsonl` in the working directory, and
     `--output` overrides it. `krt` finds SOURCE in three steps, and the first step that gives an
     address wins. `--source` names the address, and it asks nothing and opens nothing. A run that
-    names no source asks `https://api.ipify.org` once at startup, with a timeout of 3 seconds. A
-    run that reads no address there takes the address of the local interface that reaches the
-    destination, and it prints one warning line that says why. The last step opens a socket and
+    names no source asks a public address service once at startup, with a timeout of 3 seconds. The
+    host follows the IP version of the trace: `https://api.ipify.org` for IP version 4 and
+    `https://api6.ipify.org` for IP version 6, and an answer of the other family counts as no
+    answer. A run that reads no address there takes the address of the local interface that reaches
+    the destination, and it prints one warning line that says why. The last step opens a socket and
     sends no packet, so a captive network and an air-gapped network both still record.
   - The default name therefore carries the public address of the machine, and a file you share
     carries it too. `--source` avoids the lookup, and `--output` avoids the name.

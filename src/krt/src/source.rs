@@ -1,10 +1,11 @@
 //! Where the probes leave from, and what the recorded file is called.
 //!
 //! The search for the source holds three steps, and the first one that gives an
-//! address wins: the address that the user named, the address that one public
+//! address wins: the address that the user named, the address that a public
 //! service answers with, and the address of the local interface that reaches
-//! the target. The last step reaches no network, so a machine on a captive
-//! network still records.
+//! the target. The public service is the one of the family of the target, and
+//! an answer of the other family counts as no answer. The last step reaches no
+//! network, so a machine on a captive network still records.
 //!
 //! The name of a recorded file holds the source address and the destination, so
 //! one source and one destination keep one file across many runs. Both halves
@@ -159,10 +160,6 @@ const PUBLIC_SERVICE_V4: &str = "https://api.ipify.org";
 /// The host holds records of type AAAA only, so the name resolves to an address
 /// of IP version 6 and the request leaves on that family. It answers the same
 /// plain GET with the address as text, as the service of IP version 4 does.
-#[allow(
-    dead_code,
-    reason = "public_service() picks this in the green half of this fix"
-)]
 const PUBLIC_SERVICE_V6: &str = "https://api6.ipify.org";
 
 /// The service that answers with the address of the family of the target.
@@ -175,8 +172,10 @@ const PUBLIC_SERVICE_V6: &str = "https://api6.ipify.org";
 /// records of one family. The check that [`public_address`] makes on the answer
 /// is the guarantee.
 fn public_service(target: IpAddr) -> &'static str {
-    let _ = target;
-    PUBLIC_SERVICE_V4
+    match target {
+        IpAddr::V4(_) => PUBLIC_SERVICE_V4,
+        IpAddr::V6(_) => PUBLIC_SERVICE_V6,
+    }
 }
 
 /// How long the lookup of the public address waits before it gives up.
@@ -242,10 +241,6 @@ enum PublicError {
     #[error(
         "the public address service answered with {answer}, which is not of the family of {target}"
     )]
-    #[allow(
-        dead_code,
-        reason = "public_address() raises this in the green half of this fix"
-    )]
     Family {
         /// The address that the service answered with.
         answer: IpAddr,
@@ -270,14 +265,22 @@ enum PublicError {
 /// The answer loses the whitespace of both ends before it parses, because a
 /// service that ends its answer with a newline is a common one.
 ///
+/// An address of the family that the target is not of is a failure. The caller
+/// picks a host of the family of the target, and that pick holds only while the
+/// host keeps the records of one family, so this check is the guarantee. A
+/// record of one family that carries a source of the other reads as a fault of
+/// the tool, and it derives the file name that the run of the other family
+/// derives, so two traces of two families then append to one file.
+///
 /// # Errors
 ///
 /// Returns [`PublicError::Request`] when the client does not build, when the
 /// request does not complete inside the timeout, when the service answers with
 /// the status of an error, and when the answer does not read as text. Returns
-/// [`PublicError::Answer`] when the answer is not an address.
+/// [`PublicError::Answer`] when the answer is not an address. Returns
+/// [`PublicError::Family`] when the answer is an address of the family that the
+/// target is not of.
 fn public_address(service: &str, target: IpAddr, timeout: Duration) -> Result<IpAddr, PublicError> {
-    let _ = target;
     let answer = reqwest::blocking::Client::builder()
         .timeout(timeout)
         .build()
@@ -288,9 +291,17 @@ fn public_address(service: &str, target: IpAddr, timeout: Duration) -> Result<Ip
             reason: error.to_string(),
         })?;
     let trimmed = answer.trim();
-    trimmed.parse().map_err(|_| PublicError::Answer {
+    let found: IpAddr = trimmed.parse().map_err(|_| PublicError::Answer {
         answer: shorten(trimmed),
-    })
+    })?;
+    if found.is_ipv4() == target.is_ipv4() {
+        Ok(found)
+    } else {
+        Err(PublicError::Family {
+            answer: found,
+            target,
+        })
+    }
 }
 
 /// What the warning of an unread public address says after the reason.
@@ -313,9 +324,10 @@ pub(crate) struct Discovery {
 /// The search holds three steps, and the first one that gives an address wins.
 /// The address that the user named wins over both of the others, and it asks no
 /// service and opens no socket. A run that names no source asks the public
-/// address service once. A run that reads no address there records the address
-/// of the interface that reaches the target, and it carries the note that says
-/// why.
+/// address service of the family of the target once, and an answer of the other
+/// family counts as no answer. A run that reads no address there records the
+/// address of the interface that reaches the target, and it carries the note
+/// that says why.
 ///
 /// The last step is what keeps a run recording: a machine on a captive network,
 /// and a machine on a network with no route out, both reach the local egress
@@ -613,7 +625,7 @@ mod tests {
 
     /// The address of IP version 6 that a mock service answers with.
     ///
-    /// 2001:db8::/32 is the range that the registries hold for documentation,
+    /// `2001:db8::/32` is the range that the registries hold for documentation,
     /// so no machine of the internet carries this address. Every test that
     /// reads it names a target of IP version 4, so the two families disagree.
     const PUBLIC_ADDRESS_VERSION_6: &str = "2001:db8::7";
