@@ -412,7 +412,8 @@ mod tests {
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::collections::VecDeque;
-    use std::path::PathBuf;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     /// Builds the press of a key that no modifier holds.
@@ -459,6 +460,22 @@ mod tests {
 
     /// The identifier of the run that every name record below belongs to.
     const RUN: &str = "2026-08-18T12:00:00.000Z";
+
+    /// The number of bytes of the recorded file at the first draw of the test
+    /// of the size.
+    ///
+    /// A size below one kilobyte reads as whole bytes, so the header names the
+    /// count itself and no unit above the byte.
+    const FIRST_BYTES: usize = 100;
+
+    /// The number of bytes of that same file at the second draw.
+    const SECOND_BYTES: usize = 142;
+
+    /// The byte that fills that file.
+    ///
+    /// The header names the size of the recorded file and reads no line of it,
+    /// so one byte serves as well as a record.
+    const FILLER: u8 = b'x';
 
     /// The start of the header line of a table that folded one round.
     ///
@@ -524,6 +541,43 @@ mod tests {
             .as_nanos();
         let process = std::process::id();
         std::env::temp_dir().join(format!("krt-live-{label}-{process}-{nanos}.jsonl"))
+    }
+
+    /// A file that one test makes. The file goes away when the test ends, and
+    /// also when the test panics.
+    struct TempFile {
+        /// The path of the file.
+        path: PathBuf,
+    }
+
+    impl TempFile {
+        /// Holds a path that no file uses yet, and that no other run reaches.
+        fn absent(label: &str) -> Self {
+            Self {
+                path: temp_path(label),
+            }
+        }
+
+        /// The path of the file.
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        /// Writes a file of `bytes` bytes at that path.
+        ///
+        /// # Panics
+        ///
+        /// Panics on a write that fails. Such a fault is a fault of the
+        /// machine, not an answer of the code under test.
+        fn of(&self, bytes: usize) {
+            fs::write(&self.path, vec![FILLER; bytes]).expect("the test file must write");
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 
     /// A table that draws into bytes, reads `keys`, and heads its frames with
@@ -791,6 +845,32 @@ mod tests {
             drawn,
             "a turn of no key leaves the frame that stands: {:?}",
             painted(&screen.sink)
+        );
+    }
+
+    #[test]
+    fn the_header_names_the_size_of_the_recorded_file_at_the_moment_of_the_draw() {
+        let file = TempFile::absent("size");
+        file.of(FIRST_BYTES);
+        let mut screen = table_at(file.path().to_owned(), FakeKeys::of(&[]));
+
+        screen.round(&one_round());
+        let first = painted(&screen.sink);
+        assert!(
+            first.first().is_some_and(|line| line.ends_with("(100 B)")),
+            "the header line names the size that the file holds: {first:?}"
+        );
+
+        // The run appends one record for each round, so the file grows while
+        // the table stands. A header that measured the file one time would
+        // name the size of an empty file for the whole of a long run.
+        file.of(SECOND_BYTES);
+        screen.sink.clear();
+        screen.round(&one_round());
+        let second = painted(&screen.sink);
+        assert!(
+            second.first().is_some_and(|line| line.ends_with("(142 B)")),
+            "and the next draw names the size that the file holds then: {second:?}"
         );
     }
 
