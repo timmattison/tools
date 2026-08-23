@@ -63,6 +63,22 @@ pub fn thing() {}
 /// Source rustdoc cannot parse, so the unit that holds it never documents.
 const UNPARSABLE_SOURCE: &str = "pub fn broken( {\n";
 
+/// A library whose every link resolves, to sit beside a binary of the same
+/// name.
+const RESOLVING_LIB: &str = "\
+/// The thing.
+pub fn thing() {}
+";
+
+/// A binary whose doc comment links to an item that does not exist.
+///
+/// Written to `src/main.rs`, so cargo names the binary after the package — the
+/// same name the library beside it carries.
+const COLLIDING_BIN: &str = "\
+/// Calls [`nowhere`] first.
+fn main() {}
+";
+
 /// A library whose one link names two items at once.
 ///
 /// This is the second spelling of the same lint. Rustdoc writes "`trace` is
@@ -203,6 +219,56 @@ fn unresolved_intra_doc_link_is_reported() {
     assert_eq!(link.line(), 1, "the report must name the line");
 }
 
+/// A binary whose name collides with the library beside it is read all the
+/// same.
+///
+/// This is the target-level spelling of the false green the module header
+/// warns about at the package level. `cargo doc --workspace` uses cargo's
+/// default target filter, and that filter drops a binary whose name equals its
+/// package's library name — silently, with nothing on stderr and a zero exit.
+/// The fixture is the smallest shape that triggers it: a package named
+/// `fixture` with both a `src/lib.rs` and a `src/main.rs`, so the library
+/// target and the binary target are both called `fixture`.
+///
+/// The link that goes unread is a real one. Ten binaries in this repository sit
+/// in exactly this shape, two of them carrying intra-doc links, and the scan
+/// reported "every intra-doc link resolves" over every one of them.
+#[test]
+fn a_bin_that_shares_its_name_with_the_lib_beside_it_is_read() {
+    let dir = fixture_files(&[("src/lib.rs", RESOLVING_LIB), ("src/main.rs", COLLIDING_BIN)]);
+
+    let scan = scan(&dir);
+
+    assert!(
+        !scan.is_clean(),
+        "the binary's unresolved link must be reported even though its name collides \
+         with the library beside it, but the scan was clean:\n{scan}"
+    );
+    let broken = scan.broken();
+    assert_eq!(
+        broken.len(),
+        1,
+        "the fixture holds exactly one unresolved link, in the binary; got:\n{scan}"
+    );
+    let link = &broken[0];
+    assert_eq!(
+        link.target_kind(),
+        "bin",
+        "the link sits in the binary, not the library beside it; got:\n{scan}"
+    );
+    assert_eq!(link.target_name(), "fixture");
+    assert_eq!(
+        link.file(),
+        Path::new("src/main.rs"),
+        "the report must name the file the link sits in"
+    );
+    assert!(
+        link.message().contains("nowhere"),
+        "the report must carry rustdoc's own words, got: {}",
+        link.message()
+    );
+}
+
 /// A link that names two items at once is unresolved too, and rustdoc says so
 /// under the same lint code in entirely different words.
 ///
@@ -300,12 +366,23 @@ fn repo_root() -> PathBuf {
         .unwrap_or_else(|e| panic!("cannot canonicalize {}: {e}", root.display()))
 }
 
-/// The name of every workspace member `cargo metadata` reports for `repo_root`.
+/// Every documentable target `cargo metadata` reports for `repo_root`, rendered
+/// the way [`doc_links::DocScan::documented`] renders the targets it read.
+///
+/// "Documentable" is cargo's own answer, not this test's: every target carries a
+/// boolean `doc` field, and cargo sets it from the manifest. Deciding here which
+/// kinds of target are documentable would be a second model of a question the
+/// toolchain already answers, and the two would part company on the first kind
+/// nobody here thought of.
+///
+/// The comparison runs on the rendered form because that is the one shape both
+/// sides can produce: `cargo metadata` names a target by package, kind, and
+/// name, and so does the scan.
 ///
 /// Every step fails loudly. A parity test that skipped when cargo could not be
 /// started, or compared against a set it quietly failed to parse, would be an
 /// instance of the very defect it exists to catch.
-fn cargo_workspace_members(repo_root: &Path) -> BTreeSet<String> {
+fn cargo_documentable_targets(repo_root: &Path) -> BTreeSet<String> {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(repo_root)
@@ -351,68 +428,106 @@ fn cargo_workspace_members(repo_root: &Path) -> BTreeSet<String> {
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|id| members.contains(id))
         })
-        .map(|package| {
-            package
+        .flat_map(|package| {
+            let package_name = package
                 .get("name")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_else(|| panic!("a package in `cargo metadata` has no `name`"))
-                .to_owned()
+                .to_owned();
+            package
+                .get("targets")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| {
+                    panic!("the package `{package_name}` in `cargo metadata` has no `targets`")
+                })
+                .iter()
+                .filter(|target| {
+                    target
+                        .get("doc")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or_else(|| {
+                            panic!("a target of `{package_name}` has no boolean `doc` field")
+                        })
+                })
+                .map(|target| {
+                    let name = target
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_else(|| panic!("a target of `{package_name}` has no `name`"));
+                    let kind = target
+                        .get("kind")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|kinds| kinds.first())
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_else(|| panic!("a target of `{package_name}` has no `kind`"));
+                    rendered_target(&package_name, kind, name)
+                })
+                .collect::<Vec<String>>()
         })
         .collect()
 }
 
-/// The set of packages the scan documented must equal the set of workspace
-/// members cargo reports.
+/// One target, in the words [`doc_links::DocScan::documented`] uses.
+///
+/// Spelled once, so the two sides of the parity test cannot drift into two
+/// shapes and report a difference that is only a difference of wording.
+fn rendered_target(package: &str, kind: &str, name: &str) -> String {
+    format!("{kind} target `{name}` of {package}")
+}
+
+/// The set of targets the scan documented must equal the set of documentable
+/// targets cargo reports.
 ///
 /// Every other test here asks what the guard *concludes* about a link. This one
 /// asks the prior question, which a verdict cannot: whether the guard read every
-/// crate there is. A member the documentation build never reached contributes no
+/// unit there is. A target the documentation build never reached contributes no
 /// diagnostics, so its links are reported as resolved for the same reason a
-/// crate with no links is — and the scan says "clean" in both cases, in the same
-/// words.
+/// target with no links is — and the scan says "clean" in both cases, in the
+/// same words.
+///
+/// The comparison is per *target*, not per package, and that is the whole point
+/// of it. A package-level comparison cannot see a package whose library was
+/// documented and whose binary was not: the library alone already puts the
+/// package in the documented set, so the missing binary reads as covered. This
+/// repository had ten binaries in exactly that state, two of them carrying
+/// intra-doc links nothing had ever read.
 ///
 /// The answer comes from the toolchain rather than from a list in this file. A
-/// hardcoded list would go stale the moment somebody adds a member, and it would
-/// go stale silently, in the direction that reports clean. A member added later
+/// hardcoded list would go stale the moment somebody adds a target, and it would
+/// go stale silently, in the direction that reports clean. A target added later
 /// is therefore either scanned or shows up here as a set difference, with nobody
 /// needing to notice.
 #[test]
-fn the_scan_documents_exactly_the_workspace_members_cargo_reports() {
+fn the_scan_documents_exactly_the_documentable_targets_cargo_reports() {
     let repo_root = repo_root();
     let scan = doc_links::audit(&repo_root).expect("scan the workspace");
 
-    let cargo = cargo_workspace_members(&repo_root);
+    let cargo = cargo_documentable_targets(&repo_root);
     assert!(
         !cargo.is_empty(),
-        "`cargo metadata` reported no workspace members for {}; every package the \
+        "`cargo metadata` reported no documentable targets for {}; every target the \
          scan documented would then look invented and every real gap would vanish, \
          so an empty cargo side is a broken test rather than a verdict",
         repo_root.display()
     );
 
-    let documented = scan.documented();
-    let missed: Vec<&String> = cargo
-        .iter()
-        .filter(|name| !documented.contains(*name))
-        .collect();
+    let documented: BTreeSet<String> = scan.documented().iter().map(ToString::to_string).collect();
+    let missed: Vec<&String> = cargo.difference(&documented).collect();
     assert!(
         missed.is_empty(),
-        "the documentation build never documented {} workspace member(s): {missed:?}\n\
-         This is the false-green direction. A crate the build does not reach reports \
+        "the documentation build never documented {} documentable target(s): {missed:?}\n\
+         This is the false-green direction. A target the build does not reach reports \
          no diagnostics, so its links are called resolved on the strength of the \
-         crates that were read.",
+         targets that were read.",
         missed.len()
     );
 
-    let invented: Vec<&String> = documented
-        .iter()
-        .filter(|name| !cargo.contains(*name))
-        .collect();
+    let invented: Vec<&String> = documented.difference(&cargo).collect();
     assert!(
         invented.is_empty(),
-        "the scan reports {} package(s) cargo does not list as workspace members: {invented:?}\n\
+        "the scan reports {} target(s) cargo does not list as documentable: {invented:?}\n\
          This direction is loud rather than silent, but it is the same drift: a guard \
-         wrong about which crates it read is not to be trusted about what it found.",
+         wrong about which units it read is not to be trusted about what it found.",
         invented.len()
     );
 }
