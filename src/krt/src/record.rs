@@ -78,13 +78,6 @@ pub(crate) struct RunId(String);
 
 impl RunId {
     /// Builds the identifier of the run that starts at this moment.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the tracer opens a new run and builds its identifier, and the tracer arrives in a later slice of issue #366"
-        )
-    )]
     pub(crate) fn at(start: DateTime<Utc>) -> Self {
         Self(format_millis(start))
     }
@@ -140,13 +133,6 @@ impl Record {
     /// # Errors
     ///
     /// Returns the reason when the record does not become JSON.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the writer is the one caller, and the tracer that runs the writer arrives in a later slice of issue #366"
-        )
-    )]
     pub(crate) fn to_line(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
