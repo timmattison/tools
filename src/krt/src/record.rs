@@ -349,25 +349,11 @@ impl TtlRange {
     }
 
     /// The first TTL of the round.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the aggregate fold builds a row for every TTL that the round probed, and the fold arrives in a later slice of issue #369"
-        )
-    )]
     pub(crate) fn first(self) -> u8 {
         self.first
     }
 
     /// The last TTL of the round.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the aggregate fold builds a row for every TTL that the round probed, and the fold arrives in a later slice of issue #369"
-        )
-    )]
     pub(crate) fn last(self) -> u8 {
         self.last
     }
@@ -377,7 +363,7 @@ impl TtlRange {
         not(test),
         expect(
             dead_code,
-            reason = "the aggregate fold asks whether a round probed a TTL, to part a hop that did not answer from a hop the round never probed, and the fold arrives in a later slice of issue #369"
+            reason = "the aggregate fold walks the range from its first TTL to its last one, so no caller asks about one TTL today, and the tests of this module are the one reader"
         )
     )]
     pub(crate) fn contains(self, ttl: u8) -> bool {

@@ -868,6 +868,94 @@ fn summarize(run: &Run<'_>) -> String {
     .join(SUMMARY_SEPARATOR)
 }
 
+/// Writes one round-trip time, to `DECIMALS` decimal places.
+///
+/// A key that holds no such time takes one word in its place. A TTL that
+/// answered no probe holds none of the times, and a key of one answer holds no
+/// jitter.
+fn render_time(value: Option<f64>) -> String {
+    value.map_or_else(
+        || NO_NUMBER.to_owned(),
+        |value| format!("{value:.DECIMALS$}"),
+    )
+}
+
+/// Writes one percentage, to `DECIMALS` decimal places.
+fn render_percent(value: f64) -> String {
+    format!("{value:.DECIMALS$}{PERCENT_SIGN}")
+}
+
+/// The six round-trip time fields that end the line of one TTL and the line of
+/// one address.
+///
+/// Both lines carry the same six times, in the same order, so a reader compares
+/// one address against the whole of its TTL by column.
+fn time_fields(stats: &stats::HopStats) -> [String; 6] {
+    [
+        format!("{LAST} {}", render_time(stats.last())),
+        format!("{MIN} {}", render_time(stats.min())),
+        format!("{AVG} {}", render_time(stats.avg())),
+        format!("{MAX} {}", render_time(stats.max())),
+        format!("{STDDEV} {}", render_time(stats.stddev())),
+        format!("{JITTER} {}", render_time(stats.jitter())),
+    ]
+}
+
+/// The host field of the line of one TTL.
+///
+/// The field names the address that the TTL first answered from. A TTL that
+/// answered from more addresses adds the count of the other ones, so the line
+/// of a TTL stays one line however many routers answer at it. The line of each
+/// address then carries the numbers of that address. A TTL that never answered
+/// names no host.
+fn host_of(row: &stats::TtlRow) -> String {
+    let others = row.addresses().len().saturating_sub(1);
+    let Some(first) = row.addresses().next() else {
+        return NO_HOST.to_owned();
+    };
+    if others == 0 {
+        return first.addr().to_string();
+    }
+    format!("{} (+{others})", first.addr())
+}
+
+/// Writes the line of one TTL of the path.
+///
+/// The line holds the TTL, the host, the loss, the count of the probes, the
+/// count of the answers, and the six round-trip times. A TTL that no round
+/// probed holds no loss, and the field then takes the word of an absent number.
+fn ttl_line(row: &stats::TtlRow) -> String {
+    let loss = row
+        .loss()
+        .map_or_else(|| NO_NUMBER.to_owned(), render_percent);
+    let mut fields = vec![
+        row.ttl().to_string(),
+        host_of(row),
+        format!("{LOSS} {loss}"),
+        format!("{SENT} {}", row.sent()),
+        format!("{RECV} {}", row.stats().recv()),
+    ];
+    fields.extend(time_fields(row.stats()));
+    format!("{TTL_INDENT}{}", fields.join(SUMMARY_SEPARATOR))
+}
+
+/// Writes the line of one address of a TTL.
+///
+/// The line holds the address, the share of the answers of the TTL that the
+/// address took, the count of those answers, and the six round-trip times of
+/// them. The line carries no count of the probes, because a probe reaches a
+/// TTL and not a router: the run asks the TTL, and whichever router answers
+/// takes that answer.
+fn address_line(address: stats::Address<'_>) -> String {
+    let mut fields = vec![
+        address.addr().to_string(),
+        format!("{SHARE} {}", render_percent(address.share())),
+        format!("{RECV} {}", address.stats().recv()),
+    ];
+    fields.extend(time_fields(address.stats()));
+    format!("{ADDRESS_INDENT}{}", fields.join(SUMMARY_SEPARATOR))
+}
+
 /// The lines that a replay prints for the aggregate of one run.
 ///
 /// One line holds one TTL of the path, in TTL order. A TTL that saw more than
@@ -877,8 +965,17 @@ fn summarize(run: &Run<'_>) -> String {
 /// The design puts the fold in `stats.rs` and the render in `ui.rs`. This
 /// slice builds no `ui.rs`, so the render lives here. A later slice replaces
 /// these lines with the aggregate table.
-fn aggregate_lines(_table: &stats::HopTable) -> Vec<String> {
-    Vec::new()
+fn aggregate_lines(table: &stats::HopTable) -> Vec<String> {
+    let mut lines = Vec::new();
+    for row in table.rows() {
+        lines.push(ttl_line(row));
+        // The one address of a TTL is already the host of the line of that
+        // TTL, and a second line of the same numbers tells a reader nothing.
+        if row.addresses().len() > 1 {
+            lines.extend(row.addresses().map(address_line));
+        }
+    }
+    lines
 }
 
 /// Writes the reason of a file that holds no run to fold.

@@ -19,13 +19,6 @@ use std::net::IpAddr;
 const PERCENT: f64 = 100.0;
 
 /// The number of round-trip times that one key keeps.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-    )
-)]
 const RECENT_CAPACITY: usize = 60;
 
 /// Reads a count as the number that an arithmetic of this module takes.
@@ -36,13 +29,6 @@ const RECENT_CAPACITY: usize = 60;
     clippy::cast_precision_loss,
     reason = "an `f64` holds every whole number below 2^53, and a probe run counts one answer for one TTL of one round, so no count of a run reaches that point"
 )]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-    )
-)]
 fn count_as_f64(count: u64) -> f64 {
     count as f64
 }
@@ -50,13 +36,6 @@ fn count_as_f64(count: u64) -> f64 {
 /// The statistics of one key, over the round-trip times it observed.
 ///
 /// A key is one TTL of the path, or one address that answered at a TTL.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-    )
-)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct HopStats {
     /// The number of round-trip times that the key observed.
@@ -86,13 +65,6 @@ impl HopStats {
     /// samples. A naive sum of the squares loses precision on a long run,
     /// because that sum grows large while the distances between the samples
     /// stay small.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     fn observe(&mut self, rtt_ms: f64) {
         self.recv += 1;
         self.previous = self.last;
@@ -118,88 +90,39 @@ impl HopStats {
     }
 
     /// The number of round-trip times that the key observed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn recv(&self) -> u64 {
         self.recv
     }
 
     /// The most recent round-trip time. A key with no sample holds none.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn last(&self) -> Option<f64> {
         self.last
     }
 
     /// The smallest round-trip time. A key with no sample holds none.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn min(&self) -> Option<f64> {
         self.min
     }
 
     /// The arithmetic mean of the round-trip times. A key with no sample holds
     /// none.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn avg(&self) -> Option<f64> {
         (self.recv > 0).then_some(self.mean)
     }
 
     /// The largest round-trip time. A key with no sample holds none.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn max(&self) -> Option<f64> {
         self.max
     }
 
     /// The population standard deviation of the round-trip times. A key with no
     /// sample holds none.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn stddev(&self) -> Option<f64> {
         (self.recv > 0).then(|| (self.m2 / count_as_f64(self.recv)).sqrt())
     }
 
     /// The absolute difference between the last two round-trip times. A key
     /// with one sample or none holds none.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn jitter(&self) -> Option<f64> {
         let last = self.last?;
         let previous = self.previous?;
@@ -211,7 +134,7 @@ impl HopStats {
         not(test),
         expect(
             dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+            reason = "the sparkline of one hop reads the history, and that sparkline arrives in issue #370, so the tests of this module are the one reader of it today"
         )
     )]
     pub(crate) fn recent(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
@@ -220,13 +143,6 @@ impl HopStats {
 }
 
 /// The aggregate view of every hop seen so far, keyed and ordered by TTL.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-    )
-)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct HopTable {
     /// One row for each TTL that a round probed, and for each TTL that a hop
@@ -236,13 +152,6 @@ pub(crate) struct HopTable {
 
 impl HopTable {
     /// Builds a table that holds no row.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -254,13 +163,6 @@ impl HopTable {
     /// Every hop of the round then folds its round-trip time twice: once into
     /// the statistics of the TTL, and once into the statistics of the address
     /// that answered.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn observe(&mut self, round: &record::RoundRecord) {
         for ttl in round.ttl_range.first()..=round.ttl_range.last() {
             self.row_mut(ttl).sent += 1;
@@ -279,13 +181,6 @@ impl HopTable {
     }
 
     /// Every TTL row, in TTL order.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn rows(&self) -> impl ExactSizeIterator<Item = &TtlRow> {
         self.rows.values()
     }
@@ -295,7 +190,7 @@ impl HopTable {
         not(test),
         expect(
             dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+            reason = "the render walks every row in TTL order, so the tests of this module are the one reader of the row of one TTL today"
         )
     )]
     pub(crate) fn row(&self, ttl: u8) -> Option<&TtlRow> {
@@ -304,13 +199,6 @@ impl HopTable {
 }
 
 /// One hop position on the path, over every answer it gave.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-    )
-)]
 #[derive(Debug, Clone)]
 pub(crate) struct TtlRow {
     /// The TTL of the row.
@@ -329,13 +217,6 @@ pub(crate) struct TtlRow {
 
 impl TtlRow {
     /// Builds the row of one TTL, before any round reaches it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     fn new(ttl: u8) -> Self {
         Self {
             ttl,
@@ -347,13 +228,6 @@ impl TtlRow {
 
     /// The statistics of one address of this row. The entry of an address that
     /// this row never saw is made here.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     fn address_mut(&mut self, addr: IpAddr) -> &mut HopStats {
         let found = self.addresses.iter().position(|(held, _)| *held == addr);
         let index = if let Some(index) = found {
@@ -368,50 +242,22 @@ impl TtlRow {
     }
 
     /// The TTL of the row.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn ttl(&self) -> u8 {
         self.ttl
     }
 
     /// The rounds whose `ttl_range` covered this TTL.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn sent(&self) -> u64 {
         self.sent
     }
 
     /// The statistics over every answer at this TTL, whichever address gave it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn stats(&self) -> &HopStats {
         &self.stats
     }
 
     /// The loss of this position, as a percentage. A TTL that no round probed
     /// gives `None`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn loss(&self) -> Option<f64> {
         if self.sent == 0 {
             return None;
@@ -425,13 +271,6 @@ impl TtlRow {
 
     /// Every address that answered at this TTL, in the order the TTL first saw
     /// them, each with the share of the answers it took.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn addresses(&self) -> impl ExactSizeIterator<Item = Address<'_>> {
         let answers = self.stats.recv();
         self.addresses.iter().map(move |(addr, stats)| Address {
@@ -444,13 +283,6 @@ impl TtlRow {
 
 /// One router that answered at a TTL, and the share of that TTL's answers it
 /// took.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-    )
-)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Address<'a> {
     /// The address that answered.
@@ -463,25 +295,11 @@ pub(crate) struct Address<'a> {
 
 impl Address<'_> {
     /// The address that answered.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn addr(&self) -> IpAddr {
         self.addr
     }
 
     /// The statistics over the answers of this address.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn stats(&self) -> &HopStats {
         self.stats
     }
@@ -491,13 +309,6 @@ impl Address<'_> {
     ///
     /// The divisor is never zero. This entry exists because the address
     /// answered at the TTL, so the TTL holds one answer at least.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn share(&self) -> f64 {
         count_as_f64(self.stats.recv()) / count_as_f64(self.answers) * PERCENT
     }
