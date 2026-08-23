@@ -23,8 +23,8 @@ use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
 
-use identify::Tv;
-use scan::{fetch_google_tv, fetch_roku, is_port_open, Probe, PROBE_PORTS, ROKU_ECP_PORT};
+use identify::{Platform, Tv};
+use scan::{probe, Probe, PROBE_PORTS};
 
 /// Probes in flight at once. High enough to sweep a /23 in seconds, low enough
 /// to stay well inside the open-file limit.
@@ -58,11 +58,11 @@ async fn main() -> Result<()> {
     let hosts = cidr::hosts_in(&subnet)?;
     eprintln!("Scanning {subnet} ({}) for TVs...", host_count(hosts.len()));
 
-    let tvs = find_tvs(&hosts, &args.vendor).await;
-    report_tvs(&tvs);
+    let found = scan_hosts(&hosts, &args.vendor).await;
+    report_tvs(&found.tvs);
 
     if !args.no_arp {
-        report_powered_off(&tvs, &args.vendor);
+        report_powered_off(&found.answered, &args.vendor);
     }
 
     Ok(())
@@ -105,43 +105,46 @@ impl ScanResult {
     /// stays in `answered` whatever the probe found there, because a host that
     /// completed a TCP handshake has power.
     fn from_probes(probes: Vec<Probe>, vendor_filter: &str) -> Self {
-        let _ = (probes, vendor_filter);
-        todo!("a sweep does not yet collect the addresses that answered")
+        let answered: HashSet<Ipv4Addr> = probes
+            .iter()
+            .filter(|found| found.answered)
+            .map(|found| found.ip)
+            .collect();
+
+        let mut tvs: Vec<Tv> = probes
+            .into_iter()
+            .filter_map(|found| found.tv)
+            .filter(|tv| vendor::matches(&tv.vendor, vendor_filter))
+            .collect();
+        tvs.sort_by_key(|tv| tv.ip);
+
+        Self { tvs, answered }
     }
 }
 
-/// Probe every host on both TV ports and identify whatever answers.
-async fn find_tvs(hosts: &[Ipv4Addr], vendor_filter: &str) -> Vec<Tv> {
+/// Probe every host on both TV ports and record what each probe found.
+async fn scan_hosts(hosts: &[Ipv4Addr], vendor_filter: &str) -> ScanResult {
     let client = Client::new();
 
-    let targets: Vec<(Ipv4Addr, u16)> = hosts
+    let targets: Vec<(Ipv4Addr, u16, Platform)> = hosts
         .iter()
-        .flat_map(|ip| PROBE_PORTS.iter().map(move |port| (*ip, *port)))
+        .flat_map(|ip| {
+            PROBE_PORTS
+                .iter()
+                .map(move |(port, platform)| (*ip, *port, *platform))
+        })
         .collect();
 
-    let mut tvs: Vec<Tv> = stream::iter(targets)
-        .map(|(ip, port)| {
+    let probes: Vec<Probe> = stream::iter(targets)
+        .map(|(ip, port, platform)| {
             let client = client.clone();
-            async move {
-                if !is_port_open(ip, port).await {
-                    return None;
-                }
-                let base_url = format!("http://{ip}:{port}");
-                if port == ROKU_ECP_PORT {
-                    fetch_roku(&client, &base_url, ip).await
-                } else {
-                    fetch_google_tv(&client, &base_url, ip).await
-                }
-            }
+            async move { probe(&client, ip, port, platform).await }
         })
         .buffer_unordered(MAX_CONCURRENT_PROBES)
-        .filter_map(|found| async move { found })
         .collect()
         .await;
 
-    tvs.retain(|tv| vendor::matches(&tv.vendor, vendor_filter));
-    tvs.sort_by_key(|tv| tv.ip);
-    tvs
+    ScanResult::from_probes(probes, vendor_filter)
 }
 
 /// Print the identified televisions as a table.
@@ -169,9 +172,13 @@ fn report_tvs(tvs: &[Tv]) {
 /// Report neighbours whose MAC belongs to the wanted vendor but which answered
 /// nothing — almost always a set that is powered off.
 ///
+/// `answered` holds every address that answered a probe, and not only the
+/// addresses that proved to be televisions. A host that answered has power, so
+/// it is never powered off, whatever the probe found there.
+///
 /// Every step here is best-effort: without `arp` or nmap's OUI database there
 /// is simply nothing extra to say, which is not a reason to fail the scan.
-fn report_powered_off(tvs: &[Tv], vendor_filter: &str) {
+fn report_powered_off(answered: &HashSet<Ipv4Addr>, vendor_filter: &str) {
     let Some(arp_output) = arp_table() else {
         return;
     };
@@ -180,8 +187,7 @@ fn report_powered_off(tvs: &[Tv], vendor_filter: &str) {
         return;
     };
 
-    let identified: HashSet<Ipv4Addr> = tvs.iter().map(|tv| tv.ip).collect();
-    let candidates = oui::unresponsive_candidates(&arp_output, &db, &identified, vendor_filter);
+    let candidates = oui::unresponsive_candidates(&arp_output, &db, answered, vendor_filter);
     if candidates.is_empty() {
         return;
     }

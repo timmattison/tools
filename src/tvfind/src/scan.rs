@@ -18,8 +18,12 @@ use crate::identify::{dial_app_installed, parse_google_tv, parse_roku_device_inf
 pub const ROKU_ECP_PORT: u16 = 8060;
 /// Chromecast built-in, present on Google TV sets.
 pub const GOOGLETV_CAST_PORT: u16 = 8008;
-/// Ports probed on every host, in the order they are reported.
-pub const PROBE_PORTS: &[u16] = &[ROKU_ECP_PORT, GOOGLETV_CAST_PORT];
+/// Ports probed on every host, each with the firmware family that answers on
+/// it, in the order they are reported.
+pub const PROBE_PORTS: &[(u16, Platform)] = &[
+    (ROKU_ECP_PORT, Platform::RokuTv),
+    (GOOGLETV_CAST_PORT, Platform::GoogleTv),
+];
 
 /// DIAL applications that need a display to be of any use.
 ///
@@ -113,8 +117,25 @@ pub struct Probe {
 /// Chromecast built-in answers the cast port. Both devices have power, so
 /// neither belongs in the powered-off report.
 pub async fn probe(client: &Client, ip: Ipv4Addr, port: u16, platform: Platform) -> Probe {
-    let _ = (client, ip, port, platform);
-    todo!("a probe does not yet report a host that answered but is not a television")
+    if !is_port_open(ip, port).await {
+        return Probe {
+            ip,
+            answered: false,
+            tv: None,
+        };
+    }
+
+    let base_url = format!("http://{ip}:{port}");
+    let tv = match platform {
+        Platform::RokuTv => fetch_roku(client, &base_url, ip).await,
+        Platform::GoogleTv => fetch_google_tv(client, &base_url, ip).await,
+    };
+
+    Probe {
+        ip,
+        answered: true,
+        tv,
+    }
 }
 
 #[cfg(test)]

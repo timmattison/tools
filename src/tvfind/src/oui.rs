@@ -3,6 +3,9 @@
 //! A TV in standby refuses every TCP connection but still answers ARP, so it
 //! is invisible to a port scan yet plainly present in the neighbour table.
 //! Resolving its MAC prefix against nmap's OUI database recovers it.
+//!
+//! Only a neighbour that answered no probe is a candidate. A device that
+//! completed a TCP handshake has power, whatever the exchange after it found.
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
@@ -40,20 +43,24 @@ pub struct Candidate {
     pub vendor: String,
 }
 
-/// Neighbours matching `vendor_filter` by MAC that no probe identified.
+/// Neighbours matching `vendor_filter` by MAC that answered no probe.
 ///
-/// `identified` holds the addresses already confirmed as televisions, so a TV
-/// that answered is never also reported as a silent candidate.
+/// `answered` holds every address that answered a probe, and not only the
+/// addresses that proved to be televisions. A host that answered has power, so
+/// it is never a powered-off candidate. That difference is what keeps a Roku
+/// streaming player out of the list: the player answers the Roku port, fails
+/// the `is-tv` test, and is registered to the address block of a television
+/// maker.
 #[must_use]
 pub fn unresponsive_candidates(
     arp_output: &str,
     db: &HashMap<String, String>,
-    identified: &HashSet<Ipv4Addr>,
+    answered: &HashSet<Ipv4Addr>,
     vendor_filter: &str,
 ) -> Vec<Candidate> {
     let mut candidates: Vec<Candidate> = parse_arp_table(arp_output)
         .into_iter()
-        .filter(|neighbour| !identified.contains(&neighbour.ip))
+        .filter(|neighbour| !answered.contains(&neighbour.ip))
         .filter_map(|neighbour| {
             let vendor = db.get(&mac_prefix(&neighbour.mac)?)?;
             crate::vendor::wanted_as_television(vendor, vendor_filter).then(|| Candidate {

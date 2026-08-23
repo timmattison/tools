@@ -68,6 +68,10 @@ That test proves a **screen**, not a television. A streaming box or a smart
 display that offers a video app passes it, which is the known limit of what
 port 8008 can tell you.
 
+A device that fails either test still has power. `tvfind` records that the
+device answered. Thus a device that these tests refuse can never come back as a
+television that is powered off.
+
 ### Why not SSDP or mDNS?
 
 Because discovery multicast is unreliable in practice. Access points routinely
@@ -80,8 +84,17 @@ therefore probes hosts directly and treats discovery protocols as unavailable.
 
 A TV in standby refuses every TCP connection but still answers ARP, so it is
 invisible to a port scan yet plainly present in the neighbour table. When nmap's
-`nmap-mac-prefixes` database is installed, `tvfind` resolves each unexplained
-neighbour's MAC prefix and reports the ones registered to a television maker.
+`nmap-mac-prefixes` database is installed, `tvfind` resolves the MAC prefix of
+each neighbour that answered nothing and reports the ones registered to a
+television maker.
+
+**A host that answered any probe is never in this list**, whatever the probe
+found there. A completed TCP handshake proves that the device has power, and a
+device with power is not powered off. The rule matters most for the devices the
+two tests above refuse: nmap registers every Roku address block to the bare name
+`Roku`, so a Roku streaming player matches a television brand. The player
+answers port 8060, therefore it is a host with power, and it stays out of this
+report.
 
 An OUI lookup names the company an address block belongs to, and nothing more.
 It cannot say what the device is. The heading of this report therefore states
