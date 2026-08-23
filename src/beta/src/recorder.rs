@@ -98,9 +98,34 @@ impl RecordingSession {
 /// the answer of a terminal without a terminal to name it with. [`record`]
 /// reads the terminal and hands the answer here.
 ///
-/// `None` is a run that measured no terminal, and it stops the recording.
+/// `None` stops the recording. Two terminals answer `None`: one that the probe
+/// failed to read, and one that carries no window. A recording needs a real
+/// window either way, so one arm covers both.
+///
+/// A size of zero stops the recording as well. A recording carries the columns
+/// and the rows of the window it recorded, and every reader of the file lays
+/// that window out again: the player prints the two numbers, the web export
+/// hands them to the terminal in the page, and the video export multiplies them
+/// by the size of a character to get the size of a frame. A recording of 0x0
+/// therefore holds no cell to play back, and the file says nothing about why.
+/// An error the user reads at the start of the run beats a file that is useless
+/// at the end of it.
+///
+/// `termsize` already gives `None` for a size of zero, so no zero reaches this
+/// function through [`record`]. The rule stays here because this function is
+/// where `beta` states what it records, and the test of the rule is what keeps
+/// it true if the probe of [`record`] ever changes.
+///
+/// # Errors
+///
+/// Returns an error when the terminal reported no size.
 fn recorded_size(answer: Option<(u16, u16)>) -> Result<(u16, u16)> {
-    answer.context("Failed to get terminal size")
+    match answer {
+        Some((columns, rows)) if columns > 0 && rows > 0 => Ok((columns, rows)),
+        _ => anyhow::bail!(
+            "The terminal reported no size. A recording carries the number of columns and the number of rows of the window it recorded, and a terminal that carries no window gives neither number."
+        ),
+    }
 }
 
 pub async fn record(
@@ -121,7 +146,7 @@ pub async fn record(
         anyhow::bail!("Output file already exists: {}", output_path.display());
     }
 
-    let (term_width, term_height) = recorded_size(terminal::size().ok())?;
+    let (term_width, term_height) = recorded_size(termsize::controlling_size())?;
 
     let shell =
         command.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string()));
