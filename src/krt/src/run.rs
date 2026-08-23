@@ -86,9 +86,11 @@ pub(crate) enum RunError {
 /// Records one run: the record that opens it, one record for each round, and
 /// the record that closes it.
 ///
-/// `stop` answers whether the user asked the run to stop. The loop asks it once
-/// at the top of each turn, before it reads a round, so a run that the user
-/// stops records no further round.
+/// `stop` answers whether the user asked the run to stop, and the ask of
+/// `screen` answers the same question. The loop asks both once at the top of
+/// each turn, before it reads a round, so a run that the user stops records no
+/// further round. The ask of the screen also draws that screen, which is why one
+/// turn asks one time.
 ///
 /// The `run` record goes first, and a fault there stops the run before it reads
 /// anything. Each round that arrives becomes one `round` record. The `end`
@@ -152,8 +154,8 @@ pub(crate) fn record<W: Write>(
                 show_names(writer, screen, &namer.names(&round.hops, Utc::now()))?;
                 // The recording comes first. The round reaches the file before
                 // it reaches the screen, so a screen that fails loses one frame
-                // and no record, and the file of a run whose display the user
-                // held holds every round of it. The record takes a copy of the
+                // and no record, and a run whose display the user held still
+                // holds every round in its file. The record takes a copy of the
                 // round, because the screen reads the round after the write.
                 writer
                     .write(&Record::Round(round.clone()))
