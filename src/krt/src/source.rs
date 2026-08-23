@@ -238,9 +238,18 @@ enum PublicError {
     reason = "discover() calls this in the next slice of issue #368; the tests of this module cover it now"
 )]
 fn public_address(service: &str, timeout: Duration) -> Result<IpAddr, PublicError> {
-    let _ = (service, timeout);
-    Err(PublicError::Answer {
-        answer: String::new(),
+    let answer = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .and_then(|client| client.get(service).send())
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .and_then(reqwest::blocking::Response::text)
+        .map_err(|error| PublicError::Request {
+            reason: error.to_string(),
+        })?;
+    let trimmed = answer.trim();
+    trimmed.parse().map_err(|_| PublicError::Answer {
+        answer: shorten(trimmed),
     })
 }
 
@@ -274,11 +283,10 @@ pub(crate) fn discover(named: Option<IpAddr>, target: IpAddr) -> std::io::Result
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSWER_LIMIT, ELLIPSIS, PublicError, bind_address, derive_name, discover, egress_address,
-        output_path, public_address,
+        bind_address, derive_name, discover, egress_address, output_path, public_address,
+        PublicError, ANSWER_LIMIT, ELLIPSIS,
     };
     use crate::record::SourceKind;
-    use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -656,9 +664,7 @@ mod tests {
     /// message ends with the ellipsis and the test does not panic.
     #[test]
     fn an_answer_that_is_not_an_address_and_holds_many_characters_gives_a_short_message() {
-        let body = LONG_ANSWER_CHARACTER
-            .to_string()
-            .repeat(LONG_ANSWER_LENGTH);
+        let body = LONG_ANSWER_CHARACTER.to_string().repeat(LONG_ANSWER_LENGTH);
         let error = answer_of(OK, &body).expect_err("a page of text is not an address");
         let message = error.to_string();
         assert!(
