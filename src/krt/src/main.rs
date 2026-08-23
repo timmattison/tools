@@ -1100,12 +1100,22 @@ enum Display {
 
 /// The screen that a run shows, from the `--headless` flag and from whether
 /// standard output is a terminal.
-fn display_of(headless: bool, _is_terminal: bool) -> Display {
-    if headless {
-        Display::Headless
-    } else {
-        Display::Table
+///
+/// The table holds the terminal in raw mode on the alternate screen, and it
+/// draws one whole frame for each round. A run whose standard output is a pipe
+/// or a file has no terminal to hold, no key to read, and no screen to clear,
+/// and a table there writes one whole frame into that file for each round. Such
+/// a run therefore takes the headless screen, which writes one line each
+/// minute. `--headless` asks for that same line from a run that does hold a
+/// terminal.
+///
+/// The read of the terminal stands apart from this decision, so a test names
+/// the answer of a terminal without a terminal to name it with.
+fn display_of(headless: bool, is_terminal: bool) -> Display {
+    if headless || !is_terminal {
+        return Display::Headless;
     }
+    Display::Table
 }
 
 /// Records one trace, from the destination of the command line to the record
