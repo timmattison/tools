@@ -190,6 +190,15 @@ const STDDEV: &str = "stddev";
 /// The name of the field that holds the jitter.
 const JITTER: &str = "jitter";
 
+/// The name of the field that counts the answers of one TTL that no tracked
+/// address holds.
+///
+/// One TTL keeps an entry for a bounded number of addresses, so a TTL that
+/// answered from more of them prints this field and no line for the addresses
+/// past that bound. Without the field, the shares of the printed addresses sum
+/// to less than the whole and nothing on the line says why.
+const UNTRACKED: &str = "untracked";
+
 /// The host of a TTL that never answered.
 const NO_HOST: &str = "???";
 
@@ -1317,7 +1326,7 @@ mod tests {
         resolve_target, source_from, stop_reason, user_stopped, AddressFamily, Cli, Command,
         EndReason, Family, Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind,
         SourceLabel, ADDRESS_INDENT, PERCENT_SIGN, RESOLVE_PORT, SHARE, SOURCE_FALLBACK,
-        SUMMARY_SEPARATOR, UNKNOWN,
+        SUMMARY_SEPARATOR, UNKNOWN, UNTRACKED,
     };
     use crate::record::{Hop, RoundRecord, RunId, TtlRange};
     use crate::run::Outcome;
@@ -2893,5 +2902,73 @@ resolved configuration:
     #[test]
     fn an_empty_table_prints_no_line() {
         assert!(aggregate_lines(&HopTable::new()).is_empty());
+    }
+
+    /// The number of routers that answer at one TTL of the crowded run.
+    ///
+    /// The count stands above the number of addresses that one TTL tracks, so
+    /// the row of that TTL counts the answers it keeps no entry for.
+    const MANY_ROUTERS: u32 = 40;
+
+    /// The round-trip time of every answer of the crowded run.
+    ///
+    /// One time for every answer makes every number of the TTL line that time,
+    /// so the line stays hand-computed however many routers answer.
+    const SAME_RTT: f64 = 10.0;
+
+    /// The lines that the crowded run prints.
+    ///
+    /// The line of the TTL stands first, and one line for each of the 32
+    /// tracked addresses stands under it, so 1 + 32 = 33 lines.
+    const CROWDED_LINES: usize = 33;
+
+    /// One round for each router of a TTL that answers from more routers than
+    /// it tracks.
+    ///
+    /// The addresses run upward from `10.0.0.1`, one for each round, and every
+    /// answer carries the same round-trip time.
+    fn crowded_rounds() -> Vec<RoundRecord> {
+        (1..=MANY_ROUTERS)
+            .map(|host| round(1, 1, &[(1, &format!("10.0.0.{host}"), SAME_RTT)]))
+            .collect()
+    }
+
+    /// A TTL that answered from more routers than it tracks names the answers
+    /// that no tracked address holds.
+    ///
+    /// Each of the 40 rounds probed TTL 1 and answered from a router of its
+    /// own, so the loss is 0 / 40 * 100 = 0.0 percent. The row tracks 32 of the
+    /// 40 addresses, so the host names the first one and the other 31 tracked
+    /// ones, and 40 - 32 = 8 answers hold no tracked address. Every answer is
+    /// 10.0, so the last, the smallest, the mean, and the largest are all 10.0,
+    /// the deviation is 0.0, and the jitter is |10.0 - 10.0| = 0.0.
+    #[test]
+    fn a_ttl_past_the_tracked_addresses_prints_the_untracked_answers() {
+        let lines = lines_of(&crowded_rounds());
+        assert_eq!(
+            lines.len(),
+            CROWDED_LINES,
+            "the line of the TTL and one line for each tracked address: {lines:?}"
+        );
+        assert_eq!(
+            lines[0],
+            "  1  10.0.0.1 (+31)  loss 0.0%  sent 40  recv 40  last 10.0  min 10.0  avg 10.0  max 10.0  stddev 0.0  jitter 0.0  untracked 8"
+        );
+    }
+
+    /// A TTL that tracks every router that answered at it names no untracked
+    /// answer, so the line of the common case reads as it always did.
+    #[test]
+    fn a_ttl_below_the_tracked_addresses_prints_no_untracked_field() {
+        let lines = lines_of(&[
+            round(1, 1, &[(1, ONE_ROUTER, 10.0)]),
+            round(1, 1, &[(1, ANOTHER_ROUTER, 20.0)]),
+        ]);
+        for line in &lines {
+            assert!(
+                !line.contains(UNTRACKED),
+                "the TTL tracks both of its routers, so no line names an untracked answer: {line}"
+            );
+        }
     }
 }

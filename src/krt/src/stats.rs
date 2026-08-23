@@ -21,6 +21,16 @@ const PERCENT: f64 = 100.0;
 /// The number of round-trip times that one key keeps.
 const RECENT_CAPACITY: usize = 60;
 
+/// The number of addresses that one TTL keeps an entry for.
+///
+/// A load-balanced path and a flapping path both answer one TTL from many
+/// routers. Without this bound, a long run over such a path would hold one
+/// entry for every router it ever saw at every TTL, so the memory of the fold,
+/// the scan of the address list, and the printed lines of one TTL would all
+/// grow with the length of the run. The row counts the answers past this bound
+/// and keeps no entry for them.
+const TRACKED_ADDRESSES: usize = 32;
+
 /// Reads a count as the number that an arithmetic of this module takes.
 ///
 /// The mean, the loss, and the share each divide by a count, so each of them
@@ -213,6 +223,12 @@ pub(crate) struct TtlRow {
     /// One TTL sees a handful of routers, so a scan of the whole list costs
     /// less than a map that keeps the order beside the keys.
     addresses: Vec<(IpAddr, HopStats)>,
+    /// The number of answers of this TTL that no tracked address holds.
+    ///
+    /// The count is of the answers and not of the addresses that gave them. A
+    /// count of those addresses would need a set of every one of them, and that
+    /// set is the unbounded memory that `TRACKED_ADDRESSES` removes.
+    untracked: u64,
 }
 
 impl TtlRow {
@@ -223,6 +239,7 @@ impl TtlRow {
             sent: 0,
             stats: HopStats::default(),
             addresses: Vec::new(),
+            untracked: 0,
         }
     }
 
@@ -254,6 +271,15 @@ impl TtlRow {
     /// The statistics over every answer at this TTL, whichever address gave it.
     pub(crate) fn stats(&self) -> &HopStats {
         &self.stats
+    }
+
+    /// The answers of this TTL that no tracked address holds.
+    ///
+    /// A TTL that answered from more than `TRACKED_ADDRESSES` addresses counts
+    /// every later answer here, so the answers of the tracked addresses and
+    /// this count together account for every answer of the row.
+    pub(crate) fn untracked(&self) -> u64 {
+        todo!("the count of the untracked answers arrives with the green step")
     }
 
     /// The loss of this position, as a percentage. A TTL that no round probed
@@ -316,7 +342,7 @@ impl Address<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HopStats, HopTable, TtlRow, RECENT_CAPACITY};
+    use super::{Address, HopStats, HopTable, TtlRow, RECENT_CAPACITY, TRACKED_ADDRESSES};
     use crate::record::{Hop, RoundRecord, RunId, TtlRange};
     use chrono::{DateTime, Utc};
     use std::net::IpAddr;
@@ -658,5 +684,121 @@ mod tests {
         ]);
         assert_eq!(table.rows().len(), 3, "the table holds three rows");
         assert_eq!(ttls_of(&table), [1, 2, 3], "the rows run in ttl order");
+    }
+
+    /// The TTL that the addresses of the bound tests answer at.
+    const CROWDED_TTL: u8 = 1;
+
+    /// The number of addresses that the bound tests answer from.
+    ///
+    /// The count stands above `TRACKED_ADDRESSES`, so the row of the TTL fills
+    /// its address list and then meets addresses it has no room for.
+    const MANY_ADDRESSES: u32 = 40;
+
+    /// The answers of the crowded TTL that no tracked address holds.
+    ///
+    /// Each of the `MANY_ADDRESSES` addresses answers one round, so the TTL
+    /// takes 40 answers from 40 distinct routers. The row tracks the first 32
+    /// of them, so 40 - 32 = 8 answers hold no tracked address.
+    const UNTRACKED_ANSWERS: u64 = 8;
+
+    /// The addresses of a TTL that answers from more of them than it tracks.
+    ///
+    /// The addresses run upward from `10.0.0.1`, one for each answer, so no two
+    /// answers of the set come from the same router.
+    fn many_addresses() -> Vec<String> {
+        (1..=MANY_ADDRESSES)
+            .map(|host| format!("10.0.0.{host}"))
+            .collect()
+    }
+
+    /// A table of one round for each address of [`many_addresses`], each of
+    /// them answering at `CROWDED_TTL`.
+    fn crowded_table() -> HopTable {
+        let addresses = many_addresses();
+        let rounds: Vec<RoundRecord> = addresses
+            .iter()
+            .map(|addr| {
+                round(
+                    CROWDED_TTL,
+                    CROWDED_TTL,
+                    &[(CROWDED_TTL, addr.as_str(), ANY_RTT)],
+                )
+            })
+            .collect();
+        table_of(&rounds)
+    }
+
+    /// A TTL that answers from more addresses than it tracks keeps the first
+    /// `TRACKED_ADDRESSES` of them, and counts the answers of the rest.
+    ///
+    /// The 40 answers come from 40 distinct addresses, so the row tracks the
+    /// first 32 and the other 40 - 32 = 8 answers hold no tracked address.
+    #[test]
+    fn a_ttl_tracks_a_bounded_number_of_addresses() {
+        let table = crowded_table();
+        let row = row_of(&table, CROWDED_TTL);
+        let held: Vec<_> = row.addresses().collect();
+        assert_eq!(
+            held.len(),
+            TRACKED_ADDRESSES,
+            "the row tracks {TRACKED_ADDRESSES} addresses of the {MANY_ADDRESSES}"
+        );
+        assert_eq!(
+            row.untracked(),
+            UNTRACKED_ANSWERS,
+            "the answers past the tracked addresses count as untracked ones"
+        );
+        let tracked: Vec<IpAddr> = held.iter().map(Address::addr).collect();
+        let first_seen: Vec<IpAddr> = many_addresses()
+            .iter()
+            .take(TRACKED_ADDRESSES)
+            .map(|text| address(text))
+            .collect();
+        assert_eq!(
+            tracked, first_seen,
+            "the row keeps the addresses that answered first"
+        );
+    }
+
+    /// The row of a TTL counts every answer of that TTL, whether a tracked
+    /// address holds the answer or not.
+    ///
+    /// Each of the 40 rounds probed the TTL once and each one answered, so the
+    /// row holds 40 probes and 40 answers, and the loss is 0 / 40 * 100 = 0.0
+    /// percent. The bound stops at the address list, and it takes nothing away
+    /// from the numbers of the TTL itself.
+    #[test]
+    fn the_row_of_a_ttl_counts_the_answers_past_the_tracked_addresses() {
+        let table = crowded_table();
+        let row = row_of(&table, CROWDED_TTL);
+        assert_eq!(
+            row.sent(),
+            u64::from(MANY_ADDRESSES),
+            "each of the rounds probed the crowded ttl"
+        );
+        assert_eq!(
+            row.stats().recv(),
+            u64::from(MANY_ADDRESSES),
+            "the row counts every answer of the ttl, tracked or not"
+        );
+        holds(row.loss(), 0.0, "loss of the crowded ttl");
+    }
+
+    /// A TTL that answers from fewer addresses than it tracks counts no
+    /// untracked answer, so the shares of its addresses cover the whole of it.
+    #[test]
+    fn a_ttl_below_the_bound_counts_no_untracked_answer() {
+        let table = table_of(&[
+            round(1, 2, &[(2, LEFT_ROUTER, ANY_RTT)]),
+            round(1, 2, &[(2, RIGHT_ROUTER, ANY_RTT)]),
+        ]);
+        let two = row_of(&table, 2);
+        assert_eq!(two.addresses().len(), 2, "two routers answered at ttl 2");
+        assert_eq!(
+            two.untracked(),
+            0,
+            "the row holds an entry for both of the addresses"
+        );
     }
 }
