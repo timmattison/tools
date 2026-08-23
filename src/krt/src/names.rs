@@ -141,11 +141,8 @@ impl Namer {
 mod tests {
     use super::{Lookup, Namer, NoLookups, Resolver};
     use crate::record::{Hop, NameRecord, RunId};
-    use crate::testing::{address, round};
+    use crate::testing::{address, named, round, FakeResolver};
     use chrono::{DateTime, Utc};
-    use std::cell::{Cell, RefCell};
-    use std::collections::{HashMap, VecDeque};
-    use std::net::IpAddr;
     use std::rc::Rc;
 
     /// The identifier of the run that every test of this module folds.
@@ -204,11 +201,6 @@ mod tests {
         round(FIRST_TTL, LAST_TTL, &answers).hops
     }
 
-    /// The answer of a lookup that finished with a name.
-    fn named(host: &str) -> Lookup {
-        Lookup::Named(host.to_owned())
-    }
-
     /// The record that the name of one address takes at one moment.
     fn record(ts: &str, addr: &str, host: &str) -> NameRecord {
         NameRecord {
@@ -216,64 +208,6 @@ mod tests {
             ts: moment(ts),
             addr: address(addr),
             host: host.to_owned(),
-        }
-    }
-
-    /// A resolver that a test programs: one answer for each ask of one address,
-    /// and the last answer of the list for every ask after the list runs out.
-    ///
-    /// An address that the test named no answer for answers `Nameless`.
-    ///
-    /// The counts and the answers sit behind a `Cell` and a `RefCell`, because
-    /// [`Resolver::lookup`] takes the resolver by reference. The fake stays on
-    /// one thread.
-    struct FakeResolver {
-        /// The answers that each address holds, the next answer first.
-        answers: RefCell<HashMap<IpAddr, VecDeque<Lookup>>>,
-        /// The number of asks that the resolver took.
-        asks: Cell<usize>,
-    }
-
-    impl FakeResolver {
-        /// A resolver that answers each address with the answers of its list.
-        fn new(answers: &[(&str, &[Lookup])]) -> Rc<Self> {
-            Rc::new(Self {
-                answers: RefCell::new(
-                    answers
-                        .iter()
-                        .map(|(addr, list)| (address(addr), list.iter().cloned().collect()))
-                        .collect(),
-                ),
-                asks: Cell::new(0),
-            })
-        }
-
-        /// The number of asks that the resolver took.
-        fn asks(&self) -> usize {
-            self.asks.get()
-        }
-
-        /// The answer of one ask, and one step along the list of that address.
-        fn answer(&self, addr: IpAddr) -> Lookup {
-            self.asks.set(self.asks.get() + 1);
-            let mut answers = self.answers.borrow_mut();
-            let Some(queue) = answers.get_mut(&addr) else {
-                return Lookup::Nameless;
-            };
-            // The last answer of a list stands for every ask after it, so the
-            // list keeps that answer in the place of a step.
-            let answer = if queue.len() > 1 {
-                queue.pop_front()
-            } else {
-                queue.front().cloned()
-            };
-            answer.unwrap_or(Lookup::Nameless)
-        }
-    }
-
-    impl Resolver for Rc<FakeResolver> {
-        fn lookup(&self, addr: IpAddr) -> Lookup {
-            self.answer(addr)
         }
     }
 
