@@ -465,13 +465,19 @@ pub(crate) struct Headless<W: Write, C: Clock> {
     sink: W,
     /// The clock that times the lines.
     clock: C,
+    /// The moment of the last line, and nothing before the first one.
+    last: Option<Instant>,
 }
 
 impl<W: Write, C: Clock> Headless<W, C> {
     /// A headless screen that writes into `sink` and times its lines by
     /// `clock`.
     pub(crate) fn new(sink: W, clock: C) -> Self {
-        Self { sink, clock }
+        Self {
+            sink,
+            clock,
+            last: None,
+        }
     }
 }
 
@@ -481,6 +487,10 @@ impl<W: Write, C: Clock> Screen for Headless<W, C> {
     }
 
     fn round(&mut self, round: &RoundRecord) {
+        if self.last.is_some() {
+            return;
+        }
+        self.last = Some(self.clock.now());
         // A line that does not print stops nothing. The recording is the
         // purpose of the tool, and the line is one view of it, so a reader who
         // closes the pipe of the display loses the display and keeps the
