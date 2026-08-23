@@ -341,10 +341,12 @@ fn icmp_kind(packet: IcmpPacketType) -> IcmpKind {
 /// pure and a test drives every case of it.
 ///
 /// `first_ttl` is the first TTL that the run probes. The last TTL of the range
-/// is the largest TTL that answered, which the tracer reports and which
-/// shrinks when the target moves closer, so a TTL beyond the end of the path
-/// never counts as lost. A round that answered nothing reports zero there, and
-/// the range then closes at the highest TTL that the round truly sent.
+/// comes from the tracer. A round that reached the target reports the TTL of
+/// the target. A round that did not reach the target reports one TTL past the
+/// largest TTL that answered, and no more than the largest TTL that the round
+/// sent. The tracer adds that one TTL because it assumes that the next probe
+/// holds the target. A round that answered nothing reports zero there, and the
+/// range then closes at the highest TTL that the round truly sent.
 fn to_round_record(
     round: &Round<'_>,
     run: &RunId,

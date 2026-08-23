@@ -594,7 +594,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `--output` overrides it. The default name carries the address of the machine, so a file you
     share carries it too.
   - `--rounds` stops the run after that many rounds, and `--duration` stops it after that much
-    time. Ctrl-C stops it at once. Each of the three writes the record that closes the run.
+    time. Each of the two writes the record that closes the run. On macOS and Linux, Ctrl-C also
+    stops the run at once and writes that record. Windows gets that key with the table that a
+    later build adds.
   - This build prints one status line for each round. A later build adds the aggregate table.
   - macOS sends the probes without privileges. Linux needs `CAP_NET_RAW`, and Windows needs an
     elevated prompt. A platform that needs privileges and does not hold them prints the remedy and

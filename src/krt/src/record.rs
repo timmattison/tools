@@ -4,8 +4,9 @@
 //! record, and every record carries the identifier of the run it belongs to.
 //! This module builds the records, the two functions that turn a record into
 //! one line and back, the reader that loads a whole file, and the writer that
-//! appends to one. The `replay` command reads through this module. The writer
-//! waits for the tracer, which arrives in a later slice.
+//! appends to one. The `replay` command reads through this module. The run loop
+//! writes the `run` record, one `round` record for each round, and the `end`
+//! record through the writer, and every write flushes.
 
 use crate::{Multipath, Protocol};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -352,7 +353,7 @@ impl TtlRange {
         not(test),
         expect(
             dead_code,
-            reason = "the aggregate table shows a row for every TTL that the round probed, and the table arrives in a later slice of issue #366"
+            reason = "the aggregate fold builds a row for every TTL that the round probed, and the fold arrives in a later slice of issue #369"
         )
     )]
     pub(crate) fn first(self) -> u8 {
@@ -364,7 +365,7 @@ impl TtlRange {
         not(test),
         expect(
             dead_code,
-            reason = "the aggregate table shows a row for every TTL that the round probed, and the table arrives in a later slice of issue #366"
+            reason = "the aggregate fold builds a row for every TTL that the round probed, and the fold arrives in a later slice of issue #369"
         )
     )]
     pub(crate) fn last(self) -> u8 {
@@ -376,7 +377,7 @@ impl TtlRange {
         not(test),
         expect(
             dead_code,
-            reason = "the aggregate table asks whether a round probed a TTL, to part a hop that did not answer from a hop the round never probed, and the table arrives in a later slice of issue #366"
+            reason = "the aggregate fold asks whether a round probed a TTL, to part a hop that did not answer from a hop the round never probed, and the fold arrives in a later slice of issue #369"
         )
     )]
     pub(crate) fn contains(self, ttl: u8) -> bool {
@@ -663,7 +664,7 @@ impl<'a> Run<'a> {
         not(test),
         expect(
             dead_code,
-            reason = "the aggregate table shows the name of each hop, and the table arrives in a later slice of issue #366"
+            reason = "a replay shows the name of each hop beside its address, and the names arrive in a later slice of issue #371"
         )
     )]
     pub(crate) fn names(&self) -> &[&'a NameRecord] {
@@ -680,7 +681,7 @@ impl<'a> Run<'a> {
         not(test),
         expect(
             dead_code,
-            reason = "the aggregate table shows why the run stopped, and the table arrives in a later slice of issue #366"
+            reason = "the table that a replay prints shows why the run stopped, and the table arrives in a later slice of issue #370"
         )
     )]
     pub(crate) fn end(&self) -> Option<&'a EndRecord> {

@@ -743,7 +743,7 @@ fn stop_flag() -> std::io::Result<Arc<AtomicBool>> {
 ///
 /// This platform registers no handler, so nothing sets the flag. The user of
 /// this platform stops a run through the key handler of the table, and the
-/// table arrives in a later slice of issue #367.
+/// table arrives in a later slice of issue #372.
 ///
 /// # Errors
 ///
