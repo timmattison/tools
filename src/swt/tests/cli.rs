@@ -28,7 +28,7 @@ fn assert_usage_error(output: &Output, invocation: &str) {
         output.status.code(),
         Some(USAGE_EXIT_STATUS),
         "`{invocation}` should exit {USAGE_EXIT_STATUS}, stderr was: {}",
-        String::from_utf8_lossy(&output.stderr)
+        support::stderr(output)
     );
     assert!(
         !output.stderr.is_empty(),
@@ -41,12 +41,12 @@ fn assert_usage_error(output: &Output, invocation: &str) {
 #[test]
 fn version_reports_the_build_it_came_from() {
     let output = run_swt_outside_a_repository(&["--version"]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = support::stdout(&output);
 
     assert!(
         output.status.success(),
         "swt --version failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        support::stderr(&output)
     );
     let pattern = Regex::new(r"^swt \d+\.\d+\.\d+ \(.+, (clean|dirty)\)$")
         .expect("version pattern should compile");
@@ -62,7 +62,7 @@ fn bare_invocation_is_a_usage_error_naming_both_commands() {
     let output = run_swt_outside_a_repository(&[]);
 
     assert_usage_error(&output, "swt");
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = support::stderr(&output);
     assert!(
         stderr.contains("create") && stderr.contains("merge"),
         "usage should name both commands, got: {stderr}"

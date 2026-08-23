@@ -31,7 +31,7 @@ const WORKTREE_NAME_RULE: &str =
 #[test]
 fn create_rejects_a_traversing_name_before_touching_git() {
     let output = run_swt_outside_a_repository(&["create", TRAVERSING_NAME]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = support::stderr(&output);
 
     assert_eq!(
         output.status.code(),
@@ -52,7 +52,7 @@ fn create_rejects_a_traversing_name_before_touching_git() {
 fn create_rejects_option_looking_names_with_its_own_message() {
     for name in OPTION_LOOKING_NAMES {
         let output = run_swt_outside_a_repository(&["create", name]);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = support::stderr(&output);
 
         assert_eq!(
             output.status.code(),
@@ -73,7 +73,7 @@ fn create_rejects_option_looking_names_with_its_own_message() {
 fn subcommand_help_still_prints_usage() {
     for command in ["create", "merge"] {
         let output = run_swt_outside_a_repository(&[command, "--help"]);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = support::stdout(&output);
 
         assert_eq!(
             output.status.code(),

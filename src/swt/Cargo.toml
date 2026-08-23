@@ -23,6 +23,7 @@ signal-hook.workspace = true
 libc.workspace = true
 regex.workspace = true
 tempfile.workspace = true
+testcolor.workspace = true
 
 [lints]
 workspace = true
