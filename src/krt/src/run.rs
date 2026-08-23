@@ -336,8 +336,8 @@ mod tests {
         EndReason, EndRecord, Family, Hop, NameRecord, Privilege, Record, Recording, RoundRecord,
         RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange, Writer,
     };
-    use crate::live::Screen;
-    use crate::testing::{address, named, FakeResolver};
+    use crate::live::{Command, RunFacts, Screen, Table};
+    use crate::testing::{address, named, FakeKeys, FakeResolver};
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};
     use std::cell::{Cell, RefCell};
@@ -451,6 +451,45 @@ mod tests {
     /// The second question follows the first turn, so the run stops on the turn
     /// that comes straight after the round it recorded.
     const STOP_AFTER_ONE_TURN: u64 = 1;
+
+    /// The number of terminal columns that the live table of a test draws in.
+    ///
+    /// The nominal frame is 97 columns wide: every column of the table, with a
+    /// Host column of 30.
+    const WIDTH: u16 = 97;
+
+    /// The period of one round of the run that a live table shows.
+    const AN_INTERVAL: Duration = Duration::from_secs(1);
+
+    /// The word that a table which holds where it stands writes under itself.
+    ///
+    /// The test spells the word, and the module of the table spells it again.
+    /// That is on purpose: a test that read the constant of that module would
+    /// agree with every word the module ever holds, and this word is what a
+    /// reader of the screen sees.
+    const PAUSED: &str = "paused";
+
+    /// The sequence that starts every frame of a live table.
+    ///
+    /// A draw clears the screen first, so the text between two of these
+    /// sequences is one frame.
+    const CLEAR: &str = "\u{1b}[2J";
+
+    /// The number of frames that the run of a held table drew.
+    ///
+    /// One frame at the pause, one at the release of that pause, and one for
+    /// the round that arrived after the release. The rounds that arrived while
+    /// the table held drew none.
+    const FRAMES_OF_A_HELD_RUN: usize = 3;
+
+    /// The number of rounds that arrive while the table holds.
+    const ROUNDS_WHILE_HELD: u64 = 3;
+
+    /// The number of rounds of the run of a held table.
+    const ROUNDS_OF_A_HELD_RUN: u64 = 4;
+
+    /// The number of rounds that a table which folded none names.
+    const NO_ROUND: u64 = 0;
 
     /// The number of turns that a run takes before its screen stops it.
     ///
@@ -706,6 +745,53 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A sink that the test reads while a live table writes into it.
+    ///
+    /// A table owns its sink and gives it back to nobody, so the bytes live
+    /// behind a handle that the test keeps. One test and one table share the
+    /// handle, on one thread.
+    #[derive(Clone)]
+    struct Shared {
+        /// The bytes that reached the sink.
+        bytes: Rc<RefCell<Vec<u8>>>,
+    }
+
+    impl Shared {
+        /// A sink that holds nothing.
+        fn new() -> Self {
+            Self {
+                bytes: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+
+        /// The text that reached the sink.
+        fn text(&self) -> String {
+            String::from_utf8(self.bytes.borrow().clone()).expect("the sink must hold UTF-8 text")
+        }
+    }
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        /// The sink holds every byte in memory, so it flushes nothing.
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The frames that a live table drew, in the order they reached the sink.
+    fn frames(painted: &str) -> Vec<&str> {
+        painted.split(CLEAR).skip(1).collect()
+    }
+
+    /// The text of a header line that names this number of rounds.
+    fn rounds_in_header(rounds: u64) -> String {
+        format!("round {rounds}")
     }
 
     /// A namer of the test run that asks this resolver.
@@ -1534,6 +1620,83 @@ mod tests {
             ran.screen.names.is_empty(),
             "and it reached no screen: {:?}",
             ran.screen.names
+        );
+    }
+
+    /// The acceptance of the live table: a table that the user holds still
+    /// records every round.
+    ///
+    /// The display is one view of the recording, and the pause key holds that
+    /// view alone. The file behind it takes every round while the view stands
+    /// still, and the fold behind it takes every round too, so the frame of the
+    /// release names the rounds that arrived while the table held.
+    ///
+    /// The key of the first turn holds the table, and the key of the fourth
+    /// turn lets it move again. Three rounds arrive between those two turns.
+    #[test]
+    fn a_run_whose_table_is_paused_keeps_writing_every_round() {
+        // The name of the file stands in the header line of every frame, so
+        // the label of it holds no word that a frame is read for.
+        let file = TempFile::absent("held-table");
+        let painted = Shared::new();
+        let mut screen = Table::new(
+            RunFacts {
+                destination: TARGET_ARG.to_owned(),
+                address: address(TARGET_ADDRESS),
+                source: address(SOURCE_ADDRESS),
+                interval: AN_INTERVAL,
+                path: file.path().to_owned(),
+            },
+            painted.clone(),
+            FakeKeys::of(&[&[Command::Pause], &[], &[], &[Command::Pause]]),
+            WIDTH,
+        );
+        let outcome = ran_on(
+            file.path(),
+            &a_stream(&rounds_of(&[1, 2, 3, 4])),
+            &after_rounds(ROUNDS_OF_A_HELD_RUN),
+            &|| false,
+            &mut a_nameless_namer(),
+            &mut screen,
+        );
+        let recording = Recording::read(file.path()).expect("the test file must read");
+
+        assert_eq!(
+            seqs_of(&recording),
+            [1, 2, 3, 4],
+            "every round of the run reached the file, and the pause held none of them back"
+        );
+        match &outcome {
+            Ok(outcome) => assert_eq!(outcome.rounds, ROUNDS_OF_A_HELD_RUN),
+            Err(error) => panic!("the run must reach its round limit: {error:?}"),
+        }
+
+        let text = painted.text();
+        let drawn = frames(&text);
+        assert_eq!(
+            drawn.len(),
+            FRAMES_OF_A_HELD_RUN,
+            "the rounds that arrived while the table held drew nothing: {drawn:?}"
+        );
+        assert!(
+            drawn[0].contains(PAUSED) && drawn[0].contains(&rounds_in_header(NO_ROUND)),
+            "the first frame marks the pause, and the table under it folded no round: {:?}",
+            drawn[0]
+        );
+        assert!(
+            drawn[1].contains(&rounds_in_header(ROUNDS_WHILE_HELD)),
+            "the frame of the release names the rounds that arrived while the table held: {:?}",
+            drawn[1]
+        );
+        assert!(
+            !drawn[1].contains(PAUSED),
+            "and it carries no mark of a pause: {:?}",
+            drawn[1]
+        );
+        assert!(
+            drawn[2].contains(&rounds_in_header(ROUNDS_OF_A_HELD_RUN)),
+            "the round that arrived after the release drew the frame of it: {:?}",
+            drawn[2]
         );
     }
 }

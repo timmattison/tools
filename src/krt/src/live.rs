@@ -536,11 +536,10 @@ mod tests {
         SystemClock, Table,
     };
     use crate::record::{NameRecord, RoundRecord, RunId};
-    use crate::testing::{address, round};
+    use crate::testing::{address, round, FakeKeys};
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::cell::Cell;
-    use std::collections::VecDeque;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
@@ -629,29 +628,6 @@ mod tests {
 
     /// The escape character that starts every control sequence of a draw.
     const ESCAPE: char = '\u{1b}';
-
-    /// A key source that hands back one list of commands for each turn.
-    ///
-    /// A turn past the end of the script took no key.
-    struct FakeKeys {
-        /// The commands of each turn, the next turn first.
-        turns: VecDeque<Vec<Command>>,
-    }
-
-    impl FakeKeys {
-        /// A key source of one script.
-        fn of(script: &[&[Command]]) -> Self {
-            Self {
-                turns: script.iter().map(|turn| turn.to_vec()).collect(),
-            }
-        }
-    }
-
-    impl Keys for FakeKeys {
-        fn presses(&mut self) -> Vec<Command> {
-            self.turns.pop_front().unwrap_or_default()
-        }
-    }
 
     /// Builds a path under the temporary directory that no other run reaches.
     ///
