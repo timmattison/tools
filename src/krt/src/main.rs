@@ -1066,7 +1066,15 @@ fn resolver_of(reverse_dns: bool) -> std::io::Result<Box<dyn names::Resolver>> {
 /// the lookups off or whether no address of the run resolved. The field
 /// separates the two.
 fn run_config(config: &ResolvedConfig, privilege: record::Privilege) -> RunConfig {
-    todo!("the configuration that one run records arrives with the green step: {config:?} {privilege:?}")
+    RunConfig {
+        interval_ms: interval_millis(config.interval),
+        protocol: config.protocol,
+        first_ttl: config.first_ttl,
+        max_ttl: config.max_ttl,
+        multipath: config.multipath,
+        privilege,
+        dns: config.reverse_dns,
+    }
 }
 
 /// Records one trace, from the destination of the command line to the record
