@@ -461,7 +461,7 @@ impl Clock for SystemClock {
 /// such a run fills a terminal with 3600 lines that say almost the same thing.
 /// One line for each minute of the run says the same thing and leaves the
 /// window of the terminal to the work of the reader.
-const LINE_PERIOD: Duration = Duration::from_secs(60);
+const LINE_PERIOD: Duration = Duration::from_mins(1);
 
 /// The display of a run that draws no table.
 ///
@@ -874,7 +874,7 @@ mod tests {
     /// purpose, as the word of the pause is: a test that read the constant of
     /// the module would agree with every period the module ever holds, and one
     /// line each minute is what a reader of a headless run gets.
-    const ONE_MINUTE: Duration = Duration::from_secs(60);
+    const ONE_MINUTE: Duration = Duration::from_mins(1);
 
     /// The lines that a headless screen wrote, in the order they arrived.
     fn printed(sink: &[u8]) -> Vec<String> {
