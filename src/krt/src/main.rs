@@ -869,8 +869,9 @@ fn replay(path: &Path, wanted: Option<&str>, width: u16) -> Replay {
             }
             // A `name` record names one address, and one address answers at any
             // number of TTLs, so the map is keyed by the address and not by the
-            // hop. No run writes such a record yet, and a file that a later
-            // build recorded holds them.
+            // hop. A run of this build writes such a record. A file that an
+            // older build recorded holds none, and the map then leaves the
+            // address raw.
             let names: BTreeMap<IpAddr, String> = run
                 .names()
                 .iter()
@@ -1037,11 +1038,10 @@ fn closing_line(outcome: &run::Outcome, path: &Path) -> String {
 /// platform.
 ///
 /// A resolver that does not start stops the run, and that is a decision. The
-/// start of the system resolver fails when the platform gives it no thread, and
-/// the tracer of the same run needs threads of its own, so a run that cannot
-/// start a resolver cannot record either. A fatal start also keeps the `dns`
-/// field of the `run` record true by construction: a run that reaches the loop
-/// holds the resolver that the user asked for.
+/// crate reports a start failure as an `io::Error`, and `krt` treats one as
+/// fatal. A fatal start also keeps the `dns` field of the `run` record true by
+/// construction: a run that reaches the loop holds the resolver that the user
+/// asked for.
 ///
 /// # Errors
 ///
