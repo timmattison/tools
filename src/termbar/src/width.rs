@@ -18,7 +18,7 @@ impl TerminalWidth {
     /// otherwise returns `None`.
     #[must_use]
     pub fn get() -> Option<u16> {
-        crossterm::terminal::size().map(|(w, _)| w).ok()
+        Self::columns_of(crossterm::terminal::size().map(|(w, _)| w).ok())
     }
 
     /// Get the current terminal width with a fallback.
@@ -31,7 +31,7 @@ impl TerminalWidth {
     /// * `fallback` - The value to return if terminal width cannot be detected.
     #[must_use]
     pub fn get_or(fallback: u16) -> u16 {
-        Self::get().unwrap_or(fallback)
+        Self::columns_or(crossterm::terminal::size().map(|(w, _)| w).ok(), fallback)
     }
 
     /// Get the current terminal width with the default fallback.
@@ -41,6 +41,28 @@ impl TerminalWidth {
     #[must_use]
     pub fn get_or_default() -> u16 {
         Self::get_or(DEFAULT_TERMINAL_WIDTH)
+    }
+
+    /// The width to report, from the answer that the terminal gave.
+    ///
+    /// The read of the terminal stands apart from this decision, so a test
+    /// names the answer of a terminal without a terminal to name it with.
+    /// [`get`](Self::get) reads the terminal and hands the answer here.
+    ///
+    /// `None` is a run that measured no terminal.
+    fn columns_of(answer: Option<u16>) -> Option<u16> {
+        answer
+    }
+
+    /// The width to report with a fallback, from the answer that the terminal
+    /// gave.
+    ///
+    /// This is the decision of [`get_or`](Self::get_or), and it stands apart
+    /// from the read of the terminal for the same reason that
+    /// [`columns_of`](Self::columns_of) does. An answer that
+    /// [`columns_of`](Self::columns_of) refuses gives the fallback.
+    fn columns_or(answer: Option<u16>, fallback: u16) -> u16 {
+        Self::columns_of(answer).unwrap_or(fallback)
     }
 }
 
@@ -200,6 +222,69 @@ impl Default for TerminalWidthWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The width of a window that a terminal really holds.
+    const REAL: u16 = 120;
+
+    /// A fallback that no terminal reports, so a test that reads it back knows
+    /// where the number came from.
+    const FALLBACK: u16 = 77;
+
+    #[test]
+    fn a_real_width_comes_through() {
+        assert_eq!(
+            TerminalWidth::columns_of(Some(REAL)),
+            Some(REAL),
+            "a terminal that reports a window keeps the width of it"
+        );
+        assert_eq!(
+            TerminalWidth::columns_or(Some(REAL), FALLBACK),
+            REAL,
+            "a terminal that reports a window is what the caller draws in, and the fallback stays out of the way"
+        );
+    }
+
+    #[test]
+    fn a_run_that_measured_no_terminal_falls_back() {
+        assert_eq!(
+            TerminalWidth::columns_of(None),
+            None,
+            "a run that measured no terminal holds no width"
+        );
+        assert_eq!(
+            TerminalWidth::columns_or(None, FALLBACK),
+            FALLBACK,
+            "a run that measured no terminal gets the fallback that the caller named"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_reports_no_columns_falls_back() {
+        assert_eq!(
+            TerminalWidth::columns_of(Some(0)),
+            None,
+            "a terminal that carries no window answers the TIOCGWINSZ ioctl with zero columns, and no character of a line prints into no column"
+        );
+        assert_eq!(
+            TerminalWidth::columns_or(Some(0), FALLBACK),
+            FALLBACK,
+            "a zero must not defeat the fallback: a progress bar laid out at zero columns is what the user then reads"
+        );
+        assert_eq!(
+            TerminalWidth::columns_or(Some(0), DEFAULT_TERMINAL_WIDTH),
+            DEFAULT_TERMINAL_WIDTH,
+            "get_or_default names DEFAULT_TERMINAL_WIDTH as its fallback, and a zero from the terminal must reach it"
+        );
+    }
+
+    #[test]
+    fn the_narrowest_window_is_still_a_window() {
+        assert_eq!(
+            TerminalWidth::columns_of(Some(1)),
+            Some(1),
+            "one column holds one character, so the rule stops at zero and no higher"
+        );
+    }
 
     #[test]
     fn test_terminal_width_get_or() {
