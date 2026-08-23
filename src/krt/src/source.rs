@@ -141,13 +141,43 @@ fn egress_address(target: IpAddr) -> std::io::Result<IpAddr> {
     Ok(socket.local_addr()?.ip())
 }
 
-/// The service that answers with the address that the internet sees.
+/// The service that answers with the address that the internet sees, for a
+/// target of IP version 4.
 ///
 /// The service answers a plain GET with the address as text and nothing else,
 /// so the answer needs no parser of a format and the request needs no key of an
 /// account. A service that goes away, or that starts to limit the rate of a
 /// caller, costs this one line to change.
-const PUBLIC_SERVICE: &str = "https://api.ipify.org";
+///
+/// The host holds records of type A only, so the name resolves to an address of
+/// IP version 4 and the request leaves on that family.
+const PUBLIC_SERVICE_V4: &str = "https://api.ipify.org";
+
+/// The service that answers with the address that the internet sees, for a
+/// target of IP version 6.
+///
+/// The host holds records of type AAAA only, so the name resolves to an address
+/// of IP version 6 and the request leaves on that family. It answers the same
+/// plain GET with the address as text, as the service of IP version 4 does.
+#[allow(
+    dead_code,
+    reason = "public_service() picks this in the green half of this fix"
+)]
+const PUBLIC_SERVICE_V6: &str = "https://api6.ipify.org";
+
+/// The service that answers with the address of the family of the target.
+///
+/// A record of one family that carries a source of the other reads as a fault
+/// of the tool, and it derives the file name that the run of the other family
+/// derives, so the pick reads the family of the target and never guesses it.
+///
+/// The pick is a best effort, because it holds only while each host keeps the
+/// records of one family. The check that [`public_address`] makes on the answer
+/// is the guarantee.
+fn public_service(target: IpAddr) -> &'static str {
+    let _ = target;
+    PUBLIC_SERVICE_V4
+}
 
 /// How long the lookup of the public address waits before it gives up.
 ///
@@ -208,6 +238,20 @@ enum PublicError {
         /// The start of the text that the service answered.
         answer: String,
     },
+    /// The answer is an address of the family that the target is not of.
+    #[error(
+        "the public address service answered with {answer}, which is not of the family of {target}"
+    )]
+    #[allow(
+        dead_code,
+        reason = "public_address() raises this in the green half of this fix"
+    )]
+    Family {
+        /// The address that the service answered with.
+        answer: IpAddr,
+        /// The address of the target of the run.
+        target: IpAddr,
+    },
 }
 
 /// The address that the internet sees, from one GET of a public service.
@@ -232,7 +276,8 @@ enum PublicError {
 /// request does not complete inside the timeout, when the service answers with
 /// the status of an error, and when the answer does not read as text. Returns
 /// [`PublicError::Answer`] when the answer is not an address.
-fn public_address(service: &str, timeout: Duration) -> Result<IpAddr, PublicError> {
+fn public_address(service: &str, target: IpAddr, timeout: Duration) -> Result<IpAddr, PublicError> {
+    let _ = target;
     let answer = reqwest::blocking::Client::builder()
         .timeout(timeout)
         .build()
@@ -284,14 +329,14 @@ pub(crate) struct Discovery {
 /// read. A run that names a source raises none of these, and neither does a run
 /// that reads a public address, because neither one opens a socket.
 pub(crate) fn discover(named: Option<IpAddr>, target: IpAddr) -> std::io::Result<Discovery> {
-    discover_at(named, target, PUBLIC_SERVICE, PUBLIC_TIMEOUT)
+    discover_at(named, target, public_service(target), PUBLIC_TIMEOUT)
 }
 
 /// Finds the source address against the service and the timeout of the caller.
 ///
 /// [`discover`] names the service and the timeout of a run. A test names a
 /// service of its own, which runs on this machine, so no test of this module
-/// reaches the service that `PUBLIC_SERVICE` names.
+/// reaches a public address service of the internet.
 ///
 /// # Errors
 ///
@@ -312,7 +357,7 @@ fn discover_at(
             note: None,
         });
     }
-    match public_address(service, timeout) {
+    match public_address(service, target, timeout) {
         Ok(addr) => Ok(Discovery {
             label: SourceLabel {
                 addr,
@@ -334,7 +379,8 @@ fn discover_at(
 mod tests {
     use super::{
         bind_address, derive_name, discover_at, egress_address, output_path, public_address,
-        Discovery, PublicError, ANSWER_LIMIT, ELLIPSIS, PUBLIC_FALLBACK,
+        public_service, Discovery, PublicError, ANSWER_LIMIT, ELLIPSIS, PUBLIC_FALLBACK,
+        PUBLIC_SERVICE_V4, PUBLIC_SERVICE_V6,
     };
     use crate::record::SourceKind;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -527,11 +573,58 @@ mod tests {
         );
     }
 
+    /// The lookup reads the family of the target and never guesses it.
+    ///
+    /// The host of the service of IP version 4 holds records of type A only, so
+    /// a request to it leaves on IP version 4. A run of IP version 6 that asks
+    /// that host reads the address of IP version 4 of the machine, and it
+    /// writes that address into a record that names IP version 6.
+    #[test]
+    fn a_target_of_ip_version_4_asks_the_service_of_that_family() {
+        assert_eq!(public_service(address(SOURCE)), PUBLIC_SERVICE_V4);
+    }
+
+    /// The lookup reads the family of the target and never guesses it.
+    ///
+    /// The host of the service of IP version 6 holds records of type AAAA only,
+    /// so a request to it leaves on IP version 6. This test is pure, so it
+    /// holds on a machine that has turned IP version 6 off.
+    #[test]
+    fn a_target_of_ip_version_6_asks_the_service_of_that_family() {
+        assert_eq!(public_service(address(SOURCE_VERSION_6)), PUBLIC_SERVICE_V6);
+    }
+
+    /// The two families ask two hosts.
+    ///
+    /// One host for both families reads as a pick and is none, and a test of
+    /// each family alone passes when the two constants hold one host. The two
+    /// tests above also pass when the two constants swap, and this one fails
+    /// with them.
+    #[test]
+    fn the_service_of_each_family_is_a_service_of_its_own() {
+        assert_ne!(PUBLIC_SERVICE_V4, PUBLIC_SERVICE_V6);
+    }
+
     /// The address that a mock service answers with.
     ///
     /// 203.0.113.0/24 is TEST-NET-3, which the registries hold for
     /// documentation, so no machine of the internet carries this address.
     const PUBLIC_ADDRESS: &str = "203.0.113.7";
+
+    /// The address of IP version 6 that a mock service answers with.
+    ///
+    /// 2001:db8::/32 is the range that the registries hold for documentation,
+    /// so no machine of the internet carries this address. Every test that
+    /// reads it names a target of IP version 4, so the two families disagree.
+    const PUBLIC_ADDRESS_VERSION_6: &str = "2001:db8::7";
+
+    /// The target of every test that reads the lookup on its own.
+    ///
+    /// The lookup opens no socket, so this address only names a family.
+    /// 198.51.100.0/24 is TEST-NET-2, which the registries hold for
+    /// documentation, so the number tells a reader that it names no machine of
+    /// the internet, and it stands apart from the answers of TEST-NET-3.
+    const TARGET: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
 
     /// The name that the public address and the plain destination derive.
     const PUBLIC_NAME: &str = "203.0.113.7-example.com.jsonl";
@@ -596,18 +689,22 @@ mod tests {
     const LONG_ANSWER_LENGTH: usize = ANSWER_LIMIT * 4;
 
     /// Reads a mock service that answers one GET of its root with a status and
-    /// a body.
+    /// a body, for a target that the caller names.
+    ///
+    /// The target names the family that the answer must be of. A caller that
+    /// names a target of one family and a body of the other reads the check of
+    /// the family.
     ///
     /// `mockito::Server` binds the loopback and asks the operating system for a
     /// port, so two copies of one test that run at the same time take two ports
     /// and never collide. The service is a local one, so no test of the lookup
-    /// reaches the service that `PUBLIC_SERVICE` names.
+    /// reaches a public address service of the internet.
     ///
     /// The guard of the server stays alive until the lookup has its answer, and
     /// the server stops when the guard drops. `Mock::assert` then reads the
     /// count of requests, which proves that the lookup asked the mock service
     /// and asked it once.
-    fn answer_of(status: usize, body: &str) -> Result<IpAddr, PublicError> {
+    fn answer_of(status: usize, body: &str, target: IpAddr) -> Result<IpAddr, PublicError> {
         let mut server = mockito::Server::new();
         let mock = server
             .mock(GET, ROOT)
@@ -615,7 +712,7 @@ mod tests {
             .with_body(body)
             .expect(ONE_REQUEST)
             .create();
-        let found = public_address(&server.url(), TEST_TIMEOUT);
+        let found = public_address(&server.url(), target, TEST_TIMEOUT);
         mock.assert();
         found
     }
@@ -623,7 +720,8 @@ mod tests {
     /// The address that a service which answers at once gives.
     #[test]
     fn a_service_that_answers_with_an_address_gives_that_address() {
-        let found = answer_of(OK, PUBLIC_ADDRESS).expect("the mock service answers an address");
+        let found =
+            answer_of(OK, PUBLIC_ADDRESS, TARGET).expect("the mock service answers an address");
         assert_eq!(found, address(PUBLIC_ADDRESS));
     }
 
@@ -632,7 +730,8 @@ mod tests {
     #[test]
     fn a_service_that_answers_with_an_address_and_whitespace_gives_that_address() {
         let body = format!("  {PUBLIC_ADDRESS}\r\n");
-        let found = answer_of(OK, &body).expect("the answer loses the whitespace of both ends");
+        let found =
+            answer_of(OK, &body, TARGET).expect("the answer loses the whitespace of both ends");
         assert_eq!(found, address(PUBLIC_ADDRESS));
     }
 
@@ -641,7 +740,7 @@ mod tests {
     /// takes that page for an answer.
     #[test]
     fn a_service_that_answers_with_the_status_of_an_error_gives_no_address() {
-        let error = answer_of(SERVER_ERROR, PUBLIC_ADDRESS)
+        let error = answer_of(SERVER_ERROR, PUBLIC_ADDRESS, TARGET)
             .expect_err("the status of an error gives no address");
         assert!(
             matches!(error, PublicError::Request { .. }),
@@ -669,7 +768,7 @@ mod tests {
                 writer.write_all(PUBLIC_ADDRESS.as_bytes())
             })
             .create();
-        let error = public_address(&server.url(), SHORT_TIMEOUT)
+        let error = public_address(&server.url(), TARGET, SHORT_TIMEOUT)
             .expect_err("the lookup gives up before the service answers");
         assert!(
             matches!(error, PublicError::Request { .. }),
@@ -682,8 +781,8 @@ mod tests {
     /// the warning line sees what arrived.
     #[test]
     fn a_service_that_answers_with_text_that_is_not_an_address_gives_no_address() {
-        let error =
-            answer_of(OK, NOT_AN_ADDRESS).expect_err("the text of the answer is not an address");
+        let error = answer_of(OK, NOT_AN_ADDRESS, TARGET)
+            .expect_err("the text of the answer is not an address");
         assert!(
             matches!(error, PublicError::Answer { .. }),
             "the request completed and the answer did not parse: {error}"
@@ -703,7 +802,7 @@ mod tests {
     #[test]
     fn an_answer_that_is_not_an_address_and_holds_many_characters_gives_a_short_message() {
         let body = LONG_ANSWER_CHARACTER.to_string().repeat(LONG_ANSWER_LENGTH);
-        let error = answer_of(OK, &body).expect_err("a page of text is not an address");
+        let error = answer_of(OK, &body, TARGET).expect_err("a page of text is not an address");
         let message = error.to_string();
         assert!(
             message.ends_with(ELLIPSIS),
@@ -712,6 +811,36 @@ mod tests {
         assert!(
             message.chars().count() < body.chars().count(),
             "the message is shorter than the answer: {message}"
+        );
+    }
+
+    /// A service that answers with an address of the other family gives no
+    /// address.
+    ///
+    /// The pick of the host by the family of the target is a best effort, and
+    /// this check is the guarantee. A record of one family that carries a
+    /// source of the other reads as a fault of the tool, and it derives the
+    /// file name that the run of the other family derives, so two traces of two
+    /// families append to one file.
+    ///
+    /// The message names both addresses, because a reader of the warning line
+    /// needs to see which two families disagreed.
+    #[test]
+    fn a_service_that_answers_with_an_address_of_the_other_family_gives_no_address() {
+        let error = answer_of(OK, PUBLIC_ADDRESS_VERSION_6, TARGET)
+            .expect_err("an address of the other family is not the source of this run");
+        assert!(
+            matches!(error, PublicError::Family { .. }),
+            "the answer parses and its family disagrees with the target: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(PUBLIC_ADDRESS_VERSION_6),
+            "the message names the address that arrived: {message}"
+        );
+        assert!(
+            message.contains(&TARGET.to_string()),
+            "the message names the target of the run: {message}"
         );
     }
 
@@ -729,8 +858,8 @@ mod tests {
     /// address opens a socket of the loopback and touches no network. The mock
     /// service binds the loopback too, and it asks the operating system for a
     /// port, so two copies of one test that run at the same time take two ports
-    /// and never collide. No test of the search reaches the service that
-    /// `PUBLIC_SERVICE` names.
+    /// and never collide. No test of the search reaches a public address
+    /// service of the internet.
     fn search_of(
         named: Option<IpAddr>,
         status: usize,
@@ -817,6 +946,39 @@ mod tests {
         assert!(
             note.contains(NOT_AN_ADDRESS),
             "the note names the reason: {note}"
+        );
+        assert!(
+            note.contains(PUBLIC_FALLBACK),
+            "the note names what the run recorded in its place: {note}"
+        );
+    }
+
+    /// A run that reads an address of the other family falls back to the local
+    /// egress address, and it says why.
+    ///
+    /// The target of this test is the loopback of IP version 4, and the mock
+    /// service answers an address of IP version 6, so the two families
+    /// disagree. The mock service binds the loopback of IP version 4, and the
+    /// check reads the address that arrived and not the address of the
+    /// transport, so the test needs no route of IP version 6.
+    ///
+    /// Without the fallback the run writes an address of one family into a
+    /// record that names the other, and it derives the file name that the run
+    /// of that other family derives.
+    #[test]
+    fn a_service_that_answers_an_address_of_the_other_family_falls_back_and_says_why() {
+        let found = search_of(None, OK, PUBLIC_ADDRESS_VERSION_6, ONE_REQUEST)
+            .expect("every machine holds a loopback route");
+        assert_eq!(found.label.addr, LOOPBACK);
+        assert_eq!(found.label.kind, SourceKind::Local);
+        let note = found.note.expect("a search that fell back carries a note");
+        assert!(
+            note.contains(PUBLIC_ADDRESS_VERSION_6),
+            "the note names the address that arrived: {note}"
+        );
+        assert!(
+            note.contains(&LOOPBACK.to_string()),
+            "the note names the target of the run: {note}"
         );
         assert!(
             note.contains(PUBLIC_FALLBACK),
