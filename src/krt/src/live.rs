@@ -822,6 +822,16 @@ mod tests {
         Headless::new(Vec::new(), Rc::clone(clock))
     }
 
+    /// The step that the clock of the test takes between two rounds.
+    ///
+    /// The rounds of [`ROUNDS_INSIDE_A_MINUTE`] at this step stand inside one
+    /// minute, so a screen that holds to the minute prints one line for the
+    /// whole of them.
+    const ROUND_STEP: Duration = Duration::from_secs(10);
+
+    /// The number of rounds that arrive inside one minute of the test.
+    const ROUNDS_INSIDE_A_MINUTE: usize = 4;
+
     /// The lines that a headless screen wrote, in the order they arrived.
     fn printed(sink: &[u8]) -> Vec<String> {
         String::from_utf8_lossy(sink)
@@ -1100,6 +1110,24 @@ mod tests {
             printed(&screen.sink),
             [A_WHOLE_PATH_LINE],
             "the first round of a run puts its status line on the screen"
+        );
+    }
+
+    #[test]
+    fn a_headless_screen_prints_no_second_line_inside_one_minute() {
+        // A run of one round each second prints one line each second, and an
+        // hour of such a run fills a terminal with the same line 3600 times.
+        let clock = FakeClock::new();
+        let mut screen = headless(&clock);
+
+        for _ in 0..ROUNDS_INSIDE_A_MINUTE {
+            screen.round(&a_whole_path_round());
+            clock.advance(ROUND_STEP);
+        }
+        assert_eq!(
+            printed(&screen.sink),
+            [A_WHOLE_PATH_LINE],
+            "the rounds that follow the first one inside the minute print nothing"
         );
     }
 
