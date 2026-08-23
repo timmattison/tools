@@ -341,6 +341,43 @@ mod tests {
         );
     }
 
+    /// The answer of the namer about the lookups that are still on their way.
+    ///
+    /// A namer that saw no address waits for nothing. An address whose lookup
+    /// has not finished holds the namer. An address that took a name, and an
+    /// address that took none, hold it no longer.
+    #[test]
+    fn the_namer_waits_only_while_an_address_waits_for_its_lookup() {
+        let resolver = FakeResolver::new(&[
+            (FIRST_HOP, &[Lookup::Pending, named(FIRST_HOP_NAME)]),
+            (TARGET, &[Lookup::Pending, Lookup::Nameless]),
+        ]);
+        let mut namer = namer(&resolver);
+        assert!(
+            !namer.waits(),
+            "a namer that saw no address waits for nothing"
+        );
+        let first = namer.names(&hops(&[(1, FIRST_HOP), (3, TARGET)]), moment(FIRST_MOMENT));
+        assert!(
+            first.is_empty(),
+            "neither lookup finished on the first turn"
+        );
+        assert!(
+            namer.waits(),
+            "the two addresses that wait for their lookups hold the namer"
+        );
+        let later = namer.names(&[], moment(LATER_MOMENT));
+        assert_eq!(
+            later,
+            vec![record(LATER_MOMENT, FIRST_HOP, FIRST_HOP_NAME)],
+            "the address that took a name gives its record on the later turn"
+        );
+        assert!(
+            !namer.waits(),
+            "an address that took a name, and an address that took none, hold the namer no longer"
+        );
+    }
+
     #[test]
     fn two_addresses_that_resolve_on_one_turn_give_two_records_in_address_order() {
         let resolver = FakeResolver::new(&[

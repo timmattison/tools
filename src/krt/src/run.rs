@@ -408,6 +408,20 @@ mod tests {
     /// value, so a name that arrived after the last round still lands.
     const NO_GRACE: Duration = Duration::ZERO;
 
+    /// The grace of a run whose name arrives after its last round.
+    ///
+    /// The drain sleeps for one hundred milliseconds at the longest between two
+    /// asks, so this value holds a few asks. The name arrives on the second ask
+    /// of the drain, and the run closes there, so the test pays one sleep and
+    /// not this whole time.
+    const A_GRACE: Duration = Duration::from_millis(300);
+
+    /// The grace of a run whose lookup never finishes.
+    ///
+    /// The drain asks until this time runs out, so this value is the whole cost
+    /// of the test that reads it.
+    const A_SHORT_GRACE: Duration = Duration::from_millis(200);
+
     /// The limits of a run that stops on nothing.
     const NO_LIMIT: Limits = Limits {
         rounds: None,
@@ -562,10 +576,16 @@ mod tests {
 
     /// The limits of a run that stops after this many rounds.
     fn after_rounds(rounds: u64) -> Limits {
+        after_rounds_with_grace(rounds, NO_GRACE)
+    }
+
+    /// The limits of a run that stops after this many rounds and that gives its
+    /// names this grace.
+    fn after_rounds_with_grace(rounds: u64, grace: Duration) -> Limits {
         Limits {
             rounds: Some(rounds),
             deadline: None,
-            name_grace: NO_GRACE,
+            name_grace: grace,
         }
     }
 
@@ -1261,6 +1281,70 @@ mod tests {
             "the record holds the name that arrived"
         );
         assert_eq!(outcome_of(&ran).reason, EndReason::Quit);
+        assert_eq!(outcome_of(&ran).rounds, 1);
+    }
+
+    /// One ask of the drain is not always enough. The drain asks again until
+    /// the name arrives, and the grace holds the run open for it.
+    ///
+    /// The resolver answers `Pending` for the first two asks of the first hop.
+    /// The round takes the first ask and the drain takes the second, so the
+    /// name arrives on the third ask, which is the second ask of the drain. The
+    /// drain sleeps between those two asks.
+    #[test]
+    fn a_name_that_the_first_ask_of_the_drain_does_not_reach_arrives_on_the_second() {
+        let resolver = FakeResolver::new(&[(
+            FIRST_HOP,
+            &[Lookup::Pending, Lookup::Pending, named(FIRST_HOP_NAME)],
+        )]);
+        let ran = ran_with(
+            "name-drain-again",
+            &a_stream(&rounds_of(&[1])),
+            &after_rounds_with_grace(1, A_GRACE),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        assert_eq!(
+            kinds_of(&ran.recording),
+            ["run", "round", "name", "end"],
+            "the name of the second ask of the drain stands before the end"
+        );
+        assert_eq!(
+            names_of(&ran.recording)[0].host,
+            FIRST_HOP_NAME,
+            "the record holds the name that the drain waited for"
+        );
+        assert_eq!(
+            resolver.asks(),
+            4,
+            "the round asked about the two hops, and the drain asked twice more about the first one"
+        );
+        assert_eq!(outcome_of(&ran).reason, EndReason::Rounds);
+        assert_eq!(outcome_of(&ran).rounds, 1);
+    }
+
+    /// The grace bounds the drain. A lookup that never finishes holds the run
+    /// open for the grace and no longer, and the run closes with no name.
+    #[test]
+    fn a_lookup_that_never_finishes_lets_the_grace_close_the_run() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[Lookup::Pending])]);
+        let ran = ran_with(
+            "name-drain-grace",
+            &a_stream(&rounds_of(&[1])),
+            &after_rounds_with_grace(1, A_SHORT_GRACE),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        assert_eq!(
+            kinds_of(&ran.recording),
+            ["run", "round", "end"],
+            "the run closed after the grace ran out"
+        );
+        assert!(
+            names_of(&ran.recording).is_empty(),
+            "a lookup that never finishes writes no record"
+        );
+        assert_eq!(outcome_of(&ran).reason, EndReason::Rounds);
         assert_eq!(outcome_of(&ran).rounds, 1);
     }
 
