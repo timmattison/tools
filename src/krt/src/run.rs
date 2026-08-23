@@ -5,7 +5,9 @@
 //! A reverse lookup takes a time that no round waits for, so the loop asks the
 //! namer of `names.rs` on every turn and writes whatever the namer hands back.
 //! A turn that saw no round asks too, so a name that arrives between two rounds
-//! still reaches the file.
+//! still reaches the file. The run also asks one last time before it closes,
+//! because the name of an address that a round reports arrives after that
+//! round, and the last round of a run has no turn behind it.
 //!
 //! The tracer of `trace.rs` carries no limit of its own. It sends one round
 //! after another until the process ends, and this module owns the number of
@@ -104,6 +106,12 @@ pub(crate) enum RunError {
 /// finishes between two rounds still reaches the file. The `name` records of a
 /// turn stand before the `round` record of that turn.
 ///
+/// The run asks the namer one last time before it writes the `end` record, and
+/// again until no address waits or `limits.name_grace` runs out. The first ask
+/// of an address starts the lookup of that address, so the name of an address
+/// that the last round reported arrives after that round, and this last ask is
+/// what puts it in the file.
+///
 /// Each round that the run records also prints one status line to `status`.
 ///
 /// A failed write of any record stops the run. The recording is the whole
@@ -129,6 +137,7 @@ pub(crate) fn record<W: Write, S: Write>(
     let mut recorded: u64 = 0;
     loop {
         if let Some(reason) = stopped(recorded, limits, stop) {
+            drain_names(writer, namer, limits.name_grace)?;
             close(writer, &start.run, recorded, reason)?;
             return Ok(Outcome {
                 rounds: recorded,
@@ -138,9 +147,10 @@ pub(crate) fn record<W: Write, S: Write>(
         match rounds.recv_timeout(wait(limits.deadline)) {
             Ok(round) => {
                 let line = status_line(&round);
-                // The names of the round stand before the round, so a reader of
-                // the file holds the name of every address of a round by the
-                // time the round arrives.
+                // The names that arrived stand before the round of the same
+                // turn. A name always lands on a later turn than the round that
+                // first reported its address, because the first ask of an
+                // address starts the lookup of that address.
                 write_names(writer, namer.names(&round.hops, Utc::now()))?;
                 writer
                     .write(&Record::Round(round))
@@ -167,6 +177,11 @@ pub(crate) fn record<W: Write, S: Write>(
                 // `end` record will not write reports that fault and not the
                 // dead tracer, because a file that takes no record names the
                 // fault that stops the tool from doing its job at all.
+                //
+                // The grace of this drain is zero. The names that already
+                // arrived still reach the file, and a run that is already
+                // failing waits for nothing.
+                drain_names(writer, namer, Duration::ZERO)?;
                 close(writer, &start.run, recorded, EndReason::Error)?;
                 return Err(RunError::Tracer { rounds: recorded });
             }
@@ -184,6 +199,40 @@ fn write_names<W: Write>(writer: &mut Writer<W>, names: Vec<NameRecord>) -> Resu
         writer.write(&Record::Name(name)).map_err(RunError::Write)?;
     }
     Ok(())
+}
+
+/// Asks the namer one last time, and again until no address waits or the grace
+/// runs out. Each name that arrives becomes one record.
+///
+/// The first ask of an address starts the lookup of that address, so the name of
+/// an address that a round reports arrives on a later turn. A run whose last
+/// turn is its stopping turn therefore holds names that no turn wrote, and this
+/// drain is the turn that writes them.
+///
+/// The drain asks once whatever the grace, so a grace of zero still writes the
+/// names that already arrived. Between two asks it sleeps for [`POLL`] at the
+/// longest, and never past the end of the grace.
+///
+/// # Errors
+///
+/// Returns [`RunError::Write`] when a record does not reach the file.
+fn drain_names<W: Write>(
+    writer: &mut Writer<W>,
+    namer: &mut Namer,
+    grace: Duration,
+) -> Result<(), RunError> {
+    let end = Instant::now() + grace;
+    loop {
+        write_names(writer, namer.names(&[], Utc::now()))?;
+        if !namer.waits() {
+            return Ok(());
+        }
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(left.min(POLL));
+    }
 }
 
 /// Writes the one line that a run prints for one round.
