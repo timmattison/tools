@@ -12,7 +12,7 @@ use reqwest::Client;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-use crate::identify::{dial_app_installed, parse_google_tv, parse_roku_device_info, Tv};
+use crate::identify::{dial_app_installed, parse_google_tv, parse_roku_device_info, Platform, Tv};
 
 /// Roku External Control Protocol.
 pub const ROKU_ECP_PORT: u16 = 8060;
@@ -90,6 +90,31 @@ pub async fn fetch_google_tv(client: &Client, base_url: &str, ip: Ipv4Addr) -> O
 
     let tv = parse_google_tv(ip, &desc, eureka.as_deref())?;
     has_screen(client, base_url).await.then_some(tv)
+}
+
+/// What one probe of one host on one port found.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Probe {
+    /// Address that was probed.
+    pub ip: Ipv4Addr,
+    /// Whether the TCP handshake completed.
+    pub answered: bool,
+    /// The television, if the host proved that it is one.
+    pub tv: Option<Tv>,
+}
+
+/// Probe `ip` on `port` and report what the exchange found.
+///
+/// `platform` names the firmware family that answers on `port`, so the map from
+/// a port to its family stays in one place.
+///
+/// A host that completes the TCP handshake answered, even if it is not a
+/// television. A Roku streaming player answers the ECP port and a speaker with
+/// Chromecast built-in answers the cast port. Both devices have power, so
+/// neither belongs in the powered-off report.
+pub async fn probe(client: &Client, ip: Ipv4Addr, port: u16, platform: Platform) -> Probe {
+    let _ = (client, ip, port, platform);
+    todo!("a probe does not yet report a host that answered but is not a television")
 }
 
 #[cfg(test)]
@@ -315,5 +340,113 @@ mod tests {
         netflix.assert_async().await;
         youtube.assert_async().await;
         assert_eq!(tv.vendor, "TCL");
+    }
+
+    /// A Roku streaming player answers ECP with the same document a TV does.
+    /// Only `is-tv` separates the two.
+    const ROKU_STREAMING_STICK: &str = r"<device-info>
+<vendor-name>Roku</vendor-name>
+<model-name>Roku Express</model-name>
+<is-tv>false</is-tv>
+<friendly-device-name>Roku Express</friendly-device-name>
+<software-version>15.2.4</software-version>
+</device-info>";
+
+    /// The port a mock server listens on, for a probe of `127.0.0.1`.
+    fn mock_port(server: &mockito::Server) -> u16 {
+        server.socket_address().port()
+    }
+
+    #[tokio::test]
+    async fn records_a_roku_streaming_player_as_a_host_that_answered() {
+        // The player is not a television, but it has power. A host with power
+        // must never appear in the powered-off report.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/query/device-info")
+            .with_status(200)
+            .with_body(ROKU_STREAMING_STICK)
+            .create_async()
+            .await;
+        let port = mock_port(&server);
+
+        let found = probe(&Client::new(), Ipv4Addr::LOCALHOST, port, Platform::RokuTv).await;
+
+        mock.assert_async().await;
+        assert!(found.answered, "the TCP handshake completed");
+        assert_eq!(found.tv, None, "a streaming player is not a television");
+        assert_eq!(found.ip, Ipv4Addr::LOCALHOST);
+    }
+
+    #[tokio::test]
+    async fn records_a_roku_television_as_a_host_that_answered_with_a_tv() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/query/device-info")
+            .with_status(200)
+            .with_body(ROKU_DEVICE_INFO)
+            .create_async()
+            .await;
+        let port = mock_port(&server);
+
+        let found = probe(&Client::new(), Ipv4Addr::LOCALHOST, port, Platform::RokuTv).await;
+
+        assert!(found.answered);
+        let tv = found.tv.expect("should identify the TV");
+        assert_eq!(tv.vendor, "TCL");
+        assert_eq!(tv.platform, Platform::RokuTv);
+    }
+
+    #[tokio::test]
+    async fn records_a_cast_speaker_as_a_host_that_answered() {
+        // A speaker with Chromecast built-in answers the cast port and fails
+        // the screen test. It has power, so it did answer.
+        let mut server = mockito::Server::new_async().await;
+        let _desc = server
+            .mock("GET", "/ssdp/device-desc.xml")
+            .with_status(200)
+            .with_body(
+                GOOGLE_TV_DESC
+                    .replace("Smart TV Pro", "Google Home")
+                    .as_str(),
+            )
+            .create_async()
+            .await;
+        let _eureka = server
+            .mock("GET", "/setup/eureka_info")
+            .with_status(200)
+            .with_body(r#"{"name":"Kitchen speaker"}"#)
+            .create_async()
+            .await;
+        let _no_apps = server
+            .mock("GET", mockito::Matcher::Regex(r"^/apps/.*$".to_owned()))
+            .with_status(404)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let port = mock_port(&server);
+
+        let found = probe(
+            &Client::new(),
+            Ipv4Addr::LOCALHOST,
+            port,
+            Platform::GoogleTv,
+        )
+        .await;
+
+        assert!(found.answered, "the TCP handshake completed");
+        assert_eq!(found.tv, None, "a speaker is not a television");
+    }
+
+    #[tokio::test]
+    async fn records_a_closed_port_as_a_host_that_did_not_answer() {
+        let (listener, port) = ephemeral_port();
+        drop(listener);
+
+        let found = probe(&Client::new(), Ipv4Addr::LOCALHOST, port, Platform::RokuTv).await;
+
+        assert!(!found.answered);
+        assert_eq!(found.tv, None);
+        assert_eq!(found.ip, Ipv4Addr::LOCALHOST);
     }
 }

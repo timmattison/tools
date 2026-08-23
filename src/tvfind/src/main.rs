@@ -24,7 +24,7 @@ use futures::stream::{self, StreamExt};
 use reqwest::Client;
 
 use identify::Tv;
-use scan::{fetch_google_tv, fetch_roku, is_port_open, PROBE_PORTS, ROKU_ECP_PORT};
+use scan::{fetch_google_tv, fetch_roku, is_port_open, Probe, PROBE_PORTS, ROKU_ECP_PORT};
 
 /// Probes in flight at once. High enough to sweep a /23 in seconds, low enough
 /// to stay well inside the open-file limit.
@@ -88,6 +88,26 @@ fn powered_off_heading(vendor_filter: &str) -> String {
     };
 
     format!("\nRegistered to {registrant}, but answered no probe (powered off?):\n")
+}
+
+/// What one sweep of the subnet found.
+struct ScanResult {
+    /// Televisions identified, after the vendor filter.
+    tvs: Vec<Tv>,
+    /// Every address that answered a probe, television or not.
+    answered: HashSet<Ipv4Addr>,
+}
+
+impl ScanResult {
+    /// Fold the probes of one sweep into televisions and answering addresses.
+    ///
+    /// The vendor filter narrows the televisions only. An address that answered
+    /// stays in `answered` whatever the probe found there, because a host that
+    /// completed a TCP handshake has power.
+    fn from_probes(probes: Vec<Probe>, vendor_filter: &str) -> Self {
+        let _ = (probes, vendor_filter);
+        todo!("a sweep does not yet collect the addresses that answered")
+    }
 }
 
 /// Probe every host on both TV ports and identify whatever answers.
@@ -191,7 +211,101 @@ fn oui_database() -> Option<std::collections::HashMap<String, String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_count, powered_off_heading};
+    use std::net::Ipv4Addr;
+
+    use super::identify::{Platform, Tv};
+    use super::scan::Probe;
+    use super::{host_count, powered_off_heading, ScanResult};
+
+    /// A television as the Roku path reports one.
+    fn a_tv(ip: Ipv4Addr, vendor: &str) -> Tv {
+        Tv {
+            ip,
+            platform: Platform::RokuTv,
+            vendor: vendor.to_owned(),
+            model: "43S435".to_owned(),
+            name: "Office".to_owned(),
+            software: "15.0.4".to_owned(),
+        }
+    }
+
+    #[test]
+    fn counts_a_host_that_answered_without_proving_a_television_as_answered() {
+        // A Roku streaming player answers the ECP port and is rejected as a
+        // television. It has power, so it is not powered off.
+        let player = Ipv4Addr::new(192, 168, 0, 77);
+        let television = Ipv4Addr::new(192, 168, 0, 119);
+        let silent = Ipv4Addr::new(192, 168, 0, 217);
+        let probes = vec![
+            Probe {
+                ip: player,
+                answered: true,
+                tv: None,
+            },
+            Probe {
+                ip: television,
+                answered: true,
+                tv: Some(a_tv(television, "TCL")),
+            },
+            Probe {
+                ip: silent,
+                answered: false,
+                tv: None,
+            },
+        ];
+
+        let found = ScanResult::from_probes(probes, "");
+
+        assert!(
+            found.answered.contains(&player),
+            "a Roku streaming player has power"
+        );
+        assert!(found.answered.contains(&television));
+        assert!(
+            !found.answered.contains(&silent),
+            "a host that refused the handshake answered nothing"
+        );
+    }
+
+    #[test]
+    fn keeps_a_television_the_vendor_filter_removed_among_the_addresses_that_answered() {
+        let sony = Ipv4Addr::new(192, 168, 0, 33);
+        let probes = vec![Probe {
+            ip: sony,
+            answered: true,
+            tv: Some(a_tv(sony, "Sony")),
+        }];
+
+        let found = ScanResult::from_probes(probes, "tcl");
+
+        assert!(found.tvs.is_empty(), "the filter keeps a Sony set out");
+        assert!(found.answered.contains(&sony), "the set still has power");
+    }
+
+    #[test]
+    fn orders_the_televisions_by_address() {
+        let high = Ipv4Addr::new(192, 168, 0, 248);
+        let low = Ipv4Addr::new(192, 168, 0, 119);
+        let probes = vec![
+            Probe {
+                ip: high,
+                answered: true,
+                tv: Some(a_tv(high, "TCL")),
+            },
+            Probe {
+                ip: low,
+                answered: true,
+                tv: Some(a_tv(low, "TCL")),
+            },
+        ];
+
+        let found = ScanResult::from_probes(probes, "");
+
+        assert_eq!(
+            found.tvs.iter().map(|tv| tv.ip).collect::<Vec<_>>(),
+            vec![low, high]
+        );
+    }
 
     #[test]
     fn says_what_an_unfiltered_candidate_actually_has_in_common_with_a_tv() {
