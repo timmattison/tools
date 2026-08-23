@@ -10,6 +10,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// What one key press asks for.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the tests of this module read the whole table, and the display that acts on a command joins it in the next step of this work. The expectation fails once that display lands, which takes the attribute back off"
+    )
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Command {
     /// Stop the run.
@@ -25,9 +32,48 @@ pub(crate) enum Command {
 }
 
 /// What one key press means, or nothing.
+///
+/// - A key release means nothing. A kitty terminal and a Windows terminal both
+///   report a release, and only a press acts.
+/// - Ctrl-C stops the run, and `q` stops it too. Raw mode clears `ISIG`, so
+///   Ctrl-C arrives as this key press and the process takes no `SIGINT`. A run
+///   that ignored it would need a second terminal to stop.
+/// - `p` holds the display, `n` turns the names on or off, `r` empties the
+///   table of the display, and `?` shows the list of the keys.
+/// - Every other key means nothing.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the tests of this module read the whole table, and the display that polls the keyboard joins it in the next step of this work. The expectation fails once that display lands, which takes the attribute back off"
+    )
+)]
 pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
-    let _ = key;
-    None
+    let KeyEvent {
+        code,
+        modifiers,
+        kind,
+        ..
+    } = key;
+
+    if kind == KeyEventKind::Release {
+        return None;
+    }
+
+    // Checked in front of the table of the letters, so no mode that a later
+    // display adds can trap the user.
+    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+        return Some(Command::Quit);
+    }
+
+    match code {
+        KeyCode::Char('q') => Some(Command::Quit),
+        KeyCode::Char('p') => Some(Command::Pause),
+        KeyCode::Char('n') => Some(Command::Names),
+        KeyCode::Char('r') => Some(Command::Reset),
+        KeyCode::Char('?') => Some(Command::Help),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
