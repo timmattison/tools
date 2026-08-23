@@ -33,6 +33,26 @@
 //! mentions a link, would be red from the day it landed and would be switched
 //! off within the week.
 //!
+//! # A documented unit is not a compiled unit
+//!
+//! The scan reports which workspace packages the build documented, and a caller
+//! compares that set against the members cargo reports. A package the build
+//! never reached raises no diagnostics, so its links are called resolved for
+//! the same reason a package with no links is — and the verdict says "clean" in
+//! both cases, in the same words.
+//!
+//! A unit was documented when one of the files it produced lies under
+//! `<target_directory>/doc/`. That test is load-bearing, because
+//! `cargo doc --no-deps` still *compiles* every member another member depends
+//! on, and each of those compilations reports an artifact of its own — with
+//! `.rmeta` files under `<target_directory>/debug/deps/`. This workspace
+//! reports artifacts for 672 packages and documents 77 of them. A count that
+//! skipped the test would make the parity check pass for the wrong reason.
+//!
+//! The target directory comes from `cargo metadata`, never from
+//! `<root>/target`. A `[build] target-dir` in any config file cargo reads moves
+//! it, and a guard that guessed would then find no documented unit anywhere.
+//!
 //! # Refuse rather than shrink
 //!
 //! Everything that could quietly reduce what the scan covered is a refusal
@@ -45,6 +65,25 @@
 //! over forty crates that were never read is indistinguishable from a guard
 //! doing real work — and it is worse than silence, because it looks like a
 //! finished answer.
+//!
+//! # What the scan costs, and where it runs
+//!
+//! Measured on this workspace, 77 members:
+//!
+//! - Cold, with an empty target directory: about 74 seconds. The target
+//!   directory grows to about 741 MB, of which the rendered pages under
+//!   `target/doc` are about 42 MB.
+//! - Warm, with nothing changed: under a second (0.4 s and 0.7 s on two runs).
+//! - Warm, with one crate edited: 1 to 3 seconds (1.5 s measured).
+//!
+//! The warm figures hold because cargo *replays* the rustdoc diagnostics of a
+//! unit it does not rebuild: a fresh unit reports `"fresh": true` and its
+//! warnings arrive all the same. So a second run finds the same links as the
+//! first without documenting anything again.
+//!
+//! The guard therefore needs no gate of its own. It runs as a test, under the
+//! `cargo test` the pre-commit hook already runs, and pays a warm build. A
+//! fifth pre-commit gate would buy nothing and would add a step to maintain.
 //!
 //! # The environment is scrubbed, not inherited
 //!
@@ -134,6 +173,9 @@ const REASON: &str = "reason";
 /// The record kind that carries a compiler or rustdoc diagnostic.
 const COMPILER_MESSAGE: &str = "compiler-message";
 
+/// The record kind that names the files one unit of the build produced.
+const COMPILER_ARTIFACT: &str = "compiler-artifact";
+
 /// The key naming the package a record belongs to.
 const PACKAGE_ID: &str = "package_id";
 
@@ -172,6 +214,18 @@ const WORKSPACE_MEMBERS: &str = "workspace_members";
 
 /// The key holding a package's identifier.
 const ID: &str = "id";
+
+/// The key listing the files one unit of the build produced.
+const FILENAMES: &str = "filenames";
+
+/// The `cargo metadata` key naming the directory cargo builds into.
+const TARGET_DIRECTORY: &str = "target_directory";
+
+/// The subdirectory of the target directory that holds rendered documentation.
+///
+/// This one path separates a unit that was *documented* from a unit that was
+/// merely *compiled*. See the module header.
+const DOC_SUBDIR: &str = "doc";
 
 /// How much of an offending line a refusal quotes.
 const QUOTED_CHARS: usize = 400;
@@ -445,12 +499,14 @@ impl fmt::Display for DocScan {
 /// ([`MetadataFailed`](DocLinksError::MetadataFailed)) or reports no members
 /// ([`NoWorkspaceMembers`](DocLinksError::NoWorkspaceMembers)), a line of cargo
 /// output is not JSON ([`Json`](DocLinksError::Json)) or lacks a field the
-/// guard reads ([`MissingField`](DocLinksError::MissingField)), or a diagnostic
+/// guard reads ([`MissingField`](DocLinksError::MissingField)), the build
+/// documents no package at all
+/// ([`NothingDocumented`](DocLinksError::NothingDocumented)), or a diagnostic
 /// names a package the workspace does not hold
 /// ([`UnknownPackage`](DocLinksError::UnknownPackage)).
 pub fn audit(workspace_root: &Path) -> Result<DocScan, DocLinksError> {
     let cargo = cargo_program();
-    let names = workspace_package_names(&cargo, workspace_root)?;
+    let workspace = workspace(&cargo, workspace_root)?;
     let output = run(&cargo, workspace_root, &DOC_ARGS)?;
     if !output.status.success() {
         return Err(DocLinksError::DocBuildFailed {
@@ -459,12 +515,22 @@ pub fn audit(workspace_root: &Path) -> Result<DocScan, DocLinksError> {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
 
-    Ok(DocScan {
-        broken: broken_links(&stdout, &names)?,
-        documented: BTreeSet::new(),
-    })
+    let scan = read_build(&String::from_utf8_lossy(&output.stdout), &workspace)?;
+    if scan.documented.is_empty() {
+        return Err(DocLinksError::NothingDocumented {
+            dir: workspace_root.to_path_buf(),
+        });
+    }
+    Ok(scan)
+}
+
+/// What `cargo metadata` tells the guard before the documentation build starts.
+struct Workspace {
+    /// Package identifier to package name, for the workspace members only.
+    names: BTreeMap<String, String>,
+    /// The directory a documented unit writes its pages into.
+    doc_dir: PathBuf,
 }
 
 /// The cargo to start: the one that started this process, when there is one.
@@ -509,10 +575,7 @@ fn run(program: &OsStr, dir: &Path, args: &[&str]) -> Result<Output, DocLinksErr
 /// identifier reads `path+file:///…/src/aa#0.1.0` when the directory and the
 /// package agree on a name, and `path+file:///…/p4#fixture@0.1.0` when they do
 /// not.
-fn workspace_package_names(
-    program: &OsStr,
-    dir: &Path,
-) -> Result<BTreeMap<String, String>, DocLinksError> {
+fn workspace(program: &OsStr, dir: &Path) -> Result<Workspace, DocLinksError> {
     let output = run(program, dir, &METADATA_ARGS)?;
     if !output.status.success() {
         return Err(DocLinksError::MetadataFailed {
@@ -549,16 +612,22 @@ fn workspace_package_names(
             dir: dir.to_path_buf(),
         });
     }
-    Ok(names)
+
+    let target_directory = text_field(&metadata, TARGET_DIRECTORY, METADATA_COMMAND, &text)?;
+    Ok(Workspace {
+        names,
+        doc_dir: Path::new(target_directory).join(DOC_SUBDIR),
+    })
 }
 
-/// Every link rustdoc could not resolve, read out of the JSON Lines `cargo doc`
-/// wrote.
-fn broken_links(
-    stdout: &str,
-    names: &BTreeMap<String, String>,
-) -> Result<Vec<BrokenLink>, DocLinksError> {
+/// Read the JSON Lines `cargo doc` wrote: the links rustdoc could not resolve,
+/// and the workspace packages the build documented.
+///
+/// Both come out of one pass, because they are two readings of the same
+/// transcript and a second pass could disagree with the first.
+fn read_build(stdout: &str, workspace: &Workspace) -> Result<DocScan, DocLinksError> {
     let mut broken = Vec::new();
+    let mut documented = BTreeSet::new();
 
     for line in stdout.lines() {
         if line.trim().is_empty() {
@@ -570,25 +639,72 @@ fn broken_links(
             source,
         })?;
 
-        if text_field(&record, REASON, DOC_COMMAND, line)? != COMPILER_MESSAGE {
-            continue;
+        match text_field(&record, REASON, DOC_COMMAND, line)? {
+            COMPILER_MESSAGE => {
+                if let Some(link) = unresolved_link(&record, workspace, line)? {
+                    broken.push(link);
+                }
+            }
+            COMPILER_ARTIFACT => {
+                if let Some(name) = documented_package(&record, workspace, line)? {
+                    documented.insert(name);
+                }
+            }
+            _ => {}
         }
-        let message = field(&record, MESSAGE, DOC_COMMAND, line)?;
-        let Some(code) = message
-            .get(CODE)
-            .and_then(|code| code.get(CODE))
-            .and_then(Value::as_str)
-        else {
-            continue;
-        };
-        if code != BROKEN_INTRA_DOC_LINKS {
-            continue;
-        }
-
-        broken.push(broken_link(&record, message, names, line)?);
     }
 
-    Ok(broken)
+    Ok(DocScan { broken, documented })
+}
+
+/// The unresolved link one diagnostic reports, or `None` when the diagnostic is
+/// some other lint.
+fn unresolved_link(
+    record: &Value,
+    workspace: &Workspace,
+    line: &str,
+) -> Result<Option<BrokenLink>, DocLinksError> {
+    let message = field(record, MESSAGE, DOC_COMMAND, line)?;
+    let Some(code) = message
+        .get(CODE)
+        .and_then(|code| code.get(CODE))
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    if code != BROKEN_INTRA_DOC_LINKS {
+        return Ok(None);
+    }
+    broken_link(record, message, &workspace.names, line).map(Some)
+}
+
+/// The workspace package one artifact record documented, or `None` when the
+/// record reports a unit that was compiled rather than documented, or a unit of
+/// a package outside the workspace.
+///
+/// The test is where the files landed. `cargo doc --no-deps` still *compiles*
+/// every member another member depends on, and each of those compilations
+/// reports an artifact too — with `.rmeta` files under `target/debug/deps`
+/// rather than pages under `target/doc`. Counting artifacts without this test
+/// would count those compilations as documentation, so the parity check would
+/// pass while crates went unread.
+fn documented_package(
+    record: &Value,
+    workspace: &Workspace,
+    line: &str,
+) -> Result<Option<String>, DocLinksError> {
+    let package_id = text_field(record, PACKAGE_ID, DOC_COMMAND, line)?;
+    let Some(name) = workspace.names.get(package_id) else {
+        return Ok(None);
+    };
+
+    for filename in array_field(record, FILENAMES, DOC_COMMAND, line)? {
+        let path = Path::new(as_text(filename, FILENAMES, DOC_COMMAND, line)?);
+        if path.starts_with(&workspace.doc_dir) {
+            return Ok(Some(name.clone()));
+        }
+    }
+    Ok(None)
 }
 
 /// Read one diagnostic into a [`BrokenLink`].
