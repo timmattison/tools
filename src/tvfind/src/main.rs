@@ -90,6 +90,18 @@ fn powered_off_heading(vendor_filter: &str) -> String {
     format!("\nRegistered to {registrant}, but answered no probe (powered off?):\n")
 }
 
+/// Hint printed when the `arp` command cannot be run.
+///
+/// `os` names the operating system, as `std::env::consts::OS` spells it. A
+/// Linux distribution that ships iproute2 gets `arp` from the `net-tools`
+/// package, and many such distributions do not install that package. Every
+/// other system supplies `arp` itself, thus an absence there is a question of
+/// the PATH.
+fn missing_arp_hint(os: &str) -> &'static str {
+    let _ = os;
+    todo!("a missing arp command still returns in silence")
+}
+
 /// What one sweep of the subnet found.
 struct ScanResult {
     /// Televisions identified, after the vendor filter.
@@ -221,7 +233,7 @@ mod tests {
 
     use super::identify::{Platform, Tv};
     use super::scan::Probe;
-    use super::{host_count, powered_off_heading, ScanResult};
+    use super::{host_count, missing_arp_hint, powered_off_heading, ScanResult};
 
     /// A television as the Roku path reports one.
     fn a_tv(ip: Ipv4Addr, vendor: &str) -> Tv {
@@ -331,6 +343,33 @@ mod tests {
         let heading = powered_off_heading("tcl");
 
         assert!(heading.contains("tcl"), "got {heading:?}");
+    }
+
+    #[test]
+    fn names_the_package_that_supplies_arp_on_linux() {
+        // A distribution that ships iproute2 carries no arp command until
+        // net-tools is installed, and the powered-off report needs arp.
+        let hint = missing_arp_hint("linux");
+
+        assert!(hint.contains("net-tools"), "got {hint:?}");
+        assert!(hint.contains("arp"), "got {hint:?}");
+        assert!(
+            hint.contains("powered off"),
+            "the hint must name the report that was lost, got {hint:?}"
+        );
+    }
+
+    #[test]
+    fn points_at_the_path_on_a_system_that_supplies_arp_itself() {
+        // macOS installs arp with the system, so there is no package to name.
+        let hint = missing_arp_hint("macos");
+
+        assert!(hint.contains("arp"), "got {hint:?}");
+        assert!(hint.contains("PATH"), "got {hint:?}");
+        assert!(
+            !hint.contains("net-tools"),
+            "macOS has no net-tools package, got {hint:?}"
+        );
     }
 
     #[test]
