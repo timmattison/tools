@@ -126,6 +126,55 @@ pub fn helper() -> Thing {
 }
 ";
 
+// ---------------------------------------------------------------------------
+// One constant per visibility a `use` inside the allowed module arrives in.
+//
+// The forms above ask whether a file names a trippy type. These ask the
+// question the allowed module raises instead: whether the name it holds stays
+// inside it. A `use` that carries a trippy type out puts that type into every
+// module of the crate under a `crate::` name, and the wall promises that an
+// upgrade of the trippy crates breaks one file and no other.
+// ---------------------------------------------------------------------------
+
+/// A public re-export. The tracer holds the name, and so does every caller of
+/// the tracer.
+const PUBLIC_RE_EXPORT: &str = "\
+pub use trippy_core::Port;
+";
+
+/// A crate-visible re-export, under an alias. This is the exact shape that got
+/// past the wall: the alias hides the name, and `pub(crate)` still carries the
+/// type to every other module of `krt`.
+const CRATE_RE_EXPORT: &str = "\
+pub(crate) use trippy_core::Port as LeakedPort;
+";
+
+/// Every visibility that carries a name out of the module that writes it.
+///
+/// `pub(super)` and `pub(in ...)` are the two spellings a reader forgets. Each
+/// one reaches at least one module that is not the tracer, so each one is the
+/// fault the wall exists to stop.
+const EVERY_RE_EXPORT_VISIBILITY: [&str; 4] = [
+    "pub use trippy_core::Port;\n",
+    "pub(crate) use trippy_core::Round as R;\n",
+    "pub(super) use trippy_core::Builder;\n",
+    "pub(in crate::trace) use trippy_core::MAX_TTL;\n",
+];
+
+/// A `use` restricted to the module that writes it. `pub(self)` is the long
+/// spelling of private, and it carries nothing out of the tracer.
+const SELF_RESTRICTED_USE: &str = "\
+pub(self) use trippy_core::Port;
+";
+
+/// A public re-export of types this workspace owns. The tracer hands its
+/// callers types that `krt` owns, which is the whole point of the wall, so
+/// these must not fire.
+const OWNED_RE_EXPORT: &str = "\
+pub use crate::record::Hop;
+pub(crate) use self::inner::Thing;
+";
+
 /// Write a source tree in its own temp dir, one file per `(relative, contents)`
 /// pair, and return the directory that holds it.
 fn tree(files: &[(&str, &str)]) -> TempDir {
@@ -334,6 +383,113 @@ fn a_file_under_the_allowed_module_directory_carries_a_trippy_path() {
 }
 
 // ---------------------------------------------------------------------------
+// The allowed module keeps what it holds: a re-export out of it is an offender
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_public_re_export_out_of_the_allowed_module_is_an_offender() {
+    let dir = tree(&[("main.rs", PLAIN), (ALLOWED, PUBLIC_RE_EXPORT)]);
+
+    let report = audit_fixture(&dir);
+
+    assert!(
+        !report.is_compliant(),
+        "a public re-export puts the trippy type into every module of the crate: {report}"
+    );
+    assert_eq!(
+        offenders(&dir, &report),
+        one_offender(ALLOWED, &["trippy_core::Port"])
+    );
+}
+
+#[test]
+fn a_crate_visible_re_export_out_of_the_allowed_module_is_an_offender() {
+    let dir = tree(&[("main.rs", PLAIN), (ALLOWED, CRATE_RE_EXPORT)]);
+
+    let report = audit_fixture(&dir);
+
+    assert!(
+        !report.is_compliant(),
+        "`pub(crate)` reaches every module of krt, and the alias hides the name: {report}"
+    );
+    assert_eq!(
+        offenders(&dir, &report),
+        one_offender(ALLOWED, &["trippy_core::Port"]),
+        "the report names the trippy path, not the alias a caller reads"
+    );
+}
+
+#[test]
+fn every_visibility_that_leaves_the_allowed_module_is_an_offender() {
+    for source in EVERY_RE_EXPORT_VISIBILITY {
+        let dir = tree(&[("main.rs", PLAIN), (ALLOWED, source)]);
+
+        let report = audit_fixture(&dir);
+
+        assert!(
+            !report.is_compliant(),
+            "`{source}` carries a trippy type out of {ALLOWED}: {report}"
+        );
+    }
+}
+
+#[test]
+fn a_private_use_inside_the_allowed_module_is_not_a_re_export() {
+    let dir = tree(&[("main.rs", PLAIN), (ALLOWED, USE_DECLARATION)]);
+
+    let report = audit_fixture(&dir);
+
+    assert!(
+        report.is_compliant(),
+        "a private import is how the tracer names a trippy type, and it carries nothing \
+         out: {report}"
+    );
+}
+
+#[test]
+fn a_use_restricted_to_the_allowed_module_is_not_a_re_export() {
+    let dir = tree(&[("main.rs", PLAIN), (ALLOWED, SELF_RESTRICTED_USE)]);
+
+    let report = audit_fixture(&dir);
+
+    assert!(
+        report.is_compliant(),
+        "`pub(self)` is the long spelling of private; no module outside the tracer can \
+         name what it holds: {report}"
+    );
+}
+
+#[test]
+fn a_re_export_of_a_type_this_workspace_owns_is_not_an_offender() {
+    let dir = tree(&[("main.rs", PLAIN), (ALLOWED, OWNED_RE_EXPORT)]);
+
+    let report = audit_fixture(&dir);
+
+    assert!(
+        report.is_compliant(),
+        "handing the caller a type this crate owns is the purpose of the wall: {report}"
+    );
+}
+
+#[test]
+fn a_re_export_under_the_allowed_module_directory_is_an_offender() {
+    let dir = tree(&[
+        ("main.rs", PLAIN),
+        ("trace/mod.rs", USE_DECLARATION),
+        ("trace/probe.rs", PUBLIC_RE_EXPORT),
+    ]);
+
+    let report = audit_fixture(&dir);
+
+    assert_eq!(
+        offenders(&dir, &report),
+        one_offender("trace/probe.rs", &["trippy_core::Port"]),
+        "a split of the tracer into submodules keeps the wall where it is, and a re-export \
+         out of one of them reaches the same callers"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The message has to be usable without opening the source
 // ---------------------------------------------------------------------------
 
@@ -350,6 +506,29 @@ fn the_failure_message_names_the_file_and_the_remedy() {
     assert!(
         rendered.contains("Move that code into trace.rs"),
         "the message must say what to do, got:\n{rendered}"
+    );
+}
+
+/// The two faults have two remedies, and a message that gives the wrong one
+/// sends a reader to move code that is already in the right file.
+#[test]
+fn the_failure_message_names_the_re_export_and_its_own_remedy() {
+    let dir = tree(&[("main.rs", PLAIN), (ALLOWED, CRATE_RE_EXPORT)]);
+
+    let rendered = audit_fixture(&dir).to_string();
+
+    assert!(
+        rendered.contains("trace.rs re-exports: trippy_core::Port"),
+        "the message must say the file carries the type out, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Do not re-export a trippy type out of trace.rs"),
+        "the message must say what to do, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Move that code into trace.rs"),
+        "the code is already in trace.rs; the remedy of the other fault does not apply, \
+         got:\n{rendered}"
     );
 }
 
