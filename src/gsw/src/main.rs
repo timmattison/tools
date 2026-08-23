@@ -203,7 +203,7 @@ pub(crate) const DEFAULT_TERMINAL_HEIGHT: usize = 24;
 /// Mirrors [`effective_terminal_width`]: when stdout is captured by a
 /// watch-like wrapper (not a TTY) that exports `LINES`, trust that height —
 /// minus [`WRAPPER_CHROME_ROWS`] for the wrapper's own header — because
-/// `terminal_size()` can't see through the pipe. With a direct TTY, use the
+/// `termsize::stdout_size` can't see through the pipe. With a direct TTY, use the
 /// queried height. With no signal at all, fall back to
 /// [`DEFAULT_TERMINAL_HEIGHT`].
 pub(crate) fn effective_terminal_height(
@@ -316,8 +316,7 @@ fn main() -> Result<()> {
         watch::Mode::OneShot => {
             // Preserve the viddy-aware env sizing and the trailing newline of
             // the historical one-shot output exactly.
-            let tty_size =
-                terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), usize::from(h.0)));
+            let tty_size = termsize::stdout_size().map(|(w, h)| (usize::from(w), usize::from(h)));
             let lines_env: Option<usize> = std::env::var("LINES").ok().and_then(|s| s.parse().ok());
             let dims = watch::resolve_dimensions(
                 watch::Mode::OneShot,

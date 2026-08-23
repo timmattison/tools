@@ -3528,7 +3528,7 @@ dependencies = [
  "libc",
  "notify",
  "tempfile",
- "terminal_size",
+ "termsize",
  "testcolor",
  "unicode-width",
 ]
@@ -3870,8 +3870,8 @@ dependencies = [
  "image",
  "libc",
  "notify",
- "terminal_size",
  "termion",
+ "termsize",
  "unicode-width",
 ]
 
@@ -6767,7 +6767,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "terminal_size",
+ "termsize",
  "thiserror 2.0.20",
  "toml",
  "unicode-width",
