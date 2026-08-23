@@ -502,7 +502,10 @@ impl<W: Write, C: Clock> Headless<W, C> {
 
 impl<W: Write, C: Clock> Screen for Headless<W, C> {
     fn poll(&mut self) -> bool {
-        todo!("a headless screen reads no key")
+        // A headless run holds no terminal, so no key of it reaches this
+        // process. The signal handler that `main.rs` registers stops such a
+        // run, and the limits of the command line stop it too.
+        false
     }
 
     fn round(&mut self, round: &RoundRecord) {
