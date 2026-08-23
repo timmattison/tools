@@ -455,11 +455,21 @@ impl Clock for SystemClock {
     }
 }
 
+/// The time between two lines of a run that draws no table.
+///
+/// A run of one round each second writes one line each second, and an hour of
+/// such a run fills a terminal with 3600 lines that say almost the same thing.
+/// One line for each minute of the run says the same thing and leaves the
+/// window of the terminal to the work of the reader.
+const LINE_PERIOD: Duration = Duration::from_secs(60);
+
 /// The display of a run that draws no table.
 ///
 /// A run whose standard output is a pipe or a file holds no terminal. Such a
-/// run clears no screen and reads no key, so it writes one status line for a
-/// round and nothing else.
+/// run clears no screen and reads no key. It writes one status line at its
+/// first round, and one more each time a whole [`LINE_PERIOD`] passed since the
+/// line before it. The first round stands on its own reason: a run that printed
+/// nothing for a whole minute reads as a run that died.
 pub(crate) struct Headless<W: Write, C: Clock> {
     /// Where the lines go.
     sink: W,
@@ -479,6 +489,15 @@ impl<W: Write, C: Clock> Headless<W, C> {
             last: None,
         }
     }
+
+    /// Whether the line of a round that arrives at `now` reaches the sink.
+    ///
+    /// The first round of a run prints, and every round after it prints when a
+    /// whole [`LINE_PERIOD`] passed since the last line.
+    fn due(&self, now: Instant) -> bool {
+        self.last
+            .is_none_or(|last| now.duration_since(last) >= LINE_PERIOD)
+    }
 }
 
 impl<W: Write, C: Clock> Screen for Headless<W, C> {
@@ -487,10 +506,11 @@ impl<W: Write, C: Clock> Screen for Headless<W, C> {
     }
 
     fn round(&mut self, round: &RoundRecord) {
-        if self.last.is_some() {
+        let now = self.clock.now();
+        if !self.due(now) {
             return;
         }
-        self.last = Some(self.clock.now());
+        self.last = Some(now);
         // A line that does not print stops nothing. The recording is the
         // purpose of the tool, and the line is one view of it, so a reader who
         // closes the pipe of the display loses the display and keeps the
