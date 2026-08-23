@@ -26,9 +26,11 @@ use crate::stats::HopTable;
 use crate::ui;
 use crate::ui::render_duration;
 use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
-use crossterm::cursor::{MoveTo, Show};
+use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, Clear, ClearType, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::{execute, queue};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -650,6 +652,78 @@ fn restore_panic_hook(previous: PanicHook) {
         return;
     }
     std::panic::set_hook(Box::new(move |info| (*previous)(info)));
+}
+
+/// The hold of a live run on the terminal of that run.
+///
+/// The guard takes the terminal at the start of the live run and puts it back
+/// at the end. It is a local of the run, so every way out of that run gives the
+/// terminal back: the stop that the user asked for, the fault that ends the run
+/// early, and the panic that nobody asked for.
+///
+/// No test of this file builds this guard. `crossterm` takes raw mode of the
+/// terminal of the process, and a test that took the terminal of `cargo test`
+/// takes the terminal of the reader who started it. The pseudo terminal of a
+/// later step of this work is what drives the guard. The panic hook of the
+/// guard holds no terminal, and the tests above drive that hook on its own.
+#[expect(
+    dead_code,
+    reason = "the caller that picks the live table joins this module in the next step of this work"
+)]
+pub(crate) struct TerminalGuard {
+    /// The panic hook that stood before [`TerminalGuard::enter`] wrapped it.
+    ///
+    /// An `Option`, so the drop moves the hook out of it and back into the
+    /// process.
+    previous_hook: Option<PanicHook>,
+}
+
+impl TerminalGuard {
+    /// Takes the terminal for a live run.
+    ///
+    /// Raw mode sends the bytes of every key straight to this process, which is
+    /// what lets a key of the reader reach the run. The alternate screen holds
+    /// the frames of the run, so the lines that stood in the terminal come back
+    /// at the end of it. The cursor goes away, because a table that redraws
+    /// itself ten times each second drags a cursor across itself.
+    ///
+    /// The panic hook comes last. A panic of a live run prints its message on
+    /// the alternate screen in raw mode, and the process then dies and takes
+    /// that screen away with it, so the reader reads no message at all. The
+    /// hook puts the terminal back in front of the message.
+    ///
+    /// # Errors
+    ///
+    /// Answers the fault of a terminal that refused raw mode, or that refused
+    /// the alternate screen. A terminal that refused the second of the two
+    /// comes all the way back before the fault answers, so a run that stops
+    /// here leaves no terminal in raw mode.
+    #[expect(
+        dead_code,
+        reason = "the caller that picks the live table joins this module in the next step of this work"
+    )]
+    pub(crate) fn enter() -> std::io::Result<Self> {
+        enable_raw_mode()?;
+        if let Err(fault) = execute!(std::io::stdout(), EnterAlternateScreen, Hide) {
+            restore_terminal();
+            return Err(fault);
+        }
+        Ok(Self {
+            previous_hook: Some(install_panic_hook()),
+        })
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+        // The hook of the live run goes off the process with the run that
+        // installed it. A hook that stood on holds a terminal that no part of
+        // the process holds.
+        if let Some(previous) = self.previous_hook.take() {
+            restore_panic_hook(previous);
+        }
+    }
 }
 
 #[cfg(test)]
