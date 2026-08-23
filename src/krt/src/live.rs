@@ -94,6 +94,43 @@ pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
 /// front of them. One word answers that.
 const PAUSED: &str = "paused";
 
+/// The number of keys that a live table reads.
+const KEY_COUNT: usize = 5;
+
+/// Each key of a live table, and what that key does.
+///
+/// This list is the one place that says what a key does, and the help builds
+/// its lines out of it. A second list would name a key that [`classify`] no
+/// longer holds, and a reader who pressed that key would then read a screen
+/// which says that nothing happened.
+const KEYS: [(&str, &str); KEY_COUNT] = [
+    ("q, Ctrl-C", "stop the run"),
+    ("p", "hold the table, or let it move"),
+    ("n", "show the names, or show the addresses"),
+    ("r", "empty the table"),
+    ("?", "show these keys, or hide them"),
+];
+
+/// The text between a key and what that key does.
+///
+/// Two spaces, so the widest key of the list stands clear of its own text.
+const KEY_GAP: &str = "  ";
+
+/// The lines of the list of the keys.
+///
+/// Every key takes the columns of the widest key, so the text of each of them
+/// starts at one column and the list reads as two columns.
+fn key_lines() -> Vec<String> {
+    let width = KEYS
+        .iter()
+        .map(|(key, _)| ui::display_width(key))
+        .max()
+        .unwrap_or(0);
+    KEYS.iter()
+        .map(|(key, does)| format!("{key:<width$}{KEY_GAP}{does}"))
+        .collect()
+}
+
 /// The end of every line that a draw writes.
 ///
 /// Raw mode returns no carriage on a bare line feed, so a frame of bare line
@@ -264,6 +301,10 @@ impl<W: Write, K: Keys> Table<W, K> {
             lines.push(String::new());
             lines.push(PAUSED.to_owned());
         }
+        if self.help {
+            lines.push(String::new());
+            lines.extend(key_lines());
+        }
         lines
     }
 
@@ -280,9 +321,9 @@ impl<W: Write, K: Keys> Table<W, K> {
                 self.table = HopTable::new();
                 self.rounds = 0;
             }
-            // Each command below takes an arm of this table with the test of
-            // that command.
-            Command::Quit | Command::Help => {}
+            Command::Help => self.help = !self.help,
+            // The stop takes an arm of this table with the test of it.
+            Command::Quit => {}
         }
     }
 
