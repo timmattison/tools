@@ -2047,6 +2047,47 @@ mod ui_tests {
     }
 
     #[test]
+    fn a_failed_push_shows_the_last_lines_rather_than_the_first() {
+        // A pre-push hook that runs a test suite prints its whole run before
+        // it fails, and git adds its own verdict after that. The reason is
+        // therefore at the end, and three rows spent on the hook's opening
+        // banner say nothing at all — which is what the head rule gave every
+        // repository that has a hook.
+        //
+        // A plain rejection is unaffected: git writes exactly three non-hint
+        // lines there, so the head and the tail are the same three.
+        let mut ui = asking();
+        ui.confirm(t0());
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "Running clippy\n\
+                     Compiling gsw v0.1.0\n\
+                     Compiling repo-guards v0.1.0\n\
+                     test push::window ... FAILED\n\
+                     error: test failed\n\
+                     error: failed to push some refs\n"
+                    .to_string(),
+            },
+            t0(),
+        );
+
+        let overlay = ui.overlay(tall_pane(120), t0()).text();
+        assert!(
+            overlay.contains("error: failed to push some refs"),
+            "git's own verdict is the last line and must survive, got {overlay:?}",
+        );
+        assert!(
+            overlay.contains("test push::window ... FAILED"),
+            "the failing test is what names the reason, got {overlay:?}",
+        );
+        assert!(
+            !overlay.contains("Compiling"),
+            "the opening banner is what the rows come from, got {overlay:?}",
+        );
+    }
+
+    #[test]
     fn a_failed_push_never_takes_more_than_three_rows() {
         // The frame below is what the user is watching. A wall of git output
         // must not push it off the screen.
@@ -2094,12 +2135,17 @@ mod ui_tests {
             t0(),
         );
         assert_eq!(overlay.rows(), 2, "the frame keeps the third row");
-        // git leads with the part worth reading, so the tail is what goes.
+        // The reason a push failed is the last thing said about it, so the
+        // head is what goes. `To /tmp/origin` names a remote the frame above
+        // already shows, and it is the line the clip can most afford to lose.
         let text = overlay.text();
-        assert!(text.contains("To /tmp/origin"), "got {text:?}");
         assert!(
-            !text.contains("error: failed to push some refs"),
-            "the last line is the one to drop, got {text:?}",
+            text.contains("error: failed to push some refs"),
+            "the verdict must survive the clip, got {text:?}",
+        );
+        assert!(
+            !text.contains("To /tmp/origin"),
+            "the first line is the one to drop, got {text:?}",
         );
     }
 
