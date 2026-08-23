@@ -3500,6 +3500,62 @@ echo "{SECOND_LINE}"
             );
         }
 
+        #[test]
+        fn a_failed_push_shows_the_last_thing_said_across_both_pipes() {
+            // The runner reads two pipes. Joining their text by stream puts
+            // the whole of one after the whole of the other, so the last three
+            // lines are the tail of one pipe alone and whatever the other said
+            // last is nowhere in them.
+            //
+            // That is the ordinary failure. A hook prints its progress on
+            // stdout and fails, and git writes `error: failed to push some
+            // refs` on stderr after everything — so grouping by stream buries
+            // the one line that says the push did not happen, behind a hook's
+            // banner that says nothing about it.
+            //
+            // The gate makes the order a fact rather than a race: the hook
+            // does not exit until the runner has reported its last stdout
+            // line, so git's stderr cannot be read before them.
+            let (_origin, clone) = clone_with_feature_branch();
+            let p = clone.path();
+            let gate = p.join(".git").join("gate");
+            write_hook(
+                p,
+                &format!(
+                    r#"for i in 1 2 3 4; do echo "hook stdout $i"; done
+i=0
+while [ $i -lt {GATE_POLLS} ]; do
+    [ -f "{gate}" ] && break
+    sleep 0.2
+    i=$((i + 1))
+done
+exit 1"#,
+                    gate = gate.display(),
+                ),
+            );
+
+            let gate_path = gate;
+            let outcome = run_push(
+                &confirmed(&["push", "-u", "origin", "feature"]),
+                p,
+                &move |line: String| {
+                    if line == "hook stdout 4" {
+                        std::fs::write(&gate_path, b"open").expect("open the gate");
+                    }
+                },
+            );
+
+            assert!(
+                !outcome.success,
+                "the hook exits non-zero, so the push must fail",
+            );
+            let shown = failure_lines(&outcome.output);
+            assert!(
+                shown.iter().any(|line| line.contains("error:")),
+                "git's verdict is the last thing said and must survive, got {shown:?}",
+            );
+        }
+
         /// What [`spawn`] delivered, in the order the channel carried it.
         enum Report {
             Line(String),
