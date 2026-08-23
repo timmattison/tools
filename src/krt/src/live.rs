@@ -751,6 +751,16 @@ mod tests {
     }
 
     #[test]
+    fn the_quit_key_stops_the_run_and_a_turn_of_no_key_stops_nothing() {
+        let mut screen = table(&[&[], &[Command::Quit]]);
+        assert!(
+            !screen.poll(),
+            "a turn that took no key asks for no stop of the run"
+        );
+        assert!(screen.poll(), "the quit key asks for the stop of the run");
+    }
+
+    #[test]
     fn the_q_key_asks_for_a_quit() {
         assert_eq!(classify(press(KeyCode::Char('q'))), Some(Command::Quit));
     }
