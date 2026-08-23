@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use colored::{ColoredString, Colorize};
 
 use crate::age::{format_age_detailed, scale_rgb};
+use crate::lines::LineSplitter;
 use crate::render::{truncate_right, Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
 use crate::watch::{Dimensions, InputMode};
@@ -328,12 +329,13 @@ fn run_push(
         .args(command.args())
         .current_dir(workdir)
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0");
     detach_from_terminal(&mut child);
-    let result = child.output();
 
-    let output = match result {
-        Ok(output) => output,
+    let mut child = match child.spawn() {
+        Ok(child) => child,
         // git is missing, or not executable. Rare, and worth saying plainly:
         // every other failure here is git's own words, and this one would
         // otherwise arrive as an empty message.
@@ -345,30 +347,117 @@ fn run_push(
         }
     };
 
+    // Taken out of the handle so each pipe is owned by the thread that drains
+    // it, which leaves `child` free to be waited on below.
+    let child_stdout = child.stdout.take();
+    let child_stderr = child.stderr.take();
+
+    // One thread per pipe, and both must run at once. A pipe holds a fixed
+    // number of bytes, so a reader that waits its turn lets the other pipe
+    // fill, and a child blocked writing into a full pipe never exits — which
+    // is the deadlock a single-threaded read of two streams always eventually
+    // finds. Scoped threads because `on_line` is borrowed, not owned: it is
+    // `Sync`, so both threads can call it, and the scope is what proves to the
+    // compiler that neither outlives the borrow.
+    let (stderr_text, stdout_text) = std::thread::scope(|scope| {
+        let errors = scope.spawn(|| drain(child_stderr, on_line));
+        let output = scope.spawn(|| drain(child_stdout, on_line));
+        // A panicking reader loses its own text and nothing else. The
+        // alternative is to carry the panic out of `run_push`, which runs on
+        // the push thread — and a push thread that dies never calls
+        // `on_finish`, so the monitor would sit in the pushing mode for the
+        // rest of the session over a callback that misbehaved.
+        (
+            errors.join().unwrap_or_default(),
+            output.join().unwrap_or_default(),
+        )
+    });
+
+    // Waited on only after both pipes reach end of file, which they do when
+    // the child closes them at exit. Reversing the two would be the same
+    // deadlock by another door on a child that outputs more than a pipe holds.
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            return PushOutcome {
+                success: false,
+                output: format!("cannot wait for git: {error}"),
+            }
+        }
+    };
+
     // stderr first: `git push` reports what it did — `To <remote>`, the ref
     // updates, and every rejection — on stderr, and writes to stdout only under
-    // flags gsw does not pass. Leading with it puts the useful lines at the
-    // head, which is the part a status message has room for — at most
-    // [`MAX_STATUS_ROWS`], and fewer on a short pane.
-    let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    // Carriage returns are how a progress meter redraws in place. Capturing
-    // both streams already suppresses it, so this is for anything else that
-    // emits CRLF: left in, a stray `\r` would send the cursor to column zero
-    // mid-row and scramble the frame under it.
-    let mut text = text.replace('\r', "");
+    // flags gsw does not pass. A hook writes to both, and git passes each
+    // through to its own stream rather than merging them, so the two halves are
+    // joined here in the order that puts git's own account first.
+    let mut text = stderr_text;
+    text.push_str(&stdout_text);
 
-    let success = output.status.success();
+    let success = status.success();
     if !success && text.trim().is_empty() {
         // A failure with nothing to show would render as a blank row, which
         // reads as success. The exit status is all git left us.
-        text = format!("git push failed ({})", output.status);
+        text = format!("git push failed ({status})");
     }
 
     PushOutcome {
         success,
         output: text,
     }
+}
+
+/// Read one of the child's pipes to the end, reporting each line as it lands
+/// and returning everything the pipe carried.
+///
+/// The two jobs are one pass on purpose. The live window wants each line at the
+/// moment it arrives, and [`PushOutcome`] wants the whole text at the end. Read
+/// twice they would be two different accounts of one stream, and the pipe only
+/// gives its bytes up once anyway.
+///
+/// `stream` is an `Option` because [`std::process::Child`]'s handles are, and a
+/// missing pipe is treated as an empty one: it cannot happen for a child
+/// configured with [`Stdio::piped`], and inventing an error message for it
+/// would put words in git's mouth.
+///
+/// A read error ends the drain with what was read so far. The child is on the
+/// other end of a pipe that is about to close anyway, and the exit status —
+/// which is what decides success — is read from the child itself.
+fn drain(stream: Option<impl std::io::Read>, on_line: &(dyn Fn(String) + Sync)) -> String {
+    let Some(mut stream) = stream else {
+        return String::new();
+    };
+
+    let mut splitter = LineSplitter::new();
+    let mut collected = String::new();
+    let mut buffer = [0_u8; 8192];
+    let mut report = |line: String, collected: &mut String| {
+        collected.push_str(&line);
+        collected.push('\n');
+        on_line(line);
+    };
+
+    loop {
+        match stream.read(&mut buffer) {
+            // End of file: the child closed this pipe.
+            Ok(0) => break,
+            Ok(read) => {
+                for line in splitter.feed(&buffer[..read]) {
+                    report(line, &mut collected);
+                }
+            }
+            // A signal arrived mid-read. Nothing was lost and nothing is wrong.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+
+    // A hook that exits without a trailing newline still said something.
+    if let Some(line) = splitter.finish() {
+        report(line, &mut collected);
+    }
+
+    collected
 }
 
 /// Arrange for `command`'s child to run detached from the terminal, so nothing
