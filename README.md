@@ -625,9 +625,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - The default name therefore carries the public address of the machine, and a file you share
     carries it too. `--source` avoids the lookup, and `--output` avoids the name.
   - `--rounds` stops the run after that many rounds, and `--duration` stops it after that much
-    time. Each of the two writes the record that closes the run. On macOS and Linux, Ctrl-C also
-    stops the run at once and writes that record. Windows gets that key with the table that a
-    later build adds.
+    time. Each of the two writes the record that closes the run, whatever screen that run shows. On
+    macOS and Linux, Ctrl-C also stops the run at once and writes that record. A run that draws the
+    live table takes Ctrl-C as a key, and a run that draws no table takes it as a signal. On
+    Windows, the live table is what reads that key, and a Windows run that draws no table stops at
+    a limit of the command line alone.
   - A run resolves the name of each address it sees through the system resolver of the platform.
     The file takes one `name` record for each name, and one record for each address at most,
     however many rounds that address answers in. An address that resolves to no name keeps its raw
@@ -636,6 +638,37 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     that every lookup settles, and its ceiling is the timeout of the system resolver, which is 5
     seconds. `--no-dns` skips every lookup, so the file then holds no `name` record and the `run`
     record says `"dns":false`.
+  - A run draws the live table of the path when standard output is a terminal and `--headless` is
+    off. Every other run prints one status line at its first round, and one more each minute: a run
+    of `--headless`, a run whose output goes to a pipe or to a file, and a run under a `nohup`, a
+    `launchd` job, or a `systemd` unit. Such a run holds no terminal, and no key of it reaches
+    `krt`. A table there writes one whole frame into that pipe or that file for each round, and one
+    line each minute says what the run is doing and leaves that file readable.
+  - The live table is the table of `krt replay` below. It holds the same header line, the same
+    columns, the same marks, and the same rule for a terminal too narrow for every column. It takes
+    the width of the terminal at the start of the run, and a window that changes size while the run
+    stands leaves the frame at that width. The table folds every round that arrives and draws the
+    frame of that fold, so the count of the rounds in its header line is the count that the table
+    folded, and the size in that same line is the size the recorded file holds at that draw.
+  - Five keys drive the live table. `q` and Ctrl-C stop the run, write the record that closes it,
+    give the terminal back, and exit with success. `p` holds the table where it stands, and a
+    second press lets it move again. A held table holds the display alone: the file still takes
+    every round, and the table still folds every round into its numbers, so the frame that follows
+    the pause holds every round of that pause. `n` shows the names of the hosts, and a second press
+    shows the raw addresses. `r` empties the table and counts its rounds from zero, and it touches
+    neither the recorded file nor the count of the rounds that the closing record carries. `?`
+    shows the list of the keys under the table, and a second press hides it.
+  - Ctrl-C reaches the live table as a key and not as a signal. The table holds the terminal in raw
+    mode, which clears `ISIG`, so the terminal sends the byte to `krt` and the process takes no
+    `SIGINT`. A run that draws no table keeps the signal handler of the platform.
+  - The terminal always comes back. The live table draws on the alternate screen, and a guard gives
+    the terminal back on every way out of the run: the key that stopped it, a write that failed
+    (exit code 3), a tracer that died (exit code 4), and a panic that nobody asked for. A panic
+    hook gives the terminal back ahead of the message of the panic, so that message lands on the
+    screen the reader keeps. The line that closes the run prints there too, under the lines that
+    stood in the terminal before the run. A destination that resolves to no address (exit code 1)
+    and a platform that withholds the privilege of a raw socket (exit code 2) both print before the
+    run takes the terminal at all.
   - `krt replay` prints one table of the path. A header line names the destination, the address it
     resolved to, the source, the count of the rounds, the period of one round, and the recorded
     file with its size. Under it stands one row for each TTL, with the columns `TTL`, `Host`,
@@ -661,7 +694,6 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - A host too wide for the `Host` column loses the tail of its name, and it keeps its `★` and its
     `(+N)`. A name with its address fills that column of a run that resolves names, and the two
     marks say what no other column of the row says.
-  - A live run still prints one status line for each round. A later build gives it the table.
   - macOS sends the probes without privileges. Linux needs `CAP_NET_RAW`, and Windows needs an
     elevated prompt. A platform that needs privileges and does not hold them prints the remedy and
     stops, and `krt` never falls back to a degraded trace without saying so.
