@@ -794,9 +794,17 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
                 // a case the user can reach.
                 if let Some(workdir) = workdir.clone() {
                     let tx = push_tx.clone();
-                    crate::push::spawn(command, workdir, move |outcome| {
-                        let _ = tx.send(Event::PushFinished(outcome));
-                    });
+                    let finish_tx = push_tx.clone();
+                    crate::push::spawn(
+                        command,
+                        workdir,
+                        move |_line| {
+                            let _ = &tx;
+                        },
+                        move |outcome| {
+                            let _ = finish_tx.send(Event::PushFinished(outcome));
+                        },
+                    );
                 }
             },
         },

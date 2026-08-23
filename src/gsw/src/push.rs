@@ -250,11 +250,12 @@ pub(crate) fn prompt_for(
 /// Takes the whole [`PushCommand`] by value, so the branch the confirmation
 /// named crosses onto the thread with the arguments and [`run_push`] can still
 /// refuse a repository that moved on in the meantime.
-pub(crate) fn spawn<F>(command: PushCommand, workdir: PathBuf, on_finish: F)
+pub(crate) fn spawn<L, F>(command: PushCommand, workdir: PathBuf, on_line: L, on_finish: F)
 where
+    L: Fn(String) + Send + Sync + 'static,
     F: FnOnce(PushOutcome) + Send + 'static,
 {
-    std::thread::spawn(move || on_finish(run_push(&command, &workdir)));
+    std::thread::spawn(move || on_finish(run_push(&command, &workdir, &on_line)));
 }
 
 /// What a refused push tells the user to do. Pressing `p` again re-resolves the
@@ -301,7 +302,12 @@ const RETRY_ADVICE: &str = "press p again";
 /// - **Both streams are captured**, which also suppresses git's progress meter:
 ///   it renders only to a terminal, so a pipe removes the carriage-return
 ///   redraws that would otherwise arrive as unreadable status rows.
-fn run_push(command: &PushCommand, workdir: &Path) -> PushOutcome {
+fn run_push(
+    command: &PushCommand,
+    workdir: &Path,
+    on_line: &(dyn Fn(String) + Sync),
+) -> PushOutcome {
+    let _ = on_line;
     // `None` means git could not be run at all, which the push below reports in
     // git's own terms. Refusing here instead would blame a branch change that
     // did not happen — and a git that cannot start cannot push either.
@@ -2555,6 +2561,12 @@ mod run_tests {
         PushCommand::new("feature", args.iter().map(|s| (*s).to_string()).collect())
     }
 
+    /// [`run_push`] for a test that does not care what arrived while it ran,
+    /// which is every test here but the streaming one.
+    fn run_quiet(command: &PushCommand, workdir: &Path) -> PushOutcome {
+        run_push(command, workdir, &|_| {})
+    }
+
     /// Whether `origin` has a `feature` branch, read from the origin itself.
     fn origin_has_feature(origin: &Path) -> bool {
         Command::new("git")
@@ -2577,7 +2589,7 @@ mod run_tests {
             "the fixture must start without the branch",
         );
 
-        let outcome = run_push(
+        let outcome = run_quiet(
             &confirmed(&["push", "-u", "origin", "feature"]),
             clone.path(),
         );
@@ -2610,7 +2622,7 @@ mod run_tests {
         std::fs::write(p.join("feature.txt"), "more work\n").expect("write feature.txt");
         git(p, &["commit", "-q", "-am", "more work"]);
 
-        let outcome = run_push(&confirmed(&["push"]), p);
+        let outcome = run_quiet(&confirmed(&["push"]), p);
         assert!(outcome.success, "push failed: {}", outcome.output);
 
         let subject = Command::new("git")
@@ -2636,7 +2648,7 @@ mod run_tests {
         git(p, &["push", "-q", "-u", "origin", "feature"]);
         git(p, &["commit", "-q", "--amend", "-m", "rewritten"]);
 
-        let outcome = run_push(&confirmed(&["push"]), p);
+        let outcome = run_quiet(&confirmed(&["push"]), p);
         assert!(!outcome.success, "a diverged push must fail");
         assert!(
             outcome.output.contains("rejected"),
@@ -2648,7 +2660,7 @@ mod run_tests {
     #[test]
     fn a_push_to_a_remote_that_does_not_exist_reports_it() {
         let (_origin, clone) = clone_with_feature_branch();
-        let outcome = run_push(
+        let outcome = run_quiet(
             &confirmed(&["push", "no-such-remote", "feature"]),
             clone.path(),
         );
@@ -2665,7 +2677,7 @@ mod run_tests {
         // unsuccessful outcome never arrives with an empty message, because a
         // blank status row reads as success.
         let (_origin, clone) = clone_with_feature_branch();
-        let outcome = run_push(&confirmed(&["push", "--no-such-flag"]), clone.path());
+        let outcome = run_quiet(&confirmed(&["push", "--no-such-flag"]), clone.path());
         assert!(!outcome.success);
         assert!(!failure_lines(&outcome.output).is_empty());
         assert!(!outcome.output.trim().is_empty());
@@ -2677,7 +2689,7 @@ mod run_tests {
         // would read the same keystrokes the event reader is reading, behind a
         // question gsw did not draw. It must fail fast instead of waiting.
         let (_origin, clone) = clone_with_feature_branch();
-        let outcome = run_push(
+        let outcome = run_quiet(
             &confirmed(&["push", "https://user@127.0.0.1:1/nope.git", "feature"]),
             clone.path(),
         );
@@ -2796,7 +2808,7 @@ mod run_tests {
                 &["remote", "add", "tty-probe", "ssh://127.0.0.1/nope.git"],
             );
 
-            let outcome = run_push(&confirmed(&["push", "tty-probe", "feature"]), p);
+            let outcome = run_quiet(&confirmed(&["push", "tty-probe", "feature"]), p);
             assert!(
                 !outcome.success,
                 "the fake ssh connects to nothing, so the push must fail: {}",
@@ -2861,7 +2873,7 @@ mod run_tests {
         let before_other = tip(origin.path(), "other");
         let before_feature = tip(origin.path(), "feature");
 
-        let outcome = run_push(&command, p);
+        let outcome = run_quiet(&command, p);
 
         assert!(
             !outcome.success,
@@ -2907,7 +2919,7 @@ mod run_tests {
         );
         git(p, &["checkout", "-q", "main"]);
 
-        let outcome = run_push(&command, p);
+        let outcome = run_quiet(&command, p);
 
         assert!(
             !outcome.success,
@@ -2941,7 +2953,7 @@ mod run_tests {
         let command = confirmed(&["push", "-u", "origin", "feature"]);
         git(p, &["checkout", "-q", "--detach"]);
 
-        let outcome = run_push(&command, p);
+        let outcome = run_quiet(&command, p);
 
         assert!(!outcome.success, "got {:?}", outcome.output);
         assert!(
@@ -2955,6 +2967,104 @@ mod run_tests {
         );
     }
 
+    /// The runner reports a hook's output while the hook is still running.
+    ///
+    /// Unix-only for the hook's execute bit, which is what makes git run it at
+    /// all. The rule under test is not Unix-specific — a pipe read returns what
+    /// the writer flushed on every platform — but a test that cannot make an
+    /// executable hook cannot ask the question.
+    #[cfg(unix)]
+    mod streaming_tests {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
+
+        /// What the hook writes before it waits to hear that the line arrived.
+        const FIRST_LINE: &str = "hook-said-this-first";
+
+        /// What the hook writes only once it has heard, so its presence proves
+        /// the runner reported the first line while the child was still alive.
+        const SECOND_LINE: &str = "hook-said-this-second";
+
+        /// Longest the hook waits to be told, in units of its own poll.
+        /// Bounded so a runner that reports nothing until the child exits
+        /// fails this test in a few seconds instead of deadlocking it: the
+        /// runner would be waiting for a hook that is waiting for the runner.
+        const GATE_POLLS: u32 = 100;
+
+        #[test]
+        fn the_runner_reports_a_line_while_the_push_is_still_running() {
+            // This is the whole feature. A pre-push hook that runs a test suite
+            // holds the push for minutes, and output that arrives only when the
+            // child exits is output that arrives when nobody needs it any more.
+            let (_origin, clone) = clone_with_feature_branch();
+            let p = clone.path();
+            // Stated rather than inherited: a developer with `core.hooksPath`
+            // set globally would otherwise run their own hooks here, and the
+            // test would pass or fail on a machine's configuration.
+            git(p, &["config", "core.hooksPath", ".git/hooks"]);
+
+            // Inside the git dir rather than the worktree, so the gate cannot
+            // appear as an untracked file in the repository under test.
+            let gate = p.join(".git").join("gate");
+            let hook = p.join(".git").join("hooks").join("pre-push");
+            std::fs::create_dir_all(hook.parent().expect("the hook has a parent"))
+                .expect("create the hooks directory");
+            std::fs::write(
+                &hook,
+                format!(
+                    r#"#!/bin/sh
+echo "{FIRST_LINE}"
+i=0
+while [ $i -lt {GATE_POLLS} ]; do
+    [ -f "{gate}" ] && break
+    sleep 0.2
+    i=$((i + 1))
+done
+if [ ! -f "{gate}" ]; then
+    echo "the runner reported no line while the hook was running" >&2
+    exit 1
+fi
+echo "{SECOND_LINE}"
+"#,
+                    gate = gate.display(),
+                ),
+            )
+            .expect("write the pre-push hook");
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+                .expect("make the hook executable");
+
+            let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&seen);
+            let gate_path = gate.clone();
+            let outcome = run_push(
+                &confirmed(&["push", "-u", "origin", "feature"]),
+                p,
+                &move |line: String| {
+                    if line == FIRST_LINE {
+                        std::fs::write(&gate_path, b"open").expect("open the gate");
+                    }
+                    recorded.lock().expect("the record lock is never poisoned").push(line);
+                },
+            );
+
+            // The hook itself makes the assertion: it exits non-zero when it
+            // was never told, so a runner that buffers to the end fails here
+            // with the hook's own words.
+            assert!(outcome.success, "push failed: {}", outcome.output);
+
+            let seen = seen.lock().expect("the record lock is never poisoned");
+            assert!(
+                seen.iter().any(|line| line == FIRST_LINE),
+                "the first line must reach the reporter, got {seen:?}",
+            );
+            assert!(
+                seen.iter().any(|line| line == SECOND_LINE),
+                "the line written after the gate opened must reach it too, got {seen:?}",
+            );
+        }
+    }
+
     #[test]
     fn spawn_delivers_the_outcome_off_the_calling_thread() {
         // The loop learns a push finished only through this callback, so a
@@ -2966,6 +3076,8 @@ mod run_tests {
         spawn(
             confirmed(&["push", "-u", "origin", "feature"]),
             clone.path().to_path_buf(),
+            // This test is about the outcome hop, not the line hop.
+            |_line| {},
             move |outcome| {
                 let _ = tx.send(outcome);
             },
