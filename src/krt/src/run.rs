@@ -149,7 +149,7 @@ pub(crate) fn record<W: Write>(
                 // turn. A name always lands on a later turn than the round that
                 // first reported its address, because the first ask of an
                 // address starts the lookup of that address.
-                write_names(writer, namer.names(&round.hops, Utc::now()))?;
+                show_names(writer, screen, &namer.names(&round.hops, Utc::now()))?;
                 // The recording comes first. The round reaches the file before
                 // it reaches the screen, so a screen that fails loses one frame
                 // and no record, and the file of a run whose display the user
@@ -166,7 +166,7 @@ pub(crate) fn record<W: Write>(
             // finished inside the wait lands here, so a name that arrives
             // between two rounds reaches the file at the moment it arrives.
             Err(RecvTimeoutError::Timeout) => {
-                write_names(writer, namer.names(&[], Utc::now()))?;
+                show_names(writer, screen, &namer.names(&[], Utc::now()))?;
             }
             Err(RecvTimeoutError::Disconnected) => {
                 // The tracer holds the sender for as long as it lives, so a
@@ -188,14 +188,43 @@ pub(crate) fn record<W: Write>(
     }
 }
 
-/// Appends one record for each name that arrived.
+/// Appends one record for each name that arrived, and then shows the names.
+///
+/// The record comes first, for the reason that the round of a turn does: the
+/// file is the purpose of the tool, and the screen is one view of it.
+///
+/// A turn of no name shows nothing. The loop takes ten turns each second, and a
+/// live table that took an empty list on each of them would clear the screen and
+/// paint it again at that rate.
 ///
 /// # Errors
 ///
 /// Returns [`RunError::Write`] when a record does not reach the file.
-fn write_names<W: Write>(writer: &mut Writer<W>, names: Vec<NameRecord>) -> Result<(), RunError> {
+fn show_names<W: Write>(
+    writer: &mut Writer<W>,
+    screen: &mut dyn Screen,
+    names: &[NameRecord],
+) -> Result<(), RunError> {
+    write_names(writer, names)?;
+    if !names.is_empty() {
+        screen.names(names);
+    }
+    Ok(())
+}
+
+/// Appends one record for each name that arrived.
+///
+/// Each record holds a copy of one name, because the caller keeps the names for
+/// the screen and the writer takes a whole record.
+///
+/// # Errors
+///
+/// Returns [`RunError::Write`] when a record does not reach the file.
+fn write_names<W: Write>(writer: &mut Writer<W>, names: &[NameRecord]) -> Result<(), RunError> {
     for name in names {
-        writer.write(&Record::Name(name)).map_err(RunError::Write)?;
+        writer
+            .write(&Record::Name(name.clone()))
+            .map_err(RunError::Write)?;
     }
     Ok(())
 }
@@ -212,6 +241,10 @@ fn write_names<W: Write>(writer: &mut Writer<W>, names: Vec<NameRecord>) -> Resu
 /// names that already arrived. Between two asks it sleeps for [`POLL`] at the
 /// longest, and never past the end of the grace.
 ///
+/// The names of the drain reach no screen. The drain runs while the run closes,
+/// and the display of a run that closes shows nothing more. Every one of them
+/// reaches the file, so a replay of that file names the address.
+///
 /// # Errors
 ///
 /// Returns [`RunError::Write`] when a record does not reach the file.
@@ -222,7 +255,7 @@ fn drain_names<W: Write>(
 ) -> Result<(), RunError> {
     let end = Instant::now() + grace;
     loop {
-        write_names(writer, namer.names(&[], Utc::now()))?;
+        write_names(writer, &namer.names(&[], Utc::now()))?;
         if !namer.waits() {
             return Ok(());
         }
