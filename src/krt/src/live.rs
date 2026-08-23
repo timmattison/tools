@@ -842,6 +842,14 @@ mod tests {
     /// The number of rounds that arrive inside one minute of the test.
     const ROUNDS_INSIDE_A_MINUTE: usize = 4;
 
+    /// One whole minute.
+    ///
+    /// The test spells the minute, and the module spells it again. That is on
+    /// purpose, as the word of the pause is: a test that read the constant of
+    /// the module would agree with every period the module ever holds, and one
+    /// line each minute is what a reader of a headless run gets.
+    const ONE_MINUTE: Duration = Duration::from_secs(60);
+
     /// The lines that a headless screen wrote, in the order they arrived.
     fn printed(sink: &[u8]) -> Vec<String> {
         String::from_utf8_lossy(sink)
@@ -1138,6 +1146,23 @@ mod tests {
             printed(&screen.sink),
             [A_WHOLE_PATH_LINE],
             "the rounds that follow the first one inside the minute print nothing"
+        );
+    }
+
+    #[test]
+    fn a_headless_screen_prints_a_second_line_after_a_minute() {
+        // The line of each minute is what says that the run still stands, and
+        // it names the round that the file holds now.
+        let clock = FakeClock::new();
+        let mut screen = headless(&clock);
+
+        screen.round(&a_whole_path_round());
+        clock.advance(ONE_MINUTE);
+        screen.round(&a_lost_round());
+        assert_eq!(
+            printed(&screen.sink),
+            [A_WHOLE_PATH_LINE, A_LOST_ROUND_LINE],
+            "the first round of the next minute puts its own line on the screen"
         );
     }
 
