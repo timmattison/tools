@@ -322,7 +322,6 @@ fn run_push(
     workdir: &Path,
     on_line: &(dyn Fn(String) + Sync),
 ) -> PushOutcome {
-    let _ = on_line;
     // `None` means git could not be run at all, which the push below reports in
     // git's own terms. Refusing here instead would blame a branch change that
     // did not happen — and a git that cannot start cannot push either.
