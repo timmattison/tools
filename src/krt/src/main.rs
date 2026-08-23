@@ -17,12 +17,14 @@ mod trace;
 
 use buildinfo::version_string;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use record::{Recording, Run, RunId};
+use record::{Family, Recording, Run, RunId, Target};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The name that starts every message that `krt` writes to standard error.
@@ -90,8 +92,25 @@ const SOURCE_DISCOVERED: &str = "discovered at run time";
 /// The text between two fields of a summary line.
 const SUMMARY_SEPARATOR: &str = "  ";
 
-/// The target field of a run whose `run` record is absent.
-const TARGET_UNKNOWN: &str = "unknown";
+/// The value of a field that `krt` cannot fill.
+///
+/// A replay of a run whose `run` record is absent names no target, and a
+/// machine that reports no name leaves the run without a host. Both fields
+/// carry this word in the place of the value.
+const UNKNOWN: &str = "unknown";
+
+/// The port of a resolution.
+///
+/// The resolver takes a host and a port together, and it gives back socket
+/// addresses. A trace of `krt` probes no port of the destination, so this
+/// number takes no part in the answer.
+const RESOLVE_PORT: u16 = 0;
+
+/// The flag that asks for ip version 4.
+const FLAG_VERSION_4: &str = "-4";
+
+/// The flag that asks for ip version 6.
+const FLAG_VERSION_6: &str = "-6";
 
 /// The name of one round of a run, in a summary line.
 const ROUND: &str = "round";
@@ -563,6 +582,174 @@ fn render_duration(duration: Duration) -> String {
     format!("{seconds}s")
 }
 
+/// Picks the address of the version that the run asked for.
+///
+/// The `auto` family takes the first address that the resolver named, whatever
+/// its version.
+fn pick_address(found: &[SocketAddr], _family: AddressFamily) -> Option<IpAddr> {
+    found.first().map(|found| found.ip())
+}
+
+/// Writes the reason that a destination names no address to probe.
+///
+/// A run that asked for one version names that version and the flag that asks
+/// for it, so the user reads one line and corrects the command line. A run that
+/// asked for no version takes an address of either version, so no flag of the
+/// command line changed the answer, and the message names none.
+fn no_address_message(destination: &str, family: AddressFamily) -> String {
+    let flag = match family {
+        AddressFamily::Auto => {
+            return format!(
+                "`{destination}` names no address: name a destination that resolves to one"
+            );
+        }
+        AddressFamily::Version4 => FLAG_VERSION_4,
+        AddressFamily::Version6 => FLAG_VERSION_6,
+    };
+    format!(
+        "`{destination}` names no {family} address: drop `{flag}`, or name a destination that holds one"
+    )
+}
+
+/// Why a destination names no address to probe.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+enum ResolveError {
+    /// The resolver refused the destination.
+    #[error("`{destination}` does not resolve: {reason}")]
+    Lookup {
+        /// The destination as the user typed it.
+        destination: String,
+        /// The reason that the resolver gave.
+        reason: String,
+    },
+    /// The destination names no address of the version that the run asked for.
+    #[error("{}", no_address_message(destination, *family))]
+    NoAddress {
+        /// The destination as the user typed it.
+        destination: String,
+        /// The IP version that the run asked for.
+        family: AddressFamily,
+    },
+}
+
+/// Reads the address that a destination names.
+///
+/// The destination is a host name or a literal address, and the answer carries
+/// the destination as the user typed it, the address, and the version of that
+/// address.
+///
+/// # Errors
+///
+/// Returns [`ResolveError::Lookup`] when the resolver refuses the destination.
+/// Returns [`ResolveError::NoAddress`] when the destination names no address of
+/// the version that the run asked for.
+#[allow(
+    dead_code,
+    reason = "main resolves the destination when it starts the run loop, and that arrives in a later slice of issue #367"
+)]
+fn resolve_target(destination: &str, family: AddressFamily) -> Result<Target, ResolveError> {
+    let found: Vec<SocketAddr> = (destination, RESOLVE_PORT)
+        .to_socket_addrs()
+        .map_err(|error| ResolveError::Lookup {
+            destination: destination.to_owned(),
+            reason: error.to_string(),
+        })?
+        .collect();
+    let addr = pick_address(&found, family).ok_or_else(|| ResolveError::NoAddress {
+        destination: destination.to_owned(),
+        family,
+    })?;
+    Ok(Target {
+        arg: destination.to_owned(),
+        addr,
+        family: match addr {
+            IpAddr::V4(_) => Family::Ipv4,
+            IpAddr::V6(_) => Family::Ipv6,
+        },
+    })
+}
+
+/// The name of the machine that makes a run.
+#[allow(
+    dead_code,
+    reason = "main names the host of the `run` record when it starts the run loop, and that arrives in a later slice of issue #367"
+)]
+fn host_name() -> String {
+    host_name_or(sysinfo::System::host_name())
+}
+
+/// The name of the machine, from what the system reported.
+///
+/// A system that reports no name, and a system that reports an empty one, both
+/// leave the run without a name, so the record carries one word in its place.
+fn host_name_or(reported: Option<String>) -> String {
+    reported.unwrap_or_default()
+}
+
+/// The signals that stop a run.
+///
+/// SIGINT is the Ctrl-C of the terminal, and SIGTERM is the polite kill.
+/// SIGKILL is the one signal that no program handles, and `krt` does not
+/// pretend otherwise.
+#[cfg(unix)]
+const TERMINATION_SIGNALS: [std::os::raw::c_int; 2] =
+    [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM];
+
+// No test calls `stop_flag`. The registration changes the whole process, so a
+// test that called it would take the Ctrl-C of `cargo test` away from the test
+// runner. `user_stopped` carries the behavior that a test drives.
+
+/// A flag that a termination signal sets.
+///
+/// The run loop reads the flag once per turn of its loop. A run that the user
+/// stops therefore writes the record that closes it and flushes the file. A run
+/// that registers no handler loses that record, because the signal ends the
+/// process where it stands.
+///
+/// # Errors
+///
+/// Returns the reason when the platform refuses the registration.
+#[cfg(unix)]
+#[allow(
+    dead_code,
+    reason = "main holds the stop flag beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+fn stop_flag() -> std::io::Result<Arc<AtomicBool>> {
+    let flag = Arc::new(AtomicBool::new(false));
+    for signal in TERMINATION_SIGNALS {
+        signal_hook::flag::register(signal, Arc::clone(&flag))?;
+    }
+    Ok(flag)
+}
+
+/// A flag that a termination signal sets.
+///
+/// This platform registers no handler, so nothing sets the flag. The user of
+/// this platform stops a run through the key handler of the table, and the
+/// table arrives in a later slice of issue #367.
+///
+/// # Errors
+///
+/// Returns no reason. The result holds the shape of the unix build, so one call
+/// site serves both platforms.
+#[cfg(not(unix))]
+#[allow(
+    dead_code,
+    reason = "main holds the stop flag beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+fn stop_flag() -> std::io::Result<Arc<AtomicBool>> {
+    Ok(Arc::new(AtomicBool::new(false)))
+}
+
+/// Answers whether the user stopped the run.
+#[allow(
+    dead_code,
+    reason = "the run loop asks the question once per turn, and main starts the run loop in a later slice of issue #367"
+)]
+fn user_stopped(_flag: &AtomicBool) -> bool {
+    false
+}
+
 /// Writes a count and the name of what it counts.
 ///
 /// One of a thing keeps the singular name, and every other count adds one `s`.
@@ -589,7 +776,7 @@ fn counted(count: usize, name: &str) -> String {
 /// replaces this line with the aggregate table.
 fn summarize(run: &Run<'_>) -> String {
     let target = run.start().map_or_else(
-        || TARGET_UNKNOWN.to_owned(),
+        || UNKNOWN.to_owned(),
         |start| format!("{} ({})", start.target.arg, start.target.addr),
     );
     let ttls: BTreeSet<u8> = run
@@ -714,13 +901,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_duration, render_duration, AddressFamily, Cli, Command, Multipath, Protocol,
-        ResolvedConfig,
+        host_name_or, parse_duration, pick_address, render_duration, resolve_target, user_stopped,
+        AddressFamily, Cli, Command, Family, Multipath, Protocol, ResolveError, ResolvedConfig,
+        RESOLVE_PORT, UNKNOWN,
     };
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser};
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     /// The accepted units, as `parse_duration` names them for an unknown unit.
@@ -1738,5 +1927,200 @@ resolved configuration:
                 "the block holds no `{absent}`: {block}"
             );
         }
+    }
+
+    /// A literal address of ip version 4, for a test of the resolution.
+    const AN_IPV4_ADDRESS: &str = "1.2.3.4";
+
+    /// The loopback address of ip version 6, for a test of the resolution.
+    const AN_IPV6_ADDRESS: &str = "::1";
+
+    /// An address of ip version 6 that no machine holds, for a test of the
+    /// resolution. The block `2001:db8::/32` is the block of the documents.
+    const ANOTHER_IPV6_ADDRESS: &str = "2001:db8::1";
+
+    /// A destination that holds no label, for a test of the resolution.
+    const NO_LABEL: &str = "";
+
+    /// The name that a machine reports, for a test of the host name.
+    const A_HOST_NAME: &str = "tims-mac";
+
+    /// The name that a machine reports when it holds none.
+    const AN_EMPTY_HOST_NAME: &str = "";
+
+    /// Every family of the address, for a test that walks all three.
+    const EVERY_FAMILY: [AddressFamily; 3] = [
+        AddressFamily::Auto,
+        AddressFamily::Version4,
+        AddressFamily::Version6,
+    ];
+
+    /// Reads a literal address that a test names.
+    ///
+    /// Every test of the resolution names a literal address. `to_socket_addrs`
+    /// reads a literal address inside the machine and asks no resolver, so
+    /// every such test runs offline. A host name in the place of a literal
+    /// reaches a name server, and the test then answers for the network of the
+    /// machine and not for this code.
+    fn address(text: &str) -> IpAddr {
+        text.parse().expect("the test address must parse")
+    }
+
+    /// Builds the socket address of one literal address that a test names.
+    fn socket(text: &str) -> SocketAddr {
+        SocketAddr::new(address(text), RESOLVE_PORT)
+    }
+
+    /// Reads the fault of a destination that names no address to probe.
+    fn resolve_failure(destination: &str, family: AddressFamily) -> ResolveError {
+        resolve_target(destination, family)
+            .expect_err("the destination must name no address to probe")
+    }
+
+    #[test]
+    fn the_auto_family_takes_the_first_address_that_the_resolver_named() {
+        let found = [socket(AN_IPV6_ADDRESS), socket(AN_IPV4_ADDRESS)];
+        assert_eq!(
+            pick_address(&found, AddressFamily::Auto),
+            Some(address(AN_IPV6_ADDRESS))
+        );
+    }
+
+    #[test]
+    fn ip_version_4_takes_the_first_address_of_that_version() {
+        let found = [socket(AN_IPV6_ADDRESS), socket(AN_IPV4_ADDRESS)];
+        assert_eq!(
+            pick_address(&found, AddressFamily::Version4),
+            Some(address(AN_IPV4_ADDRESS))
+        );
+    }
+
+    #[test]
+    fn ip_version_6_takes_the_first_address_of_that_version() {
+        let found = [socket(AN_IPV4_ADDRESS), socket(AN_IPV6_ADDRESS)];
+        assert_eq!(
+            pick_address(&found, AddressFamily::Version6),
+            Some(address(AN_IPV6_ADDRESS))
+        );
+    }
+
+    #[test]
+    fn ip_version_4_takes_no_address_of_a_list_of_ip_version_6_only() {
+        let found = [socket(AN_IPV6_ADDRESS), socket(ANOTHER_IPV6_ADDRESS)];
+        assert_eq!(pick_address(&found, AddressFamily::Version4), None);
+    }
+
+    #[test]
+    fn ip_version_6_takes_no_address_of_a_list_of_ip_version_4_only() {
+        let found = [socket(AN_IPV4_ADDRESS), socket("5.6.7.8")];
+        assert_eq!(pick_address(&found, AddressFamily::Version6), None);
+    }
+
+    #[test]
+    fn every_family_takes_no_address_of_an_empty_list() {
+        for family in EVERY_FAMILY {
+            assert_eq!(pick_address(&[], family), None, "the `{family}` family");
+        }
+    }
+
+    #[test]
+    fn a_literal_address_of_ip_version_4_resolves_to_itself() {
+        let target = resolve_target(AN_IPV4_ADDRESS, AddressFamily::Auto)
+            .expect("a literal address must resolve");
+        assert_eq!(target.arg, AN_IPV4_ADDRESS);
+        assert_eq!(target.addr, address(AN_IPV4_ADDRESS));
+        assert_eq!(target.family, Family::Ipv4);
+    }
+
+    #[test]
+    fn a_literal_address_of_ip_version_6_resolves_to_itself() {
+        let target = resolve_target(AN_IPV6_ADDRESS, AddressFamily::Auto)
+            .expect("a literal address must resolve");
+        assert_eq!(target.addr, address(AN_IPV6_ADDRESS));
+        assert_eq!(target.family, Family::Ipv6);
+    }
+
+    #[test]
+    fn a_literal_address_of_ip_version_6_resolves_under_the_flag_of_ip_version_6() {
+        let target = resolve_target(ANOTHER_IPV6_ADDRESS, AddressFamily::Version6)
+            .expect("a literal address must resolve");
+        assert_eq!(target.addr, address(ANOTHER_IPV6_ADDRESS));
+        assert_eq!(target.family, Family::Ipv6);
+    }
+
+    #[test]
+    fn an_address_of_ip_version_4_names_no_address_under_the_flag_of_ip_version_6() {
+        let error = resolve_failure(AN_IPV4_ADDRESS, AddressFamily::Version6);
+        assert_eq!(
+            error,
+            ResolveError::NoAddress {
+                destination: AN_IPV4_ADDRESS.to_owned(),
+                family: AddressFamily::Version6,
+            }
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&AddressFamily::Version6.to_string()),
+            "the message names ip version 6: {message}"
+        );
+        assert!(
+            message.contains(AN_IPV4_ADDRESS),
+            "the message names the destination: {message}"
+        );
+    }
+
+    #[test]
+    fn an_address_of_ip_version_6_names_no_address_under_the_flag_of_ip_version_4() {
+        assert_eq!(
+            resolve_failure(AN_IPV6_ADDRESS, AddressFamily::Version4),
+            ResolveError::NoAddress {
+                destination: AN_IPV6_ADDRESS.to_owned(),
+                family: AddressFamily::Version4,
+            }
+        );
+    }
+
+    /// A destination that holds no label never reaches a name server, because
+    /// the resolver of the machine refuses it. The test is therefore offline,
+    /// as every other test of the resolution is.
+    #[test]
+    fn a_destination_that_holds_no_label_does_not_resolve() {
+        let error = resolve_failure(NO_LABEL, AddressFamily::Auto);
+        assert!(
+            matches!(error, ResolveError::Lookup { .. }),
+            "the resolver refused the destination: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("`{NO_LABEL}`")),
+            "the message names the destination: {message}"
+        );
+    }
+
+    #[test]
+    fn a_machine_that_reports_a_name_carries_that_name() {
+        assert_eq!(host_name_or(Some(A_HOST_NAME.to_owned())), A_HOST_NAME);
+    }
+
+    #[test]
+    fn a_machine_that_reports_no_name_carries_one_word() {
+        assert_eq!(host_name_or(None), UNKNOWN);
+    }
+
+    /// An empty name is no name, so it takes the same word as an absent one.
+    #[test]
+    fn a_machine_that_reports_an_empty_name_carries_one_word() {
+        assert_eq!(
+            host_name_or(Some(AN_EMPTY_HOST_NAME.to_owned())),
+            UNKNOWN
+        );
+    }
+
+    #[test]
+    fn a_flag_that_a_signal_set_stops_the_run() {
+        let flag = AtomicBool::new(false);
+        assert!(!user_stopped(&flag), "a clear flag leaves the run going");
+        flag.store(true, Ordering::SeqCst);
+        assert!(user_stopped(&flag), "a set flag stops the run");
     }
 }

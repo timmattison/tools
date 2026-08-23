@@ -4426,6 +4426,8 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "signal-hook 0.3.18",
+ "sysinfo",
  "thiserror 2.0.20",
  "trippy-core",
  "trippy-privilege",
