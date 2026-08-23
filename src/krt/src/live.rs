@@ -590,9 +590,13 @@ fn install_panic_hook() -> PanicHook {
 }
 
 /// Puts a hook back.
+///
+/// The hook that [`install_panic_hook`] answers goes back here, at the end of
+/// the live run that installed it. The hook of a live run puts a terminal back,
+/// and no part of the process that follows that run holds one, so a hook that
+/// outlived its run acts on a panic that it knows nothing about.
 fn restore_panic_hook(previous: PanicHook) {
-    drop(previous);
-    drop(std::panic::take_hook());
+    std::panic::set_hook(Box::new(move |info| (*previous)(info)));
 }
 
 #[cfg(test)]
