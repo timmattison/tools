@@ -13,6 +13,7 @@
 use crate::record::{SourceKind, SourceLabel};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The extension of a recorded file.
 const EXTENSION: &str = "jsonl";
@@ -133,6 +134,116 @@ fn egress_address(target: IpAddr) -> std::io::Result<IpAddr> {
     Ok(socket.local_addr()?.ip())
 }
 
+/// The service that answers with the address that the internet sees.
+///
+/// The service answers a plain GET with the address as text and nothing else,
+/// so the answer needs no parser of a format and the request needs no key of an
+/// account. A service that goes away, or that starts to limit the rate of a
+/// caller, costs this one line to change.
+#[allow(
+    dead_code,
+    reason = "discover() reads this in the next slice of issue #368"
+)]
+const PUBLIC_SERVICE: &str = "https://api.ipify.org";
+
+/// How long the lookup of the public address waits before it gives up.
+///
+/// The lookup stands between the source that the user named and the local
+/// egress address, so every run that names no source pays it. Three seconds is
+/// long enough for a service on the other side of an ocean, and short enough
+/// that a service that has broken does not hold the run for long.
+///
+/// The client gives this much time to the request and this much again to the
+/// read of the answer, so a service that answers the headers and then stops
+/// costs twice this at the most.
+#[allow(
+    dead_code,
+    reason = "discover() reads this in the next slice of issue #368"
+)]
+const PUBLIC_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How many characters of an answer that is not an address the message holds.
+///
+/// A service that answers with a page of HTML, and not with an address, writes
+/// that whole page to the warning line of the run without this limit. Sixty
+/// characters name the service and the trouble, and they fit one line.
+const ANSWER_LIMIT: usize = 60;
+
+/// The character that marks an answer that the message cut.
+const ELLIPSIS: &str = "…";
+
+/// The start of an answer, short enough for one line of a warning.
+///
+/// The walk reads characters and never bytes, so a character of more than one
+/// byte survives whole. An answer that the walk cut ends with an ellipsis, so a
+/// reader sees that more of it exists.
+fn shorten(answer: &str) -> String {
+    let mut characters = answer.chars();
+    let start: String = characters.by_ref().take(ANSWER_LIMIT).collect();
+    if characters.next().is_some() {
+        format!("{start}{ELLIPSIS}")
+    } else {
+        start
+    }
+}
+
+/// Why the lookup of the public address gives no address.
+///
+/// The text of each one becomes part of the warning line that the run prints
+/// before it falls back to the local egress address.
+#[derive(Debug, thiserror::Error)]
+enum PublicError {
+    /// The request did not complete.
+    ///
+    /// The client did not build, the name did not resolve, the connection did
+    /// not open, the service answered with the status of an error, or the
+    /// answer did not arrive inside the timeout.
+    #[error("the request to the public address service did not complete: {reason}")]
+    Request {
+        /// The reason that the client gave.
+        reason: String,
+    },
+    /// The answer is not an address.
+    #[error("the public address service answered with text that is not an address: {answer}")]
+    Answer {
+        /// The start of the text that the service answered.
+        answer: String,
+    },
+}
+
+/// The address that the internet sees, from one GET of a public service.
+///
+/// The client of `reqwest` that blocks holds its `tokio` runtime inside itself
+/// and drops that runtime when the call returns. `krt` therefore starts no
+/// runtime of its own and holds no async code.
+///
+/// The caller names the timeout, so a test names a short one and runs fast. The
+/// client gives that time to the request and that time again to the read of the
+/// answer.
+///
+/// A status of an error is a failure. A service that answers `503` answers with
+/// a page of its own, and that page is not an address.
+///
+/// The answer loses the whitespace of both ends before it parses, because a
+/// service that ends its answer with a newline is a common one.
+///
+/// # Errors
+///
+/// Returns [`PublicError::Request`] when the client does not build, when the
+/// request does not complete inside the timeout, when the service answers with
+/// the status of an error, and when the answer does not read as text. Returns
+/// [`PublicError::Answer`] when the answer is not an address.
+#[allow(
+    dead_code,
+    reason = "discover() calls this in the next slice of issue #368; the tests of this module cover it now"
+)]
+fn public_address(service: &str, timeout: Duration) -> Result<IpAddr, PublicError> {
+    let _ = (service, timeout);
+    Err(PublicError::Answer {
+        answer: String::new(),
+    })
+}
+
 /// Finds the address that the probes leave from, and how krt found it.
 ///
 /// The address that the user named wins, and it opens no socket. Every other
@@ -162,10 +273,15 @@ pub(crate) fn discover(named: Option<IpAddr>, target: IpAddr) -> std::io::Result
 
 #[cfg(test)]
 mod tests {
-    use super::{bind_address, derive_name, discover, egress_address, output_path};
+    use super::{
+        ANSWER_LIMIT, ELLIPSIS, PublicError, bind_address, derive_name, discover, egress_address,
+        output_path, public_address,
+    };
     use crate::record::SourceKind;
+    use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     /// The loopback address of IP version 4.
     ///
@@ -371,5 +487,187 @@ mod tests {
         let label = discover(None, LOOPBACK).expect("every machine holds a loopback route");
         assert_eq!(label.addr, LOOPBACK);
         assert_eq!(label.kind, SourceKind::Local);
+    }
+
+    /// The address that a mock service answers with.
+    ///
+    /// 203.0.113.0/24 is TEST-NET-3, which the registries hold for
+    /// documentation, so no machine of the internet carries this address.
+    const PUBLIC_ADDRESS: &str = "203.0.113.7";
+
+    /// The method of the one request that the lookup makes.
+    const GET: &str = "GET";
+
+    /// The path that the mock service answers on.
+    ///
+    /// `Server::url` gives a URL that carries no path, and a URL that carries
+    /// no path asks for the root.
+    const ROOT: &str = "/";
+
+    /// The status of an answer that carries an address.
+    const OK: usize = 200;
+
+    /// The status of a service that has broken.
+    const SERVER_ERROR: usize = 500;
+
+    /// How many requests one lookup makes. One lookup asks once.
+    const ONE_REQUEST: usize = 1;
+
+    /// The timeout of a test that reads a service that answers at once.
+    ///
+    /// The service runs on the loopback of this machine, so it answers in a
+    /// millisecond or two. Five seconds is large enough that a machine under
+    /// load does not fail the test for a reason that this code does not own.
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// The timeout of the test that reads a service that answers too late.
+    const SHORT_TIMEOUT: Duration = Duration::from_millis(50);
+
+    /// How long the slow service waits before it writes the first byte of a
+    /// body.
+    ///
+    /// The value is ten times `SHORT_TIMEOUT`, and the two numbers stand far
+    /// apart on purpose. The service starts to wait when the request arrives,
+    /// and the client starts its clock before it sends that request, so the
+    /// answer cannot reach the client earlier than this. The order of the two
+    /// is therefore fixed and not a race, and the gap makes that plain to a
+    /// reader and leaves room on a machine under load.
+    const SLOW_ANSWER: Duration = Duration::from_millis(500);
+
+    /// An answer that is not an address.
+    const NOT_AN_ADDRESS: &str = "the service moved";
+
+    /// The character that the long answer repeats.
+    ///
+    /// It holds three bytes and one character, so a cut that reads bytes lands
+    /// inside it and panics.
+    const LONG_ANSWER_CHARACTER: char = '日';
+
+    /// How many characters the long answer holds.
+    ///
+    /// The count is more than `ANSWER_LIMIT`, so the message holds a part of
+    /// the answer and not all of it.
+    const LONG_ANSWER_LENGTH: usize = ANSWER_LIMIT * 4;
+
+    /// Reads a mock service that answers one GET of its root with a status and
+    /// a body.
+    ///
+    /// `mockito::Server` binds the loopback and asks the operating system for a
+    /// port, so two copies of one test that run at the same time take two ports
+    /// and never collide. The service is a local one, so no test of the lookup
+    /// reaches the service that `PUBLIC_SERVICE` names.
+    ///
+    /// The guard of the server stays alive until the lookup has its answer, and
+    /// the server stops when the guard drops. `Mock::assert` then reads the
+    /// count of requests, which proves that the lookup asked the mock service
+    /// and asked it once.
+    fn answer_of(status: usize, body: &str) -> Result<IpAddr, PublicError> {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock(GET, ROOT)
+            .with_status(status)
+            .with_body(body)
+            .expect(ONE_REQUEST)
+            .create();
+        let found = public_address(&server.url(), TEST_TIMEOUT);
+        mock.assert();
+        found
+    }
+
+    /// The address that a service which answers at once gives.
+    #[test]
+    fn a_service_that_answers_with_an_address_gives_that_address() {
+        let found = answer_of(OK, PUBLIC_ADDRESS).expect("the mock service answers an address");
+        assert_eq!(found, address(PUBLIC_ADDRESS));
+    }
+
+    /// A service that ends its answer with a newline is a common one, and a
+    /// lookup that keeps that newline parses no address at all.
+    #[test]
+    fn a_service_that_answers_with_an_address_and_whitespace_gives_that_address() {
+        let body = format!("  {PUBLIC_ADDRESS}\r\n");
+        let found = answer_of(OK, &body).expect("the answer loses the whitespace of both ends");
+        assert_eq!(found, address(PUBLIC_ADDRESS));
+    }
+
+    /// A service that answers `500` answers with a page of its own, and that
+    /// page is not an address. A lookup that reads the body of every status
+    /// takes that page for an answer.
+    #[test]
+    fn a_service_that_answers_with_the_status_of_an_error_gives_no_address() {
+        let error = answer_of(SERVER_ERROR, PUBLIC_ADDRESS)
+            .expect_err("the status of an error gives no address");
+        assert!(
+            matches!(error, PublicError::Request { .. }),
+            "the status stops the request before the body parses: {error}"
+        );
+    }
+
+    /// The timeout holds the run to a known cost.
+    ///
+    /// The service writes the first byte of the body after `SLOW_ANSWER`, which
+    /// is ten times the timeout that the lookup takes, so the lookup gives up
+    /// first. Without the timeout the run waits as long as the service does.
+    ///
+    /// This test names no `Mock::assert`. The client drops the connection when
+    /// it gives up, and the count of requests is of no interest here: the URL
+    /// is the URL of the mock service, so the lookup reached no other one.
+    #[test]
+    fn a_service_that_answers_after_the_timeout_gives_no_address() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock(GET, ROOT)
+            .with_status(OK)
+            .with_chunked_body(|writer| {
+                std::thread::sleep(SLOW_ANSWER);
+                writer.write_all(PUBLIC_ADDRESS.as_bytes())
+            })
+            .create();
+        let error = public_address(&server.url(), SHORT_TIMEOUT)
+            .expect_err("the lookup gives up before the service answers");
+        assert!(
+            matches!(error, PublicError::Request { .. }),
+            "a request that runs out of time did not complete: {error}"
+        );
+    }
+
+    /// A service that answers `200` with a page of its own, and not with an
+    /// address, gives no address. The message names the text, so a reader of
+    /// the warning line sees what arrived.
+    #[test]
+    fn a_service_that_answers_with_text_that_is_not_an_address_gives_no_address() {
+        let error =
+            answer_of(OK, NOT_AN_ADDRESS).expect_err("the text of the answer is not an address");
+        assert!(
+            matches!(error, PublicError::Answer { .. }),
+            "the request completed and the answer did not parse: {error}"
+        );
+        assert!(
+            error.to_string().contains(NOT_AN_ADDRESS),
+            "the message names the text that arrived: {error}"
+        );
+    }
+
+    /// A service that answers with a whole page writes that whole page to the
+    /// warning line of the run, unless the message cuts it.
+    ///
+    /// The answer repeats a character of three bytes, so a cut that reads bytes
+    /// lands inside a character and panics. The cut reads characters, so the
+    /// message ends with the ellipsis and the test does not panic.
+    #[test]
+    fn an_answer_that_is_not_an_address_and_holds_many_characters_gives_a_short_message() {
+        let body = LONG_ANSWER_CHARACTER
+            .to_string()
+            .repeat(LONG_ANSWER_LENGTH);
+        let error = answer_of(OK, &body).expect_err("a page of text is not an address");
+        let message = error.to_string();
+        assert!(
+            message.ends_with(ELLIPSIS),
+            "the message cut the answer and said so: {message}"
+        );
+        assert!(
+            message.chars().count() < body.chars().count(),
+            "the message is shorter than the answer: {message}"
+        );
     }
 }
