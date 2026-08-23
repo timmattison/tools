@@ -1166,3 +1166,190 @@ fn elide(text: &str) -> String {
     }
     quoted
 }
+
+#[cfg(test)]
+mod tests {
+    //! What each refusal says when a record is not the shape the guard reads.
+    //!
+    //! The readers below are private, and driving a whole cargo invocation to
+    //! reach them would be slower and less precise than handing them the one
+    //! record under test. Every assertion is on the rendered message, because
+    //! the words are the product: this module's value is the precision of its
+    //! refusals, and "no `spans`" printed over a record that has `spans` sends
+    //! the reader after a defect that is not there.
+    //!
+    //! Parallel-safe and hermetic by construction: every fixture is a
+    //! `serde_json::Value` built in memory, so nothing here names a file, a
+    //! port, an environment variable, or any other shared resource.
+
+    use serde_json::json;
+
+    use super::{
+        DOC_COMMAND, DocLinksError, FILE_NAME, KIND, LINE_START, METADATA_COMMAND, PACKAGE_ID,
+        SPANS, WORKSPACE_MEMBERS, array_field, as_text, bool_field, field, first_kind,
+        number_field, primary_span, text_field,
+    };
+
+    /// The refusal a reader handed back, in the words a human reads.
+    ///
+    /// A reader that returns a value read something it should have refused, and
+    /// that is a failure of the test rather than of the message.
+    fn refusal<T>(result: Result<T, DocLinksError>) -> String {
+        match result {
+            Ok(_) => panic!("the reader accepted a record it cannot read"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    /// A field that is genuinely absent still reads as absent. The refusals for
+    /// a wrong type and for an empty array are additions, not a rename.
+    #[test]
+    fn an_absent_field_is_reported_as_absent() {
+        let record = json!({ "reason": "compiler-artifact" });
+        let source = record.to_string();
+
+        assert_eq!(
+            refusal(field(&record, PACKAGE_ID, DOC_COMMAND, &source)),
+            format!("a `cargo doc` record has no `{PACKAGE_ID}`:\n  {source}")
+        );
+    }
+
+    /// A diagnostic that carries no `spans` key at all is the case the absence
+    /// refusal describes, and it keeps that refusal.
+    #[test]
+    fn an_absent_spans_array_is_reported_as_absent() {
+        let message = json!({ "message": "unresolved link to `run`" });
+        let source = message.to_string();
+
+        assert_eq!(
+            refusal(primary_span(&message, &source)),
+            format!("a `cargo doc` record has no `{SPANS}`:\n  {source}")
+        );
+    }
+
+    /// A field the guard reads as a string, holding an array.
+    #[test]
+    fn a_string_field_holding_an_array_names_both_types() {
+        let record = json!({ "file_name": ["src/lib.rs"] });
+        let source = record.to_string();
+
+        assert_eq!(
+            refusal(text_field(&record, FILE_NAME, DOC_COMMAND, &source)),
+            format!(
+                "a `cargo doc` record has a `{FILE_NAME}` that is an array, not a string:\n  {source}"
+            )
+        );
+    }
+
+    /// An array entry the guard reads as a string, holding a number. The entry
+    /// is named by the array it came out of, which is the only name it has.
+    #[test]
+    fn an_array_entry_that_is_not_a_string_names_both_types() {
+        let source = json!({ "workspace_members": [7] }).to_string();
+
+        assert_eq!(
+            refusal(as_text(&json!(7), WORKSPACE_MEMBERS, METADATA_COMMAND, &source)),
+            format!(
+                "a `cargo metadata` record has a `{WORKSPACE_MEMBERS}` that is a number, not a string:\n  {source}"
+            )
+        );
+    }
+
+    /// A field the guard reads as an array, holding an object.
+    #[test]
+    fn an_array_field_holding_an_object_names_both_types() {
+        let record = json!({ "kind": { "bin": true } });
+        let source = record.to_string();
+
+        assert_eq!(
+            refusal(array_field(&record, KIND, DOC_COMMAND, &source)),
+            format!(
+                "a `cargo doc` record has a `{KIND}` that is an object, not an array:\n  {source}"
+            )
+        );
+    }
+
+    /// A field the guard reads as a boolean, holding a string. `"true"` is the
+    /// spelling most likely to arrive, and it is not a boolean.
+    #[test]
+    fn a_boolean_field_holding_a_string_names_both_types() {
+        let record = json!({ "doc": "true" });
+        let source = record.to_string();
+
+        assert_eq!(
+            refusal(bool_field(&record, super::DOC_FIELD, METADATA_COMMAND, &source)),
+            format!(
+                "a `cargo metadata` record has a `doc` that is a string, not a boolean:\n  {source}"
+            )
+        );
+    }
+
+    /// A field the guard reads as an unsigned integer, holding a string.
+    #[test]
+    fn a_number_field_holding_a_string_names_both_types() {
+        let record = json!({ "line_start": "12" });
+        let source = record.to_string();
+
+        assert_eq!(
+            refusal(number_field(&record, LINE_START, DOC_COMMAND, &source)),
+            format!(
+                "a `cargo doc` record has a `{LINE_START}` that is a string, not an unsigned integer:\n  {source}"
+            )
+        );
+    }
+
+    /// A field the guard reads as an unsigned integer, holding a number that is
+    /// not one. What the guard wanted comes from the reader, not from the value
+    /// it got, so a negative number is still refused for not being unsigned.
+    #[test]
+    fn a_number_field_holding_a_negative_number_names_what_the_reader_wanted() {
+        let record = json!({ "line_start": -12 });
+        let source = record.to_string();
+
+        assert_eq!(
+            refusal(number_field(&record, LINE_START, DOC_COMMAND, &source)),
+            format!(
+                "a `cargo doc` record has a `{LINE_START}` that is a number, not an unsigned integer:\n  {source}"
+            )
+        );
+    }
+
+    /// A diagnostic whose `spans` array is present and holds nothing. The
+    /// absence refusal would send the reader looking for a key that is there.
+    #[test]
+    fn an_empty_spans_array_is_reported_as_empty() {
+        let message = json!({ "spans": [] });
+        let source = message.to_string();
+
+        assert_eq!(
+            refusal(primary_span(&message, &source)),
+            format!("a `cargo doc` record has an empty `{SPANS}` array:\n  {source}")
+        );
+    }
+
+    /// A target whose `kind` array is present and holds nothing.
+    #[test]
+    fn an_empty_kind_array_is_reported_as_empty() {
+        let target = json!({ "name": "aa", "kind": [] });
+        let source = target.to_string();
+
+        assert_eq!(
+            refusal(first_kind(&target, METADATA_COMMAND, &source)),
+            format!("a `cargo metadata` record has an empty `{KIND}` array:\n  {source}")
+        );
+    }
+
+    /// A `kind` array that holds something that is not a target kind.
+    #[test]
+    fn a_kind_entry_that_is_not_a_string_names_both_types() {
+        let target = json!({ "name": "aa", "kind": [7] });
+        let source = target.to_string();
+
+        assert_eq!(
+            refusal(first_kind(&target, METADATA_COMMAND, &source)),
+            format!(
+                "a `cargo metadata` record has a `{KIND}` that is a number, not a string:\n  {source}"
+            )
+        );
+    }
+}
