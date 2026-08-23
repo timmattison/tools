@@ -1,5 +1,11 @@
-//! The run loop: the record that opens a run, one record for each round, the
-//! record that closes it, and one status line for each round.
+//! The run loop: the record that opens a run, one record for each name that a
+//! reverse lookup gave, one record for each round, the record that closes it,
+//! and one status line for each round.
+//!
+//! A reverse lookup takes a time that no round waits for, so the loop asks the
+//! namer of `names.rs` on every turn and writes whatever the namer hands back.
+//! A turn that saw no round asks too, so a name that arrives between two rounds
+//! still reaches the file.
 //!
 //! The tracer of `trace.rs` carries no limit of its own. It sends one round
 //! after another until the process ends, and this module owns the number of
@@ -14,7 +20,10 @@
 //! recording is the whole purpose of the tool, and a run that keeps a display
 //! while it silently records nothing is worse than a run that stops.
 
-use crate::record::{EndReason, EndRecord, Record, RoundRecord, RunId, RunRecord, Writer};
+use crate::names::Namer;
+use crate::record::{
+    EndReason, EndRecord, NameRecord, Record, RoundRecord, RunId, RunRecord, Writer,
+};
 use crate::ui::render_duration;
 use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
 use chrono::Utc;
@@ -75,6 +84,12 @@ pub(crate) enum RunError {
 /// anything. Each round that arrives becomes one `round` record. The `end`
 /// record names the number of rounds that the run recorded and why it stopped.
 ///
+/// Every turn also asks `namer` for the names that arrived, and each name
+/// becomes one `name` record. The turn hands the namer the hops of the round it
+/// read, and a turn that read no round hands it nothing, so a lookup that
+/// finishes between two rounds still reaches the file. The `name` records of a
+/// turn stand before the `round` record of that turn.
+///
 /// Each round that the run records also prints one status line to `status`.
 ///
 /// A failed write of any record stops the run. The recording is the whole
@@ -90,6 +105,7 @@ pub(crate) fn record<W: Write, S: Write>(
     rounds: &Receiver<RoundRecord>,
     limits: &Limits,
     stop: &dyn Fn() -> bool,
+    namer: &mut Namer,
     writer: &mut Writer<W>,
     status: &mut S,
 ) -> Result<Outcome, RunError> {
@@ -134,6 +150,15 @@ pub(crate) fn record<W: Write, S: Write>(
             }
         }
     }
+}
+
+/// Appends one record for each name that arrived.
+///
+/// # Errors
+///
+/// Returns [`RunError::Write`] when a record does not reach the file.
+fn write_names<W: Write>(_writer: &mut Writer<W>, _names: Vec<NameRecord>) -> Result<(), RunError> {
+    todo!("the write of the name records arrives with the green step")
 }
 
 /// Writes the one line that a run prints for one round.
@@ -215,19 +240,22 @@ fn close<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{record, Limits, Outcome, RunError};
+    use crate::names::{Lookup, Namer, NoLookups, Resolver};
     use crate::record::{
-        EndReason, EndRecord, Family, Hop, Privilege, Record, Recording, RoundRecord, RunConfig,
-        RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange, Writer,
+        EndReason, EndRecord, Family, Hop, NameRecord, Privilege, Record, Recording, RoundRecord,
+        RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange, Writer,
     };
     use crate::testing::address;
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};
     use std::cell::{Cell, RefCell};
+    use std::collections::{HashMap, VecDeque};
     use std::fs;
     use std::io::{self, Write};
+    use std::net::IpAddr;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
-    use std::sync::mpsc::{self, Receiver};
+    use std::sync::mpsc::{self, Receiver, Sender};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     /// The identifier of the run that every test record belongs to.
@@ -242,8 +270,14 @@ mod tests {
     /// The address of the first hop of a test round.
     const FIRST_HOP: &str = "192.168.1.1";
 
+    /// The name that a reverse lookup gives the first hop of a test round.
+    const FIRST_HOP_NAME: &str = "gateway.example.com";
+
     /// The address of the target of a test run.
     const TARGET_ADDRESS: &str = "93.184.216.34";
+
+    /// The name that a reverse lookup gives the target of a test run.
+    const TARGET_NAME: &str = "target.example.com";
 
     /// The destination of a test run, as the user typed it.
     const TARGET_ARG: &str = "example.com";
@@ -301,12 +335,10 @@ mod tests {
         deadline: None,
     };
 
-    /// The number of turns that the run of one test takes before the user stops
-    /// it.
+    /// The number of turns that a run takes before the user stops it.
     ///
-    /// The loop asks the stop closure once at the top of each turn, and each
-    /// turn of that test records one round, so the third question follows the
-    /// second round.
+    /// The loop asks the stop closure once at the top of each turn, so the
+    /// third question follows the second turn.
     const STOP_AFTER: u64 = 2;
 
     /// The fault of a sink that takes no more records.
@@ -393,6 +425,19 @@ mod tests {
         }
     }
 
+    /// One round that no hop answered.
+    fn a_silent_round(seq: u64) -> RoundRecord {
+        RoundRecord {
+            run: RunId::from(RUN),
+            seq,
+            ts: moment(ROUND_START),
+            dur_ms: LOST_ROUND_MS,
+            ttl_range: TtlRange::new(FIRST_TTL, TARGET_TTL).expect("the test range must hold"),
+            reached: false,
+            hops: Vec::new(),
+        }
+    }
+
     /// The rounds of a test, in the order the tracer sends them.
     fn rounds_of(seqs: &[u64]) -> Vec<RoundRecord> {
         seqs.iter().copied().map(a_round).collect()
@@ -411,6 +456,21 @@ mod tests {
                 .expect("the receiver of the test must stand");
         }
         receiver
+    }
+
+    /// A channel that holds these rounds and whose sender the caller keeps.
+    ///
+    /// The loop reads a closed channel as a tracer that died, so a test whose
+    /// run must reach a limit holds the sender for the whole run. The tracer
+    /// holds its own sender the same way.
+    fn a_held_stream(rounds: &[RoundRecord]) -> (Sender<RoundRecord>, Receiver<RoundRecord>) {
+        let (sender, receiver) = mpsc::channel();
+        for round in rounds {
+            sender
+                .send(round.clone())
+                .expect("the receiver of the test must stand");
+        }
+        (sender, receiver)
     }
 
     /// The limits of a run that stops after this many rounds.
@@ -541,6 +601,79 @@ mod tests {
         }
     }
 
+    /// A resolver that a test programs: one answer for each ask of one address,
+    /// and the last answer of the list for every ask after the list runs out.
+    ///
+    /// An address that the test named no answer for answers `Nameless`.
+    ///
+    /// The count and the answers sit behind a `Cell` and a `RefCell`, because
+    /// [`Resolver::lookup`] takes the resolver by reference. The fake stays on
+    /// one thread.
+    struct FakeResolver {
+        /// The answers that each address holds, the next answer first.
+        answers: RefCell<HashMap<IpAddr, VecDeque<Lookup>>>,
+        /// The number of asks that the resolver took.
+        asks: Cell<usize>,
+    }
+
+    impl FakeResolver {
+        /// A resolver that answers each address with the answers of its list.
+        fn new(answers: &[(&str, &[Lookup])]) -> Rc<Self> {
+            Rc::new(Self {
+                answers: RefCell::new(
+                    answers
+                        .iter()
+                        .map(|(addr, list)| (address(addr), list.iter().cloned().collect()))
+                        .collect(),
+                ),
+                asks: Cell::new(0),
+            })
+        }
+
+        /// The number of asks that the resolver took.
+        fn asks(&self) -> usize {
+            self.asks.get()
+        }
+
+        /// The answer of one ask, and one step along the list of that address.
+        fn answer(&self, addr: IpAddr) -> Lookup {
+            self.asks.set(self.asks.get() + 1);
+            let mut answers = self.answers.borrow_mut();
+            let Some(queue) = answers.get_mut(&addr) else {
+                return Lookup::Nameless;
+            };
+            // The last answer of a list stands for every ask after it, so the
+            // list keeps that answer in the place of a step.
+            let answer = if queue.len() > 1 {
+                queue.pop_front()
+            } else {
+                queue.front().cloned()
+            };
+            answer.unwrap_or(Lookup::Nameless)
+        }
+    }
+
+    impl Resolver for Rc<FakeResolver> {
+        fn lookup(&self, addr: IpAddr) -> Lookup {
+            self.answer(addr)
+        }
+    }
+
+    /// The answer of a lookup that finished with a name.
+    fn named(host: &str) -> Lookup {
+        Lookup::Named(host.to_owned())
+    }
+
+    /// A namer of the test run that asks this resolver.
+    fn a_namer(resolver: &Rc<FakeResolver>) -> Namer {
+        Namer::new(Box::new(Rc::clone(resolver)), RunId::from(RUN))
+    }
+
+    /// A namer of the test run that looks nothing up.
+    fn a_nameless_namer() -> Namer {
+        Namer::new(Box::new(NoLookups), RunId::from(RUN))
+    }
+
     /// What one recorded run produced.
     struct Ran {
         /// What the run loop gave back.
@@ -551,18 +684,37 @@ mod tests {
         status: String,
     }
 
-    /// Records one run to a real file, and reads the file back.
+    /// Records one run that looks nothing up to a real file, and reads the file
+    /// back.
     fn ran(label: &str, rounds: &[RoundRecord], limits: &Limits, stop: &dyn Fn() -> bool) -> Ran {
+        ran_with(
+            label,
+            &a_stream(rounds),
+            limits,
+            stop,
+            &mut a_nameless_namer(),
+        )
+    }
+
+    /// Records one run that asks this namer to a real file, and reads the file
+    /// back.
+    fn ran_with(
+        label: &str,
+        rounds: &Receiver<RoundRecord>,
+        limits: &Limits,
+        stop: &dyn Fn() -> bool,
+        namer: &mut Namer,
+    ) -> Ran {
         let file = TempFile::absent(label);
-        let stream = a_stream(rounds);
         let mut status: Vec<u8> = Vec::new();
         let outcome = {
             let mut writer = Writer::append(file.path()).expect("the test file must open");
             record(
                 &a_run_record(),
-                &stream,
+                rounds,
                 limits,
                 stop,
+                namer,
                 &mut writer,
                 &mut status,
             )
@@ -604,6 +756,30 @@ mod tests {
             Some(Record::End(end)) => end,
             other => panic!("the file must end with an `end` record: {other:?}"),
         }
+    }
+
+    /// The `type` value of every record that reached a sink, in write order.
+    fn kinds_in(text: &str) -> Vec<&'static str> {
+        text.lines()
+            .map(|line| {
+                let written = Record::from_line(line)
+                    .expect("the record must parse")
+                    .expect("the record must name a type that this build knows");
+                kind_of(&written)
+            })
+            .collect()
+    }
+
+    /// The `name` record of every name of a recording, in file order.
+    fn names_of(recording: &Recording) -> Vec<&NameRecord> {
+        recording
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::Name(name) => Some(name),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The number of every round of a recording, in file order.
@@ -746,6 +922,7 @@ mod tests {
             &a_stream(&rounds_of(&[1])),
             &after_rounds(1),
             &|| false,
+            &mut a_nameless_namer(),
             &mut writer,
             &mut Vec::new(),
         );
@@ -769,6 +946,7 @@ mod tests {
             &a_stream(&rounds_of(&[1])),
             &after_rounds(3),
             &|| false,
+            &mut a_nameless_namer(),
             &mut writer,
             &mut Vec::new(),
         );
@@ -783,6 +961,213 @@ mod tests {
             .expect("the record must parse")
             .expect("the record must name a type that this build knows");
         assert_eq!(kind_of(&written), "run");
+    }
+
+    // The `name` record of each address that a run sees.
+
+    #[test]
+    fn an_address_that_resolves_writes_one_name_record_of_the_run() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[named(FIRST_HOP_NAME)])]);
+        let ran = ran_with(
+            "name-one",
+            &a_stream(&rounds_of(&[1])),
+            &after_rounds(1),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        assert_eq!(
+            kinds_of(&ran.recording),
+            ["run", "name", "round", "end"],
+            "the name of the round stands before the round"
+        );
+        let names = names_of(&ran.recording);
+        assert_eq!(names.len(), 1, "the run named one address: {names:?}");
+        assert_eq!(names[0].run, RunId::from(RUN), "the record names the run");
+        assert_eq!(
+            names[0].addr,
+            address(FIRST_HOP),
+            "the record names the address"
+        );
+        assert_eq!(names[0].host, FIRST_HOP_NAME, "the record holds the name");
+    }
+
+    #[test]
+    fn an_address_in_every_round_writes_one_name_record_for_the_whole_run() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[named(FIRST_HOP_NAME)])]);
+        let ran = ran_with(
+            "name-once",
+            &a_stream(&rounds_of(&[1, 2, 3])),
+            &after_rounds(3),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        assert_eq!(seqs_of(&ran.recording), [1, 2, 3]);
+        let names = names_of(&ran.recording);
+        assert_eq!(
+            names.len(),
+            1,
+            "one address takes one record in one run: {names:?}"
+        );
+        assert_eq!(names[0].addr, address(FIRST_HOP));
+    }
+
+    /// The acceptance of the reverse DNS work: a lookup that takes its time
+    /// holds up no round of the run.
+    ///
+    /// The resolver answers `Pending` for the first two asks of the first hop
+    /// and gives the name on the third, so the name lands on the third turn.
+    /// Every round still reaches the file, and in its own turn.
+    #[test]
+    fn a_slow_lookup_holds_up_no_round_of_the_run() {
+        let resolver = FakeResolver::new(&[(
+            FIRST_HOP,
+            &[Lookup::Pending, Lookup::Pending, named(FIRST_HOP_NAME)],
+        )]);
+        // The sender stands for the whole run, so the loop reaches its limit
+        // and reads no closed channel.
+        let (_sender, stream) = a_held_stream(&rounds_of(&[1, 2, 3]));
+        let ran = ran_with(
+            "name-slow",
+            &stream,
+            &after_rounds(3),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        assert_eq!(
+            seqs_of(&ran.recording),
+            [1, 2, 3],
+            "the slow lookup held up no round"
+        );
+        let names = names_of(&ran.recording);
+        assert_eq!(names.len(), 1, "the slow lookup landed once: {names:?}");
+        assert_eq!(names[0].addr, address(FIRST_HOP));
+        assert_eq!(
+            kinds_of(&ran.recording),
+            ["run", "round", "round", "name", "round", "end"],
+            "the name stands after the rounds that ran before it arrived"
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_never_finishes_still_records_every_round_and_closes_the_run() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[Lookup::Pending])]);
+        let (_sender, stream) = a_held_stream(&rounds_of(&[1, 2, 3]));
+        let ran = ran_with(
+            "name-never",
+            &stream,
+            &after_rounds(3),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        assert_eq!(
+            kinds_of(&ran.recording),
+            ["run", "round", "round", "round", "end"]
+        );
+        assert!(
+            names_of(&ran.recording).is_empty(),
+            "a lookup that never finishes writes no record"
+        );
+        assert_eq!(outcome_of(&ran).reason, EndReason::Rounds);
+        assert_eq!(end_of(&ran.recording).rounds, 3);
+    }
+
+    #[test]
+    fn a_run_that_looks_nothing_up_writes_no_name_record() {
+        let ran = ran(
+            "name-none",
+            &rounds_of(&[1, 2, 3]),
+            &after_rounds(3),
+            &|| false,
+        );
+        assert_eq!(
+            kinds_of(&ran.recording),
+            ["run", "round", "round", "round", "end"]
+        );
+        assert!(
+            names_of(&ran.recording).is_empty(),
+            "the resolver that looks nothing up names no address"
+        );
+    }
+
+    /// The sink takes the `run` record, the name of the target, and the first
+    /// round. The next write is the name of the first hop, which the second
+    /// turn reads, so the write that fails is a `name` record.
+    #[test]
+    fn a_failed_write_of_a_name_record_stops_the_run() {
+        let resolver = FakeResolver::new(&[
+            (TARGET_ADDRESS, &[named(TARGET_NAME)]),
+            (FIRST_HOP, &[Lookup::Pending, named(FIRST_HOP_NAME)]),
+        ]);
+        let sink = Sink::that_takes(3);
+        let mut writer = Writer::to_sink(sink.clone());
+        let outcome = record(
+            &a_run_record(),
+            &a_stream(&rounds_of(&[1, 2])),
+            &after_rounds(2),
+            &|| false,
+            &mut a_namer(&resolver),
+            &mut writer,
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(outcome, Err(RunError::Write(_))),
+            "a failed write of a name stops the run: {outcome:?}"
+        );
+        let text = sink.text();
+        assert_eq!(
+            kinds_in(&text),
+            ["run", "name", "round"],
+            "the run stopped on the name of the second turn: {text}"
+        );
+    }
+
+    #[test]
+    fn a_round_that_reports_no_hop_writes_no_name_record() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[named(FIRST_HOP_NAME)])]);
+        let ran = ran_with(
+            "name-no-hop",
+            &a_stream(&[a_silent_round(1)]),
+            &after_rounds(1),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        assert_eq!(kinds_of(&ran.recording), ["run", "round", "end"]);
+        assert!(
+            names_of(&ran.recording).is_empty(),
+            "a round that reports no hop names no address"
+        );
+        assert_eq!(
+            resolver.asks(),
+            0,
+            "a round that reports no hop asks the resolver nothing"
+        );
+    }
+
+    /// A lookup that finishes between two rounds lands on the turn that saw no
+    /// round, so the name reaches the file whatever the period of the rounds.
+    #[test]
+    fn a_name_that_arrives_between_two_rounds_reaches_the_file_on_the_turn_that_saw_no_round() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[Lookup::Pending, named(FIRST_HOP_NAME)])]);
+        // The channel holds one round and the sender stands, so the second turn
+        // of the loop waits out its poll and reads no round.
+        let (_sender, stream) = a_held_stream(&rounds_of(&[1]));
+        let asked = Cell::new(0_u64);
+        let stop = || {
+            let asked_before = asked.get();
+            asked.set(asked_before + 1);
+            asked_before >= STOP_AFTER
+        };
+        let ran = ran_with("name-late", &stream, &NO_LIMIT, &stop, &mut a_namer(&resolver));
+        assert_eq!(
+            kinds_of(&ran.recording),
+            ["run", "round", "name", "end"],
+            "the name stands after the one round that the run recorded"
+        );
+        assert_eq!(
+            names_of(&ran.recording)[0].host,
+            FIRST_HOP_NAME,
+            "the record holds the name that arrived"
+        );
     }
 
     // The status line of one round. A later slice replaces this line with the

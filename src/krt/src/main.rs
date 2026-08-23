@@ -1107,12 +1107,16 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         rounds: config.rounds,
         deadline: deadline_of(config.duration),
     };
+    // Every run of this slice looks nothing up. The slice that follows reads
+    // `--no-dns` and picks the resolver of the run from it.
+    let mut namer = names::Namer::new(Box::new(names::NoLookups), start.run.clone());
     let mut status = std::io::stdout();
     let outcome = run::record(
         &start,
         &rounds,
         &limits,
         &|| user_stopped(&flag),
+        &mut namer,
         &mut writer,
         &mut status,
     )
