@@ -16,6 +16,7 @@
 // summary in the module list. Adding an outer `///` summary here as well would
 // move module-doc link resolution to the crate root, silently breaking every
 // intra-doc link inside those headers.
+pub mod doc_links;
 pub mod target_lints;
 pub mod tool_index;
 pub mod trippy_wall;
