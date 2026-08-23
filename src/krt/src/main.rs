@@ -4,9 +4,9 @@
 //! A command line that names a destination prints the configuration that it
 //! resolved, opens the recorded file, starts the tracer, and appends one record
 //! for each round until a limit stops the run. It prints one status line for
-//! each round. The `replay` command reads a recorded file and prints one
-//! summary line for one run of it. A later slice replaces the status lines with
-//! the live table.
+//! each round. The `replay` command reads a recorded file, prints one summary
+//! line for one run of it, and prints the aggregate numbers of that run under
+//! it. A later slice replaces the status lines with the live table.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -15,6 +15,9 @@
 mod record;
 mod run;
 mod source;
+mod stats;
+#[cfg(test)]
+mod testing;
 mod trace;
 
 use buildinfo::version_string;
@@ -143,6 +146,72 @@ const REACHED: &str = "reached";
 
 /// The last field of a summary line, when no round reached the target.
 const NEVER_REACHED: &str = "never reached";
+
+/// The text that starts the line of one TTL of the aggregate.
+const TTL_INDENT: &str = "  ";
+
+/// The text that starts the line of one address of a TTL.
+///
+/// The line of an address stands under the line of its TTL, so a reader tells
+/// the two apart by the width of the indent alone.
+const ADDRESS_INDENT: &str = "      ";
+
+/// The name of the field that holds the loss of one TTL, as a percentage.
+const LOSS: &str = "loss";
+
+/// The name of the field that holds the share of one address, as a percentage.
+///
+/// A TTL carries a loss and an address carries a share, and the two words
+/// differ because the two measures differ. Two routers that split the traffic
+/// of one TTL evenly each answer half of the probes of that TTL, and a loss per
+/// address would report 50 percent for a pair that loses nothing.
+const SHARE: &str = "share";
+
+/// The name of the field that counts the probes of one TTL.
+const SENT: &str = "sent";
+
+/// The name of the field that counts the answers.
+const RECV: &str = "recv";
+
+/// The name of the field that holds the most recent round-trip time.
+const LAST: &str = "last";
+
+/// The name of the field that holds the smallest round-trip time.
+const MIN: &str = "min";
+
+/// The name of the field that holds the mean round-trip time.
+const AVG: &str = "avg";
+
+/// The name of the field that holds the largest round-trip time.
+const MAX: &str = "max";
+
+/// The name of the field that holds the standard deviation of the round-trip
+/// times.
+const STDDEV: &str = "stddev";
+
+/// The name of the field that holds the jitter.
+const JITTER: &str = "jitter";
+
+/// The name of the field that counts the answers of one TTL that no tracked
+/// address holds.
+///
+/// One TTL keeps an entry for a bounded number of addresses, so a TTL that
+/// answered from more of them prints this field and no line for the addresses
+/// past that bound. Without the field, the shares of the printed addresses sum
+/// to less than the whole and nothing on the line says why.
+const UNTRACKED: &str = "untracked";
+
+/// The host of a TTL that never answered.
+const NO_HOST: &str = "???";
+
+/// The value of a number that the run holds none of.
+const NO_NUMBER: &str = "-";
+
+/// The sign that ends a percentage.
+const PERCENT_SIGN: &str = "%";
+
+/// The number of decimal places of every round-trip time and every percentage.
+const DECIMALS: usize = 1;
 
 /// The reason of a file that holds no run.
 ///
@@ -453,7 +522,7 @@ impl Cli {
 /// The block names no `replay` and no `run`. `main` prints the block only when
 /// the command line names no `replay`, and `resolve` fills the run only inside
 /// a `replay`, so neither field can reach the block with a value. A replay
-/// prints its own summary line in the place of the block.
+/// prints its own summary line and aggregate in the place of the block.
 impl fmt::Display for ResolvedConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let path_or = |path: Option<&PathBuf>, absent: &str| {
@@ -782,8 +851,8 @@ fn counted(count: usize, name: &str) -> String {
 /// below the length of the path.
 ///
 /// The design puts the fold in `stats.rs` and the render in `ui.rs`. This
-/// slice builds neither module, so the summary lives here. A later slice
-/// replaces this line with the aggregate table.
+/// slice builds no `ui.rs`, so the summary lives here. A later slice replaces
+/// this line with the aggregate table.
 fn summarize(run: &Run<'_>) -> String {
     let target = run.start().map_or_else(
         || UNKNOWN.to_owned(),
@@ -808,6 +877,129 @@ fn summarize(run: &Run<'_>) -> String {
         reached.to_owned(),
     ]
     .join(SUMMARY_SEPARATOR)
+}
+
+/// Writes one round-trip time, to `DECIMALS` decimal places.
+///
+/// A key that holds no such time takes one word in its place. A TTL that
+/// answered no probe holds none of the times, and a key of one answer holds no
+/// jitter.
+fn render_time(value: Option<f64>) -> String {
+    value.map_or_else(
+        || NO_NUMBER.to_owned(),
+        |value| format!("{value:.DECIMALS$}"),
+    )
+}
+
+/// Writes one percentage, to `DECIMALS` decimal places.
+fn render_percent(value: f64) -> String {
+    format!("{value:.DECIMALS$}{PERCENT_SIGN}")
+}
+
+/// The six round-trip time fields that end the line of one TTL and the line of
+/// one address.
+///
+/// Both lines carry the same six times, in the same order, so a reader compares
+/// one address against the whole of its TTL by column.
+fn time_fields(stats: &stats::HopStats) -> [String; 6] {
+    [
+        format!("{LAST} {}", render_time(stats.last())),
+        format!("{MIN} {}", render_time(stats.min())),
+        format!("{AVG} {}", render_time(stats.avg())),
+        format!("{MAX} {}", render_time(stats.max())),
+        format!("{STDDEV} {}", render_time(stats.stddev())),
+        format!("{JITTER} {}", render_time(stats.jitter())),
+    ]
+}
+
+/// The host field of the line of one TTL.
+///
+/// The field names the address that the TTL first answered from. A TTL that
+/// answered from more addresses adds the count of the other ones it tracks, so
+/// the line of a TTL stays one line however many routers answer at it. The line
+/// of each address then carries the numbers of that address. A TTL that never
+/// answered names no host.
+fn host_of(row: &stats::TtlRow) -> String {
+    let others = row.addresses().len().saturating_sub(1);
+    let Some(first) = row.addresses().next() else {
+        return NO_HOST.to_owned();
+    };
+    if others == 0 {
+        return first.addr().to_string();
+    }
+    format!("{} (+{others})", first.addr())
+}
+
+/// Writes the line of one TTL of the path.
+///
+/// The line holds the TTL, the host, the loss, the count of the probes, the
+/// count of the answers, and the six round-trip times. A TTL that no round
+/// probed holds no loss, and the field then takes the word of an absent number.
+///
+/// A TTL that answered from more addresses than it tracks ends the line with
+/// the count of the answers that no tracked address holds. The shares of the
+/// printed addresses of such a TTL sum to less than the whole, and this field
+/// is what names the rest of it. A TTL that tracks every address that answered
+/// prints no such field, so the line of that TTL reads as it always did.
+fn ttl_line(row: &stats::TtlRow) -> String {
+    let loss = row
+        .loss()
+        .map_or_else(|| NO_NUMBER.to_owned(), render_percent);
+    let mut fields = vec![
+        row.ttl().to_string(),
+        host_of(row),
+        format!("{LOSS} {loss}"),
+        format!("{SENT} {}", row.sent()),
+        format!("{RECV} {}", row.stats().recv()),
+    ];
+    fields.extend(time_fields(row.stats()));
+    if row.untracked() > 0 {
+        fields.push(format!("{UNTRACKED} {}", row.untracked()));
+    }
+    format!("{TTL_INDENT}{}", fields.join(SUMMARY_SEPARATOR))
+}
+
+/// Writes the line of one address of a TTL.
+///
+/// The line holds the address, the share of the answers of the TTL that the
+/// address took, the count of those answers, and the six round-trip times of
+/// them. The line carries no count of the probes, because a probe reaches a
+/// TTL and not a router: the run asks the TTL, and whichever router answers
+/// takes that answer.
+///
+/// An address that its TTL does not track takes no line, and the `UNTRACKED`
+/// field of the line of that TTL counts the answers of every such address.
+fn address_line(address: stats::Address<'_>) -> String {
+    let mut fields = vec![
+        address.addr().to_string(),
+        format!("{SHARE} {}", render_percent(address.share())),
+        format!("{RECV} {}", address.stats().recv()),
+    ];
+    fields.extend(time_fields(address.stats()));
+    format!("{ADDRESS_INDENT}{}", fields.join(SUMMARY_SEPARATOR))
+}
+
+/// The lines that a replay prints for the aggregate of one run.
+///
+/// One line holds one TTL of the path, in TTL order. A TTL that saw more than
+/// one address adds one line for each of the addresses it tracks, under the
+/// line of the TTL, so a TTL of any number of routers prints a bounded number
+/// of lines. Two spaces separate the fields, as they do on the summary line.
+///
+/// The design puts the fold in `stats.rs` and the render in `ui.rs`. This
+/// slice builds no `ui.rs`, so the render lives here. A later slice replaces
+/// these lines with the aggregate table.
+fn aggregate_lines(table: &stats::HopTable) -> Vec<String> {
+    let mut lines = Vec::new();
+    for row in table.rows() {
+        lines.push(ttl_line(row));
+        // The one address of a TTL is already the host of the line of that
+        // TTL, and a second line of the same numbers tells a reader nothing.
+        if row.addresses().len() > 1 {
+            lines.extend(row.addresses().map(address_line));
+        }
+    }
+    lines
 }
 
 /// Writes the reason of a file that holds no run to fold.
@@ -863,7 +1055,16 @@ fn replay(path: &Path, wanted: Option<&str>) -> Replay {
         None => recording.last_run(),
     };
     let outcome = match found {
-        Some(run) => Ok(summarize(&run)),
+        Some(run) => {
+            let mut table = stats::HopTable::new();
+            for round in run.rounds() {
+                table.observe(round);
+            }
+            Ok(Folded {
+                summary: summarize(&run),
+                aggregate: aggregate_lines(&table),
+            })
+        }
         None => Err(no_run_message(path, wanted, &recording.run_ids())),
     };
     Replay { warning, outcome }
@@ -873,8 +1074,19 @@ fn replay(path: &Path, wanted: Option<&str>) -> Replay {
 struct Replay {
     /// The warning about the file, when the file holds a cut final line.
     warning: Option<String>,
-    /// The one line that names the run, or the reason that no run folds.
-    outcome: Result<String, String>,
+    /// What the replay folded, or the reason that no run folds.
+    outcome: Result<Folded, String>,
+}
+
+/// What a replay folded out of one run.
+///
+/// The summary and the aggregate travel together, so one replay reads the file
+/// once and every line of the answer comes from the same run.
+struct Folded {
+    /// The one line that names the run.
+    summary: String,
+    /// The lines of the aggregate of the run.
+    aggregate: Vec<String>,
 }
 
 /// The fault that stopped a trace, and the code that names its kind.
@@ -1108,7 +1320,13 @@ fn main() {
         eprintln!("{PROGRAM}: {warning}");
     }
     match result.outcome {
-        Ok(summary) => println!("{summary}"),
+        Ok(folded) => {
+            // The summary names the run, and the aggregate stands under it.
+            println!("{}", folded.summary);
+            for line in folded.aggregate {
+                println!("{line}");
+            }
+        }
         Err(reason) => {
             eprintln!("{PROGRAM}: {reason}");
             std::process::exit(EXIT_FAILURE);
@@ -1119,13 +1337,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        closing_line, host_name_or, parse_duration, pick_address, render_duration, resolve_target,
-        source_from, stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason, Family,
-        Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, RESOLVE_PORT,
-        SOURCE_FALLBACK, UNKNOWN,
+        aggregate_lines, closing_line, host_name_or, parse_duration, pick_address, render_duration,
+        resolve_target, source_from, stop_reason, user_stopped, AddressFamily, Cli, Command,
+        EndReason, Family, Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind,
+        SourceLabel, ADDRESS_INDENT, PERCENT_SIGN, RESOLVE_PORT, SHARE, SOURCE_FALLBACK,
+        SUMMARY_SEPARATOR, UNKNOWN, UNTRACKED,
     };
+    use crate::record::RoundRecord;
     use crate::run::Outcome;
     use crate::source::Discovery;
+    use crate::stats::HopTable;
+    use crate::testing::{address, round};
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -2131,8 +2353,8 @@ resolved configuration:
     ///
     /// `main` prints the block only when the command line names no `replay`,
     /// and `resolve` fills the run only inside a `replay`, so neither field can
-    /// reach the block with a value. A replay prints its own summary line in
-    /// the place of the block.
+    /// reach the block with a value. A replay prints its own summary line and
+    /// aggregate in the place of the block.
     #[test]
     fn the_block_names_neither_the_replay_nor_the_run() {
         let config = resolve(&[
@@ -2177,18 +2399,13 @@ resolved configuration:
         AddressFamily::Version6,
     ];
 
-    /// Reads a literal address that a test names.
+    /// Builds the socket address of one literal address that a test names.
     ///
     /// Every test of the resolution names a literal address. `to_socket_addrs`
     /// reads a literal address inside the machine and asks no resolver, so
     /// every such test runs offline. A host name in the place of a literal
     /// reaches a name server, and the test then answers for the network of the
     /// machine and not for this code.
-    fn address(text: &str) -> IpAddr {
-        text.parse().expect("the test address must parse")
-    }
-
-    /// Builds the socket address of one literal address that a test names.
     fn socket(text: &str) -> SocketAddr {
         SocketAddr::new(address(text), RESOLVE_PORT)
     }
@@ -2524,5 +2741,220 @@ resolved configuration:
             warning.contains(SOURCE_FALLBACK),
             "the warning names what the run recorded in its place: {warning}"
         );
+    }
+
+    /// The address of the router that answers first at a TTL.
+    const ONE_ROUTER: &str = "10.0.0.1";
+
+    /// The address of the other router of a TTL that two of them answer at.
+    const ANOTHER_ROUTER: &str = "10.0.0.2";
+
+    /// The whole of a percentage, for the sum of the shares of one TTL that
+    /// tracks every address that answered at it.
+    const WHOLE_PERCENT: f64 = 100.0;
+
+    /// The largest difference that a comparison of two percentages admits.
+    ///
+    /// The two shares of this test are 33.3 and 66.7, which sum to exactly 100
+    /// in decimal. A read of each printed decimal into a number with a
+    /// fraction loses a little. The sum then misses the whole by about 1e-14,
+    /// and this tolerance covers that loss. A pair of shares that rounds the
+    /// other way misses the whole by a tenth, and this test names no such
+    /// pair.
+    const PERCENT_TOLERANCE: f64 = 1e-9;
+
+    /// The lines of the aggregate of every round, in one table.
+    fn lines_of(rounds: &[RoundRecord]) -> Vec<String> {
+        let mut table = HopTable::new();
+        for round in rounds {
+            table.observe(round);
+        }
+        aggregate_lines(&table)
+    }
+
+    /// Reads the share that one address line printed.
+    fn share_of(line: &str) -> f64 {
+        let prefix = format!("{SHARE} ");
+        let field = line
+            .split(SUMMARY_SEPARATOR)
+            .find_map(|field| field.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("an address line holds a share field: {line}"));
+        field
+            .strip_suffix(PERCENT_SIGN)
+            .unwrap_or_else(|| panic!("a share ends with the percent sign: {line}"))
+            .parse()
+            .unwrap_or_else(|_| panic!("a share reads as a number: {line}"))
+    }
+
+    /// A TTL that answered every round loses nothing.
+    ///
+    /// The two answers are 10.0 and 20.0. The sum is 30.0, so the mean is
+    /// 30 / 2 = 15.0. The distances from the mean are -5.0 and 5.0, and the
+    /// squares of them sum to 50.0. The population variance is 50 / 2 = 25.0,
+    /// so the standard deviation is 5.0. The jitter is the absolute difference
+    /// of the last two answers, which is 10.0.
+    #[test]
+    fn a_ttl_that_answered_every_round_prints_no_loss_and_every_number() {
+        let lines = lines_of(&[
+            round(1, 1, &[(1, ONE_ROUTER, 10.0)]),
+            round(1, 1, &[(1, ONE_ROUTER, 20.0)]),
+        ]);
+        assert_eq!(
+            lines,
+            ["  1  10.0.0.1  loss 0.0%  sent 2  recv 2  last 20.0  min 10.0  avg 15.0  max 20.0  stddev 5.0  jitter 10.0"]
+        );
+    }
+
+    /// A TTL that never answered names no host and holds no number.
+    ///
+    /// Both rounds probed TTL 2 and neither one answered at it, so the loss is
+    /// 2 / 2 * 100 = 100.0 percent.
+    #[test]
+    fn a_ttl_that_never_answered_prints_no_host_and_no_number() {
+        let lines = lines_of(&[
+            round(1, 2, &[(1, ONE_ROUTER, 10.0)]),
+            round(1, 2, &[(1, ONE_ROUTER, 20.0)]),
+        ]);
+        assert_eq!(lines.len(), 2, "two TTLs took a probe: {lines:?}");
+        assert_eq!(
+            lines[1],
+            "  2  ???  loss 100.0%  sent 2  recv 0  last -  min -  avg -  max -  stddev -  jitter -"
+        );
+    }
+
+    /// One address is the host of the TTL line, so it takes no line of its own.
+    #[test]
+    fn a_ttl_of_one_address_prints_no_address_line() {
+        let lines = lines_of(&[round(1, 1, &[(1, ONE_ROUTER, 10.0)])]);
+        assert_eq!(lines.len(), 1, "one TTL is one line: {lines:?}");
+        assert!(
+            !lines[0].starts_with(ADDRESS_INDENT),
+            "the one line is the line of the TTL: {lines:?}"
+        );
+    }
+
+    /// A TTL that two routers answer at names both of them.
+    ///
+    /// The first router answers one round of the three, and the second router
+    /// answers the other two. The shares are therefore 1 / 3 * 100 = 33.3 and
+    /// 2 / 3 * 100 = 66.7 percent, to one decimal place.
+    ///
+    /// The three answers of the TTL are 10.0, 20.0, and 30.0. The sum is 60.0,
+    /// so the mean is 60 / 3 = 20.0. The distances from the mean are -10.0,
+    /// 0.0, and 10.0, and the squares of them sum to 200.0. The population
+    /// variance is 200 / 3 = 66.667, so the standard deviation is 8.165, which
+    /// prints as 8.2.
+    ///
+    /// The second router answered 20.0 and 30.0. The mean of the two is 25.0,
+    /// the distances are -5.0 and 5.0, and the squares sum to 50.0. The
+    /// variance is 50 / 2 = 25.0, so the standard deviation is 5.0.
+    #[test]
+    fn a_ttl_of_two_addresses_prints_one_line_for_each_of_them() {
+        let lines = lines_of(&[
+            round(1, 1, &[(1, ONE_ROUTER, 10.0)]),
+            round(1, 1, &[(1, ANOTHER_ROUTER, 20.0)]),
+            round(1, 1, &[(1, ANOTHER_ROUTER, 30.0)]),
+        ]);
+        assert_eq!(
+            lines,
+            [
+                "  1  10.0.0.1 (+1)  loss 0.0%  sent 3  recv 3  last 30.0  min 10.0  avg 20.0  max 30.0  stddev 8.2  jitter 10.0",
+                "      10.0.0.1  share 33.3%  recv 1  last 10.0  min 10.0  avg 10.0  max 10.0  stddev 0.0  jitter -",
+                "      10.0.0.2  share 66.7%  recv 2  last 30.0  min 20.0  avg 25.0  max 30.0  stddev 5.0  jitter 10.0",
+            ]
+        );
+        let total = share_of(&lines[1]) + share_of(&lines[2]);
+        assert!(
+            (total - WHOLE_PERCENT).abs() < PERCENT_TOLERANCE,
+            "the printed shares of one TTL sum to {WHOLE_PERCENT}, and they sum to {total}"
+        );
+    }
+
+    /// A run that folded nothing prints nothing, and a run that folded one
+    /// round prints a line.
+    ///
+    /// The second half is what gives the first half meaning. A render that
+    /// returned no line for every table, folded or not, would satisfy the
+    /// empty case on its own, so the empty case is pinned here against a table
+    /// that does print.
+    #[test]
+    fn only_an_empty_table_prints_no_line() {
+        assert!(
+            aggregate_lines(&HopTable::new()).is_empty(),
+            "a table that folded no round holds no TTL to print"
+        );
+        let folded = lines_of(&[round(1, 1, &[(1, ONE_ROUTER, 10.0)])]);
+        assert!(
+            !folded.is_empty(),
+            "a table that folded one round prints the TTL of it: {folded:?}"
+        );
+    }
+
+    /// The number of routers that answer at one TTL of the crowded run.
+    ///
+    /// The count stands above the number of addresses that one TTL tracks, so
+    /// the row of that TTL counts the answers it keeps no entry for.
+    const MANY_ROUTERS: u32 = 40;
+
+    /// The round-trip time of every answer of the crowded run.
+    ///
+    /// One time for every answer makes every number of the TTL line that time,
+    /// so the line stays hand-computed however many routers answer.
+    const SAME_RTT: f64 = 10.0;
+
+    /// The lines that the crowded run prints.
+    ///
+    /// The line of the TTL stands first, and one line for each of the 32
+    /// tracked addresses stands under it, so 1 + 32 = 33 lines.
+    const CROWDED_LINES: usize = 33;
+
+    /// One round for each router of a TTL that answers from more routers than
+    /// it tracks.
+    ///
+    /// The addresses run upward from `10.0.0.1`, one for each round, and every
+    /// answer carries the same round-trip time.
+    fn crowded_rounds() -> Vec<RoundRecord> {
+        (1..=MANY_ROUTERS)
+            .map(|host| round(1, 1, &[(1, &format!("10.0.0.{host}"), SAME_RTT)]))
+            .collect()
+    }
+
+    /// A TTL that answered from more routers than it tracks names the answers
+    /// that no tracked address holds.
+    ///
+    /// Each of the 40 rounds probed TTL 1 and answered from a router of its
+    /// own, so the loss is 0 / 40 * 100 = 0.0 percent. The row tracks 32 of the
+    /// 40 addresses, so the host names the first one and the other 31 tracked
+    /// ones, and 40 - 32 = 8 answers hold no tracked address. Every answer is
+    /// 10.0, so the last, the smallest, the mean, and the largest are all 10.0,
+    /// the deviation is 0.0, and the jitter is |10.0 - 10.0| = 0.0.
+    #[test]
+    fn a_ttl_past_the_tracked_addresses_prints_the_untracked_answers() {
+        let lines = lines_of(&crowded_rounds());
+        assert_eq!(
+            lines.len(),
+            CROWDED_LINES,
+            "the line of the TTL and one line for each tracked address: {lines:?}"
+        );
+        assert_eq!(
+            lines[0],
+            "  1  10.0.0.1 (+31)  loss 0.0%  sent 40  recv 40  last 10.0  min 10.0  avg 10.0  max 10.0  stddev 0.0  jitter 0.0  untracked 8"
+        );
+    }
+
+    /// A TTL that tracks every router that answered at it names no untracked
+    /// answer, so the line of the common case reads as it always did.
+    #[test]
+    fn a_ttl_below_the_tracked_addresses_prints_no_untracked_field() {
+        let lines = lines_of(&[
+            round(1, 1, &[(1, ONE_ROUTER, 10.0)]),
+            round(1, 1, &[(1, ANOTHER_ROUTER, 20.0)]),
+        ]);
+        for line in &lines {
+            assert!(
+                !line.contains(UNTRACKED),
+                "the TTL tracks both of its routers, so no line names an untracked answer: {line}"
+            );
+        }
     }
 }

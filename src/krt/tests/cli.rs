@@ -11,8 +11,8 @@
 //! The rest of the file covers the resolved configuration. A command line that
 //! names a destination prints the block and exits with success. A command line
 //! that contradicts itself prints the reason on standard error and exits with a
-//! failure. The `replay` command prints one summary line in the place of the
-//! block, and `tests/replay.rs` covers that line.
+//! failure. The `replay` command prints one summary line and the aggregate of
+//! the run in the place of the block, and `tests/replay.rs` covers those lines.
 
 // Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -440,8 +440,8 @@ fn a_destination_beside_a_replay_fails_and_names_both() {
 
 /// A replay takes no destination, and the parser asks for none.
 ///
-/// The summary line that the replay prints belongs to `tests/replay.rs`, so
-/// this test reads the exit status only.
+/// The lines that the replay prints belong to `tests/replay.rs`, so this test
+/// reads the exit status only.
 #[test]
 fn a_replay_needs_no_destination() {
     let result = run(&[REPLAY, FIXTURE]);

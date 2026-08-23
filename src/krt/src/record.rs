@@ -349,39 +349,13 @@ impl TtlRange {
     }
 
     /// The first TTL of the round.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the aggregate fold builds a row for every TTL that the round probed, and the fold arrives in a later slice of issue #369"
-        )
-    )]
     pub(crate) fn first(self) -> u8 {
         self.first
     }
 
     /// The last TTL of the round.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the aggregate fold builds a row for every TTL that the round probed, and the fold arrives in a later slice of issue #369"
-        )
-    )]
     pub(crate) fn last(self) -> u8 {
         self.last
-    }
-
-    /// True when the round probed this TTL.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the aggregate fold asks whether a round probed a TTL, to part a hop that did not answer from a hop the round never probed, and the fold arrives in a later slice of issue #369"
-        )
-    )]
-    pub(crate) fn contains(self, ttl: u8) -> bool {
-        (self.first..=self.last).contains(&ttl)
     }
 }
 
@@ -792,10 +766,10 @@ mod tests {
         RoundRecord, Run, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange,
         Writer,
     };
+    use crate::testing::address;
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};
     use std::fs;
-    use std::net::IpAddr;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -862,11 +836,6 @@ mod tests {
 
     /// Two bytes that no UTF-8 text holds.
     const NOT_TEXT: [u8; 2] = [0xff, 0xfe];
-
-    /// Reads an address that a test names.
-    fn address(text: &str) -> IpAddr {
-        text.parse().expect("the test address must parse")
-    }
 
     /// Reads a moment that a test names, and converts it to UTC.
     fn moment(text: &str) -> DateTime<Utc> {
@@ -1070,14 +1039,8 @@ mod tests {
     }
 
     #[test]
-    fn a_range_holds_every_ttl_from_the_first_one_to_the_last_one() {
+    fn a_range_keeps_the_first_ttl_and_the_last_one_it_was_made_with() {
         let range = TtlRange::new(1, 30).expect("the test range must hold");
-        for held in [1, 15, 30] {
-            assert!(range.contains(held), "the range holds {held}");
-        }
-        for outside in [0, 31] {
-            assert!(!range.contains(outside), "the range holds no {outside}");
-        }
         assert_eq!(range.first(), 1);
         assert_eq!(range.last(), 30);
     }
@@ -2019,8 +1982,11 @@ mod tests {
         assert_eq!(round.seq, 2);
         assert_eq!(round.hops.len(), 1, "one hop of the round answered");
         assert_eq!(round.ttl_range.first(), 1);
-        assert_eq!(round.ttl_range.last(), 3);
-        assert!(round.ttl_range.contains(3), "the round probed ttl 3");
+        assert_eq!(
+            round.ttl_range.last(),
+            3,
+            "the round probed ttl 3, the last ttl of its range"
+        );
         assert!(
             !round.hops.iter().any(|answer| answer.ttl == 3),
             "the hop at ttl 3 did not answer, so the round holds no hop at ttl 3"
