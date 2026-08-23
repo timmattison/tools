@@ -556,6 +556,20 @@ mod tests {
     /// screen sees.
     const PAUSED: &str = "paused";
 
+    /// The list of the keys, one line for each key.
+    ///
+    /// The test spells every line, and the module builds the same lines out of
+    /// one table of pairs. That is on purpose, as the word of the pause is: a
+    /// test that read the table of the module would agree with every list the
+    /// module ever holds, and this list is what a reader of the screen sees.
+    const HELP_LINES: [&str; 5] = [
+        "q, Ctrl-C  stop the run",
+        "p          hold the table, or let it move",
+        "n          show the names, or show the addresses",
+        "r          empty the table",
+        "?          show these keys, or hide them",
+    ];
+
     /// The last `count` lines of a frame, or every line of a frame that holds
     /// fewer than that.
     ///
@@ -668,6 +682,30 @@ mod tests {
         assert!(
             first.iter().any(|line| line == ONE_ROUND_ROW),
             "the round that follows the reset counts as the first round: {first:?}"
+        );
+    }
+
+    #[test]
+    fn the_help_key_shows_the_list_of_the_keys_and_hides_it_again() {
+        let mut screen = table(&[&[Command::Help], &[Command::Help]]);
+        screen.poll();
+        let shown = painted(&screen.sink);
+        let mut wanted = vec![""];
+        wanted.extend(HELP_LINES);
+        assert_eq!(
+            last_lines(&shown, wanted.len()),
+            wanted,
+            "one blank line and the list of the keys close the frame: {shown:?}"
+        );
+
+        screen.sink.clear();
+        screen.poll();
+        let hidden = painted(&screen.sink);
+        assert!(
+            !hidden
+                .iter()
+                .any(|line| HELP_LINES.contains(&line.as_str())),
+            "a second press takes the list back off the screen: {hidden:?}"
         );
     }
 
