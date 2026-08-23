@@ -636,6 +636,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     too narrow for every column drops columns, first dropped first: `Recent`, `StDev`, `Max`, `Min`,
     `Last`, `Sent`, `Loss%`. The `TTL`, the `Host`, and the `Avg` never drop. A replay whose output
     goes to a pipe or to a file prints the whole table, because such a run has no terminal to ask.
+  - A host too wide for the `Host` column loses the tail of its name, and it keeps its `★` and its
+    `(+N)`. A name with its address fills that column of a run that resolves names, and the two
+    marks say what no other column of the row says.
   - A live run still prints one status line for each round. A later build gives it the table.
   - macOS sends the probes without privileges. Linux needs `CAP_NET_RAW`, and Windows needs an
     elevated prompt. A platform that needs privileges and does not hold them prints the remedy and

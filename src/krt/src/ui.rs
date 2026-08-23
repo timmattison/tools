@@ -19,6 +19,16 @@
 //! column of its own. The Host column is the one column that absorbs a change
 //! of the terminal width.
 //!
+//! A host too wide for that column loses the tail of its name, and it keeps
+//! the count of the other routers and the star of the destination. The name
+//! takes the columns that the two marks leave. Both marks stand at the end of
+//! the text, so a cut of the whole text takes them first, and a name with its
+//! address fills the column of a run that resolves names: such a cut therefore
+//! takes the marks off the common row and not off the rare one. A cut name
+//! still reads as a name, and nothing else on the screen carries either mark.
+//! The branch glyph of an address row stands at the start of its text, where
+//! the cut spares it already.
+//!
 //! A terminal too narrow for the frame at the floor of the Host column drops
 //! columns, one at a time, until the frame fits. The order, first dropped
 //! first: `Recent`, `StDev`, `Max`, `Min`, `Last`, `Sent`, `Loss%`. It runs
@@ -1059,7 +1069,20 @@ impl Frame<'_> {
     /// The host names the router that answered first, so a path that flaps
     /// keeps the name a reader already read. The count behind it says how many
     /// more routers answered there, and the star says that one of them is the
-    /// destination.
+    /// destination. A row that answered from one router alone carries no
+    /// count, and a row that answered from no destination carries no star.
+    ///
+    /// A host too wide for the Host column loses the tail of its name, and it
+    /// keeps both marks. The name therefore takes the columns that the marks
+    /// leave. A cut of the whole text takes the marks first, because the two
+    /// of them stand at the end of it, and a name with its address fills the
+    /// column of a run that resolves names. A cut name still reads as a name.
+    /// Nothing else on the screen carries either mark.
+    ///
+    /// A Host column narrower than the two marks together keeps as much of the
+    /// marks as it holds, and it prints no name. The floor of the column is
+    /// [`HOST_MIN`] columns and the two marks take far fewer, so no terminal
+    /// reaches that corner.
     fn ttl_row(&self, row: &TtlRow, host: u16) -> RowText {
         let named = row
             .addresses()
@@ -1076,7 +1099,13 @@ impl Frame<'_> {
         } else {
             String::new()
         };
-        let host_text = format!("{named}{more}{star}");
+        // The name takes the columns that the two marks leave, and the marks
+        // then stand whole behind it. The cut below holds the whole text
+        // inside the column anyway, so a Host column narrower than the marks
+        // keeps as much of them as it holds and prints no name at all.
+        let marks = format!("{more}{star}");
+        let for_the_name = usize::from(host).saturating_sub(display_width(&marks));
+        let host_text = format!("{}{marks}", truncate_to_width(&named, for_the_name));
         RowText {
             ttl: row.ttl().to_string(),
             host: truncate_to_width(&host_text, usize::from(host)),
