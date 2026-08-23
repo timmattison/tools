@@ -2912,10 +2912,24 @@ resolved configuration:
         );
     }
 
-    /// A run that folded nothing prints nothing.
+    /// A run that folded nothing prints nothing, and a run that folded one
+    /// round prints a line.
+    ///
+    /// The second half is what gives the first half meaning. A render that
+    /// returned no line for every table, folded or not, would satisfy the
+    /// empty case on its own, so the empty case is pinned here against a table
+    /// that does print.
     #[test]
-    fn an_empty_table_prints_no_line() {
-        assert!(aggregate_lines(&HopTable::new()).is_empty());
+    fn only_an_empty_table_prints_no_line() {
+        assert!(
+            aggregate_lines(&HopTable::new()).is_empty(),
+            "a table that folded no round holds no TTL to print"
+        );
+        let folded = lines_of(&[round(1, 1, &[(1, ONE_ROUTER, 10.0)])]);
+        assert!(
+            !folded.is_empty(),
+            "a table that folded one round prints the TTL of it: {folded:?}"
+        );
     }
 
     /// The number of routers that answer at one TTL of the crowded run.
