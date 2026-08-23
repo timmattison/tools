@@ -455,18 +455,55 @@ impl Clock for SystemClock {
     }
 }
 
+/// The display of a run that draws no table.
+///
+/// A run whose standard output is a pipe or a file holds no terminal. Such a
+/// run clears no screen and reads no key, so it writes one status line for a
+/// round and nothing else.
+pub(crate) struct Headless<W: Write, C: Clock> {
+    /// Where the lines go.
+    sink: W,
+    /// The clock that times the lines.
+    clock: C,
+}
+
+impl<W: Write, C: Clock> Headless<W, C> {
+    /// A headless screen that writes into `sink` and times its lines by
+    /// `clock`.
+    pub(crate) fn new(sink: W, clock: C) -> Self {
+        Self { sink, clock }
+    }
+}
+
+impl<W: Write, C: Clock> Screen for Headless<W, C> {
+    fn poll(&mut self) -> bool {
+        todo!("a headless screen reads no key")
+    }
+
+    fn round(&mut self, _round: &RoundRecord) {
+        todo!("a headless screen writes the status line of a round")
+    }
+
+    fn names(&mut self, _names: &[NameRecord]) {
+        todo!("a headless screen shows no name")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, status_line, Clock, Command, Keys, NoKeys, RunFacts, Screen, SystemClock, Table,
+        classify, status_line, Clock, Command, Headless, Keys, NoKeys, RunFacts, Screen,
+        SystemClock, Table,
     };
     use crate::record::{NameRecord, RoundRecord, RunId};
     use crate::testing::{address, round};
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use std::cell::Cell;
     use std::collections::VecDeque;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     /// Builds the press of a key that no modifier holds.
@@ -744,6 +781,51 @@ mod tests {
         record
     }
 
+    /// A clock that the test moves by hand.
+    ///
+    /// A headless screen writes one line each minute, and a test that waited a
+    /// minute for the second line would take a minute of the suite. The moment
+    /// sits behind a `Cell`, because [`Clock::now`] takes the clock by
+    /// reference. The fake stays on one thread.
+    struct FakeClock {
+        /// The moment that the clock reads now.
+        now: Cell<Instant>,
+    }
+
+    impl FakeClock {
+        /// A clock that stands at the moment of its making.
+        fn new() -> Rc<Self> {
+            Rc::new(Self {
+                now: Cell::new(Instant::now()),
+            })
+        }
+
+        /// Moves the clock forward.
+        fn advance(&self, by: Duration) {
+            self.now.set(self.now.get() + by);
+        }
+    }
+
+    impl Clock for Rc<FakeClock> {
+        fn now(&self) -> Instant {
+            self.now.get()
+        }
+    }
+
+    /// A headless screen that writes into bytes and reads the clock of the
+    /// test.
+    fn headless(clock: &Rc<FakeClock>) -> Headless<Vec<u8>, Rc<FakeClock>> {
+        Headless::new(Vec::new(), Rc::clone(clock))
+    }
+
+    /// The lines that a headless screen wrote, in the order they arrived.
+    fn printed(sink: &[u8]) -> Vec<String> {
+        String::from_utf8_lossy(sink)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// The record of one name that a lookup answered.
     ///
     /// The identifier of the run and the moment of the record take the values
@@ -1000,6 +1082,21 @@ mod tests {
     #[test]
     fn a_round_that_answered_one_hop_and_reached_nothing_prints_the_singular_name() {
         assert_eq!(status_line(&a_lost_round()), A_LOST_ROUND_LINE);
+    }
+
+    #[test]
+    fn a_headless_screen_prints_a_line_at_its_first_round() {
+        // A run that printed nothing for its first minute reads as a run that
+        // died, so the first round always prints.
+        let clock = FakeClock::new();
+        let mut screen = headless(&clock);
+
+        screen.round(&a_whole_path_round());
+        assert_eq!(
+            printed(&screen.sink),
+            [A_WHOLE_PATH_LINE],
+            "the first round of a run puts its status line on the screen"
+        );
     }
 
     #[test]
