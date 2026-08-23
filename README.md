@@ -586,11 +586,22 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - The `replay` command reads a file that an earlier run wrote, and it takes no destination and no
     flag of a probe. `--run` picks which run in that file to read, and the last run of the file is
     the default. A recorded file holds one JSON record on each line.
-  - This build reads that file and prints one summary line for a recorded run. It writes no file,
-    because it does not probe yet. The writer is in place, and it opens the file in append mode.
-    One source and one destination will keep one file across many runs, once the tracer arrives. A
-    later build adds the tracer and the aggregate table.
-  - Usage: `krt example.com`, `krt example.com --interval 500ms --protocol udp --multipath paris`,
+  - A run probes every hop once per round and appends one record for each round to the file. The
+    file opens in append mode, so one source and one destination keep one file across many runs,
+    and the `run` field separates the runs inside it. The run flushes after every record, so a
+    `kill -9` loses at most one round.
+  - The default name of the file is `SOURCE-DESTINATION.jsonl` in the working directory, and
+    `--output` overrides it. The default name carries the address of the machine, so a file you
+    share carries it too.
+  - `--rounds` stops the run after that many rounds, and `--duration` stops it after that much
+    time. Ctrl-C stops it at once. Each of the three writes the record that closes the run.
+  - This build prints one status line for each round. A later build adds the aggregate table.
+  - macOS sends the probes without privileges. Linux needs `CAP_NET_RAW`, and Windows needs an
+    elevated prompt. A platform that needs privileges and does not hold them prints the remedy and
+    stops, and `krt` never falls back to a degraded trace without saying so.
+  - `krt` takes its tracer from [`trippy-core`](https://trippy.rs), which is Apache-2.0.
+  - Usage: `krt example.com`, `krt example.com --rounds 3`, `krt example.com --duration 1h`,
+    `krt example.com --interval 500ms --protocol udp --multipath paris`,
     `krt replay trace.jsonl`, `krt replay trace.jsonl --run 2026-08-19T12:00:00.000Z`
   - To install: `cargo install --git https://github.com/timmattison/tools krt`
 
