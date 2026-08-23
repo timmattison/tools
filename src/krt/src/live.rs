@@ -467,9 +467,6 @@ mod tests {
 
     /// The number of bytes of the recorded file at the first draw of the test
     /// of the size.
-    ///
-    /// A size below one kilobyte reads as whole bytes, so the header names the
-    /// count itself and no unit above the byte.
     const FIRST_BYTES: usize = 100;
 
     /// The number of bytes of that same file at the second draw.
@@ -642,6 +639,14 @@ mod tests {
             .split_terminator(super::LINE_END)
             .map(str::to_owned)
             .collect()
+    }
+
+    /// The text that ends a header line whose file holds this many bytes.
+    ///
+    /// A size below one kilobyte reads as whole bytes, so the text names the
+    /// count of the bytes itself and no unit above the byte.
+    fn size_of(bytes: usize) -> String {
+        format!("({bytes} B)")
     }
 
     /// One round of one TTL, which the router answered.
@@ -863,7 +868,9 @@ mod tests {
         screen.round(&one_round());
         let first = painted(&screen.sink);
         assert!(
-            first.first().is_some_and(|line| line.ends_with("(100 B)")),
+            first
+                .first()
+                .is_some_and(|line| line.ends_with(&size_of(FIRST_BYTES))),
             "the header line names the size that the file holds: {first:?}"
         );
 
@@ -875,7 +882,9 @@ mod tests {
         screen.round(&one_round());
         let second = painted(&screen.sink);
         assert!(
-            second.first().is_some_and(|line| line.ends_with("(142 B)")),
+            second
+                .first()
+                .is_some_and(|line| line.ends_with(&size_of(SECOND_BYTES))),
             "and the next draw names the size that the file holds then: {second:?}"
         );
     }
