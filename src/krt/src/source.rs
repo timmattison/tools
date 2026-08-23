@@ -14,20 +14,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::path::{Path, PathBuf};
 
 /// The extension of a recorded file.
-#[allow(
-    dead_code,
-    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 const EXTENSION: &str = "jsonl";
 
 /// The character that a file name always holds safely.
 ///
 /// It replaces every character that a file name must not hold, and it joins the
 /// two halves of a derived name.
-#[allow(
-    dead_code,
-    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 const HYPHEN: char = '-';
 
 /// The characters that a file name must not hold, as a list.
@@ -39,10 +31,6 @@ const HYPHEN: char = '-';
 /// Whitespace becomes a hyphen too, and this list does not hold it.
 /// `char::is_whitespace` reads the whole Unicode table, and no list of a few
 /// characters holds as much.
-#[allow(
-    dead_code,
-    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 const FORBIDDEN: [char; 3] = [':', '/', '\\'];
 
 /// Replaces every character that a file name must not hold.
@@ -55,10 +43,6 @@ const FORBIDDEN: [char; 3] = [':', '/', '\\'];
 /// byte survives whole. `char::is_whitespace` reads the Unicode table, so a
 /// space such as U+3000 IDEOGRAPHIC SPACE becomes a hyphen as an ASCII space
 /// does.
-#[allow(
-    dead_code,
-    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 fn sanitize(text: &str) -> String {
     text.chars()
         .map(|character| {
@@ -76,10 +60,6 @@ fn sanitize(text: &str) -> String {
 /// The name is `SOURCE-DESTINATION.jsonl`, and both halves lose the characters
 /// that a file name must not hold. A source of IP version 6 therefore gives a
 /// name such as `2001-db8--1-example.com.jsonl`.
-#[allow(
-    dead_code,
-    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 fn derive_name(source: IpAddr, destination: &str) -> String {
     format!(
         "{}{HYPHEN}{}.{EXTENSION}",
@@ -92,10 +72,6 @@ fn derive_name(source: IpAddr, destination: &str) -> String {
 ///
 /// The file that the user named wins over the derived name. The derived name
 /// carries no directory, so it lands in the working directory.
-#[allow(
-    dead_code,
-    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 pub(crate) fn output_path(named: Option<&Path>, source: IpAddr, destination: &str) -> PathBuf {
     named.map_or_else(
         || PathBuf::from(derive_name(source, destination)),
@@ -109,20 +85,12 @@ pub(crate) fn output_path(named: Option<&Path>, source: IpAddr, destination: &st
 /// zero, because some systems refuse a connect to port zero. 33434 is the port
 /// that traceroute probes, so the number tells a reader what the socket is
 /// for.
-#[allow(
-    dead_code,
-    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 const PROBE_PORT: u16 = 33434_u16;
 
 /// The port that the operating system picks for the socket.
 ///
 /// A bind to port zero asks the operating system for a free port. The socket
 /// never listens, so the number it picks is of no interest.
-#[allow(
-    dead_code,
-    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 const ANY_PORT: u16 = 0_u16;
 
 /// The address to bind before the socket records its peer: the unspecified
@@ -130,10 +98,6 @@ const ANY_PORT: u16 = 0_u16;
 ///
 /// A socket bound to one family refuses a connect to the other one, so the bind
 /// reads the family of the target and never guesses it.
-#[allow(
-    dead_code,
-    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 fn bind_address(target: IpAddr) -> IpAddr {
     match target {
         IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -151,10 +115,6 @@ fn bind_address(target: IpAddr) -> IpAddr {
 ///
 /// Returns the reason when the socket does not open, when the operating system
 /// finds no route to the target, and when the local address does not read.
-#[allow(
-    dead_code,
-    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 fn egress_address(target: IpAddr) -> std::io::Result<IpAddr> {
     let socket = UdpSocket::bind((bind_address(target), ANY_PORT))?;
     socket.connect((target, PROBE_PORT))?;
@@ -175,10 +135,6 @@ fn egress_address(target: IpAddr) -> std::io::Result<IpAddr> {
 /// the operating system finds no route to the target, and when the local
 /// address does not read. A run that names a source raises none of these,
 /// because it opens no socket.
-#[allow(
-    dead_code,
-    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 pub(crate) fn discover(named: Option<IpAddr>, target: IpAddr) -> std::io::Result<SourceLabel> {
     match named {
         Some(addr) => Ok(SourceLabel {

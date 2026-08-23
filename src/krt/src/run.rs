@@ -28,10 +28,6 @@ use std::time::{Duration, Instant};
 const POLL: Duration = Duration::from_millis(100);
 
 /// The limits that stop a run.
-#[allow(
-    dead_code,
-    reason = "main starts the run loop when it resolves the destination, and that arrives in a later slice of issue #367"
-)]
 #[derive(Debug)]
 pub(crate) struct Limits {
     /// The number of rounds that stops the run. No number runs until the user
@@ -42,10 +38,6 @@ pub(crate) struct Limits {
 }
 
 /// What a run produced.
-#[allow(
-    dead_code,
-    reason = "main starts the run loop when it resolves the destination, and that arrives in a later slice of issue #367"
-)]
 #[derive(Debug)]
 pub(crate) struct Outcome {
     /// The number of rounds that the run recorded.
@@ -55,10 +47,6 @@ pub(crate) struct Outcome {
 }
 
 /// The fault that stopped a run.
-#[allow(
-    dead_code,
-    reason = "main starts the run loop when it resolves the destination, and that arrives in a later slice of issue #367"
-)]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RunError {
     /// A write to the recorded file failed.
@@ -96,10 +84,6 @@ pub(crate) enum RunError {
 ///
 /// Returns [`RunError::Write`] when a record does not reach the file, and
 /// [`RunError::Tracer`] when the tracer thread stops before a limit does.
-#[allow(
-    dead_code,
-    reason = "main starts the run loop when it resolves the destination, and that arrives in a later slice of issue #367"
-)]
 pub(crate) fn record<W: Write, S: Write>(
     start: &RunRecord,
     rounds: &Receiver<RoundRecord>,

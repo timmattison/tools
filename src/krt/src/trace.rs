@@ -38,10 +38,6 @@ use trippy_core::{CompletionReason, IcmpPacketType, ProbeStatus, Round};
 /// `main` writes every message as `krt: {reason}`, so the text carries no
 /// program name. The two lines under the first one carry two spaces each, and
 /// the remedy of each platform starts at the same column.
-#[allow(
-    dead_code,
-    reason = "main wires the privilege gate beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 const MISSING_PRIVILEGES: &str = "\
 this platform needs raw socket privileges to send probes.
   Linux:   sudo setcap 'cap_net_raw+p' $(which krt)
@@ -55,10 +51,6 @@ this platform needs raw socket privileges to send probes.
 /// privileges and the process does not hold them. Returns
 /// [`PrivilegeError::Discovery`] when the platform will not report what it
 /// holds.
-#[allow(
-    dead_code,
-    reason = "main wires the privilege gate beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 pub(crate) fn acquire_privilege() -> Result<record::Privilege, PrivilegeError> {
     let privilege = trippy_privilege::Privilege::acquire_privileges().map_err(|error| {
         PrivilegeError::Discovery {
@@ -77,10 +69,6 @@ pub(crate) fn acquire_privilege() -> Result<record::Privilege, PrivilegeError> {
 ///
 /// Returns [`PrivilegeError::Missing`] when the platform needs the privileges
 /// and the process holds none.
-#[allow(
-    dead_code,
-    reason = "main wires the privilege gate beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 fn choose_privilege(has: bool, needs: bool) -> Result<record::Privilege, PrivilegeError> {
     match (needs, has) {
         // macOS sends through an `IPPROTO_ICMP` socket with the `IP_HDRINCL`
@@ -94,10 +82,6 @@ fn choose_privilege(has: bool, needs: bool) -> Result<record::Privilege, Privile
 }
 
 /// Why a run does not start.
-#[allow(
-    dead_code,
-    reason = "main wires the privilege gate beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum PrivilegeError {
     /// The platform needs raw socket privileges, and the process holds none.
@@ -119,27 +103,15 @@ pub(crate) enum PrivilegeError {
 ///
 /// A fixed source port to a varying destination port is the direction of a UDP
 /// trace, and 33434 is the first port of the range that traceroute probes.
-#[allow(
-    dead_code,
-    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 const UDP_SOURCE_PORT: u16 = 33_434;
 
 /// The destination port that a TCP trace holds while the source port varies.
 ///
 /// A varying source port to a fixed destination port is the direction of a TCP
 /// trace, and 80 is the port of HTTP.
-#[allow(
-    dead_code,
-    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 const TCP_DESTINATION_PORT: u16 = 80;
 
 /// The number of the first round of a run. The schema counts from one.
-#[allow(
-    dead_code,
-    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 const FIRST_ROUND: u64 = 1;
 
 /// The configuration of one tracing run, in the words that `krt` owns.
@@ -147,10 +119,6 @@ const FIRST_ROUND: u64 = 1;
 /// No field holds a type of a trippy crate, so a caller states a whole run
 /// from outside the wall of this module.
 #[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 pub(crate) struct TraceConfig {
     /// The address to probe. `main` resolves the destination of the command
     /// line to this address.
@@ -172,10 +140,6 @@ pub(crate) struct TraceConfig {
 }
 
 /// Why the tracer of a run does not start.
-#[allow(
-    dead_code,
-    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum TraceError {
     /// The tracer refused the configuration of the run.
@@ -201,10 +165,6 @@ pub(crate) enum TraceError {
 /// # Errors
 ///
 /// Returns [`TraceError::Build`] when the tracer refuses the configuration.
-#[allow(
-    dead_code,
-    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 fn tracer_of(config: &TraceConfig) -> Result<trippy_core::Tracer, TraceError> {
     trippy_core::Builder::new(config.target)
         .min_round_duration(config.interval)
@@ -253,10 +213,6 @@ fn tracer_of(config: &TraceConfig) -> Result<trippy_core::Tracer, TraceError> {
 ///
 /// The callback of the tracer is `Fn` and not `FnMut`, so the count of the
 /// rounds lives in an atomic and not in a number of the closure.
-#[allow(
-    dead_code,
-    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 fn next_seq(counter: &AtomicU64) -> u64 {
     counter.fetch_add(1, Ordering::Relaxed) + FIRST_ROUND
 }
@@ -275,10 +231,6 @@ fn next_seq(counter: &AtomicU64) -> u64 {
 ///
 /// Returns [`TraceError::Build`] when the tracer refuses the configuration, and
 /// [`TraceError::Spawn`] when the thread does not start.
-#[allow(
-    dead_code,
-    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 pub(crate) fn spawn(config: &TraceConfig) -> Result<Receiver<RoundRecord>, TraceError> {
     let tracer = tracer_of(config)?;
     let (sender, receiver) = mpsc::channel();
@@ -393,10 +345,6 @@ fn icmp_kind(packet: IcmpPacketType) -> IcmpKind {
 /// shrinks when the target moves closer, so a TTL beyond the end of the path
 /// never counts as lost. A round that answered nothing reports zero there, and
 /// the range then closes at the highest TTL that the round truly sent.
-#[allow(
-    dead_code,
-    reason = "the tracer thread converts each round, and the tracer arrives in a later slice of issue #367"
-)]
 fn to_round_record(
     round: &Round<'_>,
     run: &RunId,
@@ -458,10 +406,6 @@ fn to_round_record(
 /// sent, that it skipped, that failed, and that still waits each record
 /// nothing. `ttl_range` states which TTLs the round probed, so a reader still
 /// parts a hop that did not answer from a TTL that the round never probed.
-#[allow(
-    dead_code,
-    reason = "the tracer thread converts each round, and the tracer arrives in a later slice of issue #367"
-)]
 fn to_hop(status: &ProbeStatus) -> Option<Hop> {
     match status {
         ProbeStatus::Complete(probe) => Some(Hop {
@@ -483,10 +427,6 @@ fn to_hop(status: &ProbeStatus) -> Option<Hop> {
 /// probes that left are the answer. This value carries the two facts that such
 /// a round reads from one of them.
 #[derive(Debug, Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "the tracer thread converts each round, and the tracer arrives in a later slice of issue #367"
-)]
 struct SentProbe {
     /// The TTL that the probe carried.
     ttl: u8,
@@ -501,10 +441,6 @@ struct SentProbe {
 /// arrived. A probe that the round never sent, that it skipped, and that
 /// failed each left nothing on the wire, so none of them widens the range of
 /// TTLs and none of them invents a hop that was lost.
-#[allow(
-    dead_code,
-    reason = "the tracer thread converts each round, and the tracer arrives in a later slice of issue #367"
-)]
 fn sent_probe(status: &ProbeStatus) -> Option<SentProbe> {
     match status {
         ProbeStatus::Awaited(probe) => Some(SentProbe {
@@ -525,10 +461,6 @@ fn sent_probe(status: &ProbeStatus) -> Option<SentProbe> {
 /// of the operating system steps when the machine corrects its time, so the
 /// two stamps of one probe can run backward, and a record holds no negative
 /// round trip time.
-#[allow(
-    dead_code,
-    reason = "the tracer thread converts each round, and the tracer arrives in a later slice of issue #367"
-)]
 fn rtt_millis(sent: SystemTime, received: SystemTime) -> f64 {
     received
         .duration_since(sent)

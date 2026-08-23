@@ -1,10 +1,12 @@
 //! `krt` (Knights of the Round Trip) records the network path to a
 //! destination, hop by hop.
 //!
-//! No tracer exists yet, so a command line that names a destination prints the
-//! configuration that it resolved. The `replay` command reads a recorded file
-//! and prints one summary line for one run of it. Later slices add the tracer
-//! and the table.
+//! A command line that names a destination prints the configuration that it
+//! resolved, opens the recorded file, starts the tracer, and appends one record
+//! for each round until a limit stops the run. It prints one status line for
+//! each round. The `replay` command reads a recorded file and prints one
+//! summary line for one run of it. A later slice replaces the status lines with
+//! the live table.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -16,16 +18,19 @@ mod source;
 mod trace;
 
 use buildinfo::version_string;
+use chrono::Utc;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use record::{Family, Recording, Run, RunId, Target};
+use record::{
+    EndReason, Family, Recording, Run, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The name that starts every message that `krt` writes to standard error.
 const PROGRAM: &str = "krt";
@@ -35,11 +40,26 @@ const EXIT_FAILURE: i32 = 1;
 
 /// The exit code of a platform that needs raw socket privileges and does not
 /// hold them.
-#[allow(
-    dead_code,
-    reason = "main wires the privilege gate beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 const EXIT_NO_PRIVILEGES: i32 = 2;
+
+/// The exit code of a run whose recorded file did not take a record.
+///
+/// The recording is the whole purpose of the tool. A run that cannot record
+/// stops, because a run that keeps a display while it silently records nothing
+/// is worse than a run that stops.
+const EXIT_WRITE_FAILED: i32 = 3;
+
+/// The exit code of a run whose tracer stopped, or never started.
+const EXIT_TRACER_FAILED: i32 = 4;
+
+/// What a trace prints before it probes, ahead of the path of its file.
+const RECORDING_TO: &str = "recording to";
+
+/// What a trace prints when it stops, ahead of the count of its rounds.
+const RECORDED: &str = "recorded";
+
+/// What the warning of an unread source address says after the reason.
+const SOURCE_FALLBACK: &str = "The run records the unspecified address of the family in its place.";
 
 /// The accepted units of a duration.
 const DURATION_UNITS: &str = "the unit must be `ms`, `s`, `m`, or `h`";
@@ -650,10 +670,6 @@ enum ResolveError {
 /// Returns [`ResolveError::Lookup`] when the resolver refuses the destination.
 /// Returns [`ResolveError::NoAddress`] when the destination names no address of
 /// the version that the run asked for.
-#[allow(
-    dead_code,
-    reason = "main resolves the destination when it starts the run loop, and that arrives in a later slice of issue #367"
-)]
 fn resolve_target(destination: &str, family: AddressFamily) -> Result<Target, ResolveError> {
     let found: Vec<SocketAddr> = (destination, RESOLVE_PORT)
         .to_socket_addrs()
@@ -677,10 +693,6 @@ fn resolve_target(destination: &str, family: AddressFamily) -> Result<Target, Re
 }
 
 /// The name of the machine that makes a run.
-#[allow(
-    dead_code,
-    reason = "main names the host of the `run` record when it starts the run loop, and that arrives in a later slice of issue #367"
-)]
 fn host_name() -> String {
     host_name_or(sysinfo::System::host_name())
 }
@@ -719,10 +731,6 @@ const TERMINATION_SIGNALS: [std::os::raw::c_int; 2] =
 ///
 /// Returns the reason when the platform refuses the registration.
 #[cfg(unix)]
-#[allow(
-    dead_code,
-    reason = "main holds the stop flag beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 fn stop_flag() -> std::io::Result<Arc<AtomicBool>> {
     let flag = Arc::new(AtomicBool::new(false));
     for signal in TERMINATION_SIGNALS {
@@ -742,19 +750,11 @@ fn stop_flag() -> std::io::Result<Arc<AtomicBool>> {
 /// Returns no reason. The result holds the shape of the unix build, so one call
 /// site serves both platforms.
 #[cfg(not(unix))]
-#[allow(
-    dead_code,
-    reason = "main holds the stop flag beside the run loop, and the run loop arrives in a later slice of issue #367"
-)]
 fn stop_flag() -> std::io::Result<Arc<AtomicBool>> {
     Ok(Arc::new(AtomicBool::new(false)))
 }
 
 /// Answers whether the user stopped the run.
-#[allow(
-    dead_code,
-    reason = "the run loop asks the question once per turn, and main starts the run loop in a later slice of issue #367"
-)]
 fn user_stopped(flag: &AtomicBool) -> bool {
     flag.load(Ordering::Relaxed)
 }
@@ -876,6 +876,182 @@ struct Replay {
     outcome: Result<String, String>,
 }
 
+/// The fault that stopped a trace, and the code that names its kind.
+struct TraceFailure {
+    /// The reason, as the user reads it.
+    reason: String,
+    /// The exit code of that kind of fault.
+    code: i32,
+}
+
+impl TraceFailure {
+    /// Builds the fault from a reason and the code of its kind.
+    fn new(reason: &dyn fmt::Display, code: i32) -> Self {
+        Self {
+            reason: reason.to_string(),
+            code,
+        }
+    }
+}
+
+/// The unspecified address of the family of an address.
+fn unspecified_of(target: IpAddr) -> IpAddr {
+    match target {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    }
+}
+
+/// The address that the probes leave from.
+///
+/// A machine that names no route to the target still records. The discovery of
+/// the source therefore stops no run: a fault leaves the unspecified address of
+/// the family of the target in the record, and one warning names the fault. A
+/// captive network and a network with no route out both still record.
+fn source_of(named: Option<IpAddr>, target: IpAddr) -> SourceLabel {
+    match source::discover(named, target) {
+        Ok(label) => label,
+        Err(error) => {
+            eprintln!("{PROGRAM}: the source address did not read: {error}. {SOURCE_FALLBACK}");
+            SourceLabel {
+                addr: unspecified_of(target),
+                kind: SourceKind::Local,
+            }
+        }
+    }
+}
+
+/// The period of one round in milliseconds, for the record that opens a run.
+///
+/// A period too large for the field takes the largest number the field holds.
+/// No command line reaches that period, because `parse_duration` stops well
+/// below it.
+fn interval_millis(interval: Duration) -> u64 {
+    u64::try_from(interval.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The moment that the time limit of a run falls due.
+///
+/// A limit too large to add to the clock leaves the run without a moment, so
+/// the run goes until the user stops it. No command line reaches that limit.
+fn deadline_of(limit: Option<Duration>) -> Option<Instant> {
+    limit.and_then(|limit| Instant::now().checked_add(limit))
+}
+
+/// Names why a run stopped, for the line that a trace prints when it stops.
+fn stop_reason(reason: EndReason) -> &'static str {
+    match reason {
+        EndReason::Quit | EndReason::Duration | EndReason::Rounds | EndReason::Error => {
+            "the run stopped"
+        }
+    }
+}
+
+/// Writes the one line that a trace prints when it stops.
+///
+/// The line holds the number of rounds that the run recorded, the file that
+/// holds them, and why the run stopped. Two spaces separate the fields, as they
+/// do on the summary line of a replay.
+fn closing_line(outcome: &run::Outcome, path: &Path) -> String {
+    let rounds = usize::try_from(outcome.rounds).unwrap_or(usize::MAX);
+    [
+        format!("{RECORDED} {}", counted(rounds, ROUND)),
+        path.display().to_string(),
+        stop_reason(outcome.reason).to_owned(),
+    ]
+    .join(SUMMARY_SEPARATOR)
+}
+
+/// Records one trace, from the destination of the command line to the record
+/// that closes the run.
+///
+/// The order of the steps is the order of their cost, and each one stops the
+/// run before the next one spends anything. The resolution comes first, because
+/// it needs no privilege and touches no file. The privilege gate comes next, so
+/// a platform that cannot probe says so before the run makes a file. The
+/// recorded file opens before the tracer starts, so no probe leaves the machine
+/// for a run that cannot record it.
+///
+/// # Errors
+///
+/// Returns the reason and the exit code of the fault that stopped the run.
+fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
+    // The parser makes the destination required outside a command, so a trace
+    // always names one.
+    let destination = config.destination.as_deref().unwrap_or_default();
+
+    let target = resolve_target(destination, config.address_family)
+        .map_err(|error| TraceFailure::new(&error, EXIT_FAILURE))?;
+    let privilege = trace::acquire_privilege()
+        .map_err(|error| TraceFailure::new(&error, EXIT_NO_PRIVILEGES))?;
+
+    let source = source_of(config.source, target.addr);
+    let path = source::output_path(config.output.as_deref(), source.addr, destination);
+    let mut writer = record::Writer::append(&path).map_err(|error| {
+        TraceFailure::new(&format!("{}: {error}", path.display()), EXIT_WRITE_FAILED)
+    })?;
+    println!("{RECORDING_TO} {}", path.display());
+
+    let run = RunId::at(Utc::now());
+    let rounds = trace::spawn(&trace::TraceConfig {
+        target: target.addr,
+        run: run.clone(),
+        interval: config.interval,
+        first_ttl: config.first_ttl,
+        max_ttl: config.max_ttl,
+        protocol: config.protocol,
+        multipath: config.multipath,
+        privilege,
+    })
+    .map_err(|error| TraceFailure::new(&error, EXIT_TRACER_FAILED))?;
+
+    let start = RunRecord {
+        run,
+        krt: version_string!().to_owned(),
+        source,
+        target,
+        config: RunConfig {
+            interval_ms: interval_millis(config.interval),
+            protocol: config.protocol,
+            first_ttl: config.first_ttl,
+            max_ttl: config.max_ttl,
+            multipath: config.multipath,
+            privilege,
+            dns: config.reverse_dns,
+        },
+        host: host_name(),
+    };
+
+    let flag = stop_flag().map_err(|error| {
+        TraceFailure::new(
+            &format!("the stop signal did not register: {error}"),
+            EXIT_FAILURE,
+        )
+    })?;
+    let limits = run::Limits {
+        rounds: config.rounds,
+        deadline: deadline_of(config.duration),
+    };
+    let mut status = std::io::stdout();
+    let outcome = run::record(
+        &start,
+        &rounds,
+        &limits,
+        &|| user_stopped(&flag),
+        &mut writer,
+        &mut status,
+    )
+    .map_err(|error| {
+        let code = match error {
+            run::RunError::Write(_) => EXIT_WRITE_FAILED,
+            run::RunError::Tracer { .. } => EXIT_TRACER_FAILED,
+        };
+        TraceFailure::new(&error, code)
+    })?;
+    println!("{}", closing_line(&outcome, &path));
+    Ok(outcome)
+}
+
 fn main() {
     // The parse handles `--version`, `-V`, and `--help` on its own. A
     // contradiction between two flags leaves the parser, so `clap` writes it to
@@ -888,8 +1064,12 @@ fn main() {
             .exit(),
     };
     let Some(path) = config.replay.as_deref() else {
-        // No tracer exists yet, so a trace prints what it resolved.
+        // The block names what the run will do, and then the run does it.
         print!("{config}");
+        if let Err(failure) = trace(&config) {
+            eprintln!("{PROGRAM}: {}", failure.reason);
+            std::process::exit(failure.code);
+        }
         return;
     };
     // The warning comes before the outcome, so a reader of standard error sees

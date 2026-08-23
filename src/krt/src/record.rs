@@ -345,10 +345,6 @@ impl TtlRange {
     /// round has already clamped that case away, so a `Result` there would
     /// carry an arm that no input reaches. A reader of a recorded file still
     /// needs the refusal, because a file states the two numbers on its own.
-    #[allow(
-        dead_code,
-        reason = "the tracer converts each round through this constructor, and the tracer arrives in a later slice of issue #367"
-    )]
     pub(crate) fn from_first(first: u8, last: u8) -> Self {
         Self {
             first,
@@ -722,20 +718,12 @@ pub(crate) enum ReadError {
 ///
 /// The sink of a run is the open file, and that is the sink a caller takes when
 /// it names none.
-#[allow(
-    dead_code,
-    reason = "the run loop records each round through this writer, and main starts the run loop in a later slice of issue #367"
-)]
 pub(crate) struct Writer<W: Write = BufWriter<File>> {
     /// The sink that takes every record. A run writes to the open file, in
     /// append mode.
     sink: W,
 }
 
-#[allow(
-    dead_code,
-    reason = "the run loop records each round through this writer, and main starts the run loop in a later slice of issue #367"
-)]
 impl Writer<BufWriter<File>> {
     /// Opens the file for appending, and makes the file when it is absent.
     ///
@@ -750,16 +738,15 @@ impl Writer<BufWriter<File>> {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the run loop records each round through this writer, and main starts the run loop in a later slice of issue #367"
-)]
 impl<W: Write> Writer<W> {
     /// Sends every record to this sink.
     ///
     /// A run writes to a file, and a file fails a write only when the disk
     /// fills or the device goes away. A test drives the writer through a sink
     /// that fails on demand, so it covers the fault that a file rarely gives.
+    ///
+    /// No run builds a writer this way, so the build of the tool holds none.
+    #[cfg(test)]
     pub(crate) fn to_sink(sink: W) -> Self {
         Self { sink }
     }
