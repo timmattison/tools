@@ -56,9 +56,11 @@ pub(crate) struct Dimensions {
 /// mode. The resolver picks which of these to trust based on the mode.
 #[derive(Clone, Copy)]
 pub(crate) struct SizeInputs {
-    /// Width queried from `terminal_size` (the ioctl), when a TTY is present.
+    /// Width queried from `termsize::stdout_size` (the ioctl), when a TTY is
+    /// present.
     pub tty_width: Option<usize>,
-    /// Height queried from `terminal_size` (the ioctl), when a TTY is present.
+    /// Height queried from `termsize::stdout_size` (the ioctl), when a TTY is
+    /// present.
     pub tty_height: Option<usize>,
     /// `COLUMNS` env var, exported by watch-like wrappers (viddy).
     pub columns_env: Option<usize>,
@@ -77,7 +79,7 @@ pub(crate) struct SizeInputs {
 ///   a wrapper, reserving rows for the wrapper's chrome. This keeps `gsw | …`
 ///   and `viddy gsw` byte-identical to before.
 /// - [`Mode::Watch`] owns the entire pane, so it takes width and height
-///   straight from `terminal_size`, ignores `COLUMNS`/`LINES`, and reserves
+///   straight from `termsize::stdout_size`, ignores `COLUMNS`/`LINES`, and reserves
 ///   **no** wrapper chrome rows. The one-cell width safety margin (DECAWM) and
 ///   the user's `width_offset` still apply.
 pub(crate) fn resolve_dimensions(mode: Mode, inputs: &SizeInputs) -> Dimensions {
@@ -97,7 +99,7 @@ pub(crate) fn resolve_dimensions(mode: Mode, inputs: &SizeInputs) -> Dimensions 
         },
         Mode::Watch => Dimensions {
             // Watch owns the whole pane: ignore COLUMNS/LINES, take the size
-            // from terminal_size, and reserve no wrapper chrome. The one-cell
+            // from termsize::stdout_size, and reserve no wrapper chrome. The one-cell
             // DECAWM safety margin and the user's width_offset still apply to
             // width, matching the one-shot path's right-edge behavior.
             width: inputs
@@ -1501,7 +1503,7 @@ fn paint_output(output: &str) -> Result<()> {
 
 /// Query the live terminal size and resolve watch-mode dimensions from it.
 fn current_dimensions(width_offset: usize) -> Dimensions {
-    let tty = terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), usize::from(h.0)));
+    let tty = termsize::stdout_size().map(|(w, h)| (usize::from(w), usize::from(h)));
     resolve_dimensions(
         Mode::Watch,
         &SizeInputs {

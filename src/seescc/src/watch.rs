@@ -380,7 +380,7 @@ pub(crate) const FALLBACK_TERMINAL_WIDTH: usize = 80;
 ///   stranding at 80 while colors pass through.
 /// - **Direct TTY, or no `COLUMNS`** (`stdout_is_tty == true`, or a plain pipe):
 ///   use the queried `tty_width`, or [`FALLBACK_TERMINAL_WIDTH`] when none was
-///   reported. A leaked `COLUMNS` is ignored on a real TTY — `terminal_size` is
+///   reported. A leaked `COLUMNS` is ignored on a real TTY — the queried width is
 ///   authoritative there. The margin still applies: rendering a row exactly
 ///   `cols` cells wide collides with DECAWM auto-wrap and right-edge chrome on
 ///   many terminals, pushing the last glyph onto the next line.
@@ -611,11 +611,11 @@ pub(crate) fn run(
 /// behind a live TTY (see [`decide_mode`]), so it always takes the direct-TTY
 /// branch — `stdout_is_tty = true` makes the leaked `COLUMNS` irrelevant and
 /// trusts the queried column count, falling back to [`FALLBACK_TERMINAL_WIDTH`]
-/// when `terminal_size` reports nothing. The one-cell DECAWM safety margin and
+/// when `termsize::stdout_columns` reports nothing. The one-cell DECAWM safety margin and
 /// the fallback both come from `effective_width`, so the watch and one-shot
 /// paths can never disagree about either.
 fn current_watch_width() -> usize {
-    let tty_width = terminal_size::terminal_size().map(|(w, _h)| usize::from(w.0));
+    let tty_width = termsize::stdout_columns().map(usize::from);
     effective_width(tty_width, None, true)
 }
 

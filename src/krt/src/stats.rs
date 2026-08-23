@@ -139,6 +139,13 @@ impl HopStats {
 
     /// The absolute difference between the last two round-trip times. A key
     /// with one sample or none holds none.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the design names the jitter among the statistics of the fold, and the table holds no `Jitter` column: the jitter reads the last two answers alone, so it moves with every round and says nothing over a folded run that the deviation does not say better. The tests of this module are its one reader"
+        )
+    )]
     pub(crate) fn jitter(&self) -> Option<f64> {
         let last = self.last?;
         let previous = self.previous?;
@@ -146,13 +153,6 @@ impl HopStats {
     }
 
     /// The last `RECENT_CAPACITY` round-trip times, oldest first.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the sparkline of one hop reads the history, and that sparkline arrives in issue #370, so the tests of this module are the one reader of it today"
-        )
-    )]
     pub(crate) fn recent(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
         self.recent.iter().copied()
     }

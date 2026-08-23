@@ -8,14 +8,17 @@ description = "Knights of the Round Trip: a Rust tool that records the network p
 buildinfo.workspace = true
 chrono.workspace = true
 clap.workspace = true
+ratatui.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 sysinfo.workspace = true
+termsize.workspace = true
 thiserror.workspace = true
 trippy-core.workspace = true
 trippy-privilege.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 mockito.workspace = true

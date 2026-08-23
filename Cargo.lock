@@ -853,6 +853,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook 0.3.18",
+ "termsize",
  "tokio",
  "tokio-stream",
  "vte",
@@ -3527,7 +3528,7 @@ dependencies = [
  "libc",
  "notify",
  "tempfile",
- "terminal_size",
+ "termsize",
  "testcolor",
  "unicode-width",
 ]
@@ -3869,8 +3870,8 @@ dependencies = [
  "image",
  "libc",
  "notify",
- "terminal_size",
  "termion",
+ "termsize",
  "unicode-width",
 ]
 
@@ -4437,14 +4438,17 @@ dependencies = [
  "chrono",
  "clap",
  "mockito",
+ "ratatui",
  "reqwest",
  "serde",
  "serde_json",
  "signal-hook 0.3.18",
  "sysinfo",
+ "termsize",
  "thiserror 2.0.20",
  "trippy-core",
  "trippy-privilege",
+ "unicode-width",
 ]
 
 [[package]]
@@ -6763,7 +6767,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "terminal_size",
+ "termsize",
  "thiserror 2.0.20",
  "toml",
  "unicode-width",
@@ -7306,8 +7310,8 @@ dependencies = [
 name = "termbar"
 version = "0.1.0"
 dependencies = [
- "crossterm",
  "indicatif",
+ "termsize",
  "thiserror 2.0.20",
  "tokio",
  "unicode-width",
@@ -7365,6 +7369,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "411c5bf740737c7918b8b1fe232dca4dc9f8e754b8ad5e20966814001ed0ac6b"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "termsize"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "terminal_size",
 ]
 
 [[package]]

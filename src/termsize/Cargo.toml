@@ -1,0 +1,13 @@
+[package]
+name = "termsize"
+version = "0.1.0"
+edition.workspace = true
+description = "The one reader of the terminal size, which takes a zero as no answer"
+license = "MIT"
+
+[dependencies]
+crossterm.workspace = true
+terminal_size.workspace = true
+
+[lints]
+workspace = true

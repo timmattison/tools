@@ -151,6 +151,7 @@ portplz-core = { path = "src/portplz-core" }
 repowalker = { path = "src/repowalker" }
 shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }
+termsize = { path = "src/termsize" }
 testcolor = { path = "src/testcolor" }
 
 [workspace.lints.rust]

@@ -15,7 +15,8 @@
 //! while it silently records nothing is worse than a run that stops.
 
 use crate::record::{EndReason, EndRecord, Record, RoundRecord, RunId, RunRecord, Writer};
-use crate::{counted, render_duration, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
+use crate::ui::render_duration;
+use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
 use chrono::Utc;
 use std::io::Write;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -139,7 +140,7 @@ pub(crate) fn record<W: Write, S: Write>(
 ///
 /// The line holds the number of the round, the number of hops that answered,
 /// whether the round reached the target, and the time that the round took. Two
-/// spaces separate the fields, as they do in the summary line of a replay.
+/// spaces separate the fields, as they do in the closing line of the run.
 ///
 /// A hop that did not answer is absent from the record, so the count is the
 /// number of hops that answered and not the length of the path.

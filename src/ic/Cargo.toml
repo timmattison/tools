@@ -17,8 +17,8 @@ icy_sixel.workspace = true
 image.workspace = true
 libc.workspace = true
 notify.workspace = true
-terminal_size.workspace = true
 termion.workspace = true
+termsize.workspace = true
 unicode-width.workspace = true
 
 [lints]

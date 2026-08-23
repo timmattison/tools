@@ -15,7 +15,6 @@ use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
-use terminal_size::{terminal_size, Height, Width};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
@@ -1553,8 +1552,8 @@ const FALLBACK_TERMINAL_COLS: u32 = 80;
 const FALLBACK_TERMINAL_ROWS: u32 = 24;
 
 fn get_terminal_size() -> Result<(u32, u32)> {
-    if let Some((Width(w), Height(h))) = terminal_size() {
-        Ok((w as u32, h as u32))
+    if let Some((cols, rows)) = termsize::stdout_size() {
+        Ok((u32::from(cols), u32::from(rows)))
     } else {
         // Fallback to common terminal size if detection fails
         Ok((FALLBACK_TERMINAL_COLS, FALLBACK_TERMINAL_ROWS))

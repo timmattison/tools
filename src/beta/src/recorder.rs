@@ -92,6 +92,42 @@ impl RecordingSession {
     }
 }
 
+/// The size that the recording carries, from the answer that the terminal gave.
+///
+/// The read of the terminal stands apart from this decision, so a test names
+/// the answer of a terminal without a terminal to name it with. [`record`]
+/// reads the terminal and hands the answer here.
+///
+/// `None` stops the recording. Two terminals answer `None`: one that the probe
+/// failed to read, and one that carries no window. A recording needs a real
+/// window either way, so one arm covers both.
+///
+/// A size of zero stops the recording as well. A recording carries the columns
+/// and the rows of the window it recorded, and every reader of the file lays
+/// that window out again: the player prints the two numbers, the web export
+/// hands them to the terminal in the page, and the video export multiplies them
+/// by the size of a character to get the size of a frame. A recording of 0x0
+/// therefore holds no cell to play back, and the file says nothing about why.
+/// An error the user reads at the start of the run beats a file that is useless
+/// at the end of it.
+///
+/// `termsize` already gives `None` for a size of zero, so no zero reaches this
+/// function through [`record`]. The rule stays here because this function is
+/// where `beta` states what it records, and the test of the rule is what keeps
+/// it true if the probe of [`record`] ever changes.
+///
+/// # Errors
+///
+/// Returns an error when the terminal reported no size.
+fn recorded_size(answer: Option<(u16, u16)>) -> Result<(u16, u16)> {
+    match answer {
+        Some((columns, rows)) if columns > 0 && rows > 0 => Ok((columns, rows)),
+        _ => anyhow::bail!(
+            "The terminal reported no size. A recording carries the number of columns and the number of rows of the window it recorded, and a terminal that carries no window gives neither number."
+        ),
+    }
+}
+
 pub async fn record(
     output: Option<PathBuf>,
     command: Option<String>,
@@ -110,7 +146,7 @@ pub async fn record(
         anyhow::bail!("Output file already exists: {}", output_path.display());
     }
 
-    let (term_width, term_height) = terminal::size().context("Failed to get terminal size")?;
+    let (term_width, term_height) = recorded_size(termsize::controlling_size())?;
 
     let shell =
         command.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string()));
@@ -284,4 +320,54 @@ pub async fn record(
     println!("Exit status: {}", exit_status);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recorded_size;
+
+    /// The size of a window that a terminal really holds.
+    const REAL: (u16, u16) = (120, 40);
+
+    #[test]
+    fn a_real_size_records_that_window() {
+        assert_eq!(
+            recorded_size(Some(REAL)).unwrap(),
+            REAL,
+            "a terminal that reports a window records the columns and the rows of it, in that order"
+        );
+    }
+
+    #[test]
+    fn a_run_that_measured_no_terminal_stops_the_recording() {
+        assert!(
+            recorded_size(None).is_err(),
+            "a run that measured no terminal holds no geometry to open a pty with"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_reports_no_size_stops_the_recording() {
+        assert!(
+            recorded_size(Some((0, 0))).is_err(),
+            "a terminal that carries no window answers the TIOCGWINSZ ioctl with zero columns and zero rows, and a 0x0 recording holds no cell to play back"
+        );
+        assert!(
+            recorded_size(Some((0, 40))).is_err(),
+            "a row of no columns holds no character"
+        );
+        assert!(
+            recorded_size(Some((120, 0))).is_err(),
+            "a window of no rows shows no line"
+        );
+    }
+
+    #[test]
+    fn the_smallest_window_is_still_a_window() {
+        assert_eq!(
+            recorded_size(Some((1, 1))).unwrap(),
+            (1, 1),
+            "one column and one row hold one character, so the rule stops at zero and no higher"
+        );
+    }
 }
