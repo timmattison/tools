@@ -366,25 +366,37 @@ fn run_push(
     let child_stdout = child.stdout.take();
     let child_stderr = child.stderr.take();
 
+    // Every line both pipes carried, in the order it was read.
+    //
+    // **Arrival order, not stream order.** Grouping the text by stream buries
+    // whatever the quieter pipe said last in the middle of the louder pipe's
+    // output, and on a failed push that is exactly git's `error: failed to
+    // push some refs` — written on stderr after a hook has filled stdout. The
+    // user's own terminal merges the two in write order, and this is the same
+    // account of the same push.
+    let collected = std::sync::Mutex::new(Vec::<String>::new());
+    let record = |line: String| {
+        // The guard is a temporary of this statement, so it is released before
+        // the callback below runs. A reader therefore holds the lock for a
+        // push onto a vector and never across the caller's work.
+        collected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(line.clone());
+        on_line(line);
+    };
+
     // One thread per pipe, and both must run at once. A pipe holds a fixed
     // number of bytes, so a reader that waits its turn lets the other pipe
     // fill, and a child blocked writing into a full pipe never exits — which
     // is the deadlock a single-threaded read of two streams always eventually
-    // finds. Scoped threads because `on_line` is borrowed, not owned: it is
+    // finds. Scoped threads because `record` is borrowed, not owned: it is
     // `Sync`, so both threads can call it, and the scope is what proves to the
-    // compiler that neither outlives the borrow.
-    let (stderr_text, stdout_text) = std::thread::scope(|scope| {
-        let errors = scope.spawn(|| drain(child_stderr, on_line));
-        let output = scope.spawn(|| drain(child_stdout, on_line));
-        // A panicking reader loses its own text and nothing else. The
-        // alternative is to carry the panic out of `run_push`, which runs on
-        // the push thread — and a push thread that dies never calls
-        // `on_finish`, so the monitor would sit in the pushing mode for the
-        // rest of the session over a callback that misbehaved.
-        (
-            errors.join().unwrap_or_default(),
-            output.join().unwrap_or_default(),
-        )
+    // compiler that neither outlives the borrow. The scope joins both readers
+    // before it returns, which is what makes the wait below safe.
+    std::thread::scope(|scope| {
+        scope.spawn(|| drain(child_stderr, &record));
+        scope.spawn(|| drain(child_stdout, &record));
     });
 
     // Waited on only after both pipes reach end of file, which they do when
@@ -400,13 +412,10 @@ fn run_push(
         }
     };
 
-    // stderr first: `git push` reports what it did — `To <remote>`, the ref
-    // updates, and every rejection — on stderr, and writes to stdout only under
-    // flags gsw does not pass. A hook writes to both, and git passes each
-    // through to its own stream rather than merging them, so the two halves are
-    // joined here in the order that puts git's own account first.
-    let mut text = stderr_text;
-    text.push_str(&stdout_text);
+    let mut text = collected
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .join("\n");
 
     let success = status.success();
     if !success && text.trim().is_empty() {
@@ -421,13 +430,20 @@ fn run_push(
     }
 }
 
-/// Read one of the child's pipes to the end, reporting each line as it lands
-/// and returning everything the pipe carried.
+/// Read one of the child's pipes to the end, reporting each line as it lands.
 ///
-/// The two jobs are one pass on purpose. The live window wants each line at the
-/// moment it arrives, and [`PushOutcome`] wants the whole text at the end. Read
-/// twice they would be two different accounts of one stream, and the pipe only
-/// gives its bytes up once anyway.
+/// Every line goes to `report` and nowhere else, so the caller's record of the
+/// stream and the window's view of it are the same sequence in the same order.
+/// A drain that also returned its own text would be a second account of one
+/// pipe, and joining two such accounts is what put git's verdict in the middle
+/// of a hook's output rather than at the end of the push.
+///
+/// `report` **must not panic.** It is called on this thread, inside a
+/// [`std::thread::scope`], and a scope whose thread panicked panics in turn
+/// when it ends — carrying the panic out of [`run_push`], off the push thread,
+/// and past the `on_finish` that tells the monitor a push is over. The one
+/// production caller sends on a channel and ignores the result, which cannot
+/// panic.
 ///
 /// `stream` is an `Option` because [`std::process::Child`]'s handles are, and a
 /// missing pipe is treated as an empty one: it cannot happen for a child
@@ -437,19 +453,13 @@ fn run_push(
 /// A read error ends the drain with what was read so far. The child is on the
 /// other end of a pipe that is about to close anyway, and the exit status —
 /// which is what decides success — is read from the child itself.
-fn drain(stream: Option<impl std::io::Read>, on_line: &(dyn Fn(String) + Sync)) -> String {
+fn drain(stream: Option<impl std::io::Read>, report: &(dyn Fn(String) + Sync)) {
     let Some(mut stream) = stream else {
-        return String::new();
+        return;
     };
 
     let mut splitter = LineSplitter::new();
-    let mut collected = String::new();
     let mut buffer = [0_u8; 8192];
-    let report = |line: String, collected: &mut String| {
-        collected.push_str(&line);
-        collected.push('\n');
-        on_line(line);
-    };
 
     loop {
         match stream.read(&mut buffer) {
@@ -457,7 +467,7 @@ fn drain(stream: Option<impl std::io::Read>, on_line: &(dyn Fn(String) + Sync)) 
             Ok(0) => break,
             Ok(read) => {
                 for line in splitter.feed(&buffer[..read]) {
-                    report(line, &mut collected);
+                    report(line);
                 }
             }
             // A signal arrived mid-read. Nothing was lost and nothing is wrong.
@@ -468,10 +478,8 @@ fn drain(stream: Option<impl std::io::Read>, on_line: &(dyn Fn(String) + Sync)) 
 
     // A hook that exits without a trailing newline still said something.
     if let Some(line) = splitter.finish() {
-        report(line, &mut collected);
+        report(line);
     }
-
-    collected
 }
 
 /// Arrange for `command`'s child to run detached from the terminal, so nothing
@@ -600,9 +608,14 @@ fn current_branch(workdir: &Path) -> Option<String> {
 
 /// How a finished `git push` came out.
 ///
-/// `output` is git's own stdout and stderr, kept whole: choosing which of it to
-/// show is [`PushUi`]'s job, and a runner that pre-digested it would decide the
-/// wording from a place with no idea how many rows are free.
+/// `output` is everything the child said on both pipes, in the order it was
+/// read, kept whole: choosing which of it to show is [`PushUi`]'s job, and a
+/// runner that pre-digested it would decide the wording from a place with no
+/// idea how many rows are free.
+///
+/// The order is load-bearing. [`failure_lines`] shows the last lines, and on a
+/// failed pre-push hook the last line is git's verdict on stderr — which comes
+/// after a hook that wrote to stdout, and only after.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PushOutcome {
     /// Whether `git push` exited zero.
