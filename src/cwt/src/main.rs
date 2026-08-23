@@ -157,10 +157,10 @@ struct Cli {
 
     /// Add shell integration to your shell config. Adds these commands:
     ///
-    ///   wt [target]  - List worktrees or change to one
-    ///   wtf          - Next worktree (forward)
-    ///   wtb          - Previous worktree (back)
-    ///   wtm          - Main worktree, or a level up when you are at its root
+    ///     wt [target]  - List worktrees or change to one
+    ///     wtf          - Next worktree (forward)
+    ///     wtb          - Previous worktree (back)
+    ///     wtm          - Main worktree, or a level up when you are at its root
     #[arg(long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "main", "target"])]
     shell_setup: bool,
 
