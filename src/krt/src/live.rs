@@ -332,7 +332,9 @@ impl<W: Write, K: Keys> Screen for Table<W, K> {
 #[cfg(test)]
 mod tests {
     use super::{classify, Command, Keys, RunFacts, Screen, Table};
+    use crate::record::{NameRecord, RunId};
     use crate::testing::{address, round};
+    use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::collections::VecDeque;
     use std::path::PathBuf;
@@ -365,11 +367,23 @@ mod tests {
     /// The address of the one router that answers the rounds below.
     const ROUTER: &str = "10.0.0.1";
 
+    /// The name that a name record gives that router.
+    const ROUTER_NAME: &str = "router.lan";
+
+    /// The host of the row of that router, while the names stand.
+    ///
+    /// The address stays beside the name, because a name is what a resolver
+    /// said and an address is what answered.
+    const NAMED_ROUTER: &str = "router.lan (10.0.0.1)";
+
     /// The round-trip time of the answer of that router, in milliseconds.
     const RTT: f64 = 0.87;
 
     /// The first TTL of every round below, which is also the last one.
     const TTL: u8 = 1;
+
+    /// The identifier of the run that every name record below belongs to.
+    const RUN: &str = "2026-08-18T12:00:00.000Z";
 
     /// The start of the header line of a table that folded one round.
     ///
@@ -497,6 +511,21 @@ mod tests {
         round(TTL, TTL, &[(TTL, ROUTER, RTT)])
     }
 
+    /// The record of one name that a lookup answered.
+    ///
+    /// The identifier of the run and the moment of the record take the values
+    /// of the moment of the test. No frame reads either of them: the map of the
+    /// names is keyed by the address, because one address answers at any number
+    /// of TTLs.
+    fn name(addr: &str, host: &str) -> NameRecord {
+        NameRecord {
+            run: RunId::from(RUN),
+            ts: Utc::now(),
+            addr: address(addr),
+            host: host.to_owned(),
+        }
+    }
+
     /// The word that a table which holds where it stands writes under its
     /// table.
     ///
@@ -558,6 +587,38 @@ mod tests {
             screen.sink.is_empty(),
             "a round of a table that holds draws nothing: {:?}",
             painted(&screen.sink)
+        );
+    }
+
+    #[test]
+    fn the_names_key_swaps_a_name_for_the_address_of_it_and_back() {
+        let mut screen = table(&[&[Command::Names], &[Command::Names]]);
+        screen.round(&one_round());
+        screen.names(&[name(ROUTER, ROUTER_NAME)]);
+        let named = painted(&screen.sink);
+        assert!(
+            named.iter().any(|line| line.contains(NAMED_ROUTER)),
+            "the name that arrived stands in the host of the row: {named:?}"
+        );
+
+        screen.sink.clear();
+        screen.poll();
+        let raw = painted(&screen.sink);
+        assert!(
+            !raw.iter().any(|line| line.contains(ROUTER_NAME)),
+            "the key takes the names off the table: {raw:?}"
+        );
+        assert!(
+            raw.iter().any(|line| line.contains(ROUTER)),
+            "the host of the row then reads as the address that answered: {raw:?}"
+        );
+
+        screen.sink.clear();
+        screen.poll();
+        let again = painted(&screen.sink);
+        assert!(
+            again.iter().any(|line| line.contains(NAMED_ROUTER)),
+            "a second press puts the names back, so the table keeps them: {again:?}"
         );
     }
 
