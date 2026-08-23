@@ -21,7 +21,7 @@ use std::net::IpAddr;
     not(test),
     expect(
         dead_code,
-        reason = "the run loop of issue #371 writes these records; the tests of this module are the one reader today"
+        reason = "the binary of this slice looks nothing up, so it builds `Nameless` alone. The resolver of the slice that follows builds `Named` and `Pending`, and the tests of this module build them today"
     )
 )]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,13 +37,6 @@ pub(crate) enum Lookup {
 }
 
 /// A reverse resolver that never blocks its caller.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the run loop of issue #371 writes these records; the tests of this module are the one reader today"
-    )
-)]
 pub(crate) trait Resolver {
     /// Asks for the name of one address, and answers with whatever the resolver
     /// holds now.
@@ -57,13 +50,6 @@ pub(crate) trait Resolver {
 ///
 /// `--no-dns` becomes this resolver, so no branch of the run loop reads the
 /// switch and no lookup leaves the machine.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the run loop of issue #371 writes these records; the tests of this module are the one reader today"
-    )
-)]
 pub(crate) struct NoLookups;
 
 impl Resolver for NoLookups {
@@ -73,13 +59,6 @@ impl Resolver for NoLookups {
 }
 
 /// Turns the addresses that a run reports into `name` records.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the run loop of issue #371 writes these records; the tests of this module are the one reader today"
-    )
-)]
 pub(crate) struct Namer {
     /// The resolver that every ask of this namer goes to.
     resolver: Box<dyn Resolver>,
@@ -95,13 +74,6 @@ pub(crate) struct Namer {
 
 impl Namer {
     /// A namer that asks this resolver and stamps every record with this run.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the run loop of issue #371 writes these records; the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn new(resolver: Box<dyn Resolver>, run: RunId) -> Self {
         Self {
             resolver,
@@ -120,13 +92,6 @@ impl Namer {
     ///
     /// One address takes one record in one run, whatever the number of TTLs it
     /// answers at and whatever the number of rounds it appears in.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the run loop of issue #371 writes these records; the tests of this module are the one reader today"
-        )
-    )]
     pub(crate) fn names(&mut self, hops: &[Hop], now: DateTime<Utc>) -> Vec<NameRecord> {
         // An address that settled needs no further ask, so no round puts it
         // back into the set of the addresses that wait. One address arrives at

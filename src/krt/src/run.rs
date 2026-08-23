@@ -124,6 +124,10 @@ pub(crate) fn record<W: Write, S: Write>(
         match rounds.recv_timeout(wait(limits.deadline)) {
             Ok(round) => {
                 let line = status_line(&round);
+                // The names of the round stand before the round, so a reader of
+                // the file holds the name of every address of a round by the
+                // time the round arrives.
+                write_names(writer, namer.names(&round.hops, Utc::now()))?;
                 writer
                     .write(&Record::Round(round))
                     .map_err(RunError::Write)?;
@@ -135,8 +139,12 @@ pub(crate) fn record<W: Write, S: Write>(
                 recorded += 1;
             }
             // No round arrived inside the wait. The loop takes another turn, so
-            // it reads the stop flag and the deadline again.
-            Err(RecvTimeoutError::Timeout) => {}
+            // it reads the stop flag and the deadline again. A lookup that
+            // finished inside the wait lands here, so a name that arrives
+            // between two rounds reaches the file at the moment it arrives.
+            Err(RecvTimeoutError::Timeout) => {
+                write_names(writer, namer.names(&[], Utc::now()))?;
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 // The tracer holds the sender for as long as it lives, so a
                 // closed channel names a tracer thread that died.
@@ -157,8 +165,11 @@ pub(crate) fn record<W: Write, S: Write>(
 /// # Errors
 ///
 /// Returns [`RunError::Write`] when a record does not reach the file.
-fn write_names<W: Write>(_writer: &mut Writer<W>, _names: Vec<NameRecord>) -> Result<(), RunError> {
-    todo!("the write of the name records arrives with the green step")
+fn write_names<W: Write>(writer: &mut Writer<W>, names: Vec<NameRecord>) -> Result<(), RunError> {
+    for name in names {
+        writer.write(&Record::Name(name)).map_err(RunError::Write)?;
+    }
+    Ok(())
 }
 
 /// Writes the one line that a run prints for one round.
@@ -1157,7 +1168,13 @@ mod tests {
             asked.set(asked_before + 1);
             asked_before >= STOP_AFTER
         };
-        let ran = ran_with("name-late", &stream, &NO_LIMIT, &stop, &mut a_namer(&resolver));
+        let ran = ran_with(
+            "name-late",
+            &stream,
+            &NO_LIMIT,
+            &stop,
+            &mut a_namer(&resolver),
+        );
         assert_eq!(
             kinds_of(&ran.recording),
             ["run", "round", "name", "end"],
