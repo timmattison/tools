@@ -921,6 +921,22 @@ fn source_of(named: Option<IpAddr>, target: IpAddr) -> SourceLabel {
     }
 }
 
+/// The label that the record carries, and the one line that standard error
+/// takes.
+fn source_from(
+    found: std::io::Result<source::Discovery>,
+    target: IpAddr,
+) -> (SourceLabel, Option<String>) {
+    let _ = found;
+    (
+        SourceLabel {
+            addr: target,
+            kind: SourceKind::Local,
+        },
+        None,
+    )
+}
+
 /// The period of one round in milliseconds, for the record that opens a run.
 ///
 /// A period too large for the field takes the largest number the field holds.
@@ -1095,10 +1111,12 @@ fn main() {
 mod tests {
     use super::{
         closing_line, host_name_or, parse_duration, pick_address, render_duration, resolve_target,
-        stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason, Family, Multipath,
-        Protocol, ResolveError, ResolvedConfig, RESOLVE_PORT, UNKNOWN,
+        source_from, stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason, Family,
+        Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, RESOLVE_PORT,
+        SOURCE_FALLBACK, UNKNOWN,
     };
     use crate::run::Outcome;
+    use crate::source::Discovery;
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -2373,5 +2391,129 @@ resolved configuration:
         assert!(!user_stopped(&flag), "a clear flag leaves the run going");
         flag.store(true, Ordering::SeqCst);
         assert!(user_stopped(&flag), "a set flag stops the run");
+    }
+
+    /// The reason of a fault that leaves a search without any address.
+    const A_SOURCE_FAULT: &str = "the network is unreachable";
+
+    /// The note of a search that fell back to the local egress address.
+    ///
+    /// `source.rs` builds this line. The text of it is of no interest here:
+    /// what matters is that the caller reads the same characters back.
+    const A_FALLBACK_NOTE: &str = "the public address service answered with text that is not an address: away. The run records the local egress address in its place.";
+
+    /// The unspecified address of ip version 4, as its text reads.
+    const UNSPECIFIED_VERSION_4: &str = "0.0.0.0";
+
+    /// The unspecified address of ip version 6, as its text reads.
+    const UNSPECIFIED_VERSION_6: &str = "::";
+
+    /// Builds the outcome of a search that read no address at all.
+    ///
+    /// The fault is a made one, so the test opens no socket and asks no
+    /// service.
+    fn source_fault() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::NetworkUnreachable, A_SOURCE_FAULT)
+    }
+
+    /// Reads what a search that read no address hands back for one target.
+    fn failed_search_of(target: &str) -> (SourceLabel, Option<String>) {
+        source_from(Err(source_fault()), address(target))
+    }
+
+    /// A search that read an address hands back that label and no warning.
+    ///
+    /// Without this a run that read its public address writes a warning line
+    /// that names no fault, and every user reads that line on every run.
+    ///
+    /// The target of this test is of the other family than the label, and the
+    /// result holds no part of it. A step that reads the target on this path
+    /// throws the address of the search away.
+    #[test]
+    fn a_search_that_needed_no_fallback_hands_back_no_warning() {
+        let label = SourceLabel {
+            addr: address(AN_IPV4_ADDRESS),
+            kind: SourceKind::Public,
+        };
+        let (source, warning) = source_from(
+            Ok(Discovery {
+                label: label.clone(),
+                note: None,
+            }),
+            address(AN_IPV6_ADDRESS),
+        );
+        assert_eq!(source, label, "the label passes through whole");
+        assert_eq!(
+            warning, None,
+            "a search that needed no fallback carries no warning"
+        );
+    }
+
+    /// A search that fell back hands its note to the caller unchanged.
+    ///
+    /// The note names why the public service gave no address, and the search
+    /// builds it. A step that rewrites the note, or that swallows it, leaves
+    /// the user of a captive network with a file of local addresses and no
+    /// word about why.
+    #[test]
+    fn a_search_that_fell_back_hands_its_note_to_the_caller_unchanged() {
+        let label = SourceLabel {
+            addr: address(AN_IPV4_ADDRESS),
+            kind: SourceKind::Local,
+        };
+        let (source, warning) = source_from(
+            Ok(Discovery {
+                label: label.clone(),
+                note: Some(A_FALLBACK_NOTE.to_owned()),
+            }),
+            address(AN_IPV4_ADDRESS),
+        );
+        assert_eq!(source, label, "the label passes through whole");
+        assert_eq!(
+            warning.as_deref(),
+            Some(A_FALLBACK_NOTE),
+            "the note reaches the caller as the search wrote it"
+        );
+    }
+
+    /// A search that read no address at all records the unspecified address of
+    /// the family of the target, and it names the fault.
+    ///
+    /// Without this the run stops, and a machine on a network with no route out
+    /// records nothing at all. The address is of the family of the target,
+    /// because a record of one family that carries a source of the other reads
+    /// as a fault of the tool.
+    #[test]
+    fn a_search_that_failed_records_the_unspecified_address_of_ip_version_4_and_says_why() {
+        let (source, warning) = failed_search_of(AN_IPV4_ADDRESS);
+        assert_eq!(source.addr, address(UNSPECIFIED_VERSION_4));
+        assert_eq!(source.kind, SourceKind::Local);
+        let warning = warning.expect("a search that read no address carries a warning");
+        assert!(
+            warning.contains(A_SOURCE_FAULT),
+            "the warning names the fault: {warning}"
+        );
+        assert!(
+            warning.contains(SOURCE_FALLBACK),
+            "the warning names what the run recorded in its place: {warning}"
+        );
+    }
+
+    /// The family of the unspecified address follows the family of the target,
+    /// and it never falls back to ip version 4.
+    #[test]
+    fn a_search_that_failed_records_the_unspecified_address_of_ip_version_6_and_says_why() {
+        let (source, warning) = failed_search_of(AN_IPV6_ADDRESS);
+        assert_eq!(source.addr, address(UNSPECIFIED_VERSION_6));
+        assert_eq!(source.kind, SourceKind::Local);
+        let warning = warning.expect("a search that read no address carries a warning");
+        assert!(
+            warning.contains(A_SOURCE_FAULT),
+            "the warning names the fault: {warning}"
+        );
+        assert!(
+            warning.contains(SOURCE_FALLBACK),
+            "the warning names what the run recorded in its place: {warning}"
+        );
     }
 }
