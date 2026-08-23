@@ -16,6 +16,8 @@ mod record;
 mod run;
 mod source;
 mod stats;
+#[cfg(test)]
+mod testing;
 mod trace;
 
 use buildinfo::version_string;
@@ -1341,11 +1343,11 @@ mod tests {
         SourceLabel, ADDRESS_INDENT, PERCENT_SIGN, RESOLVE_PORT, SHARE, SOURCE_FALLBACK,
         SUMMARY_SEPARATOR, UNKNOWN, UNTRACKED,
     };
-    use crate::record::{Hop, RoundRecord, RunId, TtlRange};
+    use crate::record::RoundRecord;
     use crate::run::Outcome;
     use crate::source::Discovery;
     use crate::stats::HopTable;
-    use chrono::{DateTime, Utc};
+    use crate::testing::{address, round};
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -2397,18 +2399,13 @@ resolved configuration:
         AddressFamily::Version6,
     ];
 
-    /// Reads a literal address that a test names.
+    /// Builds the socket address of one literal address that a test names.
     ///
     /// Every test of the resolution names a literal address. `to_socket_addrs`
     /// reads a literal address inside the machine and asks no resolver, so
     /// every such test runs offline. A host name in the place of a literal
     /// reaches a name server, and the test then answers for the network of the
     /// machine and not for this code.
-    fn address(text: &str) -> IpAddr {
-        text.parse().expect("the test address must parse")
-    }
-
-    /// Builds the socket address of one literal address that a test names.
     fn socket(text: &str) -> SocketAddr {
         SocketAddr::new(address(text), RESOLVE_PORT)
     }
@@ -2746,18 +2743,6 @@ resolved configuration:
         );
     }
 
-    /// The identifier of the run of every round of an aggregate test.
-    const AGGREGATE_RUN: &str = "2026-08-20T00:00:00.000Z";
-
-    /// The moment of every round of an aggregate test.
-    const AGGREGATE_MOMENT: &str = "2026-08-20T00:00:01.000Z";
-
-    /// The time that every round of an aggregate test took, in milliseconds.
-    const AGGREGATE_DURATION: u64 = 1000;
-
-    /// The name of the ICMP message of every hop of an aggregate test.
-    const TIME_EXCEEDED: &str = "time_exceeded";
-
     /// The address of the router that answers first at a TTL.
     const ONE_ROUTER: &str = "10.0.0.1";
 
@@ -2777,33 +2762,6 @@ resolved configuration:
     /// other way misses the whole by a tenth, and this test names no such
     /// pair.
     const PERCENT_TOLERANCE: f64 = 1e-9;
-
-    /// One round that probed the TTLs of the range, and that the named hops
-    /// answered.
-    ///
-    /// Each hop is a TTL, the address that answered at it, and the round-trip
-    /// time of that answer.
-    fn round(first: u8, last: u8, hops: &[(u8, &str, f64)]) -> RoundRecord {
-        RoundRecord {
-            run: RunId::from(AGGREGATE_RUN),
-            seq: 1,
-            ts: DateTime::parse_from_rfc3339(AGGREGATE_MOMENT)
-                .expect("the test moment must parse")
-                .with_timezone(&Utc),
-            dur_ms: AGGREGATE_DURATION,
-            ttl_range: TtlRange::new(first, last).expect("the test range must hold"),
-            reached: false,
-            hops: hops
-                .iter()
-                .map(|(ttl, addr, rtt_ms)| Hop {
-                    ttl: *ttl,
-                    addr: address(addr),
-                    rtt_ms: *rtt_ms,
-                    icmp: TIME_EXCEEDED.to_owned(),
-                })
-                .collect(),
-        }
-    }
 
     /// The lines of the aggregate of every round, in one table.
     fn lines_of(rounds: &[RoundRecord]) -> Vec<String> {

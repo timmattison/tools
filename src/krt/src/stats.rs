@@ -370,8 +370,8 @@ impl Address<'_> {
 #[cfg(test)]
 mod tests {
     use super::{Address, HopStats, HopTable, TtlRow, RECENT_CAPACITY, TRACKED_ADDRESSES};
-    use crate::record::{Hop, RoundRecord, RunId, TtlRange};
-    use chrono::{DateTime, Utc};
+    use crate::record::RoundRecord;
+    use crate::testing::{address, round};
     use std::net::IpAddr;
 
     /// The largest difference that a comparison of two round-trip times admits.
@@ -491,18 +491,6 @@ mod tests {
         assert_eq!(history, expected, "the history keeps the last samples");
     }
 
-    /// The identifier of the run that every test round belongs to.
-    const RUN: &str = "2026-08-18T12:00:00.000Z";
-
-    /// The moment of every test round.
-    const MOMENT: &str = "2026-08-18T12:00:01.000Z";
-
-    /// The time that every test round took, in milliseconds.
-    const ROUND_DURATION: u64 = 1000;
-
-    /// The name of the ICMP message of every test hop.
-    const TIME_EXCEEDED: &str = "time_exceeded";
-
     /// The address of the first router of the test path.
     const FIRST_HOP: &str = "192.168.1.1";
 
@@ -517,38 +505,6 @@ mod tests {
 
     /// The round-trip time of a hop that a test does not read.
     const ANY_RTT: f64 = 1.5;
-
-    /// Reads an address that a test names.
-    fn address(text: &str) -> IpAddr {
-        text.parse().expect("the test address must parse")
-    }
-
-    /// One round that probed the TTLs of the range, and that the named hops
-    /// answered.
-    ///
-    /// Each hop is a TTL, the address that answered at it, and the round-trip
-    /// time of that answer.
-    fn round(first: u8, last: u8, hops: &[(u8, &str, f64)]) -> RoundRecord {
-        RoundRecord {
-            run: RunId::from(RUN),
-            seq: 1,
-            ts: DateTime::parse_from_rfc3339(MOMENT)
-                .expect("the test moment must parse")
-                .with_timezone(&Utc),
-            dur_ms: ROUND_DURATION,
-            ttl_range: TtlRange::new(first, last).expect("the test range must hold"),
-            reached: false,
-            hops: hops
-                .iter()
-                .map(|(ttl, addr, rtt_ms)| Hop {
-                    ttl: *ttl,
-                    addr: address(addr),
-                    rtt_ms: *rtt_ms,
-                    icmp: TIME_EXCEEDED.to_owned(),
-                })
-                .collect(),
-        }
-    }
 
     /// Folds every round into one table.
     fn table_of(rounds: &[RoundRecord]) -> HopTable {

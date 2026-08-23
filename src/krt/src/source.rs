@@ -454,6 +454,7 @@ mod tests {
         PUBLIC_SERVICE_V4, PUBLIC_SERVICE_V6,
     };
     use crate::record::SourceKind;
+    use crate::testing::address;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -478,11 +479,6 @@ mod tests {
 
     /// The file that a test names on the command line.
     const NAMED_FILE: &str = "elsewhere/trace.jsonl";
-
-    /// Reads an address that a test names.
-    fn address(text: &str) -> IpAddr {
-        text.parse().expect("the test address must parse")
-    }
 
     /// The name that a source and a destination of a test derive.
     fn name_of(source: &str, destination: &str) -> String {

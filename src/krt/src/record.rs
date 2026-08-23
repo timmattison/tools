@@ -766,10 +766,10 @@ mod tests {
         RoundRecord, Run, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange,
         Writer,
     };
+    use crate::testing::address;
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};
     use std::fs;
-    use std::net::IpAddr;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -836,11 +836,6 @@ mod tests {
 
     /// Two bytes that no UTF-8 text holds.
     const NOT_TEXT: [u8; 2] = [0xff, 0xfe];
-
-    /// Reads an address that a test names.
-    fn address(text: &str) -> IpAddr {
-        text.parse().expect("the test address must parse")
-    }
 
     /// Reads a moment that a test names, and converts it to UTC.
     fn moment(text: &str) -> DateTime<Utc> {

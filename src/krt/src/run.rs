@@ -218,12 +218,12 @@ mod tests {
         EndReason, EndRecord, Family, Hop, Privilege, Record, Recording, RoundRecord, RunConfig,
         RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange, Writer,
     };
+    use crate::testing::address;
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};
     use std::cell::{Cell, RefCell};
     use std::fs;
     use std::io::{self, Write};
-    use std::net::IpAddr;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::mpsc::{self, Receiver};
@@ -313,11 +313,6 @@ mod tests {
 
     /// The byte that ends one record.
     const NEWLINE: u8 = b'\n';
-
-    /// Reads an address that a test names.
-    fn address(text: &str) -> IpAddr {
-        text.parse().expect("the test address must parse")
-    }
 
     /// Reads a moment that a test names, and converts it to UTC.
     fn moment(text: &str) -> DateTime<Utc> {

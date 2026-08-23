@@ -478,9 +478,9 @@ mod tests {
         PrivilegeError, TraceConfig, TraceError,
     };
     use crate::record::{Privilege, Record, RoundRecord, RunId};
+    use crate::testing::address;
     use crate::{Multipath, Protocol, PROGRAM};
     use chrono::{DateTime, Utc};
-    use std::net::IpAddr;
     use std::sync::atomic::AtomicU64;
     use std::time::{Duration, SystemTime};
     use trippy_core::{
@@ -669,11 +669,6 @@ this platform needs raw socket privileges to send probes.
     /// The same moment, as the clock of the operating system reads it.
     fn clock(text: &str) -> SystemTime {
         SystemTime::from(utc(text))
-    }
-
-    /// Reads an address that a test names.
-    fn address(text: &str) -> IpAddr {
-        text.parse().expect("the test address must parse")
     }
 
     /// A probe that the round sent and that answered.
