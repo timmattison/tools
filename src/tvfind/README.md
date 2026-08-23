@@ -28,7 +28,7 @@ tvfind [--subnet CIDR] [--vendor NAME] [--no-arp]
 
 | Flag | Meaning |
 | --- | --- |
-| `--subnet CIDR` | Subnet to scan. Defaults to the subnet of this machine's first non-loopback IPv4 interface. Blocks wider than a `/16` are refused. |
+| `--subnet CIDR` | Subnet to scan. Defaults to the first IPv4 interface of this machine that can reach a neighbour. Blocks wider than a `/16` are refused. |
 | `--vendor NAME` | Report only TVs whose manufacturer contains `NAME`, case-insensitively. Omit to list every TV found. Also narrows the powered-off report to that vendor. |
 | `--no-arp` | Skip the ARP cross-check that reports televisions which are powered off. |
 
@@ -120,6 +120,26 @@ would be missed entirely.
 Every host is reported once. macOS `arp` prints a separate line for each
 interface that reaches a neighbour, so a machine on three networks lists every
 one of them three times.
+
+### The subnet that is scanned by default
+
+Without `--subnet`, `tvfind` reads the interfaces of this machine and takes the
+first IPv4 interface that can reach a neighbour. Loopback is skipped, and so is
+any interface whose netmask holds one or two addresses. Such an interface is a
+point-to-point link and not a LAN.
+
+That second rule is what keeps a VPN out of the result. Tailscale and most
+WireGuard clients present a `utun` address with the netmask 255.255.255.255,
+which is a `/32`. A `/32` holds one address, this machine, so a scan of it
+reaches nothing. The operating system owns the order the interfaces arrive in
+and is free to list the VPN before the LAN, so the order alone cannot be
+trusted to pick the right one.
+
+The address is not examined, only the netmask. A LAN that uses public
+addressing is still a LAN, and `tvfind` scans it.
+
+When no interface qualifies, `tvfind` names the interfaces it skipped and asks
+for `--subnet`.
 
 ## Installation
 

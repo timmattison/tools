@@ -78,31 +78,77 @@ pub fn subnet_from(address: Ipv4Addr, netmask: Ipv4Addr) -> String {
     format!("{network}/{}", mask.count_ones())
 }
 
+/// Least number of host bits an interface needs before `tvfind` scans it.
+///
+/// A netmask with no host bits gives a `/32`, which holds one address: this
+/// machine. A netmask with one host bit gives a `/31`, which holds two: this
+/// machine and the far end of a point-to-point link. Neither describes a LAN,
+/// and a television sits on a LAN.
+const MIN_HOST_BITS: u32 = 2;
+
+/// Whether `netmask` leaves room for a neighbour to probe.
+fn holds_a_neighbour(netmask: Ipv4Addr) -> bool {
+    ADDRESS_BITS - u32::from(netmask).count_ones() >= MIN_HOST_BITS
+}
+
+/// Every non-loopback IPv4 interface of `interfaces`, with its netmask.
+fn ipv4_interfaces(
+    interfaces: &[get_if_addrs::Interface],
+) -> impl Iterator<Item = (&str, &get_if_addrs::Ifv4Addr)> {
+    interfaces
+        .iter()
+        .filter(|interface| !interface.is_loopback())
+        .filter_map(|interface| match interface.addr {
+            get_if_addrs::IfAddr::V4(ref v4) => Some((interface.name.as_str(), v4)),
+            get_if_addrs::IfAddr::V6(_) => None,
+        })
+}
+
 /// The CIDR to scan, chosen from the interfaces the operating system reports.
 ///
 /// `interfaces` arrives in the order the operating system gives, and that order
 /// is not a ranking. `tvfind` takes the first IPv4 interface that is not
 /// loopback and whose netmask leaves room for a neighbour. It skips an
 /// interface that holds one or two addresses, because a VPN presents such an
-/// interface and a scan of it reaches nothing.
+/// interface and a scan of it reaches nothing. Tailscale and most WireGuard
+/// clients present a `utun` address with the netmask 255.255.255.255.
+///
+/// The address itself is not examined. A LAN is free to use public addressing,
+/// and a scan of it is as valid as a scan of a private block.
 ///
 /// Returns `None` if no interface qualifies.
 #[must_use]
 pub fn subnet_of(interfaces: &[get_if_addrs::Interface]) -> Option<String> {
-    let _ = interfaces;
-    todo!("the subnet is not yet chosen by the room an interface leaves for a neighbour")
+    ipv4_interfaces(interfaces)
+        .find(|(_, v4)| holds_a_neighbour(v4.netmask))
+        .map(|(_, v4)| subnet_from(v4.ip, v4.netmask))
 }
 
 /// Why the interfaces of this machine gave no subnet to scan.
 ///
-/// The message names each interface that was skipped for a single-address
-/// netmask. That is the case a user cannot see from the outside.
+/// The message names each interface that was skipped for a netmask with no room
+/// for a neighbour. That is the case a user cannot see from the outside.
 fn no_subnet_reason(interfaces: &[get_if_addrs::Interface]) -> String {
-    let _ = interfaces;
-    todo!("the error does not yet report an interface that was skipped")
+    let skipped: Vec<&str> = ipv4_interfaces(interfaces)
+        .filter(|(_, v4)| !holds_a_neighbour(v4.netmask))
+        .map(|(name, _)| name)
+        .collect();
+
+    if skipped.is_empty() {
+        return "found no non-loopback IPv4 interface. Pass --subnet explicitly.".to_owned();
+    }
+
+    format!(
+        "found no IPv4 interface with room for a neighbour. \
+         Skipped {}, because the netmask holds too few addresses to scan. \
+         A VPN interface has such a netmask. Pass --subnet explicitly.",
+        skipped.join(", ")
+    )
 }
 
-/// The CIDR of the first non-loopback IPv4 interface on this machine.
+/// The CIDR of the first IPv4 interface of this machine that a scan can reach.
+///
+/// See [`subnet_of`] for the rule that chooses the interface.
 ///
 /// # Errors
 ///
@@ -110,14 +156,7 @@ fn no_subnet_reason(interfaces: &[get_if_addrs::Interface]) -> String {
 pub fn local_subnet() -> Result<String> {
     let interfaces = get_if_addrs::get_if_addrs().context("could not enumerate interfaces")?;
 
-    interfaces
-        .iter()
-        .filter(|interface| !interface.is_loopback())
-        .find_map(|interface| match interface.addr {
-            get_if_addrs::IfAddr::V4(ref v4) => Some(subnet_from(v4.ip, v4.netmask)),
-            get_if_addrs::IfAddr::V6(_) => None,
-        })
-        .context("no non-loopback IPv4 interface found; pass --subnet explicitly")
+    subnet_of(&interfaces).with_context(|| no_subnet_reason(&interfaces))
 }
 
 #[cfg(test)]
