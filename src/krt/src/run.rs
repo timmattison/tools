@@ -406,6 +406,12 @@ mod tests {
     /// that comes straight after the round it recorded.
     const STOP_AFTER_ONE_TURN: u64 = 1;
 
+    /// The number of turns that a run takes before its screen stops it.
+    ///
+    /// The screen answers the first turn, and the run records the round of that
+    /// turn. The second answer stops the run, so the run holds one round.
+    const SCREEN_STOPS_AFTER: usize = 1;
+
     /// The fault of a sink that takes no more records.
     const THE_SINK_IS_FULL: &str = "the sink takes no more records";
 
@@ -689,6 +695,15 @@ mod tests {
                 rounds: Vec::new(),
                 names: Vec::new(),
             }
+        }
+
+        /// A screen that asks for the stop of the run on the turn that follows
+        /// this many turns.
+        fn that_stops_after(turns: usize) -> Self {
+            let mut screen = Self::new();
+            screen.stops = vec![false; turns].into();
+            screen.stops.push_back(true);
+            screen
         }
 
         /// The number of every round that reached the screen, in the order they
@@ -1390,6 +1405,29 @@ mod tests {
             "the run showed no round: {:?}",
             ran.screen.seqs()
         );
+    }
+
+    /// The key of a live table stops the run, and the signal of a headless run
+    /// stops it the same way. The stop closure of this run asks for nothing, so
+    /// the screen is the one thing that stopped it.
+    #[test]
+    fn a_screen_that_asks_to_stop_ends_the_run_with_a_quit() {
+        let ran = ran_seeing(
+            "screen-quit",
+            &a_stream(&rounds_of(&[1, 2])),
+            &NO_LIMIT,
+            &|| false,
+            &mut a_nameless_namer(),
+            Recorder::that_stops_after(SCREEN_STOPS_AFTER),
+        );
+        assert_eq!(outcome_of(&ran).reason, EndReason::Quit);
+        assert_eq!(outcome_of(&ran).rounds, 1);
+        assert_eq!(
+            seqs_of(&ran.recording),
+            [1],
+            "the run recorded the round of the turn before the screen stopped it"
+        );
+        assert_eq!(end_of(&ran.recording).reason, EndReason::Quit);
     }
 
     #[test]
