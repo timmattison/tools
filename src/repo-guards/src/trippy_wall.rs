@@ -1,19 +1,29 @@
-//! Guard: no module of `krt` except `trace.rs` names a type from a trippy
-//! crate.
+//! Guard: no file of `krt` except `trace.rs` names a type from a trippy crate.
 //!
 //! `krt` records a network path with the `trippy-core` and `trippy-privilege`
 //! crates. The documentation of `trippy-core` says that its public API is not
 //! stable, and that it is highly likely to change. Two rules answer that risk.
 //! The manifest pins the exact version, and one module — `trace.rs` — is the
-//! only place that names a trippy type. Every other module speaks to the tracer
+//! only place that names a trippy type. Every other file speaks to the tracer
 //! through types that `krt` owns. An upgrade of the trippy crates then breaks
 //! one file, and the compiler shows the whole break in that one file.
 //!
 //! The first rule needs no guard, because a pinned version is visible in the
-//! manifest. The second rule needs one. A trippy path in the wrong module looks
+//! manifest. The second rule needs one. A trippy path in the wrong file looks
 //! like an ordinary line of code, and nothing fails when a person writes it. So
 //! it spreads: the module that needs one field of a trippy struct takes the
 //! struct, and the wall is gone before a reviewer reads the diff.
+//!
+//! # The whole package, not one directory of it
+//!
+//! `trippy-core` is an ordinary `[dependencies]` entry of `krt`, so *every*
+//! target of the package can name a trippy type: the binary, and both
+//! integration tests. A wall around `src/` alone would keep a smaller promise
+//! than the one this module makes, and would keep it silently — an integration
+//! test that took a trippy type would compile, pass, and leave the guard
+//! reporting clean. The `KRT_DIRECTORIES` table therefore names every directory
+//! of the package, in one place, and a companion test asks `cargo metadata`
+//! whether that set still covers the roots cargo builds.
 //!
 //! # Parse, never text-match
 //!
@@ -65,12 +75,48 @@ use proc_macro2::{TokenStream, TokenTree};
 use syn::visit::Visit;
 use thiserror::Error;
 
-/// The source directory of the crate that carries the wall, relative to the
-/// repository root.
-const KRT_SRC: &str = "src/krt/src";
-
-/// The one module of that crate which names a trippy type.
+/// The one module of `krt` which names a trippy type.
 const TRACE_MODULE: &str = "trace.rs";
+
+/// One directory of `krt` that the wall audits, and the module inside it that
+/// the wall lets through.
+#[derive(Debug, Clone, Copy)]
+struct AuditedDirectory {
+    /// The directory, relative to the repository root.
+    path: &'static str,
+    /// The module inside `path` that names a trippy type, or `None` when no
+    /// file in `path` is allowed to name one.
+    allowed_module: Option<&'static str>,
+}
+
+/// Every directory of `krt` the wall audits, stated once.
+///
+/// A directory that is absent from this table is a directory nobody reads, and
+/// a file nobody reads cannot be reported as naming a trippy type. So a new
+/// target of `krt` — a bench, an example, a second directory of tests — belongs
+/// here on the day it is written.
+///
+/// Nothing in this table is derived from `cargo metadata`, and that is
+/// deliberate: a guard that spawns cargo on every run is a guard that gets
+/// deleted from the test suite. The companion test
+/// `every_target_root_of_krt_is_a_file_the_guard_read` pays that cost once, and
+/// asks cargo whether this table still covers the roots it builds. A target
+/// kind nobody taught the guard about then arrives as a set difference rather
+/// than as a clean report.
+const KRT_DIRECTORIES: [AuditedDirectory; 2] = [
+    AuditedDirectory {
+        path: "src/krt/src",
+        allowed_module: Some(TRACE_MODULE),
+    },
+    // The tracer is one file, and it lives in the source directory. An
+    // integration test speaks to `krt` by running the binary, so nothing here
+    // needs a trippy type — and a test file that happened to be named
+    // `trace.rs` must not inherit the exemption by coincidence of naming.
+    AuditedDirectory {
+        path: "src/krt/tests",
+        allowed_module: None,
+    },
+];
 
 /// The first characters of the name of every trippy crate.
 const TRIPPY: &str = "trippy";
@@ -254,14 +300,43 @@ impl fmt::Display for Report {
     }
 }
 
-/// Audit the real repository: the sources of `krt`, with `trace.rs` allowed.
+/// Audit the real repository: every directory of `krt`, with `trace.rs`
+/// allowed.
+///
+/// One [`Report`] comes back for the whole package, so a caller reads one count
+/// of files examined and one list of offenders however many directories the
+/// package grows.
 ///
 /// # Errors
 ///
-/// Returns [`TrippyWallError`] — never a clean [`Report`] — when the sources
-/// cannot be read with confidence. See [`audit_sources`], which does the work.
+/// Returns [`TrippyWallError`] — never a clean [`Report`] — when any one
+/// directory cannot be read with confidence. See [`audit_sources`], which does
+/// the work for one directory.
+///
+/// A directory in the table that no longer exists, or that holds no Rust file,
+/// is a refusal rather than a smaller audit. The table is the guard's model of
+/// the package, and a model that has fallen behind the package is not a model
+/// to report a clean verdict from.
 pub fn audit(repo_root: &Path) -> Result<Report, TrippyWallError> {
-    audit_sources(&repo_root.join(KRT_SRC), TRACE_MODULE)
+    let mut files = Vec::new();
+    let mut offenders = Vec::new();
+
+    for directory in &KRT_DIRECTORIES {
+        let report = audit_directory(&repo_root.join(directory.path), directory.allowed_module)?;
+        files.extend(report.files);
+        offenders.extend(report.offenders);
+    }
+
+    files.sort();
+    offenders.sort_by(|left, right| left.path.cmp(&right.path));
+
+    Ok(Report {
+        files,
+        offenders,
+        // The remedy is the same wherever the offender sits: the tracer is the
+        // one file that names a trippy type.
+        allowed_module: TRACE_MODULE.to_owned(),
+    })
 }
 
 /// Audit the Rust sources under `src_dir`, with `allowed_module` let through.
@@ -281,6 +356,20 @@ pub fn audit(repo_root: &Path) -> Result<Report, TrippyWallError> {
 /// - the directory holds no Rust file at all
 ///   ([`NoSources`](TrippyWallError::NoSources)).
 pub fn audit_sources(src_dir: &Path, allowed_module: &str) -> Result<Report, TrippyWallError> {
+    audit_directory(src_dir, Some(allowed_module))
+}
+
+/// Audit one directory, where `allowed_module` is `None` for a directory in
+/// which no file may name a trippy type.
+///
+/// A caller that names a directory always names the module it lets through, so
+/// [`audit_sources`] takes a plain name. The absent case belongs to
+/// `KRT_DIRECTORIES`, where the directory of integration tests carries no
+/// exemption at all.
+fn audit_directory(
+    src_dir: &Path,
+    allowed_module: Option<&str>,
+) -> Result<Report, TrippyWallError> {
     let files = rust_sources(src_dir)?;
     if files.is_empty() {
         return Err(TrippyWallError::NoSources {
@@ -320,7 +409,9 @@ pub fn audit_sources(src_dir: &Path, allowed_module: &str) -> Result<Report, Tri
     Ok(Report {
         files,
         offenders,
-        allowed_module: allowed_module.to_owned(),
+        // A directory with no exemption still points a reader at the tracer,
+        // because moving the code there is still the remedy.
+        allowed_module: allowed_module.unwrap_or(TRACE_MODULE).to_owned(),
     })
 }
 
@@ -331,7 +422,14 @@ pub fn audit_sources(src_dir: &Path, allowed_module: &str) -> Result<Report, Tri
 /// The directory half is deliberate. A later split of the tracer into
 /// submodules — `trace/mod.rs` beside `trace/probe.rs` — must not open the wall
 /// without a word.
-fn is_allowed(src_dir: &Path, path: &Path, allowed_module: &str) -> bool {
+///
+/// `None` lets nothing through, which is what a directory of integration tests
+/// gets: the exemption belongs to one file in one directory, not to a file
+/// name.
+fn is_allowed(src_dir: &Path, path: &Path, allowed_module: Option<&str>) -> bool {
+    let Some(allowed_module) = allowed_module else {
+        return false;
+    };
     let Ok(relative) = path.strip_prefix(src_dir) else {
         return false;
     };
