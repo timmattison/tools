@@ -272,9 +272,17 @@ impl<W: Write, K: Keys> Table<W, K> {
         match command {
             Command::Pause => self.paused = !self.paused,
             Command::Names => self.named = !self.named,
+            Command::Reset => {
+                // A new table, because the fold keeps no way back to the empty
+                // one. The names stay: a name belongs to an address and not to
+                // a round, and a reader who emptied the table did not ask to
+                // resolve every address of the path again.
+                self.table = HopTable::new();
+                self.rounds = 0;
+            }
             // Each command below takes an arm of this table with the test of
             // that command.
-            Command::Quit | Command::Reset | Command::Help => {}
+            Command::Quit | Command::Help => {}
         }
     }
 
