@@ -327,6 +327,23 @@ const DOC_SUBDIR: &str = "doc";
 /// How much of an offending line a refusal quotes.
 const QUOTED_CHARS: usize = 400;
 
+/// What [`as_text`] asks a field to be, in the words a refusal uses.
+///
+/// Each reader states what *it* wanted, because a refusal derived from the
+/// value it got could only say what the field is. A reader needs the other
+/// half: `line_start` holding `-12` is a number, and the guard wanted an
+/// unsigned integer, so the number is not the defect the message should name.
+const WANTED_STRING: &str = "a string";
+
+/// What [`array_field`] asks a field to be.
+const WANTED_ARRAY: &str = "an array";
+
+/// What [`bool_field`] asks a field to be.
+const WANTED_BOOLEAN: &str = "a boolean";
+
+/// What [`number_field`] asks a field to be.
+const WANTED_UNSIGNED: &str = "an unsigned integer";
+
 /// Everything that can stop the scan from reaching a verdict.
 ///
 /// Every variant is a *refusal*. A guard that cannot read the whole
@@ -387,11 +404,56 @@ pub enum DocLinksError {
     },
 
     /// A cargo record lacks a field the guard reads.
+    ///
+    /// The key is absent. A key that is present but holds something the guard
+    /// cannot read is [`WrongFieldType`](DocLinksError::WrongFieldType), and a
+    /// key that holds an array with nothing in it is
+    /// [`EmptyArrayField`](DocLinksError::EmptyArrayField). Three defects, three
+    /// refusals: a reader sent after a missing key that is in fact present
+    /// spends the search on the wrong record.
     #[error("a `{command}` record has no `{field}`:\n  {record}")]
     MissingField {
         /// The cargo invocation whose record is short.
         command: &'static str,
         /// The field the guard needs.
+        field: &'static str,
+        /// The offending record.
+        record: String,
+    },
+
+    /// A cargo record carries a field the guard reads, holding a value of a
+    /// type it cannot read.
+    ///
+    /// `wanted` comes from the reader that refused, never from the value. A
+    /// `line_start` of `-12` *is* a number, so a message derived from the value
+    /// would say the field is a number and stop, leaving the reader to guess
+    /// which number the guard would have taken.
+    #[error("a `{command}` record has a `{field}` that is {found}, not {wanted}:\n  {record}")]
+    WrongFieldType {
+        /// The cargo invocation whose record cannot be read.
+        command: &'static str,
+        /// The field the guard reads.
+        field: &'static str,
+        /// What the field holds, as JSON names it.
+        found: &'static str,
+        /// What the reader needed it to be.
+        wanted: &'static str,
+        /// The offending record.
+        record: String,
+    },
+
+    /// A cargo record carries an array the guard reads an entry out of, and the
+    /// array holds nothing.
+    ///
+    /// The key is there, so this is neither an absence nor a wrong type. A
+    /// target of no kind cannot be asked for by name, and a diagnostic with no
+    /// span cannot say where the link is, so each is a refusal rather than a
+    /// value the guard invents.
+    #[error("a `{command}` record has an empty `{field}` array:\n  {record}")]
+    EmptyArrayField {
+        /// The cargo invocation whose record is empty where the guard reads.
+        command: &'static str,
+        /// The array the guard reads an entry out of.
         field: &'static str,
         /// The offending record.
         record: String,
@@ -683,8 +745,12 @@ impl fmt::Display for DocScan {
 /// ([`DocBuildFailed`](DocLinksError::DocBuildFailed)), `cargo metadata` fails
 /// ([`MetadataFailed`](DocLinksError::MetadataFailed)) or reports no members
 /// ([`NoWorkspaceMembers`](DocLinksError::NoWorkspaceMembers)), a line of cargo
-/// output is not JSON ([`Json`](DocLinksError::Json)) or lacks a field the
-/// guard reads ([`MissingField`](DocLinksError::MissingField)), the build
+/// output is not JSON ([`Json`](DocLinksError::Json)), lacks a field the guard
+/// reads ([`MissingField`](DocLinksError::MissingField)), carries one whose
+/// value is of a type the guard cannot read
+/// ([`WrongFieldType`](DocLinksError::WrongFieldType)) or carries an empty array
+/// where the guard reads an entry
+/// ([`EmptyArrayField`](DocLinksError::EmptyArrayField)), the build
 /// documents no target at all
 /// ([`NothingDocumented`](DocLinksError::NothingDocumented)), a documentable
 /// target is still unread once the targeted passes have run
@@ -1017,11 +1083,13 @@ fn first_kind<'a>(
     source: &str,
 ) -> Result<&'a str, DocLinksError> {
     let kinds = array_field(target, KIND, command, source)?;
-    let kind = kinds.first().ok_or_else(|| DocLinksError::MissingField {
-        command,
-        field: KIND,
-        record: elide(source),
-    })?;
+    let kind = kinds
+        .first()
+        .ok_or_else(|| DocLinksError::EmptyArrayField {
+            command,
+            field: KIND,
+            record: elide(source),
+        })?;
     as_text(kind, KIND, command, source)
 }
 
@@ -1060,7 +1128,7 @@ fn primary_span<'a>(message: &'a Value, line: &str) -> Result<&'a Value, DocLink
         .iter()
         .find(|span| span.get(IS_PRIMARY).and_then(Value::as_bool) == Some(true))
         .or_else(|| spans.first())
-        .ok_or_else(|| DocLinksError::MissingField {
+        .ok_or_else(|| DocLinksError::EmptyArrayField {
             command: DOC_COMMAND,
             field: SPANS,
             record: elide(line),
@@ -1098,13 +1166,10 @@ fn array_field<'a>(
     command: &'static str,
     source: &str,
 ) -> Result<&'a Vec<Value>, DocLinksError> {
-    field(record, key, command, source)?
+    let value = field(record, key, command, source)?;
+    value
         .as_array()
-        .ok_or_else(|| DocLinksError::MissingField {
-            command,
-            field: key,
-            record: elide(source),
-        })
+        .ok_or_else(|| wrong_type(value, key, WANTED_ARRAY, command, source))
 }
 
 /// One boolean field of a record.
@@ -1114,13 +1179,10 @@ fn bool_field(
     command: &'static str,
     source: &str,
 ) -> Result<bool, DocLinksError> {
-    field(record, key, command, source)?
+    let value = field(record, key, command, source)?;
+    value
         .as_bool()
-        .ok_or_else(|| DocLinksError::MissingField {
-            command,
-            field: key,
-            record: elide(source),
-        })
+        .ok_or_else(|| wrong_type(value, key, WANTED_BOOLEAN, command, source))
 }
 
 /// One unsigned-integer field of a record.
@@ -1130,13 +1192,10 @@ fn number_field(
     command: &'static str,
     source: &str,
 ) -> Result<u64, DocLinksError> {
-    field(record, key, command, source)?
+    let value = field(record, key, command, source)?;
+    value
         .as_u64()
-        .ok_or_else(|| DocLinksError::MissingField {
-            command,
-            field: key,
-            record: elide(source),
-        })
+        .ok_or_else(|| wrong_type(value, key, WANTED_UNSIGNED, command, source))
 }
 
 /// A JSON value as a string, or a refusal.
@@ -1146,11 +1205,47 @@ fn as_text<'a>(
     command: &'static str,
     source: &str,
 ) -> Result<&'a str, DocLinksError> {
-    value.as_str().ok_or_else(|| DocLinksError::MissingField {
+    value
+        .as_str()
+        .ok_or_else(|| wrong_type(value, key, WANTED_STRING, command, source))
+}
+
+/// The refusal for a field that is there and holds the wrong kind of value.
+///
+/// `wanted` is the caller's word, and only `found` is read off the value. The
+/// two halves answer different questions — what the record holds, and what the
+/// guard would have taken — and a message with one of them is a message the
+/// reader has to guess the rest of.
+fn wrong_type(
+    value: &Value,
+    key: &'static str,
+    wanted: &'static str,
+    command: &'static str,
+    source: &str,
+) -> DocLinksError {
+    DocLinksError::WrongFieldType {
         command,
         field: key,
+        found: found(value),
+        wanted,
         record: elide(source),
-    })
+    }
+}
+
+/// What a JSON value is, in the words a refusal uses.
+///
+/// Deliberately coarse. `-12` and `1.5` are both "a number" here, because the
+/// half of the message that says why the guard refused them is the `wanted`
+/// half, which the reader supplies.
+fn found(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
 }
 
 /// The first [`QUOTED_CHARS`] characters of `text`, with a marker when more
@@ -1185,9 +1280,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DOC_COMMAND, DocLinksError, FILE_NAME, KIND, LINE_START, METADATA_COMMAND, PACKAGE_ID,
-        SPANS, WORKSPACE_MEMBERS, array_field, as_text, bool_field, field, first_kind,
-        number_field, primary_span, text_field,
+        array_field, as_text, bool_field, field, first_kind, number_field, primary_span,
+        text_field, DocLinksError, DOC_COMMAND, DOC_FIELD, FILE_NAME, KIND, LINE_START,
+        METADATA_COMMAND, PACKAGE_ID, SPANS, WORKSPACE_MEMBERS,
     };
 
     /// The refusal a reader handed back, in the words a human reads.
@@ -1277,9 +1372,9 @@ mod tests {
         let source = record.to_string();
 
         assert_eq!(
-            refusal(bool_field(&record, super::DOC_FIELD, METADATA_COMMAND, &source)),
+            refusal(bool_field(&record, DOC_FIELD, METADATA_COMMAND, &source)),
             format!(
-                "a `cargo metadata` record has a `doc` that is a string, not a boolean:\n  {source}"
+                "a `cargo metadata` record has a `{DOC_FIELD}` that is a string, not a boolean:\n  {source}"
             )
         );
     }
