@@ -15,6 +15,7 @@
 mod record;
 mod run;
 mod source;
+mod stats;
 mod trace;
 
 use buildinfo::version_string;
