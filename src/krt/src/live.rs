@@ -87,6 +87,13 @@ pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
     }
 }
 
+/// The word that a table which holds where it stands writes under itself.
+///
+/// A held table looks like a table of a run that stopped, and a reader who
+/// pressed the key a minute ago does not remember which of the two stands in
+/// front of them. One word answers that.
+const PAUSED: &str = "paused";
+
 /// The end of every line that a draw writes.
 ///
 /// Raw mode returns no carriage on a bare line feed, so a frame of bare line
@@ -223,6 +230,10 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// beside the names. The frame names an address that its map holds none of
     /// by the address itself, so one empty map turns every host of the table
     /// back into the number that answered.
+    ///
+    /// The footer stands under the table, and one blank line holds it off the
+    /// last row of the path: a word directly under the numbers of a hop reads
+    /// as a part of the table.
     fn frame_lines(&self) -> Vec<String> {
         let frame = ui::Frame {
             header: ui::Header {
@@ -248,7 +259,22 @@ impl<W: Write, K: Keys> Table<W, K> {
             },
             destination: Some(self.facts.address),
         };
-        frame.lines(self.width)
+        let mut lines = frame.lines(self.width);
+        if self.paused {
+            lines.push(String::new());
+            lines.push(PAUSED.to_owned());
+        }
+        lines
+    }
+
+    /// Acts on one command.
+    fn apply(&mut self, command: Command) {
+        match command {
+            Command::Pause => self.paused = !self.paused,
+            // Each command below takes an arm of this table with the test of
+            // that command.
+            Command::Quit | Command::Names | Command::Reset | Command::Help => {}
+        }
     }
 
     /// Puts one frame on the screen, over the frame that stands there.
@@ -281,13 +307,23 @@ impl<W: Write, K: Keys> Table<W, K> {
 
 impl<W: Write, K: Keys> Screen for Table<W, K> {
     fn poll(&mut self) -> bool {
+        for command in self.keys.presses() {
+            self.apply(command);
+        }
+        // The draw stands outside the loop, and it draws while the table holds
+        // as well: a table that took the key of the pause must put the mark of
+        // that pause on the screen, and no round draws it while the table
+        // holds.
+        self.draw();
         false
     }
 
     fn round(&mut self, round: &RoundRecord) {
         self.table.observe(round);
         self.rounds += 1;
-        self.draw();
+        if !self.paused {
+            self.draw();
+        }
     }
 
     fn names(&mut self, _names: &[NameRecord]) {}
