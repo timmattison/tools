@@ -56,6 +56,26 @@
 //! over-match fails loudly, and a person corrects it in an hour. An under-match
 //! stays green for years.
 //!
+//! # The allowed module keeps what it holds
+//!
+//! The wall lets `trace.rs` name a trippy type, and that permission has one
+//! limit. `pub(crate) use trippy_core::Port as LeakedPort;` inside `trace.rs`
+//! puts that type into every other module of `krt` under a `crate::trace::`
+//! name, and every one of those modules then breaks on the upgrade that the
+//! wall promises breaks one file. The four checks above never see it, because
+//! they never run on the allowed module.
+//!
+//! So the allowed module gets a check of its own, and it is a narrow one: a
+//! `use` inside it whose tree is rooted at a trippy crate, and whose visibility
+//! reaches past the module that writes it, is an offender. Nothing else about
+//! the allowed module changes. A private `use trippy_core::{...};` is how the
+//! tracer names a trippy type at all, and it stays the normal case.
+//!
+//! The two faults carry two remedies, so [`Report`] says which one a file hit.
+//! Code outside the tracer that names a trippy type belongs in the tracer. A
+//! re-export is already in the right file, and telling its author to move it
+//! sends them nowhere.
+//!
 //! # Refuse rather than shrink
 //!
 //! Everything that stops the guard from reading a source is an error, never a
@@ -176,12 +196,53 @@ pub enum TrippyWallError {
     },
 }
 
-/// One source file that names a trippy type and is not the allowed module.
+/// The two ways one file breaks the wall.
+///
+/// The distinction exists for the remedy. Both faults put a trippy type where
+/// an upgrade can reach it, and the two answers are opposites: one file must
+/// give its code to the tracer, and the other must stop giving the tracer's
+/// names away.
+#[derive(Debug, Clone, Copy)]
+enum Offense {
+    /// The file is not the allowed module, and it names a trippy type.
+    Names,
+    /// The file is the allowed module, and a `use` inside it carries a trippy
+    /// type out to the rest of the crate.
+    ReExports,
+}
+
+impl Offense {
+    /// What the file did, as the verb of the line that reports it.
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Names => "names",
+            Self::ReExports => "re-exports",
+        }
+    }
+
+    /// What the author of the file must do, in one sentence.
+    fn remedy(self, allowed_module: &str) -> String {
+        match self {
+            Self::Names => format!(
+                "Move that code into {allowed_module}, and give the caller a type this crate owns."
+            ),
+            Self::ReExports => format!(
+                "Do not re-export a trippy type out of {allowed_module}; give the caller a type \
+                 this crate owns."
+            ),
+        }
+    }
+}
+
+/// One source file that puts a trippy type where an upgrade of the trippy
+/// crates can reach it.
 #[derive(Debug, Clone)]
 pub struct Offender {
     /// The offending file.
     path: PathBuf,
-    /// The trippy paths that file names, sorted and deduplicated.
+    /// Which of the two faults this file hit.
+    offense: Offense,
+    /// The trippy paths at stake, sorted and deduplicated.
     trippy_paths: Vec<String>,
 }
 
@@ -192,42 +253,43 @@ impl Offender {
         &self.path
     }
 
-    /// The trippy paths that file names, sorted and deduplicated.
+    /// The trippy paths at stake, sorted and deduplicated.
     ///
-    /// The failure message carries these so a reader knows what to move,
-    /// without opening the file first.
+    /// For a file outside the allowed module, these are the paths it names. For
+    /// the allowed module, these are the paths its `use` items carry out. The
+    /// failure message carries them either way, so a reader knows which names
+    /// are at stake without opening the file first.
     #[must_use]
     pub fn trippy_paths(&self) -> &[String] {
         &self.trippy_paths
     }
 }
 
-/// The verdict of one audit: which files were examined, and which of them name
-/// a trippy type outside the allowed module.
+/// The verdict of one audit: which files were examined, and which of them broke
+/// the wall.
 ///
 /// The remediation text lives here rather than at the call site, so every
-/// caller — test, CI job, or CLI — reports the same thing.
+/// caller — test, CI job, or CLI — reports the same thing. It also means one
+/// place decides which of the two remedies each offender gets.
 #[derive(Debug, Clone)]
 pub struct Report {
     /// Every file the audit read and parsed, sorted by path.
     files: Vec<PathBuf>,
-    /// The files that name a trippy type outside the allowed module, sorted by
-    /// path.
+    /// The files that broke the wall, sorted by path.
     offenders: Vec<Offender>,
     /// The module the audit let through, for the message.
     allowed_module: String,
 }
 
 impl Report {
-    /// True when no examined file except the allowed module names a trippy
-    /// type.
+    /// True when no examined file names a trippy type outside the allowed
+    /// module, and the allowed module re-exports none.
     #[must_use]
     pub fn is_compliant(&self) -> bool {
         self.offenders.is_empty()
     }
 
-    /// The files that name a trippy type outside the allowed module, sorted by
-    /// path.
+    /// The files that broke the wall, sorted by path.
     #[must_use]
     pub fn offenders(&self) -> &[Offender] {
         &self.offenders
@@ -269,7 +331,7 @@ impl fmt::Display for Report {
 
         writeln!(
             f,
-            "{} of {} source files name a trippy type outside {}.",
+            "{} of {} source files break the wall around {}.",
             self.offenders.len(),
             self.files.len(),
             self.allowed_module
@@ -281,27 +343,27 @@ impl fmt::Display for Report {
             self.allowed_module
         )?;
 
+        // The remedy sits under the offender it answers, rather than once at
+        // the end, because the two faults take opposite answers and a reader
+        // must not have to work out which one is theirs.
         for offender in &self.offenders {
             writeln!(f)?;
             writeln!(
                 f,
-                "{} names: {}",
+                "{} {}: {}",
                 offender.path.display(),
+                offender.offense.verb(),
                 offender.trippy_paths.join(", ")
             )?;
+            writeln!(f, "    {}", offender.offense.remedy(&self.allowed_module))?;
         }
 
-        writeln!(f)?;
-        write!(
-            f,
-            "Move that code into {}, and give the caller a type this crate owns.",
-            self.allowed_module
-        )
+        Ok(())
     }
 }
 
-/// Audit the real repository: every directory of `krt`, with `trace.rs`
-/// allowed.
+/// Audit the real repository: every directory of `krt`, with `trace.rs` the one
+/// module that names a trippy type and re-exports none.
 ///
 /// One [`Report`] comes back for the whole package, so a caller reads one count
 /// of files examined and one list of offenders however many directories the
@@ -333,18 +395,25 @@ pub fn audit(repo_root: &Path) -> Result<Report, TrippyWallError> {
     Ok(Report {
         files,
         offenders,
-        // The remedy is the same wherever the offender sits: the tracer is the
-        // one file that names a trippy type.
+        // Both remedies point at the same file wherever the offender sits: the
+        // tracer is the one file that names a trippy type, and the one file
+        // that must not pass one on.
         allowed_module: TRACE_MODULE.to_owned(),
     })
 }
 
-/// Audit the Rust sources under `src_dir`, with `allowed_module` let through.
+/// Audit the Rust sources under `src_dir`, with `allowed_module` the one module
+/// that names a trippy type.
 ///
-/// `allowed_module` is a file name such as `trace.rs`. It lets through both
-/// that file directly under `src_dir` and every file under a directory of the
-/// same name beside it, so a later split of the module into submodules does not
-/// open the wall without a word.
+/// `allowed_module` is a file name such as `trace.rs`. The permission covers
+/// both that file directly under `src_dir` and every file under a directory of
+/// the same name beside it, so a later split of the module into submodules does
+/// not open the wall without a word.
+///
+/// The permission is to *name* a trippy type, not to pass one on: a `use` in
+/// the allowed module that carries a trippy path out under a visibility of
+/// `pub`, `pub(crate)`, `pub(super)`, or `pub(in path)` is an offender like any
+/// other. A private `use` is not.
 ///
 /// # Errors
 ///
@@ -362,10 +431,10 @@ pub fn audit_sources(src_dir: &Path, allowed_module: &str) -> Result<Report, Tri
 /// Audit one directory, where `allowed_module` is `None` for a directory in
 /// which no file may name a trippy type.
 ///
-/// A caller that names a directory always names the module it lets through, so
-/// [`audit_sources`] takes a plain name. The absent case belongs to
-/// `KRT_DIRECTORIES`, where the directory of integration tests carries no
-/// exemption at all.
+/// A caller that names a directory always names the module that may hold a
+/// trippy type, so [`audit_sources`] takes a plain name. The absent case
+/// belongs to `KRT_DIRECTORIES`, where the directory of integration tests
+/// carries no such module at all.
 fn audit_directory(
     src_dir: &Path,
     allowed_module: Option<&str>,
@@ -391,18 +460,24 @@ fn audit_directory(
             message: error.to_string(),
         })?;
 
-        if is_allowed(src_dir, path, allowed_module) {
-            continue;
-        }
+        // Two rules, one for each side of the wall. Outside the allowed module,
+        // naming a trippy type at all is the fault. Inside it, naming one is
+        // the whole job, and handing that name to the rest of the crate is the
+        // fault.
+        let offense = if is_allowed_module(src_dir, path, allowed_module) {
+            Offense::ReExports
+        } else {
+            Offense::Names
+        };
 
-        let mut finder = Finder::default();
-        finder.visit_file(&file);
-        if finder.found.is_empty() {
+        let found = trippy_paths(&file, offense);
+        if found.is_empty() {
             continue;
         }
         offenders.push(Offender {
             path: path.clone(),
-            trippy_paths: finder.found.into_iter().collect(),
+            offense,
+            trippy_paths: found.into_iter().collect(),
         });
     }
 
@@ -415,18 +490,21 @@ fn audit_directory(
     })
 }
 
-/// True when `path` belongs to the one module the wall lets through: the file
-/// `allowed_module` directly under `src_dir`, or any file under a directory of
-/// the same name beside it.
+/// True when `path` is the one module the wall lets name a trippy type: the
+/// file `allowed_module` directly under `src_dir`, or any file under a
+/// directory of the same name beside it.
+///
+/// The answer picks which of the two rules the file is read under, rather than
+/// whether it is read at all. Every file is read.
 ///
 /// The directory half is deliberate. A later split of the tracer into
 /// submodules — `trace/mod.rs` beside `trace/probe.rs` — must not open the wall
 /// without a word.
 ///
-/// `None` lets nothing through, which is what a directory of integration tests
-/// gets: the exemption belongs to one file in one directory, not to a file
+/// `None` names no such module, which is what a directory of integration tests
+/// gets: the permission belongs to one file in one directory, not to a file
 /// name.
-fn is_allowed(src_dir: &Path, path: &Path, allowed_module: Option<&str>) -> bool {
+fn is_allowed_module(src_dir: &Path, path: &Path, allowed_module: Option<&str>) -> bool {
     let Some(allowed_module) = allowed_module else {
         return false;
     };
@@ -478,6 +556,27 @@ fn rust_sources(dir: &Path) -> Result<Vec<PathBuf>, TrippyWallError> {
     Ok(files)
 }
 
+/// The trippy paths one file puts within reach of an upgrade, under the rule
+/// that applies to that file.
+///
+/// One walk answers each rule, and this is the one door to both. A caller
+/// therefore states which side of the wall the file sits on, and never which
+/// visitor reads it.
+fn trippy_paths(file: &syn::File, offense: Offense) -> BTreeSet<String> {
+    match offense {
+        Offense::Names => {
+            let mut finder = Finder::default();
+            finder.visit_file(file);
+            finder.found
+        }
+        Offense::ReExports => {
+            let mut finder = ReExportFinder::default();
+            finder.visit_file(file);
+            finder.found
+        }
+    }
+}
+
 /// The trippy paths one file names, collected by one walk of its syntax tree.
 ///
 /// The four checks are the four shapes the same fact arrives in. See the module
@@ -524,6 +623,57 @@ impl<'ast> Visit<'ast> for Finder {
     fn visit_meta_list(&mut self, node: &'ast syn::MetaList) {
         scan_tokens(&node.tokens, &mut self.found);
         syn::visit::visit_meta_list(self, node);
+    }
+}
+
+/// The trippy paths one file carries *out* of itself, collected by one walk of
+/// its syntax tree.
+///
+/// This is the walk that reads the allowed module, and it is deliberately
+/// narrow. Everything that module names privately is its own business — that is
+/// the permission the wall grants it — so the only question left is what leaves
+/// it. A `use` is the one item that can hand a name from another crate on, so a
+/// `use` is the one item this walk reads.
+#[derive(Debug, Default)]
+struct ReExportFinder {
+    /// What the walk found, sorted and deduplicated by the set itself.
+    found: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ReExportFinder {
+    /// A `use` tree rooted at a trippy crate, under a visibility that reaches
+    /// past the module which writes it.
+    ///
+    /// [`collect_use_tree`] computes the rooted paths, so the alias in
+    /// `pub(crate) use trippy_core::Port as LeakedPort;` hides nothing: the
+    /// path recorded is the one the trippy crate owns.
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        if leaves_the_module(&node.vis) {
+            collect_use_tree(&node.tree, &mut Vec::new(), &mut self.found);
+        }
+        syn::visit::visit_item_use(self, node);
+    }
+}
+
+/// True when a visibility carries the name it marks past the module that writes
+/// it.
+///
+/// `pub(self)` is the one restriction that reaches nothing. It is the long
+/// spelling of private, and no module outside the one that writes it can name
+/// what it marks, so a `pub(self) use trippy_core::Port;` in the tracer leaks
+/// nothing and does not fire.
+///
+/// Every other restriction is read as leaving, `pub(in crate::trace)` included,
+/// although that one also reaches no further than the tracer. To tell it apart
+/// needs the path resolved against the module tree of the whole crate, and the
+/// guard holds one file at a time. The over-match is the safe direction: it
+/// fails loudly on a line somebody wrote on purpose, where an under-match
+/// reports the wall intact for years.
+fn leaves_the_module(visibility: &syn::Visibility) -> bool {
+    match visibility {
+        syn::Visibility::Inherited => false,
+        syn::Visibility::Public(_) => true,
+        syn::Visibility::Restricted(restricted) => !restricted.path.is_ident("self"),
     }
 }
 
