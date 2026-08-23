@@ -26,7 +26,8 @@ use crate::watch::{Dimensions, InputMode};
 /// A rejected push can produce a dozen lines of hints, and the frame below is
 /// what the user is actually watching. Three rows is enough for git's
 /// `To <remote>` / `! [rejected] …` / `error: failed to push …` triple, which
-/// is the part that says what went wrong.
+/// is the part that says what went wrong — and enough, when a pre-push hook
+/// failed instead, for the line that failed and git's verdict on it.
 ///
 /// A ceiling, not a promise: a pane with fewer than four rows cannot spare
 /// three and still show a frame, so [`PushUi::overlay`] clips the message
@@ -951,9 +952,15 @@ impl PushUi {
     /// ever wraps or scrolls the pane it was measured to fill, so each line is
     /// truncated to `dims.width` by display column (UTF-8 safe), and the
     /// overlay as a whole is capped at one row short of `dims.height`. The
-    /// frame therefore always keeps a row of its own, and a message too tall
-    /// for what is left loses its last lines — [`failure_lines`] puts git's
-    /// most useful output first, so the head is the part worth keeping.
+    /// frame therefore always keeps a row of its own.
+    ///
+    /// **Which rows a too-tall message loses is decided by the state, not by
+    /// that cap.** The cap drops from the end, and for both of the states that
+    /// can outgrow a pane the end is the part worth keeping: a failure's
+    /// reason is its last line (see [`failure_lines`]) and a running push's
+    /// newest output is its last row. Each arm therefore sizes itself against
+    /// [`Overlay::rows_to_spare`] before returning, and the cap below is left
+    /// as the backstop it is everywhere else.
     ///
     /// That second clamp is why this takes `&mut self`. In a pane with no row
     /// to spare it cuts a status down to nothing, which costs the user a
@@ -1032,14 +1039,23 @@ impl PushUi {
             }
             State::Status { lines, life } => {
                 let elapsed = life.elapsed(now);
+                // Which rows go when the pane cannot hold them all, decided
+                // here rather than by the clamp at the end of this function.
+                // That clamp drops from the end, and the end is where a
+                // failure's reason is — see [`failure_lines`]. The running
+                // window sizes itself first for the same reason.
+                let dropped = lines.len().saturating_sub(Overlay::rows_to_spare(dims));
                 // The age goes on the last row, which for every message that
                 // has one is the only row: a success and a refusal are one
                 // sentence each, and git's several-line error text is the one
-                // kind that never ages.
+                // kind that never ages. Numbered before the drop above, so the
+                // row that carries it is the message's last and not merely the
+                // last one that fitted.
                 let last = lines.len().saturating_sub(1);
                 lines
                     .iter()
                     .enumerate()
+                    .skip(dropped)
                     .map(|(row, line)| match elapsed {
                         // Appended *before* the truncation, so the age is part
                         // of what the pane has to fit rather than something
@@ -1252,28 +1268,42 @@ const SILENT_FAILURE: &str = "git push failed";
 
 /// Pick the lines of a failed push's output worth the rows they cost.
 ///
-/// git leads with the useful part — `To <remote>`, `! [rejected] …`,
-/// `error: failed to push …` — and follows with `hint:` advice that repeats in
-/// every rejection. So the hints are dropped first, and only if that leaves
-/// nothing are they let back in: a message the user cannot read beats a blank
-/// row that reads as success.
+/// **The last of them, not the first.** A push git refuses on its own writes
+/// exactly three non-hint lines — `To <remote>`, `! [rejected] …`,
+/// `error: failed to push …` — so for that failure the head and the tail are
+/// the same three and the choice does not arise. It arises the moment a
+/// repository has a pre-push hook: the hook prints its whole run, fails, and
+/// git adds its verdict after, so the reason sits at the end behind a banner
+/// that would otherwise take every row.
+///
+/// Hints are dropped first either way. They follow the real error, so under a
+/// tail rule they are the lines that would crowd it out. Only if dropping them
+/// leaves nothing are they let back in: a message the user cannot act on beats
+/// a blank row that reads as success.
 fn failure_lines(output: &str) -> Vec<String> {
     let meaningful = |line: &&str| !line.trim().is_empty();
-    let mut lines: Vec<String> = output
-        .lines()
-        .filter(meaningful)
-        .filter(|line| !line.trim_start().starts_with(HINT_PREFIX))
-        .take(MAX_STATUS_ROWS)
-        .map(|line| line.trim_end().to_string())
-        .collect();
+    let last = |lines: Vec<String>| -> Vec<String> {
+        let dropped = lines.len().saturating_sub(MAX_STATUS_ROWS);
+        lines.into_iter().skip(dropped).collect()
+    };
 
-    if lines.is_empty() {
-        lines = output
+    let mut lines = last(
+        output
             .lines()
             .filter(meaningful)
-            .take(MAX_STATUS_ROWS)
+            .filter(|line| !line.trim_start().starts_with(HINT_PREFIX))
             .map(|line| line.trim_end().to_string())
-            .collect();
+            .collect(),
+    );
+
+    if lines.is_empty() {
+        lines = last(
+            output
+                .lines()
+                .filter(meaningful)
+                .map(|line| line.trim_end().to_string())
+                .collect(),
+        );
     }
     if lines.is_empty() {
         lines.push(SILENT_FAILURE.to_string());

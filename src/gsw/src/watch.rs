@@ -4549,17 +4549,26 @@ mod push_loop_tests {
     }
 
     #[test]
-    fn an_overlay_that_does_not_fit_drops_its_last_lines() {
-        // git leads with the part worth reading — `To <remote>`, then the
-        // rejection — so a message that has to lose rows loses them off the
-        // bottom.
+    fn an_overlay_that_does_not_fit_drops_its_first_lines() {
+        // A failure's reason is the last thing said about it, so a message
+        // that has to lose rows loses them off the top. `To <remote>` names a
+        // remote the frame above already shows, which makes it the row the
+        // clip can most afford.
+        //
+        // The same rule is stated against `PushUi` directly in
+        // `a_message_taller_than_the_pane_keeps_the_rows_the_frame_can_spare`.
+        // This one is here because the loop divides the pane, and a division
+        // that disagreed with the overlay would scroll the screen.
         let (displayed, _) = run_loop_in_pane(a_three_row_failure(), SHORT_PANE);
         let painted = strip_ansi(&displayed);
-        assert!(painted.contains("To /tmp/origin"), "got {painted:?}");
+        assert!(
+            painted.contains("error: failed to push some refs"),
+            "the verdict must survive the clip, got {painted:?}",
+        );
         assert!(painted.contains("! [rejected]"), "got {painted:?}");
         assert!(
-            !painted.contains("error: failed to push some refs"),
-            "the tail must be the part that is dropped, got {painted:?}",
+            !painted.contains("To /tmp/origin"),
+            "the head must be the part that is dropped, got {painted:?}",
         );
     }
 
