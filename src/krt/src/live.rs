@@ -7,7 +7,14 @@
 //! reason this module classifies the keys itself: it is the one part of the
 //! live run that can stop a run that the user asked to stop.
 
+use crate::record::{NameRecord, RoundRecord};
+use crate::stats::HopTable;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::net::IpAddr;
+use std::path::PathBuf;
+use std::time::Duration;
 
 /// What one key press asks for.
 #[cfg_attr(
@@ -76,14 +83,326 @@ pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
     }
 }
 
+/// The end of every line that a draw writes.
+///
+/// Raw mode returns no carriage on a bare line feed, so a frame of bare line
+/// feeds walks down the screen one column further to the right for each line
+/// of it.
+const LINE_END: &str = "\r\n";
+
+/// A source of key presses.
+pub(crate) trait Keys {
+    /// The commands of the keys that arrived since the last ask.
+    ///
+    /// The ask never waits. A run that waited for a key would take no round
+    /// while it waited, and the table would then stand still while the path
+    /// moved.
+    fn presses(&mut self) -> Vec<Command>;
+}
+
+/// The key source of a run that reads no key.
+pub(crate) struct NoKeys;
+
+impl Keys for NoKeys {
+    fn presses(&mut self) -> Vec<Command> {
+        Vec::new()
+    }
+}
+
+/// What a live run shows.
+pub(crate) trait Screen {
+    /// Takes the key presses that arrived. Answers whether the user asked the
+    /// run to stop.
+    fn poll(&mut self) -> bool;
+    /// One round arrived.
+    fn round(&mut self, round: &RoundRecord);
+    /// The names that arrived.
+    fn names(&mut self, names: &[NameRecord]);
+}
+
+/// The facts of a run that every frame of that run repeats.
+///
+/// The header line names them, and no round changes any of them, so the table
+/// takes them one time at the start of the run. They travel as one value
+/// because a constructor of eight parameters says nothing about which
+/// parameter is which.
+pub(crate) struct RunFacts {
+    /// The destination as the command line named it.
+    pub(crate) destination: String,
+    /// The address that the destination resolved to.
+    pub(crate) address: IpAddr,
+    /// The source address of the run.
+    pub(crate) source: IpAddr,
+    /// The period of one round.
+    pub(crate) interval: Duration,
+    /// The path of the recorded file.
+    ///
+    /// The header line names the size of that file, and the file grows with
+    /// every round, so each draw reads the size again.
+    pub(crate) path: PathBuf,
+}
+
+/// The live table of a run.
+///
+/// The table folds every round that arrives, and it draws the frame of that
+/// fold. It holds the terminal in raw mode on the alternate screen, so each
+/// draw clears the screen and moves the cursor to the origin first, and every
+/// line ends with a carriage return and a line feed. Raw mode returns no
+/// carriage on a bare line feed, and a frame of bare line feeds walks down the
+/// screen one column further to the right for each line of it.
+pub(crate) struct Table<W: Write, K: Keys> {
+    /// The facts of the run that the header line names.
+    facts: RunFacts,
+    /// The name of the recorded file, without its directory.
+    file: String,
+    /// The fold of every round that arrived.
+    table: HopTable,
+    /// The host name of each address that a name record named.
+    names: BTreeMap<IpAddr, String>,
+    /// The map that a table of the raw addresses hands the frame.
+    ///
+    /// One empty map that stands beside the names, and not a map that a draw
+    /// builds: a run draws one frame for each round, and each of those draws
+    /// would build the same empty map and drop it again.
+    nameless: BTreeMap<IpAddr, String>,
+    /// The number of rounds that the table folded.
+    ///
+    /// This is the counter of the display, and not the counter of the run. The
+    /// `end` record counts what the file holds, and a reader of the table asks
+    /// how many rounds the picture in front of them stands on. The reset
+    /// command therefore zeroes this counter and touches no file.
+    rounds: usize,
+    /// Whether the table holds where it stands.
+    paused: bool,
+    /// Whether the hosts read as names.
+    named: bool,
+    /// Whether the list of the keys stands under the table.
+    help: bool,
+    /// Where the frames go.
+    sink: W,
+    /// Where the commands come from.
+    keys: K,
+    /// The number of terminal columns that a frame draws in.
+    width: u16,
+}
+
+impl<W: Write, K: Keys> Table<W, K> {
+    /// A table of one run, which draws into `sink` and reads `keys`.
+    ///
+    /// The names start on. A reader who wants the raw addresses asks for them
+    /// with a key, and a run that resolves no name shows the addresses anyway,
+    /// because the map of the names then stays empty.
+    pub(crate) fn new(facts: RunFacts, sink: W, keys: K, width: u16) -> Self {
+        Self {
+            file: crate::file_name(&facts.path),
+            facts,
+            table: HopTable::new(),
+            names: BTreeMap::new(),
+            nameless: BTreeMap::new(),
+            rounds: 0,
+            paused: false,
+            named: true,
+            help: false,
+            sink,
+            keys,
+            width,
+        }
+    }
+}
+
+impl<W: Write, K: Keys> Screen for Table<W, K> {
+    fn poll(&mut self) -> bool {
+        false
+    }
+
+    fn round(&mut self, _round: &RoundRecord) {}
+
+    fn names(&mut self, _names: &[NameRecord]) {}
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{classify, Command};
+    use super::{classify, Command, Keys, RunFacts, Screen, Table};
+    use crate::testing::{address, round};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use std::collections::VecDeque;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     /// Builds the press of a key that no modifier holds.
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// The number of terminal columns that every table below draws in.
+    ///
+    /// The nominal frame is 97 columns wide: every column of the table, with a
+    /// Host column of 30. The rows of `tests/replay.rs` stand at that same
+    /// width, so a row of this file reads as a row of that one.
+    const WIDTH: u16 = 97;
+
+    /// The destination of every table below.
+    const DESTINATION: &str = "example.com";
+
+    /// The address that the destination resolved to.
+    const DESTINATION_ADDRESS: &str = "93.184.216.34";
+
+    /// The source address of every run below.
+    const SOURCE: &str = "1.2.3.4";
+
+    /// The period of one round of every run below.
+    const INTERVAL: Duration = Duration::from_secs(1);
+
+    /// The address of the one router that answers the rounds below.
+    const ROUTER: &str = "10.0.0.1";
+
+    /// The round-trip time of the answer of that router, in milliseconds.
+    const RTT: f64 = 0.87;
+
+    /// The first TTL of every round below, which is also the last one.
+    const TTL: u8 = 1;
+
+    /// The start of the header line of a table that folded one round.
+    ///
+    /// The name of the recorded file ends that line, and each test builds a
+    /// path of its own, so the assertion reads the start of the line and not
+    /// the whole of it.
+    const ONE_ROUND_HEADER: &str = " krt  example.com → 93.184.216.34   src 1.2.3.4   round 1   1s   ";
+
+    /// The row of a table that folded one round of one TTL.
+    ///
+    /// The round answers at TTL 1 from 10.0.0.1 at 0.87, which one decimal
+    /// place writes as 0.9. One answer is its own last, smallest, mean, and
+    /// largest time, and the population standard deviation of one sample is
+    /// 0.0. The TTL answered the one probe it took, so it loses nothing. One
+    /// sample draws one bar, and a window of one sample varies by nothing, so
+    /// that bar is the lowest one.
+    const ONE_ROUND_ROW: &str =
+        "   1  10.0.0.1                          0.0%      1    0.9    0.9    0.9    0.9    0.0  ▁";
+
+    /// The escape character that starts every control sequence of a draw.
+    const ESCAPE: char = '\u{1b}';
+
+    /// A key source that hands back one list of commands for each turn.
+    ///
+    /// A turn past the end of the script took no key.
+    struct FakeKeys {
+        /// The commands of each turn, the next turn first.
+        turns: VecDeque<Vec<Command>>,
+    }
+
+    impl FakeKeys {
+        /// A key source of one script.
+        fn of(script: &[&[Command]]) -> Self {
+            Self {
+                turns: script.iter().map(|turn| turn.to_vec()).collect(),
+            }
+        }
+    }
+
+    impl Keys for FakeKeys {
+        fn presses(&mut self) -> Vec<Command> {
+            self.turns.pop_front().unwrap_or_default()
+        }
+    }
+
+    /// Builds a path under the temporary directory that no other run reaches.
+    ///
+    /// Two runs of one test can overlap, because `cargo test` runs on many
+    /// threads and more than one `cargo test` can run at once. The process
+    /// identifier and the nanosecond keep the two runs apart.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a clock that stands before the epoch. Such a clock is a fault
+    /// of the machine, not an answer of the code under test.
+    fn temp_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock must stand after the epoch")
+            .as_nanos();
+        let process = std::process::id();
+        std::env::temp_dir().join(format!("krt-live-{label}-{process}-{nanos}.jsonl"))
+    }
+
+    /// A table that draws into bytes, reads `keys`, and heads its frames with
+    /// the recorded file at `path`.
+    fn table_at<K: Keys>(path: PathBuf, keys: K) -> Table<Vec<u8>, K> {
+        Table::new(
+            RunFacts {
+                destination: DESTINATION.to_owned(),
+                address: address(DESTINATION_ADDRESS),
+                source: address(SOURCE),
+                interval: INTERVAL,
+                path,
+            },
+            Vec::new(),
+            keys,
+            WIDTH,
+        )
+    }
+
+    /// A table that draws into bytes and takes the keys of a script.
+    ///
+    /// The path of its recorded file names no file, so the header line of it
+    /// names no size. The one test that reads a size writes a file of its own.
+    fn table(script: &[&[Command]]) -> Table<Vec<u8>, FakeKeys> {
+        table_at(temp_path("frame"), FakeKeys::of(script))
+    }
+
+    /// The text that a terminal prints for what the draws wrote, with the
+    /// control sequences taken out.
+    ///
+    /// Every sequence of a draw starts with the escape character and ends with
+    /// a letter: the clear of the screen ends `J`, and the move of the cursor
+    /// ends `H`. The reader therefore drops from one escape to the letter that
+    /// closes it, and what stays is what a reader of the terminal sees.
+    fn glyphs(painted: &[u8]) -> String {
+        let text = String::from_utf8_lossy(painted);
+        let mut kept = String::new();
+        let mut characters = text.chars();
+        while let Some(character) = characters.next() {
+            if character != ESCAPE {
+                kept.push(character);
+                continue;
+            }
+            for inside in characters.by_ref() {
+                if inside.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        kept
+    }
+
+    /// The lines that the draws wrote into a sink, in the order they arrived.
+    fn painted(sink: &[u8]) -> Vec<String> {
+        glyphs(sink)
+            .split_terminator(super::LINE_END)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// One round of one TTL, which the router answered.
+    fn one_round() -> crate::record::RoundRecord {
+        round(TTL, TTL, &[(TTL, ROUTER, RTT)])
+    }
+
+    #[test]
+    fn one_round_reaches_the_sink_as_a_row_of_the_table() {
+        let mut screen = table(&[]);
+        screen.round(&one_round());
+        let lines = painted(&screen.sink);
+        assert!(
+            lines
+                .first()
+                .is_some_and(|line| line.starts_with(ONE_ROUND_HEADER)),
+            "the header line names the target, the source, the one round, and the interval: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == ONE_ROUND_ROW),
+            "the row of the TTL stands under that header: {lines:?}"
+        );
     }
 
     #[test]
