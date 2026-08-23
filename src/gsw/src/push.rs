@@ -3417,6 +3417,22 @@ mod run_tests {
         /// the runner reported the first line while the child was still alive.
         const SECOND_LINE: &str = "hook-said-this-second";
 
+        /// Install `body` as the repository's pre-push hook.
+        ///
+        /// `core.hooksPath` is stated rather than inherited: a developer with
+        /// one set globally would otherwise run their own hooks here, and the
+        /// test would pass or fail on a machine's configuration.
+        fn write_hook(workdir: &Path, body: &str) {
+            git(workdir, &["config", "core.hooksPath", ".git/hooks"]);
+            let hook = workdir.join(".git").join("hooks").join("pre-push");
+            std::fs::create_dir_all(hook.parent().expect("the hook has a parent"))
+                .expect("create the hooks directory");
+            std::fs::write(&hook, format!("#!/bin/sh\n{body}\n"))
+                .expect("write the pre-push hook");
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+                .expect("make the hook executable");
+        }
+
         /// Longest the hook waits to be told, in units of its own poll.
         /// Bounded so a runner that reports nothing until the child exits
         /// fails this test in a few seconds instead of deadlocking it: the
@@ -3430,22 +3446,14 @@ mod run_tests {
             // child exits is output that arrives when nobody needs it any more.
             let (_origin, clone) = clone_with_feature_branch();
             let p = clone.path();
-            // Stated rather than inherited: a developer with `core.hooksPath`
-            // set globally would otherwise run their own hooks here, and the
-            // test would pass or fail on a machine's configuration.
-            git(p, &["config", "core.hooksPath", ".git/hooks"]);
 
             // Inside the git dir rather than the worktree, so the gate cannot
             // appear as an untracked file in the repository under test.
             let gate = p.join(".git").join("gate");
-            let hook = p.join(".git").join("hooks").join("pre-push");
-            std::fs::create_dir_all(hook.parent().expect("the hook has a parent"))
-                .expect("create the hooks directory");
-            std::fs::write(
-                &hook,
-                format!(
-                    r#"#!/bin/sh
-echo "{FIRST_LINE}"
+            write_hook(
+                p,
+                &format!(
+                    r#"echo "{FIRST_LINE}"
 i=0
 while [ $i -lt {GATE_POLLS} ]; do
     [ -f "{gate}" ] && break
@@ -3460,10 +3468,7 @@ echo "{SECOND_LINE}"
 "#,
                     gate = gate.display(),
                 ),
-            )
-            .expect("write the pre-push hook");
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-                .expect("make the hook executable");
+            );
 
             let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
             let recorded = Arc::clone(&seen);
@@ -3493,6 +3498,63 @@ echo "{SECOND_LINE}"
                 seen.iter().any(|line| line == SECOND_LINE),
                 "the line written after the gate opened must reach it too, got {seen:?}",
             );
+        }
+
+        /// What [`spawn`] delivered, in the order the channel carried it.
+        enum Report {
+            Line(String),
+            Done(PushOutcome),
+        }
+
+        #[test]
+        fn spawn_reports_every_line_before_the_outcome() {
+            // The watch loop applies events in the order they arrive, and the
+            // outcome closes the window. A line that landed after it would
+            // reopen the window over the message the user is meant to read.
+            //
+            // This passes as written, because `run_push` joins both reader
+            // threads before it returns and `spawn` reports the outcome after
+            // that. The test is here to keep it true: the two are separated by
+            // a thread boundary, and nothing else states the order.
+            let (_origin, clone) = clone_with_feature_branch();
+            let p = clone.path();
+            write_hook(p, "for i in 1 2 3; do echo \"line-$i\"; done");
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let line_tx = tx.clone();
+            spawn(
+                confirmed(&["push", "-u", "origin", "feature"]),
+                p.to_path_buf(),
+                move |line| {
+                    let _ = line_tx.send(Report::Line(line));
+                },
+                move |outcome| {
+                    let _ = tx.send(Report::Done(outcome));
+                },
+            );
+
+            // Stops at the outcome, so a line that arrived after it is a line
+            // this never records — which is what the assertions below catch.
+            let mut lines = Vec::new();
+            loop {
+                match rx
+                    .recv_timeout(Duration::from_secs(60))
+                    .expect("the callbacks must fire")
+                {
+                    Report::Line(line) => lines.push(line),
+                    Report::Done(outcome) => {
+                        assert!(outcome.success, "push failed: {}", outcome.output);
+                        break;
+                    }
+                }
+            }
+
+            for expected in ["line-1", "line-2", "line-3"] {
+                assert!(
+                    lines.iter().any(|line| line == expected),
+                    "{expected} must arrive before the outcome, got {lines:?}",
+                );
+            }
         }
     }
 

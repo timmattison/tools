@@ -608,7 +608,17 @@ enum Event {
     PushConfirmed,
     /// The user declined the push at the prompt (`n`, Esc, or `q`).
     PushCancelled,
+    /// A running push wrote a line. Carried one line at a time rather than as
+    /// a batch at the end, because the point of it is to arrive early: a
+    /// pre-push hook can hold the push for minutes, and a batch would land
+    /// when the wait it explains is already over.
+    PushOutput(String),
     /// A push that was running has finished, either way.
+    ///
+    /// Always arrives after the last [`Event::PushOutput`] of the same push.
+    /// The runner joins its reader threads before it reports, so every line is
+    /// already on this channel by the time the outcome is sent — which is what
+    /// keeps a late line from reopening a window the outcome just closed.
     PushFinished(crate::push::PushOutcome),
     /// A key press with no other meaning. Clears a status message if one is on
     /// screen and does nothing otherwise, which is what keeps a push error up
@@ -1070,6 +1080,7 @@ where
                 start_push(command);
             }
         }
+        Event::PushOutput(_line) => {}
         Event::PushCancelled => ui.cancel(),
         Event::Dismiss => ui.dismiss(),
         Event::PushFinished(outcome) => {
@@ -4546,6 +4557,25 @@ mod push_loop_tests {
                 seen.pushes,
             );
         }
+    }
+
+    #[test]
+    fn a_line_from_a_running_push_reaches_the_screen() {
+        // The runner reports on its own reader threads, and this is the hop
+        // that turns a reported line into a painted row. Without it the window
+        // is a state nothing ever fills.
+        let (displayed, _) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushOutput("Compiling gsw v0.1.0".to_string()),
+            Event::Quit,
+        ]);
+
+        let painted = strip_ansi(&displayed);
+        assert!(
+            painted.contains("Compiling gsw v0.1.0"),
+            "the reported line must reach the pane, got {painted:?}",
+        );
     }
 
     #[test]
