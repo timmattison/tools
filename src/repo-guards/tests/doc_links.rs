@@ -417,6 +417,30 @@ fn the_scan_documents_exactly_the_workspace_members_cargo_reports() {
     );
 }
 
+/// Every intra-doc link this repository writes must resolve.
+///
+/// This is the guard itself, pointed at the workspace it guards. Every other
+/// test here proves that `audit()` can tell a broken link from a clean one on a
+/// fixture; this one spends that ability on the real tree, so a link that goes
+/// stale after a rename fails `cargo test` on the commit that renamed the item.
+///
+/// The failure renders the whole [`doc_links::DocScan`], never a count. A count
+/// tells a reader that something is wrong and leaves the search to them; the
+/// scan names each file, each line, and rustdoc's own words, and closes with the
+/// remediation. That report lives in the guard, so a test, a CI job, and a CLI
+/// all print the same thing.
+#[test]
+fn every_intra_doc_link_in_this_workspace_resolves() {
+    let repo_root = repo_root();
+
+    let scan = doc_links::audit(&repo_root).expect("scan the workspace");
+
+    assert!(
+        scan.is_clean(),
+        "this workspace holds intra-doc links rustdoc cannot resolve:\n{scan}"
+    );
+}
+
 /// A build that documents nothing is a refusal, not a clean verdict.
 ///
 /// `doc = false` is the smallest way to write it, and it is not hypothetical: a
