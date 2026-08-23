@@ -331,12 +331,12 @@ fn close<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{record, Limits, Outcome, RunError};
+    use crate::live::{Command, RunFacts, Screen, Table};
     use crate::names::{Lookup, Namer, NoLookups};
     use crate::record::{
         EndReason, EndRecord, Family, Hop, NameRecord, Privilege, Record, Recording, RoundRecord,
         RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange, Writer,
     };
-    use crate::live::{Command, RunFacts, Screen, Table};
     use crate::testing::{address, named, FakeKeys, FakeResolver};
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};

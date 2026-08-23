@@ -7,16 +7,17 @@
 //! reason this module classifies the keys itself: it is the one part of the
 //! live run that can stop a run that the user asked to stop.
 
-// Nothing outside this module names any item of it. The run loop takes a
-// screen in the next step of this work, and every item below is then live. One
-// attribute stands here, and not one attribute for each item, because the
-// items are dead for one reason: no caller. The expectation fails once the
-// whole module is live, which takes this attribute back off.
+// The run loop reads the headless screen of this module. The live table waits
+// for the caller that chooses between the two screens, and that caller joins
+// in the next step of this work. One attribute stands here, and not one
+// attribute for each item of the table, because those items are dead for one
+// reason: no caller. The expectation fails once that caller stands, which
+// takes this attribute back off.
 #![cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the run loop joins this module in the next step of this work"
+        reason = "the caller that picks the live table joins this module in the next step of this work"
     )
 )]
 
