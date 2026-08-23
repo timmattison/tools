@@ -44,6 +44,9 @@ const LINK_TO_NOWHERE: &str = "\
 pub fn thing() {}
 ";
 
+/// Source rustdoc cannot parse, so the unit that holds it never documents.
+const UNPARSABLE_SOURCE: &str = "pub fn broken( {\n";
+
 /// A library whose one link names two items at once.
 ///
 /// This is the second spelling of the same lint. Rustdoc writes "`trace` is
@@ -91,16 +94,26 @@ pub fn thing() {}
 fn hidden() {}
 ";
 
-/// Build a fixture crate in its own temp dir and return the dir.
+/// Build a fixture crate whose library is `lib_rs`, in its own temp dir.
+fn fixture(lib_rs: &str) -> TempDir {
+    fixture_files(&[("src/lib.rs", lib_rs)])
+}
+
+/// Build a fixture crate from `files`, each a path relative to the crate root,
+/// in its own temp dir.
 ///
 /// The `TempDir` is returned rather than its path, so the caller holds it for
 /// the length of the test and the fixture is removed afterwards.
-fn fixture(lib_rs: &str) -> TempDir {
+fn fixture_files(files: &[(&str, &str)]) -> TempDir {
     let dir = TempDir::new().expect("create fixture crate dir");
     fs::write(dir.path().join("Cargo.toml"), FIXTURE_MANIFEST)
         .expect("write fixture crate manifest");
-    fs::create_dir_all(dir.path().join("src")).expect("create fixture crate src dir");
-    fs::write(dir.path().join("src/lib.rs"), lib_rs).expect("write fixture crate library");
+    for (relative, contents) in files {
+        let path = dir.path().join(relative);
+        let parent = path.parent().expect("a fixture file has a parent dir");
+        fs::create_dir_all(parent).expect("create fixture crate source dir");
+        fs::write(&path, contents).expect("write fixture crate source file");
+    }
     dir
 }
 
@@ -109,6 +122,21 @@ fn fixture(lib_rs: &str) -> TempDir {
 fn scan(dir: &TempDir) -> doc_links::DocScan {
     doc_links::audit(dir.path())
         .unwrap_or_else(|e| panic!("the audit refused a fixture it should have scanned: {e}"))
+}
+
+/// Scan a fixture and require a refusal.
+///
+/// The panic renders the *scan* when one came back, so a fail-closed regression
+/// says what the guard wrongly concluded rather than only "expected Err".
+fn must_refuse(dir: &TempDir) -> doc_links::DocLinksError {
+    match doc_links::audit(dir.path()) {
+        Err(e) => e,
+        Ok(scan) => panic!(
+            "the audit should have refused this fixture, but returned a verdict:\n{scan}\n\
+             (clean = {})",
+            scan.is_clean()
+        ),
+    }
 }
 
 /// The defect this guard exists for: a doc comment links to an item that is not
@@ -197,5 +225,48 @@ fn other_rustdoc_warnings_are_not_findings() {
     assert!(
         scan.is_clean(),
         "only unresolved links are findings; got:\n{scan}"
+    );
+}
+
+/// A documentation build that fails is a refusal, never a verdict.
+///
+/// A unit that fails to document takes every unit downstream of it with it, so
+/// the link list is short by an unknown amount. "No broken links" printed over
+/// forty crates that were never read is indistinguishable from a guard doing
+/// real work.
+#[test]
+fn a_failed_documentation_build_refuses() {
+    let dir = fixture(UNPARSABLE_SOURCE);
+
+    let error = must_refuse(&dir);
+
+    assert!(
+        matches!(&error, doc_links::DocLinksError::DocBuildFailed { .. }),
+        "a failed documentation build must be a refusal, got: {error}"
+    );
+    assert!(
+        error.to_string().contains("could not document"),
+        "the refusal must carry what cargo said, got: {error}"
+    );
+}
+
+/// The refusal holds even when the build reported findings before it failed.
+///
+/// This is the whole rule. The fixture documents its library — rustdoc reports
+/// the unresolved link in it — and then fails on the binary beside it. A guard
+/// that refused only when it had found nothing would print "1 broken link" here
+/// and say nothing about the target it never read.
+#[test]
+fn a_failed_build_refuses_even_when_it_found_a_broken_link() {
+    let dir = fixture_files(&[
+        ("src/lib.rs", LINK_TO_NOWHERE),
+        ("src/bin/other.rs", UNPARSABLE_SOURCE),
+    ]);
+
+    let error = must_refuse(&dir);
+
+    assert!(
+        matches!(&error, doc_links::DocLinksError::DocBuildFailed { .. }),
+        "a partial build must be a refusal however much it found, got: {error}"
     );
 }

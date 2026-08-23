@@ -193,6 +193,24 @@ pub enum DocLinksError {
         stderr: String,
     },
 
+    /// The documentation build failed.
+    ///
+    /// This is a refusal on *every* non-zero exit, not only on one that found
+    /// nothing. A unit that fails to document takes every unit downstream of it
+    /// with it, so the list of links is short by an unknown amount.
+    #[error(
+        "`cargo doc` in {} exited with {status}; the link list is incomplete because the build stopped:\n{stderr}",
+        dir.display()
+    )]
+    DocBuildFailed {
+        /// The directory cargo ran in.
+        dir: PathBuf,
+        /// How cargo exited.
+        status: String,
+        /// What cargo wrote to its error stream.
+        stderr: String,
+    },
+
     /// A line of cargo output is not JSON.
     #[error("cannot parse a line of `{command}` output as JSON: {source}\n  line: {line}")]
     Json {
