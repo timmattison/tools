@@ -250,10 +250,12 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 /// Knights of the Round Trip: record the network path to a destination.
 ///
 /// A trace resolves the destination, opens the recorded file, and probes every
-/// hop to the destination once per round. It appends one record for each round,
-/// and it prints one status line for that round. The `replay` command reads a
-/// file that an earlier run wrote, so it takes no destination and no flag of a
-/// probe.
+/// hop to the destination once per round. It appends one record for each round.
+/// A run under a terminal draws the live table of that path, and it takes the
+/// keys of the terminal. A run whose standard output is a pipe or a file, and a
+/// run that `--headless` asked, print one status line each minute. The `replay`
+/// command reads a file that an earlier run wrote, so it takes no destination
+/// and no flag of a probe.
 #[derive(Parser, Debug)]
 // `args_conflicts_with_subcommands` rejects a flag of a probe beside a command,
 // because a replay probes nothing. `subcommand_negates_reqs` lifts the demand
@@ -333,7 +335,7 @@ struct Cli {
     #[arg(long, value_name = "IP")]
     source: Option<IpAddr>,
 
-    /// No table. Print one status line per minute.
+    /// No table and no keys. Print one status line per minute.
     #[arg(long)]
     headless: bool,
 

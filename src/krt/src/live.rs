@@ -167,8 +167,8 @@ impl Keys for NoKeys {
 /// No test of this file builds this source. `crossterm` reads the keys of a
 /// terminal, and `cargo test` hands the test binary a pipe. A source that read
 /// the keys of the terminal of `cargo test` takes the keys of the reader who
-/// started it. The pseudo terminal of a later step of this work is what drives
-/// this source.
+/// started it. The pseudo terminal of `tests/terminal.rs` is what drives this
+/// source.
 pub(crate) struct Keyboard;
 
 impl Keys for Keyboard {
@@ -661,9 +661,9 @@ fn restore_panic_hook(previous: PanicHook) {
 ///
 /// No test of this file builds this guard. `crossterm` takes raw mode of the
 /// terminal of the process, and a test that took the terminal of `cargo test`
-/// takes the terminal of the reader who started it. The pseudo terminal of a
-/// later step of this work is what drives the guard. The panic hook of the
-/// guard holds no terminal, and the tests above drive that hook on its own.
+/// takes the terminal of the reader who started it. The pseudo terminal of
+/// `tests/terminal.rs` is what drives the guard. The panic hook of the guard
+/// holds no terminal, and the tests above drive that hook on its own.
 pub(crate) struct TerminalGuard {
     /// The panic hook that stood before [`TerminalGuard::enter`] wrapped it.
     ///
