@@ -321,6 +321,20 @@ mod tests {
     }
 
     #[test]
+    fn a_line_that_sanitizes_away_is_not_a_line() {
+        // A hook that erases the row it is about to reuse said nothing a
+        // reader could see, and the window is six rows tall. Left in, one
+        // erase before each newline spends the window on blanks.
+        assert!(
+            split_all(b"\x1b[2K\n").is_empty(),
+            "a line that is only escape sequences costs no row",
+        );
+        // The distinction the rule turns on: `echo \"\"` said something, and
+        // it said it blank. Dropping every empty line would swallow that too.
+        assert_eq!(split_all(b"a\n\nb\n"), vec!["a", "", "b"]);
+    }
+
+    #[test]
     fn a_tab_expands_to_the_next_tab_stop() {
         // One character, up to eight columns. Left in, the frame is measured
         // eight columns short and its bottom row goes off the screen.
