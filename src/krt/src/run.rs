@@ -15,7 +15,8 @@
 //! while it silently records nothing is worse than a run that stops.
 
 use crate::record::{EndReason, EndRecord, Record, RoundRecord, RunId, RunRecord, Writer};
-use crate::{counted, render_duration, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
+use crate::ui::render_duration;
+use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
 use chrono::Utc;
 use std::io::Write;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};

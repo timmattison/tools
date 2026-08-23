@@ -537,7 +537,7 @@ impl fmt::Display for ResolvedConfig {
                     .unwrap_or_else(|| ABSENT.to_owned()),
             ),
             ("output", path_or(self.output.as_ref(), OUTPUT_DERIVED)),
-            ("interval", render_duration(self.interval)),
+            ("interval", ui::render_duration(self.interval)),
             ("first ttl", self.first_ttl.to_string()),
             ("max ttl", self.max_ttl.to_string()),
             ("protocol", value_name(&self.protocol)),
@@ -561,7 +561,7 @@ impl fmt::Display for ResolvedConfig {
             (
                 "duration limit",
                 self.duration
-                    .map_or_else(|| ABSENT.to_owned(), render_duration),
+                    .map_or_else(|| ABSENT.to_owned(), ui::render_duration),
             ),
             (
                 "round limit",
@@ -584,6 +584,11 @@ impl fmt::Display for ResolvedConfig {
 /// The text holds a whole number and one unit, with no space between them. The
 /// units are `ms` for milliseconds, `s` for seconds, `m` for minutes, and `h`
 /// for hours. `500ms`, `1s`, `2m`, and `3h` are examples.
+///
+/// `ui::render_duration` writes the text that this function reads. The two live
+/// apart because the header line of the frame writes a duration as well, and one
+/// writer keeps the three places that print a period in agreement. A test below
+/// asserts that the pair agrees over every accepted form.
 ///
 /// # Errors
 ///
@@ -648,29 +653,6 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
         ));
     }
     Ok(duration)
-}
-
-/// Writes the shortest text of a duration, to the millisecond.
-///
-/// A duration that carries milliseconds becomes milliseconds. A whole number of
-/// hours becomes hours. A whole number of minutes becomes minutes. Every other
-/// duration becomes seconds. The text reads like the text a user types, so
-/// `Duration::from_secs(3600)` becomes `1h`. A duration that carries less than
-/// one millisecond loses that remainder. No caller gives such a duration today,
-/// because every duration comes from `parse_duration`, which stops at
-/// milliseconds.
-fn render_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    if duration.subsec_millis() != 0 || seconds == 0 {
-        return format!("{}ms", duration.as_millis());
-    }
-    if seconds.is_multiple_of(SECONDS_PER_HOUR) {
-        return format!("{}h", seconds / SECONDS_PER_HOUR);
-    }
-    if seconds.is_multiple_of(SECONDS_PER_MINUTE) {
-        return format!("{}m", seconds / SECONDS_PER_MINUTE);
-    }
-    format!("{seconds}s")
 }
 
 /// Picks the address of the version that the run asked for.
@@ -1338,17 +1320,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_lines, closing_line, host_name_or, parse_duration, pick_address, render_duration,
-        resolve_target, source_from, stop_reason, user_stopped, AddressFamily, Cli, Command,
-        EndReason, Family, Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind,
-        SourceLabel, ADDRESS_INDENT, PERCENT_SIGN, RESOLVE_PORT, SHARE, SOURCE_FALLBACK,
-        SUMMARY_SEPARATOR, UNKNOWN, UNTRACKED,
+        aggregate_lines, closing_line, host_name_or, parse_duration, pick_address, resolve_target,
+        source_from, stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason, Family,
+        Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, ADDRESS_INDENT,
+        PERCENT_SIGN, RESOLVE_PORT, SHARE, SOURCE_FALLBACK, SUMMARY_SEPARATOR, UNKNOWN, UNTRACKED,
     };
     use crate::record::RoundRecord;
     use crate::run::Outcome;
     use crate::source::Discovery;
     use crate::stats::HopTable;
     use crate::testing::{address, round};
+    use crate::ui::render_duration;
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -1586,50 +1568,6 @@ resolved configuration:
                 "the message names the accepted forms: {message}"
             );
         }
-    }
-
-    #[test]
-    fn renders_milliseconds() {
-        assert_eq!(render_duration(Duration::from_millis(500)), "500ms");
-    }
-
-    #[test]
-    fn renders_one_second() {
-        assert_eq!(render_duration(Duration::from_secs(1)), "1s");
-    }
-
-    #[test]
-    fn renders_many_seconds() {
-        assert_eq!(render_duration(Duration::from_secs(90)), "90s");
-    }
-
-    #[test]
-    fn renders_minutes() {
-        assert_eq!(render_duration(Duration::from_mins(2)), "2m");
-    }
-
-    #[test]
-    fn renders_one_hour() {
-        assert_eq!(render_duration(Duration::from_hours(1)), "1h");
-    }
-
-    #[test]
-    #[allow(
-        clippy::duration_suboptimal_units,
-        reason = "the seconds are the behavior: a duration of 3600 seconds renders as hours"
-    )]
-    fn renders_seconds_that_make_a_whole_hour_as_hours() {
-        assert_eq!(render_duration(Duration::from_secs(3600)), "1h");
-    }
-
-    #[test]
-    fn renders_whole_hours_as_hours() {
-        assert_eq!(render_duration(Duration::from_hours(2)), "2h");
-    }
-
-    #[test]
-    fn renders_a_duration_that_carries_milliseconds_as_milliseconds() {
-        assert_eq!(render_duration(Duration::from_millis(1500)), "1500ms");
     }
 
     #[test]

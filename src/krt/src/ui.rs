@@ -12,6 +12,11 @@
 //!
 //! A later slice prints the table on these helpers, and states there the
 //! order in which the columns drop as the terminal gets narrow.
+//!
+//! The module also writes the one duration text of the crate. The resolved
+//! configuration, the status line of a round, and the header line of the frame
+//! each name a period of time, and a second writer of a duration would print
+//! `1s` in one of those three places and `1000ms` in another.
 
 #![cfg_attr(
     not(test),
@@ -21,9 +26,39 @@
     )
 )]
 
+use crate::{ROUND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE, UNKNOWN};
 use std::net::IpAddr;
 use std::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// The start of the header line: one space, the name of the tool, and two more
+/// spaces.
+///
+/// The leading space holds the name off the left edge of the terminal, where
+/// the whole block — this line, the column header, and every row — then stands
+/// one column in from the frame. The two spaces that follow are the widest gap
+/// of the line, so the name of the tool reads as the name of the block and not
+/// as the first field of it.
+const HEADER_START: &str = " krt  ";
+
+/// The text between two fields of the header line.
+///
+/// Three spaces, and not the two of a summary line. Two of these fields hold a
+/// space of their own — `src 1.2.3.4` and `round 142` each do — so a narrower
+/// gap would read as one sentence, and a reader would have to know the words to
+/// find where one field stops.
+const FIELD_SEPARATOR: &str = "   ";
+
+/// The glyph between a destination and the address that it resolved to.
+///
+/// The destination is what the user typed, and the address is what the resolver
+/// answered. The arrow says which is which. The summary line of a replay writes
+/// the same pair as `name (address)`, because that line names a run, where this
+/// one heads the table of the path to that address.
+const RESOLVES_TO: &str = " → ";
+
+/// The name of the field that holds the source address of the run.
+const SOURCE: &str = "src";
 
 /// What the header line of the frame names.
 ///
@@ -66,18 +101,123 @@ pub(crate) struct Header<'a> {
 impl Header<'_> {
     /// The one line that stands above the table.
     ///
-    /// This slice is the red one: it writes no line, and the tests below state
-    /// the line that the green slice writes.
+    /// Five fields stand in it: the target, the source, the count of the
+    /// rounds, the period of one round, and the recorded file with its size.
+    /// Each of them carries a label of its own, or a value that names itself, so
+    /// no field depends on where it stands. A reader finds the source by the
+    /// word `src`, and not by counting the gaps from the left.
+    ///
+    /// A target names a destination and an address together, or it names
+    /// nothing. A destination with no address is a name that this run never
+    /// probed, and an address with no name is a number that the user did not
+    /// type, so half a target says less than the one word that stands for a
+    /// target the file holds none of.
+    ///
+    /// The label of the rounds stays `round` for every count, where a summary
+    /// line writes `142 rounds`. This line is a set of labelled fields and not a
+    /// sentence, and a label that grew with the count would move the text of
+    /// every field behind it as the run goes on.
     pub(crate) fn line(&self) -> String {
-        String::new()
+        let target = match (self.destination, self.address) {
+            (Some(destination), Some(address)) => format!("{destination}{RESOLVES_TO}{address}"),
+            _ => UNKNOWN.to_owned(),
+        };
+        let source = self
+            .source
+            .map_or_else(|| UNKNOWN.to_owned(), |address| address.to_string());
+        let interval = self
+            .interval
+            .map_or_else(|| UNKNOWN.to_owned(), render_duration);
+        let size = self.bytes.map_or_else(|| UNKNOWN.to_owned(), render_size);
+        let fields = [
+            target,
+            format!("{SOURCE} {source}"),
+            format!("{ROUND} {}", self.rounds),
+            interval,
+            format!("{} ({size})", self.file),
+        ];
+        format!("{HEADER_START}{}", fields.join(FIELD_SEPARATOR))
     }
 }
 
-/// Writes the size of the recorded file.
+/// The units of a file size, smallest first.
+const SIZE_UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+
+/// The number of bytes of one unit, in the unit below it.
+const BYTES_PER_UNIT: f64 = 1024.0;
+
+/// The number of decimal places that a size above one step prints.
+const SIZE_DECIMALS: usize = 1;
+
+/// The smallest size that one decimal place writes as a whole unit.
 ///
-/// This slice is the red one: it writes no size.
-fn render_size(_bytes: u64) -> String {
-    String::new()
+/// The print rounds, so every size from half of the last decimal place below
+/// 1024 writes as `1024.0`. The scale steps to the next unit at that point, and
+/// not at 1024 exactly, because `1024.0 KB` writes one megabyte in kilobytes:
+/// one whole unit of the scale, in the units of the step below it.
+const ROUNDS_UP_TO_A_WHOLE_UNIT: f64 = 1023.95;
+
+/// Reads a size as the number that the scale divides.
+///
+/// Each step of the scale is a divide by 1024, so the size needs a number that
+/// holds a fraction. `count_as_f64` of `stats.rs` reads a count the same way,
+/// for the same reason.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "an `f64` holds every whole number below 2^53, which is 8 petabytes. A recorded file above that point loses digits far below the one decimal place that the scale prints, and no run writes such a file: one round of one path records a few hundred bytes"
+)]
+fn bytes_as_f64(bytes: u64) -> f64 {
+    bytes as f64
+}
+
+/// Writes the size of the recorded file, in the largest unit that holds it.
+///
+/// A size below one step reads as whole bytes. A file of 842 bytes is 842
+/// bytes, and `0.8 KB` says less about it. Every larger size reads to one
+/// decimal place, in the largest unit of the scale that holds it. A size above
+/// the largest unit stays in that unit, and `5120.0 TB` is a number a reader
+/// still reads.
+///
+/// This is `rr::format_size` (`src/rr/src/main.rs`), at one decimal place
+/// instead of two. `krt` cannot call that one: `rr` is a binary crate, so it
+/// exports nothing and there is no library of it to take a dependency on. Do
+/// not go looking for one.
+fn render_size(bytes: u64) -> String {
+    let mut size = bytes_as_f64(bytes);
+    if size < BYTES_PER_UNIT {
+        // A whole number of bytes, and no decimal place: the bytes are the
+        // measure, not a rounding of a larger unit.
+        return format!("{bytes} {}", SIZE_UNITS[0]);
+    }
+    let mut unit = 0;
+    while size >= ROUNDS_UP_TO_A_WHOLE_UNIT && unit < SIZE_UNITS.len() - 1 {
+        size /= BYTES_PER_UNIT;
+        unit += 1;
+    }
+    format!("{size:.SIZE_DECIMALS$} {}", SIZE_UNITS[unit])
+}
+
+/// Writes the shortest text of a duration, to the millisecond.
+///
+/// A duration that carries milliseconds becomes milliseconds. A whole number of
+/// hours becomes hours. A whole number of minutes becomes minutes. Every other
+/// duration becomes seconds. The text reads like the text a user types, so
+/// `Duration::from_secs(3600)` becomes `1h`. A duration that carries less than
+/// one millisecond loses that remainder. No caller gives such a duration today,
+/// because every duration comes from `parse_duration`, which stops at
+/// milliseconds.
+pub(crate) fn render_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if duration.subsec_millis() != 0 || seconds == 0 {
+        return format!("{}ms", duration.as_millis());
+    }
+    if seconds.is_multiple_of(SECONDS_PER_HOUR) {
+        return format!("{}h", seconds / SECONDS_PER_HOUR);
+    }
+    if seconds.is_multiple_of(SECONDS_PER_MINUTE) {
+        return format!("{}m", seconds / SECONDS_PER_MINUTE);
+    }
+    format!("{seconds}s")
 }
 
 /// The number of terminal columns that the text occupies.
@@ -229,7 +369,9 @@ fn bar_at(part: f64) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::{display_width, render_size, sparkline, truncate_to_width, Header};
+    use super::{
+        display_width, render_duration, render_size, sparkline, truncate_to_width, Header,
+    };
     use crate::testing::address;
     use std::time::Duration;
 
@@ -485,6 +627,50 @@ mod tests {
             "1023.4 KB",
             "a size that rounds to less than a whole unit keeps its unit"
         );
+    }
+
+    #[test]
+    fn renders_milliseconds() {
+        assert_eq!(render_duration(Duration::from_millis(500)), "500ms");
+    }
+
+    #[test]
+    fn renders_one_second() {
+        assert_eq!(render_duration(Duration::from_secs(1)), "1s");
+    }
+
+    #[test]
+    fn renders_many_seconds() {
+        assert_eq!(render_duration(Duration::from_secs(90)), "90s");
+    }
+
+    #[test]
+    fn renders_minutes() {
+        assert_eq!(render_duration(Duration::from_mins(2)), "2m");
+    }
+
+    #[test]
+    fn renders_one_hour() {
+        assert_eq!(render_duration(Duration::from_hours(1)), "1h");
+    }
+
+    #[test]
+    #[allow(
+        clippy::duration_suboptimal_units,
+        reason = "the seconds are the behavior: a duration of 3600 seconds renders as hours"
+    )]
+    fn renders_seconds_that_make_a_whole_hour_as_hours() {
+        assert_eq!(render_duration(Duration::from_secs(3600)), "1h");
+    }
+
+    #[test]
+    fn renders_whole_hours_as_hours() {
+        assert_eq!(render_duration(Duration::from_hours(2)), "2h");
+    }
+
+    #[test]
+    fn renders_a_duration_that_carries_milliseconds_as_milliseconds() {
+        assert_eq!(render_duration(Duration::from_millis(1500)), "1500ms");
     }
 
     /// A name of wide glyphs. Each of the eight characters takes two columns,
