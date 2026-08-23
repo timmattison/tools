@@ -628,6 +628,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     time. Each of the two writes the record that closes the run. On macOS and Linux, Ctrl-C also
     stops the run at once and writes that record. Windows gets that key with the table that a
     later build adds.
+  - A run resolves the name of each address it sees through the system resolver of the platform.
+    The file takes one `name` record for each name, and one record for each address at most,
+    however many rounds that address answers in. An address that resolves to no name keeps its raw
+    address, and the file holds no record for it. A lookup holds up no round, and a run waits after
+    its last round for the names that its lookups have not given yet. That wait ends the moment
+    that every lookup settles, and its ceiling is the timeout of the system resolver, which is 5
+    seconds. `--no-dns` skips every lookup, so the file then holds no `name` record and the `run`
+    record says `"dns":false`.
   - `krt replay` prints one table of the path. A header line names the destination, the address it
     resolved to, the source, the count of the rounds, the period of one round, and the recorded
     file with its size. Under it stands one row for each TTL, with the columns `TTL`, `Host`,
@@ -657,7 +665,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - macOS sends the probes without privileges. Linux needs `CAP_NET_RAW`, and Windows needs an
     elevated prompt. A platform that needs privileges and does not hold them prints the remedy and
     stops, and `krt` never falls back to a degraded trace without saying so.
-  - `krt` takes its tracer from [`trippy-core`](https://trippy.rs), which is Apache-2.0.
+  - `krt` takes its tracer from [`trippy-core`](https://trippy.rs) and its resolver from
+    [`trippy-dns`](https://trippy.rs), and both of them are Apache-2.0.
   - Usage: `krt example.com`, `krt example.com --rounds 3`, `krt example.com --duration 1h`,
     `krt example.com --interval 500ms --protocol udp --multipath paris`,
     `krt replay trace.jsonl`, `krt replay trace.jsonl --run 2026-08-19T12:00:00.000Z`

@@ -13,10 +13,14 @@
 //! that needs them and holds none stops, and the message names the remedy of
 //! each platform.
 //!
-//! The interface of the wall is one type and one function. [`TraceConfig`]
+//! The interface of the wall is one type and three functions. [`TraceConfig`]
 //! states one run in the words that `krt` owns, and [`spawn`] starts the
-//! tracer of that run and gives back a receiver of completed rounds. A caller
-//! outside this module therefore names no type of a trippy crate.
+//! tracer of that run and gives back a receiver of completed rounds.
+//! [`resolver`] gives the reverse resolver of the platform as a
+//! [`crate::names::Resolver`], which is a type that `krt` owns, and
+//! [`resolver_timeout`] gives the longest that one lookup of that resolver
+//! takes, as a [`Duration`]. A caller outside this module therefore names no
+//! type of a trippy crate.
 //!
 //! The conversion is the wall itself. The tracer hands one round over as a
 //! borrowed value that lives for the length of one call, and
@@ -25,6 +29,7 @@
 //! this file alone. The run loop that reads the receiver arrives in a later
 //! slice.
 
+use crate::names::Lookup;
 use crate::record::{self, Hop, RoundRecord, RunId, TtlRange};
 use chrono::{DateTime, Utc};
 use std::net::IpAddr;
@@ -32,6 +37,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime};
 use trippy_core::{CompletionReason, IcmpPacketType, ProbeStatus, Round};
+use trippy_dns::{DnsEntry, DnsResolver, Resolver as _};
 
 /// The remedy of a platform that needs raw socket privileges and holds none.
 ///
@@ -471,12 +477,90 @@ fn rtt_millis(sent: SystemTime, received: SystemTime) -> f64 {
         * MILLIS_PER_SECOND
 }
 
+/// The reverse resolver of the platform, behind the interface that `krt` owns.
+///
+/// The resolver holds a counted reference that no thread can move, so it stays
+/// on the thread that built it. That thread is the thread of the run loop,
+/// which is the one thread that asks it.
+struct SystemNames {
+    /// The resolver that every ask of this run goes to.
+    names: DnsResolver,
+}
+
+impl crate::names::Resolver for SystemNames {
+    fn lookup(&self, addr: IpAddr) -> Lookup {
+        to_lookup(&self.names.lazy_reverse_lookup(addr))
+    }
+}
+
+/// The configuration of the reverse resolver of a run.
+///
+/// The configuration is the one that the crate holds by default: the system
+/// resolver, the address families in the order IPv4 and then IPv6, a timeout of
+/// five seconds, and a cache of five minutes. `krt` asks for the system
+/// resolver, so a lookup of a run reads the same names as every other program
+/// of the machine.
+///
+/// [`resolver`] and [`resolver_timeout`] both read this one configuration, so a
+/// change of a field moves the resolver and the timeout that `krt` reports
+/// together.
+fn resolver_config() -> trippy_dns::Config {
+    trippy_dns::Config::default()
+}
+
+/// The longest that one reverse lookup of a run takes.
+///
+/// The resolver settles an address when this time runs out, and a settled
+/// address gives its name or gives none. No lookup of a run therefore stays
+/// open past this time.
+pub(crate) fn resolver_timeout() -> Duration {
+    resolver_config().timeout
+}
+
+/// A reverse resolver over the system resolver of the platform.
+///
+/// [`resolver_config`] states the configuration of the resolver.
+///
+/// # Errors
+///
+/// Returns the reason when the resolver does not start.
+pub(crate) fn resolver() -> std::io::Result<Box<dyn crate::names::Resolver>> {
+    let names = DnsResolver::start(resolver_config())?;
+    Ok(Box::new(SystemNames { names }))
+}
+
+/// Reads what one reverse lookup holds now, in the words that `krt` owns.
+///
+/// An address that carries more than one name takes the first name of the
+/// answer, because one record of the schema holds one name. The iterator of
+/// that crate gives its first name again at every step, so this conversion
+/// reads one name from it and collects nothing.
+///
+/// A lookup that timed out settles the address, and it does not wait. The
+/// resolver puts a timed-out address back into its queue on every ask, and the
+/// run loop asks ten times a second, so an address that waited on a timeout
+/// would probe a name server that does not answer, without end. The design of
+/// `krt` says that a failed lookup stops no run, and that the display shows the
+/// raw address of such a hop. One ask for each address of one run is the
+/// bounded reading of that rule.
+fn to_lookup(entry: &DnsEntry) -> Lookup {
+    match entry {
+        DnsEntry::Pending(_) => Lookup::Pending,
+        DnsEntry::Resolved(_) => entry
+            .hostnames()
+            .next()
+            .map_or(Lookup::Nameless, |host| Lookup::Named(host.to_owned())),
+        DnsEntry::NotFound(_) | DnsEntry::Failed(_) | DnsEntry::Timeout(_) => Lookup::Nameless,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_privilege, icmp_kind, next_seq, to_round_record, tracer_of, IcmpKind,
+        choose_privilege, icmp_kind, next_seq, to_lookup, to_round_record, tracer_of, IcmpKind,
         PrivilegeError, TraceConfig, TraceError,
     };
+    use crate::names::Lookup;
     use crate::record::{Privilege, Record, RoundRecord, RunId};
     use crate::testing::address;
     use crate::{Multipath, Protocol, PROGRAM};
@@ -487,6 +571,7 @@ mod tests {
         CompletionReason, Flags, IcmpPacketType, Port, Probe, ProbeComplete, ProbeStatus, Round,
         RoundId, Sequence, TimeToLive, TraceId,
     };
+    use trippy_dns::{DnsEntry, Resolved, Unresolved};
 
     /// The remedy, exactly as the design writes it.
     ///
@@ -1188,5 +1273,84 @@ this platform needs raw socket privileges to send probes.
         let counter = AtomicU64::new(0);
         assert_eq!(next_seq(&counter), 1);
         assert_eq!(next_seq(&counter), 2);
+    }
+
+    // The reading of one reverse lookup. No test below touches the network, and
+    // none of them starts a resolver. Each one builds the answer of a lookup by
+    // hand.
+    //
+    // Every answer below is a `Normal` answer. `krt` asks for no autonomous
+    // system information, so the resolver of this module never gives a
+    // `WithAsInfo` answer and no test builds one.
+
+    /// The address that every lookup of these tests reads.
+    const A_HOP: &str = "192.168.1.1";
+
+    /// The name that a lookup of that address finds.
+    const A_HOP_NAME: &str = "router.lan";
+
+    /// One more name of the same address, after the first one.
+    const ONE_MORE_NAME: &str = "gateway.lan";
+
+    /// The answer of a lookup that found these names.
+    fn found(names: &[&str]) -> DnsEntry {
+        DnsEntry::Resolved(Resolved::Normal(
+            address(A_HOP),
+            names.iter().map(|name| (*name).to_owned()).collect(),
+        ))
+    }
+
+    /// The name that one lookup holds.
+    fn name(host: &str) -> Lookup {
+        Lookup::Named(host.to_owned())
+    }
+
+    #[test]
+    fn a_lookup_that_has_not_finished_gives_a_wait() {
+        assert_eq!(
+            to_lookup(&DnsEntry::Pending(address(A_HOP))),
+            Lookup::Pending
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_finished_gives_the_first_name_it_holds() {
+        assert_eq!(
+            to_lookup(&found(&[A_HOP_NAME, ONE_MORE_NAME])),
+            name(A_HOP_NAME)
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_finished_with_no_name_gives_a_nameless_address() {
+        assert_eq!(to_lookup(&found(&[])), Lookup::Nameless);
+    }
+
+    #[test]
+    fn a_lookup_that_matched_no_record_gives_a_nameless_address() {
+        assert_eq!(
+            to_lookup(&DnsEntry::NotFound(Unresolved::Normal(address(A_HOP)))),
+            Lookup::Nameless
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_failed_gives_a_nameless_address() {
+        assert_eq!(
+            to_lookup(&DnsEntry::Failed(address(A_HOP))),
+            Lookup::Nameless
+        );
+    }
+
+    /// A timeout settles the address, and it does not wait. The resolver puts a
+    /// timed-out address back into its queue on every ask, and the run loop asks
+    /// ten times a second, so an address that waited on a timeout would probe a
+    /// name server that does not answer, without end.
+    #[test]
+    fn a_lookup_that_timed_out_gives_a_nameless_address_and_the_run_asks_no_second_time() {
+        assert_eq!(
+            to_lookup(&DnsEntry::Timeout(address(A_HOP))),
+            Lookup::Nameless
+        );
     }
 }

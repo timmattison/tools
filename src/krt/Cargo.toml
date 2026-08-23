@@ -17,6 +17,7 @@ sysinfo.workspace = true
 termsize.workspace = true
 thiserror.workspace = true
 trippy-core.workspace = true
+trippy-dns.workspace = true
 trippy-privilege.workspace = true
 unicode-width.workspace = true
 

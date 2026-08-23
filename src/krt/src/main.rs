@@ -13,6 +13,7 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+mod names;
 mod record;
 mod run;
 mod source;
@@ -868,8 +869,9 @@ fn replay(path: &Path, wanted: Option<&str>, width: u16) -> Replay {
             }
             // A `name` record names one address, and one address answers at any
             // number of TTLs, so the map is keyed by the address and not by the
-            // hop. No run writes such a record yet, and a file that a later
-            // build recorded holds them.
+            // hop. A run of this build writes such a record. A file that an
+            // older build recorded holds none, and the map then leaves the
+            // address raw.
             let names: BTreeMap<IpAddr, String> = run
                 .names()
                 .iter()
@@ -1029,6 +1031,63 @@ fn closing_line(outcome: &run::Outcome, path: &Path) -> String {
     .join(SUMMARY_SEPARATOR)
 }
 
+/// The reverse resolver of one run.
+///
+/// `--no-dns` gives the resolver that looks nothing up, so no lookup of such a
+/// run leaves the machine. Every other run takes the system resolver of the
+/// platform.
+///
+/// A resolver that does not start stops the run, and that is a decision. The
+/// crate reports a start failure as an `io::Error`, and `krt` treats one as
+/// fatal. A fatal start also keeps the `dns` field of the `run` record true by
+/// construction: a run that reaches the loop holds the resolver that the user
+/// asked for.
+///
+/// # Errors
+///
+/// Returns the reason when the system resolver does not start.
+fn resolver_of(reverse_dns: bool) -> std::io::Result<Box<dyn names::Resolver>> {
+    if reverse_dns {
+        trace::resolver()
+    } else {
+        Ok(Box::new(names::NoLookups))
+    }
+}
+
+/// The grace that a run gives its names after its last round.
+///
+/// The grace is the timeout of the reverse resolver. Every lookup settles when
+/// that time runs out, so this grace outlives every lookup that can still
+/// answer, and a hop whose name server answers slowly still takes a `name`
+/// record. The wait ends at the moment that no address waits, so a run whose
+/// addresses settled pays none of it.
+fn name_grace() -> Duration {
+    trace::resolver_timeout()
+}
+
+/// Reads the configuration that one run records, out of the command line that
+/// the run resolved and the privilege mode that the platform gave.
+///
+/// The `run` record states what the run does, and a reader of a recorded file
+/// takes that statement as the truth. So every field here reads one field of
+/// the resolved command line, and nothing here holds a value of its own.
+///
+/// The `dns` field is the one that a reader is most likely to doubt, because
+/// a file that holds no `name` record reads the same whether `--no-dns` turned
+/// the lookups off or whether no address of the run resolved. The field
+/// separates the two.
+fn run_config(config: &ResolvedConfig, privilege: record::Privilege) -> RunConfig {
+    RunConfig {
+        interval_ms: interval_millis(config.interval),
+        protocol: config.protocol,
+        first_ttl: config.first_ttl,
+        max_ttl: config.max_ttl,
+        multipath: config.multipath,
+        privilege,
+        dns: config.reverse_dns,
+    }
+}
+
 /// Records one trace, from the destination of the command line to the record
 /// that closes the run.
 ///
@@ -1036,8 +1095,10 @@ fn closing_line(outcome: &run::Outcome, path: &Path) -> String {
 /// run before the next one spends anything. The resolution comes first, because
 /// it needs no privilege and touches no file. The privilege gate comes next, so
 /// a platform that cannot probe says so before the run makes a file. The
-/// recorded file opens before the tracer starts, so no probe leaves the machine
-/// for a run that cannot record it.
+/// reverse resolver starts after the gate and before the recorded file opens,
+/// so a run that cannot start its resolver makes no file and prints no path.
+/// The recorded file opens before the tracer starts, so no probe leaves the
+/// machine for a run that cannot record it.
 ///
 /// # Errors
 ///
@@ -1051,6 +1112,15 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         .map_err(|error| TraceFailure::new(&error, EXIT_FAILURE))?;
     let privilege = trace::acquire_privilege()
         .map_err(|error| TraceFailure::new(&error, EXIT_NO_PRIVILEGES))?;
+    // The resolver starts here, before the run makes a file and before it
+    // prints the path of that file, so no message of a run that stops misleads
+    // a reader.
+    let resolver = resolver_of(config.reverse_dns).map_err(|error| {
+        TraceFailure::new(
+            &format!("the reverse resolver did not start: {error}"),
+            EXIT_FAILURE,
+        )
+    })?;
 
     // The search runs here, and it runs once. The warning of a fallback
     // therefore reaches standard error once a run and never once a round, and
@@ -1084,15 +1154,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         krt: version_string!().to_owned(),
         source,
         target,
-        config: RunConfig {
-            interval_ms: interval_millis(config.interval),
-            protocol: config.protocol,
-            first_ttl: config.first_ttl,
-            max_ttl: config.max_ttl,
-            multipath: config.multipath,
-            privilege,
-            dns: config.reverse_dns,
-        },
+        config: run_config(config, privilege),
         host: host_name(),
     };
 
@@ -1105,13 +1167,16 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
     let limits = run::Limits {
         rounds: config.rounds,
         deadline: deadline_of(config.duration),
+        name_grace: name_grace(),
     };
+    let mut namer = names::Namer::new(resolver, start.run.clone());
     let mut status = std::io::stdout();
     let outcome = run::record(
         &start,
         &rounds,
         &limits,
         &|| user_stopped(&flag),
+        &mut namer,
         &mut writer,
         &mut status,
     )
@@ -1173,11 +1238,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        closing_line, host_name_or, parse_duration, pick_address, resolve_target, source_from,
-        stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason, Family, Multipath,
-        Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, RESOLVE_PORT,
-        SOURCE_FALLBACK, UNKNOWN,
+        closing_line, host_name_or, name_grace, parse_duration, pick_address, resolve_target,
+        run_config, source_from, stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason,
+        Family, Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel,
+        RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
     };
+    use crate::record::{Privilege, RunConfig};
     use crate::run::Outcome;
     use crate::source::Discovery;
     use crate::testing::address;
@@ -1211,6 +1277,77 @@ mod tests {
         parse(arguments)
             .resolve()
             .expect("the command line must resolve")
+    }
+
+    /// The configuration that a command line records, under the privilege that
+    /// a probe of this run needs.
+    fn recorded_config(arguments: &[&str], privilege: Privilege) -> RunConfig {
+        run_config(&resolve(arguments), privilege)
+    }
+
+    #[test]
+    fn a_run_that_reads_names_records_that_it_reads_them() {
+        assert!(
+            recorded_config(&["krt", "example.com"], Privilege::Unprivileged).dns,
+            "reverse DNS is on by default, and the record must say so"
+        );
+    }
+
+    #[test]
+    fn the_no_dns_flag_reaches_the_dns_field_of_the_record() {
+        assert!(
+            !recorded_config(&["krt", "example.com", "--no-dns"], Privilege::Unprivileged).dns,
+            "`--no-dns` turns the lookups off, and the record must say so"
+        );
+    }
+
+    #[test]
+    fn every_field_of_the_recorded_config_reads_the_command_line_that_set_it() {
+        let recorded = recorded_config(
+            &[
+                "krt",
+                "example.com",
+                "--interval",
+                "2s",
+                "--first-ttl",
+                "3",
+                "--max-ttl",
+                "9",
+                "--protocol",
+                "udp",
+                "--multipath",
+                "paris",
+            ],
+            Privilege::Privileged,
+        );
+        assert_eq!(
+            recorded,
+            RunConfig {
+                interval_ms: 2000,
+                protocol: Protocol::Udp,
+                first_ttl: 3,
+                max_ttl: 9,
+                multipath: Multipath::Paris,
+                privilege: Privilege::Privileged,
+                dns: true,
+            }
+        );
+    }
+
+    /// The grace that a run gives its names is never shorter than the longest
+    /// that one lookup takes.
+    ///
+    /// A grace below the timeout of the resolver drops the name of a hop whose
+    /// name server answers slowly and truly, and the file of the run then holds
+    /// the raw address of that hop.
+    #[test]
+    fn the_grace_of_the_names_outlives_every_lookup_that_can_still_answer() {
+        let grace = name_grace();
+        let timeout = crate::trace::resolver_timeout();
+        assert!(
+            grace >= timeout,
+            "the run gives its names {grace:?}, and one lookup takes up to {timeout:?}"
+        );
     }
 
     /// Reads the message of a command line that contradicts itself.
