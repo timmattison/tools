@@ -1187,6 +1187,20 @@ mod tests {
     }
 
     #[test]
+    fn a_headless_screen_reads_no_key_and_stops_nothing() {
+        // A headless run holds no terminal, so no key of it reaches this
+        // process. The signal handler of `main.rs` stops such a run, and the
+        // limits of the command line stop it too.
+        let clock = FakeClock::new();
+        let mut screen = headless(&clock);
+
+        assert!(
+            !screen.poll(),
+            "a turn of a headless screen asks for no stop of the run"
+        );
+    }
+
+    #[test]
     fn the_q_key_asks_for_a_quit() {
         assert_eq!(classify(press(KeyCode::Char('q'))), Some(Command::Quit));
     }
