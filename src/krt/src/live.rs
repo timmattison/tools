@@ -451,7 +451,7 @@ pub(crate) struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
-        todo!("the clock of a run reads the clock of the machine")
+        Instant::now()
     }
 }
 
