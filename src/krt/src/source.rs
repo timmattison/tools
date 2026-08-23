@@ -253,6 +253,25 @@ fn public_address(service: &str, timeout: Duration) -> Result<IpAddr, PublicErro
     })
 }
 
+/// What the warning of an unread public address says after the reason.
+const PUBLIC_FALLBACK: &str = "The run records the local egress address in its place.";
+
+/// What the search for the source address found.
+#[derive(Debug)]
+pub(crate) struct Discovery {
+    /// The address that the probes leave from, and how `krt` found it.
+    pub(crate) label: SourceLabel,
+    /// The one line that names why the public service gave no address.
+    ///
+    /// `main` writes it to standard error before the display starts. A search
+    /// that needed no fallback carries none.
+    #[allow(
+        dead_code,
+        reason = "main() writes this line in the next slice of issue #368"
+    )]
+    pub(crate) note: Option<String>,
+}
+
 /// Finds the address that the probes leave from, and how krt found it.
 ///
 /// The address that the user named wins, and it opens no socket. Every other
@@ -267,15 +286,35 @@ fn public_address(service: &str, timeout: Duration) -> Result<IpAddr, PublicErro
 /// the operating system finds no route to the target, and when the local
 /// address does not read. A run that names a source raises none of these,
 /// because it opens no socket.
-pub(crate) fn discover(named: Option<IpAddr>, target: IpAddr) -> std::io::Result<SourceLabel> {
+pub(crate) fn discover(named: Option<IpAddr>, target: IpAddr) -> std::io::Result<Discovery> {
+    discover_at(named, target, PUBLIC_SERVICE, PUBLIC_TIMEOUT)
+}
+
+/// Finds the source address against the service and the timeout of the caller.
+///
+/// # Errors
+///
+/// Returns the reason when the socket of the egress address does not open.
+fn discover_at(
+    named: Option<IpAddr>,
+    target: IpAddr,
+    service: &str,
+    timeout: Duration,
+) -> std::io::Result<Discovery> {
     match named {
-        Some(addr) => Ok(SourceLabel {
-            addr,
-            kind: SourceKind::Override,
+        Some(addr) => Ok(Discovery {
+            label: SourceLabel {
+                addr,
+                kind: SourceKind::Override,
+            },
+            note: None,
         }),
-        None => Ok(SourceLabel {
-            addr: egress_address(target)?,
-            kind: SourceKind::Local,
+        None => Ok(Discovery {
+            label: SourceLabel {
+                addr: egress_address(target)?,
+                kind: SourceKind::Local,
+            },
+            note: None,
         }),
     }
 }
@@ -283,8 +322,8 @@ pub(crate) fn discover(named: Option<IpAddr>, target: IpAddr) -> std::io::Result
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_address, derive_name, discover, egress_address, output_path, public_address,
-        PublicError, ANSWER_LIMIT, ELLIPSIS,
+        bind_address, derive_name, discover_at, egress_address, output_path, public_address,
+        Discovery, PublicError, ANSWER_LIMIT, ELLIPSIS, PUBLIC_FALLBACK,
     };
     use crate::record::SourceKind;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -477,31 +516,14 @@ mod tests {
         );
     }
 
-    /// A source that the user named opens no socket, and the record marks it an
-    /// override.
-    #[test]
-    fn a_source_that_the_user_named_is_an_override() {
-        let named = address(SOURCE);
-        let label = discover(Some(named), LOOPBACK).expect("a named source opens no socket");
-        assert_eq!(label.addr, named);
-        assert_eq!(label.kind, SourceKind::Override);
-    }
-
-    /// A run that names no source reads the egress address, and the record
-    /// marks it local. The target is the loopback, so the test touches no
-    /// network.
-    #[test]
-    fn no_named_source_gives_the_local_egress_address() {
-        let label = discover(None, LOOPBACK).expect("every machine holds a loopback route");
-        assert_eq!(label.addr, LOOPBACK);
-        assert_eq!(label.kind, SourceKind::Local);
-    }
-
     /// The address that a mock service answers with.
     ///
     /// 203.0.113.0/24 is TEST-NET-3, which the registries hold for
     /// documentation, so no machine of the internet carries this address.
     const PUBLIC_ADDRESS: &str = "203.0.113.7";
+
+    /// The name that the public address and the plain destination derive.
+    const PUBLIC_NAME: &str = "203.0.113.7-example.com.jsonl";
 
     /// The method of the one request that the lookup makes.
     const GET: &str = "GET";
@@ -520,6 +542,11 @@ mod tests {
 
     /// How many requests one lookup makes. One lookup asks once.
     const ONE_REQUEST: usize = 1;
+
+    /// How many requests a search that names its source makes.
+    ///
+    /// Such a search reads no service, so it makes none.
+    const NO_REQUEST: usize = 0;
 
     /// The timeout of a test that reads a service that answers at once.
     ///
@@ -674,6 +701,148 @@ mod tests {
         assert!(
             message.chars().count() < body.chars().count(),
             "the message is shorter than the answer: {message}"
+        );
+    }
+
+    /// Runs the search for the source against a mock service that answers one
+    /// GET of its root with a status and a body.
+    ///
+    /// `requests` is how many requests the search must make. `Mock::assert`
+    /// reads that count when the search returns, so a search that asks the
+    /// service twice, or that asks it at all when the count is zero, fails the
+    /// test. The count is what proves the order of the three steps, because a
+    /// search that asks the service and then throws the answer away gives the
+    /// same label as one that never asks.
+    ///
+    /// The target is the loopback, so the step that reads the local egress
+    /// address opens a socket of the loopback and touches no network. The mock
+    /// service binds the loopback too, and it asks the operating system for a
+    /// port, so two copies of one test that run at the same time take two ports
+    /// and never collide. No test of the search reaches the service that
+    /// `PUBLIC_SERVICE` names.
+    fn search_of(
+        named: Option<IpAddr>,
+        status: usize,
+        body: &str,
+        requests: usize,
+    ) -> std::io::Result<Discovery> {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock(GET, ROOT)
+            .with_status(status)
+            .with_body(body)
+            .expect(requests)
+            .create();
+        let found = discover_at(named, LOOPBACK, &server.url(), TEST_TIMEOUT);
+        mock.assert();
+        found
+    }
+
+    /// A source that the user named wins over both lookups. The record marks it
+    /// an override, the search asks no service, and it opens no socket.
+    ///
+    /// The mock service of this test answers an address, and the result holds
+    /// no part of that answer. A search that asks the service first pays a
+    /// request, and a timeout, for an address that it then throws away.
+    #[test]
+    fn a_source_that_the_user_named_is_an_override() {
+        let named = address(SOURCE);
+        let found = search_of(Some(named), OK, PUBLIC_ADDRESS, NO_REQUEST)
+            .expect("a named source opens no socket");
+        assert_eq!(found.label.addr, named);
+        assert_eq!(found.label.kind, SourceKind::Override);
+        assert_eq!(
+            found.note, None,
+            "a search that needed no fallback carries no warning"
+        );
+    }
+
+    /// A service that answers an address makes that address the source, and the
+    /// record marks it public.
+    ///
+    /// Without this step the record names an address of a local interface,
+    /// which every machine behind one router shares with the others, so two
+    /// machines of one house record to one file.
+    #[test]
+    fn a_service_that_answers_an_address_gives_the_public_source() {
+        let found = search_of(None, OK, PUBLIC_ADDRESS, ONE_REQUEST)
+            .expect("the mock service answers an address");
+        assert_eq!(found.label.addr, address(PUBLIC_ADDRESS));
+        assert_eq!(found.label.kind, SourceKind::Public);
+        assert_eq!(
+            found.note, None,
+            "a search that needed no fallback carries no warning"
+        );
+    }
+
+    /// A run that names no source, and that reads no public address, records
+    /// the local egress address, and the record marks it local.
+    ///
+    /// The service of this test answers the status of an error, and the target
+    /// is the loopback, so the test touches no network. Without this step a
+    /// machine on a captive network, or on a network with no route out, records
+    /// nothing at all.
+    #[test]
+    fn no_named_source_gives_the_local_egress_address() {
+        let found = search_of(None, SERVER_ERROR, PUBLIC_ADDRESS, ONE_REQUEST)
+            .expect("every machine holds a loopback route");
+        assert_eq!(found.label.addr, LOOPBACK);
+        assert_eq!(found.label.kind, SourceKind::Local);
+    }
+
+    /// A search that fell back to the local egress address names the reason and
+    /// names what it did.
+    ///
+    /// The service of this test answers text that is not an address, so the
+    /// note carries that text. A note that names only the reason leaves a
+    /// reader to guess which address the file then holds.
+    #[test]
+    fn a_service_that_answers_no_address_falls_back_and_says_why() {
+        let found = search_of(None, OK, NOT_AN_ADDRESS, ONE_REQUEST)
+            .expect("every machine holds a loopback route");
+        assert_eq!(found.label.addr, LOOPBACK);
+        assert_eq!(found.label.kind, SourceKind::Local);
+        let note = found.note.expect("a search that fell back carries a note");
+        assert!(
+            note.contains(NOT_AN_ADDRESS),
+            "the note names the reason: {note}"
+        );
+        assert!(
+            note.contains(PUBLIC_FALLBACK),
+            "the note names what the run recorded in its place: {note}"
+        );
+    }
+
+    /// One run asks the public service once, and one run therefore writes one
+    /// warning.
+    ///
+    /// The service of this test fails, because the warning belongs to the run
+    /// that falls back. A search that asks once a round pays a request, and a
+    /// timeout, for every round of a run that lasts for hours, and it writes
+    /// that warning once a round. The count of requests that `search_of` reads
+    /// is the proof.
+    #[test]
+    fn one_search_asks_the_public_service_once() {
+        let found = search_of(None, SERVER_ERROR, PUBLIC_ADDRESS, ONE_REQUEST)
+            .expect("every machine holds a loopback route");
+        assert!(
+            found.note.is_some(),
+            "the search fell back, so it carries the one warning of the run"
+        );
+    }
+
+    /// The derived name carries the label that won.
+    ///
+    /// A run that reads a public address keeps one file for that address across
+    /// many runs, and the name loses the characters that a file name must not
+    /// hold, as every derived name does.
+    #[test]
+    fn the_derived_name_carries_the_public_source_that_won() {
+        let found = search_of(None, OK, PUBLIC_ADDRESS, ONE_REQUEST)
+            .expect("the mock service answers an address");
+        assert_eq!(
+            output_path(None, found.label.addr, DESTINATION),
+            PathBuf::from(PUBLIC_NAME)
         );
     }
 }

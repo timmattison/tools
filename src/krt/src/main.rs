@@ -910,7 +910,7 @@ fn unspecified_of(target: IpAddr) -> IpAddr {
 /// captive network and a network with no route out both still record.
 fn source_of(named: Option<IpAddr>, target: IpAddr) -> SourceLabel {
     match source::discover(named, target) {
-        Ok(label) => label,
+        Ok(discovery) => discovery.label,
         Err(error) => {
             eprintln!("{PROGRAM}: the source address did not read: {error}. {SOURCE_FALLBACK}");
             SourceLabel {
