@@ -19,6 +19,7 @@ mod stats;
 #[cfg(test)]
 mod testing;
 mod trace;
+mod ui;
 
 use buildinfo::version_string;
 use chrono::Utc;
