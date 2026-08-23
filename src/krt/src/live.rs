@@ -361,8 +361,16 @@ impl<W: Write, K: Keys> Table<W, K> {
 
 impl<W: Write, K: Keys> Screen for Table<W, K> {
     fn poll(&mut self) -> bool {
+        let commands = self.keys.presses();
+        // A turn of no key leaves the frame that stands. The run loop polls
+        // ten times each second, and a draw of every turn would clear the
+        // screen and paint it again at that rate. The table would flicker, and
+        // no key of the reader asked for anything.
+        if commands.is_empty() {
+            return false;
+        }
         let mut quit = false;
-        for command in self.keys.presses() {
+        for command in commands {
             // Every command of the turn acts, and the loop does not stop at
             // the stop: a turn that took `p` and then `q` holds the table and
             // stops the run.
