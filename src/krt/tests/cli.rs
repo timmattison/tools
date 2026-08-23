@@ -46,6 +46,28 @@ const STATUS_WORDS: [&str; 3] = ["clean", "dirty", UNKNOWN];
 /// The name of the command that folds a recorded file.
 const REPLAY: &str = "replay";
 
+/// The flag that asks for the long help.
+const FLAG_HELP: &str = "--help";
+
+/// The heading that `clap` writes above the forms of the command line.
+const USAGE_HEADING: &str = "Usage:";
+
+/// Every mark of a claim about `krt` at one moment of its build history.
+///
+/// A help page describes the tool. A sentence that describes the build of the
+/// day instead goes stale as soon as the next slice lands, and a reader of the
+/// help has no way to know that it went stale. Each entry names one way that
+/// English carries a claim of that kind.
+const PASSING_STATE_MARKERS: [&str; 7] = [
+    "yet",
+    "for now",
+    "currently",
+    "at present",
+    "so far",
+    "this build",
+    "later slice",
+];
+
 /// The exit code of a run that stopped before it recorded anything.
 const EXIT_FAILURE: i32 = 1;
 
@@ -138,6 +160,49 @@ fn assert_flag_prints_the_build_string(flag: &str) {
 fn version_flags_report_the_build_string() {
     assert_flag_prints_the_build_string("--version");
     assert_flag_prints_the_build_string("-V");
+}
+
+/// The help page names no part of `krt` that does not exist.
+///
+/// The sentence that this test removed said that no tracer exists yet, and it
+/// said so in the long help, which is the first text a user reads. A test that
+/// read for that one sentence would pass again as soon as somebody reworded
+/// it, so this test reads for the class of the claim instead: a help page tells
+/// a reader what the tool does, and it never tells a reader what the build of
+/// one moment does not do.
+///
+/// The match is a substring match of the lowercased page, and it is generous on
+/// purpose. A marker that catches an innocent sentence fails loudly, and the
+/// correction takes one minute. A marker that misses a stale sentence reports
+/// clean, and a clean report for the wrong reason is the one failure that
+/// nobody sees.
+///
+/// The test reads the whole page and not the one paragraph, because a stale
+/// claim costs the same wherever a user meets it. It reads the usage heading
+/// first, so a binary that printed nothing fails here in the place of passing
+/// every assertion below it.
+#[test]
+fn the_long_help_names_no_part_of_the_tool_that_does_not_exist() {
+    let result = run(&[FLAG_HELP]);
+    assert!(
+        result.success,
+        "`krt {FLAG_HELP}` must exit with success; stderr: {}",
+        result.stderr
+    );
+    assert!(
+        result.stdout.contains(USAGE_HEADING),
+        "`krt {FLAG_HELP}` must print a help page, but it printed {:?}",
+        result.stdout
+    );
+
+    let page = result.stdout.to_lowercase();
+    for marker in PASSING_STATE_MARKERS {
+        assert!(
+            !page.contains(marker),
+            "the help page must describe `krt` and never the build of one moment, but it holds `{marker}`: {}",
+            result.stdout
+        );
+    }
 }
 
 /// The block that `krt 1.2.3.4 -6` prints before it stops.
