@@ -20,6 +20,25 @@ use std::collections::VecDeque;
 )]
 const RECENT_CAPACITY: usize = 60;
 
+/// Reads a count as the number that an arithmetic of this module takes.
+///
+/// The mean, the loss, and the share each divide by a count, so each of them
+/// needs the count as a number with a fraction.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "an `f64` holds every whole number below 2^53, and a probe run counts one answer for one TTL of one round, so no count of a run reaches that point"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the replay slice of issue #369 wires the fold into `krt replay`, so the tests of this module are the one reader today"
+    )
+)]
+fn count_as_f64(count: u64) -> f64 {
+    count as f64
+}
+
 /// The statistics of one key, over the round-trip times it observed.
 ///
 /// A key is one TTL of the path, or one address that answered at a TTL.
@@ -52,6 +71,13 @@ pub(crate) struct HopStats {
 
 impl HopStats {
     /// Folds one more round-trip time into the statistics.
+    ///
+    /// The mean and the standard deviation come from Welford's online
+    /// algorithm. The algorithm holds the mean and the sum of the squared
+    /// distances in constant memory, and it stays stable over millions of
+    /// samples. A naive sum of the squares loses precision on a long run,
+    /// because that sum grows large while the distances between the samples
+    /// stay small.
     #[cfg_attr(
         not(test),
         expect(
@@ -60,7 +86,27 @@ impl HopStats {
         )
     )]
     fn observe(&mut self, rtt_ms: f64) {
-        todo!("the fold of one round-trip time arrives with the green step: {rtt_ms}")
+        self.recv += 1;
+        self.previous = self.last;
+        self.last = Some(rtt_ms);
+        self.min = Some(self.min.map_or(rtt_ms, |min| min.min(rtt_ms)));
+        self.max = Some(self.max.map_or(rtt_ms, |max| max.max(rtt_ms)));
+
+        // Welford's online algorithm. The mean moves toward the new sample by
+        // one part in the count, and the sum of the squared distances takes the
+        // product of the distance from the old mean and the distance from the
+        // new one.
+        let count = count_as_f64(self.recv);
+        let from_old_mean = rtt_ms - self.mean;
+        self.mean += from_old_mean / count;
+        self.m2 += from_old_mean * (rtt_ms - self.mean);
+
+        // The buffer holds a bounded amount of memory, so a run of any length
+        // holds the same amount.
+        if self.recent.len() == RECENT_CAPACITY {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(rtt_ms);
     }
 
     /// The number of round-trip times that the key observed.
@@ -72,7 +118,7 @@ impl HopStats {
         )
     )]
     pub(crate) fn recv(&self) -> u64 {
-        todo!("the count arrives with the green step")
+        self.recv
     }
 
     /// The most recent round-trip time. A key with no sample holds none.
@@ -84,7 +130,7 @@ impl HopStats {
         )
     )]
     pub(crate) fn last(&self) -> Option<f64> {
-        todo!("the most recent round-trip time arrives with the green step")
+        self.last
     }
 
     /// The smallest round-trip time. A key with no sample holds none.
@@ -96,7 +142,7 @@ impl HopStats {
         )
     )]
     pub(crate) fn min(&self) -> Option<f64> {
-        todo!("the smallest round-trip time arrives with the green step")
+        self.min
     }
 
     /// The arithmetic mean of the round-trip times. A key with no sample holds
@@ -109,7 +155,7 @@ impl HopStats {
         )
     )]
     pub(crate) fn avg(&self) -> Option<f64> {
-        todo!("the mean arrives with the green step")
+        (self.recv > 0).then_some(self.mean)
     }
 
     /// The largest round-trip time. A key with no sample holds none.
@@ -121,7 +167,7 @@ impl HopStats {
         )
     )]
     pub(crate) fn max(&self) -> Option<f64> {
-        todo!("the largest round-trip time arrives with the green step")
+        self.max
     }
 
     /// The population standard deviation of the round-trip times. A key with no
@@ -134,7 +180,7 @@ impl HopStats {
         )
     )]
     pub(crate) fn stddev(&self) -> Option<f64> {
-        todo!("the standard deviation arrives with the green step")
+        (self.recv > 0).then(|| (self.m2 / count_as_f64(self.recv)).sqrt())
     }
 
     /// The absolute difference between the last two round-trip times. A key
@@ -147,7 +193,9 @@ impl HopStats {
         )
     )]
     pub(crate) fn jitter(&self) -> Option<f64> {
-        todo!("the jitter arrives with the green step")
+        let last = self.last?;
+        let previous = self.previous?;
+        Some((last - previous).abs())
     }
 
     /// The last `RECENT_CAPACITY` round-trip times, oldest first.
@@ -159,7 +207,7 @@ impl HopStats {
         )
     )]
     pub(crate) fn recent(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
-        self.recent.iter().skip(self.recent.len()).copied()
+        self.recent.iter().copied()
     }
 }
 
