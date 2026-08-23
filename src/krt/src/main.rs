@@ -1054,6 +1054,21 @@ fn resolver_of(reverse_dns: bool) -> std::io::Result<Box<dyn names::Resolver>> {
     }
 }
 
+/// Reads the configuration that one run records, out of the command line that
+/// the run resolved and the privilege mode that the platform gave.
+///
+/// The `run` record states what the run does, and a reader of a recorded file
+/// takes that statement as the truth. So every field here reads one field of
+/// the resolved command line, and nothing here holds a value of its own.
+///
+/// The `dns` field is the one that a reader is most likely to doubt, because
+/// a file that holds no `name` record reads the same whether `--no-dns` turned
+/// the lookups off or whether no address of the run resolved. The field
+/// separates the two.
+fn run_config(config: &ResolvedConfig, privilege: record::Privilege) -> RunConfig {
+    todo!("the configuration that one run records arrives with the green step: {config:?} {privilege:?}")
+}
+
 /// Records one trace, from the destination of the command line to the record
 /// that closes the run.
 ///
@@ -1120,15 +1135,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         krt: version_string!().to_owned(),
         source,
         target,
-        config: RunConfig {
-            interval_ms: interval_millis(config.interval),
-            protocol: config.protocol,
-            first_ttl: config.first_ttl,
-            max_ttl: config.max_ttl,
-            multipath: config.multipath,
-            privilege,
-            dns: config.reverse_dns,
-        },
+        config: run_config(config, privilege),
         host: host_name(),
     };
 
@@ -1211,11 +1218,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        closing_line, host_name_or, parse_duration, pick_address, resolve_target, source_from,
-        stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason, Family, Multipath,
-        Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, RESOLVE_PORT,
+        closing_line, host_name_or, parse_duration, pick_address, resolve_target, run_config,
+        source_from, stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason, Family,
+        Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, RESOLVE_PORT,
         SOURCE_FALLBACK, UNKNOWN,
     };
+    use crate::record::{Privilege, RunConfig};
     use crate::run::Outcome;
     use crate::source::Discovery;
     use crate::testing::address;
@@ -1249,6 +1257,61 @@ mod tests {
         parse(arguments)
             .resolve()
             .expect("the command line must resolve")
+    }
+
+    /// The configuration that a command line records, under the privilege that
+    /// a probe of this run needs.
+    fn recorded_config(arguments: &[&str], privilege: Privilege) -> RunConfig {
+        run_config(&resolve(arguments), privilege)
+    }
+
+    #[test]
+    fn a_run_that_reads_names_records_that_it_reads_them() {
+        assert!(
+            recorded_config(&["krt", "example.com"], Privilege::Unprivileged).dns,
+            "reverse DNS is on by default, and the record must say so"
+        );
+    }
+
+    #[test]
+    fn the_no_dns_flag_reaches_the_dns_field_of_the_record() {
+        assert!(
+            !recorded_config(&["krt", "example.com", "--no-dns"], Privilege::Unprivileged).dns,
+            "`--no-dns` turns the lookups off, and the record must say so"
+        );
+    }
+
+    #[test]
+    fn every_field_of_the_recorded_config_reads_the_command_line_that_set_it() {
+        let recorded = recorded_config(
+            &[
+                "krt",
+                "example.com",
+                "--interval",
+                "2s",
+                "--first-ttl",
+                "3",
+                "--max-ttl",
+                "9",
+                "--protocol",
+                "udp",
+                "--multipath",
+                "paris",
+            ],
+            Privilege::Privileged,
+        );
+        assert_eq!(
+            recorded,
+            RunConfig {
+                interval_ms: 2000,
+                protocol: Protocol::Udp,
+                first_ttl: 3,
+                max_ttl: 9,
+                multipath: Multipath::Paris,
+                privilege: Privilege::Privileged,
+                dns: true,
+            }
+        );
     }
 
     /// Reads the message of a command line that contradicts itself.
