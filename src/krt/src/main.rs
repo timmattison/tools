@@ -1054,6 +1054,11 @@ fn resolver_of(reverse_dns: bool) -> std::io::Result<Box<dyn names::Resolver>> {
     }
 }
 
+/// The grace that a run gives its names after its last round.
+fn name_grace() -> Duration {
+    run::NAME_GRACE
+}
+
 /// Reads the configuration that one run records, out of the command line that
 /// the run resolved and the privilege mode that the platform gave.
 ///
@@ -1156,7 +1161,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
     let limits = run::Limits {
         rounds: config.rounds,
         deadline: deadline_of(config.duration),
-        name_grace: run::NAME_GRACE,
+        name_grace: name_grace(),
     };
     let mut namer = names::Namer::new(resolver, start.run.clone());
     let mut status = std::io::stdout();
@@ -1227,10 +1232,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        closing_line, host_name_or, parse_duration, pick_address, resolve_target, run_config,
-        source_from, stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason, Family,
-        Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, RESOLVE_PORT,
-        SOURCE_FALLBACK, UNKNOWN,
+        closing_line, host_name_or, name_grace, parse_duration, pick_address, resolve_target,
+        run_config, source_from, stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason,
+        Family, Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel,
+        RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
     };
     use crate::record::{Privilege, RunConfig};
     use crate::run::Outcome;
@@ -1320,6 +1325,22 @@ mod tests {
                 privilege: Privilege::Privileged,
                 dns: true,
             }
+        );
+    }
+
+    /// The grace that a run gives its names is never shorter than the longest
+    /// that one lookup takes.
+    ///
+    /// A grace below the timeout of the resolver drops the name of a hop whose
+    /// name server answers slowly and truly, and the file of the run then holds
+    /// the raw address of that hop.
+    #[test]
+    fn the_grace_of_the_names_outlives_every_lookup_that_can_still_answer() {
+        let grace = name_grace();
+        let timeout = crate::trace::resolver_timeout();
+        assert!(
+            grace >= timeout,
+            "the run gives its names {grace:?}, and one lookup takes up to {timeout:?}"
         );
     }
 

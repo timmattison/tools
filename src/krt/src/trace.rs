@@ -13,12 +13,14 @@
 //! that needs them and holds none stops, and the message names the remedy of
 //! each platform.
 //!
-//! The interface of the wall is one type and two functions. [`TraceConfig`]
+//! The interface of the wall is one type and three functions. [`TraceConfig`]
 //! states one run in the words that `krt` owns, and [`spawn`] starts the
 //! tracer of that run and gives back a receiver of completed rounds.
 //! [`resolver`] gives the reverse resolver of the platform as a
-//! [`crate::names::Resolver`], which is a type that `krt` owns. A caller
-//! outside this module therefore names no type of a trippy crate.
+//! [`crate::names::Resolver`], which is a type that `krt` owns, and
+//! [`resolver_timeout`] gives the longest that one lookup of that resolver
+//! takes, as a [`Duration`]. A caller outside this module therefore names no
+//! type of a trippy crate.
 //!
 //! The conversion is the wall itself. The tracer hands one round over as a
 //! borrowed value that lives for the length of one call, and
@@ -491,7 +493,7 @@ impl crate::names::Resolver for SystemNames {
     }
 }
 
-/// A reverse resolver over the system resolver of the platform.
+/// The configuration of the reverse resolver of a run.
 ///
 /// The configuration is the one that the crate holds by default: the system
 /// resolver, the address families in the order IPv4 and then IPv6, a timeout of
@@ -499,11 +501,31 @@ impl crate::names::Resolver for SystemNames {
 /// resolver, so a lookup of a run reads the same names as every other program
 /// of the machine.
 ///
+/// [`resolver`] and [`resolver_timeout`] both read this one configuration, so a
+/// change of a field moves the resolver and the timeout that `krt` reports
+/// together.
+fn resolver_config() -> trippy_dns::Config {
+    trippy_dns::Config::default()
+}
+
+/// The longest that one reverse lookup of a run takes.
+///
+/// The resolver settles an address when this time runs out, and a settled
+/// address gives its name or gives none. No lookup of a run therefore stays
+/// open past this time.
+pub(crate) fn resolver_timeout() -> Duration {
+    resolver_config().timeout
+}
+
+/// A reverse resolver over the system resolver of the platform.
+///
+/// [`resolver_config`] states the configuration of the resolver.
+///
 /// # Errors
 ///
 /// Returns the reason when the resolver does not start.
 pub(crate) fn resolver() -> std::io::Result<Box<dyn crate::names::Resolver>> {
-    let names = DnsResolver::start(trippy_dns::Config::default())?;
+    let names = DnsResolver::start(resolver_config())?;
     Ok(Box::new(SystemNames { names }))
 }
 
