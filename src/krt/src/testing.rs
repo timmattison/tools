@@ -7,10 +7,10 @@
 //! probed, and the hops that answered.
 //!
 //! The module also holds the fake resolver that a test of the fold and a test
-//! of the run loop both program. The fake stands for one contract: the first
-//! ask of an address starts the lookup, and every ask after it reads the
-//! answer. One copy of the fake holds one statement of that contract, so a
-//! correction to the contract reaches every test of it.
+//! of the run loop both program. The fake is a queue of answers for each
+//! address, not a contract. The first ask of a real resolver starts the
+//! lookup and answers no name, so a test that wants that behavior programs
+//! `Lookup::Pending` first. A test of the fold programs a name first.
 //!
 //! This module compiles under `cfg(test)` alone, so nothing it holds reaches
 //! the binary.
