@@ -223,11 +223,11 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 
 /// Knights of the Round Trip: record the network path to a destination.
 ///
-/// `krt` probes every hop to the destination once per round, and it records
-/// each round in a file. The `replay` command reads a file that an earlier run
-/// wrote, so it takes no destination and no flag of a probe. This build prints
-/// the configuration that a trace resolved, because no tracer exists yet, and
-/// it prints one summary line for a replay.
+/// A trace resolves the destination, opens the recorded file, and probes every
+/// hop to the destination once per round. It appends one record for each round,
+/// and it prints one status line for that round. The `replay` command reads a
+/// file that an earlier run wrote, so it takes no destination and no flag of a
+/// probe.
 #[derive(Parser, Debug)]
 // `args_conflicts_with_subcommands` rejects a flag of a probe beside a command,
 // because a replay probes nothing. `subcommand_negates_reqs` lifts the demand
@@ -344,8 +344,9 @@ enum Command {
 
 /// The configuration of one run, after the command line resolves.
 ///
-/// Every field holds a resolved value and not a flag, so a later slice reads
-/// the behavior of the run and never reads the switch that made it.
+/// Every field holds a resolved value and not a flag, so a reader of the
+/// configuration reads the behavior of the run and never reads the switch that
+/// made it.
 #[derive(Debug)]
 struct ResolvedConfig {
     /// The host or the address to trace. A replay traces nothing, so the
@@ -386,9 +387,8 @@ impl Cli {
     ///
     /// The two flags of the address family collapse into one value, and the
     /// `--no-dns` switch becomes the behavior it controls. The `replay` command
-    /// becomes the recorded file and the run to fold, so every later slice
-    /// reads one flat configuration and never reads the shape of the command
-    /// line.
+    /// becomes the recorded file and the run to fold, so every reader takes one
+    /// flat configuration and never reads the shape of the command line.
     ///
     /// # Errors
     ///
