@@ -8,6 +8,7 @@ description = "Knights of the Round Trip: a Rust tool that records the network p
 buildinfo.workspace = true
 chrono.workspace = true
 clap.workspace = true
+crossterm.workspace = true
 ratatui.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 serde.workspace = true

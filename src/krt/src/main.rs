@@ -13,6 +13,7 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+mod live;
 mod names;
 mod record;
 mod run;

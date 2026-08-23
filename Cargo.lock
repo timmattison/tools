@@ -4563,6 +4563,7 @@ dependencies = [
  "buildinfo",
  "chrono",
  "clap",
+ "crossterm",
  "mockito",
  "ratatui",
  "reqwest",
