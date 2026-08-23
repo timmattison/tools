@@ -851,8 +851,8 @@ fn counted(count: usize, name: &str) -> String {
 /// below the length of the path.
 ///
 /// The design puts the fold in `stats.rs` and the render in `ui.rs`. This
-/// slice builds neither module, so the summary lives here. A later slice
-/// replaces this line with the aggregate table.
+/// slice builds no `ui.rs`, so the summary lives here. A later slice replaces
+/// this line with the aggregate table.
 fn summarize(run: &Run<'_>) -> String {
     let target = run.start().map_or_else(
         || UNKNOWN.to_owned(),
