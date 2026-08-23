@@ -7,6 +7,19 @@
 //! reason this module classifies the keys itself: it is the one part of the
 //! live run that can stop a run that the user asked to stop.
 
+// Nothing outside this module names any item of it. The run loop takes a
+// screen in the next step of this work, and every item below is then live. One
+// attribute stands here, and not one attribute for each item, because the
+// items are dead for one reason: no caller. The expectation fails once the
+// whole module is live, which takes this attribute back off.
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the run loop joins this module in the next step of this work"
+    )
+)]
+
 use crate::record::{NameRecord, RoundRecord};
 use crate::stats::HopTable;
 use crate::ui;
@@ -21,13 +34,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// What one key press asks for.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the tests of this module read the whole table, and the display that acts on a command joins it in the next step of this work. The expectation fails once that display lands, which takes the attribute back off"
-    )
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Command {
     /// Stop the run.
@@ -52,13 +58,6 @@ pub(crate) enum Command {
 /// - `p` holds the display, `n` turns the names on or off, `r` empties the
 ///   table of the display, and `?` shows the list of the keys.
 /// - Every other key means nothing.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the tests of this module read the whole table, and the display that polls the keyboard joins it in the next step of this work. The expectation fails once that display lands, which takes the attribute back off"
-    )
-)]
 pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
     let KeyEvent {
         code,
@@ -161,6 +160,10 @@ impl Keys for NoKeys {
 pub(crate) trait Screen {
     /// Takes the key presses that arrived. Answers whether the user asked the
     /// run to stop.
+    ///
+    /// A turn that took no key draws nothing. The run loop takes ten turns each
+    /// second, and a draw of every turn would clear the screen and paint it
+    /// again at that rate.
     fn poll(&mut self) -> bool;
     /// One round arrived.
     fn round(&mut self, round: &RoundRecord);
@@ -193,18 +196,19 @@ pub(crate) struct RunFacts {
 /// The live table of a run.
 ///
 /// The table folds every round that arrives, and it draws the frame of that
-/// fold. It holds the terminal in raw mode on the alternate screen, so each
-/// draw clears the screen and moves the cursor to the origin first, and every
-/// line ends with a carriage return and a line feed. Raw mode returns no
-/// carriage on a bare line feed, and a frame of bare line feeds walks down the
-/// screen one column further to the right for each line of it.
+/// fold. A run that draws this table holds the terminal in raw mode on the
+/// alternate screen, so each draw clears the screen and moves the cursor to the
+/// origin first, and every line ends with a carriage return and a line feed.
+/// Raw mode returns no carriage on a bare line feed, and a frame of bare line
+/// feeds walks down the screen one column further to the right for each line of
+/// it.
 pub(crate) struct Table<W: Write, K: Keys> {
     /// The facts of the run that the header line names.
     facts: RunFacts,
     /// The name of the recorded file, without its directory.
     file: String,
     /// The fold of every round that arrived.
-    table: HopTable,
+    fold: HopTable,
     /// The host name of each address that a name record named.
     names: BTreeMap<IpAddr, String>,
     /// The map that a table of the raw addresses hands the frame.
@@ -244,7 +248,7 @@ impl<W: Write, K: Keys> Table<W, K> {
         Self {
             file: crate::file_name(&facts.path),
             facts,
-            table: HopTable::new(),
+            fold: HopTable::new(),
             names: BTreeMap::new(),
             nameless: BTreeMap::new(),
             rounds: 0,
@@ -288,7 +292,7 @@ impl<W: Write, K: Keys> Table<W, K> {
                     .ok()
                     .map(|data| data.len()),
             },
-            table: &self.table,
+            table: &self.fold,
             names: if self.named {
                 &self.names
             } else {
@@ -318,7 +322,7 @@ impl<W: Write, K: Keys> Table<W, K> {
                 // one. The names stay: a name belongs to an address and not to
                 // a round, and a reader who emptied the table did not ask to
                 // resolve every address of the path again.
-                self.table = HopTable::new();
+                self.fold = HopTable::new();
                 self.rounds = 0;
             }
             Command::Help => self.help = !self.help,
@@ -385,7 +389,7 @@ impl<W: Write, K: Keys> Screen for Table<W, K> {
     }
 
     fn round(&mut self, round: &RoundRecord) {
-        self.table.observe(round);
+        self.fold.observe(round);
         self.rounds += 1;
         if !self.paused {
             self.draw();
@@ -482,10 +486,12 @@ mod tests {
     /// The name of the recorded file ends that line, and each test builds a
     /// path of its own, so the assertion reads the start of the line and not
     /// the whole of it.
-    const ONE_ROUND_HEADER: &str = " krt  example.com → 93.184.216.34   src 1.2.3.4   round 1   1s   ";
+    const ONE_ROUND_HEADER: &str =
+        " krt  example.com → 93.184.216.34   src 1.2.3.4   round 1   1s   ";
 
     /// The start of the header line of a table that folded no round.
-    const NO_ROUND_HEADER: &str = " krt  example.com → 93.184.216.34   src 1.2.3.4   round 0   1s   ";
+    const NO_ROUND_HEADER: &str =
+        " krt  example.com → 93.184.216.34   src 1.2.3.4   round 0   1s   ";
 
     /// The row of a table that folded one round of one TTL.
     ///
