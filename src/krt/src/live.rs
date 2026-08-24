@@ -140,6 +140,22 @@ fn key_lines() -> Vec<String> {
 /// hold.
 const MORE_MARK: &str = "+";
 
+/// The lines of one frame that a window holds, and the number of rows of the
+/// path that reached that frame.
+///
+/// The count travels with the lines, because a caller that draws an image over
+/// one row of the path must draw no image for a row that went out of the frame.
+/// Such an image would stand over the footer of the frame, or over a line of
+/// another frame, and nothing on the screen would say which row it belongs to.
+/// A caller that counted the rows itself would count the rows of the table and
+/// not the rows of the window.
+struct Fitted {
+    /// The lines of the frame, head first.
+    lines: Vec<String>,
+    /// The number of rows of the path that the frame holds.
+    rows: usize,
+}
+
 /// The lines of one frame that fit a window of `rows` rows.
 ///
 /// The head and the footer stand at every height. The head names the
@@ -161,18 +177,13 @@ const MORE_MARK: &str = "+";
 /// together. A frame that ran past the foot of the window would scroll the
 /// window by the lines that ran past it, and the head of the frame goes off the
 /// top of an alternate screen that keeps no scrollback.
-fn fitted(
-    head: Vec<String>,
-    body: Vec<String>,
-    footer: Vec<String>,
-    rows: Option<u16>,
-) -> Vec<String> {
+fn fitted(head: Vec<String>, body: Vec<String>, footer: Vec<String>, rows: Option<u16>) -> Fitted {
     let budget = rows.map_or(usize::MAX, usize::from);
     let mut lines = head;
     if lines.len() + body.len() + footer.len() <= budget {
         lines.extend(body);
         lines.extend(footer);
-        return lines;
+        return Fitted { lines, rows: 0 };
     }
     // The head, the footer, and the one line that counts the rows which went
     // out of the frame keep their lines. The rows of the path take what is
@@ -187,7 +198,7 @@ fn fitted(
     }
     lines.extend(footer);
     lines.truncate(budget);
-    lines
+    Fitted { lines, rows: 0 }
 }
 
 /// The text between two lines that a draw writes.
@@ -476,7 +487,7 @@ impl<W: Write, K: Keys> Table<W, K> {
         let head: Vec<String> = body
             .drain(..usize::from(ui::HEAD_LINES).min(body.len()))
             .collect();
-        fitted(head, body, self.footer(), self.window.rows)
+        fitted(head, body, self.footer(), self.window.rows).lines
     }
 
     /// The lines that stand under the rows of the path.
@@ -1482,6 +1493,63 @@ mod tests {
             .skip(lines.len().saturating_sub(count))
             .map(String::as_str)
             .collect()
+    }
+
+    /// The lines that stand above the rows of the path of a fitted frame.
+    fn a_head() -> Vec<String> {
+        (0..HEAD_LINES).map(|line| format!("head {line}")).collect()
+    }
+
+    /// One row of the path for each of `count` TTLs.
+    fn a_body(count: usize) -> Vec<String> {
+        (0..count).map(|row| format!("row {row}")).collect()
+    }
+
+    /// The number of rows of the path that the frames below hold.
+    const A_PATH: usize = 8;
+
+    /// The number of rows of a window that holds the whole of that path.
+    const A_TALL_WINDOW: u16 = 24;
+
+    /// The number of rows of a window too short for that path.
+    ///
+    /// The head takes three of these rows and the line that counts the rows
+    /// which went out of the frame takes one, so two rows of the path stand.
+    const A_SHORT_WINDOW: u16 = 6;
+
+    /// The number of rows of the path that a window of [`A_SHORT_WINDOW`] rows
+    /// holds.
+    const KEPT_ROWS: usize = 2;
+
+    #[test]
+    fn a_frame_that_its_window_holds_whole_keeps_every_row_of_the_path() {
+        let fitted = super::fitted(a_head(), a_body(A_PATH), Vec::new(), Some(A_TALL_WINDOW));
+
+        assert_eq!(
+            fitted.lines.len(),
+            HEAD_LINES + A_PATH,
+            "the frame holds its head and every row of the path: {:?}",
+            fitted.lines
+        );
+        assert_eq!(
+            fitted.rows, A_PATH,
+            "and it says that every row of the path reached it"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_dropped_rows_counts_the_rows_that_reached_it() {
+        // A caller that draws an image over one row of the path must draw no
+        // image for a row that went out of the frame. Such an image would stand
+        // over the footer of the frame, and nothing on the screen would say
+        // which row it belongs to.
+        let fitted = super::fitted(a_head(), a_body(A_PATH), Vec::new(), Some(A_SHORT_WINDOW));
+
+        assert_eq!(
+            fitted.rows, KEPT_ROWS,
+            "the count names the rows of the path that the window held: {:?}",
+            fitted.lines
+        );
     }
 
     #[test]
