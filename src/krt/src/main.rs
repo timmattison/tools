@@ -3,16 +3,19 @@
 //!
 //! A command line that names a destination prints the configuration that it
 //! resolved, opens the recorded file, starts the tracer, and appends one record
-//! for each round until a limit stops the run. It prints one status line for
-//! each round. The `replay` command reads a recorded file, folds one run of it,
-//! and prints the table of that path: a header line that names the run, and one
-//! row for each TTL. A later slice gives the live run that same table in the
-//! place of its status lines.
+//! for each round until a limit stops the run. A run that holds a terminal
+//! draws the live table of that path and takes the keys of the terminal. A run
+//! whose standard output is a pipe or a file, and a run that `--headless`
+//! asked, print one status line each minute in the place of the table. The
+//! `replay` command reads a recorded file, folds one run of it, and prints the
+//! table of that path: a header line that names the run, and one row for each
+//! TTL.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+mod live;
 mod names;
 mod record;
 mod run;
@@ -32,6 +35,7 @@ use record::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::IsTerminal;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -145,6 +149,10 @@ const ROUND: &str = "round";
 /// The name of one TTL that answered, in the status line of one round.
 const HOP: &str = "hop";
 
+/// The name of one row of a table, in the line that counts the rows which a
+/// window too short left out of a frame.
+const ROW: &str = "row";
+
 /// The last field of the status line of one round that reached the target.
 const REACHED: &str = "reached";
 
@@ -246,10 +254,20 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 /// Knights of the Round Trip: record the network path to a destination.
 ///
 /// A trace resolves the destination, opens the recorded file, and probes every
-/// hop to the destination once per round. It appends one record for each round,
-/// and it prints one status line for that round. The `replay` command reads a
-/// file that an earlier run wrote, so it takes no destination and no flag of a
-/// probe.
+/// hop to the destination once per round. It appends one record for each round.
+/// A run under a terminal draws the live table of that path, and it takes the
+/// keys of the terminal. The `?` key shows the list of those keys under the
+/// table. A run whose standard output is a pipe or a file, and a run that
+/// `--headless` asked, print one status line each minute. The `replay` command
+/// reads a file that an earlier run wrote, so it takes no destination and no
+/// flag of a probe.
+// The help names the `?` key and no other key of the live table, because
+// `live::KEYS` is the one list that says what a key does and a doc comment of
+// `clap` is a string literal that reads that list at no time. A help page that
+// named all five keys would be a second list of them, and the second list
+// drifts. One key name opens the first list from inside the table, and
+// `live::tests::the_long_help_names_the_key_that_lists_the_keys` holds that
+// name and the list together.
 #[derive(Parser, Debug)]
 // `args_conflicts_with_subcommands` rejects a flag of a probe beside a command,
 // because a replay probes nothing. `subcommand_negates_reqs` lifts the demand
@@ -329,7 +347,7 @@ struct Cli {
     #[arg(long, value_name = "IP")]
     source: Option<IpAddr>,
 
-    /// No table. Print one status line per minute.
+    /// No table and no keys. Print one status line per minute.
     #[arg(long)]
     headless: bool,
 
@@ -747,8 +765,9 @@ fn stop_flag() -> std::io::Result<Arc<AtomicBool>> {
 /// A flag that a termination signal sets.
 ///
 /// This platform registers no handler, so nothing sets the flag. The user of
-/// this platform stops a run through the key handler of the table, and the
-/// table arrives in a later slice of issue #372.
+/// this platform stops a run with the `q` key or with Ctrl-C, which the key
+/// handler of the live table reads. A run of this platform that draws no table
+/// reads no key, and only a limit of the command line stops such a run.
 ///
 /// # Errors
 ///
@@ -1088,6 +1107,35 @@ fn run_config(config: &ResolvedConfig, privilege: record::Privilege) -> RunConfi
     }
 }
 
+/// The screen that a run shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Display {
+    /// The live table of the path, which holds the terminal and reads its keys.
+    Table,
+    /// One status line each minute, and no table.
+    Headless,
+}
+
+/// The screen that a run shows, from the `--headless` flag and from whether
+/// standard output is a terminal.
+///
+/// The table holds the terminal in raw mode on the alternate screen, and it
+/// draws one whole frame for each round. A run whose standard output is a pipe
+/// or a file has no terminal to hold, no key to read, and no screen to clear,
+/// and a table there writes one whole frame into that file for each round. Such
+/// a run therefore takes the headless screen, which writes one line each
+/// minute. `--headless` asks for that same line from a run that does hold a
+/// terminal.
+///
+/// The read of the terminal stands apart from this decision, so a test names
+/// the answer of a terminal without a terminal to name it with.
+fn display_of(headless: bool, is_terminal: bool) -> Display {
+    if headless || !is_terminal {
+        return Display::Headless;
+    }
+    Display::Table
+}
+
 /// Records one trace, from the destination of the command line to the record
 /// that closes the run.
 ///
@@ -1099,6 +1147,12 @@ fn run_config(config: &ResolvedConfig, privilege: record::Privilege) -> RunConfi
 /// so a run that cannot start its resolver makes no file and prints no path.
 /// The recorded file opens before the tracer starts, so no probe leaves the
 /// machine for a run that cannot record it.
+///
+/// The screen comes last of all, after every step that can print a line and
+/// after every step that can stop the run. A live table takes the terminal and
+/// draws on the alternate screen, and a screen that stood in front of those
+/// steps would put each of their lines on a screen that the drop of the guard
+/// then takes away.
 ///
 /// # Errors
 ///
@@ -1170,25 +1224,91 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         name_grace: name_grace(),
     };
     let mut namer = names::Namer::new(resolver, start.run.clone());
-    let mut status = std::io::stdout();
-    let outcome = run::record(
-        &start,
-        &rounds,
-        &limits,
-        &|| user_stopped(&flag),
-        &mut namer,
-        &mut writer,
-        &mut status,
-    )
-    .map_err(|error| {
-        let code = match error {
-            run::RunError::Write(_) => EXIT_WRITE_FAILED,
-            run::RunError::Tracer { .. } => EXIT_TRACER_FAILED,
-        };
-        TraceFailure::new(&error, code)
-    })?;
+
+    // The screen and the guard stand in a scope of their own, and the closing
+    // line stands under it. The guard drops at the end of the scope, which
+    // takes the alternate screen away and puts the lines of the reader back. A
+    // line that printed in front of that drop lands on the alternate screen,
+    // and the drop then takes the screen away with the line on it.
+    let outcome = {
+        // `_guard` is a name, and a name holds the guard for the whole scope.
+        // A bare `_` in its place drops the guard where it stands, which gives
+        // the terminal back before the first frame draws on it. The two spell
+        // almost the same, and one of them is a defect.
+        let (mut screen, _guard) = screen_of(config, &start, &path)?;
+        run::record(
+            &start,
+            &rounds,
+            &limits,
+            &|| user_stopped(&flag),
+            &mut namer,
+            &mut writer,
+            screen.as_mut(),
+        )
+        .map_err(|error| {
+            let code = match error {
+                run::RunError::Write(_) => EXIT_WRITE_FAILED,
+                run::RunError::Tracer { .. } => EXIT_TRACER_FAILED,
+            };
+            TraceFailure::new(&error, code)
+        })?
+    };
     println!("{}", closing_line(&outcome, &path));
     Ok(outcome)
+}
+
+/// The screen of one run, and the hold that screen takes on the terminal.
+///
+/// The table holds the terminal, so it travels with the guard that gives that
+/// terminal back. The headless screen holds nothing, and its guard is `None`.
+/// The caller binds both, and every way out of the run then drops the guard:
+/// the stop that the user asked for, the fault that ends the run early, and the
+/// panic that nobody asked for.
+///
+/// The guard comes before the table, because the table draws into the terminal
+/// that the guard takes.
+///
+/// The table takes the columns and the rows of that terminal one time, at the
+/// start of the run. A window that changes size while the run stands leaves the
+/// frame at the size it started with.
+///
+/// # Errors
+///
+/// Returns the reason and [`EXIT_FAILURE`] when the terminal refused the hold.
+/// A terminal that will not go into raw mode reads no key of the user, and a
+/// run that drew a table on it would stop for nothing that the user pressed.
+fn screen_of(
+    config: &ResolvedConfig,
+    start: &RunRecord,
+    path: &Path,
+) -> Result<(Box<dyn live::Screen>, Option<live::TerminalGuard>), TraceFailure> {
+    if display_of(config.headless, std::io::stdout().is_terminal()) == Display::Headless {
+        return Ok((
+            Box::new(live::Headless::new(std::io::stdout(), live::SystemClock)),
+            None,
+        ));
+    }
+    let guard = live::TerminalGuard::enter().map_err(|error| {
+        TraceFailure::new(
+            &format!("the live table did not take the terminal: {error}"),
+            EXIT_FAILURE,
+        )
+    })?;
+    let facts = live::RunFacts {
+        destination: start.target.arg.clone(),
+        address: start.target.addr,
+        source: start.source.addr,
+        interval: config.interval,
+        path: path.to_owned(),
+    };
+    let (columns, rows) = ui::frame_size();
+    let table = live::Table::new(
+        facts,
+        std::io::stdout(),
+        live::Keyboard,
+        live::Window::new(columns, rows),
+    );
+    Ok((Box::new(table), Some(guard)))
 }
 
 fn main() {
@@ -1238,10 +1358,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        closing_line, host_name_or, name_grace, parse_duration, pick_address, resolve_target,
-        run_config, source_from, stop_reason, user_stopped, AddressFamily, Cli, Command, EndReason,
-        Family, Multipath, Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel,
-        RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
+        closing_line, display_of, host_name_or, name_grace, parse_duration, pick_address,
+        resolve_target, run_config, source_from, stop_reason, user_stopped, AddressFamily, Cli,
+        Command, Display, EndReason, Family, Multipath, Protocol, ResolveError, ResolvedConfig,
+        SourceKind, SourceLabel, RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
     };
     use crate::record::{Privilege, RunConfig};
     use crate::run::Outcome;
@@ -2125,6 +2245,34 @@ resolved configuration:
         let cli = parse(&["krt", "example.com", "--no-dns", "--headless"]);
         assert!(cli.no_dns);
         assert!(cli.headless);
+    }
+
+    #[test]
+    fn a_run_shows_the_table_only_under_a_terminal_that_the_headless_flag_left_alone() {
+        assert_eq!(
+            display_of(false, true),
+            Display::Table,
+            "a run that holds a terminal and took no flag draws the live table"
+        );
+        assert_eq!(
+            display_of(true, true),
+            Display::Headless,
+            "the flag takes the table off a run that does hold a terminal"
+        );
+        // A run whose standard output is a pipe or a file has no terminal to
+        // hold, no key to read, and no screen to clear. A table there writes
+        // one whole frame into that file for each round, where one line each
+        // minute says the same thing in four lines an hour.
+        assert_eq!(
+            display_of(false, false),
+            Display::Headless,
+            "a run that holds no terminal draws no table"
+        );
+        assert_eq!(
+            display_of(true, false),
+            Display::Headless,
+            "and the flag leaves such a run where it stands"
+        );
     }
 
     #[test]

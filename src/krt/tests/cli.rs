@@ -214,6 +214,48 @@ fn the_long_help_names_no_part_of_the_tool_that_does_not_exist() {
     }
 }
 
+/// The key of the live table that lists every key of that table, as the help
+/// page writes it.
+///
+/// The backticks are part of the match. The help page writes the name of a
+/// flag and the name of a command in backticks, so the three characters
+/// together name a key and one bare question mark does not.
+const KEY_THAT_LISTS_THE_KEYS: &str = "`?`";
+
+/// The help page names the key that lists the keys of the live table.
+///
+/// The help page says that a run under a terminal takes the keys of that
+/// terminal, and the list of those keys stands behind a key press. A reader
+/// who learns that keys exist and reads the name of no key has no way to reach
+/// that list. One key name in the help page opens it.
+///
+/// The help page names that one key and no other, because `live::KEYS` is the
+/// one list that says what a key does. `live::tests` holds the name in this
+/// test and that list together.
+///
+/// The test reads the usage heading first, so a binary that printed nothing
+/// fails there in the place of the assertion below it.
+#[test]
+fn the_long_help_names_the_key_that_lists_the_keys() {
+    let result = run(&[FLAG_HELP]);
+    assert!(
+        result.success,
+        "`krt {FLAG_HELP}` must exit with success; stderr: {}",
+        result.stderr
+    );
+    assert!(
+        result.stdout.contains(USAGE_HEADING),
+        "`krt {FLAG_HELP}` must print a help page, but it printed {:?}",
+        result.stdout
+    );
+
+    assert!(
+        result.stdout.contains(KEY_THAT_LISTS_THE_KEYS),
+        "the help page must name {KEY_THAT_LISTS_THE_KEYS} as the key that lists the keys of the live table, but it printed {:?}",
+        result.stdout
+    );
+}
+
 /// The block that `krt 1.2.3.4 -6` prints before it stops.
 ///
 /// A trace prints the block that names what it will do, and then it acts. This

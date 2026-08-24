@@ -1,6 +1,6 @@
 //! The run loop: the record that opens a run, one record for each name that a
 //! reverse lookup gave, one record for each round, the record that closes it,
-//! and one status line for each round.
+//! and the screen that shows the run while it stands.
 //!
 //! A reverse lookup takes a time that no round waits for, so the loop asks the
 //! namer of `names.rs` on every turn and writes whatever the namer hands back.
@@ -22,12 +22,11 @@
 //! recording is the whole purpose of the tool, and a run that keeps a display
 //! while it silently records nothing is worse than a run that stops.
 
+use crate::live::Screen;
 use crate::names::Namer;
 use crate::record::{
     EndReason, EndRecord, NameRecord, Record, RoundRecord, RunId, RunRecord, Writer,
 };
-use crate::ui::render_duration;
-use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
 use chrono::Utc;
 use std::io::Write;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -87,9 +86,11 @@ pub(crate) enum RunError {
 /// Records one run: the record that opens it, one record for each round, and
 /// the record that closes it.
 ///
-/// `stop` answers whether the user asked the run to stop. The loop asks it once
-/// at the top of each turn, before it reads a round, so a run that the user
-/// stops records no further round.
+/// `stop` answers whether the user asked the run to stop, and the ask of
+/// `screen` answers the same question. The loop asks both once at the top of
+/// each turn, before it reads a round, so a run that the user stops records no
+/// further round. The ask of the screen also draws that screen, which is why one
+/// turn asks one time.
 ///
 /// The `run` record goes first, and a fault there stops the run before it reads
 /// anything. Each round that arrives becomes one `round` record. The `end`
@@ -107,7 +108,9 @@ pub(crate) enum RunError {
 /// that the last round reported arrives after that round, and this last ask is
 /// what puts it in the file.
 ///
-/// Each round that the run records also prints one status line to `status`.
+/// Each round that the run records also reaches `screen`, and the recording
+/// comes first: a round reaches the file before it reaches the screen, so a
+/// screen that fails loses one frame and no record.
 ///
 /// A failed write of any record stops the run. The recording is the whole
 /// purpose of the tool, and a run that keeps a display while it silently
@@ -117,21 +120,24 @@ pub(crate) enum RunError {
 ///
 /// Returns [`RunError::Write`] when a record does not reach the file, and
 /// [`RunError::Tracer`] when the tracer thread stops before a limit does.
-pub(crate) fn record<W: Write, S: Write>(
+pub(crate) fn record<W: Write>(
     start: &RunRecord,
     rounds: &Receiver<RoundRecord>,
     limits: &Limits,
     stop: &dyn Fn() -> bool,
     namer: &mut Namer,
     writer: &mut Writer<W>,
-    status: &mut S,
+    screen: &mut dyn Screen,
 ) -> Result<Outcome, RunError> {
     writer
         .write(&Record::Run(start.clone()))
         .map_err(RunError::Write)?;
     let mut recorded: u64 = 0;
     loop {
-        if let Some(reason) = stopped(recorded, limits, stop) {
+        // The ask of the screen draws it, so one turn asks one time. The answer
+        // then travels to the decision as a value.
+        let asked = screen.poll();
+        if let Some(reason) = stopped(recorded, limits, stop, asked) {
             drain_names(writer, namer, limits.name_grace)?;
             close(writer, &start.run, recorded, reason)?;
             return Ok(Outcome {
@@ -141,20 +147,20 @@ pub(crate) fn record<W: Write, S: Write>(
         }
         match rounds.recv_timeout(wait(limits.deadline)) {
             Ok(round) => {
-                let line = status_line(&round);
                 // The names that arrived stand before the round of the same
                 // turn. A name always lands on a later turn than the round that
                 // first reported its address, because the first ask of an
                 // address starts the lookup of that address.
-                write_names(writer, namer.names(&round.hops, Utc::now()))?;
+                show_names(writer, screen, &namer.names(&round.hops, Utc::now()))?;
+                // The recording comes first. The round reaches the file before
+                // it reaches the screen, so a screen that fails loses one frame
+                // and no record, and a run whose display the user held still
+                // holds every round in its file. The record takes a copy of the
+                // round, because the screen reads the round after the write.
                 writer
-                    .write(&Record::Round(round))
+                    .write(&Record::Round(round.clone()))
                     .map_err(RunError::Write)?;
-                // A line that does not print stops nothing. The recording is
-                // the purpose of the tool, and the line is one view of it, so a
-                // reader who closes the pipe of the display loses the display
-                // and keeps the recording.
-                drop(writeln!(status, "{line}"));
+                screen.round(&round);
                 recorded += 1;
             }
             // No round arrived inside the wait. The loop takes another turn, so
@@ -162,7 +168,7 @@ pub(crate) fn record<W: Write, S: Write>(
             // finished inside the wait lands here, so a name that arrives
             // between two rounds reaches the file at the moment it arrives.
             Err(RecvTimeoutError::Timeout) => {
-                write_names(writer, namer.names(&[], Utc::now()))?;
+                show_names(writer, screen, &namer.names(&[], Utc::now()))?;
             }
             Err(RecvTimeoutError::Disconnected) => {
                 // The tracer holds the sender for as long as it lives, so a
@@ -184,14 +190,43 @@ pub(crate) fn record<W: Write, S: Write>(
     }
 }
 
-/// Appends one record for each name that arrived.
+/// Appends one record for each name that arrived, and then shows the names.
+///
+/// The record comes first, for the reason that the round of a turn does: the
+/// file is the purpose of the tool, and the screen is one view of it.
+///
+/// A turn of no name shows nothing. The loop takes ten turns each second, and a
+/// live table that took an empty list on each of them would clear the screen and
+/// paint it again at that rate.
 ///
 /// # Errors
 ///
 /// Returns [`RunError::Write`] when a record does not reach the file.
-fn write_names<W: Write>(writer: &mut Writer<W>, names: Vec<NameRecord>) -> Result<(), RunError> {
+fn show_names<W: Write>(
+    writer: &mut Writer<W>,
+    screen: &mut dyn Screen,
+    names: &[NameRecord],
+) -> Result<(), RunError> {
+    write_names(writer, names)?;
+    if !names.is_empty() {
+        screen.names(names);
+    }
+    Ok(())
+}
+
+/// Appends one record for each name that arrived.
+///
+/// Each record holds a copy of one name, because the caller keeps the names for
+/// the screen and the writer takes a whole record.
+///
+/// # Errors
+///
+/// Returns [`RunError::Write`] when a record does not reach the file.
+fn write_names<W: Write>(writer: &mut Writer<W>, names: &[NameRecord]) -> Result<(), RunError> {
     for name in names {
-        writer.write(&Record::Name(name)).map_err(RunError::Write)?;
+        writer
+            .write(&Record::Name(name.clone()))
+            .map_err(RunError::Write)?;
     }
     Ok(())
 }
@@ -208,6 +243,10 @@ fn write_names<W: Write>(writer: &mut Writer<W>, names: Vec<NameRecord>) -> Resu
 /// names that already arrived. Between two asks it sleeps for [`POLL`] at the
 /// longest, and never past the end of the grace.
 ///
+/// The names of the drain reach no screen. The drain runs while the run closes,
+/// and the display of a run that closes shows nothing more. Every one of them
+/// reaches the file, so a replay of that file names the address.
+///
 /// # Errors
 ///
 /// Returns [`RunError::Write`] when a record does not reach the file.
@@ -218,7 +257,7 @@ fn drain_names<W: Write>(
 ) -> Result<(), RunError> {
     let end = Instant::now() + grace;
     loop {
-        write_names(writer, namer.names(&[], Utc::now()))?;
+        write_names(writer, &namer.names(&[], Utc::now()))?;
         if !namer.waits() {
             return Ok(());
         }
@@ -230,37 +269,22 @@ fn drain_names<W: Write>(
     }
 }
 
-/// Writes the one line that a run prints for one round.
-///
-/// The line holds the number of the round, the number of hops that answered,
-/// whether the round reached the target, and the time that the round took. Two
-/// spaces separate the fields, as they do in the closing line of the run.
-///
-/// A hop that did not answer is absent from the record, so the count is the
-/// number of hops that answered and not the length of the path.
-///
-/// A later slice replaces this line with the live table.
-fn status_line(round: &RoundRecord) -> String {
-    let reached = if round.reached {
-        REACHED
-    } else {
-        NEVER_REACHED
-    };
-    [
-        format!("{ROUND} {}", round.seq),
-        counted(round.hops.len(), HOP),
-        reached.to_owned(),
-        render_duration(Duration::from_millis(round.dur_ms)),
-    ]
-    .join(SUMMARY_SEPARATOR)
-}
-
 /// Why the run stops at the top of this turn. A run that goes on stops for
 /// nothing.
 ///
-/// The user comes first, then the number of rounds, then the moment.
-fn stopped(recorded: u64, limits: &Limits, stop: &dyn Fn() -> bool) -> Option<EndReason> {
-    if stop() {
+/// `asked` is what the screen of this turn answered. The ask of a screen draws
+/// it, so the turn asks one time and hands the answer here as a value.
+///
+/// The user comes first, then the number of rounds, then the moment. The screen
+/// and the stop flag are two doors of the same user: the key of a live table and
+/// the signal of a headless run both give [`EndReason::Quit`].
+fn stopped(
+    recorded: u64,
+    limits: &Limits,
+    stop: &dyn Fn() -> bool,
+    asked: bool,
+) -> Option<EndReason> {
+    if asked || stop() {
         return Some(EndReason::Quit);
     }
     if limits.rounds.is_some_and(|limit| recorded >= limit) {
@@ -309,15 +333,17 @@ fn close<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{record, Limits, Outcome, RunError};
+    use crate::live::{Command, RunFacts, Screen, Table, Window};
     use crate::names::{Lookup, Namer, NoLookups};
     use crate::record::{
         EndReason, EndRecord, Family, Hop, NameRecord, Privilege, Record, Recording, RoundRecord,
         RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange, Writer,
     };
-    use crate::testing::{address, named, FakeResolver};
+    use crate::testing::{address, named, FakeKeys, FakeResolver};
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};
     use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use std::fs;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
@@ -387,15 +413,6 @@ mod tests {
     /// The time that a round of one answer takes, in milliseconds.
     const LOST_ROUND_MS: u64 = 1004;
 
-    /// The status line of the first round of a run that answered the whole path.
-    const A_WHOLE_PATH_LINE: &str = "round 1  2 hops  reached  1s";
-
-    /// The number of the round that answered one hop.
-    const LOST_ROUND_SEQ: u64 = 2;
-
-    /// The status line of a round that answered one hop and reached nothing.
-    const A_LOST_ROUND_LINE: &str = "round 2  1 hop  never reached  1004ms";
-
     /// The grace that every test run gives its names.
     ///
     /// The fake resolver of a test answers at once, so no test waits for a
@@ -436,6 +453,60 @@ mod tests {
     /// The second question follows the first turn, so the run stops on the turn
     /// that comes straight after the round it recorded.
     const STOP_AFTER_ONE_TURN: u64 = 1;
+
+    /// The number of terminal columns that the live table of a test draws in.
+    ///
+    /// The nominal frame is 97 columns wide: every column of the table, with a
+    /// Host column of 30.
+    const WIDTH: u16 = 97;
+
+    /// The rows of the window that the live table of a test draws in.
+    ///
+    /// No probe measured that window, so the table fits its frames to no
+    /// height and draws every line of them. A test of this file reads what a
+    /// frame holds, and a height that left rows out would take those lines off
+    /// the frame.
+    const NO_ROWS: Option<u16> = None;
+
+    /// The period of one round of the run that a live table shows.
+    const AN_INTERVAL: Duration = Duration::from_secs(1);
+
+    /// The word that a table which holds where it stands writes under itself.
+    ///
+    /// The test spells the word, and the module of the table spells it again.
+    /// That is on purpose: a test that read the constant of that module would
+    /// agree with every word the module ever holds, and this word is what a
+    /// reader of the screen sees.
+    const PAUSED: &str = "paused";
+
+    /// The sequence that starts every frame of a live table.
+    ///
+    /// A draw clears the screen first, so the text between two of these
+    /// sequences is one frame.
+    const CLEAR: &str = "\u{1b}[2J";
+
+    /// The number of frames that the run of a held table drew.
+    ///
+    /// One frame at the moment the table took the terminal, one at the pause,
+    /// one at the release of that pause, and one for the round that arrived
+    /// after the release. The rounds that arrived while the table held drew
+    /// none.
+    const FRAMES_OF_A_HELD_RUN: usize = 4;
+
+    /// The number of rounds that arrive while the table holds.
+    const ROUNDS_WHILE_HELD: u64 = 3;
+
+    /// The number of rounds of the run of a held table.
+    const ROUNDS_OF_A_HELD_RUN: u64 = 4;
+
+    /// The number of rounds that a table which folded none names.
+    const NO_ROUND: u64 = 0;
+
+    /// The number of turns that a run takes before its screen stops it.
+    ///
+    /// The screen answers the first turn, and the run records the round of that
+    /// turn. The second answer stops the run, so the run holds one round.
+    const SCREEN_STOPS_AFTER: usize = 1;
 
     /// The fault of a sink that takes no more records.
     const THE_SINK_IS_FULL: &str = "the sink takes no more records";
@@ -500,24 +571,6 @@ mod tests {
                     icmp: ECHO_REPLY.to_owned(),
                 },
             ],
-        }
-    }
-
-    /// One round that answered one hop and reached nothing.
-    fn a_lost_round(seq: u64) -> RoundRecord {
-        RoundRecord {
-            run: RunId::from(RUN),
-            seq,
-            ts: moment(ROUND_START),
-            dur_ms: LOST_ROUND_MS,
-            ttl_range: TtlRange::new(FIRST_TTL, TARGET_TTL).expect("the test range must hold"),
-            reached: false,
-            hops: vec![Hop {
-                ttl: FIRST_TTL,
-                addr: address(FIRST_HOP),
-                rtt_ms: FIRST_HOP_RTT_MS,
-                icmp: TIME_EXCEEDED.to_owned(),
-            }],
         }
     }
 
@@ -705,6 +758,53 @@ mod tests {
         }
     }
 
+    /// A sink that the test reads while a live table writes into it.
+    ///
+    /// A table owns its sink and gives it back to nobody, so the bytes live
+    /// behind a handle that the test keeps. One test and one table share the
+    /// handle, on one thread.
+    #[derive(Clone)]
+    struct Shared {
+        /// The bytes that reached the sink.
+        bytes: Rc<RefCell<Vec<u8>>>,
+    }
+
+    impl Shared {
+        /// A sink that holds nothing.
+        fn new() -> Self {
+            Self {
+                bytes: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+
+        /// The text that reached the sink.
+        fn text(&self) -> String {
+            String::from_utf8(self.bytes.borrow().clone()).expect("the sink must hold UTF-8 text")
+        }
+    }
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        /// The sink holds every byte in memory, so it flushes nothing.
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The frames that a live table drew, in the order they reached the sink.
+    fn frames(painted: &str) -> Vec<&str> {
+        painted.split(CLEAR).skip(1).collect()
+    }
+
+    /// The text of a header line that names this number of rounds.
+    fn rounds_in_header(rounds: u64) -> String {
+        format!("round {rounds}")
+    }
+
     /// A namer of the test run that asks this resolver.
     fn a_namer(resolver: &Rc<FakeResolver>) -> Namer {
         Namer::new(Box::new(Rc::clone(resolver)), RunId::from(RUN))
@@ -715,14 +815,69 @@ mod tests {
         Namer::new(Box::new(NoLookups), RunId::from(RUN))
     }
 
+    /// A screen that keeps what the run showed on it.
+    ///
+    /// A run hands its screen every round and every name that it recorded, and
+    /// a test of the loop asks what reached the screen. This screen keeps both,
+    /// and it answers the stop question from a script.
+    struct Recorder {
+        /// The answer of each turn, the next turn first. A turn past the end of
+        /// the script asks for no stop of the run.
+        stops: VecDeque<bool>,
+        /// The rounds that reached the screen, in the order they arrived.
+        rounds: Vec<RoundRecord>,
+        /// The names that reached the screen, in the order they arrived.
+        names: Vec<NameRecord>,
+    }
+
+    impl Recorder {
+        /// A screen that asks for no stop of the run.
+        fn new() -> Self {
+            Self {
+                stops: VecDeque::new(),
+                rounds: Vec::new(),
+                names: Vec::new(),
+            }
+        }
+
+        /// A screen that asks for the stop of the run on the turn that follows
+        /// this many turns.
+        fn that_stops_after(turns: usize) -> Self {
+            let mut screen = Self::new();
+            screen.stops = vec![false; turns].into();
+            screen.stops.push_back(true);
+            screen
+        }
+
+        /// The number of every round that reached the screen, in the order they
+        /// arrived.
+        fn seqs(&self) -> Vec<u64> {
+            self.rounds.iter().map(|round| round.seq).collect()
+        }
+    }
+
+    impl Screen for Recorder {
+        fn poll(&mut self) -> bool {
+            self.stops.pop_front().unwrap_or(false)
+        }
+
+        fn round(&mut self, round: &RoundRecord) {
+            self.rounds.push(round.clone());
+        }
+
+        fn names(&mut self, names: &[NameRecord]) {
+            self.names.extend_from_slice(names);
+        }
+    }
+
     /// What one recorded run produced.
     struct Ran {
         /// What the run loop gave back.
         outcome: Result<Outcome, RunError>,
         /// What the recorded file holds.
         recording: Recording,
-        /// What the run printed.
-        status: String,
+        /// What the run showed on its screen.
+        screen: Recorder,
     }
 
     /// Records one run that looks nothing up to a real file, and reads the file
@@ -746,25 +901,50 @@ mod tests {
         stop: &dyn Fn() -> bool,
         namer: &mut Namer,
     ) -> Ran {
+        ran_seeing(label, rounds, limits, stop, namer, Recorder::new())
+    }
+
+    /// Records one run that shows itself on this screen, and reads the file
+    /// back.
+    fn ran_seeing(
+        label: &str,
+        rounds: &Receiver<RoundRecord>,
+        limits: &Limits,
+        stop: &dyn Fn() -> bool,
+        namer: &mut Namer,
+        mut screen: Recorder,
+    ) -> Ran {
         let file = TempFile::absent(label);
-        let mut status: Vec<u8> = Vec::new();
-        let outcome = {
-            let mut writer = Writer::append(file.path()).expect("the test file must open");
-            record(
-                &a_run_record(),
-                rounds,
-                limits,
-                stop,
-                namer,
-                &mut writer,
-                &mut status,
-            )
-        };
+        let outcome = ran_on(file.path(), rounds, limits, stop, namer, &mut screen);
         Ran {
             outcome,
             recording: Recording::read(file.path()).expect("the test file must read"),
-            status: String::from_utf8(status).expect("the status must hold UTF-8 text"),
+            screen,
         }
+    }
+
+    /// Records one run whose screen the caller owns, into the file at `path`.
+    ///
+    /// The writer of the run drops before the call answers, so the caller reads
+    /// a file that holds every record of the run.
+    fn ran_on(
+        path: &Path,
+        rounds: &Receiver<RoundRecord>,
+        limits: &Limits,
+        stop: &dyn Fn() -> bool,
+        namer: &mut Namer,
+        screen: &mut dyn Screen,
+    ) -> Result<Outcome, RunError> {
+        let mut writer = Writer::append(path).expect("the test file must open");
+        record(
+            &a_run_record(),
+            rounds,
+            limits,
+            stop,
+            namer,
+            &mut writer,
+            screen,
+        )
     }
 
     /// The outcome of a run that reached a limit.
@@ -965,7 +1145,7 @@ mod tests {
             &|| false,
             &mut a_nameless_namer(),
             &mut writer,
-            &mut Vec::new(),
+            &mut Recorder::new(),
         );
         assert!(
             matches!(outcome, Err(RunError::Write(_))),
@@ -989,7 +1169,7 @@ mod tests {
             &|| false,
             &mut a_nameless_namer(),
             &mut writer,
-            &mut Vec::new(),
+            &mut Recorder::new(),
         );
         assert!(
             matches!(outcome, Err(RunError::Write(_))),
@@ -1148,7 +1328,7 @@ mod tests {
             &|| false,
             &mut a_namer(&resolver),
             &mut writer,
-            &mut Vec::new(),
+            &mut Recorder::new(),
         );
         assert!(
             matches!(outcome, Err(RunError::Write(_))),
@@ -1343,64 +1523,198 @@ mod tests {
         assert_eq!(outcome_of(&ran).rounds, 1);
     }
 
-    // The status line of one round. A later slice replaces this line with the
-    // live table.
-
-    /// The status lines that a run printed, without the newline of each one.
-    fn lines_of(ran: &Ran) -> Vec<&str> {
-        ran.status.lines().collect()
-    }
+    // What the run shows on its screen. The one line that a headless screen
+    // prints for a round is the work of `live::status_line`, and the tests of
+    // that line stand beside it.
 
     #[test]
-    fn a_round_that_answered_two_hops_and_reached_the_target_prints_one_line() {
+    fn a_run_of_three_rounds_hands_the_screen_three_rounds() {
         let ran = ran(
-            "status-reached",
-            &rounds_of(&[1]),
-            &after_rounds(1),
-            &|| false,
-        );
-        assert_eq!(ran.status, format!("{A_WHOLE_PATH_LINE}\n"));
-    }
-
-    /// One hop keeps the singular name, and a round that reached nothing says
-    /// so.
-    #[test]
-    fn a_round_that_answered_one_hop_and_reached_nothing_prints_the_singular_name() {
-        let ran = ran(
-            "status-lost",
-            &[a_lost_round(LOST_ROUND_SEQ)],
-            &after_rounds(1),
-            &|| false,
-        );
-        assert_eq!(ran.status, format!("{A_LOST_ROUND_LINE}\n"));
-    }
-
-    #[test]
-    fn a_run_of_three_rounds_prints_one_line_for_each_round() {
-        let ran = ran(
-            "status-three",
+            "screen-three",
             &rounds_of(&[1, 2, 3]),
             &after_rounds(3),
             &|| false,
         );
-        assert_eq!(
-            lines_of(&ran),
-            [
-                A_WHOLE_PATH_LINE,
-                "round 2  2 hops  reached  1s",
-                "round 3  2 hops  reached  1s",
-            ]
-        );
+        assert_eq!(ran.screen.seqs(), [1, 2, 3]);
+        assert_eq!(outcome_of(&ran).rounds, 3);
     }
 
     #[test]
-    fn a_run_that_records_no_round_prints_nothing() {
-        let ran = ran("status-none", &rounds_of(&[1, 2]), &NO_LIMIT, &|| true);
+    fn a_run_that_records_no_round_hands_the_screen_nothing() {
+        let ran = ran("screen-none", &rounds_of(&[1, 2]), &NO_LIMIT, &|| true);
         assert_eq!(outcome_of(&ran).rounds, 0);
         assert!(
-            ran.status.is_empty(),
-            "the run printed no line: {:?}",
-            ran.status
+            ran.screen.rounds.is_empty(),
+            "the run showed no round: {:?}",
+            ran.screen.seqs()
+        );
+    }
+
+    /// The key of a live table stops the run, and the signal of a headless run
+    /// stops it the same way. The stop closure of this run asks for nothing, so
+    /// the screen is the one thing that stopped it.
+    #[test]
+    fn a_screen_that_asks_to_stop_ends_the_run_with_a_quit() {
+        let ran = ran_seeing(
+            "screen-quit",
+            &a_stream(&rounds_of(&[1, 2])),
+            &NO_LIMIT,
+            &|| false,
+            &mut a_nameless_namer(),
+            Recorder::that_stops_after(SCREEN_STOPS_AFTER),
+        );
+        assert_eq!(outcome_of(&ran).reason, EndReason::Quit);
+        assert_eq!(outcome_of(&ran).rounds, 1);
+        assert_eq!(
+            seqs_of(&ran.recording),
+            [1],
+            "the run recorded the round of the turn before the screen stopped it"
+        );
+        assert_eq!(end_of(&ran.recording).reason, EndReason::Quit);
+    }
+
+    #[test]
+    fn every_round_reaches_the_screen_in_the_order_the_tracer_sent_them() {
+        let ran = ran(
+            "screen-order",
+            &rounds_of(&[7, 3, 9]),
+            &after_rounds(3),
+            &|| false,
+        );
+        assert_eq!(ran.screen.seqs(), [7, 3, 9]);
+    }
+
+    /// A live table names the host of a row, so every name that the run writes
+    /// reaches the screen as well as the file.
+    #[test]
+    fn a_name_that_arrives_reaches_the_screen() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[named(FIRST_HOP_NAME)])]);
+        let ran = ran_with(
+            "screen-name",
+            &a_stream(&rounds_of(&[1])),
+            &after_rounds(1),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        let names = &ran.screen.names;
+        assert_eq!(names.len(), 1, "the run showed one name: {names:?}");
+        assert_eq!(
+            names[0].addr,
+            address(FIRST_HOP),
+            "the name that reached the screen names the address of the hop"
+        );
+        assert_eq!(
+            names[0].host, FIRST_HOP_NAME,
+            "and it holds the name that the lookup gave"
+        );
+    }
+
+    /// The last ask of a run runs while that run closes, and the display of a
+    /// run that closes shows nothing more. The name still reaches the file, so
+    /// a replay of that file names the address.
+    #[test]
+    fn the_names_that_a_run_writes_while_it_closes_reach_no_screen() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[Lookup::Pending, named(FIRST_HOP_NAME)])]);
+        let ran = ran_with(
+            "screen-name-drain",
+            &a_stream(&rounds_of(&[1])),
+            &after_rounds(1),
+            &|| false,
+            &mut a_namer(&resolver),
+        );
+        assert_eq!(
+            kinds_of(&ran.recording),
+            ["run", "round", "name", "end"],
+            "the name that arrived after the last round reached the file"
+        );
+        assert!(
+            ran.screen.names.is_empty(),
+            "and it reached no screen: {:?}",
+            ran.screen.names
+        );
+    }
+
+    /// The acceptance of the live table: a table that the user holds still
+    /// records every round.
+    ///
+    /// The display is one view of the recording, and the pause key holds that
+    /// view alone. The file behind it takes every round while the view stands
+    /// still, and the fold behind it takes every round too, so the frame of the
+    /// release names the rounds that arrived while the table held.
+    ///
+    /// The key of the first turn holds the table, and the key of the fourth
+    /// turn lets it move again. Three rounds arrive between those two turns.
+    /// The table draws one frame in front of all of that, at the moment it
+    /// takes the terminal, and that frame counts no round and marks no pause.
+    #[test]
+    fn a_run_whose_table_is_paused_keeps_writing_every_round() {
+        // The name of the file stands in the header line of every frame, so
+        // the label of it holds no word that a frame is read for.
+        let file = TempFile::absent("held-table");
+        let painted = Shared::new();
+        let mut screen = Table::new(
+            RunFacts {
+                destination: TARGET_ARG.to_owned(),
+                address: address(TARGET_ADDRESS),
+                source: address(SOURCE_ADDRESS),
+                interval: AN_INTERVAL,
+                path: file.path().to_owned(),
+            },
+            painted.clone(),
+            FakeKeys::of(&[&[Command::Pause], &[], &[], &[Command::Pause]]),
+            Window::new(WIDTH, NO_ROWS),
+        );
+        let outcome = ran_on(
+            file.path(),
+            &a_stream(&rounds_of(&[1, 2, 3, 4])),
+            &after_rounds(ROUNDS_OF_A_HELD_RUN),
+            &|| false,
+            &mut a_nameless_namer(),
+            &mut screen,
+        );
+        let recording = Recording::read(file.path()).expect("the test file must read");
+
+        assert_eq!(
+            seqs_of(&recording),
+            [1, 2, 3, 4],
+            "every round of the run reached the file, and the pause held none of them back"
+        );
+        match &outcome {
+            Ok(outcome) => assert_eq!(outcome.rounds, ROUNDS_OF_A_HELD_RUN),
+            Err(error) => panic!("the run must reach its round limit: {error:?}"),
+        }
+
+        let text = painted.text();
+        let drawn = frames(&text);
+        assert_eq!(
+            drawn.len(),
+            FRAMES_OF_A_HELD_RUN,
+            "the rounds that arrived while the table held drew nothing: {drawn:?}"
+        );
+        assert!(
+            drawn[0].contains(&rounds_in_header(NO_ROUND)) && !drawn[0].contains(PAUSED),
+            "the table drew the frame of no round when it took the terminal, and no key marked a pause in front of it: {:?}",
+            drawn[0]
+        );
+        assert!(
+            drawn[1].contains(PAUSED) && drawn[1].contains(&rounds_in_header(NO_ROUND)),
+            "the frame of the first key marks the pause, and the table under it folded no round: {:?}",
+            drawn[1]
+        );
+        assert!(
+            drawn[2].contains(&rounds_in_header(ROUNDS_WHILE_HELD)),
+            "the frame of the release names the rounds that arrived while the table held: {:?}",
+            drawn[2]
+        );
+        assert!(
+            !drawn[2].contains(PAUSED),
+            "and it carries no mark of a pause: {:?}",
+            drawn[2]
+        );
+        assert!(
+            drawn[3].contains(&rounds_in_header(ROUNDS_OF_A_HELD_RUN)),
+            "the round that arrived after the release drew the frame of it: {:?}",
+            drawn[3]
         );
     }
 }

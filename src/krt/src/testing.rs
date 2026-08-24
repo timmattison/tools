@@ -12,9 +12,14 @@
 //! lookup and answers no name, so a test that wants that behavior programs
 //! `Lookup::Pending` first. A test of the fold programs a name first.
 //!
+//! The fake key source stands here for the same reason. A test of the live
+//! table and a test of the run loop both script the keys of a turn, and one
+//! script serves both.
+//!
 //! This module compiles under `cfg(test)` alone, so nothing it holds reaches
 //! the binary.
 
+use crate::live::{Command, Keys};
 use crate::names::{Lookup, Resolver};
 use crate::record::{Hop, RoundRecord, RunId, TtlRange};
 use chrono::{DateTime, Utc};
@@ -137,5 +142,28 @@ impl FakeResolver {
 impl Resolver for Rc<FakeResolver> {
     fn lookup(&self, addr: IpAddr) -> Lookup {
         self.answer(addr)
+    }
+}
+
+/// A key source that hands back one list of commands for each turn.
+///
+/// A turn past the end of the script took no key.
+pub(crate) struct FakeKeys {
+    /// The commands of each turn, the next turn first.
+    turns: VecDeque<Vec<Command>>,
+}
+
+impl FakeKeys {
+    /// A key source of one script.
+    pub(crate) fn of(script: &[&[Command]]) -> Self {
+        Self {
+            turns: script.iter().map(|turn| turn.to_vec()).collect(),
+        }
+    }
+}
+
+impl Keys for FakeKeys {
+    fn presses(&mut self) -> Vec<Command> {
+        self.turns.pop_front().unwrap_or_default()
     }
 }
