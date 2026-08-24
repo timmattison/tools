@@ -1,5 +1,5 @@
 //! Black-box coverage for the parts of `krt` that need a real terminal, and
-//! for the parts that need the one tracer of the machine.
+//! for the parts that need a known count of the live runs of the machine.
 //!
 //! `cargo test` hands a test binary a pipe, and three parts of `krt` answer
 //! nothing without a terminal: the width that a frame draws in, the keys that a
@@ -7,12 +7,13 @@
 //! on. A pseudo terminal is a terminal, so these tests give the binary one and
 //! drive it through that.
 //!
-//! One test below gives the binary a pipe on purpose, because the answer it
-//! covers is the one a pipe produces: such a run draws no table. It stands here
-//! beside the runs of a terminal for the other reason of this file. Every live
-//! run takes the one tracer of the machine, and every test of a live run holds
-//! the lock of that tracer while it does. A second lock in a second file locks
-//! nothing, so a live run belongs here whatever its standard output is.
+//! Two tests below give the binary a pipe on purpose. One covers the answer a
+//! pipe produces, which is that such a run draws no table. The other starts two
+//! runs at one moment and reads what each of them recorded. Both stand here
+//! beside the runs of a terminal for the other reason of this file. Every test
+//! of a live run holds the lock of the live runs of the machine while that run
+//! stands. A second lock in a second file locks nothing, so a live run belongs
+//! here whatever its standard output is.
 //!
 //! Every pseudo terminal below carries a size. A pseudo terminal that nobody
 //! sized answers the `TIOCGWINSZ` ioctl with zero columns, and that ioctl
@@ -52,6 +53,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+use std::net;
 #[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -185,6 +188,33 @@ const FLAG_MAX_TTL: &str = "--max-ttl";
 /// The flag that asks for the status lines in the place of the table.
 #[cfg(target_os = "macos")]
 const FLAG_HEADLESS: &str = "--headless";
+
+/// The flag that names the protocol of a probe.
+#[cfg(target_os = "macos")]
+const FLAG_PROTOCOL: &str = "--protocol";
+
+/// The protocol that `krt` probes with by default.
+#[cfg(target_os = "macos")]
+const ICMP: &str = "icmp";
+
+/// The protocol of a trace that holds its source port and varies the
+/// destination port.
+#[cfg(target_os = "macos")]
+const UDP: &str = "udp";
+
+/// The protocol of a trace that holds its destination port and varies the
+/// source port.
+#[cfg(target_os = "macos")]
+const TCP: &str = "tcp";
+
+/// The first port of the range that a traceroute probes.
+///
+/// Every UDP run of `krt` fixed this port as its source port once, and the
+/// unprivileged path of macOS binds the source port for each probe it sends. So
+/// one program that held this port stopped every UDP run of the machine, and
+/// two runs stopped each other.
+#[cfg(target_os = "macos")]
+const THE_CLASSIC_SOURCE_PORT: u16 = 33_434;
 
 /// The number one, as a limit of rounds and as a limit of TTLs.
 #[cfg(target_os = "macos")]
@@ -640,7 +670,7 @@ impl Drop for Recording {
     }
 }
 
-/// The name of the file that holds the one tracer of the machine.
+/// The name of the file that holds the live runs of the machine.
 ///
 /// The name is fixed, where every other path of this file keys on the process
 /// and on the moment. That is the purpose of it: a lock that two processes
@@ -648,13 +678,15 @@ impl Drop for Recording {
 #[cfg(target_os = "macos")]
 const TRACER_LOCK: &str = "krt-live-tracer.lock";
 
-/// The longest that a wait for the tracer of the machine runs.
+/// The longest that a wait for the live runs of the machine runs.
 ///
 /// One holder takes a few seconds. A live test carries two waits of
 /// [`PATIENCE`], one for the first frame and one for the stop, so twice
-/// PATIENCE bounds a holder that passes. Two test binaries of four live runs
-/// each therefore take well under this bound, and a wait that reaches it says
-/// that something outside these tests holds the lock.
+/// PATIENCE bounds a holder that passes. The test of two runs at one time waits
+/// for no frame, and the round limit of its two runs stops both of them inside
+/// a second. Two test binaries of the live tests of this file therefore take
+/// well under this bound, and a wait that reaches it says that something
+/// outside these tests holds the lock.
 ///
 /// The bound is more than twice [`STALE_LOCK`], so a waiter that pays the whole
 /// wait for a stale file keeps most of its patience for the lock it then takes.
@@ -675,14 +707,26 @@ const LOCK_PATIENCE: Duration = Duration::from_mins(4);
 #[cfg(target_os = "macos")]
 const STALE_LOCK: Duration = Duration::from_secs(90);
 
-/// The hold of one test on the tracer of the machine.
+/// The hold of one test on the live runs of the machine.
 ///
-/// Two tracers of one machine collide. macOS hands the ICMP replies of one
-/// process to the socket of every other process that reads that protocol, so a
-/// tracer reads the answer of a probe that another tracer sent. The probe of
-/// that answer stands in no state that an answer belongs to, and the tracer
-/// then stops with a fault. Three live runs of this file collided that way, and
-/// two of the three failed.
+/// A test that holds this lock knows the number of live runs of the machine:
+/// it is the number of runs that the test itself started. Every other test of
+/// this file waits.
+///
+/// The lock started as a workaround, and that is no longer the reason it
+/// stands. macOS hands the ICMP replies of one process to the socket of every
+/// other process that reads that protocol, so a tracer reads the answer of a
+/// probe that another tracer sent. `krt` named no identifier of its own once,
+/// so every run took every answer. Three live runs of this file collided that
+/// way, and two of the three failed. `src/krt/src/trace.rs` closes that defect:
+/// each run carries the identifier of its process, and the tracer drops every
+/// answer that carries another one.
+///
+/// What the lock gives now is the count above, and one test reads that count.
+/// [`two_live_runs_of_one_machine_each_record_only_the_answers_of_its_own_probes`]
+/// starts two runs and asks what each of them recorded. A third run beside them
+/// would make a failure of that test read as a defect of `krt`, when it was a
+/// test of this file running at the same moment.
 ///
 /// The lock is a file, and not a mutex of the process. `cargo test` runs the
 /// tests of one binary on many threads, and more than one `cargo test` can run
@@ -695,7 +739,7 @@ struct TracerLock {
 
 #[cfg(target_os = "macos")]
 impl TracerLock {
-    /// Waits for the tracer of the machine, and takes it.
+    /// Waits for the live runs of the machine, and takes the hold on them.
     ///
     /// # Panics
     ///
@@ -723,7 +767,7 @@ impl TracerLock {
             }
             assert!(
                 Instant::now() < deadline,
-                "the tracer of the machine must come free inside {LOCK_PATIENCE:?}: {}",
+                "the live runs of the machine must come free inside {LOCK_PATIENCE:?}: {}",
                 path.display()
             );
             thread::sleep(GLANCE);
@@ -780,12 +824,12 @@ fn a_waiter_that_takes_a_stale_lock_over_keeps_patience_for_the_run_it_starts() 
 struct LiveRun {
     /// The terminal of the run.
     terminal: Terminal,
-    /// The hold on the tracer of the machine.
+    /// The hold on the live runs of the machine.
     ///
     /// The field stands under the terminal, because a field drops in the order
     /// it stands: the drop of the terminal stops the run, and the lock then
     /// goes back to the next test. A lock that went back first would let that
-    /// test start its tracer beside a tracer that still stands.
+    /// test start its run beside a run that still stands.
     _lock: TracerLock,
 }
 
@@ -1086,36 +1130,23 @@ fn the_headless_flag_draws_no_table_under_a_terminal() {
     }
 }
 
-/// Two live runs of one machine each record the answers of its own probes, and
-/// no answer of the other run.
+/// Asserts that two live runs of `protocol`, which stand at one moment, each
+/// record the answers of its own probes and no answer of the other run.
 ///
-/// This is the test of the identifier that `src/krt/src/trace.rs` gives each
-/// run. macOS hands the ICMP answers of one process to the socket of every
-/// other process that reads that protocol, so each of these two runs reads
-/// every answer that the machine took. A run that reads a foreign answer as its
-/// own records the path of another run, and the tracer of a debug build stops
-/// with a fault on the way, because that answer belongs to no probe of the
-/// state which the tracer holds.
+/// One run probes [`LOOPBACK`], which answers every probe, and the other probes
+/// [`OTHER_LOOPBACK`], which answers none as [`LOOPBACK`]. That is what makes
+/// the answers tell the two runs apart: a [`LOOPBACK`] hop in the file of the
+/// second run is an answer that the first run earned.
 ///
-/// The two destinations are what make the answers tell the two runs apart. The
-/// run of [`LOOPBACK`] gets an answer for each probe, and the run of
-/// [`OTHER_LOOPBACK`] gets none that names [`LOOPBACK`]. So a [`LOOPBACK`] hop
-/// in the file of the second run is an answer that the first run earned.
-///
-/// The test holds the lock of the tracer for both runs, so the number of live
-/// runs of the machine while it measures is the two that it started. A third
-/// run beside them would make a failure read as a defect of `krt` when it was a
-/// test of this file running beside this one.
+/// The caller holds the lock of the live runs of the machine, so the number of
+/// runs while this helper measures is the two that it starts.
 #[cfg(target_os = "macos")]
-#[test]
-fn two_live_runs_of_one_machine_each_record_only_the_answers_of_its_own_probes() {
-    let answered = Recording::at("krt-collide-answered");
-    let silent = Recording::at("krt-collide-silent");
-    // The lock stands under the two recordings, so the drop of the lock comes
-    // first and the removal of the two files comes after it. That is the order
-    // of every other live test of this file.
-    let _lock = TracerLock::take();
+fn two_live_runs_of(name: &str, protocol: &str) {
+    let answered = Recording::at(&format!("krt-collide-{name}-answered"));
+    let silent = Recording::at(&format!("krt-collide-{name}-silent"));
     let flags = [
+        FLAG_PROTOCOL,
+        protocol,
         FLAG_ROUNDS,
         FIVE,
         FLAG_MAX_TTL,
@@ -1127,7 +1158,9 @@ fn two_live_runs_of_one_machine_each_record_only_the_answers_of_its_own_probes()
 
     // The two runs start one after the other and then stand together. The round
     // limit of each one stops it, so neither wait below carries a deadline of
-    // its own.
+    // its own. The output of a headless run of five rounds is a few hundred
+    // bytes, which is far under the buffer of a pipe, so the run that this
+    // thread does not wait for never stalls on a full pipe.
     let answered_output = answered.argument();
     let silent_output = silent.argument();
     let mut running: Vec<process::Child> = [
@@ -1157,7 +1190,7 @@ fn two_live_runs_of_one_machine_each_record_only_the_answers_of_its_own_probes()
     for (finished, destination) in finished.iter().zip([LOOPBACK, OTHER_LOOPBACK]) {
         assert!(
             finished.status.success(),
-            "the round limit stops the run of {destination}, and no answer of the other run does: {} said {:?}",
+            "the round limit stops the {protocol} run of {destination}, and no answer of the other run does: {} said {:?}",
             finished.status,
             String::from_utf8_lossy(&finished.stderr)
         );
@@ -1166,17 +1199,124 @@ fn two_live_runs_of_one_machine_each_record_only_the_answers_of_its_own_probes()
         assert_eq!(
             recording.end_reason().as_deref(),
             Some(ROUNDS_REASON),
-            "the file of the run of {destination} closes with the reason of the round limit"
+            "the file of the {protocol} run of {destination} closes with the reason of the round limit"
         );
     }
     assert!(
         answered.hop_addresses().iter().any(|hop| hop == LOOPBACK),
-        "the run of {LOOPBACK} records the answers of its own probes: {:?}",
+        "the {protocol} run of {LOOPBACK} records the answers of its own probes: {:?}",
         answered.hop_addresses()
     );
     assert!(
         !silent.hop_addresses().iter().any(|hop| hop == LOOPBACK),
-        "and the run of {OTHER_LOOPBACK} records no answer that the other run earned: {:?}",
+        "and the {protocol} run of {OTHER_LOOPBACK} records no answer that the other run earned: {:?}",
         silent.hop_addresses()
+    );
+}
+
+/// Two live ICMP runs of one machine each record the answers of its own probes.
+///
+/// This is the test of the identifier that `src/krt/src/trace.rs` gives each
+/// run. macOS hands the ICMP answers of one process to the socket of every
+/// other process that reads that protocol, so each of these two runs reads
+/// every answer that the machine took. A run that reads a foreign answer as its
+/// own records the path of another run, and the tracer of a debug build stops
+/// with a fault on the way, because that answer belongs to no probe of the
+/// state which the tracer holds.
+#[cfg(target_os = "macos")]
+#[test]
+fn two_live_icmp_runs_of_one_machine_each_record_only_the_answers_of_its_own_probes() {
+    // The lock stands over the runs of the helper, and the recordings of that
+    // helper drop inside it, so the drop of the lock comes after the runs stop
+    // and before the next test starts one.
+    let _lock = TracerLock::take();
+    two_live_runs_of("icmp", ICMP);
+}
+
+/// Two live UDP runs of one machine each record the answers of its own probes.
+///
+/// The source port is what tells two UDP runs apart. A UDP trace holds its
+/// source port while the destination port varies, and the unprivileged path of
+/// macOS binds that port for each probe, so two runs of one port cannot both
+/// send. The tracer of the second one stops on the port it cannot take, and the
+/// answers of the two would carry one port besides.
+#[cfg(target_os = "macos")]
+#[test]
+fn two_live_udp_runs_of_one_machine_each_record_only_the_answers_of_its_own_probes() {
+    let _lock = TracerLock::take();
+    two_live_runs_of("udp", UDP);
+}
+
+/// Two live TCP runs of one machine each record the answers of its own probes.
+///
+/// A TCP trace holds its destination port while the source port varies, and the
+/// tracer takes the next source port when one is in use, so two TCP runs stand
+/// beside each other already. The test holds that answer in place.
+#[cfg(target_os = "macos")]
+#[test]
+fn two_live_tcp_runs_of_one_machine_each_record_only_the_answers_of_its_own_probes() {
+    let _lock = TracerLock::take();
+    two_live_runs_of("tcp", TCP);
+}
+
+/// A live UDP run stands while another program holds the port that a traceroute
+/// probes first.
+///
+/// This is the answer of the test above, said once and for certain. The two
+/// runs of that test meet on a port that each of them binds for a moment and
+/// then gives back, so they meet on it often and not on every run. This test
+/// holds the port for the whole run, so a run that wanted that one port stops
+/// every time.
+///
+/// The port that the run takes in its place is a port of the range which stands
+/// above the ports a traceroute probes and under the ports that macOS hands to
+/// a socket asking for any port. `src/krt/src/trace.rs` states the range and
+/// the fold onto it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_udp_run_stands_while_another_program_holds_the_port_of_a_traceroute() {
+    let recording = Recording::at("krt-udp-classic-port");
+    // The lock stands under the recording, so the drop of the lock comes first
+    // and the removal of the file comes after it.
+    let _lock = TracerLock::take();
+    let held = net::UdpSocket::bind((LOOPBACK, THE_CLASSIC_SOURCE_PORT))
+        .expect("the port that a traceroute probes first must be free for this test to hold");
+    let output = recording.argument();
+    let flags = [
+        FLAG_PROTOCOL,
+        UDP,
+        FLAG_ROUNDS,
+        ONE,
+        FLAG_MAX_TTL,
+        ONE,
+        FLAG_HEADLESS,
+    ];
+
+    let finished = process::Command::new(env!("CARGO_BIN_EXE_krt"))
+        .args(live_arguments(LOOPBACK, &output, &flags))
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::piped())
+        .stderr(process::Stdio::piped())
+        .spawn()
+        .expect("the binary must start")
+        .wait_with_output()
+        .expect("the run must stop on its round limit");
+    drop(held);
+
+    assert!(
+        finished.status.success(),
+        "the round limit stops the run, and the held port does not: {} said {:?}",
+        finished.status,
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    assert_eq!(
+        recording.end_reason().as_deref(),
+        Some(ROUNDS_REASON),
+        "the file closes with the reason of the round limit"
+    );
+    assert!(
+        recording.hop_addresses().iter().any(|hop| hop == LOOPBACK),
+        "and the run records the answer of the probe it sent: {:?}",
+        recording.hop_addresses()
     );
 }
