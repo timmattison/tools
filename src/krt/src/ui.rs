@@ -86,9 +86,26 @@
 //!
 //! The render draws through `ratatui`, into a buffer that no terminal ever
 //! sees, and reads the lines back out of it. A `ratatui` buffer keeps the style
-//! of a cell beside the symbol of that cell and never inside it, so the lines
-//! that come back hold glyphs alone. No test of this render therefore needs
-//! `testcolor`, and this crate takes no `colored` dependency.
+//! of a cell beside the symbol of that cell and never inside it, so a read of
+//! the symbols alone gives glyphs alone. The read is therefore the one place
+//! that writes a color code, and it writes one only for the one cell of the
+//! table that carries a color: a probe that no hop answered, which the Recent
+//! column draws red. Nothing else of the render holds a code, and no code ever
+//! reaches the buffer, where it would take columns of the table that no reader
+//! sees.
+//!
+//! The color is a decision of the caller, which [`Paint`] carries, and not a
+//! decision that this module takes off the terminal. A live table asks for the
+//! color, because it draws on a terminal by construction: the run holds that
+//! terminal in raw mode on the alternate screen. A replay asks for the plain
+//! lines. This crate thus takes no `colored` dependency, and no test of this
+//! render needs `testcolor`: the two codes are constants of this module, and a
+//! test names them.
+//!
+//! The loss carries a glyph of its own as well as the color, because the run
+//! that prints no color is the normal one. A headless run, a pipe, a file, and
+//! a replay each print text with no color, and a red `▇` alone would read on
+//! every one of them as the slowest sample of the window.
 //!
 //! The module also writes the one duration text of the crate. The resolved
 //! configuration, the status line of a round, and the header line of the frame
@@ -99,9 +116,10 @@ use crate::stats::{Address, HopStats, Sample, TtlRow};
 use crate::{ROUND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE, UNKNOWN};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Rect};
-use ratatui::style::Style;
-use ratatui::text::Text;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, Row, Table, Widget};
+use std::fmt;
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::net::IpAddr;
@@ -346,6 +364,29 @@ pub(crate) fn truncate_to_width(text: &str, width: usize) -> String {
     kept
 }
 
+/// The control sequence that paints what follows it red.
+const RED: &str = "\u{1b}[31m";
+
+/// The control sequence that gives the foreground of the terminal back.
+///
+/// The code names the default foreground of the terminal, and not a reset of
+/// every attribute, so it takes the red back and touches nothing else that the
+/// terminal holds.
+const PLAIN: &str = "\u{1b}[39m";
+
+/// Whether the lines of a frame carry the color of a terminal.
+///
+/// The caller decides, because the caller knows where its lines go. A live
+/// table draws on a terminal by construction, and a replay prints into whatever
+/// scrollback the terminal keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Paint {
+    /// The lines hold glyphs alone.
+    Plain,
+    /// The mark of a lost probe stands between the codes that paint it red.
+    Colored,
+}
+
 /// The number of bars that the sparkline draws with.
 const LEVEL_COUNT: usize = 7;
 
@@ -386,6 +427,91 @@ const NO_ANSWER: char = '╳';
 )]
 const LEVELS: f64 = LEVEL_COUNT as f64;
 
+/// One glyph of the Recent column, and what that glyph stands for.
+///
+/// The mark carries the meaning and not the color, so the one place that names
+/// a color is [`Mark::style`]. A column of glyphs alone would have to carry the
+/// codes of the color inside its text, and those codes would then reach the
+/// `ratatui` buffer as glyphs and take columns of the table that no reader ever
+/// sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// A glyph that stands in the foreground of the terminal: a bar of a
+    /// round-trip time, or a character of the heading of the column.
+    Glyph(char),
+    /// A probe that no hop answered.
+    Lost,
+}
+
+impl Mark {
+    /// The glyph that the mark draws.
+    fn glyph(self) -> char {
+        match self {
+            Self::Glyph(glyph) => glyph,
+            Self::Lost => NO_ANSWER,
+        }
+    }
+
+    /// The style that the mark draws in.
+    ///
+    /// A bar takes the foreground of the terminal, whatever that is. A reader
+    /// sets the colors of their own terminal, and a table that painted every
+    /// bar would argue with that choice for no gain: the height of the bar
+    /// already says what the bar says.
+    fn style(self) -> Style {
+        match self {
+            Self::Glyph(_) => Style::default(),
+            Self::Lost => Style::default().fg(Color::Red),
+        }
+    }
+}
+
+/// The Recent column of one row: one mark for each sample of the window.
+///
+/// The column travels as marks and not as text, because the glyphs of it do not
+/// all share a color. It is the one column of the table that carries a color at
+/// all.
+pub(crate) struct Recent(Vec<Mark>);
+
+impl Recent {
+    /// The column of a row that draws no sample at all.
+    fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    /// The column that draws one text in the foreground of the terminal.
+    ///
+    /// The column header takes this. Its heading is a word and not a picture of
+    /// a history, so every glyph of it stands in the color the reader set.
+    fn text(text: &str) -> Self {
+        Self(text.chars().map(Mark::Glyph).collect())
+    }
+
+    /// The cell of the table that draws this column.
+    ///
+    /// One span for each mark, so the `ratatui` buffer keeps the color of a
+    /// loss beside the symbol of it, and the read of the buffer finds the color
+    /// there. A cell of one style would paint the whole column or none of it.
+    fn cell(&self, alignment: Alignment) -> Cell<'static> {
+        let spans: Vec<Span<'static>> = self
+            .0
+            .iter()
+            .map(|mark| Span::styled(mark.glyph().to_string(), mark.style()))
+            .collect();
+        Cell::from(Text::from(Line::from(spans)).alignment(alignment))
+    }
+}
+
+impl fmt::Display for Recent {
+    /// The glyphs of the column, with no color at all.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for mark in &self.0 {
+            write!(formatter, "{}", mark.glyph())?;
+        }
+        Ok(())
+    }
+}
+
 /// The recent round-trip times of one key, as a bar for each of them.
 ///
 /// The bar shows the last `width` samples. A key that holds more samples than
@@ -407,7 +533,7 @@ const LEVELS: f64 = LEVEL_COUNT as f64;
 /// and it takes no part in the scale: such a probe measured no time, so no
 /// limit of the window can read it.
 ///
-/// A key with no sample, and a `width` of zero, each draw an empty string.
+/// A key with no sample, and a `width` of zero, each draw an empty column.
 ///
 /// A sample that is not a finite number — `f64::NAN`, or an infinity — draws
 /// the lowest bar, and the scale does not read it at all. Such a sample does
@@ -415,9 +541,9 @@ const LEVELS: f64 = LEVEL_COUNT as f64;
 /// stand on, and every bar of the key would then read the same. One bad sample
 /// would hide the whole history of the hop, which is a worse answer than one
 /// bar that reads low.
-pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = Sample>, width: usize) -> String {
+pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = Sample>, width: usize) -> Recent {
     if width == 0 {
-        return String::new();
+        return Recent::empty();
     }
 
     // The iterator states its length before it gives a sample, so the oldest
@@ -437,24 +563,26 @@ pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = Sample>, width: u
     }
     let span = highest - lowest;
 
-    shown
-        .iter()
-        .map(|sample| {
-            let Sample::Time(time) = *sample else {
-                return NO_ANSWER;
-            };
-            // A window of one sample, and a window whose samples are all equal,
-            // each give a span of zero. A window that holds no sample which
-            // compares gives a span below zero, because the two limits stayed
-            // at the infinities that the fold started them at. Neither window
-            // divides.
-            if span <= 0.0 || !time.is_finite() {
-                BARS[0]
-            } else {
-                bar_at((time - lowest) / span)
-            }
-        })
-        .collect()
+    Recent(
+        shown
+            .iter()
+            .map(|sample| {
+                let Sample::Time(time) = *sample else {
+                    return Mark::Lost;
+                };
+                // A window of one sample, and a window whose samples are all
+                // equal, each give a span of zero. A window that holds no
+                // sample which compares gives a span below zero, because the
+                // two limits stayed at the infinities that the fold started
+                // them at. Neither window divides.
+                if span <= 0.0 || !time.is_finite() {
+                    Mark::Glyph(BARS[0])
+                } else {
+                    Mark::Glyph(bar_at((time - lowest) / span))
+                }
+            })
+            .collect(),
+    )
 }
 
 /// The round-trip time of one sample, when that sample holds a time which
@@ -759,22 +887,26 @@ enum Field {
 }
 
 impl Field {
-    /// The text that the field takes out of one row.
+    /// The cell that the field draws out of one row.
     ///
     /// A time reads the place it stands among the times, and
     /// [`standing_slots`] takes that place from [`TIME_HEADERS`]. The times of
     /// a row stand in the order of that same list, so the heading of a time and
     /// the number under it always name the same statistic.
-    fn text(self, row: &RowText) -> String {
-        match self {
+    ///
+    /// The Recent column builds its own cell. It is the one column of the table
+    /// whose glyphs do not all share a color, so it holds marks and not text.
+    fn cell(self, row: &RowText, alignment: Alignment) -> Cell<'static> {
+        let text = match self {
             Self::Ttl => row.ttl.clone(),
             Self::Host => row.host.clone(),
             Self::Counts { sent } => {
                 counts_text(&row.percent, row.mark, sent.then_some(row.sent.as_str()))
             }
             Self::Time(index) => row.times[index].clone(),
-            Self::Recent => row.recent.clone(),
-        }
+            Self::Recent => return row.recent.cell(alignment),
+        };
+        cell(text, alignment)
     }
 }
 
@@ -1010,7 +1142,7 @@ impl Layout {
         Row::new(
             self.slots
                 .iter()
-                .map(|slot| cell(slot.field.text(text), slot.alignment))
+                .map(|slot| slot.field.cell(text, slot.alignment))
                 .collect::<Vec<Cell<'static>>>(),
         )
     }
@@ -1042,8 +1174,8 @@ struct RowText {
     sent: String,
     /// The five round-trip times, in the order the columns stand.
     times: [String; TIME_COLUMNS],
-    /// The sparkline of the recent round-trip times.
-    recent: String,
+    /// The sparkline of the recent samples.
+    recent: Recent,
 }
 
 /// The headings that stand above the rows of the path.
@@ -1059,7 +1191,7 @@ fn column_header() -> RowText {
         mark: LOSS_MARK,
         sent: SENT_HEADER.to_owned(),
         times: TIME_HEADERS.map(str::to_owned),
-        recent: RECENT_HEADER.to_owned(),
+        recent: Recent::text(RECENT_HEADER),
     }
 }
 
@@ -1127,7 +1259,11 @@ impl Frame<'_> {
     /// layout.
     ///
     /// Every line drops its trailing spaces. A terminal prints them as nothing.
-    pub(crate) fn lines(&self, width: u16) -> Vec<String> {
+    ///
+    /// `paint` says whether the lines carry the color of a terminal. The one
+    /// cell of the table that holds a color is the mark of a lost probe, which
+    /// [`Paint::Colored`] stands between the two codes that paint it red.
+    pub(crate) fn lines(&self, width: u16, paint: Paint) -> Vec<String> {
         let header_line = self.header.line();
         let layout = Layout::at(width);
         let table_width = layout.width();
@@ -1153,7 +1289,7 @@ impl Frame<'_> {
         );
 
         (0..height)
-            .map(|line| read_line(&buffer, line, buffer_width))
+            .map(|line| read_line(&buffer, line, buffer_width, paint))
             .collect()
     }
 
@@ -1309,7 +1445,7 @@ fn others_row(row: &TtlRow) -> RowText {
         mark: SHARE_MARK,
         sent: row.untracked().to_string(),
         times: TIME_HEADERS.map(|_| NO_NUMBER.to_owned()),
-        recent: String::new(),
+        recent: Recent::empty(),
     }
 }
 
@@ -1320,18 +1456,36 @@ fn others_row(row: &TtlRow) -> RowText {
 /// left there. The walk therefore steps over as many cells as the symbol is
 /// wide, or the line would grow one column for every wide glyph of it and a
 /// Japanese host name would push the numbers of its own row to the right.
-fn read_line(buffer: &Buffer, line: u16, width: u16) -> String {
+///
+/// A `ratatui` buffer keeps the style of a cell beside the symbol of that cell,
+/// so this walk is where a color of the table reaches the text. A run of red
+/// cells opens with one code and closes with one, and a line that ends inside
+/// such a run closes it at the end. No code ever stands where a cell holds
+/// none, so a `Paint::Plain` line reads character for character as it always
+/// did.
+fn read_line(buffer: &Buffer, line: u16, width: u16, paint: Paint) -> String {
     let mut text = String::new();
     let mut column = 0;
+    let mut red = false;
     while column < width {
-        let symbol = buffer
-            .cell((column, line))
-            .map_or(" ", ratatui::buffer::Cell::symbol);
+        let held = buffer.cell((column, line));
+        let symbol = held.map_or(" ", ratatui::buffer::Cell::symbol);
+        let wanted = paint == Paint::Colored && held.is_some_and(|cell| cell.fg == Color::Red);
+        if wanted != red {
+            text.push_str(if wanted { RED } else { PLAIN });
+            red = wanted;
+        }
         text.push_str(symbol);
         // A symbol that prints nothing still holds its cell, so the walk moves
         // on by one and never stands still.
         column += buffer_columns(symbol).max(1);
     }
+    if red {
+        text.push_str(PLAIN);
+    }
+    // The trailing spaces go away, and no code goes with them: a red cell holds
+    // the mark of a loss and never a space, so the code that closes a run of
+    // them already stands in front of the first space of the line.
     text.trim_end_matches(' ').to_owned()
 }
 
@@ -1339,7 +1493,7 @@ fn read_line(buffer: &Buffer, line: u16, width: u16) -> String {
 mod tests {
     use super::{
         display_width, frame_columns_of, render_duration, render_size, sparkline,
-        truncate_to_width, Frame, Header,
+        truncate_to_width, Frame, Header, Paint,
     };
     use crate::record::RoundRecord;
     use crate::stats::{HopTable, Sample};
@@ -1842,10 +1996,14 @@ mod tests {
     /// part of the sparkline a reader of the table sees.
     const BARS: &str = "▁▂▃▄▅▆▇";
 
-    /// The bar of a set of round-trip times, at a width.
+    /// The glyphs that a set of round-trip times draws, at a width.
+    ///
+    /// The glyphs and not the marks: the set of glyphs is the part of the
+    /// sparkline a reader of the table sees, and the color of a mark is what
+    /// the tests of the frame below read.
     fn bar(samples: &[f64], width: usize) -> String {
         let times: Vec<Sample> = samples.iter().copied().map(Sample::Time).collect();
-        sparkline(times.into_iter(), width)
+        sparkline(times.into_iter(), width).to_string()
     }
 
     #[test]
@@ -2260,7 +2418,7 @@ mod tests {
             names,
             destination,
         }
-        .lines(width)
+        .lines(width, Paint::Plain)
     }
 
     /// The lines of the golden frame at a width.

@@ -458,7 +458,7 @@ impl<W: Write, K: Keys> Table<W, K> {
             },
             destination: Some(self.facts.address),
         };
-        let mut body = frame.lines(self.window.columns);
+        let mut body = frame.lines(self.window.columns, ui::Paint::Colored);
         // The head comes off the front of the frame, because a frame that the
         // window does not hold keeps the head and drops rows of the path. A
         // frame holds those lines at every width, and the `min` says so anyway.

@@ -930,7 +930,7 @@ fn replay(path: &Path, wanted: Option<&str>, width: u16) -> Replay {
                 destination: start.map(|start| start.target.addr),
             };
             Ok(Folded {
-                lines: frame.lines(width),
+                lines: frame.lines(width, ui::Paint::Plain),
                 note: (held.len() > 1).then(|| folded_run_message(path, held.len(), run.id())),
             })
         }
