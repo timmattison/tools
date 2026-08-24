@@ -496,6 +496,11 @@ impl<W: Write, K: Keys> Table<W, K> {
     ///
     /// The lines then fit the window, in the three parts that [`fitted`] takes:
     /// the head of the frame, the rows of the path, and that footer.
+    ///
+    /// A run that draws the Recent column as an image asks the render for blank
+    /// body cells in that column. The block elements are one picture of a hop
+    /// and the image is a second one, and a reader who sees both has two answers
+    /// to one question.
     fn frame_lines(&self) -> Vec<String> {
         let frame = ui::Frame {
             header: ui::Header {
@@ -521,7 +526,14 @@ impl<W: Write, K: Keys> Table<W, K> {
             },
             destination: Some(self.facts.address),
         };
-        let mut body = frame.lines(self.window.columns, self.look.paint);
+        let picture = if self.look.graphics.is_some() {
+            ui::RecentPicture::Image
+        } else {
+            ui::RecentPicture::Bars
+        };
+        let mut body = frame
+            .render(self.window.columns, self.look.paint, picture)
+            .lines;
         // The head comes off the front of the frame, because a frame that the
         // window does not hold keeps the head and drops rows of the path. A
         // frame holds those lines at every width, and the `min` says so anyway.
