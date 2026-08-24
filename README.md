@@ -743,6 +743,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - macOS sends the probes without privileges. Linux needs `CAP_NET_RAW`, and Windows needs an
     elevated prompt. A platform that needs privileges and does not hold them prints the remedy and
     stops, and `krt` never falls back to a degraded trace without saying so.
+  - Two runs of one machine each record the path that it probed. macOS hands the ICMP answers of
+    one process to the socket of every other process that reads that protocol, so each run there
+    reads every answer the machine took. Each run therefore marks its own probes and drops every
+    answer that carries another mark. An ICMP probe carries the identifier of the process that sent
+    it. A UDP probe leaves from a source port of that process, of the range 33535 through 49151,
+    which stands above the destination ports a traceroute probes and under the ports that the
+    machine hands out on its own. A TCP probe varies its source port already. So a second `krt` in
+    a second window costs the first one nothing, and neither of the two records a hop of the other.
   - `krt` takes its tracer from [`trippy-core`](https://trippy.rs) and its resolver from
     [`trippy-dns`](https://trippy.rs), and both of them are Apache-2.0. This repository is MIT.
     Apache-2.0 is permissive, and it imposes no copyleft on a binary that links it, so the two

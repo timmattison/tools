@@ -13,6 +13,15 @@
 //! that needs them and holds none stops, and the message names the remedy of
 //! each platform.
 //!
+//! Every probe of a run carries a mark of the process that sent it, and a run
+//! drops every answer that carries another mark. macOS hands the ICMP answers
+//! of one process to the socket of every other process that reads that
+//! protocol, so a run there reads every answer the machine took, and a run
+//! without a mark records the path of another run. [`probe_identifier`] gives
+//! the mark of an ICMP probe, and [`udp_source_port`] gives the mark of a UDP
+//! probe. A TCP probe varies its source port already, and the tracer takes the
+//! next one when a port is in use.
+//!
 //! The interface of the wall is one type and three functions. [`TraceConfig`]
 //! states one run in the words that `krt` owns, and [`spawn`] starts the
 //! tracer of that run and gives back a receiver of completed rounds.
