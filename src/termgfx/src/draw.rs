@@ -99,6 +99,9 @@ pub struct Request {
 /// The reason that no image reached the terminal.
 #[derive(Debug, thiserror::Error)]
 pub enum DrawError {
+    /// The terminal draws no inline image at all.
+    #[error("this terminal draws no inline image")]
+    NoGraphics,
     /// A write to the stream failed.
     #[error(transparent)]
     Write(#[from] io::Error),
@@ -396,4 +399,52 @@ fn write_iterm2<W: Write>(
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detect::TerminalType;
+
+    /// The image that the tests draw. One pixel is enough, because no test here
+    /// reads the pixels of the payload.
+    fn test_image() -> DynamicImage {
+        DynamicImage::ImageRgb8(image::RgbImage::new(1, 1))
+    }
+
+    /// The request that the tests draw with. It states a budget, so no test
+    /// depends on the size of the terminal that runs the test.
+    fn test_request() -> Request {
+        Request {
+            budget: Budget {
+                columns: Some(10),
+                rows: Some(5),
+            },
+            cursor: Cursor::BelowImage,
+            preserve_aspect: true,
+        }
+    }
+
+    #[test]
+    fn a_terminal_that_draws_no_image_says_so_and_writes_no_byte() {
+        // Alacritty draws text alone. A tool that sent it an escape sequence of
+        // an image would put the sequence on the screen as text, so the answer
+        // has to come back before one byte leaves.
+        let capabilities = Capabilities::new(TerminalType::Alacritty, false, true);
+
+        let mut out = Vec::new();
+        let error = capabilities
+            .draw(&mut out, &test_image(), &test_request())
+            .expect_err("a terminal that draws no image must refuse the image");
+
+        assert!(
+            matches!(error, DrawError::NoGraphics),
+            "the refusal must name the terminal as the reason, but it is {error:?}"
+        );
+        assert!(
+            out.is_empty(),
+            "the refusal must leave the stream untouched, but it holds {} bytes",
+            out.len()
+        );
+    }
 }
