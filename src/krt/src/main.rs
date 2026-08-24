@@ -122,10 +122,15 @@ const TARGET_TIMEOUT_DEFAULT: &str = "10s";
 /// The type is the type that `clap` takes for the bound of a range.
 const ROUNDS_LOWEST: u64 = 1;
 
-/// The width of the key field of the resolved configuration block.
+/// The number of spaces between the longest key of the resolved configuration
+/// block and its value.
 ///
-/// The longest key is `address family:`, and one space follows it.
-const CONFIG_KEY_WIDTH: usize = 16;
+/// The width of the key field comes off the keys of the block that prints, so a
+/// key that a later slice adds moves the whole column and never runs into its
+/// own value. A constant width would hold the column at the longest key of the
+/// day, and the first longer key would stand against its value with nothing to
+/// say so.
+const CONFIG_KEY_GAP: usize = 1;
 
 /// The label that the derived name of a recorded file carries in the place of
 /// a destination, for a hunt.
@@ -690,10 +695,17 @@ impl Cli {
 /// prints the table of the run it folded in the place of the block.
 impl fmt::Display for ResolvedConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rows = self.rows();
+        let width = rows
+            .iter()
+            .map(|(key, _)| key.len() + ":".len())
+            .max()
+            .unwrap_or_default()
+            + CONFIG_KEY_GAP;
         writeln!(formatter, "resolved configuration:")?;
-        for (key, value) in self.rows() {
+        for (key, value) in rows {
             let key = format!("{key}:");
-            writeln!(formatter, "  {key:<CONFIG_KEY_WIDTH$}{value}")?;
+            writeln!(formatter, "  {key:<width$}{value}")?;
         }
         Ok(())
     }
