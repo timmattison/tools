@@ -1183,7 +1183,10 @@ fn display_of(headless: bool, is_terminal: bool) -> Display {
 /// The reads of the world stand apart from this decision, so a test names the
 /// answers without a terminal to name them with.
 fn graphics_of(asked: bool, draws_images: bool, cell: Option<(u32, u32)>) -> Option<(u32, u32)> {
-    todo!("the gate of the image path answers the size of a cell")
+    if !asked || !draws_images {
+        return None;
+    }
+    cell
 }
 
 /// Whether the frames of a live table carry the color of a terminal, from
