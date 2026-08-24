@@ -2237,11 +2237,19 @@ mod tests {
     /// The smallest number of bytes that the line of the largest round holds.
     ///
     /// The bound guards the two tests that write the largest round. Both of
-    /// them need a record that takes a long moment to write, because that
-    /// moment is the moment that a second run meets the first one in. A later
-    /// schema that shrank a record to a few hundred bytes would leave the two
-    /// runs almost no moment to meet in, and the tests would then pass because
-    /// they raced nothing.
+    /// them fail a writer that gives one record to its sink as more than one
+    /// write. A buffer hides such a writer: the writer of this crate made two
+    /// calls, one for the line and one for the newline, and the `BufWriter`
+    /// that this branch took out held both calls and made one write of them.
+    /// A later branch can put a buffer back.
+    ///
+    /// A record larger than the buffer takes that cover away. The sink writes
+    /// such a line straight through, keeps the newline, and writes the newline
+    /// at the flush, and the two tests read those two writes. This bound holds
+    /// the largest round at more than five times the 8192 bytes that a
+    /// `BufWriter` keeps by default. A later schema that shrank a record to a
+    /// few hundred bytes lets a buffer take the whole record and write it
+    /// once, and the two tests then pass with the defect in the writer.
     const LARGEST_ROUND_BYTES: usize = 49_000;
 
     /// The first six groups of every hop address of the first run of a shared
@@ -2281,8 +2289,8 @@ mod tests {
     /// # Panics
     ///
     /// Panics when the line of the round holds fewer bytes than
-    /// [`LARGEST_ROUND_BYTES`]. Such a round no longer races anything, and a
-    /// test that raced nothing passes for the wrong reason.
+    /// [`LARGEST_ROUND_BYTES`]. A buffer takes such a round whole and writes it
+    /// once, so the two tests that write the round pass for the wrong reason.
     fn the_largest_round_record(run: &str, seq: u64, prefix: &str) -> Record {
         let mut hops = Vec::new();
         for ttl in FIRST_TTL..=LAST_TTL {
