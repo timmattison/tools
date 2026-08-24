@@ -867,6 +867,77 @@ impl Drop for LockGuard<'_> {
     }
 }
 
+/// A sink that a recorded file appends to.
+///
+/// The file of a run is the one sink of the binary, and an append that fails
+/// after some of its bytes reached the file is the one fault that matters here.
+/// A test cannot ask a real file for that fault: a disk that fills and a device
+/// that goes away are faults of the machine, and a test starts neither one.
+/// This trait is therefore the seam. A test writes a sink that takes part of a
+/// buffer and then fails, and it reads what [`append_whole`] leaves on that
+/// sink.
+trait Appendable {
+    /// The number of bytes that the sink holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the sink does not report the number.
+    fn length(&self) -> std::io::Result<u64>;
+
+    /// Appends the whole buffer to the sink.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the append fails. An append that fails part way
+    /// keeps the bytes that it already put on the sink.
+    fn append(&mut self, buf: &[u8]) -> std::io::Result<()>;
+
+    /// Drops every byte of the sink after this number of bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the sink does not shorten.
+    fn shorten(&mut self, length: u64) -> std::io::Result<()>;
+}
+
+impl Appendable for &File {
+    /// The number of bytes that the file holds, from the metadata of the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the metadata does not read.
+    fn length(&self) -> std::io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
+
+    /// Appends the whole buffer to the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the write fails.
+    fn append(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        Write::write_all(self, buf)
+    }
+
+    /// Cuts the file back to this number of bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the file does not cut.
+    fn shorten(&mut self, length: u64) -> std::io::Result<()> {
+        self.set_len(length)
+    }
+}
+
+/// Appends the whole buffer to the sink.
+///
+/// # Errors
+///
+/// Returns the reason when the append fails.
+fn append_whole(sink: &mut impl Appendable, buf: &[u8]) -> std::io::Result<()> {
+    sink.append(buf)
+}
+
 impl Write for RecordFile {
     /// Appends the whole buffer to the file as one write, under the exclusive
     /// lock of the file.
@@ -886,8 +957,7 @@ impl Write for RecordFile {
     /// wait, and when the write fails.
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let _guard = self.lock()?;
-        let mut file = &self.file;
-        file.write_all(buf)?;
+        append_whole(&mut &self.file, buf)?;
         Ok(buf.len())
     }
 
@@ -954,9 +1024,9 @@ impl<W: Write> Writer<W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EndReason, EndRecord, Family, Hop, NameRecord, Privilege, ReadError, Record, RecordFile,
-        Recording, RoundRecord, Run, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target,
-        TtlRange, Writer, LOCK_WAIT,
+        append_whole, Appendable, EndReason, EndRecord, Family, Hop, NameRecord, Privilege,
+        ReadError, Record, RecordFile, Recording, RoundRecord, Run, RunConfig, RunId, RunRecord,
+        SourceKind, SourceLabel, Target, TtlRange, Writer, LOCK_WAIT, NEWLINE,
     };
     use crate::testing::{address, SecondRunBetweenWrites};
     use crate::{Multipath, Protocol};
@@ -1978,6 +2048,126 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A sink that fills up part way through an append.
+    ///
+    /// The sink has room for a number of bytes. An append that needs more room
+    /// than that takes the room that is left and then fails, as a disk that
+    /// fills does. The three methods are honest: the sink reports the bytes it
+    /// holds, it keeps the bytes of an append that failed, and it drops the
+    /// bytes after a length that a caller names.
+    struct SinkThatFills {
+        /// The bytes that the sink holds, in the order that they came.
+        held: Vec<u8>,
+        /// The number of bytes that the sink still takes before it fills.
+        room: usize,
+    }
+
+    impl SinkThatFills {
+        /// A sink that holds these bytes and has room for this many more.
+        fn with_room(held: &[u8], room: usize) -> Self {
+            Self {
+                held: held.to_vec(),
+                room,
+            }
+        }
+
+        /// The bytes that the sink holds.
+        fn held(&self) -> Vec<u8> {
+            self.held.clone()
+        }
+    }
+
+    impl Appendable for SinkThatFills {
+        /// The number of bytes that the sink holds.
+        ///
+        /// # Errors
+        ///
+        /// Never fails. The sink counts the bytes in memory.
+        fn length(&self) -> std::io::Result<u64> {
+            Ok(u64::try_from(self.held.len()).expect("the sink holds fewer bytes than a u64 counts"))
+        }
+
+        /// Takes the bytes that the room holds, and fails when the buffer needs
+        /// more.
+        ///
+        /// # Errors
+        ///
+        /// Returns a `StorageFull` fault when the buffer needs more room than
+        /// the sink has. The sink keeps the bytes that it already took, as a
+        /// file keeps the bytes of a write that failed part way.
+        fn append(&mut self, buf: &[u8]) -> std::io::Result<()> {
+            let taken = buf.len().min(self.room);
+            self.held.extend_from_slice(&buf[..taken]);
+            self.room -= taken;
+            if taken < buf.len() {
+                return Err(std::io::Error::from(std::io::ErrorKind::StorageFull));
+            }
+            Ok(())
+        }
+
+        /// Drops every byte of the sink after this number of bytes.
+        ///
+        /// # Errors
+        ///
+        /// Never fails. The sink cuts the bytes in memory.
+        fn shorten(&mut self, length: u64) -> std::io::Result<()> {
+            self.held
+                .truncate(usize::try_from(length).expect("the length fits the memory of the test"));
+            Ok(())
+        }
+    }
+
+    /// The line that the sink already holds before the append that fails.
+    ///
+    /// The line is whole, and it ends with a newline, as every line of a
+    /// recorded file does.
+    const A_LINE_ALREADY_HELD: &[u8] = b"{\"type\":\"end\",\"run\":\"2026-08-18T12:00:00.123Z\"}\n";
+
+    /// The number of bytes of the next record that fit before the sink fills.
+    ///
+    /// The number is smaller than the record, so the append takes part of the
+    /// record and then fails. That is the one fault that matters: the sink
+    /// holds a fragment of a record, and the fragment carries no newline.
+    const ROOM_LEFT: usize = 5;
+
+    /// A write that fails part way keeps the bytes that it already wrote, and
+    /// the guard then releases the lock. The file ends with a fragment that
+    /// carries no newline.
+    ///
+    /// One run survives that: the fragment is the last line, the reader marks
+    /// the file truncated, and the file still reads. Two runs do not. The
+    /// second run takes the lock and appends its next record onto the same
+    /// line, and that line then holds half of one record and the whole of
+    /// another. The reader answers `Corrupt` for such a line, so `replay`
+    /// refuses the whole file and both runs lose every record in it.
+    #[test]
+    fn a_write_that_fails_part_way_leaves_the_file_as_it_was() {
+        let mut record = a_run_record()
+            .to_line()
+            .expect("the record must become JSON")
+            .into_bytes();
+        record.push(NEWLINE);
+        assert!(
+            record.len() > ROOM_LEFT,
+            "the record must need more room than the sink has"
+        );
+        let mut sink = SinkThatFills::with_room(A_LINE_ALREADY_HELD, ROOM_LEFT);
+
+        let fault = append_whole(&mut sink, &record)
+            .expect_err("a sink that fills part way through the buffer must fail the append");
+
+        assert_eq!(
+            fault.kind(),
+            std::io::ErrorKind::StorageFull,
+            "the fault of the sink reaches the caller"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&sink.held()),
+            String::from_utf8_lossy(A_LINE_ALREADY_HELD),
+            "a write that fails part way leaves the file as it was"
+        );
     }
 
     /// The first TTL that a run probes.
