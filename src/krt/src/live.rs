@@ -583,7 +583,15 @@ impl<W: Write, K: Keys> Table<W, K> {
 
     /// Writes the lines of one frame.
     ///
-    /// The clear comes first, so a frame of fewer lines than the frame before
+    /// The order inside the buffer is the order that a reader of the screen
+    /// needs. The command that takes the images of the frame before it off the
+    /// screen comes first, because a Kitty placement outlives a clear of the
+    /// screen: a frame that did not delete would stack a thousand images over a
+    /// run of a thousand rounds. The Sixel protocol and the iTerm2 protocol
+    /// paint into the screen instead, and `termgfx` writes nothing for them,
+    /// because the clear below takes what they painted.
+    ///
+    /// The clear comes next, so a frame of fewer lines than the frame before
     /// it leaves none of the older lines on the screen.
     ///
     /// The whole frame stands in one buffer, and that buffer reaches the sink
@@ -606,6 +614,9 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// drops that fault, for the reason that [`Table::draw`] states.
     fn paint(&mut self, lines: &[String]) -> std::io::Result<()> {
         let mut frame: Vec<u8> = Vec::new();
+        if let Some(graphics) = self.look.graphics.as_ref() {
+            graphics.capabilities.clear_images(&mut frame)?;
+        }
         queue!(frame, Clear(ClearType::All), MoveTo(0, 0))?;
         write!(frame, "{}", lines.join(LINE_END))?;
         self.sink.write_all(&frame)?;
