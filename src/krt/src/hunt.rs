@@ -833,6 +833,11 @@ impl Summary {
     }
 
     /// The line that counts what the hunt did.
+    ///
+    /// The line stands at the left edge, where the closing line of a trace
+    /// stands, and the table above it stands one column in, where the table of
+    /// a folded run stands. The two are different things: the table is a table,
+    /// and this line closes the run.
     fn counts(&self) -> String {
         let reached = self
             .scores
