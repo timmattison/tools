@@ -661,6 +661,37 @@ mod tests {
     }
 
     #[test]
+    fn a_ttl_that_lost_a_probe_keeps_that_probe_in_its_history() {
+        // Four rounds probe TTL 1. The first and the third answer, and the two
+        // between them get nothing back. The history of the TTL holds one entry
+        // for each of the four probes: a history of the answers alone reads the
+        // same for a TTL that lost half of its probes as for a TTL that lost
+        // none, and the one picture of the recent behavior of that TTL must not
+        // say that.
+        //
+        // The router keeps its own answers alone. A probe reaches a TTL and not
+        // a router, so no loss of the TTL belongs to one router of it.
+        let table = table_of(&[
+            round(1, 1, &[(1, FIRST_HOP, 10.0)]),
+            round(1, 1, &[]),
+            round(1, 1, &[(1, FIRST_HOP, 30.0)]),
+            round(1, 1, &[]),
+        ]);
+        let one = row_of(&table, 1);
+        assert_eq!(
+            one.stats().recent().len(),
+            4,
+            "the history of the ttl holds one entry for each probe of it"
+        );
+        let addresses: Vec<Address<'_>> = one.addresses().collect();
+        assert_eq!(
+            addresses[0].stats().recent().len(),
+            2,
+            "the history of the router holds its own answers alone"
+        );
+    }
+
+    #[test]
     fn the_rows_come_back_in_ttl_order() {
         let table = table_of(&[
             round(3, 3, &[(3, TARGET, ANY_RTT)]),
