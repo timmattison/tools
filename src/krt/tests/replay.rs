@@ -26,6 +26,7 @@
 // Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
+#![warn(clippy::missing_docs_in_private_items)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

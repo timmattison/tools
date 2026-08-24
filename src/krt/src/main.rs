@@ -13,6 +13,7 @@
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
+#![warn(clippy::missing_docs_in_private_items)]
 
 mod graph;
 mod hunt;
