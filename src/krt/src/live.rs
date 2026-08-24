@@ -7,6 +7,7 @@
 //! reason this module classifies the keys itself: it is the one part of the
 //! live run that can stop a run that the user asked to stop.
 
+use crate::graph;
 use crate::record::{NameRecord, RoundRecord};
 use crate::stats::HopTable;
 use crate::ui;
@@ -18,6 +19,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{execute, queue};
+use image::DynamicImage;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::net::IpAddr;
@@ -381,6 +383,87 @@ pub(crate) struct Graphics {
     pub(crate) cell: (u32, u32),
 }
 
+/// One frame of a live table, ready for the terminal.
+///
+/// The lines and the place of the images travel together, because both of them
+/// come out of one walk of the table. A draw that asked for the lines and then
+/// asked a second time for the rows of the path could read a table that a round
+/// changed between the two asks, and an image of a row of one walk would then
+/// stand over a row of the other.
+struct Drawn {
+    /// The lines of the frame, head first.
+    lines: Vec<String>,
+    /// The Recent column of the frame, and the history of every row of the path
+    /// that reached it. `None` when a narrow terminal dropped that column.
+    recent: Option<ui::RecentColumn>,
+}
+
+/// Writes one image for each row of the path of a frame.
+///
+/// The image of the row at `index` stands over the Recent column of the line
+/// that the row draws in, which is the head of the frame plus that index. The
+/// cursor moves there first, and the image carries a placement id of its own:
+/// every image of one frame therefore replaces the image of that same row in
+/// the frame before it, where one id for every row would put the last row of
+/// the frame over the first one.
+///
+/// The image is as wide as the Recent column and as tall as one line of the
+/// table, in the pixels that the terminal reports for one character cell.
+///
+/// A draw that answers a fault stops the images of that frame and leaves the
+/// lines that already stand in the buffer. [`Table::draw`] states the rule that
+/// a frame which does not print stops nothing: the recording is the purpose of
+/// the tool.
+///
+/// # Arguments
+/// * `frame` - The buffer of the frame, which already holds the lines.
+/// * `graphics` - The terminal, and the pixel size of one character cell.
+/// * `recent` - Where the Recent column stands, and the history of every row of
+///   the path that reached the frame.
+///
+/// # Errors
+///
+/// Answers the fault of a write to the buffer. A write to a vector never fails,
+/// so no run reaches that answer today, and the rule stays here because this is
+/// where the buffer of a frame takes its bytes.
+fn write_images(
+    frame: &mut Vec<u8>,
+    graphics: &Graphics,
+    recent: &ui::RecentColumn,
+) -> std::io::Result<()> {
+    let (cell_width, cell_height) = graphics.cell;
+    let columns = u32::from(ui::RECENT_WIDTH);
+    let width = columns.saturating_mul(cell_width);
+    for (index, history) in recent.rows.iter().enumerate() {
+        // A window of a terminal holds far fewer rows than a `u16` counts, and
+        // a path holds 255 TTLs at most, so no run reaches either bound. The
+        // frame stops there anyway, because a line that no terminal can name is
+        // a line that no image can stand on.
+        let Ok(offset) = u16::try_from(index) else {
+            break;
+        };
+        let Some(line) = ui::HEAD_LINES.checked_add(offset) else {
+            break;
+        };
+        queue!(frame, MoveTo(recent.column, line))?;
+        let image = DynamicImage::ImageRgba8(graph::plot(history, width, cell_height));
+        let request = termgfx::Request {
+            budget: termgfx::Budget {
+                columns: Some(columns),
+                rows: Some(1),
+            },
+            cursor: termgfx::Cursor::Held {
+                id: u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1),
+            },
+            preserve_aspect: false,
+        };
+        if graphics.capabilities.draw(frame, &image, &request).is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// The live table of a run.
 ///
 /// The table folds every round that arrives, and it draws the frame of that
@@ -501,7 +584,7 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// body cells in that column. The block elements are one picture of a hop
     /// and the image is a second one, and a reader who sees both has two answers
     /// to one question.
-    fn frame_lines(&self) -> Vec<String> {
+    fn drawn(&self) -> Drawn {
         let frame = ui::Frame {
             header: ui::Header {
                 destination: Some(&self.facts.destination),
@@ -531,16 +614,19 @@ impl<W: Write, K: Keys> Table<W, K> {
         } else {
             ui::RecentPicture::Bars
         };
-        let mut body = frame
-            .render(self.window.columns, self.look.paint, picture)
-            .lines;
+        let rendered = frame.render(self.window.columns, self.look.paint, picture);
+        let mut body = rendered.lines;
         // The head comes off the front of the frame, because a frame that the
         // window does not hold keeps the head and drops rows of the path. A
         // frame holds those lines at every width, and the `min` says so anyway.
         let head: Vec<String> = body
             .drain(..usize::from(ui::HEAD_LINES).min(body.len()))
             .collect();
-        fitted(head, body, self.footer(), self.window.rows).lines
+        let fitted = fitted(head, body, self.footer(), self.window.rows);
+        Drawn {
+            lines: fitted.lines,
+            recent: rendered.recent,
+        }
     }
 
     /// The lines that stand under the rows of the path.
@@ -589,8 +675,8 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// of the tool, and the frame is one view of it, so a run whose terminal
     /// goes away loses the display and keeps the recording.
     fn draw(&mut self) {
-        let lines = self.frame_lines();
-        drop(self.paint(&lines));
+        let drawn = self.drawn();
+        drop(self.paint(&drawn));
     }
 
     /// Writes the lines of one frame.
@@ -624,13 +710,22 @@ impl<W: Write, K: Keys> Table<W, K> {
     ///
     /// Answers the fault that the sink raised. The caller of this function
     /// drops that fault, for the reason that [`Table::draw`] states.
-    fn paint(&mut self, lines: &[String]) -> std::io::Result<()> {
+    fn paint(&mut self, drawn: &Drawn) -> std::io::Result<()> {
         let mut frame: Vec<u8> = Vec::new();
         if let Some(graphics) = self.look.graphics.as_ref() {
             graphics.capabilities.clear_images(&mut frame)?;
         }
         queue!(frame, Clear(ClearType::All), MoveTo(0, 0))?;
-        write!(frame, "{}", lines.join(LINE_END))?;
+        write!(frame, "{}", drawn.lines.join(LINE_END))?;
+        if let (Some(graphics), Some(recent)) = (self.look.graphics.as_ref(), drawn.recent.as_ref())
+        {
+            write_images(&mut frame, graphics, recent)?;
+            // The images move the cursor across the frame, so the last of them
+            // leaves it at the Recent column of the last row of the path. The
+            // origin is where a reader expects it, and it is where the draw of
+            // the next frame starts.
+            queue!(frame, MoveTo(0, 0))?;
+        }
         self.sink.write_all(&frame)?;
         self.sink.flush()
     }
@@ -1243,13 +1338,42 @@ mod tests {
         table
     }
 
+    /// The character that opens an application program command, which is how
+    /// the Kitty graphics protocol carries an image.
+    const APC: char = '_';
+
+    /// The character that opens an operating system command, which is how the
+    /// iTerm2 protocol carries an image.
+    const OSC: char = ']';
+
+    /// The character that opens a device control string, which is how the Sixel
+    /// protocol carries an image.
+    const DCS: char = 'P';
+
+    /// The character that closes an operating system command of iTerm2.
+    const BELL: char = '\u{7}';
+
+    /// The character that closes a string of one of the three openers above,
+    /// behind the escape character.
+    const STRING_END: char = '\\';
+
     /// The text that a terminal prints for what the draws wrote, with the
     /// control sequences taken out.
     ///
-    /// Every sequence of a draw starts with the escape character and ends with
-    /// a letter: the clear of the screen ends `J`, and the move of the cursor
-    /// ends `H`. The reader therefore drops from one escape to the letter that
-    /// closes it, and what stays is what a reader of the terminal sees.
+    /// A sequence that moves the cursor or clears the screen starts with the
+    /// escape character and ends with a letter: the clear of the screen ends
+    /// `J`, and the move of the cursor ends `H`. The reader drops from one
+    /// escape to the letter that closes it.
+    ///
+    /// A sequence that carries an image is a string, and it ends where the
+    /// string ends and not at the first letter it holds: the payload of an
+    /// image is base64 or a Sixel band, and both of them are full of letters.
+    /// Three characters open such a string, one for each protocol, and the
+    /// reader then drops to the terminator of the string. A reader that stopped
+    /// at the first letter would leave the whole payload of the image on the
+    /// screen as text.
+    ///
+    /// What stays is what a reader of the terminal sees.
     fn glyphs(painted: &[u8]) -> String {
         let text = String::from_utf8_lossy(painted);
         let mut kept = String::new();
@@ -1257,6 +1381,16 @@ mod tests {
         while let Some(character) = characters.next() {
             if character != ESCAPE {
                 kept.push(character);
+                continue;
+            }
+            if matches!(characters.next(), Some(APC | OSC | DCS)) {
+                let mut escaped = false;
+                for inside in characters.by_ref() {
+                    if inside == BELL || (escaped && inside == STRING_END) {
+                        break;
+                    }
+                    escaped = inside == ESCAPE;
+                }
                 continue;
             }
             for inside in characters.by_ref() {
