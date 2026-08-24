@@ -121,6 +121,31 @@ mod tests {
         );
     }
 
+    /// The color of the column of a lost probe, as a reader of a graphics
+    /// terminal sees it.
+    ///
+    /// The test spells the four numbers, and the module spells them again, for
+    /// the reason that [`CLEAR`] states.
+    const RED: Rgba<u8> = Rgba([224, 64, 64, 255]);
+
+    #[test]
+    fn a_lost_probe_draws_a_dotted_red_column() {
+        // A solid red column and a tall teal bar differ by color alone, and the
+        // mark of a lost probe must tell a loss from a slow answer whatever a
+        // reader sees of the color. The dots carry that argument into the
+        // image: a dotted column is no bar.
+        let image = plot(&[Sample::Lost], ONE_COLUMN, SHORT);
+
+        for row in 0..SHORT {
+            let wanted = if row.is_multiple_of(2) { RED } else { CLEAR };
+            assert_eq!(
+                pixel(&image, 0, row),
+                wanted,
+                "the column of a lost probe paints its even rows and leaves its odd rows clear, down the whole height"
+            );
+        }
+    }
+
     #[test]
     fn the_background_of_the_image_is_transparent() {
         // A transparent background lets the terminal show its own background
