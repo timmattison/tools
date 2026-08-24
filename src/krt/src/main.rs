@@ -363,6 +363,11 @@ struct Cli {
     #[arg(long)]
     headless: bool,
 
+    /// Draw the Recent column as an image of the whole history. Needs a
+    /// terminal that draws images.
+    #[arg(long)]
+    graphics: bool,
+
     /// Stop after this much time.
     #[arg(long, value_name = "DUR", value_parser = parse_duration)]
     duration: Option<Duration>,
@@ -425,6 +430,16 @@ struct ResolvedConfig {
     source: Option<IpAddr>,
     /// True when the tool prints status lines and no table.
     headless: bool,
+    /// True when the live table draws the Recent column as an image of the
+    /// whole history.
+    ///
+    /// The block elements draw nine of the sixty samples that the fold holds,
+    /// and an image of the same nine columns draws every one of them. The
+    /// answer is a switch and not a resolved value, because the run cannot read
+    /// the terminal here: `graphics_of` asks the terminal at the moment the
+    /// screen starts, and it answers the block elements for a terminal that
+    /// draws no image and for a terminal that measures no character cell.
+    graphics: bool,
     /// The time that stops the run. An absent time runs until the user stops it.
     duration: Option<Duration>,
     /// The number of rounds that stops the run.
@@ -496,6 +511,7 @@ impl Cli {
             reverse_dns: !self.no_dns,
             source: self.source,
             headless: self.headless,
+            graphics: false,
             duration: self.duration,
             rounds: self.rounds,
             replay,
@@ -2327,9 +2343,22 @@ resolved configuration:
 
     #[test]
     fn parses_the_flags_that_hold_no_value() {
-        let cli = parse(&["krt", "example.com", "--no-dns", "--headless"]);
+        let cli = parse(&["krt", "example.com", "--no-dns", "--headless", "--graphics"]);
         assert!(cli.no_dns);
         assert!(cli.headless);
+        assert!(cli.graphics);
+    }
+
+    #[test]
+    fn the_graphics_flag_resolves_to_the_image_of_the_recent_column() {
+        // The flag is the first of the four questions that `graphics_of` asks.
+        // A configuration that dropped it would draw the block elements on
+        // every terminal, and no line of the run would say why.
+        let config = resolve(&["krt", "example.com", "--graphics"]);
+        assert!(
+            config.graphics,
+            "the run that asked for the image carries that answer into its screen"
+        );
     }
 
     #[test]
@@ -2448,6 +2477,10 @@ resolved configuration:
         assert!(config.reverse_dns, "reverse DNS is on by default");
         assert_eq!(config.source, None);
         assert!(!config.headless, "the table is on by default");
+        assert!(
+            !config.graphics,
+            "the block elements of the Recent column are on by default"
+        );
         assert_eq!(config.duration, None);
         assert_eq!(config.rounds, None);
         assert_eq!(config.replay, None);
