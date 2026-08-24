@@ -4570,6 +4570,7 @@ dependencies = [
  "serde_json",
  "signal-hook 0.3.18",
  "sysinfo",
+ "termgfx",
  "termsize",
  "thiserror 2.0.20",
  "trippy-core",

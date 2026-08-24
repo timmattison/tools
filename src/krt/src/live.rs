@@ -347,6 +347,40 @@ impl Window {
     }
 }
 
+/// What the frames of a live table look like.
+///
+/// The two answers travel as one value, because both of them are decisions that
+/// the caller took off the terminal and off the command line at the start of
+/// the run. A constructor that took one parameter for each of them would grow a
+/// parameter every time the run learns a new question about its terminal, and a
+/// caller of five positional parameters says nothing about which one is which.
+pub(crate) struct Look {
+    /// Whether the frames carry the color of a terminal.
+    ///
+    /// The reader of the terminal decides, and the caller reads that answer off
+    /// the environment of the run. A reader who set `NO_COLOR` gets the frames
+    /// with glyphs alone.
+    pub(crate) paint: ui::Paint,
+    /// The image path of the Recent column, when the run draws one.
+    ///
+    /// `None` is every run that draws the block elements: a run that asked for
+    /// no image, a terminal that reads no image protocol, and a terminal that
+    /// reports no pixel size. `main::graphics_of` states the four questions.
+    pub(crate) graphics: Option<Graphics>,
+}
+
+/// What a live run needs to draw the Recent column as an image.
+pub(crate) struct Graphics {
+    /// The terminal, and the protocol that it draws images with.
+    pub(crate) capabilities: termgfx::Capabilities,
+    /// The pixel size of one character cell.
+    ///
+    /// The image draws in pixels and the terminal lays the table out in cells,
+    /// so a frame that puts an image over the Recent column measures that
+    /// column in cells and draws it in pixels.
+    pub(crate) cell: (u32, u32),
+}
+
 /// The live table of a run.
 ///
 /// The table folds every round that arrives, and it draws the frame of that
@@ -396,12 +430,8 @@ pub(crate) struct Table<W: Write, K: Keys> {
     keys: K,
     /// The window that the frames draw in.
     window: Window,
-    /// Whether the frames carry the color of a terminal.
-    ///
-    /// The reader of the terminal decides, and the caller reads that answer
-    /// off the environment of the run. A reader who set `NO_COLOR` gets the
-    /// frames with glyphs alone.
-    paint: ui::Paint,
+    /// What the frames of this table look like.
+    look: Look,
 }
 
 impl<W: Write, K: Keys> Table<W, K> {
@@ -425,10 +455,11 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// A table that exists holds a frame, and no caller can forget to ask for
     /// one.
     ///
-    /// `paint` says whether the frames carry the color of a terminal. The
-    /// caller reads that answer off the environment of the run, because a
-    /// reader who wants no color says so with `NO_COLOR`.
-    pub(crate) fn new(facts: RunFacts, sink: W, keys: K, window: Window, paint: ui::Paint) -> Self {
+    /// `look` says what the frames of the table look like: whether they carry
+    /// the color of a terminal, and whether they draw the Recent column as an
+    /// image. The caller reads both answers off the terminal and the command
+    /// line at the start of the run.
+    pub(crate) fn new(facts: RunFacts, sink: W, keys: K, window: Window, look: Look) -> Self {
         let mut table = Self {
             file: crate::file_name(&facts.path),
             facts,
@@ -442,7 +473,7 @@ impl<W: Write, K: Keys> Table<W, K> {
             sink,
             keys,
             window,
-            paint,
+            look,
         };
         table.draw();
         table
@@ -490,7 +521,7 @@ impl<W: Write, K: Keys> Table<W, K> {
             },
             destination: Some(self.facts.address),
         };
-        let mut body = frame.lines(self.window.columns, self.paint);
+        let mut body = frame.lines(self.window.columns, self.look.paint);
         // The head comes off the front of the frame, because a frame that the
         // window does not hold keeps the head and drops rows of the path. A
         // frame holds those lines at every width, and the `min` says so anyway.
@@ -897,8 +928,8 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, install_panic_hook, restore_panic_hook, status_line, Clock, Command, Headless,
-        Keys, NoKeys, PanicHook, RunFacts, Screen, SystemClock, Table, Window,
+        classify, install_panic_hook, restore_panic_hook, status_line, Clock, Command, Graphics,
+        Headless, Keys, Look, NoKeys, PanicHook, RunFacts, Screen, SystemClock, Table, Window,
         KEY_THAT_LISTS_THE_KEYS,
     };
     use crate::record::{NameRecord, RoundRecord, RunId};
@@ -1090,6 +1121,18 @@ mod tests {
         }
     }
 
+    /// The look of a table that draws the block elements of the Recent column.
+    ///
+    /// Every table below but the tables of the image path takes this look, so a
+    /// frame of one of them reads as the frame of a run on a terminal that
+    /// draws no image.
+    fn bars(paint: Paint) -> Look {
+        Look {
+            paint,
+            graphics: None,
+        }
+    }
+
     /// A table that draws into bytes, reads `keys`, and heads its frames with
     /// the recorded file at `path`.
     ///
@@ -1102,7 +1145,7 @@ mod tests {
             Vec::new(),
             keys,
             Window::new(WIDTH, NO_ROWS),
-            Paint::Colored,
+            bars(Paint::Colored),
         );
         table.sink.clear();
         table
@@ -1144,7 +1187,7 @@ mod tests {
             Counted { writes: 0 },
             FakeKeys::of(&[]),
             Window::new(WIDTH, NO_ROWS),
-            Paint::Colored,
+            bars(Paint::Colored),
         );
         table.sink.writes = 0;
         table
@@ -1171,7 +1214,7 @@ mod tests {
             Vec::new(),
             FakeKeys::of(&[]),
             Window::new(WIDTH, NO_ROWS),
-            Paint::Plain,
+            bars(Paint::Plain),
         );
         table.sink.clear();
         table
@@ -1336,7 +1379,7 @@ mod tests {
             Vec::new(),
             FakeKeys::of(script),
             Window::new(WIDTH, rows),
-            Paint::Colored,
+            bars(Paint::Colored),
         );
         table.sink.clear();
         table
@@ -1492,6 +1535,110 @@ mod tests {
         "?          show these keys, or hide them",
     ];
 
+    /// The pixel size of one character cell of the terminal that the tests of
+    /// the image path draw into.
+    ///
+    /// Ten pixels by twenty is about the cell of a modern terminal at its
+    /// default font. The image of the Recent column is then 90 pixels wide and
+    /// 20 pixels tall.
+    const CELL: (u32, u32) = (10, 20);
+
+    /// The Kitty graphics command that takes every image off the screen.
+    ///
+    /// The test spells the bytes, and `termgfx` spells them again. That is on
+    /// purpose, as the word of the pause is: a Kitty placement outlives a clear
+    /// of the screen, so a frame that did not delete would stack the images of
+    /// a whole run on top of each other.
+    const KITTY_DELETE_ALL: &str = "\x1b_Ga=d,d=A\x1b\\";
+
+    /// The start of one Kitty graphics command that carries an image.
+    ///
+    /// `a=T` is the transmit-and-display action, which is the action that puts
+    /// an image on the screen. The delete command above carries `a=d` instead,
+    /// so a count of these names the images of a frame and never the delete.
+    const KITTY_IMAGE: &str = "\x1b_Ga=T";
+
+    /// The start of an iTerm2 inline image command.
+    const ITERM2_IMAGE: &str = "\x1b]1337;File=";
+
+    /// The start of a Sixel payload, which is a device control string.
+    const SIXEL_IMAGE: &str = "\x1bP";
+
+    /// A table that draws into bytes on a terminal that draws images, in a
+    /// window of `rows` rows and `columns` columns.
+    ///
+    /// The terminal is a Kitty terminal, because the Kitty protocol is the one
+    /// of the three that a test can read: it writes a delete command and it
+    /// names every image with a placement id. `termgfx::Capabilities::new`
+    /// builds the terminal, so this table needs no terminal of its own.
+    ///
+    /// The sink comes back empty, for the reason that [`table_at`] states.
+    fn graphics_table(columns: u16, rows: Option<u16>) -> Table<Vec<u8>, FakeKeys> {
+        let mut table = Table::new(
+            facts_at(temp_path("graphics")),
+            Vec::new(),
+            FakeKeys::of(&[]),
+            Window::new(columns, rows),
+            Look {
+                paint: Paint::Colored,
+                graphics: Some(Graphics {
+                    capabilities: termgfx::Capabilities::new(
+                        termgfx::TerminalType::Kitty,
+                        true,
+                        true,
+                    ),
+                    cell: CELL,
+                }),
+            },
+        );
+        table.sink.clear();
+        table
+    }
+
+    /// The number of images that a frame wrote.
+    fn image_count(sink: &[u8]) -> usize {
+        String::from_utf8_lossy(sink).matches(KITTY_IMAGE).count()
+    }
+
+    #[test]
+    fn a_table_of_no_graphics_draws_the_block_elements_and_no_escape_of_an_image() {
+        // The flag of the image path is off by default, and a run that took no
+        // flag draws what it always drew, byte for byte. Every protocol carries
+        // its image in an escape sequence, and a terminal that reads none of
+        // them puts that sequence on the screen as text.
+        let mut screen = table(&[]);
+        screen.round(&one_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        assert!(
+            lines.iter().any(|line| line == ONE_ROUND_ROW),
+            "the row of the TTL ends with the block elements of its history: {lines:?}"
+        );
+        for escape in [KITTY_DELETE_ALL, KITTY_IMAGE, ITERM2_IMAGE, SIXEL_IMAGE] {
+            assert!(
+                !drawn.contains(escape),
+                "no escape of an image protocol reaches the frame: {drawn:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_of_graphics_takes_the_images_of_the_frame_before_it_off_the_screen() {
+        // A Kitty placement outlives a clear of the screen, so a frame that did
+        // not delete would stack a thousand images over a run of a thousand
+        // rounds. The delete stands at the head of the frame, in front of the
+        // clear, so nothing of the frame that follows it goes away with it.
+        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        screen.round(&one_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+
+        assert!(
+            drawn.starts_with(KITTY_DELETE_ALL),
+            "the frame opens with the command that takes every image off the screen: {drawn:?}"
+        );
+    }
+
     /// The last `count` lines of a frame, or every line of a frame that holds
     /// fewer than that.
     ///
@@ -1575,7 +1722,7 @@ mod tests {
             Vec::new(),
             FakeKeys::of(&[]),
             Window::new(WIDTH, NO_ROWS),
-            Paint::Colored,
+            bars(Paint::Colored),
         );
         let lines = painted(&screen.sink);
 

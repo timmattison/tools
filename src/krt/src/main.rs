@@ -1382,7 +1382,10 @@ fn screen_of(
         std::io::stdout(),
         live::Keyboard,
         live::Window::new(columns, rows),
-        paint_of(std::env::var_os("NO_COLOR").is_some()),
+        live::Look {
+            paint: paint_of(std::env::var_os("NO_COLOR").is_some()),
+            graphics: None,
+        },
     );
     Ok((Box::new(table), Some(guard)))
 }

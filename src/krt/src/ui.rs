@@ -727,7 +727,11 @@ const TIME_WIDTH: u16 = 5;
 const TIME_COLUMNS: usize = 5;
 
 /// The number of columns of the sparkline.
-const RECENT_WIDTH: u16 = 9;
+///
+/// A caller that draws the Recent column as an image reads it too: the image is
+/// as wide as the column, and one character cell of it holds the pixels that
+/// the terminal reports.
+pub(crate) const RECENT_WIDTH: u16 = 9;
 
 /// The number of columns between two columns of the table.
 ///
