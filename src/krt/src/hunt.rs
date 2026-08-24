@@ -515,10 +515,16 @@ pub(crate) struct Sources<'a> {
 /// user cut short takes no row and no count of the summary: the summary counts
 /// the rounds that finished.
 ///
+/// A fault stops the hunt where the user does, and it keeps the same summary.
+/// The rounds in front of the fault measured what they measured, and the caller
+/// prints their table before it prints the reason.
+///
 /// # Errors
 ///
-/// Returns [`HuntError::Run`] when a record does not reach the file, and
-/// [`HuntError::Tracer`] when the tracer of a destination does not start.
+/// Returns a [`HuntStopped`] of the summary of the rounds that finished and the
+/// fault that stopped the hunt. The fault is [`HuntError::Run`] when a record
+/// does not reach the file, and [`HuntError::Tracer`] when the tracer of a
+/// destination does not start.
 pub(crate) fn record<W: Write>(
     facts: &Facts,
     plan: &Plan,
@@ -527,6 +533,10 @@ pub(crate) fn record<W: Write>(
     writer: &mut Writer<W>,
 ) -> Result<Summary, HuntStopped> {
     let started = Instant::now();
+    // Both ways out of the loop build the same summary over the scores that the
+    // hunt holds at that point, so the fault and the finish read alike.
+    let summarize =
+        |scores: Vec<Score>| Summary::new(scores, started.elapsed(), plan.include_partial);
     let mut scores = Vec::new();
     let mut previous = None;
     for _ in 0..plan.rounds {
@@ -544,17 +554,13 @@ pub(crate) fn record<W: Write>(
             Ok(None) => {}
             Err(fault) => {
                 return Err(HuntStopped {
-                    summary: Summary::new(Vec::new(), Duration::ZERO, plan.include_partial),
+                    summary: summarize(scores),
                     fault,
                 })
             }
         }
     }
-    Ok(Summary::new(
-        scores,
-        started.elapsed(),
-        plan.include_partial,
-    ))
+    Ok(summarize(scores))
 }
 
 /// The moment that names the run of the next destination.
@@ -787,7 +793,8 @@ impl Score {
 ///
 /// The summary reads the scores of the destinations that the hunt finished, so
 /// a hunt that `Ctrl-C` stopped prints the same table over the rounds it did
-/// finish.
+/// finish. A hunt that a fault stopped prints it too, and the fault follows the
+/// table.
 #[derive(Debug)]
 pub(crate) struct Summary {
     /// The score of each destination, in the order the hunt traced them.
@@ -1894,6 +1901,14 @@ mod tests {
     /// One round that reached the destination at TTL 5.
     const REACHED_AT_FIVE: &[&[(u8, &str, f64)]] = &[&[(1, FIRST_HOP, 1.0), (5, NEAR, 20.0)]];
 
+    /// One round that reached the far destination at TTL 18.
+    ///
+    /// The hops of a script name the address that answered, and a score reads
+    /// the destination it traced. So a hunt of two destinations that both
+    /// answer takes one script for each of them.
+    const FAR_REACHED_AT_EIGHTEEN: &[&[(u8, &str, f64)]] =
+        &[&[(1, FIRST_HOP, 1.0), (18, FAR, 85.0)]];
+
     /// One round that answered to TTL 4 and no further.
     const PARTIAL_AT_FOUR: &[&[(u8, &str, f64)]] = &[&[(1, FIRST_HOP, 1.0), (4, LAST_ANSWER, 9.0)]];
 
@@ -2088,8 +2103,11 @@ mod tests {
     /// `krt replay <file> --run <id>` for each of them.
     #[test]
     fn a_hunt_that_a_tracer_stopped_keeps_the_summary_of_the_rounds_that_finished() {
-        let mut probes =
-            FakeProbes::refuses_after(&[REACHED_AT_FIVE, REACHED_AT_FIVE], 2, NO_RAW_SOCKET);
+        let mut probes = FakeProbes::refuses_after(
+            &[REACHED_AT_FIVE, FAR_REACHED_AT_EIGHTEEN],
+            2,
+            NO_RAW_SOCKET,
+        );
         let stopped = run_hunt(&[NEAR, FAR, QUIET], &mut probes, 3, &never_stops(), &[])
             .expect_err("the tracer of the third destination stops the hunt");
         assert!(

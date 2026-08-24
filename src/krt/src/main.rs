@@ -1351,6 +1351,29 @@ impl TraceFailure {
     }
 }
 
+/// The fault that stopped a hunt, and what the hunt found before it.
+///
+/// A fault that stops the loop of the hunt carries the summary of the rounds
+/// that finished, and the caller prints that table before it prints the reason.
+/// A fault in front of the loop — the privilege gate, the resolver, the draw,
+/// the file, the signal — carries none, because no round ran.
+struct HuntFailure {
+    /// The summary of the rounds that finished, when the hunt reached the loop.
+    summary: Option<hunt::Summary>,
+    /// The fault, as the user reads it, and the code of its kind.
+    failure: TraceFailure,
+}
+
+impl From<TraceFailure> for HuntFailure {
+    /// A fault in front of the loop of the hunt, which found nothing to print.
+    fn from(failure: TraceFailure) -> Self {
+        Self {
+            summary: None,
+            failure,
+        }
+    }
+}
+
 /// The unspecified address of the family of an address.
 fn unspecified_of(target: IpAddr) -> IpAddr {
     match target {
@@ -1766,8 +1789,11 @@ impl hunt::Probes for SystemProbes<'_> {
 ///
 /// # Errors
 ///
-/// Returns the reason and the exit code of the fault that stopped the hunt.
-fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, TraceFailure> {
+/// Returns the reason and the exit code of the fault that stopped the hunt,
+/// with the summary of the rounds that finished beside them. A fault that
+/// stopped the loop of the hunt holds that summary, and a fault in front of the
+/// loop holds none.
+fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, HuntFailure> {
     let privilege = trace::acquire_privilege()
         .map_err(|error| TraceFailure::new(&error, EXIT_NO_PRIVILEGES))?;
     let resolver = resolver_of(config.reverse_dns).map_err(|error| {
@@ -1834,7 +1860,10 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Tra
                 EXIT_TRACER_FAILED
             }
         };
-        TraceFailure::new(&stopped.fault, code)
+        HuntFailure {
+            summary: Some(stopped.summary),
+            failure: TraceFailure::new(&stopped.fault, code),
+        }
     })?;
     println!("{RECORDED} {}", path.display());
     Ok(summary)
@@ -1928,16 +1957,21 @@ fn main() {
     if let Some(plan) = config.hunt {
         // The block names what the hunt will do, and then the hunt does it.
         print!("{config}");
-        match hunt(&config, &plan) {
-            Ok(summary) => {
-                for line in summary.lines() {
-                    println!("{line}");
-                }
+        // The table of the rounds that finished prints either way, and the
+        // reason that stopped the hunt follows it. A fault at round 40 of 64
+        // took nothing away from the 39 rounds in front of it.
+        let (summary, failure) = match hunt(&config, &plan) {
+            Ok(summary) => (Some(summary), None),
+            Err(stopped) => (stopped.summary, Some(stopped.failure)),
+        };
+        if let Some(summary) = summary {
+            for line in summary.lines() {
+                println!("{line}");
             }
-            Err(failure) => {
-                eprintln!("{PROGRAM}: {}", failure.reason);
-                std::process::exit(failure.code);
-            }
+        }
+        if let Some(failure) = failure {
+            eprintln!("{PROGRAM}: {}", failure.reason);
+            std::process::exit(failure.code);
         }
         return;
     }

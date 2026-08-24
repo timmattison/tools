@@ -617,7 +617,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     number of TTLs inside the path that answered nothing, and the run that recorded the trace, so
     `krt replay <FILE> --run <ID>` prints the whole path. Under the table stand the number of
     rounds, the number of reached destinations, the number of partial ones, and the wall time.
-    `Ctrl-C` stops the hunt and still prints the summary of the rounds that finished.
+    `Ctrl-C` stops the hunt and still prints the summary of the rounds that finished. A fault
+    that stops the hunt — a write that the file refuses, a tracer that does not start — prints
+    that same summary, and it then names the reason on standard error.
   - The draw of a hunt is of ip version 4 alone, because the space of ip version 6 is far too
     sparse for a random address to reach a host. It rejects every address that no packet routes
     to — the private blocks, the loopback block, the documentation blocks, the multicast block,
