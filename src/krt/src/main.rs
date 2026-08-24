@@ -2433,11 +2433,34 @@ resolved configuration:
         }
     }
 
+    /// The refusal of a mode other than `classic` reaches UDP alone, so
+    /// `classic` is what keeps every protocol of the command line usable.
+    ///
+    /// This test therefore resolves `classic` beside each protocol in turn,
+    /// and it is the one test that asks `resolve` to accept `--protocol tcp`
+    /// and `--protocol udp` at all.
     #[test]
     fn the_classic_multipath_mode_resolves_with_every_protocol() {
-        let config = resolve(&["krt", "example.com", "--multipath", "classic"]);
-        assert_eq!(config.multipath, Multipath::Classic);
-        assert_eq!(config.protocol, Protocol::Icmp);
+        for protocol in Protocol::value_variants() {
+            let name = value_name(protocol);
+            let config = resolve(&[
+                "krt",
+                "example.com",
+                "--multipath",
+                "classic",
+                "--protocol",
+                name.as_str(),
+            ]);
+            assert_eq!(
+                config.multipath,
+                Multipath::Classic,
+                "`--multipath classic --protocol {name}`"
+            );
+            assert_eq!(
+                config.protocol, *protocol,
+                "`--multipath classic --protocol {name}`"
+            );
+        }
     }
 
     #[test]
