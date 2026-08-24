@@ -2416,7 +2416,7 @@ resolved configuration:
     }
 
     #[test]
-    fn every_multipath_mode_resolves_with_udp() {
+    fn a_multipath_mode_other_than_classic_resolves_with_udp() {
         for (mode, expected) in [("paris", Multipath::Paris), ("dublin", Multipath::Dublin)] {
             let config = resolve(&[
                 "krt",
