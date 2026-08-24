@@ -3907,6 +3907,36 @@ resolved configuration:
         );
     }
 
+    /// A hunt probes at the period that the command line named.
+    ///
+    /// The tracer of each destination takes the period of the resolved
+    /// configuration, so a hunt that reads the default alone probes once a
+    /// second whatever the line asked for.
+    #[test]
+    fn a_hunt_takes_the_interval_that_the_command_line_named() {
+        assert_eq!(
+            resolve(&["krt", HUNT, "--interval", "500ms"]).interval,
+            Duration::from_millis(500)
+        );
+    }
+
+    /// The block of a hunt names the period that every probe of it takes.
+    ///
+    /// The period sets how long each destination holds the hunt, so a block
+    /// that leaves it out keeps the number from every reader.
+    #[test]
+    fn the_resolved_block_of_a_hunt_names_the_interval() {
+        let block = resolve(&["krt", HUNT, "--interval", "500ms"]).to_string();
+        assert!(
+            block.contains("interval:"),
+            "the block of a hunt names the interval: {block}"
+        );
+        assert!(
+            block.contains("500ms"),
+            "the block of a hunt names the period that the line asked for: {block}"
+        );
+    }
+
     /// A hunt of no round records nothing, so the parser rejects it.
     #[test]
     fn a_hunt_of_no_round_is_rejected() {
