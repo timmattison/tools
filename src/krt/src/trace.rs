@@ -150,7 +150,7 @@ const UDP_SOURCE_PORTS: u32 = (UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) as 
 /// A port of the range that another program already holds stops the run, as the
 /// one fixed port of every run did before. The next run holds another process
 /// identifier and takes another port.
-fn udp_source_port(process: u32) -> u16 {
+const fn udp_source_port(process: u32) -> u16 {
     // The remainder stands below `UDP_SOURCE_PORTS`, which is far inside the
     // range of a `u16`, so the conversion of it takes nothing away.
     let offset = (process % UDP_SOURCE_PORTS) as u16;
