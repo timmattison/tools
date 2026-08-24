@@ -68,10 +68,54 @@ impl fmt::Display for Block {
     }
 }
 
+/// Every block that the draw rejects.
+///
+/// The table is the special-purpose registry of ip version 4, as RFC 6890 and
+/// the registry that follows it hold it. A packet to any of these addresses
+/// reaches no host of the internet, so a round spent on one measures nothing.
+///
+/// `255.255.255.255/32` stands inside `240.0.0.0/4`, and it keeps its own entry
+/// because the registry holds it as an entry of its own. The table reads as the
+/// registry, and not as the shortest set of blocks that covers it.
+const RESERVED: [Block; 16] = [
+    // This network.
+    Block::new(Ipv4Addr::new(0, 0, 0, 0), 8),
+    // Private.
+    Block::new(Ipv4Addr::new(10, 0, 0, 0), 8),
+    // Shared address space, which a carrier puts behind one public address.
+    Block::new(Ipv4Addr::new(100, 64, 0, 0), 10),
+    // Loopback.
+    Block::new(Ipv4Addr::new(127, 0, 0, 0), 8),
+    // Link local.
+    Block::new(Ipv4Addr::new(169, 254, 0, 0), 16),
+    // Private.
+    Block::new(Ipv4Addr::new(172, 16, 0, 0), 12),
+    // The assignments of the IETF.
+    Block::new(Ipv4Addr::new(192, 0, 0, 0), 24),
+    // Documentation.
+    Block::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+    // The anycast address of a relay from ip version 6 to ip version 4.
+    Block::new(Ipv4Addr::new(192, 88, 99, 0), 24),
+    // Private.
+    Block::new(Ipv4Addr::new(192, 168, 0, 0), 16),
+    // Benchmarking.
+    Block::new(Ipv4Addr::new(198, 18, 0, 0), 15),
+    // Documentation.
+    Block::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+    // Documentation.
+    Block::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+    // Multicast.
+    Block::new(Ipv4Addr::new(224, 0, 0, 0), 4),
+    // Reserved for a use that no standard names.
+    Block::new(Ipv4Addr::new(240, 0, 0, 0), 4),
+    // The limited broadcast address.
+    Block::new(Ipv4Addr::new(255, 255, 255, 255), 32),
+];
+
 /// The block that holds an address, when a reserved block does. An address
 /// that a packet routes to holds none.
-fn reserved(_addr: Ipv4Addr) -> Option<Block> {
-    None
+fn reserved(addr: Ipv4Addr) -> Option<Block> {
+    RESERVED.into_iter().find(|block| block.holds(addr))
 }
 
 /// The candidates of a seeded pseudo-random sequence, without end.
@@ -80,8 +124,9 @@ fn reserved(_addr: Ipv4Addr) -> Option<Block> {
 /// hunt of that seed, for one build of `krt`. The generator of the `rand` crate
 /// is free to change its sequence between two versions of that crate, so a seed
 /// repeats a hunt of the same binary and promises nothing across an upgrade.
-fn random(_seed: u64) -> impl Iterator<Item = Ipv4Addr> {
-    std::iter::empty()
+fn random(seed: u64) -> impl Iterator<Item = Ipv4Addr> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    std::iter::repeat_with(move || Ipv4Addr::from_bits(rng.random()))
 }
 
 /// The draw of one hunt: the source of the candidates, and the addresses that
@@ -114,7 +159,13 @@ impl Draw {
     /// candidates that the draw rejected, both give no address, and the hunt
     /// then stops.
     pub(crate) fn address(&mut self) -> Option<Ipv4Addr> {
-        self.candidates.next()
+        for _ in 0..ATTEMPTS {
+            let candidate = self.candidates.next()?;
+            if reserved(candidate).is_none() && self.visited.insert(candidate) {
+                return Some(candidate);
+            }
+        }
+        None
     }
 }
 
@@ -128,7 +179,7 @@ mod tests {
     const ROUTABLE: &str = "93.184.216.34";
 
     /// A second address that a packet routes to.
-    const OTHER_ROUTABLE: &str = "198.19.255.255";
+    const OTHER_ROUTABLE: &str = "1.1.1.1";
 
     /// The number of addresses that the test of a seeded draw reads.
     const SEEDED_DRAWS: usize = 64;
