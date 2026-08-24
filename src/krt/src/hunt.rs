@@ -5,15 +5,36 @@
 //! four rows: the shortest path, the longest path, the fastest path, and the
 //! slowest path.
 //!
-//! The source of the addresses is a seam. The draw takes an iterator of
-//! candidates, so a test hands it a list and reads what the hunt did with it,
-//! and no test sends a packet. The seeded iterator of [`random`] is the source
-//! of a real hunt, and `--seed` is what makes one hunt repeat another.
+//! The word `round` carries two meanings around this module, and the two names
+//! keep them apart. A round of the hunt is one destination, and `Plan::rounds`
+//! counts those. A probe round is one sweep of the TTLs, and
+//! `Plan::probes_per_round` counts the probe rounds that each destination
+//! takes. The run loop of `run.rs` knows the second meaning alone.
+//!
+//! Both sources that a hunt draws on are seams, so no test of this module sends
+//! a packet:
+//!
+//! - The addresses come from an iterator of candidates. A test hands the draw a
+//!   list, and the seeded iterator of [`random`] is the source of a real hunt.
+//!   `--seed` is what makes one hunt repeat another.
+//! - The rounds come from a [`Probes`]. A test hands back a channel it filled,
+//!   and the tracer of `trace.rs` is the source of a real hunt.
 //!
 //! The draw rejects every candidate that no packet routes to, and it rejects
 //! every candidate it already gave. A hunt therefore traces each destination
 //! once, and it spends no round on an address that answers nothing by
 //! construction.
+//!
+//! Each destination takes one run of `run::record`, so a hunt writes the
+//! records that a trace writes and a replay folds any one of its runs with no
+//! change. The screen of that run is the [`Scorer`], which folds the rounds
+//! into the numbers that the table ranks and draws nothing: a hunt shows one
+//! table at the end and no live table. The fold therefore rides on the door
+//! that the run loop already knocks on, and the hunt reads no file back.
+//!
+//! The hunt traces one destination at a time and never two at once. A
+//! measurement of 64 destinations at the normal interval is a small load, and
+//! it stays that way only while the hunt is serial.
 
 use crate::live::Screen;
 use crate::names;
