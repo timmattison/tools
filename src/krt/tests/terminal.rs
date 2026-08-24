@@ -54,8 +54,9 @@ use std::{env, fs, process};
 /// The number of rows of every pseudo terminal below.
 ///
 /// The frames of these tests hold six lines at the most, so no run of them
-/// scrolls. The number is a part of the size that the terminal reports, and a
-/// terminal that reports a zero in either number reports no window at all.
+/// scrolls and the live table leaves no row of a path out of a frame. The
+/// number is a part of the size that the terminal reports, and a terminal that
+/// reports a zero in either number reports no window at all.
 const ROWS: u16 = 40;
 
 /// The number of columns of a terminal that holds the whole frame.
@@ -294,9 +295,11 @@ impl Terminal {
     /// The lines of the frame, from the header line to the end of the text.
     ///
     /// The terminal returns a carriage on each line of its own, and the live
-    /// table writes one of those itself, so each line ends with one carriage or
-    /// with two. The reader takes every carriage off the end of a line, and
-    /// what stays is the text that a reader of the terminal sees.
+    /// table writes one of those between two lines of a frame, so a line ends
+    /// with one carriage or with two. The last line of a live frame carries no
+    /// line end at all, because a line end there scrolls the window. The reader
+    /// takes every carriage off the end of a line, and what stays is the text
+    /// that a reader of the terminal sees.
     fn frame(&self) -> Vec<String> {
         let shown = self.shown();
         shown

@@ -517,6 +517,16 @@ const HEADER_LINES: u16 = 2;
 /// The number of lines of the column header.
 const COLUMN_HEADER_LINES: u16 = 1;
 
+/// The number of lines of a frame that stand above the rows of the path.
+///
+/// A caller that fits a frame to the window of a terminal keeps these lines and
+/// drops rows, so the reader keeps the destination, the count of the rounds,
+/// the size of the recorded file, and the name of every column. The count comes
+/// off the two constants above, because a head that grew by one line would
+/// otherwise take one row of the path with it and no line of that caller would
+/// say so.
+pub(crate) const HEAD_LINES: u16 = HEADER_LINES + COLUMN_HEADER_LINES;
+
 /// The host of a TTL that never answered.
 const NO_HOST: &str = "???";
 

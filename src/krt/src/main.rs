@@ -149,6 +149,10 @@ const ROUND: &str = "round";
 /// The name of one TTL that answered, in the status line of one round.
 const HOP: &str = "hop";
 
+/// The name of one row of a table, in the line that counts the rows which a
+/// window too short left out of a frame.
+const ROW: &str = "row";
+
 /// The last field of the status line of one round that reached the target.
 const REACHED: &str = "reached";
 

@@ -11,7 +11,7 @@ use crate::record::{NameRecord, RoundRecord};
 use crate::stats::HopTable;
 use crate::ui;
 use crate::ui::render_duration;
-use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
+use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, ROW, SUMMARY_SEPARATOR};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
@@ -124,7 +124,64 @@ fn key_lines() -> Vec<String> {
         .collect()
 }
 
-/// The end of every line that a draw writes.
+/// The mark that opens the line which counts the rows that a frame left out.
+///
+/// The mark reads as "and more of the same". The rows behind it are rows of the
+/// table above it, and the count says how many of them the window does not
+/// hold.
+const MORE_MARK: &str = "+";
+
+/// The lines of one frame that fit a window of `rows` rows.
+///
+/// The head and the footer stand at every height. The head names the
+/// destination, the count of the rounds, the size of the recorded file, and
+/// every column of the table, and the footer holds the mark of the pause and
+/// the list of the keys, which are what a key press of the reader asked for.
+/// The rows of the path take the lines that those two leave, and one line then
+/// says how many rows went out of the frame.
+///
+/// The frame drops the TTLs farthest from the source, which is the end that
+/// `traceroute` and `mtr` drop as well. The numbering of the rows then starts
+/// under the column header and runs down the window, so a reader of a short
+/// frame still reads the hops that answer first.
+///
+/// A window that no probe measured holds every line. Such a run knows no height
+/// to fit a frame to, and the terminal decides what it shows.
+///
+/// The last cut holds a window too short even for the head and the footer
+/// together. A frame that ran past the foot of the window would scroll the
+/// window by the lines that ran past it, and the head of the frame goes off the
+/// top of an alternate screen that keeps no scrollback.
+fn fitted(
+    head: Vec<String>,
+    body: Vec<String>,
+    footer: Vec<String>,
+    rows: Option<u16>,
+) -> Vec<String> {
+    let budget = rows.map_or(usize::MAX, usize::from);
+    let mut lines = head;
+    if lines.len() + body.len() + footer.len() <= budget {
+        lines.extend(body);
+        lines.extend(footer);
+        return lines;
+    }
+    // The head, the footer, and the one line that counts the rows which went
+    // out of the frame keep their lines. The rows of the path take what is
+    // left.
+    let kept = budget.saturating_sub(lines.len() + footer.len() + 1);
+    let dropped = body.len() - kept.min(body.len());
+    lines.extend(body.into_iter().take(kept));
+    // A table of no row leaves no row out, and a line that counted zero rows
+    // would name a table the reader can already see the whole of.
+    if dropped > 0 {
+        lines.push(format!("{MORE_MARK}{}", counted(dropped, ROW)));
+    }
+    lines.extend(footer);
+    lines.truncate(budget);
+    lines
+}
+
+/// The text between two lines that a draw writes.
 ///
 /// Raw mode returns no carriage on a bare line feed, so a frame of bare line
 /// feeds walks down the screen one column further to the right for each line
@@ -347,6 +404,9 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// The footer stands under the table, and one blank line holds it off the
     /// last row of the path: a word directly under the numbers of a hop reads
     /// as a part of the table.
+    ///
+    /// The lines then fit the window, in the three parts that [`fitted`] takes:
+    /// the head of the frame, the rows of the path, and that footer.
     fn frame_lines(&self) -> Vec<String> {
         let frame = ui::Frame {
             header: ui::Header {
@@ -372,7 +432,22 @@ impl<W: Write, K: Keys> Table<W, K> {
             },
             destination: Some(self.facts.address),
         };
-        let mut lines = frame.lines(self.window.columns);
+        let mut body = frame.lines(self.window.columns);
+        // The head comes off the front of the frame, because a frame that the
+        // window does not hold keeps the head and drops rows of the path. A
+        // frame holds those lines at every width, and the `min` says so anyway.
+        let head: Vec<String> = body
+            .drain(..usize::from(ui::HEAD_LINES).min(body.len()))
+            .collect();
+        fitted(head, body, self.footer(), self.window.rows)
+    }
+
+    /// The lines that stand under the rows of the path.
+    ///
+    /// The mark of the pause comes first, and the list of the keys comes under
+    /// it. One blank line holds each of them off the lines above.
+    fn footer(&self) -> Vec<String> {
+        let mut lines = Vec::new();
         if self.paused {
             lines.push(String::new());
             lines.push(PAUSED.to_owned());
@@ -429,6 +504,13 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// and the terminal draws what arrives, so the reader sees a half-drawn
     /// frame between two of those writes.
     ///
+    /// One line end stands between two lines, and no line end closes the last
+    /// line. A line end on the last row of the window scrolls the window by one
+    /// line, so a frame of as many lines as the window holds would push its own
+    /// header line off the top of a screen that keeps no scrollback. The
+    /// position of the cursor between two draws says nothing, because every
+    /// draw clears the screen and moves the cursor to the origin first.
+    ///
     /// # Errors
     ///
     /// Answers the fault that the sink raised. The caller of this function
@@ -436,9 +518,7 @@ impl<W: Write, K: Keys> Table<W, K> {
     fn paint(&mut self, lines: &[String]) -> std::io::Result<()> {
         let mut frame: Vec<u8> = Vec::new();
         queue!(frame, Clear(ClearType::All), MoveTo(0, 0))?;
-        for line in lines {
-            write!(frame, "{line}{LINE_END}")?;
-        }
+        write!(frame, "{}", lines.join(LINE_END))?;
         self.sink.write_all(&frame)?;
         self.sink.flush()
     }
@@ -939,7 +1019,12 @@ mod tests {
     /// A table that draws into bytes, reads `keys`, and heads its frames with
     /// the recorded file at `path`.
     fn table_at<K: Keys>(path: PathBuf, keys: K) -> Table<Vec<u8>, K> {
-        Table::new(facts_at(path), Vec::new(), keys, Window::new(WIDTH, NO_ROWS))
+        Table::new(
+            facts_at(path),
+            Vec::new(),
+            keys,
+            Window::new(WIDTH, NO_ROWS),
+        )
     }
 
     /// A sink that counts the calls of [`Write::write`] that reach it.
@@ -1037,7 +1122,7 @@ mod tests {
     ///
     /// The test spells the count, and the module reads it off the two
     /// constants of `ui.rs`. That is on purpose, as the word of the pause is:
-    /// these three lines are what a reader of a clamped frame keeps.
+    /// these three lines are what a reader of a short frame keeps.
     const HEAD_LINES: usize = 3;
 
     /// The start of the column header of every frame.

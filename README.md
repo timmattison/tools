@@ -646,10 +646,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     line each minute says what the run is doing and leaves that file readable.
   - The live table is the table of `krt replay` below. It holds the same header line, the same
     columns, the same marks, and the same rule for a terminal too narrow for every column. It takes
-    the width of the terminal at the start of the run, and a window that changes size while the run
-    stands leaves the frame at that width. The table folds every round that arrives and draws the
-    frame of that fold, so the count of the rounds in its header line is the count that the table
-    folded, and the size in that same line is the size the recorded file holds at that draw.
+    the width and the height of the terminal at the start of the run, and a window that changes size
+    while the run stands leaves the frame at the size it started with. A frame taller than that
+    window keeps its header line, its column header, the mark of the pause, and the list of the
+    keys. The rows of the path take the lines that those leave, first hop first, and one line under
+    the last row of them counts the rows that went out of the frame, as in `+12 rows`. A run that
+    measures no terminal draws every line of the frame. The table folds every round that arrives and
+    draws the frame of that fold, so the count of the rounds in its header line is the count that
+    the table folded, and the size in that same line is the size the recorded file holds at that
+    draw.
   - Five keys drive the live table. `q` and Ctrl-C stop the run, write the record that closes it,
     give the terminal back, and exit with success. `p` holds the table where it stands, and a
     second press lets it move again. A held table holds the display alone: the file still takes
