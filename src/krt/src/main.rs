@@ -202,14 +202,25 @@ enum Protocol {
 }
 
 /// The way a probe keeps or varies the flow of a packet.
+// `paris` and `dublin` each hold one flow for one round, and not for one run,
+// because a UDP run of `krt` holds the source port and lets the destination
+// port vary. The tracer writes the number of the round into that free port for
+// both of the two modes, and it carries the number of the probe in another
+// field: the UDP checksum for `paris`, and the IP header for `dublin`. A run
+// that held both ports would hold one flow for the whole run, and `krt` builds
+// no such direction. `trace.rs` holds the three sentences below beside the
+// direction of the ports, in
+// `the_multipath_help_stands_beside_the_port_direction_that_makes_it_true`.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Multipath {
     /// Let each probe take its own flow, as traceroute always did.
     Classic,
-    /// Hold one flow for every probe, as Paris traceroute does.
+    /// Hold one flow for each round, and carry the probe number in the UDP
+    /// checksum.
     Paris,
-    /// Walk the flows to find every path, as Dublin traceroute does.
+    /// Hold one flow for each round, and carry the probe number in the IP
+    /// header.
     Dublin,
 }
 
@@ -326,7 +337,7 @@ struct Cli {
     #[arg(long, value_name = "P", value_enum, default_value_t = Protocol::Icmp)]
     protocol: Protocol,
 
-    /// The multipath mode. UDP and TCP only.
+    /// The multipath mode. UDP only.
     #[arg(long, value_name = "M", value_enum, default_value_t = Multipath::Classic)]
     multipath: Multipath,
 
@@ -435,7 +446,11 @@ impl Cli {
     ///
     /// Returns the reason as text when two flags contradict each other. A first
     /// TTL above the max TTL leaves no hop to probe. A multipath mode other
-    /// than `classic` needs UDP or TCP, because ICMP carries no flow to vary.
+    /// than `classic` needs UDP, because no other protocol lets the mode
+    /// change a packet. ICMP carries no port to hold or to vary. A TCP probe
+    /// puts the probe number in its source port under every mode, so the mode
+    /// changes nothing, and the record then names a mode that the run did not
+    /// use.
     fn resolve(self) -> Result<ResolvedConfig, String> {
         if self.first_ttl > self.max_ttl {
             return Err(format!(
@@ -444,10 +459,10 @@ impl Cli {
             ));
         }
 
-        let carries_a_flow = matches!(self.protocol, Protocol::Udp | Protocol::Tcp);
-        if self.multipath != Multipath::Classic && !carries_a_flow {
+        let carries_a_mode = matches!(self.protocol, Protocol::Udp);
+        if self.multipath != Multipath::Classic && !carries_a_mode {
             return Err(format!(
-                "`--multipath {}` needs `--protocol udp` or `--protocol tcp`, but the protocol is `{}`",
+                "`--multipath {}` needs `--protocol udp`, but the protocol is `{}`",
                 value_name(&self.multipath),
                 value_name(&self.protocol)
             ));
@@ -1359,9 +1374,9 @@ fn main() {
 mod tests {
     use super::{
         closing_line, display_of, host_name_or, name_grace, parse_duration, pick_address,
-        resolve_target, run_config, source_from, stop_reason, user_stopped, AddressFamily, Cli,
-        Command, Display, EndReason, Family, Multipath, Protocol, ResolveError, ResolvedConfig,
-        SourceKind, SourceLabel, RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
+        resolve_target, run_config, source_from, stop_reason, user_stopped, value_name,
+        AddressFamily, Cli, Command, Display, EndReason, Family, Multipath, Protocol, ResolveError,
+        ResolvedConfig, SourceKind, SourceLabel, RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
     };
     use crate::record::{Privilege, RunConfig};
     use crate::run::Outcome;
@@ -1369,7 +1384,7 @@ mod tests {
     use crate::testing::address;
     use crate::ui::render_duration;
     use clap::error::{ContextKind, ContextValue, ErrorKind};
-    use clap::{CommandFactory, Parser};
+    use clap::{CommandFactory, Parser, ValueEnum};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::Path;
     use std::path::PathBuf;
@@ -2343,32 +2358,109 @@ resolved configuration:
     }
 
     #[test]
-    fn a_multipath_mode_resolves_with_udp_and_with_tcp() {
-        for (mode, protocol) in [("paris", "udp"), ("dublin", "tcp")] {
+    fn rejects_a_multipath_mode_beside_tcp() {
+        let message = contradiction(&[
+            "krt",
+            "example.com",
+            "--multipath",
+            "dublin",
+            "--protocol",
+            "tcp",
+        ]);
+        for part in ["--multipath", "dublin", "--protocol", "tcp"] {
+            assert!(
+                message.contains(part),
+                "the message names `{part}`: {message}"
+            );
+        }
+    }
+
+    /// The help of one flag of the command line, by the id of that flag. The
+    /// long help stands when the flag carries one, and the short help stands
+    /// otherwise.
+    fn flag_help(id: &str) -> String {
+        let command = Cli::command();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == id)
+            .expect("the command line carries the flag");
+        argument
+            .get_long_help()
+            .or_else(|| argument.get_help())
+            .expect("the flag carries help")
+            .to_string()
+    }
+
+    #[test]
+    fn the_help_of_the_multipath_flag_names_every_protocol_that_carries_a_mode() {
+        let help = flag_help("multipath");
+        for protocol in Protocol::value_variants() {
+            let name = value_name(protocol);
+            let accepted = parse(&[
+                "krt",
+                "example.com",
+                "--multipath",
+                "paris",
+                "--protocol",
+                name.as_str(),
+            ])
+            .resolve()
+            .is_ok();
+            let in_the_help = name.to_uppercase();
+            assert_eq!(
+                help.contains(&in_the_help),
+                accepted,
+                "the help names `{in_the_help}` when `--multipath paris` takes `--protocol {name}`: {help}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_multipath_mode_other_than_classic_resolves_with_udp() {
+        for (mode, expected) in [("paris", Multipath::Paris), ("dublin", Multipath::Dublin)] {
             let config = resolve(&[
                 "krt",
                 "example.com",
                 "--multipath",
                 mode,
                 "--protocol",
-                protocol,
+                "udp",
             ]);
             assert_eq!(
-                config.multipath,
-                match mode {
-                    "paris" => Multipath::Paris,
-                    _ => Multipath::Dublin,
-                },
-                "`--multipath {mode} --protocol {protocol}`"
+                config.multipath, expected,
+                "`--multipath {mode} --protocol udp`"
             );
         }
     }
 
+    /// The refusal of a mode other than `classic` reaches UDP alone, so
+    /// `classic` is what keeps every protocol of the command line usable.
+    ///
+    /// This test therefore resolves `classic` beside each protocol in turn,
+    /// and it is the one test that asks `resolve` to accept `--protocol tcp`
+    /// and `--protocol udp` at all.
     #[test]
     fn the_classic_multipath_mode_resolves_with_every_protocol() {
-        let config = resolve(&["krt", "example.com", "--multipath", "classic"]);
-        assert_eq!(config.multipath, Multipath::Classic);
-        assert_eq!(config.protocol, Protocol::Icmp);
+        for protocol in Protocol::value_variants() {
+            let name = value_name(protocol);
+            let config = resolve(&[
+                "krt",
+                "example.com",
+                "--multipath",
+                "classic",
+                "--protocol",
+                name.as_str(),
+            ]);
+            assert_eq!(
+                config.multipath,
+                Multipath::Classic,
+                "`--multipath classic --protocol {name}`"
+            );
+            assert_eq!(
+                config.protocol, *protocol,
+                "`--multipath classic --protocol {name}`"
+            );
+        }
     }
 
     #[test]

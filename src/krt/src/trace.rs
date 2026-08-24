@@ -1225,6 +1225,77 @@ this platform needs raw socket privileges to send probes.
         );
     }
 
+    /// The sentence that `krt --help` prints for each multipath mode.
+    ///
+    /// `clap` builds the help of a value out of the doc comment of the variant
+    /// that carries it, and it drops the period at the end. Each sentence
+    /// below therefore stops without one.
+    const MULTIPATH_HELP: [(Multipath, &str); 3] = [
+        (
+            Multipath::Classic,
+            "Let each probe take its own flow, as traceroute always did",
+        ),
+        (
+            Multipath::Paris,
+            "Hold one flow for each round, and carry the probe number in the UDP checksum",
+        ),
+        (
+            Multipath::Dublin,
+            "Hold one flow for each round, and carry the probe number in the IP header",
+        ),
+    ];
+
+    /// The help of each multipath mode stands beside the port direction that
+    /// makes that help true.
+    ///
+    /// A UDP run of `krt` holds the source port and lets the destination port
+    /// vary. The tracer writes the number of the round into that free port for
+    /// `paris` and for `dublin`, so each of the two modes holds one flow for
+    /// one round. A direction that held both ports would hold one flow for the
+    /// whole run, and the help of the two modes would then be false.
+    ///
+    /// The direction and the three sentences therefore live in one test. An
+    /// edit of the direction above breaks this test, and no reader of
+    /// `krt --help` then reads a sentence which the code left behind.
+    #[test]
+    fn the_multipath_help_stands_beside_the_port_direction_that_makes_it_true() {
+        use clap::{CommandFactory, ValueEnum};
+
+        assert_eq!(
+            tracer_of_protocol(Protocol::Udp).port_direction(),
+            trippy_core::PortDirection::FixedSrc(Port(UDP_SOURCE_PORT)),
+            "the free destination port of a UDP run carries the number of the round, and that is what makes `one flow for each round` true. A direction that held both ports would hold one flow for the whole run, and the help of `paris` and of `dublin` would then be false"
+        );
+
+        // `term_width(0)` stands for an unbounded width in `clap` 4, so the
+        // page below wraps no line. A page of the default width of 100 columns
+        // carries the longest sentence of a mode in 96 of them, and a sentence
+        // that grew past that margin would wrap and break the assertion below
+        // for a reason that no reader of `krt --help` ever meets.
+        let page = crate::Cli::command()
+            .term_width(0)
+            .render_long_help()
+            .to_string();
+        for (mode, sentence) in MULTIPATH_HELP {
+            let value = mode
+                .to_possible_value()
+                .expect("every multipath mode carries a name");
+            let help = value
+                .get_help()
+                .expect("every multipath mode carries help")
+                .to_string();
+            assert_eq!(
+                help, sentence,
+                "the doc comment of `{mode:?}` in `main.rs` writes this sentence on the help page, and the port direction above is what makes it true. An edit of that direction must change the doc comment with it"
+            );
+            let name = value.get_name();
+            assert!(
+                page.contains(sentence),
+                "the long help carries the sentence of the `{name}` mode, so that sentence reaches the page a reader reads. `clap` writes the name of a mode onto the page under every outcome, the bare `[possible values: ...]` line included, so the name alone says nothing about the sentence: {page}"
+            );
+        }
+    }
+
     /// `Builder::build` refuses a TCP trace whose port direction is `None`, as
     /// it refuses such a UDP trace.
     #[test]
