@@ -2304,6 +2304,17 @@ mod tests {
         lines.get(index).map_or("", String::as_str)
     }
 
+    /// The Recent column of one row, which is the last field of its line.
+    ///
+    /// Every row that draws a sparkline ends its line with that sparkline, and
+    /// a sparkline holds no space, so the last field of the line is the whole
+    /// of the column.
+    fn recent_of(line: &str) -> String {
+        fields_with_columns(line)
+            .pop()
+            .map_or_else(String::new, |(_, text)| text)
+    }
+
     /// The lines of a frame from an index, or none when the frame is shorter
     /// than that.
     fn lines_from(lines: &[String], index: usize) -> &[String] {
@@ -2525,6 +2536,50 @@ mod tests {
             display_width(&host_column(row, HOST_WIDTH)),
             HOST_WIDTH,
             "the printed cell of the host fills the Host column and no more"
+        );
+    }
+
+    #[test]
+    fn a_lost_probe_draws_a_mark_of_its_own_and_no_address_row_draws_it() {
+        // Four rounds probe TTL 1. The left router answers the first round and
+        // the fourth, the right router answers the second, and the third round
+        // gets nothing back. The Recent column of the TTL therefore draws four
+        // marks, and the third of them is the loss. A column of three bars
+        // would read as the column of a TTL that lost nothing, and the Loss%
+        // beside it would contradict the one picture of the recent behavior of
+        // that TTL.
+        //
+        // The times of the window are 10, 30, and 20, so its scale runs from 10
+        // to 30: 10 takes the lowest bar, 30 takes the highest, and 20 stands
+        // at half of the span, which is the fourth bar of the seven. The loss
+        // takes no part in the scale, because a lost probe measures no time.
+        //
+        // Neither address row draws a loss. The round that the right router
+        // answered is no loss of the left one, and the round that no router
+        // answered is a loss of the TTL and of neither of them. A mark on an
+        // address row would report a loss that the Share% beside it
+        // contradicts.
+        let table = table_of(&[
+            round(1, 1, &[(1, LEFT_ROUTER, 10.0)]),
+            round(1, 1, &[(1, RIGHT_ROUTER, 30.0)]),
+            round(1, 1, &[]),
+            round(1, 1, &[(1, LEFT_ROUTER, 20.0)]),
+        ]);
+        let lines = lines_of(&table, &BTreeMap::new(), None, NOMINAL_WIDTH);
+        assert_eq!(
+            recent_of(line(&lines, 3)),
+            "▁▇╳▄",
+            "the ttl draws one mark for each probe, and the lost probe takes a mark of its own"
+        );
+        assert_eq!(
+            recent_of(line(&lines, 4)),
+            "▁▇",
+            "the left router draws its two answers and no loss"
+        );
+        assert_eq!(
+            recent_of(line(&lines, 5)),
+            "▁",
+            "the right router draws its one answer and no loss"
         );
     }
 
