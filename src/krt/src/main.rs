@@ -4031,26 +4031,38 @@ resolved configuration:
         }
     }
 
+    /// The glyph that ends the key of a row of the block.
+    const COLON: &str = ":";
+
     /// The column that every value of a block stands in.
-    ///
-    /// The key of a row ends at the first colon of the line. A value that holds
-    /// a colon of its own — an address of ip version 6, and a path on some
-    /// machines — therefore takes no part in the answer.
-    ///
-    /// # Panics
-    ///
-    /// Panics on a row that holds no colon. Such a row is a defect of the
-    /// block, not an answer that a test names.
     fn value_columns(block: &str) -> Vec<usize> {
         block
             .lines()
             .skip(1)
             .map(|line| {
-                let colon = line.find(':').expect("every row of the block holds a key");
-                let value = &line[colon + 1..];
-                colon + 1 + (value.len() - value.trim_start().len())
+                let (key, value) = split_key(line);
+                // The count is of characters and not of bytes, because a column
+                // of a terminal holds a character.
+                key.chars().count()
+                    + COLON.len()
+                    + (value.chars().count() - value.trim_start().chars().count())
             })
             .collect()
+    }
+
+    /// The key of one row of a block, and the text that follows its colon.
+    ///
+    /// The split is on the first colon, so a value that holds a colon of its
+    /// own — an address of ip version 6, and a path on some machines — takes no
+    /// part in the answer.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a row that holds no colon. Such a row is a defect of the
+    /// block, not an answer that a test names.
+    fn split_key(line: &str) -> (&str, &str) {
+        line.split_once(COLON)
+            .expect("every row of the block holds a key")
     }
 
     /// Asserts that every value of a block stands in one column, one space
@@ -4064,9 +4076,8 @@ resolved configuration:
             "every value of the block stands in one column: {block}"
         );
         for line in block.lines().skip(1) {
-            let colon = line.find(':').expect("every row of the block holds a key");
             assert!(
-                line[colon + 1..].starts_with(' '),
+                split_key(line).1.starts_with(' '),
                 "one space at the least stands between a key and its value: {line}"
             );
         }
