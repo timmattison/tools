@@ -1267,7 +1267,15 @@ this platform needs raw socket privileges to send probes.
             "the free destination port of a UDP run carries the number of the round, and that is what makes `one flow for each round` true. A direction that held both ports would hold one flow for the whole run, and the help of `paris` and of `dublin` would then be false"
         );
 
-        let page = crate::Cli::command().render_long_help().to_string();
+        // `term_width(0)` stands for an unbounded width in `clap` 4, so the
+        // page below wraps no line. A page of the default width of 100 columns
+        // carries the longest sentence of a mode in 96 of them, and a sentence
+        // that grew past that margin would wrap and break the assertion below
+        // for a reason that no reader of `krt --help` ever meets.
+        let page = crate::Cli::command()
+            .term_width(0)
+            .render_long_help()
+            .to_string();
         for (mode, sentence) in MULTIPATH_HELP {
             let value = mode
                 .to_possible_value()
@@ -1282,8 +1290,8 @@ this platform needs raw socket privileges to send probes.
             );
             let name = value.get_name();
             assert!(
-                page.contains(name),
-                "the long help names the `{name}` mode, so the sentence of that mode reaches the page a reader reads: {page}"
+                page.contains(sentence),
+                "the long help carries the sentence of the `{name}` mode, so that sentence reaches the page a reader reads. `clap` writes the name of a mode onto the page under every outcome, the bare `[possible values: ...]` line included, so the name alone says nothing about the sentence: {page}"
             );
         }
     }
