@@ -155,7 +155,10 @@ const HEADER_START: &str = " krt  ";
 /// space of their own — `src 1.2.3.4` and `round 142` each do — so a narrower
 /// gap would read as one sentence, and a reader would have to know the words to
 /// find where one field stops.
-const FIELD_SEPARATOR: &str = "   ";
+///
+/// The line that counts a hunt reads the same separator, for the same reason:
+/// `12 reached` holds a space of its own.
+pub(crate) const FIELD_SEPARATOR: &str = "   ";
 
 /// The glyph between a destination and the address that it resolved to.
 ///

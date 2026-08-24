@@ -471,10 +471,20 @@ impl Score {
     /// keeps it: a name is what a resolver said, and an address is what
     /// answered. A run of `--no-dns` reads no name, and the cell then holds the
     /// address by itself.
+    /// The mean round-trip time that ranks this path.
+    ///
+    /// A path that no hop answered ranks after every path that one did. The
+    /// table filters those paths out before it ranks, so no row of it ever
+    /// reads this value.
+    fn time(&self) -> f64 {
+        self.rtt_ms.unwrap_or(f64::INFINITY)
+    }
+
     fn host_text(&self) -> String {
-        self.host
-            .as_ref()
-            .map_or_else(|| self.addr.to_string(), |host| format!("{host} ({})", self.addr))
+        self.host.as_ref().map_or_else(
+            || self.addr.to_string(),
+            |host| format!("{host} ({})", self.addr),
+        )
     }
 }
 
@@ -503,9 +513,144 @@ impl Summary {
     }
 
     /// The lines of the summary: the table, a blank line, and the counts.
+    ///
+    /// The table takes the width that its cells need, and it cuts no name. It
+    /// prints once, after the hunt, and it holds four rows at the most, so a
+    /// column that grows costs a reader nothing. The table of a folded run
+    /// stands under a different rule, because it draws on a terminal that the
+    /// run holds and it redraws for every round.
     pub(crate) fn lines(&self) -> Vec<String> {
-        Vec::new()
+        let ranked = self.ranked();
+        let mut lines = if ranked.is_empty() {
+            vec![format!("{ROW_START}{NOTHING_TO_RANK}")]
+        } else {
+            table(&ranked)
+        };
+        lines.push(String::new());
+        lines.push(self.counts());
+        lines
     }
+
+    /// The rows of the table, in the order they print.
+    ///
+    /// A row that no destination holds is absent. Every reached path holds a
+    /// time, because the destination answered, so the fastest row and the
+    /// slowest row go away only when a hunt of `--include-partial` ranks
+    /// partial paths alone and no hop of any of them answered.
+    fn ranked(&self) -> Vec<Row<'_>> {
+        let candidates: Vec<&Score> = self
+            .scores
+            .iter()
+            .filter(|score| self.include_partial || score.kind == PathKind::Reached)
+            .collect();
+        let timed: Vec<&Score> = candidates
+            .iter()
+            .copied()
+            .filter(|score| score.rtt_ms.is_some())
+            .collect();
+        [
+            (SHORTEST, pick(&candidates, |a, b| a.length < b.length)),
+            (LONGEST, pick(&candidates, |a, b| a.length > b.length)),
+            (FASTEST, pick(&timed, |a, b| a.time() < b.time())),
+            (SLOWEST, pick(&timed, |a, b| a.time() > b.time())),
+        ]
+        .into_iter()
+        .filter_map(|(label, score)| score.map(|score| Row { label, score }))
+        .collect()
+    }
+
+    /// The line that counts what the hunt did.
+    fn counts(&self) -> String {
+        let reached = self
+            .scores
+            .iter()
+            .filter(|score| score.kind == PathKind::Reached)
+            .count();
+        [
+            counted(self.scores.len(), ROUND),
+            format!("{reached} {REACHED}"),
+            format!("{} {PARTIAL}", self.scores.len() - reached),
+            ui::render_duration(self.elapsed),
+        ]
+        .join(ui::FIELD_SEPARATOR)
+    }
+}
+
+/// The first score of the list that beats every other one.
+///
+/// `better` is strict, so the first of two scores that tie keeps the row. A
+/// hunt therefore ranks the destination it traced first, and two runs of one
+/// seed print the same table.
+fn pick<'a>(scores: &[&'a Score], better: impl Fn(&Score, &Score) -> bool) -> Option<&'a Score> {
+    let mut best: Option<&'a Score> = None;
+    for score in scores {
+        if best.is_none_or(|held| better(score, held)) {
+            best = Some(score);
+        }
+    }
+    best
+}
+
+/// The lines of the table: the column header, and one line for each row.
+///
+/// Each column takes the width of the widest cell it holds, and of its own
+/// heading. The widths come out of [`COLUMNS`], which holds the heading and the
+/// cell of each column together, so no cell can land under the heading of
+/// another column.
+fn table(rows: &[Row]) -> Vec<String> {
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| COLUMNS.iter().map(|column| (column.cell)(row)).collect())
+        .collect();
+    let widths: Vec<usize> = COLUMNS
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            cells
+                .iter()
+                .map(|row| ui::display_width(&row[index]))
+                .chain(std::iter::once(ui::display_width(column.heading)))
+                .max()
+                .unwrap_or_default()
+        })
+        .collect();
+    let headings: Vec<String> = COLUMNS
+        .iter()
+        .map(|column| column.heading.to_owned())
+        .collect();
+    std::iter::once(&headings)
+        .chain(cells.iter())
+        .map(|row| line_of(row, &widths))
+        .collect()
+}
+
+/// One line of the table: every cell, padded to the width of its column.
+///
+/// The line loses the spaces that follow its last cell. A trailing space says
+/// nothing, and it turns a copy of the table into text that a reader must
+/// clean.
+fn line_of(cells: &[String], widths: &[usize]) -> String {
+    let padded: Vec<String> = cells
+        .iter()
+        .zip(widths)
+        .zip(COLUMNS.iter())
+        .map(|((cell, width), column)| pad(cell, *width, column.right))
+        .collect();
+    format!("{ROW_START}{}", padded.join(COLUMN_GAP))
+        .trim_end()
+        .to_owned()
+}
+
+/// One cell, padded to the width of its column.
+///
+/// The measure is in terminal columns and not in bytes, so a name that holds a
+/// wide glyph keeps its column.
+fn pad(cell: &str, width: usize, right: bool) -> String {
+    let spaces = " ".repeat(width.saturating_sub(ui::display_width(cell)));
+    if right {
+        return format!("{spaces}{cell}");
+    }
+    format!("{cell}{spaces}")
 }
 
 #[cfg(test)]
@@ -997,7 +1142,12 @@ mod tests {
                 &[&[(1, FIRST_HOP, 1.0), (5, NEAR, 20.0)]],
                 &[(NEAR, DESTINATION_NAME)],
             ),
-            traced(FAR, FAR_RUN, &[&[(1, FIRST_HOP, 1.0), (18, FAR, 85.0)]], &[]),
+            traced(
+                FAR,
+                FAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (18, FAR, 85.0)]],
+                &[],
+            ),
             traced(
                 QUIET,
                 QUIET_RUN,
@@ -1105,7 +1255,10 @@ mod tests {
 
     #[test]
     fn the_counts_hold_the_rounds_the_reached_the_partial_and_the_wall_time() {
-        assert_eq!(counts(&a_hunt(false)), "3 rounds   2 reached   1 partial   192s");
+        assert_eq!(
+            counts(&a_hunt(false)),
+            "3 rounds   2 reached   1 partial   192s"
+        );
     }
 
     /// A hunt of one round writes the singular name of a round.
@@ -1144,11 +1297,11 @@ mod tests {
 
     /// The summary of a hunt of three destinations, as the design writes it.
     const GOLDEN_SUMMARY: [&str; 7] = [
-        " Row       Host                          Len  Path       Avg  Loss%  Gaps  Run",
-        " shortest  example.com (93.184.216.34)     5  reached   20.0   0.0%     3  2026-08-18T12:00:00.123Z",
-        " longest   72.14.200.1                    18  reached   85.0   0.0%    16  2026-08-18T12:01:00.000Z",
-        " fastest   example.com (93.184.216.34)     5  reached   20.0   0.0%     3  2026-08-18T12:00:00.123Z",
-        " slowest   72.14.200.1                    18  reached   85.0   0.0%    16  2026-08-18T12:01:00.000Z",
+        " Row       Host                         Len  Path      Avg  Loss%  Gaps  Run",
+        " shortest  example.com (93.184.216.34)    5  reached  20.0   0.0%     3  2026-08-18T12:00:00.123Z",
+        " longest   72.14.200.1                   18  reached  85.0   0.0%    16  2026-08-18T12:01:00.000Z",
+        " fastest   example.com (93.184.216.34)    5  reached  20.0   0.0%     3  2026-08-18T12:00:00.123Z",
+        " slowest   72.14.200.1                   18  reached  85.0   0.0%    16  2026-08-18T12:01:00.000Z",
         "",
         "3 rounds   2 reached   1 partial   192s",
     ];

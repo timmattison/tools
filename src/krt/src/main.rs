@@ -145,7 +145,7 @@ const FLAG_VERSION_6: &str = "-6";
 
 /// The name of one round of a run, in a status line and in the header line of
 /// a frame.
-const ROUND: &str = "round";
+pub(crate) const ROUND: &str = "round";
 
 /// The name of one TTL that answered, in the status line of one round.
 const HOP: &str = "hop";
@@ -155,7 +155,7 @@ const HOP: &str = "hop";
 const ROW: &str = "row";
 
 /// The last field of the status line of one round that reached the target.
-const REACHED: &str = "reached";
+pub(crate) const REACHED: &str = "reached";
 
 /// The last field of the status line of one round that did not reach the
 /// target.
@@ -820,7 +820,7 @@ fn user_stopped(flag: &AtomicBool) -> bool {
 ///
 /// One of a thing keeps the singular name, and every other count adds one `s`.
 /// The two names of this file, `round` and `run`, both take that plural.
-fn counted(count: usize, name: &str) -> String {
+pub(crate) fn counted(count: usize, name: &str) -> String {
     let plural = if count == 1 { "" } else { "s" };
     format!("{count} {name}{plural}")
 }
