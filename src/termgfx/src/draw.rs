@@ -129,14 +129,23 @@ impl Capabilities {
     /// * `request` - The budget, the cursor and the aspect ratio.
     ///
     /// # Errors
-    /// Gives [`DrawError::Encode`] when the encoder of the protocol refuses the
-    /// image, and [`DrawError::Write`] when a write to `out` fails.
+    /// Gives [`DrawError::NoGraphics`] when this terminal draws no inline image
+    /// at all, and then leaves `out` untouched. Every protocol carries its
+    /// image in an escape sequence, and a terminal that reads none of the three
+    /// puts the sequence on the screen as text, so the answer has to come back
+    /// before one byte leaves. Gives [`DrawError::Encode`] when the encoder of
+    /// the protocol refuses the image, and [`DrawError::Write`] when a write to
+    /// `out` fails.
     pub fn draw<W: Write>(
         &self,
         out: &mut W,
         image: &DynamicImage,
         request: &Request,
     ) -> Result<(), DrawError> {
+        if !self.draws_images() {
+            return Err(DrawError::NoGraphics);
+        }
+
         match display_routine_for(self.terminal_type()) {
             DisplayRoutine::Sixel => write_sixel(out, image, request),
             DisplayRoutine::Kitty => write_kitty(out, image, request),
