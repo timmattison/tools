@@ -911,16 +911,35 @@ impl<W: Write> Writer<W> {
         Self { sink }
     }
 
-    /// Appends one record and one newline, then flushes.
+    /// Appends one record and its newline as one write, then flushes.
+    ///
+    /// The line and the newline go into one buffer, and that buffer makes one
+    /// call. This is the rule of the writer, and not a detail of it. A
+    /// [`RecordFile`] takes the exclusive lock of the file for one write and
+    /// releases it after that write, so a record that left as two writes would
+    /// release the lock in the middle of itself. Two runs of one destination
+    /// from one machine append to one file, and the second run would then put a
+    /// whole record of its own into that gap. One line of the file would hold
+    /// two records, and the reader refuses such a line and with it the whole
+    /// file.
+    ///
+    /// [`Write::write_all`] makes one call for one buffer, because
+    /// [`RecordFile::write`] answers with the whole length of the buffer it
+    /// took. So one record is one buffer, one buffer is one call, and one call
+    /// is one append.
     ///
     /// # Errors
     ///
-    /// Returns the reason when the record does not become JSON, when the write
-    /// fails, and when the flush fails.
+    /// Returns the reason when the record does not become JSON, when the append
+    /// fails, and when the flush fails. A [`RecordFile`] fails the append when
+    /// the lock of the file does not come inside the bound on the wait.
     pub(crate) fn write(&mut self, record: &Record) -> std::io::Result<()> {
-        let line = record.to_line().map_err(std::io::Error::other)?;
-        self.sink.write_all(line.as_bytes())?;
-        self.sink.write_all(&[NEWLINE])?;
+        let mut line = record
+            .to_line()
+            .map_err(std::io::Error::other)?
+            .into_bytes();
+        line.push(NEWLINE);
+        self.sink.write_all(&line)?;
         self.sink.flush()
     }
 }
