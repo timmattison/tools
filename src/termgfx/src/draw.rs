@@ -47,6 +47,15 @@ use crate::geometry::{
 /// around the same pixels.
 const KITTY_CHUNK_SIZE: usize = 4096;
 
+/// The Kitty graphics command that takes every image off the screen.
+///
+/// `a=d` is the delete action and `d=A` names every placement of every image.
+/// The upper case `d` value frees the pixels of the image as well, where the
+/// lower case value keeps them in the memory of the renderer for a later
+/// placement. A caller that draws a new image for each frame never places an
+/// old one again, so it frees the pixels.
+const KITTY_DELETE_ALL: &str = "\x1b_Ga=d,d=A\x1b\\";
+
 /// How much of the terminal one image can take, in character cells.
 ///
 /// An axis is `None` when the caller states no bound on it. The protocols each
@@ -181,8 +190,12 @@ impl Capabilities {
     ///
     /// # Errors
     /// Gives the error of the write to `out` when the write fails.
-    pub fn clear_images<W: Write>(&self, _out: &mut W) -> io::Result<()> {
-        todo!("no routine states what it leaves on the screen yet")
+    pub fn clear_images<W: Write>(&self, out: &mut W) -> io::Result<()> {
+        if display_routine_for(self.terminal_type()) == DisplayRoutine::Kitty {
+            write!(out, "{KITTY_DELETE_ALL}")?;
+        }
+
+        Ok(())
     }
 }
 
