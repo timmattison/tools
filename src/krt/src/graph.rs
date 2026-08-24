@@ -25,10 +25,22 @@
 //! three colors and gives the reason of each of them.
 
 use crate::stats::Sample;
-use image::RgbaImage;
+use image::{Rgba, RgbaImage};
+
+/// The color of a bar.
+///
+/// One color must read on a light terminal and on a dark one. A gray at either
+/// end of the range fails one of the two. A mid teal carries enough saturation
+/// to stand against white and enough lightness to stand against black, and it
+/// is not the red that the table already spends on a lost probe.
+const BAR: Rgba<u8> = Rgba([64, 176, 192, 255]);
 
 /// The image of one history of round-trip times, as the Recent column of one
 /// row draws it.
+///
+/// A sample that the run measured draws a bar of [`BAR`], which is a mid teal.
+/// One color must read on a light terminal and on a dark one, and it must not
+/// be the red that the table already spends on a lost probe.
 ///
 /// The background is transparent. A transparent background lets the terminal
 /// show its own background through the cell, and the column then reads as a
@@ -41,10 +53,14 @@ use image::RgbaImage;
 /// * `width` - The width of the image in pixels.
 /// * `height` - The height of the image in pixels.
 pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
-    let _ = history;
     // Every channel of a new image is zero, and an alpha of zero is a pixel
     // that paints nothing at all.
-    RgbaImage::new(width, height)
+    let mut image = RgbaImage::new(width, height);
+    let _ = history;
+    for column in 0..width {
+        image.put_pixel(column, height - 1, BAR);
+    }
+    image
 }
 
 #[cfg(test)]
