@@ -623,6 +623,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     | `--no-dns` | off | Skip every reverse lookup, and show the addresses alone. |
     | `--source <IP>` | discovered | Name the source of the derived filename, and skip the lookup of the public address. |
     | `--headless` | off | Draw no table and take no key. Print one status line each minute. |
+    | `--graphics` | off | Draw the `Recent` column of the live table as an image of the whole history. It needs a terminal that draws images. |
     | `--duration <DUR>` | none | Stop the run after this much time. |
     | `--rounds <N>` | none | Stop the run after this many rounds. |
     | `-V`, `--version` | | Print the version, the git hash, and whether the build was clean. |
@@ -723,6 +724,22 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     stop below the full block, so a gap stands between the graph of one row and the graph of the row
     above it. An address row draws the answers of its own router alone, because a probe reaches a
     TTL and not a router.
+  - `--graphics` draws the `Recent` column of a live run as an image. The column is nine terminal
+    columns wide, so the block elements show nine of the sixty samples that the fold of a hop keeps.
+    One character cell holds ten pixels or more across, and an image of the same nine columns
+    therefore draws every one of those sixty samples. The scale is the scale of the block elements,
+    read over the whole history: the smallest sample stands at the floor of the cell and the largest
+    fills it. A bar is teal, and it reads on a light terminal and on a dark one, because an image
+    carries its own pixels and cannot take the foreground of the terminal the way a glyph does. A
+    probe that no hop answered draws a dotted red column, and the dots are what tell a loss from a
+    slow answer. The background is transparent, so the terminal shows through the cell.
+  - The flag is off by default, and it draws an image only when the run holds a terminal, that
+    terminal reads one of the three inline-image protocols (Kitty, iTerm2, or Sixel), and that
+    terminal reports a pixel size. A run that misses any one of the four draws the block elements,
+    because two pictures of one hop is what the table must never show and an image at a guessed size
+    stands over the wrong cells. A row that draws an image draws no block element, and the heading
+    of the column stays. `krt replay`, a headless run, a pipe, and a file each draw the block
+    elements, whatever the flag says.
   - The marks of the table each say one thing. A `★` behind a host marks the row that answered from
     the destination, and a run that never reached the destination holds no such row. A `(+N)` behind
     a host says that more than one router answered at that TTL. The host of the row names the first
