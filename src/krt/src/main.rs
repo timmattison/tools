@@ -511,7 +511,7 @@ impl Cli {
             reverse_dns: !self.no_dns,
             source: self.source,
             headless: self.headless,
-            graphics: false,
+            graphics: self.graphics,
             duration: self.duration,
             rounds: self.rounds,
             replay,
@@ -1363,6 +1363,12 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
 /// [`paint_of`] holds the decision it feeds. Any value of the variable counts,
 /// as the convention of it says.
 ///
+/// The reads that the image path needs stand here as well, for the same reason:
+/// which terminal this is, whether that terminal draws an image at all, and how
+/// many pixels one character cell of it holds. [`graphics_of`] holds the
+/// decision that the three of them feed. The reads come after the guard took
+/// the terminal, so they measure the alternate screen that the frames draw on.
+///
 /// # Errors
 ///
 /// Returns the reason and [`EXIT_FAILURE`] when the terminal refused the hold.
@@ -1393,6 +1399,12 @@ fn screen_of(
         path: path.to_owned(),
     };
     let (columns, rows) = ui::frame_size();
+    let capabilities = termgfx::Capabilities::detect();
+    let cell = graphics_of(
+        config.graphics,
+        capabilities.draws_images(),
+        termgfx::cell_pixels(),
+    );
     let table = live::Table::new(
         facts,
         std::io::stdout(),
@@ -1400,7 +1412,7 @@ fn screen_of(
         live::Window::new(columns, rows),
         live::Look {
             paint: paint_of(std::env::var_os("NO_COLOR").is_some()),
-            graphics: None,
+            graphics: cell.map(|cell| live::Graphics { capabilities, cell }),
         },
     );
     Ok((Box::new(table), Some(guard)))
