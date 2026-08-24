@@ -391,15 +391,24 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// The clear comes first, so a frame of fewer lines than the frame before
     /// it leaves none of the older lines on the screen.
     ///
+    /// The whole frame stands in one buffer, and that buffer reaches the sink
+    /// in one call. The sink of a live run is `std::io::Stdout`, which is a
+    /// `LineWriter`, and such a writer flushes at every line feed. One call for
+    /// each line of the frame is therefore one `write(2)` for each line of it,
+    /// and the terminal draws what arrives, so the reader sees a half-drawn
+    /// frame between two of those writes.
+    ///
     /// # Errors
     ///
     /// Answers the fault that the sink raised. The caller of this function
     /// drops that fault, for the reason that [`Table::draw`] states.
     fn paint(&mut self, lines: &[String]) -> std::io::Result<()> {
-        queue!(self.sink, Clear(ClearType::All), MoveTo(0, 0))?;
+        let mut frame: Vec<u8> = Vec::new();
+        queue!(frame, Clear(ClearType::All), MoveTo(0, 0))?;
         for line in lines {
-            write!(self.sink, "{line}{LINE_END}")?;
+            write!(frame, "{line}{LINE_END}")?;
         }
+        self.sink.write_all(&frame)?;
         self.sink.flush()
     }
 }
