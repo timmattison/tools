@@ -276,19 +276,24 @@ const ONE_ROUND_OF_ONE_TTL: [&str; 4] = [FLAG_ROUNDS, ONE, FLAG_MAX_TTL, ONE];
 #[cfg(target_os = "macos")]
 const A_LONG_INTERVAL: &str = "2m";
 
-/// The start of the header line of a live table that folded no round.
+/// The first line of the head of a live table that folded no round.
 ///
-/// The line names the destination, the address it resolved to, the source, the
+/// The head names the destination, the address it resolved to, the source, the
 /// count of the rounds, and the period of one round. The name of the recorded
 /// file ends it, and each run of a test names a file of its own, so the text
-/// holds the start of the line and not the whole of it.
+/// holds these five fields and not that name.
+///
+/// The name is also what ends this line here. Each run of a test records to a
+/// file whose name carries a process identifier and a nanosecond, and no such
+/// name fits the window of [`WIDE`] columns beside the fields in front of it,
+/// so the head takes the file onto a second line.
 ///
 /// The test spells the line, and the table builds it out of the fields it
 /// holds. That is on purpose: `round 0` is what says that the frame stands in
 /// front of the first round of the run, and this line is what a reader of the
 /// terminal sees.
 #[cfg(target_os = "macos")]
-const NO_ROUND_HEADER: &str = " krt  127.0.0.1 → 127.0.0.1   src 127.0.0.1   round 0   2m   ";
+const NO_ROUND_HEADER: &str = " krt  127.0.0.1 → 127.0.0.1   src 127.0.0.1   round 0   2m\r\n";
 
 /// The byte that a terminal sends for Ctrl-C.
 ///

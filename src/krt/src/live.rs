@@ -393,6 +393,13 @@ pub(crate) struct Graphics {
 struct Drawn {
     /// The lines of the frame, head first.
     lines: Vec<String>,
+    /// The number of lines of the frame that stand above the rows of the path.
+    ///
+    /// The count comes off the render and not off a constant of this file. A
+    /// narrow window takes the header of a frame onto more than one line, and
+    /// an image that stood on a line this file counted itself would then cover
+    /// the heading of the Recent column.
+    head: u16,
     /// The Recent column of the frame, and the history of every row of the path
     /// that reached it. `None` when a narrow terminal dropped that column.
     recent: Option<ui::RecentColumn>,
@@ -401,8 +408,8 @@ struct Drawn {
 /// Writes one image for each row of the path of a frame.
 ///
 /// The image of the row at `index` stands over the Recent column of the line
-/// that the row draws in, which is the head of the frame plus that index. The
-/// cursor moves there first, and the image carries a placement id of its own:
+/// that the row draws in, which is `head` plus that index. The cursor moves
+/// there first, and the image carries a placement id of its own:
 /// every image of one frame therefore replaces the image of that same row in
 /// the frame before it, where one id for every row would put the last row of
 /// the frame over the first one.
@@ -420,6 +427,8 @@ struct Drawn {
 /// * `graphics` - The terminal, and the pixel size of one character cell.
 /// * `recent` - Where the Recent column stands, and the history of every row of
 ///   the path that reached the frame.
+/// * `head` - The number of lines of the frame that stand above the rows of the
+///   path, which the render of that frame answered.
 /// * `window_rows` - The number of rows that the window of the terminal holds,
 ///   and `None` for a window that no probe measured. A line at or past that
 ///   count stands under the foot of the window, and an image there would scroll
@@ -434,6 +443,7 @@ fn write_images(
     frame: &mut Vec<u8>,
     graphics: &Graphics,
     recent: &ui::RecentColumn,
+    head: u16,
     window_rows: Option<u16>,
 ) -> std::io::Result<()> {
     let (cell_width, cell_height) = graphics.cell;
@@ -447,7 +457,7 @@ fn write_images(
         let Ok(offset) = u16::try_from(index) else {
             break;
         };
-        let Some(line) = ui::HEAD_LINES.checked_add(offset) else {
+        let Some(line) = head.checked_add(offset) else {
             break;
         };
         // A line at or past the rows of the window stands under the foot of
@@ -632,11 +642,12 @@ impl<W: Write, K: Keys> Table<W, K> {
         // window does not hold keeps the head and drops rows of the path. A
         // frame holds those lines at every width, and the `min` says so anyway.
         let head: Vec<String> = body
-            .drain(..usize::from(ui::HEAD_LINES).min(body.len()))
+            .drain(..usize::from(rendered.head).min(body.len()))
             .collect();
         let fitted = fitted(head, body, self.footer(), self.window.rows);
         Drawn {
             lines: fitted.lines,
+            head: rendered.head,
             // A row that went out of the frame draws no image. Such an image
             // would stand over the line that counts the rows which went out, or
             // over a line of another frame, and nothing on the screen would say
@@ -738,7 +749,7 @@ impl<W: Write, K: Keys> Table<W, K> {
         write!(frame, "{}", drawn.lines.join(LINE_END))?;
         if let (Some(graphics), Some(recent)) = (self.look.graphics.as_ref(), drawn.recent.as_ref())
         {
-            write_images(&mut frame, graphics, recent, self.window.rows)?;
+            write_images(&mut frame, graphics, recent, drawn.head, self.window.rows)?;
             // The images move the cursor across the frame, so the last of them
             // leaves it at the Recent column of the last row of the path. The
             // origin is where a reader expects it, and it is where the draw of
@@ -1447,13 +1458,29 @@ mod tests {
         round(TTL, TTL, &[])
     }
 
-    /// The number of lines that stand above the rows of the path: the header
-    /// line, the blank line under it, and the column header.
+    /// The number of lines of the head that the tests of [`super::fitted`]
+    /// build.
     ///
-    /// The test spells the count, and the module reads it off the two
-    /// constants of `ui.rs`. That is on purpose, as the word of the pause is:
-    /// these three lines are what a reader of a short frame keeps.
-    const HEAD_LINES: usize = 3;
+    /// Three: a header line, the blank line under it, and a column header. That
+    /// is the head of a frame whose header takes one line, and the fit of a
+    /// frame reads the head it is given, so these tests need no head of a
+    /// render at all.
+    const A_HEAD_LINES: usize = 3;
+
+    /// The number of lines of a rendered frame that stand above the rows of the
+    /// path.
+    ///
+    /// The head ends with the column header, so the count reads the frame that
+    /// the test holds. A test that spelled the number would read the wrong line
+    /// of every frame whose header took a second line, and the header of a
+    /// frame takes as many lines as the window leaves it: `ui::Header::lines`
+    /// states that rule.
+    fn head_lines(lines: &[String]) -> usize {
+        lines
+            .iter()
+            .position(|line| line.starts_with(COLUMN_HEADER_START))
+            .map_or(0, |line| line + 1)
+    }
 
     /// The start of the column header of every frame.
     ///
@@ -1481,41 +1508,46 @@ mod tests {
 
     /// The number of rows of a window too short for that path.
     ///
-    /// The head takes three of these rows, and the line that counts the rows
-    /// which went out of the frame takes one, so six rows of the path stand.
+    /// The head takes four of these rows, and the line that counts the rows
+    /// which went out of the frame takes one, so five rows of the path stand.
+    ///
+    /// The head takes four rows and not three because the header of such a
+    /// table names a recorded file whose name no window of [`WIDTH`] columns
+    /// holds beside the four fields in front of it. The header therefore takes
+    /// two lines, and the blank line and the column header take one each.
     const SHORT_ROWS: u16 = 10;
 
     /// The last TTL of the tall path that a window of [`SHORT_ROWS`] rows
     /// holds.
-    const LAST_KEPT_TTL: u8 = 6;
+    const LAST_KEPT_TTL: u8 = 5;
 
     /// The first TTL of that path that such a window leaves out.
-    const FIRST_DROPPED_TTL: u8 = 7;
+    const FIRST_DROPPED_TTL: u8 = 6;
 
     /// The line that closes the rows of a frame in a window of [`SHORT_ROWS`]
     /// rows.
     ///
-    /// Six of the twenty rows of the path stand, so fourteen of them go out of
+    /// Five of the twenty rows of the path stand, so fifteen of them go out of
     /// the frame.
     ///
     /// The test spells the line, and the module builds the same line out of a
     /// count and the name of a row. That is on purpose, as the word of the
     /// pause is: this line is what a reader of the screen sees.
-    const DROPPED_LINE: &str = "+14 rows";
+    const DROPPED_LINE: &str = "+15 rows";
 
     /// The number of rows of the window of a common terminal.
     ///
-    /// The head and the tall path take 23 of these 24 rows. The pause and the
-    /// list of the keys take eight lines more, so a frame that carries both of
-    /// them runs past the foot of this window.
+    /// The head and the tall path take every one of these 24 rows. The pause
+    /// and the list of the keys take eight lines more, so a frame that carries
+    /// both of them runs past the foot of this window.
     const WINDOW_ROWS: u16 = 24;
 
     /// The line that closes the rows of that crowded frame.
     ///
-    /// The head takes three rows, the pause and the list of the keys take
-    /// eight, and this line takes one, so twelve of the twenty rows of the path
-    /// stand and eight go out of the frame.
-    const CROWDED_LINE: &str = "+8 rows";
+    /// The head takes four rows, the pause and the list of the keys take eight,
+    /// and this line takes one, so eleven of the twenty rows of the path stand
+    /// and nine go out of the frame.
+    const CROWDED_LINE: &str = "+9 rows";
 
     /// The mark that opens the line which counts the rows that a frame left
     /// out.
@@ -1889,7 +1921,7 @@ mod tests {
             lines.iter().any(|line| line == ONE_ROUND_ROW_OF_GRAPHICS),
             "the row of the TTL keeps every number and gives up its block element: {lines:?}"
         );
-        for line in lines.iter().skip(HEAD_LINES) {
+        for line in lines.iter().skip(head_lines(&lines)) {
             for glyph in BARS.chars().chain(NO_ANSWER.chars()) {
                 assert!(
                     !line.contains(glyph),
@@ -1909,12 +1941,48 @@ mod tests {
     /// and this number is what says the sum still lands where the heading does.
     const RECENT_COLUMN: u16 = 88;
 
-    /// The bytes that move the cursor to one row of the Recent column.
+    /// The text between two fields of the head of a frame.
+    ///
+    /// The test spells the three spaces, and `ui.rs` spells them again. That is
+    /// on purpose, as the word of the pause is: this gap is what a reader of the
+    /// head reads the fields by.
+    const FIELD_SEPARATOR: &str = "   ";
+
+    /// The number of lines of a head that carry no field: the blank line and the
+    /// column header.
+    const LINES_UNDER_THE_HEADER: usize = 2;
+
+    /// The head of a frame, as the one line that a wide window draws it in.
+    ///
+    /// A window that holds no whole head takes the fields that are left onto
+    /// the lines under it, so a test that read the first line alone would read
+    /// the first fields and none of the rest. The join puts the fields back in
+    /// the order the head names them.
+    fn header_text(lines: &[String]) -> String {
+        let count = head_lines(lines).saturating_sub(LINES_UNDER_THE_HEADER);
+        let mut text = String::new();
+        for line in lines.iter().take(count) {
+            if text.is_empty() {
+                text.push_str(line);
+            } else {
+                text.push_str(FIELD_SEPARATOR);
+                text.push_str(line.trim_start());
+            }
+        }
+        text
+    }
+
+    /// The bytes that move the cursor to the row of the path at `row` of a
+    /// frame that holds these lines.
     ///
     /// A terminal counts its rows and its columns from one, and `crossterm`
     /// counts from zero, so both numbers gain one on the way out.
-    fn moved_to(row: usize) -> String {
-        format!("\x1b[{};{}H", HEAD_LINES + row + 1, RECENT_COLUMN + 1)
+    fn moved_to(lines: &[String], row: usize) -> String {
+        format!(
+            "\x1b[{};{}H",
+            head_lines(lines) + row + 1,
+            RECENT_COLUMN + 1
+        )
     }
 
     /// The keys that name the placement of the image of one row.
@@ -1934,6 +2002,7 @@ mod tests {
         let mut screen = graphics_table(WIDTH, NO_ROWS);
         screen.round(&a_tall_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
 
         assert_eq!(
             image_count(&screen.sink),
@@ -1943,7 +2012,7 @@ mod tests {
         for ttl in TTL..=TALL_PATH {
             let row = usize::from(ttl - TTL);
             assert!(
-                drawn.contains(&format!("{}{KITTY_IMAGE}", moved_to(row))),
+                drawn.contains(&format!("{}{KITTY_IMAGE}", moved_to(&lines, row))),
                 "the cursor moves to the Recent column of the row of TTL {ttl}, and the image of that row follows it: {drawn:?}"
             );
             assert!(
@@ -1952,7 +2021,6 @@ mod tests {
             );
         }
     }
-
 
     /// The number of terminal rows that one line of a frame takes in a window
     /// of `columns` columns.
@@ -2022,6 +2090,7 @@ mod tests {
         let mut screen = graphics_table(WIDTH, Some(SHORT_ROWS));
         screen.round(&a_tall_round());
         let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
 
         assert_eq!(
             image_count(&screen.sink),
@@ -2029,7 +2098,7 @@ mod tests {
             "one image stands for each row of the path that reached the frame: {drawn:?}"
         );
         assert!(
-            !drawn.contains(&moved_to(usize::from(LAST_KEPT_TTL))),
+            !drawn.contains(&moved_to(&lines, usize::from(LAST_KEPT_TTL))),
             "and no image stands on the line under the last row that the window held: {drawn:?}"
         );
     }
@@ -2088,7 +2157,9 @@ mod tests {
 
     /// The lines that stand above the rows of the path of a fitted frame.
     fn a_head() -> Vec<String> {
-        (0..HEAD_LINES).map(|line| format!("head {line}")).collect()
+        (0..A_HEAD_LINES)
+            .map(|line| format!("head {line}"))
+            .collect()
     }
 
     /// One row of the path for each of `count` TTLs.
@@ -2118,7 +2189,7 @@ mod tests {
 
         assert_eq!(
             fitted.lines.len(),
-            HEAD_LINES + A_PATH,
+            A_HEAD_LINES + A_PATH,
             "the frame holds its head and every row of the path: {:?}",
             fitted.lines
         );
@@ -2161,9 +2232,7 @@ mod tests {
         let lines = painted(&screen.sink);
 
         assert!(
-            lines
-                .first()
-                .is_some_and(|line| line.starts_with(NO_ROUND_HEADER)),
+            header_text(&lines).starts_with(NO_ROUND_HEADER),
             "the header line names the target, the source, the interval, and the round that no probe took yet: {lines:?}"
         );
         assert!(
@@ -2225,9 +2294,7 @@ mod tests {
         screen.round(&one_round());
         let lines = painted(&screen.sink);
         assert!(
-            lines
-                .first()
-                .is_some_and(|line| line.starts_with(ONE_ROUND_HEADER)),
+            header_text(&lines).starts_with(ONE_ROUND_HEADER),
             "the header line names the target, the source, the one round, and the interval: {lines:?}"
         );
         assert!(
@@ -2249,21 +2316,19 @@ mod tests {
             "the frame stands inside the {SHORT_ROWS} rows of the window: {lines:?}"
         );
         assert!(
-            lines
-                .first()
-                .is_some_and(|line| line.starts_with(ONE_ROUND_HEADER)),
+            header_text(&lines).starts_with(ONE_ROUND_HEADER),
             "the header line stands, so the reader keeps the destination, the round, and the file: {lines:?}"
         );
         assert!(
             lines
-                .get(HEAD_LINES - 1)
+                .get(head_lines(&lines) - 1)
                 .is_some_and(|line| line.starts_with(COLUMN_HEADER_START)),
             "the column header stands under it, so every row that is left reads: {lines:?}"
         );
         for (index, ttl) in (TTL..=LAST_KEPT_TTL).enumerate() {
             assert!(
                 lines
-                    .get(HEAD_LINES + index)
+                    .get(head_lines(&lines) + index)
                     .is_some_and(|line| line.starts_with(&tall_row(ttl))),
                 "the hops nearest the source stand under that header, in TTL order: {lines:?}"
             );
@@ -2446,9 +2511,7 @@ mod tests {
         screen.poll();
         let empty = painted(&screen.sink);
         assert!(
-            empty
-                .first()
-                .is_some_and(|line| line.starts_with(NO_ROUND_HEADER)),
+            header_text(&empty).starts_with(NO_ROUND_HEADER),
             "the header line then counts no round: {empty:?}"
         );
         assert!(
@@ -2546,9 +2609,7 @@ mod tests {
         screen.round(&one_round());
         let first = painted(&screen.sink);
         assert!(
-            first
-                .first()
-                .is_some_and(|line| line.ends_with(&size_of(FIRST_BYTES))),
+            header_text(&first).ends_with(&size_of(FIRST_BYTES)),
             "the header line names the size that the file holds: {first:?}"
         );
 
@@ -2560,9 +2621,7 @@ mod tests {
         screen.round(&one_round());
         let second = painted(&screen.sink);
         assert!(
-            second
-                .first()
-                .is_some_and(|line| line.ends_with(&size_of(SECOND_BYTES))),
+            header_text(&second).ends_with(&size_of(SECOND_BYTES)),
             "and the next draw names the size that the file holds then: {second:?}"
         );
     }
