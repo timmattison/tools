@@ -54,6 +54,12 @@ const DOT_STEP: usize = 2;
 /// The image of one history of round-trip times, as the Recent column of one
 /// row draws it.
 ///
+/// The scale is the scale of the block elements, read over the whole history:
+/// the smallest sample of the history stands at the floor of the cell and the
+/// largest one fills it. A lost probe names no limit of that scale, and neither
+/// does a sample that is not a finite number. `ui::sparkline` states both
+/// reasons, and this module does not restate them.
+///
 /// A sample that the run measured draws a bar of [`BAR`], which is a mid teal.
 /// One color must read on a light terminal and on a dark one, and it must not
 /// be the red that the table already spends on a lost probe.
@@ -80,6 +86,13 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
     // that paints nothing at all.
     let mut image = RgbaImage::new(width, height);
     let count = history.len();
+    // The scale reads only the answers that compare. A lost probe measured no
+    // time, and a time that is not a finite number does not compare, so neither
+    // of them names a limit of the scale.
+    let mut highest = f64::NEG_INFINITY;
+    for time in history.iter().filter_map(finite_time) {
+        highest = highest.max(time);
+    }
     for column in 0..width {
         let index = usize::try_from(column).unwrap_or(usize::MAX).min(count - 1);
         match history[index] {
@@ -88,10 +101,33 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
                     image.put_pixel(column, row, LOST);
                 }
             }
-            Sample::Time(_) => image.put_pixel(column, height - 1, BAR),
+            Sample::Time(time) => {
+                let pixels = if time.is_finite() && time >= highest {
+                    height
+                } else {
+                    1
+                };
+                for row in (height - pixels)..height {
+                    image.put_pixel(column, row, BAR);
+                }
+            }
         }
     }
     image
+}
+
+/// The round-trip time of one sample, when that sample holds a time which
+/// compares.
+///
+/// This is `ui::finite_time`, and the two stand apart on purpose: `ui` names
+/// the marks of a text column and this module names the pixels of an image, so
+/// neither one reaches into the other. Both of them state the same rule,
+/// because both of them draw the same history at the same scale.
+fn finite_time(sample: &Sample) -> Option<f64> {
+    match *sample {
+        Sample::Time(time) if time.is_finite() => Some(time),
+        Sample::Time(_) | Sample::Lost => None,
+    }
 }
 
 #[cfg(test)]
