@@ -608,6 +608,39 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     flag of a probe. `--run` picks which run in that file to read, and the last run of the file is
     the default. A recorded file holds one JSON record on each line. A file that holds more than
     one run names the run of the table on standard error, so standard output stays the table alone.
+  - The `hunt` command looks for the longest path it can find. It draws a random address, traces
+    it, scores the path, and takes the next round. One round is one destination. The hunt stops
+    when it runs out of rounds, and it then prints one table of four rows: the shortest path, the
+    longest path, the fastest path, and the slowest path. One destination can hold more than one
+    row. Each row carries the address with its name, the length of the path, whether the
+    destination answered, the mean round-trip time and the loss of the last hop that answered, the
+    number of TTLs inside the path that answered nothing, and the run that recorded the trace, so
+    `krt replay <FILE> --run <ID>` prints the whole path. Under the table stand the number of
+    rounds, the number of reached destinations, the number of partial ones, and the wall time.
+    `Ctrl-C` stops the hunt and still prints the summary of the rounds that finished.
+  - The draw of a hunt is of ip version 4 alone, because the space of ip version 6 is far too
+    sparse for a random address to reach a host. It rejects every address that no packet routes
+    to — the private blocks, the loopback block, the documentation blocks, the multicast block,
+    and the rest of the special-purpose registry — and it rejects every address it already
+    visited. The hunt traces one destination at a time and never two at once.
+  - A destination that answered gives a **reached** path, whose length is the TTL that the
+    destination answered at. A destination that answered nothing gives a **partial** path, whose
+    length is the highest TTL that any hop answered at. The table ranks the reached paths, and it
+    counts the partial ones under the table. `--include-partial` lets a partial path compete for
+    every row of the table, and the row of such a path says `partial`.
+  - Each destination of a hunt writes one run into one file, with the records that a normal run
+    writes. The `run` record of each destination carries the identifier of the hunt, so a reader
+    groups the runs of one hunt, and `replay` folds any one of them with no change.
+  - `krt hunt` takes these flags, and the six flags of a trace that still apply: `--output`,
+    `--first-ttl`, `--max-ttl`, `--protocol`, `--no-dns`, and `--source`. Every flag stands behind
+    the command, because a flag in front of it reads `hunt` as the destination.
+    | Flag | Default | Meaning |
+    | ---- | ------- | ------- |
+    | `--rounds <N>` | `64` | Stop after this many destinations. One round is one destination. |
+    | `--probes-per-round <N>` | `3` | The number of probe rounds that each destination takes. One probe round is one sweep of the TTLs. |
+    | `--target-timeout <DUR>` | `10s` | Give up on a destination that answers nothing after this much time. |
+    | `--seed <N>` | the clock | The seed of the draw. A hunt of one seed visits the same addresses in the same order, for one build of `krt`. The resolved configuration prints the seed of every hunt. |
+    | `--include-partial` | off | Let a partial path compete for a row of the table. |
   - Every flag of a trace takes a default. `krt replay <FILE>` takes `--run <ID>` alone, which
     picks the run of the file to fold, and the last run of the file is the default there. The
     flags of a trace are:
@@ -625,7 +658,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     | `--headless` | off | Draw no table and take no key. Print one status line each minute. |
     | `--graphics` | off | Draw the `Recent` column of the live table as an image of the whole history. It needs a terminal that names itself and draws images. |
     | `--duration <DUR>` | none | Stop the run after this much time. |
-    | `--rounds <N>` | none | Stop the run after this many rounds. |
+    | `--rounds <N>` | none | Stop the run after this many rounds. One round is one sweep of the TTLs. |
     | `-V`, `--version` | | Print the version, the git hash, and whether the build was clean. |
     | `-h`, `--help` | | Print the usage. |
   - The interval sets what a run costs on disk. A round writes one record for each hop. The
