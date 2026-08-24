@@ -97,7 +97,7 @@ pub fn terminal_cells() -> (u32, u32) {
 /// zero is no size, so both of the two fields must be above zero for the answer
 /// to stand.
 #[must_use]
-pub fn terminal_pixels() -> Option<(u32, u32)> {
+pub(crate) fn terminal_pixels() -> Option<(u32, u32)> {
     #[repr(C)]
     struct Winsize {
         ws_row: libc::c_ushort,
@@ -222,7 +222,7 @@ fn cell_pixels_of(
 /// estimate. Every consumer of the answer therefore holds a floor of one, and
 /// [`image_rows`] states that floor.
 #[must_use]
-pub fn cell_pixels_or_estimate() -> (u32, u32) {
+pub(crate) fn cell_pixels_or_estimate() -> (u32, u32) {
     if let Some((total_px_w, total_px_h)) = terminal_pixels() {
         let (term_cols, term_rows) = terminal_cells();
         if term_cols > 0 && term_rows > 0 {
@@ -239,7 +239,7 @@ pub fn cell_pixels_or_estimate() -> (u32, u32) {
     clippy::cast_precision_loss,
     reason = "a character cell is a few tens of pixels, far inside the exact range of f64"
 )]
-pub fn cell_aspect_ratio() -> f64 {
+pub(crate) fn cell_aspect_ratio() -> f64 {
     let (cell_w, cell_h) = cell_pixels_or_estimate();
     cell_h as f64 / cell_w as f64
 }
@@ -269,7 +269,7 @@ fn cells_to_pixels(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> (u32, u32)
     clippy::cast_precision_loss,
     reason = "display dimensions are always positive and fit in u32"
 )]
-pub fn calculate_aspect_preserving_size(
+pub(crate) fn calculate_aspect_preserving_size(
     img_width: u32,
     img_height: u32,
     max_width: Option<u32>,
@@ -324,7 +324,7 @@ pub fn calculate_aspect_preserving_size(
 /// (dimensions unspecified or image already fits), avoiding an unnecessary clone.
 /// Returns an owned downscaled image when the original exceeds the target pixel dimensions.
 #[must_use]
-pub fn downscale_to_display_pixels<'a>(
+pub(crate) fn downscale_to_display_pixels<'a>(
     img: &'a DynamicImage,
     display_width: Option<u32>,
     display_height: Option<u32>,
@@ -364,7 +364,7 @@ pub fn downscale_to_display_pixels<'a>(
     clippy::cast_precision_loss,
     reason = "pixel dimensions are always positive and fit in u32"
 )]
-pub fn calculate_sixel_dimensions(
+pub(crate) fn calculate_sixel_dimensions(
     img_width: u32,
     img_height: u32,
     target_pixel_width: u32,
@@ -425,7 +425,7 @@ pub fn calculate_sixel_dimensions(
     clippy::cast_sign_loss,
     reason = "pixel dimensions are always positive and fit in u32"
 )]
-pub fn sixel_pixel_budget(
+pub(crate) fn sixel_pixel_budget(
     terminal_pixel_size: Option<(u32, u32)>,
     cell_cols: Option<u32>,
     cell_rows: Option<u32>,
@@ -470,7 +470,7 @@ pub fn sixel_pixel_budget(
 /// because [`cell_pixels_or_estimate`] divides the terminal pixel height by the
 /// row count and can give 0.
 #[must_use]
-pub fn image_rows(height_px: u32, cell_height_px: u32) -> u32 {
+pub(crate) fn image_rows(height_px: u32, cell_height_px: u32) -> u32 {
     height_px.div_ceil(cell_height_px.max(1)).max(1)
 }
 
@@ -505,7 +505,7 @@ pub fn image_rows(height_px: u32, cell_height_px: u32) -> u32 {
 /// `img_width_px` of 0 gives no scale factor, so the width-only case falls back
 /// to the pixel height of the image.
 #[must_use]
-pub fn image_rows_in_cells(
+pub(crate) fn image_rows_in_cells(
     img_width_px: u32,
     img_height_px: u32,
     display_width: Option<u32>,

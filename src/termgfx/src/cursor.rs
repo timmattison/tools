@@ -48,7 +48,7 @@ fn reservation_rows(image_rows: u32, term_height: u32) -> u32 {
 /// iTerm2 protocol each have a flag that holds the cursor still, but then the
 /// caller must move it. A tool therefore states the position of the cursor
 /// instead of a guess.
-pub enum CursorContract {
+pub(crate) enum CursorContract {
     /// The caller puts the cursor where it wants it (`--no-newline`, video
     /// playback). The routine writes the payload and nothing else.
     CallerManaged,
@@ -83,7 +83,7 @@ impl CursorContract {
     ///
     /// # Returns
     /// The promise that the display routine must keep.
-    pub fn below_image(no_newline: bool, image_rows: impl FnOnce() -> u32) -> Self {
+    pub(crate) fn below_image(no_newline: bool, image_rows: impl FnOnce() -> u32) -> Self {
         if no_newline {
             return CursorContract::CallerManaged;
         }
@@ -127,7 +127,7 @@ impl CursorContract {
 /// # Errors
 /// Gives the error of the first write to `out` that fails, which includes a
 /// failure inside the payload closure.
-pub fn write_image_with_cursor_contract<W, F>(
+pub(crate) fn write_image_with_cursor_contract<W, F>(
     out: &mut W,
     contract: CursorContract,
     payload: F,

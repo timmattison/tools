@@ -3976,10 +3976,8 @@ name = "ic"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "buildinfo",
  "clap",
- "icy_sixel",
  "image",
  "notify",
  "termgfx",
@@ -7470,9 +7468,12 @@ dependencies = [
 name = "termgfx"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "icy_sixel",
  "image",
  "libc",
  "termsize",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

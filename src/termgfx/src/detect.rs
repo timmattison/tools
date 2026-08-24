@@ -276,7 +276,7 @@ fn terminal_supports_graphics(terminal_type: &TerminalType, term: &str) -> bool 
 
 /// The concrete inline-image routine a resolved terminal type dispatches to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DisplayRoutine {
+pub(crate) enum DisplayRoutine {
     /// A palette and then a band of pixels at a time.
     Sixel,
     /// The graphics protocol of Kitty.
@@ -292,7 +292,7 @@ pub enum DisplayRoutine {
 /// to iTerm2 — the exact failure mode that sent the Kitty protocol into
 /// muxiavelli panels.
 #[must_use]
-pub fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutine {
+pub(crate) fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutine {
     match terminal_type {
         // Zellij and muxiavelli-Sixel both go through the Sixel path.
         TerminalType::Zellij | TerminalType::Muxiavelli(ImageProtocol::Sixel) => {

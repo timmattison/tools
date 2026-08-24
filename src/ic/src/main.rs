@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
-use base64::prelude::*;
 use buildinfo::version_string;
 use clap::Parser;
-use icy_sixel::{sixel_encode, EncodeOptions};
 use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
@@ -14,12 +12,7 @@ use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
-use termgfx::{
-    calculate_aspect_preserving_size, calculate_sixel_dimensions, cell_aspect_ratio,
-    cell_pixels_or_estimate, display_routine_for, downscale_to_display_pixels, image_rows,
-    image_rows_in_cells, sixel_pixel_budget, terminal_cells, terminal_pixels,
-    write_image_with_cursor_contract, Capabilities, CursorContract, DisplayRoutine, TerminalType,
-};
+use termgfx::{terminal_cells, Budget, Capabilities, Cursor, Request, TerminalType};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
@@ -27,6 +20,15 @@ use unicode_width::UnicodeWidthStr;
 
 /// The row that the shell prompt returns to below an image.
 const PROMPT_ROWS: u32 = 1;
+
+/// The placement id of an image that the caller holds the cursor for.
+///
+/// `--no-newline` is the flag of video playback, and each frame of a video must
+/// replace the frame before it in place. A Kitty terminal replaces an image
+/// when the new image carries the id of the old one, so every frame of a run
+/// carries this one id and the memory of the renderer stays flat. One run of
+/// `ic` shows one image at a time, so one id covers the whole run.
+const HELD_PLACEMENT_ID: u32 = 1;
 
 /// The number of screen rows that `ic` prints above an image.
 ///
@@ -1620,193 +1622,34 @@ fn display_image(
         (target_width, target_height)
     };
 
-    // Choose optimal display method based on terminal capabilities. The routing
-    // is resolved by display_routine_for(), which is exhaustive over terminal
-    // types so a new variant can never silently fall through to the wrong
-    // protocol. Use already-detected terminal_caps to avoid redundant env lookups.
+    // `termgfx` picks the protocol from the terminal that `Capabilities::detect`
+    // already named, so this call costs no second read of the environment.
     //
-    // No routine needs a special path for a remote proxy. Every routine holds
+    // No protocol needs a special path for a remote proxy. Every writer holds
     // the renderer still and then states the position of the cursor itself, so
     // a remote proxy tracks the cursor with the same newlines, CUU and CUD that
     // a local terminal does.
-    match display_routine_for(terminal_caps.terminal_type()) {
-        DisplayRoutine::Sixel => {
-            display_image_sixel(&img, scaled_width, scaled_height, args, no_newline)
-        }
-        DisplayRoutine::Kitty => {
-            display_image_kitty(&img, scaled_width, scaled_height, args, no_newline)
-        }
-        DisplayRoutine::Iterm2 => {
-            display_image_iterm2(&img, scaled_width, scaled_height, args, no_newline)
-        }
-    }
-}
+    let request = Request {
+        budget: Budget {
+            columns: scaled_width,
+            rows: scaled_height,
+        },
+        cursor: if no_newline {
+            Cursor::Held {
+                id: HELD_PLACEMENT_ID,
+            }
+        } else {
+            Cursor::BelowImage
+        },
+        preserve_aspect: args.preserve_aspect,
+    };
 
-/// Kitty terminal display with better performance for video.
-///
-/// Also used for WezTerm and Ghostty, which support the Kitty graphics protocol.
-fn display_image_kitty(
-    img: &DynamicImage,
-    width: Option<u32>,
-    height: Option<u32>,
-    args: &Args,
-    no_newline: bool,
-) -> Result<()> {
-    // display_width/display_height are in terminal cells (character columns/rows).
-    // They serve two roles: (1) the Kitty protocol `c=`/`r=` display hints that tell
-    // the terminal how many cells the image should span, and (2) the downscale target
-    // converted to pixels via cell dimensions to cap the raw data we send.
-    let (display_width, display_height) = calculate_aspect_preserving_size(
-        img.width(),
-        img.height(),
-        width,
-        height,
-        args.preserve_aspect,
-        cell_aspect_ratio(),
-    );
-
-    // Downscale the image to the target pixel size before sending to avoid
-    // overwhelming the terminal with huge payloads (e.g., a 16384x8192 panorama
-    // would produce ~384MB of RGB data before base64 encoding).
-    let img = downscale_to_display_pixels(img, display_width, display_height);
-
-    // Use RGB data directly for better performance (no base64 encoding overhead)
-    let rgb_data = img.to_rgb8();
-
-    // Use Kitty's more efficient graphics protocol with optimizations
-    print_kitty_image(
-        rgb_data.as_raw(),
-        img.width(),
-        img.height(),
-        display_width,
-        display_height,
-        no_newline,
-    )
-}
-
-/// Sixel display for terminals that support Sixel graphics (e.g., Zellij passthrough).
-///
-/// # Arguments
-/// * `img` - The image to display
-/// * `budget_cols` - The width that the image can occupy, in character cells.
-///   It is the width of the terminal less the chrome, or the `--width` that the
-///   user asks for. [`sixel_pixel_budget`] holds the image inside it.
-/// * `budget_rows` - The height that the image can occupy, in character cells.
-///   It is the height of the terminal less the header rows and the prompt row,
-///   or the `--height` that the user asks for. [`sixel_pixel_budget`] holds the
-///   image inside it.
-/// * `args` - Command line arguments
-fn display_image_sixel(
-    img: &DynamicImage,
-    budget_cols: Option<u32>,
-    budget_rows: Option<u32>,
-    args: &Args,
-    no_newline: bool,
-) -> Result<()> {
-    // The cell size comes from the terminal when it reports a pixel size, and
-    // from the estimates when it does not.
-    let (cell_width_px, cell_height_px) = cell_pixels_or_estimate();
-
-    let (target_pixel_width, target_pixel_height) = sixel_pixel_budget(
-        terminal_pixels(),
-        budget_cols,
-        budget_rows,
-        cell_width_px,
-        cell_height_px,
-    );
-
-    // Calculate dimensions that preserve aspect ratio
-    let (final_width, final_height) = calculate_sixel_dimensions(
-        img.width(),
-        img.height(),
-        target_pixel_width,
-        target_pixel_height,
-        args.preserve_aspect,
-    );
-
-    // Resize image to fit (scale up or down as needed)
-    let resized_img = img.resize_exact(
-        final_width,
-        final_height,
-        image::imageops::FilterType::Lanczos3,
-    );
-
-    // Convert to RGBA for sixel encoding
-    let rgba_img = resized_img.to_rgba8();
-    let rgba_data = rgba_img.as_raw();
-
-    // Encode to Sixel format using high-quality settings
-    let sixel_output = sixel_encode(
-        rgba_data,
-        resized_img.width() as usize,
-        resized_img.height() as usize,
-        &EncodeOptions::default(),
-    )
-    .map_err(|e| anyhow::anyhow!("Sixel encoding failed: {e}"))?;
-
-    // Output the sixel data
+    // `ic` owns standard output for the whole of one image, so it hands the
+    // locked stream to the writer and takes the lock once.
     let mut stdout = io::stdout().lock();
-
-    let contract = CursorContract::below_image(no_newline, || {
-        image_rows(resized_img.height(), cell_height_px)
-    });
-
-    write_image_with_cursor_contract(&mut stdout, contract, |out| write!(out, "{}", sixel_output))?;
-
-    stdout.flush().context("Failed to flush output")?;
+    terminal_caps.draw(&mut stdout, &img, &request)?;
 
     Ok(())
-}
-
-/// Optimized iTerm2 display with reduced overhead.
-///
-/// Computes aspect-preserving display dimensions and downscales the image to the
-/// target pixel size before encoding. This matches the Kitty path's behavior and
-/// prevents sending oversized payloads for very large images.
-fn display_image_iterm2(
-    img: &DynamicImage,
-    width: Option<u32>,
-    height: Option<u32>,
-    args: &Args,
-    no_newline: bool,
-) -> Result<()> {
-    // Calculate aspect-corrected display dimensions in terminal cells, then use them
-    // both as the iTerm2 width/height hints and the downscale target.
-    let (display_width, display_height) = calculate_aspect_preserving_size(
-        img.width(),
-        img.height(),
-        width,
-        height,
-        args.preserve_aspect,
-        cell_aspect_ratio(),
-    );
-
-    // Downscale the image to the target pixel size before encoding to avoid
-    // overwhelming the terminal with huge payloads
-    let img = downscale_to_display_pixels(img, display_width, display_height);
-
-    // Use more efficient encoding for iTerm2
-    // Convert to RGB first for consistency and smaller data size than RGBA
-    let rgb_img = img.to_rgb8();
-    let rgb_data = rgb_img.as_raw();
-
-    // Create PNM header manually for more control
-    let pnm_header = format!("P6\n{} {}\n255\n", img.width(), img.height());
-    let mut pnm_data = Vec::with_capacity(pnm_header.len() + rgb_data.len());
-    pnm_data.extend_from_slice(pnm_header.as_bytes());
-    pnm_data.extend_from_slice(rgb_data);
-
-    // Use base64 encoding
-    let encoded = BASE64_STANDARD.encode(&pnm_data);
-
-    print_iterm2_image(
-        &encoded,
-        img.width(),
-        img.height(),
-        display_width,
-        display_height,
-        no_newline,
-    )
 }
 
 /// Process ID newtype for type safety in process tree walking.
@@ -2222,150 +2065,6 @@ fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) ->
         &scan_for_flag(in_zellij),
         "etterminal",
     )
-}
-
-/// Write an image with the Kitty graphics protocol.
-///
-/// The command is `ESC _ G <key>=<value>,... ; <base64 data> ESC \`. A large
-/// image goes out in more than one command, because the protocol limits the
-/// size of one command.
-///
-/// The routine holds the cursor still with `C=1` and then states the position
-/// of the cursor itself through [`write_image_with_cursor_contract`].
-///
-/// # Arguments
-/// * `rgb_data` - The pixels of the image, three bytes for each pixel.
-/// * `img_width` - The width of the image in pixels.
-/// * `img_height` - The height of the image in pixels.
-/// * `display_width` - The width that `ic` asks for, in character cells.
-/// * `display_height` - The height that `ic` asks for, in character cells.
-/// * `no_newline` - True when the caller controls the position of the cursor.
-///
-/// # Returns
-/// An error when a write to stdout fails.
-fn print_kitty_image(
-    rgb_data: &[u8],
-    img_width: u32,
-    img_height: u32,
-    display_width: Option<u32>,
-    display_height: Option<u32>,
-    no_newline: bool,
-) -> Result<()> {
-    let mut stdout = io::stdout().lock();
-
-    let base64_data = BASE64_STANDARD.encode(rgb_data);
-    let chunk_size = 4096; // Kitty recommended chunk size
-
-    let contract = CursorContract::below_image(no_newline, || {
-        let (cell_width_px, cell_height_px) = cell_pixels_or_estimate();
-        image_rows_in_cells(
-            img_width,
-            img_height,
-            display_width,
-            display_height,
-            cell_width_px,
-            cell_height_px,
-        )
-    });
-
-    // The key list that opens the first command. `C=1` tells Kitty not to move
-    // the cursor, because this routine states the position of the cursor
-    // itself. In video mode, fixed image and placement ids make each frame
-    // replace the last one in place, which holds the memory of the renderer
-    // flat.
-    let cursor_keys = if no_newline { ",i=1,p=1,C=1" } else { ",C=1" };
-    // The display size, in character cells.
-    let width_key = display_width.map_or_else(String::new, |w| format!(",c={w}"));
-    let height_key = display_height.map_or_else(String::new, |h| format!(",r={h}"));
-    let header =
-        format!("\x1b_Ga=T,f=24,s={img_width},v={img_height}{cursor_keys}{width_key}{height_key}");
-
-    write_image_with_cursor_contract(&mut stdout, contract, |out| {
-        if base64_data.len() <= chunk_size {
-            // A small image goes out in one command.
-            return write!(out, "{header};{base64_data}\x1b\\");
-        }
-
-        // A large image goes out in more than one command. `m=1` says that more
-        // data follows and `m=0` closes the image.
-        let chunks: Vec<&str> = base64_data
-            .as_bytes()
-            .chunks(chunk_size)
-            .map(|chunk| std::str::from_utf8(chunk).unwrap())
-            .collect();
-
-        for (i, chunk) in chunks.iter().enumerate() {
-            if i == 0 {
-                write!(out, "{header},m=1;{chunk}\x1b\\")?;
-            } else if i == chunks.len() - 1 {
-                write!(out, "\x1b_Gm=0;{chunk}\x1b\\")?;
-            } else {
-                write!(out, "\x1b_Gm=1;{chunk}\x1b\\")?;
-            }
-        }
-
-        Ok(())
-    })?;
-
-    stdout.flush().context("Failed to flush output")?;
-    Ok(())
-}
-
-/// Write an image with the iTerm2 inline image protocol.
-///
-/// The command is `ESC ] 1337 ; File = <arguments> : <base64 data> BEL`.
-///
-/// The routine holds the cursor still with `doNotMoveCursor=1` and then states
-/// the position of the cursor itself through
-/// [`write_image_with_cursor_contract`].
-///
-/// # Arguments
-/// * `base64_data` - The image, in base64.
-/// * `img_width_px` - The width of the image in pixels.
-/// * `img_height_px` - The height of the image in pixels.
-/// * `width` - The width that `ic` asks for, in character cells.
-/// * `height` - The height that `ic` asks for, in character cells.
-/// * `no_newline` - True when the caller controls the position of the cursor.
-///
-/// # Returns
-/// An error when a write to stdout fails.
-fn print_iterm2_image(
-    base64_data: &str,
-    img_width_px: u32,
-    img_height_px: u32,
-    width: Option<u32>,
-    height: Option<u32>,
-    no_newline: bool,
-) -> Result<()> {
-    let mut stdout = io::stdout().lock();
-
-    let contract = CursorContract::below_image(no_newline, || {
-        let (cell_width_px, cell_height_px) = cell_pixels_or_estimate();
-        image_rows_in_cells(
-            img_width_px,
-            img_height_px,
-            width,
-            height,
-            cell_width_px,
-            cell_height_px,
-        )
-    });
-
-    // The width and the height are in character cells, so they carry no `px`
-    // suffix. `doNotMoveCursor=1` tells iTerm2 not to move the cursor, because
-    // this routine states the position of the cursor itself.
-    let width_argument = width.map_or_else(String::new, |w| format!(";width={w}"));
-    let height_argument = height.map_or_else(String::new, |h| format!(";height={h}"));
-
-    write_image_with_cursor_contract(&mut stdout, contract, |out| {
-        write!(
-            out,
-            "\x1b]1337;File=inline=1{width_argument}{height_argument};preserveAspectRatio=1;doNotMoveCursor=1:{base64_data}\x07"
-        )
-    })?;
-
-    stdout.flush().context("Failed to flush output")?;
-    Ok(())
 }
 
 #[cfg(test)]

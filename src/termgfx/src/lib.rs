@@ -7,18 +7,19 @@
 //! * Which terminal is this, and does it draw an image at all. Three escape
 //!   sequences are in service, no terminal reads all three, and a terminal
 //!   answers no question about the ones it reads. [`Capabilities::detect`]
-//!   names the terminal from the environment variables that the terminal set,
-//!   and [`display_routine_for`] turns that name into the one routine that
-//!   draws.
+//!   names the terminal from the environment variables that the terminal set.
 //! * How many pixels does one character cell hold. A terminal lays text out in
 //!   cells and it draws an image in pixels, so a tool that wants an image of a
 //!   given number of cells has to convert. [`cell_pixels`] measures one cell,
 //!   and it gives `None` for a terminal that reports no pixel size.
 //! * Where does the cursor stand after the image. No image protocol promises a
-//!   position, and each renderer decides for itself. [`CursorContract`] states
-//!   the position instead of guessing it, and
-//!   [`write_image_with_cursor_contract`] keeps that promise for every routine
-//!   that writes an image.
+//!   position, and each renderer decides for itself, so [`Cursor`] states the
+//!   position instead of guessing it.
+//!
+//! A caller answers none of the three itself. It reads the terminal once with
+//! [`Capabilities::detect`], builds a [`Request`], and calls
+//! [`Capabilities::draw`]. The choice of protocol, the base64 and the escape
+//! sequences all stay inside this crate.
 //!
 //! # Why the answers stand in one crate
 //!
@@ -43,17 +44,21 @@
 //!
 //! `detect` reads the environment and names the terminal. `geometry` measures
 //! a character cell and every size that comes off it. `cursor` states where the
-//! cursor ends. Each module keeps its tests beside the code they cover, and
-//! this file re-exports the whole surface that a caller reads.
+//! cursor ends. `draw` holds the three writers, one for each protocol. Each
+//! module keeps its tests beside the code they cover.
+//!
+//! Only a small part of the four modules leaves the crate. The routing, the
+//! arithmetic of the sizes and the cursor contract are all steps of one call,
+//! and a caller that reached them one at a time would hold the parts of a
+//! picture that only this crate knows how to put together. The list below is
+//! therefore short on purpose, and it grows only when a caller has a use for
+//! an answer that [`Capabilities::draw`] cannot give it.
 
 mod cursor;
 mod detect;
+mod draw;
 mod geometry;
 
-pub use cursor::{write_image_with_cursor_contract, CursorContract};
-pub use detect::{display_routine_for, Capabilities, DisplayRoutine, ImageProtocol, TerminalType};
-pub use geometry::{
-    calculate_aspect_preserving_size, calculate_sixel_dimensions, cell_aspect_ratio, cell_pixels,
-    cell_pixels_or_estimate, downscale_to_display_pixels, image_rows, image_rows_in_cells,
-    sixel_pixel_budget, terminal_cells, terminal_pixels,
-};
+pub use detect::{Capabilities, ImageProtocol, TerminalType};
+pub use draw::{Budget, Cursor, DrawError, Request};
+pub use geometry::{cell_pixels, terminal_cells};
