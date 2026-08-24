@@ -15,6 +15,7 @@
 #![warn(clippy::pedantic)]
 
 mod graph;
+mod hunt;
 mod live;
 mod names;
 mod record;
