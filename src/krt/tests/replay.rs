@@ -151,7 +151,7 @@ const FIXTURE_FIRST_HEADER: &str =
 /// the population standard deviation of one sample is 0.0. The address is the
 /// one that the destination resolved to, so the row carries the star.
 const FIXTURE_FIRST_ROWS: [&str; 3] = [
-    "   1  router.lan (192.168.1.1)          0.0%      2    1.4    1.2    1.3    1.4    0.1  ▁█",
+    "   1  router.lan (192.168.1.1)          0.0%      2    1.4    1.2    1.3    1.4    0.1  ▁▇",
     "   2  ???                             100.0%      2      -      -      -      -      -",
     "   3  93.184.216.34 ★                  50.0%      2   24.1   24.1   24.1   24.1    0.0  ▁",
 ];
@@ -241,7 +241,7 @@ const BUILT_SPLIT_ROUND_LINES: [&str; 3] = [
 /// sum to 2.0. The population variance is 2 / 3 = 0.667, so the standard
 /// deviation is 0.816, which prints as 0.8. The window of the sparkline runs
 /// from 1.0 to 3.0, so 1.0 takes the lowest bar, 3.0 takes the highest, and 2.0
-/// stands at half of the span, which is the fifth bar of the eight.
+/// stands at half of the span, which is the fourth bar of the seven.
 ///
 /// The first router answered one of the three answers of TTL 1, so its share is
 /// 1 / 3 * 100 = 33.3 percent. The second router answered the other two, so its
@@ -255,9 +255,9 @@ const BUILT_SPLIT_ROUND_LINES: [&str; 3] = [
 /// its window is equal, so every bar of it is the lowest one. That address is
 /// the one the destination resolved to, so the row carries the star.
 const BUILT_SPLIT_ROWS: [&str; 4] = [
-    "   1  10.0.0.1 (+1)                     0.0%      3    3.0    1.0    2.0    3.0    0.8  ▁▅█",
+    "   1  10.0.0.1 (+1)                     0.0%      3    3.0    1.0    2.0    3.0    0.8  ▁▄▇",
     "      ├ 10.0.0.1                       33.3%▹     1    1.0    1.0    1.0    1.0    0.0  ▁",
-    "      └ 10.0.0.2                       66.7%▹     2    3.0    2.0    2.5    3.0    0.5  ▁█",
+    "      └ 10.0.0.2                       66.7%▹     2    3.0    2.0    2.5    3.0    0.5  ▁▇",
     "   2  198.51.100.7 ★                    0.0%      3   10.0   10.0   10.0   10.0    0.0  ▁▁▁",
 ];
 

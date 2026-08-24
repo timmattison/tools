@@ -347,22 +347,30 @@ pub(crate) fn truncate_to_width(text: &str, width: usize) -> String {
 }
 
 /// The number of bars that the sparkline draws with.
-const LEVEL_COUNT: usize = 8;
+const LEVEL_COUNT: usize = 7;
 
 /// The bars of the sparkline, lowest first.
+///
+/// The set stops at `▇` and holds no `█`. A `█` paints the whole height of its
+/// cell, and the rows of the table stand one under the other, so a `█` of one
+/// row touches the bar of the row above it. The line between the two rows goes
+/// away, and a reader reads one block of ink. The empty top eighth that `▇`
+/// leaves is that line. The scale runs from the smallest sample of a window to
+/// the largest one, so the drop costs one step of resolution and no range at
+/// all.
 ///
 /// There is no ASCII fallback, and `CLAUDE.md` asks for it that way. A fallback
 /// of `.:|#` characters would draw a second, coarser picture of the same
 /// numbers, so a reader of one terminal and a reader of another would argue
 /// over a hop that the two pictures disagree about. Every terminal that this
-/// tool draws a table on prints these eight glyphs, and each of them takes one
+/// tool draws a table on prints these seven glyphs, and each of them takes one
 /// column, so the Recent column holds one sample for each column it is wide.
-const BARS: [char; LEVEL_COUNT] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+const BARS: [char; LEVEL_COUNT] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
 
 /// The count of the bars, as the arithmetic of the scale reads it.
 #[expect(
     clippy::cast_precision_loss,
-    reason = "the count of the bars is 8, and an `f64` holds every whole number below 2^53"
+    reason = "the count of the bars is 7, and an `f64` holds every whole number below 2^53"
 )]
 const LEVELS: f64 = LEVEL_COUNT as f64;
 
@@ -375,7 +383,7 @@ const LEVELS: f64 = LEVEL_COUNT as f64;
 ///
 /// The scale runs from the smallest to the largest sample **of the shown
 /// window**, and not of the whole history: the smallest takes `▁` and the
-/// largest takes `█`. A scale over the whole history would flatten the window
+/// largest takes `▇`. A scale over the whole history would flatten the window
 /// of a hop that was once slow and is not slow now, and that window is the part
 /// a reader is looking at.
 ///
@@ -1794,13 +1802,13 @@ mod tests {
         );
     }
 
-    /// The eight bars of the sparkline, lowest first.
+    /// The seven bars of the sparkline, lowest first.
     ///
     /// The test states them, and the module states them again. The two are on
     /// purpose: a test that read the constant of the module would agree with
     /// every set of glyphs the module ever holds, and the set of glyphs is the
     /// part of the sparkline a reader of the table sees.
-    const BARS: &str = "▁▂▃▄▅▆▇█";
+    const BARS: &str = "▁▂▃▄▅▆▇";
 
     /// The bar of a set of samples, at a width.
     fn bar(samples: &[f64], width: usize) -> String {
@@ -1809,14 +1817,14 @@ mod tests {
 
     #[test]
     fn a_rising_ramp_draws_every_bar_of_the_set() {
-        // The samples run from 1 to 8, so the span is 7. The bar of a sample is
-        // its distance from the smallest one, over the span, times the eight
-        // bars: 0/7, 8/7, 16/7 ... which cut to 0, 1, 2, 3, 4, 5, 6, and the
-        // largest sample gives 8, which the clamp puts on the last bar.
+        // The samples run from 1 to 7, so the span is 6. The bar of a sample is
+        // its distance from the smallest one, over the span, times the seven
+        // bars: 0/6, 7/6, 14/6 ... which cut to 0, 1, 2, 3, 4, 5, and the
+        // largest sample gives 7, which the clamp puts on the last bar.
         assert_eq!(
-            bar(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 9),
+            bar(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], 9),
             BARS,
-            "eight samples one step apart draw each of the eight bars once"
+            "seven samples one step apart draw each of the seven bars once"
         );
     }
 
@@ -1836,10 +1844,10 @@ mod tests {
     #[test]
     fn the_smallest_sample_takes_the_lowest_bar_and_the_largest_takes_the_highest() {
         // The samples run from 10 to 40, so the span is 30. The bar of 20 is
-        // (20 - 10) / 30 * 8 = 2.67, which cuts to the third bar. The bar of 30
-        // is (30 - 10) / 30 * 8 = 5.33, which cuts to the sixth bar.
+        // (20 - 10) / 30 * 7 = 2.33, which cuts to the third bar. The bar of 30
+        // is (30 - 10) / 30 * 7 = 4.67, which cuts to the fifth bar.
         let drawn = bar(&[10.0, 20.0, 30.0, 40.0], 9);
-        assert_eq!(drawn, "▁▃▆█", "the middle samples take the middle bars");
+        assert_eq!(drawn, "▁▃▅▇", "the middle samples take the middle bars");
         assert_eq!(
             drawn.chars().next(),
             Some('▁'),
@@ -1847,7 +1855,7 @@ mod tests {
         );
         assert_eq!(
             drawn.chars().next_back(),
-            Some('█'),
+            Some('▇'),
             "the largest sample takes the highest bar"
         );
     }
@@ -1891,12 +1899,12 @@ mod tests {
     fn the_bar_holds_the_last_samples_of_a_longer_history() {
         // The first two samples are far above the last four. A window of four
         // therefore drops them, and the scale of the window runs from 1 to 4:
-        // (2 - 1) / 3 * 8 = 2.67 cuts to the third bar, and (3 - 1) / 3 * 8 =
-        // 5.33 cuts to the sixth.
+        // (2 - 1) / 3 * 7 = 2.33 cuts to the third bar, and (3 - 1) / 3 * 7 =
+        // 4.67 cuts to the fifth.
         let history = [100.0, 200.0, 1.0, 2.0, 3.0, 4.0];
         assert_eq!(
             bar(&history, 4),
-            "▁▃▆█",
+            "▁▃▅▇",
             "the window holds the last four samples, and its scale reads only them"
         );
 
@@ -1906,7 +1914,7 @@ mod tests {
         // the most recent ones.
         assert_eq!(
             bar(&history, 6),
-            "▄█▁▁▁▁",
+            "▄▇▁▁▁▁",
             "a window that holds the whole history reads the large samples too"
         );
     }
@@ -1921,20 +1929,20 @@ mod tests {
     #[test]
     fn a_sample_that_is_not_a_number_keeps_the_bar_of_every_other_sample() {
         // A sample that does not compare takes the lowest bar and stays out of
-        // the scale. The ramp of eight therefore keeps each of its bars.
+        // the scale. The ramp of seven therefore keeps each of its bars.
         assert_eq!(
-            bar(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, f64::NAN], 9),
-            "▁▂▃▄▅▆▇█▁",
+            bar(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, f64::NAN], 9),
+            "▁▂▃▄▅▆▇▁",
             "the sample that is not a number draws the lowest bar and moves no other bar"
         );
         assert_eq!(
             bar(&[1.0, f64::NAN, 8.0], 9),
-            "▁▁█",
+            "▁▁▇",
             "the smallest and the largest sample keep their bars around a sample that is not a number"
         );
         assert_eq!(
             bar(&[1.0, 8.0], 9),
-            "▁█",
+            "▁▇",
             "the same two samples without it draw the same two bars"
         );
         assert_eq!(
@@ -1944,12 +1952,12 @@ mod tests {
         );
         assert_eq!(
             bar(&[1.0, f64::INFINITY, 8.0], 9),
-            "▁▁█",
+            "▁▁▇",
             "an infinity does not compare either, and it takes the lowest bar"
         );
         assert_eq!(
             bar(&[1.0, f64::NEG_INFINITY, 8.0], 9),
-            "▁▁█",
+            "▁▁▇",
             "an infinity below zero takes the lowest bar and holds the scale off the floor"
         );
     }
@@ -1961,7 +1969,7 @@ mod tests {
         for character in drawn.chars() {
             assert!(
                 BARS.contains(character),
-                "the bar {drawn} holds {character}, which is not one of the eight block elements"
+                "the bar {drawn} holds {character}, which is not one of the seven block elements"
             );
         }
         assert!(
@@ -2079,13 +2087,13 @@ mod tests {
         " krt  example.com → 93.184.216.34   src 1.2.3.4   round 4   1s   1.2.3.4-example.com.jsonl (2.1 MB)",
         "",
         " TTL  Host                             Loss%   Sent   Last    Min    Avg    Max  StDev  Recent",
-        "   1  router.lan (192.168.1.1)          0.0%      4    5.0    1.0    3.0    5.0    2.0  ▁▁██",
+        "   1  router.lan (192.168.1.1)          0.0%      4    5.0    1.0    3.0    5.0    2.0  ▁▁▇▇",
         "   2  ???                             100.0%      4      -      -      -      -      -",
-        "   3  10.0.0.1                         50.0%      4   12.0    8.0   10.0   12.0    2.0  ▁█",
-        "   4  ae1.net (203.0.113.8) (+1)        0.0%      4   70.0   10.0   40.0   70.0   22.4  ▁▆▃█",
-        "      ├ ae1.net (203.0.113.8)          50.0%▹     2   30.0   10.0   20.0   30.0   10.0  ▁█",
-        "      └ 203.0.113.9                    50.0%▹     2   70.0   50.0   60.0   70.0   10.0  ▁█",
-        "   5  example.com (93.184.216.34) ★     0.0%      4   60.0   40.0   50.0   60.0   10.0  ▁▁██",
+        "   3  10.0.0.1                         50.0%      4   12.0    8.0   10.0   12.0    2.0  ▁▇",
+        "   4  ae1.net (203.0.113.8) (+1)        0.0%      4   70.0   10.0   40.0   70.0   22.4  ▁▅▃▇",
+        "      ├ ae1.net (203.0.113.8)          50.0%▹     2   30.0   10.0   20.0   30.0   10.0  ▁▇",
+        "      └ 203.0.113.9                    50.0%▹     2   70.0   50.0   60.0   70.0   10.0  ▁▇",
+        "   5  example.com (93.184.216.34) ★     0.0%      4   60.0   40.0   50.0   60.0   10.0  ▁▁▇▇",
     ];
 
     /// Folds every round into one table.
@@ -2445,7 +2453,7 @@ mod tests {
     /// 10.0 from the mean, so the deviation is 10.0. The window of the
     /// sparkline runs from 10.0 to 30.0, so the first sample takes the lowest
     /// bar and the second takes the highest.
-    const TWO_ROUND_TAIL: &str = "  0.0%      2   30.0   10.0   20.0   30.0   10.0  ▁█";
+    const TWO_ROUND_TAIL: &str = "  0.0%      2   30.0   10.0   20.0   30.0   10.0  ▁▇";
 
     #[test]
     fn a_cut_host_keeps_the_star_of_the_destination() {
