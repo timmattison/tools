@@ -15,11 +15,14 @@
 //! once, and it spends no round on an address that answers nothing by
 //! construction.
 
+use crate::live::Screen;
+use crate::record::{NameRecord, RoundRecord, RunId};
+use crate::stats::HopTable;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 /// The number of candidates that one draw reads before it gives up.
 ///
@@ -169,11 +172,121 @@ impl Draw {
     }
 }
 
+/// Whether the destination of one round of a hunt answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathKind {
+    /// The destination answered, and the path ends at it.
+    Reached,
+    /// The destination answered nothing, and the path ends at the last hop
+    /// that did answer.
+    Partial,
+}
+
+/// What one destination of a hunt gave.
+///
+/// The score reads the rounds of one trace and nothing else, so a test builds
+/// one from scripted rounds and reaches no network.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Score {
+    /// The address that the hunt traced.
+    addr: Ipv4Addr,
+    /// The name of that address, when a reverse lookup gave one.
+    host: Option<String>,
+    /// The run that recorded the trace, so `krt replay <file> --run <id>`
+    /// prints the whole path.
+    run: RunId,
+    /// Whether the destination answered.
+    kind: PathKind,
+    /// The length of the path. A reached path ends at the TTL that the
+    /// destination answered at, and a partial one ends at the highest TTL that
+    /// any hop answered at. A destination that nothing answered for gives zero.
+    length: u8,
+    /// The mean round-trip time of the last hop that answered, in
+    /// milliseconds. A path that no hop answered holds none.
+    rtt_ms: Option<f64>,
+    /// The loss of that same hop, as a percentage. A path that no hop answered
+    /// holds none.
+    loss: Option<f64>,
+    /// The number of TTLs at or below the length that answered nothing.
+    ///
+    /// The count is of the holes inside the measured path. A TTL past the end
+    /// of the path is no hole: the path stops there, and a probe that went
+    /// further measured nothing that belongs to this path.
+    gaps: usize,
+}
+
+/// The screen of one destination of a hunt.
+///
+/// A hunt draws no table. This screen folds the rounds of one destination into
+/// the numbers that the summary ranks, and it shows nothing. The run loop
+/// hands every round and every name to the screen already, so the fold rides
+/// on the door that is there and the hunt reads no file back.
+pub(crate) struct Scorer {
+    /// The address that this destination stands at.
+    addr: Ipv4Addr,
+    /// The run that records the trace of it.
+    run: RunId,
+    /// The first TTL that a round of this trace probes.
+    first_ttl: u8,
+    /// Every round of the trace, folded by TTL.
+    table: HopTable,
+    /// The smallest TTL that the destination itself answered at.
+    reached_at: Option<u8>,
+    /// The name of each address that a reverse lookup gave.
+    names: BTreeMap<IpAddr, String>,
+}
+
+impl Scorer {
+    /// Builds the screen of one destination.
+    pub(crate) fn new(addr: Ipv4Addr, run: RunId, first_ttl: u8) -> Self {
+        Self {
+            addr,
+            run,
+            first_ttl,
+            table: HopTable::new(),
+            reached_at: None,
+            names: BTreeMap::new(),
+        }
+    }
+
+    /// What this destination gave.
+    pub(crate) fn score(self) -> Score {
+        Score {
+            addr: self.addr,
+            host: None,
+            run: self.run,
+            kind: PathKind::Partial,
+            length: 0,
+            rtt_ms: None,
+            loss: None,
+            gaps: 0,
+        }
+    }
+}
+
+impl Screen for Scorer {
+    /// A hunt takes no key of the terminal, so this screen asks for no stop.
+    ///
+    /// `Ctrl-C` reaches a hunt through the signal flag, which stops the trace
+    /// of the destination that stands and the hunt that holds it.
+    fn poll(&mut self) -> bool {
+        false
+    }
+
+    fn round(&mut self, _round: &RoundRecord) {}
+
+    fn names(&mut self, _names: &[NameRecord]) {}
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{random, reserved, Draw, ATTEMPTS};
+    use super::{random, reserved, Draw, PathKind, Score, Scorer, ATTEMPTS};
+    use crate::live::Screen;
+    use crate::record::{NameRecord, RunId};
+    use crate::testing::round;
+    use chrono::Utc;
     use std::collections::HashSet;
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
 
     /// An address that a packet routes to, and that no test rejects.
     const ROUTABLE: &str = "93.184.216.34";
@@ -404,5 +517,202 @@ mod tests {
         (0..SEEDED_DRAWS)
             .map(|_| draw.address().expect("the seeded draw never runs out"))
             .collect()
+    }
+
+    /// The identifier of the run that every scored trace of a test recorded.
+    const RUN: &str = "2026-08-18T12:00:00.123Z";
+
+    /// The first TTL that every scored trace of a test probes.
+    const FIRST_TTL: u8 = 1;
+
+    /// The last TTL that every scored trace of a test probes.
+    const MAX_TTL: u8 = 8;
+
+    /// The address of the destination of every scored trace of a test.
+    const DESTINATION: &str = "93.184.216.34";
+
+    /// The address of the first hop of every scored trace of a test.
+    const FIRST_HOP: &str = "10.0.0.1";
+
+    /// The address of the hop where a partial path of a test ends.
+    const LAST_ANSWER: &str = "72.14.200.1";
+
+    /// The name that a reverse lookup gives the destination of a test.
+    const DESTINATION_NAME: &str = "example.com";
+
+    /// The score of a trace whose rounds a test scripts.
+    ///
+    /// Every round reaches the screen through the door that the run loop uses,
+    /// so the test covers the fold that a real trace drives.
+    fn score_of(rounds: &[&[(u8, &str, f64)]]) -> Score {
+        scored(rounds, &[])
+    }
+
+    /// The score of a trace whose rounds and names a test scripts.
+    fn scored(rounds: &[&[(u8, &str, f64)]], names: &[(&str, &str)]) -> Score {
+        let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL);
+        for hops in rounds {
+            scorer.round(&round(FIRST_TTL, MAX_TTL, hops));
+        }
+        let records: Vec<NameRecord> = names
+            .iter()
+            .map(|(addr, host)| NameRecord {
+                run: RunId::from(RUN),
+                ts: Utc::now(),
+                addr: IpAddr::V4(address(addr)),
+                host: (*host).to_owned(),
+            })
+            .collect();
+        scorer.names(&records);
+        scorer.score()
+    }
+
+    #[test]
+    fn a_destination_that_answered_gives_a_reached_path() {
+        let score = score_of(&[&[(1, FIRST_HOP, 1.0), (5, DESTINATION, 20.0)]]);
+        assert_eq!(score.kind, PathKind::Reached);
+    }
+
+    #[test]
+    fn the_length_of_a_reached_path_is_the_ttl_that_the_destination_answered_at() {
+        let score = score_of(&[&[(1, FIRST_HOP, 1.0), (5, DESTINATION, 20.0)]]);
+        assert_eq!(score.length, 5);
+    }
+
+    /// A destination that answers at two TTLs takes the smaller one.
+    ///
+    /// A path that changes under a load balancer reaches the destination at one
+    /// TTL in one round and at another TTL in the next. The shorter of the two
+    /// is the length of the path, because a packet did reach the destination in
+    /// that many hops.
+    #[test]
+    fn a_destination_that_answered_at_two_ttls_takes_the_shorter_path() {
+        let score = score_of(&[
+            &[(6, DESTINATION, 20.0)],
+            &[(5, DESTINATION, 21.0)],
+            &[(6, DESTINATION, 22.0)],
+        ]);
+        assert_eq!(score.length, 5);
+    }
+
+    #[test]
+    fn a_destination_that_answered_nothing_gives_a_partial_path() {
+        let score = score_of(&[&[(1, FIRST_HOP, 1.0), (4, LAST_ANSWER, 9.0)]]);
+        assert_eq!(score.kind, PathKind::Partial);
+    }
+
+    #[test]
+    fn the_length_of_a_partial_path_is_the_highest_ttl_that_answered() {
+        let score = score_of(&[&[(1, FIRST_HOP, 1.0), (4, LAST_ANSWER, 9.0)]]);
+        assert_eq!(score.length, 4);
+    }
+
+    #[test]
+    fn a_destination_that_nothing_answered_for_gives_a_partial_path_of_no_length() {
+        let score = score_of(&[&[]]);
+        assert_eq!((score.kind, score.length), (PathKind::Partial, 0));
+    }
+
+    /// The time of a score is the mean of the last hop that answered.
+    ///
+    /// The rounds below answer at the destination three times, and the mean of
+    /// the three is the number that ranks the fastest path and the slowest one.
+    #[test]
+    fn the_time_of_a_score_is_the_mean_of_the_last_hop_that_answered() {
+        let score = score_of(&[
+            &[(5, DESTINATION, 10.0)],
+            &[(5, DESTINATION, 20.0)],
+            &[(5, DESTINATION, 30.0)],
+        ]);
+        assert_eq!(score.rtt_ms, Some(20.0));
+    }
+
+    #[test]
+    fn the_time_of_a_partial_path_is_the_mean_of_the_hop_where_it_ends() {
+        let score = score_of(&[
+            &[(1, FIRST_HOP, 1.0), (4, LAST_ANSWER, 8.0)],
+            &[(1, FIRST_HOP, 3.0), (4, LAST_ANSWER, 12.0)],
+        ]);
+        assert_eq!(score.rtt_ms, Some(10.0));
+    }
+
+    #[test]
+    fn a_path_that_no_hop_answered_holds_no_time_and_no_loss() {
+        let score = score_of(&[&[]]);
+        assert_eq!((score.rtt_ms, score.loss), (None, None));
+    }
+
+    /// The loss of a score is the loss of the last hop that answered.
+    ///
+    /// The destination answers one of the two rounds below, so half of the
+    /// probes of that hop were lost.
+    #[test]
+    fn the_loss_of_a_score_is_the_loss_of_the_last_hop_that_answered() {
+        let score = score_of(&[&[(5, DESTINATION, 10.0)], &[(1, FIRST_HOP, 1.0)]]);
+        assert_eq!(score.loss, Some(50.0));
+    }
+
+    /// The gaps count the TTLs inside the path that answered nothing.
+    ///
+    /// The round below answers at the TTLs 1 and 5, so the TTLs 2, 3, and 4
+    /// stand inside the path and answered nothing.
+    #[test]
+    fn the_gaps_count_the_ttls_inside_the_path_that_answered_nothing() {
+        let score = score_of(&[&[(1, FIRST_HOP, 1.0), (5, DESTINATION, 20.0)]]);
+        assert_eq!(score.gaps, 3);
+    }
+
+    /// A TTL past the end of the path is no gap.
+    ///
+    /// The round below probes to TTL 8 and answers to TTL 4. The TTLs 5 through
+    /// 8 stand past the end of the path, and the path holds two holes: the TTLs
+    /// 2 and 3.
+    #[test]
+    fn a_ttl_past_the_end_of_the_path_counts_as_no_gap() {
+        let score = score_of(&[&[(1, FIRST_HOP, 1.0), (4, LAST_ANSWER, 9.0)]]);
+        assert_eq!(score.gaps, 2);
+    }
+
+    #[test]
+    fn the_name_of_the_destination_reaches_the_score() {
+        let score = scored(
+            &[&[(5, DESTINATION, 20.0)]],
+            &[(DESTINATION, DESTINATION_NAME)],
+        );
+        assert_eq!(score.host.as_deref(), Some(DESTINATION_NAME));
+    }
+
+    /// A run that read no name gives a score of no name.
+    ///
+    /// `--no-dns` writes no `name` record at all, so nothing reaches the screen
+    /// and the row of the summary prints the address alone.
+    #[test]
+    fn a_score_of_a_run_that_read_no_name_holds_none() {
+        let score = score_of(&[&[(5, DESTINATION, 20.0)]]);
+        assert_eq!(score.host, None);
+    }
+
+    /// The name of a hop is no name of the destination.
+    #[test]
+    fn the_name_of_another_address_does_not_reach_the_score() {
+        let score = scored(&[&[(5, DESTINATION, 20.0)]], &[(FIRST_HOP, "gateway.lan")]);
+        assert_eq!(score.host, None);
+    }
+
+    #[test]
+    fn the_score_names_the_run_that_recorded_the_trace() {
+        assert_eq!(score_of(&[&[]]).run, RunId::from(RUN));
+    }
+
+    #[test]
+    fn the_score_names_the_address_that_the_hunt_traced() {
+        assert_eq!(score_of(&[&[]]).addr, address(DESTINATION));
+    }
+
+    /// A hunt takes no key of the terminal.
+    #[test]
+    fn the_screen_of_a_destination_asks_for_no_stop() {
+        let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL);
+        assert!(!scorer.poll());
     }
 }
