@@ -17,7 +17,7 @@
 
 use crate::live::Screen;
 use crate::record::{NameRecord, RoundRecord, RunId};
-use crate::stats::HopTable;
+use crate::stats::{HopTable, TtlRow};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::{BTreeMap, HashSet};
@@ -250,17 +250,61 @@ impl Scorer {
     }
 
     /// What this destination gave.
+    ///
+    /// A destination that answered ends the path at the TTL it answered at, and
+    /// one that answered nothing ends the path at the highest TTL that any hop
+    /// answered at. The time and the loss both read the row of that TTL, which
+    /// is the last hop of the path either way.
     pub(crate) fn score(self) -> Score {
+        let (kind, length) = match self.reached_at {
+            Some(ttl) => (PathKind::Reached, ttl),
+            None => (PathKind::Partial, self.deepest_answer()),
+        };
+        let last = self.row(length);
+        let rtt_ms = last.and_then(|row| row.stats().avg());
+        let loss = last.and_then(TtlRow::loss);
+        let gaps = self.gaps(length);
+        let host = self.names.get(&IpAddr::V4(self.addr)).cloned();
         Score {
             addr: self.addr,
-            host: None,
+            host,
             run: self.run,
-            kind: PathKind::Partial,
-            length: 0,
-            rtt_ms: None,
-            loss: None,
-            gaps: 0,
+            kind,
+            length,
+            rtt_ms,
+            loss,
+            gaps,
         }
+    }
+
+    /// The highest TTL that any hop answered at. A trace that nothing answered
+    /// for gives zero, which is a TTL that no probe carries.
+    fn deepest_answer(&self) -> u8 {
+        self.table
+            .rows()
+            .filter(|row| row.stats().recv() > 0)
+            .map(TtlRow::ttl)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The row of one TTL. A TTL that no round probed holds none.
+    fn row(&self, ttl: u8) -> Option<&TtlRow> {
+        self.table.rows().find(|row| row.ttl() == ttl)
+    }
+
+    /// The number of TTLs at or below the length that answered nothing.
+    ///
+    /// A path of no length holds no TTL at all, and it therefore holds no hole.
+    /// The `partial` mark and the length of zero already say that the trace
+    /// found nothing.
+    fn gaps(&self, length: u8) -> usize {
+        self.table
+            .rows()
+            .filter(|row| {
+                (self.first_ttl..=length).contains(&row.ttl()) && row.stats().recv() == 0
+            })
+            .count()
     }
 }
 
@@ -273,9 +317,36 @@ impl Screen for Scorer {
         false
     }
 
-    fn round(&mut self, _round: &RoundRecord) {}
+    /// Folds one round into the table, and keeps the TTL of the destination
+    /// when the destination answered.
+    ///
+    /// The smallest such TTL wins. A path that changes under a load balancer
+    /// reaches the destination at one TTL in one round and at another in the
+    /// next, and a packet did reach the destination in the smaller number of
+    /// hops.
+    fn round(&mut self, round: &RoundRecord) {
+        self.table.observe(round);
+        let answered = round
+            .hops
+            .iter()
+            .filter(|hop| hop.addr == IpAddr::V4(self.addr))
+            .map(|hop| hop.ttl)
+            .min();
+        if let Some(ttl) = answered {
+            self.reached_at = Some(self.reached_at.map_or(ttl, |held| held.min(ttl)));
+        }
+    }
 
-    fn names(&mut self, _names: &[NameRecord]) {}
+    /// Keeps the name of each address that a reverse lookup gave.
+    ///
+    /// The row of the summary names the destination alone, and the screen keeps
+    /// every name it is handed: the run loop writes one record for each address
+    /// of the path, and the destination is one of them.
+    fn names(&mut self, names: &[NameRecord]) {
+        for name in names {
+            self.names.insert(name.addr, name.host.clone());
+        }
+    }
 }
 
 #[cfg(test)]
