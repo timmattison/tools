@@ -313,6 +313,36 @@ mod tests {
     const RED: Rgba<u8> = Rgba([224, 64, 64, 255]);
 
     #[test]
+    fn the_top_of_the_cell_stays_clear() {
+        // A bar that filled the cell would touch the line above it, and the two
+        // pictures would then read as one. A terminal draws a glyph inside its
+        // cell and leaves a row of pixels around it, so the block elements of
+        // the text table already stand clear of the line above them. The image
+        // says the same thing in pixels.
+        //
+        // The largest sample of a history is the bar that reaches highest, and
+        // the column of a lost probe paints the whole height, so those two are
+        // the columns that a test of the top reads.
+        let bars = plot(
+            &[Sample::Time(ONE_TIME), Sample::Time(A_SLOWER_TIME)],
+            TWO_COLUMNS,
+            SHORT,
+        );
+        assert_eq!(
+            pixel(&bars, 1, 0),
+            CLEAR,
+            "the largest sample of a history stops below the top of the cell"
+        );
+
+        let lost = plot(&[Sample::Lost], ONE_COLUMN, SHORT);
+        assert_eq!(
+            pixel(&lost, 0, 0),
+            CLEAR,
+            "and the column of a lost probe stops below it as well"
+        );
+    }
+
+    #[test]
     fn a_lost_probe_draws_a_dotted_red_column() {
         // A solid red column and a tall teal bar differ by color alone, and the
         // mark of a lost probe must tell a loss from a slow answer whatever a
