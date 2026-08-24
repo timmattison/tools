@@ -121,6 +121,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, Row, Table, Widget};
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::fmt;
 use std::io::IsTerminal;
 use std::net::IpAddr;
@@ -504,8 +505,12 @@ impl Recent {
     }
 }
 
+/// The glyphs of the column, with no color at all.
+///
+/// The tests are the one caller. The render reaches the text of the column
+/// through [`Recent::cell`], which keeps the color of each mark.
+#[cfg(test)]
 impl fmt::Display for Recent {
-    /// The glyphs of the column, with no color at all.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         for mark in &self.0 {
             write!(formatter, "{}", mark.glyph())?;
