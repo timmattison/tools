@@ -142,6 +142,18 @@ const COLUMN_HEADER_START: &str = " TTL  Host";
 #[cfg(target_os = "macos")]
 const LOOPBACK: &str = "127.0.0.1";
 
+/// A second address of the loopback network, which no test expects an answer
+/// from.
+///
+/// The test of two runs at one time needs the answers of the two runs to be
+/// different, and it needs no interface to answer as [`LOOPBACK`] for a probe
+/// that went here. Both hold: this machine answers a probe of this address as
+/// this address, or it answers nothing at all. A [`LOOPBACK`] hop in the file
+/// of a run that probed this address is therefore the answer of the other run,
+/// on every machine that runs the test.
+#[cfg(target_os = "macos")]
+const OTHER_LOOPBACK: &str = "127.0.0.2";
+
 /// The flag that names the address the probes leave from.
 #[cfg(target_os = "macos")]
 const FLAG_SOURCE: &str = "--source";
@@ -177,6 +189,23 @@ const FLAG_HEADLESS: &str = "--headless";
 /// The number one, as a limit of rounds and as a limit of TTLs.
 #[cfg(target_os = "macos")]
 const ONE: &str = "1";
+
+/// The number of rounds that each run of the collision test records.
+///
+/// The two runs start at one moment and each round of each of them sends one
+/// probe, so five rounds give the two runs five chances each to read the
+/// answer of the other. One chance is enough to show the defect, and five
+/// stand well clear of a machine that scheduled the two runs apart.
+#[cfg(target_os = "macos")]
+const FIVE: &str = "5";
+
+/// The period of one round of the collision test.
+///
+/// The two runs of that test record [`FIVE`] rounds each, so this period puts
+/// the whole test inside one second. Every other live test of this file takes
+/// the period that `krt` holds by default.
+#[cfg(target_os = "macos")]
+const A_SHORT_INTERVAL: &str = "200ms";
 
 /// The flags of a run that records one round of one TTL and then stops.
 ///
@@ -258,6 +287,19 @@ const END_RECORD: &str = "end";
 /// The name of the field that says why a run stopped.
 #[cfg(target_os = "macos")]
 const REASON_FIELD: &str = "reason";
+
+/// The kind of the record that holds one round.
+#[cfg(target_os = "macos")]
+const ROUND_RECORD: &str = "round";
+
+/// The name of the field of a `round` record that holds the hops which
+/// answered.
+#[cfg(target_os = "macos")]
+const HOPS_FIELD: &str = "hops";
+
+/// The name of the field of a hop that holds the address which answered.
+#[cfg(target_os = "macos")]
+const ADDR_FIELD: &str = "addr";
 
 /// The reason of a run that the user stopped.
 #[cfg(target_os = "macos")]
@@ -541,20 +583,26 @@ impl Recording {
             .to_owned()
     }
 
-    /// Why the `end` record of the file says the run stopped, and `None` when
-    /// the file holds no such record.
+    /// Every record of the file, in the order that the run appended them.
     ///
     /// The file holds one JSON object for each line, so the reader parses each
-    /// line and reads the field that names its kind. A search of the text for
-    /// the two words would pass on a file whose `end` record names one reason
-    /// and whose other records name the word beside it.
-    fn end_reason(&self) -> Option<String> {
+    /// line. A search of the text for a word would pass on a file whose record
+    /// of one kind names the word that a record of another kind carries.
+    fn records(&self) -> Vec<serde_json::Value> {
         let text = fs::read_to_string(&self.path).expect("the recorded file must read");
         text.lines()
             .map(|line| {
                 serde_json::from_str::<serde_json::Value>(line)
                     .expect("each line of the recorded file must parse")
             })
+            .collect()
+    }
+
+    /// Why the `end` record of the file says the run stopped, and `None` when
+    /// the file holds no such record.
+    fn end_reason(&self) -> Option<String> {
+        self.records()
+            .into_iter()
             .find(|record| {
                 record.get(TYPE_FIELD).and_then(serde_json::Value::as_str) == Some(END_RECORD)
             })
@@ -564,6 +612,24 @@ impl Recording {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned)
             })
+    }
+
+    /// The address of every hop that the `round` records of the file report.
+    ///
+    /// A hop that did not answer is absent from a `round` record, so this list
+    /// names the routers that answered a probe of the run, one entry for each
+    /// answer and in the order that the rounds recorded them.
+    fn hop_addresses(&self) -> Vec<String> {
+        self.records()
+            .iter()
+            .filter(|record| {
+                record.get(TYPE_FIELD).and_then(serde_json::Value::as_str) == Some(ROUND_RECORD)
+            })
+            .filter_map(|record| record.get(HOPS_FIELD).and_then(serde_json::Value::as_array))
+            .flatten()
+            .filter_map(|hop| hop.get(ADDR_FIELD).and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect()
     }
 }
 
@@ -723,18 +789,19 @@ struct LiveRun {
     _lock: TracerLock,
 }
 
-/// The command line of a live run of the loopback, with `flags` behind the
+/// The command line of a live run of `destination`, with `flags` behind the
 /// flags that every live run of this file takes.
 ///
 /// A test that needs one more flag names that flag alone. The flags of the run
 /// which keep it offline stand here, in one place, so no test of this file can
 /// start a run that reaches the network. The run stays offline for the reason
-/// that the file documentation states: the destination is the loopback,
-/// [`FLAG_SOURCE`] names the loopback, and [`FLAG_NO_DNS`] looks nothing up.
+/// that the file documentation states: the destination is of the loopback
+/// network, [`FLAG_SOURCE`] names the loopback, and [`FLAG_NO_DNS`] looks
+/// nothing up.
 #[cfg(target_os = "macos")]
-fn live_arguments<'a>(output: &'a str, flags: &[&'a str]) -> Vec<&'a str> {
+fn live_arguments<'a>(destination: &'a str, output: &'a str, flags: &[&'a str]) -> Vec<&'a str> {
     let mut arguments = vec![
-        LOOPBACK,
+        destination,
         FLAG_SOURCE,
         LOOPBACK,
         FLAG_NO_DNS,
@@ -774,7 +841,7 @@ fn live_run_with(recording: &Recording, flags: &[&str]) -> LiveRun {
 fn live_run_under(recording: &Recording, flags: &[&str]) -> LiveRun {
     let lock = TracerLock::take();
     let output = recording.argument();
-    let terminal = Terminal::open(WIDE, &live_arguments(&output, flags));
+    let terminal = Terminal::open(WIDE, &live_arguments(LOOPBACK, &output, flags));
     LiveRun {
         terminal,
         _lock: lock,
@@ -951,7 +1018,7 @@ fn a_live_run_whose_standard_output_is_a_pipe_draws_no_table() {
     // `wait_with_output` waits with no deadline, and the round limit of
     // [`ONE_ROUND_OF_ONE_TTL`] is what bounds it: the run stops on its own.
     let finished = process::Command::new(env!("CARGO_BIN_EXE_krt"))
-        .args(live_arguments(&output, &ONE_ROUND_OF_ONE_TTL))
+        .args(live_arguments(LOOPBACK, &output, &ONE_ROUND_OF_ONE_TTL))
         .stdin(process::Stdio::null())
         .stdout(process::Stdio::piped())
         .stderr(process::Stdio::piped())
@@ -1017,4 +1084,99 @@ fn the_headless_flag_draws_no_table_under_a_terminal() {
             "and the flag keeps it off the alternate screen of the terminal it holds: {shown:?}"
         );
     }
+}
+
+/// Two live runs of one machine each record the answers of its own probes, and
+/// no answer of the other run.
+///
+/// This is the test of the identifier that `src/krt/src/trace.rs` gives each
+/// run. macOS hands the ICMP answers of one process to the socket of every
+/// other process that reads that protocol, so each of these two runs reads
+/// every answer that the machine took. A run that reads a foreign answer as its
+/// own records the path of another run, and the tracer of a debug build stops
+/// with a fault on the way, because that answer belongs to no probe of the
+/// state which the tracer holds.
+///
+/// The two destinations are what make the answers tell the two runs apart. The
+/// run of [`LOOPBACK`] gets an answer for each probe, and the run of
+/// [`OTHER_LOOPBACK`] gets none that names [`LOOPBACK`]. So a [`LOOPBACK`] hop
+/// in the file of the second run is an answer that the first run earned.
+///
+/// The test holds the lock of the tracer for both runs, so the number of live
+/// runs of the machine while it measures is the two that it started. A third
+/// run beside them would make a failure read as a defect of `krt` when it was a
+/// test of this file running beside this one.
+#[cfg(target_os = "macos")]
+#[test]
+fn two_live_runs_of_one_machine_each_record_only_the_answers_of_its_own_probes() {
+    let answered = Recording::at("krt-collide-answered");
+    let silent = Recording::at("krt-collide-silent");
+    // The lock stands under the two recordings, so the drop of the lock comes
+    // first and the removal of the two files comes after it. That is the order
+    // of every other live test of this file.
+    let _lock = TracerLock::take();
+    let flags = [
+        FLAG_ROUNDS,
+        FIVE,
+        FLAG_MAX_TTL,
+        ONE,
+        FLAG_INTERVAL,
+        A_SHORT_INTERVAL,
+        FLAG_HEADLESS,
+    ];
+
+    // The two runs start one after the other and then stand together. The round
+    // limit of each one stops it, so neither wait below carries a deadline of
+    // its own.
+    let answered_output = answered.argument();
+    let silent_output = silent.argument();
+    let mut running: Vec<process::Child> = [
+        (LOOPBACK, &answered_output),
+        (OTHER_LOOPBACK, &silent_output),
+    ]
+    .iter()
+    .map(|(destination, output)| {
+        process::Command::new(env!("CARGO_BIN_EXE_krt"))
+            .args(live_arguments(destination, output, &flags))
+            .stdin(process::Stdio::null())
+            .stdout(process::Stdio::piped())
+            .stderr(process::Stdio::piped())
+            .spawn()
+            .expect("the binary must start")
+    })
+    .collect();
+    let finished: Vec<process::Output> = running
+        .drain(..)
+        .map(|child| {
+            child
+                .wait_with_output()
+                .expect("the run must stop on its round limit")
+        })
+        .collect();
+
+    for (finished, destination) in finished.iter().zip([LOOPBACK, OTHER_LOOPBACK]) {
+        assert!(
+            finished.status.success(),
+            "the round limit stops the run of {destination}, and no answer of the other run does: {} said {:?}",
+            finished.status,
+            String::from_utf8_lossy(&finished.stderr)
+        );
+    }
+    for (recording, destination) in [(&answered, LOOPBACK), (&silent, OTHER_LOOPBACK)] {
+        assert_eq!(
+            recording.end_reason().as_deref(),
+            Some(ROUNDS_REASON),
+            "the file of the run of {destination} closes with the reason of the round limit"
+        );
+    }
+    assert!(
+        answered.hop_addresses().iter().any(|hop| hop == LOOPBACK),
+        "the run of {LOOPBACK} records the answers of its own probes: {:?}",
+        answered.hop_addresses()
+    );
+    assert!(
+        !silent.hop_addresses().iter().any(|hop| hop == LOOPBACK),
+        "and the run of {OTHER_LOOPBACK} records no answer that the other run earned: {:?}",
+        silent.hop_addresses()
+    );
 }

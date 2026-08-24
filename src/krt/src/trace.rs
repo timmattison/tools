@@ -1120,6 +1120,33 @@ this platform needs raw socket privileges to send probes.
         })
     }
 
+    /// The identifier that the tracer reads as the answer of any run.
+    ///
+    /// `trippy` takes an answer whose identifier is this one, whatever run sent
+    /// the probe. That is the answer of a UDP trace and of a TCP trace, which
+    /// carry no identifier and which the ports tell apart. An ICMP trace of
+    /// this identifier therefore takes the answers of every other ICMP trace of
+    /// the machine.
+    const ANY_RUN: TraceId = TraceId(0);
+
+    /// The probes of a run carry an identifier that no other run reads.
+    ///
+    /// macOS hands the ICMP answers of one process to the socket of every other
+    /// process that reads that protocol, so a tracer reads the answer of a probe
+    /// that another tracer sent. The identifier of the probe is what tells the
+    /// two apart: `trippy` drops an answer whose identifier is neither
+    /// [`ANY_RUN`] nor the one that the run holds. A run that names no
+    /// identifier holds [`ANY_RUN`], and two such runs of one machine read each
+    /// other.
+    #[test]
+    fn the_probes_of_a_run_carry_an_identifier_of_their_own() {
+        let identifier = tracer_from(&a_config()).trace_identifier();
+        assert_ne!(
+            identifier, ANY_RUN,
+            "a run of this identifier reads the answers of every other run of the machine"
+        );
+    }
+
     #[test]
     fn the_target_of_the_configuration_reaches_the_tracer() {
         assert_eq!(
