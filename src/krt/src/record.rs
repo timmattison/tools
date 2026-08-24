@@ -6,17 +6,19 @@
 //! one line and back, the reader that loads a whole file, and the writer that
 //! appends to one. The `replay` command reads through this module. The run loop
 //! writes the `run` record, one `round` record for each round, and the `end`
-//! record through the writer, and every write flushes.
+//! record through the writer, and every write flushes. Two runs of one
+//! destination from one machine append to one file, so every write of the
+//! writer holds the exclusive lock of the file.
 
 use crate::{Multipath, Protocol};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The byte that ends one line of a recorded file.
 const NEWLINE: u8 = b'\n';
@@ -698,6 +700,11 @@ pub(crate) enum ReadError {
 /// The file opens in append mode, so one source and one destination keep one
 /// file across many runs.
 ///
+/// Two runs therefore write to one file at the same time. Each write of a run
+/// takes the exclusive lock of the file, writes, and releases the lock, so the
+/// bytes of one write stay together. The wait for the lock is bounded, and a
+/// wait that runs out fails and names the file.
+///
 /// Every record reaches the operating system before the call returns, so a
 /// `kill -9` loses at most one round. The flush is enough. A `kill -9` ends the
 /// process, and the operating system keeps the bytes that the process already
@@ -747,10 +754,26 @@ impl Writer<RecordFile> {
 /// and does not release, and not the ordinary meeting of two runs.
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 
+/// The pause between two tries for the lock of a recorded file.
+///
+/// A holder keeps the lock for the length of one write, which takes
+/// microseconds. A pause of one millisecond therefore gives the holder time to
+/// finish. A shorter pause turns the wait into a spin, and a longer one adds
+/// delay to every record that meets a holder.
+const LOCK_RETRY_PAUSE: Duration = Duration::from_millis(1);
+
 /// A recorded file that takes one record as one append.
 ///
+/// The path of a recorded file comes from the source address and the
+/// destination, so two runs of one destination from one machine append to one
+/// file. Each write takes the exclusive lock of the file, writes, and releases
+/// the lock. A record of one run therefore never lands inside a record of
+/// another run.
+///
 /// The type holds no buffer of its own, so every write goes straight to the
-/// file.
+/// file. A buffer would break the guarantee: it decides on its own where one
+/// write stops, and a record that leaves as two writes is two appends with a
+/// gap between them.
 pub(crate) struct RecordFile {
     /// The open file, in append mode.
     file: File,
@@ -775,19 +798,87 @@ impl RecordFile {
             wait,
         })
     }
-}
 
-impl Write for RecordFile {
-    /// Appends the whole buffer to the file as one write.
+    /// Takes the exclusive lock of the file, inside the bound on the wait.
     ///
-    /// The answer is the whole length of the buffer, so [`Write::write_all`]
-    /// calls this function one time. A record that reaches this function as one
-    /// buffer therefore becomes one append.
+    /// The function tries the lock first, so a file that no other writer holds
+    /// costs no pause at all. A file that another writer holds costs one pause
+    /// for each try, until the bound runs out.
+    ///
+    /// The wait is bounded on purpose. A wait without a bound stops the run for
+    /// as long as some other process keeps the lock, and a run that stops
+    /// forever records nothing and says nothing.
     ///
     /// # Errors
     ///
-    /// Returns the reason when the write fails.
+    /// Returns the reason when the operating system refuses the lock, and a
+    /// `TimedOut` fault that names the path when the wait runs out.
+    fn lock(&self) -> std::io::Result<LockGuard<'_>> {
+        let start = Instant::now();
+        loop {
+            match self.file.try_lock() {
+                Ok(()) => return Ok(LockGuard { file: &self.file }),
+                // Another writer holds the lock. Give it time to finish.
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Error(fault)) => return Err(fault),
+            }
+            if start.elapsed() >= self.wait {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "{}: another writer holds the file, and the wait of {} milliseconds ran out",
+                        self.path.display(),
+                        self.wait.as_millis()
+                    ),
+                ));
+            }
+            std::thread::sleep(LOCK_RETRY_PAUSE);
+        }
+    }
+}
+
+/// The exclusive lock of one recorded file, for the length of one append.
+///
+/// The lock goes away with this value. A write that fails therefore releases
+/// the lock as well as a write that holds, and no fault leaves the file locked
+/// against the next run.
+struct LockGuard<'a> {
+    /// The file that holds the lock.
+    ///
+    /// The borrow is not mutable, because `&File` writes as well as `&mut File`
+    /// does. The guard therefore stands beside the write that it protects.
+    file: &'a File,
+}
+
+impl Drop for LockGuard<'_> {
+    fn drop(&mut self) {
+        // A release that fails leaves the lock with this process, and the
+        // operating system gives the lock back when the process closes the
+        // file. There is nothing more to do here, and a write that already
+        // reached the file must not fail on the release.
+        let _ = self.file.unlock();
+    }
+}
+
+impl Write for RecordFile {
+    /// Appends the whole buffer to the file as one write, under the exclusive
+    /// lock of the file.
+    ///
+    /// The answer is the whole length of the buffer, so [`Write::write_all`]
+    /// calls this function one time. A record that reaches this function as one
+    /// buffer therefore becomes one append, and that is what keeps the records
+    /// of two runs of one file apart.
+    ///
+    /// The lock goes away with the guard, at the end of this function. A second
+    /// writer of the same file therefore goes on as soon as the bytes are on
+    /// the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the lock does not come inside the bound on the
+    /// wait, and when the write fails.
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _guard = self.lock()?;
         let mut file = &self.file;
         file.write_all(buf)?;
         Ok(buf.len())
