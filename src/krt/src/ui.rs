@@ -2444,12 +2444,30 @@ mod tests {
             .collect()
     }
 
-    /// The lines of a frame over one table, at a width.
+    /// The lines of a frame over one table, at a width, with no color at all.
+    ///
+    /// Most tests below read the glyphs of a frame, so the plain paint is the
+    /// one they ask for.
     fn lines_of(
         table: &HopTable,
         names: &BTreeMap<IpAddr, String>,
         destination: Option<IpAddr>,
         width: u16,
+    ) -> Vec<String> {
+        painted_lines_of(table, names, destination, width, Paint::Plain)
+    }
+
+    /// The lines of a frame over one table, at a width, in a paint.
+    ///
+    /// Every frame of these tests comes out of this one call. A test of the
+    /// glyphs and a test of the color therefore read the same render, and a
+    /// frame that the two of them compare differs in the paint alone.
+    fn painted_lines_of(
+        table: &HopTable,
+        names: &BTreeMap<IpAddr, String>,
+        destination: Option<IpAddr>,
+        width: u16,
+        paint: Paint,
     ) -> Vec<String> {
         Frame {
             header: golden_header(),
@@ -2457,7 +2475,7 @@ mod tests {
             names,
             destination,
         }
-        .lines(width, Paint::Plain)
+        .lines(width, paint)
     }
 
     /// The lines of the golden frame at a width.
@@ -2806,6 +2824,48 @@ mod tests {
             recent_of(line(&lines, 5)),
             "▁",
             "the right router draws its one answer and no loss"
+        );
+    }
+
+    #[test]
+    fn the_mark_of_a_loss_is_the_one_cell_of_the_table_that_carries_a_color() {
+        // The color of this table has one job: it says which row of the path
+        // drops its probes. A color anywhere else takes that meaning away. The
+        // host, the numbers, the bars, and the column header all stand in the
+        // foreground the reader set, and this test is the one that fails when
+        // one of them takes a color of its own.
+        //
+        // The golden run lost probes, so its colored lines carry codes that its
+        // plain lines do not. That half comes first, because it holds the other
+        // half honest: a render that painted nothing at all would pass the
+        // claim below and prove nothing.
+        let golden = golden_table();
+        let names = golden_names();
+        let destination = Some(address(TARGET));
+        assert_ne!(
+            painted_lines_of(&golden, &names, destination, NOMINAL_WIDTH, Paint::Colored),
+            painted_lines_of(&golden, &names, destination, NOMINAL_WIDTH, Paint::Plain),
+            "the mark of a lost probe carries a color that the plain lines hold nowhere"
+        );
+        // Every TTL of this run answered every round, so no cell of its table
+        // holds a loss. The two sets of lines therefore agree character for
+        // character. A color that reached a bar, a name, a number, or the
+        // heading of a column stands in the colored lines alone, and the two
+        // sets part company.
+        let answered = table_of(&[
+            round(1, 2, &[(1, FIRST_HOP, 1.0), (2, TARGET, 40.0)]),
+            round(1, 2, &[(1, FIRST_HOP, 5.0), (2, TARGET, 60.0)]),
+        ]);
+        assert_eq!(
+            painted_lines_of(
+                &answered,
+                &names,
+                destination,
+                NOMINAL_WIDTH,
+                Paint::Colored
+            ),
+            painted_lines_of(&answered, &names, destination, NOMINAL_WIDTH, Paint::Plain),
+            "a frame that lost no probe reads the same with the color as without it"
         );
     }
 
