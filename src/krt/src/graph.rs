@@ -433,6 +433,52 @@ mod tests {
         );
     }
 
+    /// The number of samples that the fold of one hop holds.
+    ///
+    /// The test spells the count, and `stats.rs` spells it again. That is on
+    /// purpose: the whole point of the image is that it draws every sample the
+    /// fold keeps, where the nine columns of the block elements draw nine of
+    /// them.
+    const HISTORY: u32 = 60;
+
+    /// The width in pixels of an image that draws that whole history.
+    ///
+    /// Nine character cells of ten pixels each. Ninety columns over sixty
+    /// samples gives each sample one or two columns of pixels.
+    const WIDE: u32 = 90;
+
+    #[test]
+    fn every_sample_of_the_history_draws() {
+        // The block elements show nine of the sixty samples that the fold
+        // holds, and this is the whole point of the image: the column of pixels
+        // at `x` draws the sample at `x * count / width`, so no sample of the
+        // history goes undrawn.
+        //
+        // The image is as tall as the history is long, so each of the sixty
+        // samples takes a bar of its own height and a test reads which sample a
+        // column drew.
+        let history: Vec<Sample> = (0..HISTORY).map(|step| Sample::Time(f64::from(step))).collect();
+        let image = plot(&history, WIDE, HISTORY);
+
+        for column in 0..WIDE {
+            let index = column * HISTORY / WIDE;
+            assert_eq!(
+                bar(&image, column),
+                index + 1,
+                "the column of pixels at {column} draws the sample at {index}"
+            );
+        }
+
+        let mut heights: Vec<u32> = (0..WIDE).map(|column| bar(&image, column)).collect();
+        heights.sort_unstable();
+        heights.dedup();
+        assert_eq!(
+            heights,
+            (1..=HISTORY).collect::<Vec<u32>>(),
+            "and every sample of the history draws a bar of its own"
+        );
+    }
+
     #[test]
     fn the_background_of_the_image_is_transparent() {
         // A transparent background lets the terminal show its own background
