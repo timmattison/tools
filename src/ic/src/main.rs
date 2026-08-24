@@ -15,6 +15,7 @@ use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
+use termgfx::{display_routine_for, Capabilities, DisplayRoutine, TerminalType};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
@@ -548,7 +549,7 @@ fn ensure_ffprobe_available() -> Result<()> {
 }
 
 fn validate_terminal_for_graphics(
-    terminal_caps: &TerminalCapabilities,
+    terminal_caps: &Capabilities,
     transport: &RemoteTransport,
     feature: &str,
 ) -> Result<()> {
@@ -568,10 +569,10 @@ fn validate_terminal_for_graphics(
         anyhow::bail!("tmux detected. {} display does not work in tmux. Please run it directly in your terminal.", feature);
     }
 
-    if !terminal_caps.supports_graphics {
+    if !terminal_caps.draws_images() {
         let term = std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string());
 
-        let error_msg = match terminal_caps.terminal_type {
+        let error_msg = match terminal_caps.terminal_type() {
             TerminalType::Alacritty => format!(
                 "{} display is not supported in Alacritty terminal.\n\
                 Alacritty is a text-only terminal that doesn't support graphics protocols.\n\
@@ -623,14 +624,14 @@ fn validate_terminal_for_graphics(
 /// ask whether stdout is a terminal, so a redirected stdout does not change
 /// the answer.
 fn report_display_readiness() -> Result<()> {
-    let terminal_caps = detect_terminal_capabilities();
+    let terminal_caps = Capabilities::detect();
     let transport = detect_remote_transport();
 
     validate_terminal_for_graphics(&terminal_caps, &transport, "Image")
 }
 
 fn display_video_from_file(file_path: &Path, args: &Args) -> Result<()> {
-    let terminal_caps = detect_terminal_capabilities();
+    let terminal_caps = Capabilities::detect();
     let transport = detect_remote_transport();
 
     validate_terminal_for_graphics(&terminal_caps, &transport, "Video")?;
@@ -677,8 +678,8 @@ type VideoControlSetup = (
     Option<thread::JoinHandle<()>>,
 );
 
-fn setup_video_controls(terminal_caps: &TerminalCapabilities) -> Result<VideoControlSetup> {
-    let supports_interactive_controls = terminal_caps.supports_raw_mode;
+fn setup_video_controls(terminal_caps: &Capabilities) -> Result<VideoControlSetup> {
+    let supports_interactive_controls = terminal_caps.raw_mode();
 
     if !supports_interactive_controls {
         print_control_notice(terminal_caps);
@@ -712,8 +713,8 @@ fn setup_video_controls(terminal_caps: &TerminalCapabilities) -> Result<VideoCon
     Ok((raw_mode, input_rx, input_handle))
 }
 
-fn print_control_notice(terminal_caps: &TerminalCapabilities) {
-    match terminal_caps.terminal_type {
+fn print_control_notice(terminal_caps: &Capabilities) {
+    match terminal_caps.terminal_type() {
         TerminalType::Alacritty => {
             eprintln!(
                 "Notice: Running in Alacritty. Video will play without interactive controls."
@@ -932,7 +933,7 @@ fn play_video_simple(
     duration: f64,
     fps: f64,
 ) -> Result<()> {
-    let terminal_caps = detect_terminal_capabilities();
+    let terminal_caps = Capabilities::detect();
     let (_raw_mode, input_rx, _input_handle) = setup_video_controls(&terminal_caps)?;
 
     let _screen_guard = AlternateScreenGuard::enter()?;
@@ -1629,7 +1630,7 @@ fn display_image(
     no_newline: bool,
     header: HeaderRows,
 ) -> Result<()> {
-    let terminal_caps = detect_terminal_capabilities();
+    let terminal_caps = Capabilities::detect();
     let transport = detect_remote_transport();
 
     validate_terminal_for_graphics(&terminal_caps, &transport, "Image")?;
@@ -1691,7 +1692,7 @@ fn display_image(
     // the renderer still and then states the position of the cursor itself, so
     // a remote proxy tracks the cursor with the same newlines, CUU and CUD that
     // a local terminal does.
-    match display_routine_for(&terminal_caps.terminal_type) {
+    match display_routine_for(terminal_caps.terminal_type()) {
         DisplayRoutine::Sixel => {
             display_image_sixel(&img, scaled_width, scaled_height, args, no_newline)
         }
@@ -2336,210 +2337,6 @@ fn display_image_iterm2(
         display_height,
         no_newline,
     )
-}
-
-/// An inline-image protocol that `ic` can emit into a muxiavelli panel.
-///
-/// muxiavelli panels render through ttyd's xterm.js with `@xterm/addon-image`,
-/// which supports **Sixel and iTerm2 IIP only**. The Kitty graphics protocol is
-/// deliberately absent from this enum: it is structurally impossible for `ic` to
-/// pick Kitty for a muxiavelli panel, which is how the shared contract's "Never
-/// Kitty" guarantee is enforced at compile time rather than by convention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MuxiavelliImageProtocol {
-    Sixel,
-    Iterm2,
-}
-
-impl MuxiavelliImageProtocol {
-    /// Parse a single `MUXIAVELLI_IMAGE_PROTOCOLS` token (case- and
-    /// whitespace-insensitive). Returns `None` for anything `ic` cannot emit
-    /// into a muxiavelli panel (including `kitty`), so unsupported tokens are
-    /// simply skipped when selecting from the advertised list.
-    fn parse_token(token: &str) -> Option<Self> {
-        let token = token.trim();
-        if token.eq_ignore_ascii_case("sixel") {
-            Some(Self::Sixel)
-        } else if token.eq_ignore_ascii_case("iterm2") {
-            Some(Self::Iterm2)
-        } else {
-            None
-        }
-    }
-}
-
-/// The protocol `ic` falls back to for a muxiavelli panel when the advertised
-/// preference list is absent, empty, or names nothing `ic` supports.
-const DEFAULT_MUXIAVELLI_PROTOCOL: MuxiavelliImageProtocol = MuxiavelliImageProtocol::Sixel;
-
-/// Resolve the ordered `MUXIAVELLI_IMAGE_PROTOCOLS` preference list to the first
-/// protocol `ic` can emit, honoring the advertised order rather than hardcoding
-/// a choice. Falls back to Sixel (never Kitty) when the list is absent, empty,
-/// or names nothing supported.
-fn select_muxiavelli_protocol(raw: Option<&str>) -> MuxiavelliImageProtocol {
-    raw.unwrap_or_default()
-        .split(',')
-        .filter_map(MuxiavelliImageProtocol::parse_token)
-        .next()
-        .unwrap_or(DEFAULT_MUXIAVELLI_PROTOCOL)
-}
-
-/// Optimized Kitty image printing with reduced protocol overhead
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TerminalType {
-    Kitty,
-    Ghostty,
-    ITerm2,
-    WezTerm,
-    Alacritty,
-    Zellij,
-    /// A muxiavelli panel (ttyd/xterm.js). Carries the resolved inline-image
-    /// protocol so the host terminal's leaked env vars cannot override it.
-    Muxiavelli(MuxiavelliImageProtocol),
-    Unknown,
-}
-
-#[derive(Debug, Clone)]
-struct TerminalCapabilities {
-    terminal_type: TerminalType,
-    supports_graphics: bool,
-    supports_raw_mode: bool,
-}
-
-/// Snapshot of the environment variables that influence terminal detection.
-///
-/// Captured once so that [`classify_terminal_type`] is a pure function of its
-/// inputs — testable without mutating process-global env vars (which is `unsafe`
-/// in the 2024 edition and not parallel-safe for the test suite).
-#[derive(Debug, Clone, Default)]
-struct TerminalEnv {
-    term: String,
-    term_program: String,
-    zellij: bool,
-    muxiavelli: bool,
-    muxiavelli_protocols: Option<String>,
-    kitty_window_id: bool,
-    ghostty_resources_dir: bool,
-    iterm_session_id: bool,
-    alacritty_socket: bool,
-}
-
-impl TerminalEnv {
-    /// Capture the detection-relevant environment variables from the process.
-    fn from_process() -> Self {
-        let is_set = |key: &str| std::env::var(key).is_ok();
-        TerminalEnv {
-            term: std::env::var("TERM").unwrap_or_default(),
-            term_program: std::env::var("TERM_PROGRAM").unwrap_or_default(),
-            zellij: is_set("ZELLIJ"),
-            // The contract pins MUXIAVELLI to the literal "1"; treat any other
-            // value (including "0") as "not a muxiavelli panel".
-            muxiavelli: matches!(std::env::var("MUXIAVELLI").as_deref(), Ok("1")),
-            muxiavelli_protocols: std::env::var("MUXIAVELLI_IMAGE_PROTOCOLS").ok(),
-            kitty_window_id: is_set("KITTY_WINDOW_ID"),
-            ghostty_resources_dir: is_set("GHOSTTY_RESOURCES_DIR"),
-            iterm_session_id: is_set("ITERM_SESSION_ID"),
-            alacritty_socket: is_set("ALACRITTY_SOCKET"),
-        }
-    }
-}
-
-/// Classify the terminal from a captured [`TerminalEnv`].
-///
-/// `MUXIAVELLI` is checked **first** — before Zellij and every host-terminal
-/// signal — because a muxiavelli panel's PTY inherits (leaks) the env vars of
-/// whatever terminal launched the muxiavelli server. Honoring the panel's own
-/// advertised capability is the only correct signal; the leaked host vars must
-/// not win. (Same reasoning as checking Zellij before the host terminals.)
-fn classify_terminal_type(env: &TerminalEnv) -> TerminalType {
-    if env.muxiavelli {
-        TerminalType::Muxiavelli(select_muxiavelli_protocol(
-            env.muxiavelli_protocols.as_deref(),
-        ))
-    } else if env.zellij {
-        TerminalType::Zellij
-    } else if env.kitty_window_id || env.term.contains("kitty") {
-        TerminalType::Kitty
-    } else if env.term_program == "ghostty"
-        || env.ghostty_resources_dir
-        || env.term.contains("ghostty")
-    {
-        TerminalType::Ghostty
-    } else if env.term_program.contains("iTerm") || env.iterm_session_id {
-        TerminalType::ITerm2
-    } else if env.term_program.contains("WezTerm") {
-        TerminalType::WezTerm
-    } else if env.alacritty_socket || env.term.contains("alacritty") {
-        TerminalType::Alacritty
-    } else {
-        TerminalType::Unknown
-    }
-}
-
-/// Whether a resolved terminal type can render inline graphics at all.
-///
-/// muxiavelli panels always can (xterm.js `@xterm/addon-image`), regardless of
-/// any `TERM` leaked from a backing session.
-fn terminal_supports_graphics(terminal_type: &TerminalType, term: &str) -> bool {
-    match terminal_type {
-        TerminalType::Muxiavelli(_) => true,
-        TerminalType::Alacritty => false,
-        _ => {
-            !term.contains("linux")   // Linux console doesn't support graphics
-                && !term.contains("screen") // Screen doesn't support graphics
-                && !term.starts_with("vt") // VT terminals don't support graphics
-        }
-    }
-}
-
-/// The concrete inline-image routine a resolved terminal type dispatches to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DisplayRoutine {
-    Sixel,
-    Kitty,
-    Iterm2,
-}
-
-/// Map a resolved [`TerminalType`] to the display routine `ic` should use.
-///
-/// Deliberately exhaustive (no wildcard arm): adding a future `TerminalType`
-/// forces a conscious routing decision here instead of silently falling through
-/// to iTerm2 — the exact failure mode that sent the Kitty protocol into
-/// muxiavelli panels.
-fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutine {
-    match terminal_type {
-        // Zellij and muxiavelli-Sixel both go through the Sixel path.
-        TerminalType::Zellij | TerminalType::Muxiavelli(MuxiavelliImageProtocol::Sixel) => {
-            DisplayRoutine::Sixel
-        }
-        TerminalType::Muxiavelli(MuxiavelliImageProtocol::Iterm2) => DisplayRoutine::Iterm2,
-        TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
-            DisplayRoutine::Kitty
-        }
-        TerminalType::ITerm2 | TerminalType::Alacritty | TerminalType::Unknown => {
-            DisplayRoutine::Iterm2
-        }
-    }
-}
-
-fn detect_terminal_capabilities() -> TerminalCapabilities {
-    let env = TerminalEnv::from_process();
-    let terminal_type = classify_terminal_type(&env);
-    let supports_graphics = terminal_supports_graphics(&terminal_type, &env.term);
-
-    let supports_raw_mode = {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: isatty() is a read-only check that only examines whether the file
-        // descriptor refers to a terminal. It has no side effects and cannot cause
-        // memory unsafety. The file descriptor from stdout is always valid.
-        unsafe { libc::isatty(io::stdout().as_raw_fd()) == 1 }
-    };
-
-    TerminalCapabilities {
-        terminal_type,
-        supports_graphics,
-        supports_raw_mode,
-    }
 }
 
 /// Process ID newtype for type safety in process tree walking.
@@ -3430,314 +3227,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Tests for terminal type detection (basic sanity checks)
-    // =========================================================================
-
-    #[test]
-    fn terminal_type_enum_is_exhaustive() {
-        // Ensure we can construct all terminal types (compile-time check)
-        let _kitty = TerminalType::Kitty;
-        let _ghostty = TerminalType::Ghostty;
-        let _iterm2 = TerminalType::ITerm2;
-        let _wezterm = TerminalType::WezTerm;
-        let _alacritty = TerminalType::Alacritty;
-        let _zellij = TerminalType::Zellij;
-        let _muxiavelli = TerminalType::Muxiavelli(MuxiavelliImageProtocol::Sixel);
-        let _unknown = TerminalType::Unknown;
-    }
-
-    // =========================================================================
-    // Tests for muxiavelli image-protocol selection (select_muxiavelli_protocol)
-    // =========================================================================
-
-    #[test]
-    fn muxiavelli_protocol_absent_falls_back_to_sixel() {
-        assert_eq!(
-            select_muxiavelli_protocol(None),
-            MuxiavelliImageProtocol::Sixel
-        );
-    }
-
-    #[test]
-    fn muxiavelli_protocol_empty_falls_back_to_sixel() {
-        assert_eq!(
-            select_muxiavelli_protocol(Some("")),
-            MuxiavelliImageProtocol::Sixel
-        );
-    }
-
-    #[test]
-    fn muxiavelli_protocol_unrecognized_falls_back_to_sixel() {
-        // Kitty (and any other token `ic` cannot emit) must never be selected.
-        assert_eq!(
-            select_muxiavelli_protocol(Some("kitty")),
-            MuxiavelliImageProtocol::Sixel
-        );
-        assert_eq!(
-            select_muxiavelli_protocol(Some("kitty,png,webp")),
-            MuxiavelliImageProtocol::Sixel
-        );
-    }
-
-    #[test]
-    fn muxiavelli_protocol_honors_advertised_order() {
-        // Proves the list is honored in order, not hardcoded to Sixel.
-        assert_eq!(
-            select_muxiavelli_protocol(Some("sixel,iterm2")),
-            MuxiavelliImageProtocol::Sixel
-        );
-        assert_eq!(
-            select_muxiavelli_protocol(Some("iterm2,sixel")),
-            MuxiavelliImageProtocol::Iterm2
-        );
-    }
-
-    #[test]
-    fn muxiavelli_protocol_skips_unsupported_then_picks_supported() {
-        // An unsupported leading token is skipped, not treated as a fallback.
-        assert_eq!(
-            select_muxiavelli_protocol(Some("kitty,iterm2")),
-            MuxiavelliImageProtocol::Iterm2
-        );
-    }
-
-    #[test]
-    fn muxiavelli_protocol_tolerates_whitespace_and_case() {
-        assert_eq!(
-            select_muxiavelli_protocol(Some("  ITERM2 , sixel ")),
-            MuxiavelliImageProtocol::Iterm2
-        );
-    }
-
-    // =========================================================================
-    // Tests for classify_terminal_type (precedence + existing detection)
-    // =========================================================================
-
-    /// A muxiavelli panel whose PTY leaked the host terminal's env vars: Kitty
-    /// **and** Ghostty signals are present simultaneously. MUXIAVELLI must still
-    /// win over both. This is the exact mis-detection the issue describes.
-    fn leaked_muxiavelli_env(protocols: Option<&str>) -> TerminalEnv {
-        TerminalEnv {
-            term: "xterm-ghostty".to_string(),
-            term_program: "ghostty".to_string(),
-            zellij: false,
-            muxiavelli: true,
-            muxiavelli_protocols: protocols.map(str::to_string),
-            kitty_window_id: true,
-            ghostty_resources_dir: true,
-            iterm_session_id: false,
-            alacritty_socket: false,
-        }
-    }
-
-    #[test]
-    fn muxiavelli_wins_over_leaked_host_signals_and_selects_sixel() {
-        let env = leaked_muxiavelli_env(Some("sixel,iterm2"));
-        assert_eq!(
-            classify_terminal_type(&env),
-            TerminalType::Muxiavelli(MuxiavelliImageProtocol::Sixel)
-        );
-    }
-
-    #[test]
-    fn muxiavelli_iterm2_first_selects_iterm2_despite_leak() {
-        let env = leaked_muxiavelli_env(Some("iterm2,sixel"));
-        assert_eq!(
-            classify_terminal_type(&env),
-            TerminalType::Muxiavelli(MuxiavelliImageProtocol::Iterm2)
-        );
-    }
-
-    #[test]
-    fn muxiavelli_absent_protocols_defaults_to_sixel() {
-        let env = leaked_muxiavelli_env(None);
-        assert_eq!(
-            classify_terminal_type(&env),
-            TerminalType::Muxiavelli(MuxiavelliImageProtocol::Sixel)
-        );
-    }
-
-    #[test]
-    fn muxiavelli_wins_over_zellij_backend() {
-        // muxiavelli may run a zellij backing session, so ZELLIJ can also be set
-        // inside a panel; MUXIAVELLI must still win since it is the precise signal.
-        let mut env = leaked_muxiavelli_env(None);
-        env.zellij = true;
-        assert_eq!(
-            classify_terminal_type(&env),
-            TerminalType::Muxiavelli(MuxiavelliImageProtocol::Sixel)
-        );
-    }
-
-    #[test]
-    fn classify_zellij_when_not_muxiavelli() {
-        let env = TerminalEnv {
-            zellij: true,
-            ..TerminalEnv::default()
-        };
-        assert_eq!(classify_terminal_type(&env), TerminalType::Zellij);
-    }
-
-    #[test]
-    fn classify_kitty_from_window_id() {
-        let env = TerminalEnv {
-            kitty_window_id: true,
-            ..TerminalEnv::default()
-        };
-        assert_eq!(classify_terminal_type(&env), TerminalType::Kitty);
-    }
-
-    #[test]
-    fn classify_kitty_from_term() {
-        let env = TerminalEnv {
-            term: "xterm-kitty".to_string(),
-            ..TerminalEnv::default()
-        };
-        assert_eq!(classify_terminal_type(&env), TerminalType::Kitty);
-    }
-
-    #[test]
-    fn classify_ghostty_from_term_program() {
-        let env = TerminalEnv {
-            term_program: "ghostty".to_string(),
-            ..TerminalEnv::default()
-        };
-        assert_eq!(classify_terminal_type(&env), TerminalType::Ghostty);
-    }
-
-    #[test]
-    fn classify_iterm2_from_session_id() {
-        let env = TerminalEnv {
-            iterm_session_id: true,
-            ..TerminalEnv::default()
-        };
-        assert_eq!(classify_terminal_type(&env), TerminalType::ITerm2);
-    }
-
-    #[test]
-    fn classify_iterm2_from_term_program() {
-        let env = TerminalEnv {
-            term_program: "iTerm.app".to_string(),
-            ..TerminalEnv::default()
-        };
-        assert_eq!(classify_terminal_type(&env), TerminalType::ITerm2);
-    }
-
-    #[test]
-    fn classify_wezterm_from_term_program() {
-        let env = TerminalEnv {
-            term_program: "WezTerm".to_string(),
-            ..TerminalEnv::default()
-        };
-        assert_eq!(classify_terminal_type(&env), TerminalType::WezTerm);
-    }
-
-    #[test]
-    fn classify_alacritty_from_socket() {
-        let env = TerminalEnv {
-            alacritty_socket: true,
-            ..TerminalEnv::default()
-        };
-        assert_eq!(classify_terminal_type(&env), TerminalType::Alacritty);
-    }
-
-    #[test]
-    fn classify_unknown_when_no_signals() {
-        assert_eq!(
-            classify_terminal_type(&TerminalEnv::default()),
-            TerminalType::Unknown
-        );
-    }
-
-    // =========================================================================
-    // Tests for terminal_supports_graphics
-    // =========================================================================
-
-    #[test]
-    fn muxiavelli_supports_graphics_regardless_of_term() {
-        // Even if a backing session leaks TERM=screen/vt, muxiavelli renders images.
-        assert!(terminal_supports_graphics(
-            &TerminalType::Muxiavelli(MuxiavelliImageProtocol::Sixel),
-            "screen.xterm-256color"
-        ));
-        assert!(terminal_supports_graphics(
-            &TerminalType::Muxiavelli(MuxiavelliImageProtocol::Iterm2),
-            "vt100"
-        ));
-    }
-
-    #[test]
-    fn alacritty_never_supports_graphics() {
-        assert!(!terminal_supports_graphics(
-            &TerminalType::Alacritty,
-            "xterm-256color"
-        ));
-    }
-
-    #[test]
-    fn kitty_supports_graphics_on_normal_term() {
-        assert!(terminal_supports_graphics(
-            &TerminalType::Kitty,
-            "xterm-kitty"
-        ));
-    }
-
-    #[test]
-    fn linux_console_does_not_support_graphics() {
-        assert!(!terminal_supports_graphics(&TerminalType::Unknown, "linux"));
-    }
-
-    // =========================================================================
-    // Tests for display_routine_for (dispatch routing)
-    // =========================================================================
-
-    #[test]
-    fn dispatch_muxiavelli_sixel_routes_to_sixel() {
-        assert_eq!(
-            display_routine_for(&TerminalType::Muxiavelli(MuxiavelliImageProtocol::Sixel)),
-            DisplayRoutine::Sixel
-        );
-    }
-
-    #[test]
-    fn dispatch_muxiavelli_iterm2_routes_to_iterm2() {
-        assert_eq!(
-            display_routine_for(&TerminalType::Muxiavelli(MuxiavelliImageProtocol::Iterm2)),
-            DisplayRoutine::Iterm2
-        );
-    }
-
-    #[test]
-    fn dispatch_zellij_routes_to_sixel() {
-        assert_eq!(
-            display_routine_for(&TerminalType::Zellij),
-            DisplayRoutine::Sixel
-        );
-    }
-
-    #[test]
-    fn dispatch_kitty_family_routes_to_kitty() {
-        for terminal_type in [
-            TerminalType::Kitty,
-            TerminalType::Ghostty,
-            TerminalType::WezTerm,
-        ] {
-            assert_eq!(display_routine_for(&terminal_type), DisplayRoutine::Kitty);
-        }
-    }
-
-    #[test]
-    fn dispatch_other_terminals_route_to_iterm2() {
-        for terminal_type in [
-            TerminalType::ITerm2,
-            TerminalType::Alacritty,
-            TerminalType::Unknown,
-        ] {
-            assert_eq!(display_routine_for(&terminal_type), DisplayRoutine::Iterm2);
-        }
-    }
-
-    // =========================================================================
     // Tests verifying constants are reasonable
     // =========================================================================
 
@@ -3921,11 +3410,10 @@ not_a_number  1 /bin/bash
 
     /// Ask for the Mosh message that `ic` prints when it refuses an image.
     fn mosh_refusal_message() -> String {
-        let caps = TerminalCapabilities {
-            terminal_type: TerminalType::ITerm2,
-            supports_graphics: true,
-            supports_raw_mode: true,
-        };
+        // An iTerm2 window that draws an image and takes raw mode: every fact
+        // stands in favor of the image, so the refusal below comes from the
+        // transport alone.
+        let caps = Capabilities::new(TerminalType::ITerm2, true, true);
         let error = validate_terminal_for_graphics(&caps, &RemoteTransport::Mosh, "Image")
             .expect_err("Mosh must be refused");
         error.to_string()

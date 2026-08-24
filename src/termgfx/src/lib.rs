@@ -357,4 +357,306 @@ mod tests {
             DisplayRoutine::Kitty
         );
     }
+
+    // =========================================================================
+    // Tests for terminal type detection (basic sanity checks)
+    // =========================================================================
+
+    #[test]
+    fn terminal_type_enum_is_exhaustive() {
+        // Ensure we can construct all terminal types (compile-time check)
+        let _kitty = TerminalType::Kitty;
+        let _ghostty = TerminalType::Ghostty;
+        let _iterm2 = TerminalType::ITerm2;
+        let _wezterm = TerminalType::WezTerm;
+        let _alacritty = TerminalType::Alacritty;
+        let _zellij = TerminalType::Zellij;
+        let _muxiavelli = TerminalType::Muxiavelli(ImageProtocol::Sixel);
+        let _unknown = TerminalType::Unknown;
+    }
+
+    // =========================================================================
+    // Tests for muxiavelli image-protocol selection (select_muxiavelli_protocol)
+    // =========================================================================
+
+    #[test]
+    fn muxiavelli_protocol_absent_falls_back_to_sixel() {
+        assert_eq!(select_muxiavelli_protocol(None), ImageProtocol::Sixel);
+    }
+
+    #[test]
+    fn muxiavelli_protocol_empty_falls_back_to_sixel() {
+        assert_eq!(select_muxiavelli_protocol(Some("")), ImageProtocol::Sixel);
+    }
+
+    #[test]
+    fn muxiavelli_protocol_unrecognized_falls_back_to_sixel() {
+        // Kitty (and any other token `ic` cannot emit) must never be selected.
+        assert_eq!(
+            select_muxiavelli_protocol(Some("kitty")),
+            ImageProtocol::Sixel
+        );
+        assert_eq!(
+            select_muxiavelli_protocol(Some("kitty,png,webp")),
+            ImageProtocol::Sixel
+        );
+    }
+
+    #[test]
+    fn muxiavelli_protocol_honors_advertised_order() {
+        // Proves the list is honored in order, not hardcoded to Sixel.
+        assert_eq!(
+            select_muxiavelli_protocol(Some("sixel,iterm2")),
+            ImageProtocol::Sixel
+        );
+        assert_eq!(
+            select_muxiavelli_protocol(Some("iterm2,sixel")),
+            ImageProtocol::Iterm2
+        );
+    }
+
+    #[test]
+    fn muxiavelli_protocol_skips_unsupported_then_picks_supported() {
+        // An unsupported leading token is skipped, not treated as a fallback.
+        assert_eq!(
+            select_muxiavelli_protocol(Some("kitty,iterm2")),
+            ImageProtocol::Iterm2
+        );
+    }
+
+    #[test]
+    fn muxiavelli_protocol_tolerates_whitespace_and_case() {
+        assert_eq!(
+            select_muxiavelli_protocol(Some("  ITERM2 , sixel ")),
+            ImageProtocol::Iterm2
+        );
+    }
+
+    // =========================================================================
+    // Tests for classify_terminal_type (precedence + existing detection)
+    // =========================================================================
+
+    /// A muxiavelli panel whose PTY leaked the host terminal's env vars: Kitty
+    /// **and** Ghostty signals are present simultaneously. MUXIAVELLI must still
+    /// win over both. This is the exact mis-detection the issue describes.
+    fn leaked_muxiavelli_env(protocols: Option<&str>) -> TerminalEnv {
+        TerminalEnv {
+            term: "xterm-ghostty".to_string(),
+            term_program: "ghostty".to_string(),
+            zellij: false,
+            muxiavelli: true,
+            muxiavelli_protocols: protocols.map(str::to_string),
+            kitty_window_id: true,
+            ghostty_resources_dir: true,
+            iterm_session_id: false,
+            alacritty_socket: false,
+        }
+    }
+
+    #[test]
+    fn muxiavelli_wins_over_leaked_host_signals_and_selects_sixel() {
+        let env = leaked_muxiavelli_env(Some("sixel,iterm2"));
+        assert_eq!(
+            classify_terminal_type(&env),
+            TerminalType::Muxiavelli(ImageProtocol::Sixel)
+        );
+    }
+
+    #[test]
+    fn muxiavelli_iterm2_first_selects_iterm2_despite_leak() {
+        let env = leaked_muxiavelli_env(Some("iterm2,sixel"));
+        assert_eq!(
+            classify_terminal_type(&env),
+            TerminalType::Muxiavelli(ImageProtocol::Iterm2)
+        );
+    }
+
+    #[test]
+    fn muxiavelli_absent_protocols_defaults_to_sixel() {
+        let env = leaked_muxiavelli_env(None);
+        assert_eq!(
+            classify_terminal_type(&env),
+            TerminalType::Muxiavelli(ImageProtocol::Sixel)
+        );
+    }
+
+    #[test]
+    fn muxiavelli_wins_over_zellij_backend() {
+        // muxiavelli may run a zellij backing session, so ZELLIJ can also be set
+        // inside a panel; MUXIAVELLI must still win since it is the precise signal.
+        let mut env = leaked_muxiavelli_env(None);
+        env.zellij = true;
+        assert_eq!(
+            classify_terminal_type(&env),
+            TerminalType::Muxiavelli(ImageProtocol::Sixel)
+        );
+    }
+
+    #[test]
+    fn classify_zellij_when_not_muxiavelli() {
+        let env = TerminalEnv {
+            zellij: true,
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::Zellij);
+    }
+
+    #[test]
+    fn classify_kitty_from_window_id() {
+        let env = TerminalEnv {
+            kitty_window_id: true,
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::Kitty);
+    }
+
+    #[test]
+    fn classify_kitty_from_term() {
+        let env = TerminalEnv {
+            term: "xterm-kitty".to_string(),
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::Kitty);
+    }
+
+    #[test]
+    fn classify_ghostty_from_term_program() {
+        let env = TerminalEnv {
+            term_program: "ghostty".to_string(),
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::Ghostty);
+    }
+
+    #[test]
+    fn classify_iterm2_from_session_id() {
+        let env = TerminalEnv {
+            iterm_session_id: true,
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::ITerm2);
+    }
+
+    #[test]
+    fn classify_iterm2_from_term_program() {
+        let env = TerminalEnv {
+            term_program: "iTerm.app".to_string(),
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::ITerm2);
+    }
+
+    #[test]
+    fn classify_wezterm_from_term_program() {
+        let env = TerminalEnv {
+            term_program: "WezTerm".to_string(),
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::WezTerm);
+    }
+
+    #[test]
+    fn classify_alacritty_from_socket() {
+        let env = TerminalEnv {
+            alacritty_socket: true,
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::Alacritty);
+    }
+
+    #[test]
+    fn classify_unknown_when_no_signals() {
+        assert_eq!(
+            classify_terminal_type(&TerminalEnv::default()),
+            TerminalType::Unknown
+        );
+    }
+
+    // =========================================================================
+    // Tests for terminal_supports_graphics
+    // =========================================================================
+
+    #[test]
+    fn muxiavelli_supports_graphics_regardless_of_term() {
+        // Even if a backing session leaks TERM=screen/vt, muxiavelli renders images.
+        assert!(terminal_supports_graphics(
+            &TerminalType::Muxiavelli(ImageProtocol::Sixel),
+            "screen.xterm-256color"
+        ));
+        assert!(terminal_supports_graphics(
+            &TerminalType::Muxiavelli(ImageProtocol::Iterm2),
+            "vt100"
+        ));
+    }
+
+    #[test]
+    fn alacritty_never_supports_graphics() {
+        assert!(!terminal_supports_graphics(
+            &TerminalType::Alacritty,
+            "xterm-256color"
+        ));
+    }
+
+    #[test]
+    fn kitty_supports_graphics_on_normal_term() {
+        assert!(terminal_supports_graphics(
+            &TerminalType::Kitty,
+            "xterm-kitty"
+        ));
+    }
+
+    #[test]
+    fn linux_console_does_not_support_graphics() {
+        assert!(!terminal_supports_graphics(&TerminalType::Unknown, "linux"));
+    }
+
+    // =========================================================================
+    // Tests for display_routine_for (dispatch routing)
+    // =========================================================================
+
+    #[test]
+    fn dispatch_muxiavelli_sixel_routes_to_sixel() {
+        assert_eq!(
+            display_routine_for(&TerminalType::Muxiavelli(ImageProtocol::Sixel)),
+            DisplayRoutine::Sixel
+        );
+    }
+
+    #[test]
+    fn dispatch_muxiavelli_iterm2_routes_to_iterm2() {
+        assert_eq!(
+            display_routine_for(&TerminalType::Muxiavelli(ImageProtocol::Iterm2)),
+            DisplayRoutine::Iterm2
+        );
+    }
+
+    #[test]
+    fn dispatch_zellij_routes_to_sixel() {
+        assert_eq!(
+            display_routine_for(&TerminalType::Zellij),
+            DisplayRoutine::Sixel
+        );
+    }
+
+    #[test]
+    fn dispatch_kitty_family_routes_to_kitty() {
+        for terminal_type in [
+            TerminalType::Kitty,
+            TerminalType::Ghostty,
+            TerminalType::WezTerm,
+        ] {
+            assert_eq!(display_routine_for(&terminal_type), DisplayRoutine::Kitty);
+        }
+    }
+
+    #[test]
+    fn dispatch_other_terminals_route_to_iterm2() {
+        for terminal_type in [
+            TerminalType::ITerm2,
+            TerminalType::Alacritty,
+            TerminalType::Unknown,
+        ] {
+            assert_eq!(display_routine_for(&terminal_type), DisplayRoutine::Iterm2);
+        }
+    }
 }
