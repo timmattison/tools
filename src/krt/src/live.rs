@@ -420,6 +420,10 @@ struct Drawn {
 /// * `graphics` - The terminal, and the pixel size of one character cell.
 /// * `recent` - Where the Recent column stands, and the history of every row of
 ///   the path that reached the frame.
+/// * `window_rows` - The number of rows that the window of the terminal holds,
+///   and `None` for a window that no probe measured. A line at or past that
+///   count stands under the foot of the window, and an image there would scroll
+///   the frame that stands.
 ///
 /// # Errors
 ///
@@ -430,6 +434,7 @@ fn write_images(
     frame: &mut Vec<u8>,
     graphics: &Graphics,
     recent: &ui::RecentColumn,
+    window_rows: Option<u16>,
 ) -> std::io::Result<()> {
     let (cell_width, cell_height) = graphics.cell;
     let columns = u32::from(ui::RECENT_WIDTH);
@@ -445,6 +450,13 @@ fn write_images(
         let Some(line) = ui::HEAD_LINES.checked_add(offset) else {
             break;
         };
+        // A line at or past the rows of the window stands under the foot of
+        // that window. The rows above already stopped at the count that the
+        // frame kept, so no run reaches this bound today, and it stays because
+        // this is where the frame says which line an image can stand on.
+        if window_rows.is_some_and(|rows| line >= rows) {
+            break;
+        }
         queue!(frame, MoveTo(recent.column, line))?;
         let image = DynamicImage::ImageRgba8(graph::plot(history, width, cell_height));
         let request = termgfx::Request {
@@ -625,7 +637,14 @@ impl<W: Write, K: Keys> Table<W, K> {
         let fitted = fitted(head, body, self.footer(), self.window.rows);
         Drawn {
             lines: fitted.lines,
-            recent: rendered.recent,
+            // A row that went out of the frame draws no image. Such an image
+            // would stand over the line that counts the rows which went out, or
+            // over a line of another frame, and nothing on the screen would say
+            // which row it belongs to.
+            recent: rendered.recent.map(|mut recent| {
+                recent.rows.truncate(fitted.rows);
+                recent
+            }),
         }
     }
 
@@ -719,7 +738,7 @@ impl<W: Write, K: Keys> Table<W, K> {
         write!(frame, "{}", drawn.lines.join(LINE_END))?;
         if let (Some(graphics), Some(recent)) = (self.look.graphics.as_ref(), drawn.recent.as_ref())
         {
-            write_images(&mut frame, graphics, recent)?;
+            write_images(&mut frame, graphics, recent, self.window.rows)?;
             // The images move the cursor across the frame, so the last of them
             // leaves it at the Recent column of the last row of the path. The
             // origin is where a reader expects it, and it is where the draw of
