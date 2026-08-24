@@ -654,7 +654,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     measures no terminal draws every line of the frame. The table folds every round that arrives and
     draws the frame of that fold, so the count of the rounds in its header line is the count that
     the table folded, and the size in that same line is the size the recorded file holds at that
-    draw.
+    draw. The first frame draws at the moment the run takes the terminal, in front of the first
+    round. It counts no round, and its header line already names the destination, the address, the
+    source, the period, and the recorded file, so a run of `--interval 2m` says that it started and
+    holds no empty screen for those two minutes.
   - Five keys drive the live table. `q` and Ctrl-C stop the run, write the record that closes it,
     give the terminal back, and exit with success. `p` holds the table where it stands, and a
     second press lets it move again. A held table holds the display alone: the file still takes

@@ -487,10 +487,11 @@ mod tests {
 
     /// The number of frames that the run of a held table drew.
     ///
-    /// One frame at the pause, one at the release of that pause, and one for
-    /// the round that arrived after the release. The rounds that arrived while
-    /// the table held drew none.
-    const FRAMES_OF_A_HELD_RUN: usize = 3;
+    /// One frame at the moment the table took the terminal, one at the pause,
+    /// one at the release of that pause, and one for the round that arrived
+    /// after the release. The rounds that arrived while the table held drew
+    /// none.
+    const FRAMES_OF_A_HELD_RUN: usize = 4;
 
     /// The number of rounds that arrive while the table holds.
     const ROUNDS_WHILE_HELD: u64 = 3;
@@ -1643,6 +1644,8 @@ mod tests {
     ///
     /// The key of the first turn holds the table, and the key of the fourth
     /// turn lets it move again. Three rounds arrive between those two turns.
+    /// The table draws one frame in front of all of that, at the moment it
+    /// takes the terminal, and that frame counts no round and marks no pause.
     #[test]
     fn a_run_whose_table_is_paused_keeps_writing_every_round() {
         // The name of the file stands in the header line of every frame, so
@@ -1689,24 +1692,29 @@ mod tests {
             "the rounds that arrived while the table held drew nothing: {drawn:?}"
         );
         assert!(
-            drawn[0].contains(PAUSED) && drawn[0].contains(&rounds_in_header(NO_ROUND)),
-            "the first frame marks the pause, and the table under it folded no round: {:?}",
+            drawn[0].contains(&rounds_in_header(NO_ROUND)) && !drawn[0].contains(PAUSED),
+            "the table drew the frame of no round when it took the terminal, and no key marked a pause in front of it: {:?}",
             drawn[0]
         );
         assert!(
-            drawn[1].contains(&rounds_in_header(ROUNDS_WHILE_HELD)),
+            drawn[1].contains(PAUSED) && drawn[1].contains(&rounds_in_header(NO_ROUND)),
+            "the frame of the first key marks the pause, and the table under it folded no round: {:?}",
+            drawn[1]
+        );
+        assert!(
+            drawn[2].contains(&rounds_in_header(ROUNDS_WHILE_HELD)),
             "the frame of the release names the rounds that arrived while the table held: {:?}",
-            drawn[1]
-        );
-        assert!(
-            !drawn[1].contains(PAUSED),
-            "and it carries no mark of a pause: {:?}",
-            drawn[1]
-        );
-        assert!(
-            drawn[2].contains(&rounds_in_header(ROUNDS_OF_A_HELD_RUN)),
-            "the round that arrived after the release drew the frame of it: {:?}",
             drawn[2]
+        );
+        assert!(
+            !drawn[2].contains(PAUSED),
+            "and it carries no mark of a pause: {:?}",
+            drawn[2]
+        );
+        assert!(
+            drawn[3].contains(&rounds_in_header(ROUNDS_OF_A_HELD_RUN)),
+            "the round that arrived after the release drew the frame of it: {:?}",
+            drawn[3]
         );
     }
 }

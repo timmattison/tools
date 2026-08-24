@@ -320,12 +320,13 @@ impl Window {
 /// The live table of a run.
 ///
 /// The table folds every round that arrives, and it draws the frame of that
-/// fold. A run that draws this table holds the terminal in raw mode on the
-/// alternate screen, so each draw clears the screen and moves the cursor to the
-/// origin first, and one carriage return with one line feed stands between two
-/// lines of a frame. Raw mode returns no carriage on a bare line feed, and a
-/// frame of bare line feeds walks down the screen one column further to the
-/// right for each line of it.
+/// fold. It also draws one frame at the moment it is built, in front of every
+/// round, for the reason that [`Table::new`] states. A run that draws this
+/// table holds the terminal in raw mode on the alternate screen, so each draw
+/// clears the screen and moves the cursor to the origin first, and one carriage
+/// return with one line feed stands between two lines of a frame. Raw mode
+/// returns no carriage on a bare line feed, and a frame of bare line feeds
+/// walks down the screen one column further to the right for each line of it.
 ///
 /// The frame fits the window of the terminal. A frame of more lines than that
 /// window holds keeps its head and its footer and drops the rows of the highest
@@ -373,8 +374,22 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// The names start on. A reader who wants the raw addresses asks for them
     /// with a key, and a run that resolves no name shows the addresses anyway,
     /// because the map of the names then stays empty.
+    ///
+    /// The table draws its opening frame here, and not at the first round. The
+    /// caller takes the terminal in front of this call, so the alternate screen
+    /// of the run already stands in front of the reader, and that screen hides
+    /// every line which the run printed under it. A table that drew at the
+    /// first round alone therefore leaves an empty screen for one whole
+    /// period, and `--interval 2m` makes that two minutes with nothing on the
+    /// screen that says the run started. The frame of no round answers it: the
+    /// header line of such a frame names the destination, the address, the
+    /// source, the period of one round, and the recorded file, and the column
+    /// header stands under it.
+    ///
+    /// A table that exists holds a frame, and no caller can forget to ask for
+    /// one.
     pub(crate) fn new(facts: RunFacts, sink: W, keys: K, window: Window) -> Self {
-        Self {
+        let mut table = Self {
             file: crate::file_name(&facts.path),
             facts,
             fold: HopTable::new(),
@@ -387,7 +402,9 @@ impl<W: Write, K: Keys> Table<W, K> {
             sink,
             keys,
             window,
-        }
+        };
+        table.draw();
+        table
     }
 
     /// The lines of one frame of this table.
@@ -1018,13 +1035,19 @@ mod tests {
 
     /// A table that draws into bytes, reads `keys`, and heads its frames with
     /// the recorded file at `path`.
+    ///
+    /// The sink comes back empty. A table draws its opening frame at the moment
+    /// it is built, and every test below reads the frames that its own calls
+    /// drew.
     fn table_at<K: Keys>(path: PathBuf, keys: K) -> Table<Vec<u8>, K> {
-        Table::new(
+        let mut table = Table::new(
             facts_at(path),
             Vec::new(),
             keys,
             Window::new(WIDTH, NO_ROWS),
-        )
+        );
+        table.sink.clear();
+        table
     }
 
     /// A sink that counts the calls of [`Write::write`] that reach it.
@@ -1054,13 +1077,18 @@ mod tests {
 
     /// A table that draws into a sink which counts the calls, and that takes
     /// the keys of an empty script.
+    ///
+    /// The count comes back at zero. A table draws its opening frame at the
+    /// moment it is built, and the test below counts the calls of one draw.
     fn counted_table() -> Table<Counted, FakeKeys> {
-        Table::new(
+        let mut table = Table::new(
             facts_at(temp_path("writes")),
             Counted { writes: 0 },
             FakeKeys::of(&[]),
             Window::new(WIDTH, NO_ROWS),
-        )
+        );
+        table.sink.writes = 0;
+        table
     }
 
     /// A table that draws into bytes and takes the keys of a script.
@@ -1217,13 +1245,17 @@ mod tests {
 
     /// A table that draws into bytes in a window of `rows` rows, and that takes
     /// the keys of a script.
+    ///
+    /// The sink comes back empty, for the reason that [`table_at`] states.
     fn table_in(rows: Option<u16>, script: &[&[Command]]) -> Table<Vec<u8>, FakeKeys> {
-        Table::new(
+        let mut table = Table::new(
             facts_at(temp_path("window")),
             Vec::new(),
             FakeKeys::of(script),
             Window::new(WIDTH, rows),
-        )
+        );
+        table.sink.clear();
+        table
     }
 
     /// A table of the tall path in a window of `rows` rows, which drew the
@@ -1387,6 +1419,36 @@ mod tests {
             .skip(lines.len().saturating_sub(count))
             .map(String::as_str)
             .collect()
+    }
+
+    #[test]
+    fn a_table_draws_a_frame_of_no_round_at_the_moment_it_is_built() {
+        // The run takes the terminal in front of this call, so the alternate
+        // screen of that run already stands in front of the reader, and it
+        // hides every line which the run printed under it. A table that drew at
+        // the first round alone leaves an empty screen for one whole period,
+        // and a period of two minutes is two minutes of nothing that says the
+        // run started.
+        let screen = Table::new(
+            facts_at(temp_path("opening")),
+            Vec::new(),
+            FakeKeys::of(&[]),
+            Window::new(WIDTH, NO_ROWS),
+        );
+        let lines = painted(&screen.sink);
+
+        assert!(
+            lines
+                .first()
+                .is_some_and(|line| line.starts_with(NO_ROUND_HEADER)),
+            "the header line names the target, the source, the interval, and the round that no probe took yet: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with(COLUMN_HEADER_START)),
+            "and the column header stands under it: {lines:?}"
+        );
     }
 
     #[test]

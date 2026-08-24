@@ -76,10 +76,10 @@ const NARROW: u16 = 60;
 
 /// The longest that any wait below runs.
 ///
-/// A run of the loopback takes one round each second, and the first frame draws
-/// at the first round. Thirty seconds is far longer than that, and it is short
-/// enough that a run which stopped drawing fails the suite in the place of
-/// holding it.
+/// A run draws its first frame at the moment it takes the terminal, and a run
+/// of the loopback takes one round each second after that. Thirty seconds is
+/// far longer than either of them, and it is short enough that a run which
+/// stopped drawing fails the suite in the place of holding it.
 const PATIENCE: Duration = Duration::from_secs(30);
 
 /// The time between two reads of the state that a wait waits for.
@@ -663,9 +663,10 @@ fn live_run_with(recording: &Recording, flags: &[&str]) -> LiveRun {
     ];
     arguments.extend_from_slice(flags);
     let terminal = Terminal::open(WIDE, &arguments);
-    // The table draws its first frame at the first round. A key that arrived in
-    // front of the terminal going into raw mode reaches the line discipline and
-    // not the run, so every test below presses its key after this wait.
+    // The table draws its first frame at the moment the run takes the
+    // terminal, so a frame on the screen says that raw mode stands. A key that
+    // arrived in front of raw mode reaches the line discipline and not the run,
+    // so every test below presses its key after this wait.
     terminal.wait_for(COLUMN_HEADER_START);
     LiveRun {
         terminal,
