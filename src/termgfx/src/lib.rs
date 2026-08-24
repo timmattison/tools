@@ -51,6 +51,10 @@
 
 use std::io;
 
+mod geometry;
+
+pub use geometry::cell_pixels;
+
 /// An inline-image protocol that a caller emits into a muxiavelli panel.
 ///
 /// muxiavelli panels render through the xterm.js of ttyd with
