@@ -60,6 +60,12 @@ const DOT_STEP: usize = 2;
 /// does a sample that is not a finite number. `ui::sparkline` states both
 /// reasons, and this module does not restate them.
 ///
+/// A history whose samples are all equal, and a history of one sample, each
+/// give a span of zero, and every bar of such a history stands at the floor.
+/// `ui::sparkline` draws the lowest block element for such a window, for the
+/// same reason: a flat line at the top of the cell would draw the quietest hop
+/// of a path as the loudest one.
+///
 /// A sample that the run measured draws a bar of [`BAR`], which is a mid teal.
 /// One color must read on a light terminal and on a dark one, and it must not
 /// be the red that the table already spends on a lost probe.
@@ -89,10 +95,13 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
     // The scale reads only the answers that compare. A lost probe measured no
     // time, and a time that is not a finite number does not compare, so neither
     // of them names a limit of the scale.
+    let mut lowest = f64::INFINITY;
     let mut highest = f64::NEG_INFINITY;
     for time in history.iter().filter_map(finite_time) {
+        lowest = lowest.min(time);
         highest = highest.max(time);
     }
+    let span = highest - lowest;
     for column in 0..width {
         let index = usize::try_from(column).unwrap_or(usize::MAX).min(count - 1);
         match history[index] {
@@ -102,7 +111,13 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
                 }
             }
             Sample::Time(time) => {
-                let pixels = if time.is_finite() && time >= highest {
+                // A history of one sample, and a history whose samples are all
+                // equal, each give a span of zero. A history that holds no
+                // sample which compares gives a span below zero, because the
+                // two limits stayed at the infinities that the fold started
+                // them at. Neither history divides, and both of them draw at
+                // the floor.
+                let pixels = if span > 0.0 && time.is_finite() && time >= highest {
                     height
                 } else {
                     1
