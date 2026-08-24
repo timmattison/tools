@@ -1821,6 +1821,19 @@ mod tests {
     }
 
     #[test]
+    fn the_highest_bar_leaves_the_top_of_its_cell_empty() {
+        // The rows of the table stand one under the other, so a bar that
+        // painted the whole height of its cell would touch the bar of the row
+        // above it. The line between the two rows would then go away, and a
+        // reader would read one block of ink.
+        assert_eq!(
+            bar(&[1.0, 2.0], 9),
+            "▁▇",
+            "the largest sample of a window takes a bar that leaves the top eighth of its cell empty"
+        );
+    }
+
+    #[test]
     fn the_smallest_sample_takes_the_lowest_bar_and_the_largest_takes_the_highest() {
         // The samples run from 10 to 40, so the span is 30. The bar of 20 is
         // (20 - 10) / 30 * 8 = 2.67, which cuts to the third bar. The bar of 30
