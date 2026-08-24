@@ -124,6 +124,31 @@ mod tests {
     /// One answer of a hop, in milliseconds.
     const ONE_TIME: f64 = 1.0;
 
+    /// An answer of that same hop that took longer, in milliseconds.
+    ///
+    /// The scale of the image runs from the smallest sample of the history to
+    /// the largest one, so a test that reads the pixels above a bar must read
+    /// the column of a sample which is not the largest. This second time makes
+    /// [`ONE_TIME`] the smallest sample of the history it stands in.
+    const A_SLOWER_TIME: f64 = 2.0;
+
+    /// The width in pixels of an image of two samples.
+    const TWO_COLUMNS: u32 = 2;
+
+    /// The number of pixels of the bar that stands in the column at `x`.
+    ///
+    /// A bar grows from the floor of the cell, so the count reads up from the
+    /// last row of the column and stops at the first row that holds no bar. A
+    /// column whose bar floats above a clear pixel therefore counts short, and
+    /// the test that reads it fails.
+    fn bar(image: &RgbaImage, x: u32) -> u32 {
+        let mut pixels = 0;
+        while pixels < image.height() && pixel(image, x, image.height() - 1 - pixels) == TEAL {
+            pixels += 1;
+        }
+        pixels
+    }
+
     /// The pixel of an image at one place.
     ///
     /// A test that reached past the edge of the image must fail its assertion
@@ -177,12 +202,74 @@ mod tests {
         }
     }
 
+    /// The shortest round-trip time of the history that the scale reads, in
+    /// milliseconds.
+    const QUICKEST: f64 = 10.0;
+
+    /// The longest round-trip time of that same history, in milliseconds.
+    const SLOWEST: f64 = 20.0;
+
+    /// The number of columns of that history: the two answers above, one lost
+    /// probe, and two answers that no scale can read.
+    const FIVE_COLUMNS: u32 = 5;
+
+    #[test]
+    fn the_smallest_sample_of_the_history_stands_at_the_floor_and_the_largest_fills_the_cell() {
+        // The scale is the scale of the block elements, read over the whole
+        // history. A lost probe measured no time, so it names no limit of that
+        // scale, and a time that is not a finite number does not compare, so it
+        // names no limit either. `ui::sparkline` states both reasons.
+        //
+        // An infinity that reached the scale would take the top of it, and
+        // every answer of the hop would then draw the lowest bar.
+        let image = plot(
+            &[
+                Sample::Time(QUICKEST),
+                Sample::Lost,
+                Sample::Time(f64::INFINITY),
+                Sample::Time(f64::NAN),
+                Sample::Time(SLOWEST),
+            ],
+            FIVE_COLUMNS,
+            SHORT,
+        );
+
+        assert_eq!(
+            bar(&image, 0),
+            1,
+            "the smallest sample of the history stands at the floor of the cell"
+        );
+        assert_eq!(
+            bar(&image, 2),
+            1,
+            "an infinity draws the lowest bar and names no limit of the scale"
+        );
+        assert_eq!(
+            bar(&image, 3),
+            1,
+            "a sample that is not a number draws the lowest bar as well"
+        );
+        assert_eq!(
+            bar(&image, FIVE_COLUMNS - 1),
+            SHORT,
+            "and the largest sample of the history fills the cell"
+        );
+    }
+
     #[test]
     fn the_background_of_the_image_is_transparent() {
         // A transparent background lets the terminal show its own background
         // through the cell, and the column then reads as a part of the table
         // and not as a box laid over it.
-        let image = plot(&[Sample::Time(ONE_TIME)], ONE_COLUMN, SHORT);
+        //
+        // The column that the test reads holds the smallest sample of the
+        // history, because the largest sample fills the cell and leaves no row
+        // of a background to read.
+        let image = plot(
+            &[Sample::Time(ONE_TIME), Sample::Time(A_SLOWER_TIME)],
+            TWO_COLUMNS,
+            SHORT,
+        );
 
         for row in 0..SHORT - 1 {
             assert_eq!(
