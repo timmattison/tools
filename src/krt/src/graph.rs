@@ -509,6 +509,38 @@ mod tests {
     }
 
     #[test]
+    fn a_history_of_no_sample_and_an_image_of_no_pixel_each_draw_nothing() {
+        // A hop that answered no probe of a run holds no sample, and a table
+        // that lost every row of the path draws no pixel of a cell. Neither of
+        // them stops the run: the recording is the purpose of the tool, and a
+        // panic of the display would take the recording with it.
+        let no_sample = plot(&[], SHORT, SHORT);
+        for column in 0..SHORT {
+            for row in 0..SHORT {
+                assert_eq!(
+                    pixel(&no_sample, column, row),
+                    CLEAR,
+                    "a history of no sample paints no pixel at all"
+                );
+            }
+        }
+
+        let no_column = plot(&[Sample::Time(ONE_TIME)], 0, SHORT);
+        assert_eq!(
+            (no_column.width(), no_column.height()),
+            (0, SHORT),
+            "an image of no column holds no pixel to paint"
+        );
+
+        let no_row = plot(&[Sample::Time(ONE_TIME)], SHORT, 0);
+        assert_eq!(
+            (no_row.width(), no_row.height()),
+            (SHORT, 0),
+            "and an image of no row holds none either"
+        );
+    }
+
+    #[test]
     fn the_background_of_the_image_is_transparent() {
         // A transparent background lets the terminal show its own background
         // through the cell, and the column then reads as a part of the table
