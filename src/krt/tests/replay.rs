@@ -166,6 +166,12 @@ const BUILT_RUN_LINE: &str = r#"{"type":"run","run":"2026-08-20T00:00:00.000Z","
 /// Two TTLs answered, and the round reached the target.
 const BUILT_ROUND_LINE: &str = r#"{"type":"round","run":"2026-08-20T00:00:00.000Z","seq":1,"ts":"2026-08-20T00:00:01.000Z","dur_ms":1000,"ttl_range":[1,2],"reached":true,"hops":[{"ttl":1,"addr":"10.0.0.1","rtt_ms":0.5,"icmp":"time_exceeded"},{"ttl":2,"addr":"198.51.100.7","rtt_ms":9.5,"icmp":"echo_reply"}]}"#;
 
+/// The `run` line of a destination of a hunt.
+///
+/// Every field is the field of [`BUILT_RUN_LINE`], and the line carries the
+/// identifier of the hunt that drew the address as well.
+const BUILT_HUNT_RUN_LINE: &str = r#"{"type":"run","run":"2026-08-20T00:00:00.000Z","krt":"0.1.0 (abc1234, clean)","source":{"addr":"1.2.3.4","kind":"public"},"target":{"arg":"example.net","addr":"198.51.100.7","family":"ipv4"},"config":{"interval_ms":1000,"protocol":"icmp","first_ttl":1,"max_ttl":30,"multipath":"classic","privilege":"unprivileged","dns":true},"host":"tims-mac","hunt":"2026-08-19T23:59:00.000Z"}"#;
+
 /// A `name` line that names the first router of the built round.
 ///
 /// No run of `krt` writes such a record yet. A file that a later build recorded
@@ -655,6 +661,23 @@ fn a_name_record_names_the_router_beside_its_address() {
         result.stdout,
         frame(&built_header(&file, 1), &BUILT_NAMED_ROWS)
     );
+}
+
+/// A replay folds a run of a hunt as it folds any other run.
+///
+/// A hunt writes one run for each destination it draws, and the `run` record of
+/// each of them carries the identifier of the hunt. The frame below is the
+/// frame of [`a_file_of_one_run_names_no_run_on_standard_error`], row for row,
+/// so the identifier changes nothing that a reader of a fold sees.
+#[test]
+fn a_replay_folds_a_run_of_a_hunt_as_it_folds_any_other_run() {
+    let file = TempFile::new(
+        "hunt-run",
+        &file_of(&[BUILT_HUNT_RUN_LINE, BUILT_ROUND_LINE]),
+    );
+    let path = file.arg();
+    let result = success(&[REPLAY, path.as_str()]);
+    assert_eq!(result.stdout, frame(&built_header(&file, 1), &BUILT_ROWS));
 }
 
 /// A TTL that two routers answer at counts the second one, prints one address
