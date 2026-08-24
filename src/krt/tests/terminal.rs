@@ -22,6 +22,13 @@
 //! therefore passes or fails for a reason that has nothing to do with the code
 //! it reads.
 //!
+//! Every pseudo terminal below also names itself, and the tests of the image
+//! path name a terminal that draws images and reports a pixel size. `krt` reads
+//! that terminal the way it reads the terminal of a reader: the name arrives in
+//! the environment of the run, and the pixel size arrives through the same
+//! ioctl as the columns. The environment of the machine that runs the suite
+//! reaches none of these runs, and [`TERMINAL_SIGNALS`] says why.
+//!
 //! Every wait below carries a deadline. A read of a pseudo terminal whose child
 //! writes nothing waits for ever, and a test that waits for ever holds every
 //! commit of the repository. A wait that runs out fails with the text that the
@@ -188,6 +195,10 @@ const FLAG_MAX_TTL: &str = "--max-ttl";
 /// The flag that asks for the status lines in the place of the table.
 #[cfg(target_os = "macos")]
 const FLAG_HEADLESS: &str = "--headless";
+
+/// The flag that asks for the Recent column as an image of the whole history.
+#[cfg(target_os = "macos")]
+const FLAG_GRAPHICS: &str = "--graphics";
 
 /// The flag that names the protocol of a probe.
 #[cfg(target_os = "macos")]
@@ -358,6 +369,131 @@ const ROUNDS_REASON: &str = "rounds";
 #[cfg(target_os = "macos")]
 const STATUS_LINE_START: &str = "round 1  1 hop  reached  ";
 
+/// The pixel size of a window that no terminal measured.
+///
+/// A pseudo terminal that nobody sized answers the `TIOCGWINSZ` ioctl with a
+/// zero in each of the two pixel fields, and that ioctl succeeds. `termgfx`
+/// reads the zero as no answer, exactly as `termsize` reads a zero column count
+/// as no width, so a terminal of this size measures no character cell.
+const NO_PIXELS: (u16, u16) = (0, 0);
+
+/// The name of a terminal that reads no inline-image protocol.
+const A_PLAIN_TERM_NAME: &str = "xterm-256color";
+
+/// The name of a terminal that draws an image with the graphics protocol of
+/// Kitty.
+///
+/// `termgfx` names a terminal from the environment variables that the terminal
+/// set, and a `TERM` that holds `kitty` is one of the two signals of a Kitty
+/// window. The other one is `KITTY_WINDOW_ID`, which [`TERMINAL_SIGNALS`] takes
+/// out of the environment of every run of this file.
+#[cfg(target_os = "macos")]
+const A_KITTY_TERM_NAME: &str = "xterm-kitty";
+
+/// The pixel width of one character cell of a terminal that draws images.
+///
+/// Ten pixels by twenty is about the cell of a modern terminal at its default
+/// font, and the tests of the image path in `src/krt/src/live.rs` measure their
+/// images with the same pair. A run divides the pixel size of the window by the
+/// columns and the rows of that window, so a window sized at this cell times
+/// [`WIDE`] and [`ROWS`] hands the run this cell back.
+#[cfg(target_os = "macos")]
+const CELL_WIDTH: u16 = 10;
+
+/// The pixel height of that same cell.
+#[cfg(target_os = "macos")]
+const CELL_HEIGHT: u16 = 20;
+
+/// What a pseudo terminal of one test reports about itself.
+///
+/// Two answers of a terminal decide whether a run draws the Recent column as an
+/// image: the pixel size of the window, which measures one character cell, and
+/// the name in `TERM`, which says whether the terminal reads an image protocol
+/// at all. The two travel as one value, because a test that names one of them
+/// and leaves the other reads a terminal that nobody built. A Kitty window of no
+/// pixels draws no image, and a window of pixels that reads no protocol puts the
+/// escape sequence of an image on the screen as text.
+#[derive(Clone, Copy)]
+struct Report {
+    /// The pixel width and the pixel height of the window.
+    pixels: (u16, u16),
+    /// The name of the terminal, as `TERM` spells it.
+    term: &'static str,
+}
+
+/// The terminal of every test that names none.
+///
+/// It reports no pixel size and it carries the name of a terminal that reads no
+/// image protocol. That is the terminal every test of this file read before the
+/// image path arrived, and each of those tests reads it still.
+const A_PLAIN_TERMINAL: Report = Report {
+    pixels: NO_PIXELS,
+    term: A_PLAIN_TERM_NAME,
+};
+
+/// A terminal that draws images and reports the pixel size of its window.
+///
+/// A run under this terminal answers yes to every question that the image path
+/// asks of a terminal, so the `--graphics` flag is the one thing left that
+/// decides the picture of the Recent column.
+#[cfg(target_os = "macos")]
+const A_TERMINAL_OF_IMAGES: Report = Report {
+    pixels: (WIDE * CELL_WIDTH, ROWS * CELL_HEIGHT),
+    term: A_KITTY_TERM_NAME,
+};
+
+/// That same terminal, reporting no pixel size.
+///
+/// A pane of Zellij reports none, a ttyd panel reports none, and a terminal that
+/// carries no window reports none. The terminal reads the Kitty protocol all the
+/// same, so this report is what separates the question of the protocol from the
+/// question of the geometry.
+#[cfg(target_os = "macos")]
+const A_TERMINAL_OF_IMAGES_AND_NO_PIXELS: Report = Report {
+    pixels: NO_PIXELS,
+    term: A_KITTY_TERM_NAME,
+};
+
+/// The name of the variable that carries the name of a terminal.
+const TERM: &str = "TERM";
+
+/// Every environment variable that names a terminal to `termgfx`.
+///
+/// `portable_pty::CommandBuilder` hands the child the environment of the parent,
+/// and `cargo test` runs under the terminal of whoever started it. A run of this
+/// file would therefore read the terminal of that machine, and the tests of the
+/// image path would answer one way inside Kitty and another way inside iTerm2.
+/// Such a test is green interactively and red under a hook or in a build
+/// service, and the change that pays for it is the one that ran the suite there.
+///
+/// So every run of this file starts with none of them, and each test then names
+/// the terminal it covers. The list is the list that `TerminalEnv::from_process`
+/// reads in `src/termgfx/src/detect.rs`, and a variable that arrives there must
+/// arrive here as well:
+///
+/// * `TERM` names the terminal, and [`Report::term`] sets it again below.
+/// * `TERM_PROGRAM` names iTerm2, Ghostty, and `WezTerm`.
+/// * `ZELLIJ` names a pane of the Zellij multiplexer.
+/// * `MUXIAVELLI` names a muxiavelli panel, and
+///   `MUXIAVELLI_IMAGE_PROTOCOLS` names the protocols that panel reads. The
+///   panel signal wins over every other one, so a suite that ran inside a panel
+///   would name every terminal of this file a panel.
+/// * `KITTY_WINDOW_ID` names a Kitty window.
+/// * `GHOSTTY_RESOURCES_DIR` names a Ghostty window.
+/// * `ITERM_SESSION_ID` names an iTerm2 window.
+/// * `ALACRITTY_SOCKET` names an Alacritty window, which draws no image at all.
+const TERMINAL_SIGNALS: [&str; 9] = [
+    TERM,
+    "TERM_PROGRAM",
+    "ZELLIJ",
+    "MUXIAVELLI",
+    "MUXIAVELLI_IMAGE_PROTOCOLS",
+    "KITTY_WINDOW_ID",
+    "GHOSTTY_RESOURCES_DIR",
+    "ITERM_SESSION_ID",
+    "ALACRITTY_SOCKET",
+];
+
 /// One run of `krt` under a pseudo terminal, and the text that terminal showed.
 ///
 /// The terminal carries standard output, standard error, and standard input of
@@ -382,22 +518,38 @@ struct Terminal {
 
 impl Terminal {
     /// Starts `krt` with `arguments` under a terminal of `columns` columns.
+    ///
+    /// The terminal is [`A_PLAIN_TERMINAL`]: it reports no pixel size and it
+    /// reads no image protocol. A test that covers the image path names a
+    /// terminal of its own with [`Terminal::open_reporting`].
     fn open(columns: u16, arguments: &[&str]) -> Self {
+        Self::open_reporting(columns, A_PLAIN_TERMINAL, arguments)
+    }
+
+    /// Starts such a run under a terminal that reports `report`.
+    fn open_reporting(columns: u16, report: Report, arguments: &[&str]) -> Self {
+        let (pixel_width, pixel_height) = report.pixels;
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: ROWS,
                 cols: columns,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width,
+                pixel_height,
             })
             .expect("the pseudo terminal must open");
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_krt"));
         for argument in arguments {
             command.arg(argument);
         }
+        // The terminal of the machine that runs the suite reaches no run of this
+        // file. [`TERMINAL_SIGNALS`] says why, and it says which variables carry
+        // that terminal.
+        for signal in TERMINAL_SIGNALS {
+            command.env_remove(signal);
+        }
         // The name of the terminal reaches the child, so the run reads one
         // terminal and not whichever one started `cargo test`.
-        command.env("TERM", "xterm-256color");
+        command.env(TERM, report.term);
         let child = pair
             .slave
             .spawn_command(command)
@@ -887,9 +1039,17 @@ fn live_run_with(recording: &Recording, flags: &[&str]) -> LiveRun {
 /// the first frame of the table.
 #[cfg(target_os = "macos")]
 fn live_run_under(recording: &Recording, flags: &[&str]) -> LiveRun {
+    live_run_under_reporting(recording, A_PLAIN_TERMINAL, flags)
+}
+
+/// Starts such a run under a terminal that reports `report`, and waits for
+/// nothing.
+#[cfg(target_os = "macos")]
+fn live_run_under_reporting(recording: &Recording, report: Report, flags: &[&str]) -> LiveRun {
     let lock = TracerLock::take();
     let output = recording.argument();
-    let terminal = Terminal::open(WIDE, &live_arguments(LOOPBACK, &output, flags));
+    let terminal =
+        Terminal::open_reporting(WIDE, report, &live_arguments(LOOPBACK, &output, flags));
     LiveRun {
         terminal,
         _lock: lock,
@@ -1132,6 +1292,254 @@ fn the_headless_flag_draws_no_table_under_a_terminal() {
             "and the flag keeps it off the alternate screen of the terminal it holds: {shown:?}"
         );
     }
+}
+
+/// The flags of a live run that probes one TTL and stands until a key stops it.
+///
+/// One TTL is the whole path of the loopback, so a run of these flags folds one
+/// row and draws one picture of one history. The run carries no round limit,
+/// because the key of the reader is what stops each of the runs below.
+#[cfg(target_os = "macos")]
+const ONE_TTL: [&str; 2] = [FLAG_MAX_TTL, ONE];
+
+/// The TTL cell of the first row of a frame, and the gap that holds the Host
+/// column off it.
+///
+/// The test spells the cell, and `src/krt/src/ui.rs` lays it out of the widths
+/// of its columns. That is on purpose, as the word of every other spelled line
+/// of this file is: the row of a hop is what a reader of the table sees.
+#[cfg(target_os = "macos")]
+const FIRST_TTL_CELL: &str = "   1  ";
+
+/// The start of the row that such a run draws for the hop that answered.
+///
+/// The row names the TTL and then the address of the hop, and [`FLAG_NO_DNS`]
+/// keeps the address there in the place of a name. A frame that holds this row
+/// is a frame of a run that folded a round.
+#[cfg(target_os = "macos")]
+fn first_hop_row_start() -> String {
+    format!("{FIRST_TTL_CELL}{LOOPBACK}")
+}
+
+/// The seven block elements of the Recent column, lowest first.
+///
+/// The test spells them, and `src/krt/src/ui.rs` spells them again. That is on
+/// purpose: these glyphs are the picture of a hop that a reader of the text
+/// table sees, and a frame that draws an image draws none of them.
+#[cfg(target_os = "macos")]
+const BLOCK_ELEMENTS: &str = "▁▂▃▄▅▆▇";
+
+/// The mark that the Recent column draws for a probe that no hop answered.
+///
+/// The mark is no bar of a time, so a frame of block elements keeps it and a
+/// frame of images draws none of it. `src/krt/src/ui.rs` spells it as well.
+#[cfg(target_os = "macos")]
+const NO_ANSWER: char = '╳';
+
+/// The Kitty graphics command that takes every image off the screen.
+///
+/// The test spells the bytes, and `termgfx` spells them again. That is on
+/// purpose: a Kitty placement outlives a clear of the screen, so a frame that
+/// did not delete would stack the images of a whole run on top of each other.
+#[cfg(target_os = "macos")]
+const KITTY_DELETE_ALL: &str = "\x1b_Ga=d,d=A\x1b\\";
+
+/// The start of one Kitty graphics command that carries an image.
+///
+/// `a=T` is the transmit-and-display action, which is the action that puts an
+/// image on the screen. The delete command above carries `a=d` instead, so this
+/// text names the images of a frame and never the delete.
+#[cfg(target_os = "macos")]
+const KITTY_IMAGE: &str = "\x1b_Ga=T,";
+
+/// Starts a live run of one TTL under a terminal that reports `report`, with
+/// `flags` behind the flags of such a run, and waits until the table draws the
+/// row of the hop that answered.
+///
+/// The wait is for the row and not for the header line of the frame. A table of
+/// no round holds no row of a path, so a test that read the opening frame would
+/// find no block element of a history for the reason that the frame holds no
+/// history at all, and every mutation of the picture would pass it.
+#[cfg(target_os = "macos")]
+fn a_run_that_folded_a_round(recording: &Recording, report: Report, flags: &[&str]) -> LiveRun {
+    let mut arguments = ONE_TTL.to_vec();
+    arguments.extend_from_slice(flags);
+    let run = live_run_under_reporting(recording, report, &arguments);
+    run.terminal.wait_for(&first_hop_row_start());
+    run
+}
+
+/// Stops such a run with the key of the reader, and answers the whole text that
+/// its terminal showed.
+///
+/// The read stands after the stop on purpose. A frame that carries images runs
+/// past the buffer of one read, so a text taken while the run draws holds the
+/// lines of a frame and none of the images that follow those lines. The terminal
+/// closes when the run ends, [`Terminal::wait_for_exit`] waits for that close,
+/// and the text is whole from that moment.
+///
+/// # Panics
+///
+/// Panics when the run does not stop with success. A run that the key did not
+/// stop leaves a tracer behind, and a test of the picture it drew says nothing
+/// about a run that is still probing.
+#[cfg(target_os = "macos")]
+fn stopped(run: &mut LiveRun) -> String {
+    run.terminal.press(Q);
+    assert_eq!(
+        run.terminal.wait_for_exit(),
+        EXIT_SUCCESS,
+        "the key of the reader stops the run, so the test leaves no tracer behind: {:?}",
+        run.terminal.shown()
+    );
+    run.terminal.shown()
+}
+
+/// The lines that the run drew under the heading of the Recent column.
+///
+/// The heading names the column and it is no picture of a hop, so it stands in
+/// every frame of both pictures. What stands under it is the picture: the block
+/// elements of a text table, or nothing at all under a table of images.
+///
+/// # Panics
+///
+/// Panics when no line of the text carries the heading. A text without the
+/// heading carries no picture of a hop either, and a test that read such a text
+/// would answer for the reason that nothing was drawn at all.
+#[cfg(target_os = "macos")]
+fn under_the_recent_heading(shown: &str) -> Vec<String> {
+    // The terminal returns a carriage on each line of its own, and the live
+    // table writes one of those between two lines of a frame, so a line ends
+    // with one carriage or with two.
+    let lines: Vec<String> = shown
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r').to_owned())
+        .collect();
+    let heading = lines
+        .iter()
+        .position(|line| line.contains(RECENT_HEADING))
+        .unwrap_or_else(|| {
+            panic!("a frame of the run must carry the heading of the Recent column: {shown:?}")
+        });
+    lines.into_iter().skip(heading + 1).collect()
+}
+
+/// A live run of `--graphics` under a terminal that draws images writes an
+/// image.
+///
+/// This is the end-to-end answer of the image path. Every other test of that
+/// path builds a `termgfx::Capabilities` by hand, and a hand-built terminal says
+/// nothing about a process that reads a real one: the name of the terminal
+/// arrives in the environment of the run, the pixel size arrives through an
+/// ioctl on standard output, and `main::screen_of` reads both of them at the
+/// moment the run takes the terminal. A pseudo terminal carries both answers, so
+/// this run reads a terminal the way every run of a reader reads one.
+///
+/// The two commands are the whole of the protocol that a frame of images writes.
+/// The delete takes the images of the frame before it off the screen, and each
+/// image command puts one history of one row on it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_run_of_graphics_under_a_terminal_that_draws_images_writes_an_image() {
+    let recording = Recording::at("krt-terminal-graphics-image");
+    let mut run = a_run_that_folded_a_round(&recording, A_TERMINAL_OF_IMAGES, &[FLAG_GRAPHICS]);
+
+    let shown = stopped(&mut run);
+
+    assert!(
+        shown.contains(KITTY_DELETE_ALL),
+        "the frame opens with the command that takes every image off the screen: {shown:?}"
+    );
+    assert!(
+        shown.contains(KITTY_IMAGE),
+        "and it carries the image of the history of the hop that answered: {shown:?}"
+    );
+}
+
+/// That same run draws no block element in the body of its Recent column.
+///
+/// The block elements are one picture of a hop and the image is a second one. A
+/// reader who sees both has two answers to one question, so the body cells of
+/// the column go blank and the image stands over them. The heading stays,
+/// because it names the column and it is no picture of a hop.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_run_of_graphics_draws_no_block_element_under_the_heading_of_its_recent_column() {
+    let recording = Recording::at("krt-terminal-graphics-blank");
+    let mut run = a_run_that_folded_a_round(&recording, A_TERMINAL_OF_IMAGES, &[FLAG_GRAPHICS]);
+
+    let shown = stopped(&mut run);
+    let body = under_the_recent_heading(&shown);
+
+    for line in &body {
+        for glyph in BLOCK_ELEMENTS.chars().chain(std::iter::once(NO_ANSWER)) {
+            assert!(
+                !line.contains(glyph),
+                "no line under the heading draws a block element or a mark of a loss: {line:?}"
+            );
+        }
+    }
+}
+
+/// Asserts that a live run under a terminal that reports `report`, with `flags`
+/// behind the flags of a run of one TTL, draws the block elements of a history
+/// and writes no command of an image.
+///
+/// Two runs take this answer, and one thing separates them: one asks for no
+/// image, and the other asks for an image on a terminal that measures no
+/// character cell. The answer of the two is the same picture, and it is the
+/// picture that `krt` drew before the image path arrived.
+#[cfg(target_os = "macos")]
+fn a_live_run_draws_the_block_elements(name: &str, report: Report, flags: &[&str]) {
+    let recording = Recording::at(name);
+    let mut run = a_run_that_folded_a_round(&recording, report, flags);
+
+    let shown = stopped(&mut run);
+    let body = under_the_recent_heading(&shown);
+
+    assert!(
+        body.iter()
+            .any(|line| line.chars().any(|glyph| BLOCK_ELEMENTS.contains(glyph))),
+        "the row of the hop draws its history in block elements: {body:?}"
+    );
+    for command in [KITTY_DELETE_ALL, KITTY_IMAGE] {
+        assert!(
+            !shown.contains(command),
+            "and no command of an image protocol reaches the terminal: {shown:?}"
+        );
+    }
+}
+
+/// A live run with no `--graphics` draws the block elements under that same
+/// terminal.
+///
+/// The terminal of this run is the terminal of the two runs above, so the flag
+/// is the one thing that separates them. That is what makes this a test of the
+/// flag: a run which read the terminal alone would draw an image here, and the
+/// reader who asked for nothing would get one.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_run_of_no_graphics_draws_the_block_elements_under_a_terminal_that_draws_images() {
+    a_live_run_draws_the_block_elements("krt-terminal-no-graphics", A_TERMINAL_OF_IMAGES, &[]);
+}
+
+/// A live run of `--graphics` under a terminal that reports no pixel size draws
+/// the block elements.
+///
+/// This is the geometry of the image path, proven end to end. The terminal reads
+/// the Kitty protocol and it answers the `TIOCGWINSZ` ioctl with a zero in each
+/// pixel field, which is the answer of a pane of Zellij, of a ttyd panel, and of
+/// every terminal that carries no window. A run that guessed the size of a cell
+/// there would stand its image over the wrong cells of the frame, so the run
+/// takes no guess and draws the picture that needs no measure.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_run_of_graphics_under_a_terminal_of_no_pixels_draws_the_block_elements() {
+    a_live_run_draws_the_block_elements(
+        "krt-terminal-graphics-no-pixels",
+        A_TERMINAL_OF_IMAGES_AND_NO_PIXELS,
+        &[FLAG_GRAPHICS],
+    );
 }
 
 /// Asserts that two live runs of `protocol`, which stand at one moment, each
