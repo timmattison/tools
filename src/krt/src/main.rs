@@ -4108,6 +4108,41 @@ resolved configuration:
         );
     }
 
+    /// The reason names every flag of the top level that the command refuses.
+    ///
+    /// The repair that the reason offers — write the command first — works for
+    /// a flag that the command shares, and it fails for a flag that stands on
+    /// the top level alone: `krt hunt --headless` answers that the flag is
+    /// unknown. The reason therefore names the flags of the second kind, so the
+    /// reader takes one line and writes a command line that runs.
+    #[test]
+    fn the_reason_of_a_command_read_as_a_destination_names_the_flags_it_refuses() {
+        let reason = contradiction(&["krt", "--headless", HUNT]);
+        assert!(
+            reason.contains("--headless"),
+            "a hunt draws no live table, so the reason names `--headless`: {reason}"
+        );
+        let reason = contradiction(&["krt", "--no-dns", REPLAY]);
+        assert!(
+            reason.contains("--no-dns"),
+            "a replay reads the names of the file it folds, so the reason names `--no-dns`: {reason}"
+        );
+    }
+
+    /// The reason names no flag that the command takes.
+    ///
+    /// A hunt takes `--protocol`, so the repair works for that flag and the
+    /// reason says nothing about it. A reason that named every flag of the top
+    /// level would send the reader away from a flag that the command holds.
+    #[test]
+    fn the_reason_of_a_command_read_as_a_destination_names_no_flag_it_takes() {
+        let reason = contradiction(&["krt", "--protocol", "udp", HUNT]);
+        assert!(
+            !reason.contains("--protocol"),
+            "a hunt takes `--protocol`, so the reason names it nowhere: {reason}"
+        );
+    }
+
     /// A host whose name merely starts with the name of a command still traces.
     #[test]
     fn a_destination_that_only_starts_with_the_name_of_a_command_still_traces() {
