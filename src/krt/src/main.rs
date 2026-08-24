@@ -608,8 +608,39 @@ impl Cli {
     /// use. A target timeout that the probe rounds of the same hunt run past
     /// cuts every destination short of its last round, so such a line asks for
     /// two things at once.
+    ///
+    /// Returns the reason as text as well when the destination is the name of a
+    /// command, which a flag in front of that command makes. That check runs
+    /// ahead of the checks of the flags, because each of those reads a flag
+    /// that such a line must move.
     fn resolve(self) -> Result<ResolvedConfig, String> {
         let probe = self.probe_args();
+
+        // This guard stands in front of every check of a flag. A line that
+        // reads a command as its destination holds the flags of a trace, and
+        // those flags then contradict each other as the flags of a trace do. A
+        // message about one of them names a fault that goes away as soon as the
+        // line writes the command first, and it sends the reader after the
+        // wrong flag.
+        if let Some(destination) = self.destination.as_deref() {
+            if let Some(command) = command_named(destination) {
+                let outside = flags_outside(&command);
+                let refused = if outside.is_empty() {
+                    String::new()
+                } else {
+                    let named: Vec<String> =
+                        outside.iter().map(|flag| format!("`{flag}`")).collect();
+                    format!(
+                        " `{command}` takes none of these flags: {}.",
+                        named.join(", ")
+                    )
+                };
+                return Err(format!(
+                    "`{destination}` is the name of a command, and this line reads it as a destination: write `{PROGRAM} {command}` first, because every flag of a probe stands behind the command.{refused}"
+                ));
+            }
+        }
+
         if probe.first_ttl > probe.max_ttl {
             return Err(format!(
                 "`--first-ttl {}` is above `--max-ttl {}`: the first TTL starts the probe and the max TTL ends it",
@@ -653,25 +684,6 @@ impl Cli {
         } else {
             AddressFamily::Auto
         };
-
-        if let Some(destination) = self.destination.as_deref() {
-            if let Some(command) = command_named(destination) {
-                let outside = flags_outside(&command);
-                let refused = if outside.is_empty() {
-                    String::new()
-                } else {
-                    let named: Vec<String> =
-                        outside.iter().map(|flag| format!("`{flag}`")).collect();
-                    format!(
-                        " `{command}` takes none of these flags: {}.",
-                        named.join(", ")
-                    )
-                };
-                return Err(format!(
-                    "`{destination}` is the name of a command, and this line reads it as a destination: write `{PROGRAM} {command}` first, because every flag of a probe stands behind the command.{refused}"
-                ));
-            }
-        }
 
         let (replay, run) = match &self.command {
             Some(Command::Replay { file, run }) => (Some(file.clone()), run.clone()),
