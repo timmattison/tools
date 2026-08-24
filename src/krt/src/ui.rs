@@ -2832,6 +2832,31 @@ mod tests {
         .render(width, Paint::Plain, picture)
     }
 
+    /// The number of columns of a terminal that holds no whole header line.
+    ///
+    /// The header line of the golden run takes 99 columns, so a window of
+    /// sixty columns holds two of its five fields and no more. The table drops
+    /// columns at this width as well, so the frame here is the frame of a
+    /// narrow window and no part of it stands at the nominal width.
+    const A_NARROW_WIDTH: u16 = 60;
+
+    #[test]
+    fn no_line_of_a_frame_runs_past_the_width_it_draws_in() {
+        // A line wider than the terminal wraps onto the row under it, and every
+        // line of the frame under that one then stands one row lower than the
+        // frame counts. A live run draws the image of a row at the row it
+        // counted, so one wrapped line stands every image of the frame over the
+        // wrong row of the path.
+        for width in [A_NARROW_WIDTH, NOMINAL_WIDTH] {
+            for line in golden_lines(width) {
+                assert!(
+                    display_width(&line) <= usize::from(width),
+                    "a frame of {width} columns writes no line wider than that: {line:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_frame_says_where_its_recent_column_stands_and_what_each_row_of_it_holds() {
         // A run that draws the Recent column as an image has to put that image
