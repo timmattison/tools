@@ -973,6 +973,20 @@ mod tests {
     /// The escape character that starts every control sequence of a draw.
     const ESCAPE: char = '\u{1b}';
 
+    /// The mark that the Recent column draws for a probe that no hop answered.
+    ///
+    /// The test spells the glyph, and `ui.rs` spells it again. That is on
+    /// purpose, as the word of the pause is: a test that read the constant of
+    /// that module would agree with every mark the module ever holds, and this
+    /// mark is what a reader of the table sees.
+    const NO_ANSWER: &str = "╳";
+
+    /// The control sequence that paints what follows it red.
+    const RED: &str = "\u{1b}[31m";
+
+    /// The control sequence that gives the foreground of the terminal back.
+    const PLAIN: &str = "\u{1b}[39m";
+
     /// Builds a path under the temporary directory that no other run reaches.
     ///
     /// Two runs of one test can overlap, because `cargo test` runs on many
@@ -1153,6 +1167,11 @@ mod tests {
     /// One round of one TTL, which the router answered.
     fn one_round() -> RoundRecord {
         round(TTL, TTL, &[(TTL, ROUTER, RTT)])
+    }
+
+    /// One round of the same TTL that no hop answered.
+    fn one_lost_round() -> RoundRecord {
+        round(TTL, TTL, &[])
     }
 
     /// The number of lines that stand above the rows of the path: the header
@@ -1458,6 +1477,28 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with(COLUMN_HEADER_START)),
             "and the column header stands under it: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_lost_probe_reaches_the_terminal_in_red() {
+        // A live table draws on a terminal by construction: the run holds the
+        // terminal in raw mode on the alternate screen in front of the first
+        // draw. The loss of a probe is the one thing the table paints, and the
+        // color says at a glance which row of the path drops its probes.
+        //
+        // The test reads the bytes of the sink and not the glyphs of them,
+        // because the codes of the color are what it is about.
+        let mut screen = table(&[]);
+        screen.round(&one_lost_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        assert!(
+            drawn.contains(&format!("{RED}{NO_ANSWER}")),
+            "the mark of the lost probe carries the code that paints it red: {drawn:?}"
+        );
+        assert!(
+            drawn.contains(&format!("{NO_ANSWER}{PLAIN}")),
+            "and the code that gives the foreground of the terminal back stands behind that mark: {drawn:?}"
         );
     }
 
