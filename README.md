@@ -710,7 +710,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     resolved to, the source, the count of the rounds, the period of one round, and the recorded
     file with its size. Under it stands one row for each TTL, with the columns `TTL`, `Host`,
     `Loss%`, `Sent`, `Last`, `Min`, `Avg`, `Max`, `StDev`, and `Recent`. The `Recent` column draws
-    the last round-trip times of the hop as a bar for each of them.
+    the last probes of the TTL, one mark for each of them: a bar (`▁▂▃▄▅▆▇`) for a round-trip time,
+    at its place on the scale of the window, and a `╳` for a probe that no hop answered. The bars
+    stop below the full block, so a gap stands between the graph of one row and the graph of the row
+    above it. An address row draws the answers of its own router alone, because a probe reaches a
+    TTL and not a router.
   - The marks of the table each say one thing. A `★` behind a host marks the row that answered from
     the destination, and a run that never reached the destination holds no such row. A `(+N)` behind
     a host says that more than one router answered at that TTL. The host of the row names the first
@@ -721,7 +725,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     stands above two address rows. The first address row opens with a `├` and the last one closes
     with a `└`. An address row holds the share of the answers of its TTL that the row took, and a
     `▹` behind that percentage says that it is a share and not a loss. A `???` in the Host column is
-    a TTL that never answered.
+    a TTL that never answered. A `╳` in the `Recent` column is a probe that no hop answered, and a
+    live run under a terminal draws it red. A run that prints no color — a headless run, a pipe, a
+    file, and every replay — still shows the mark, because the mark is no bar of a time.
   - The table takes the width of the terminal, and the `Host` column absorbs the change. A terminal
     too narrow for every column drops columns, first dropped first: `Recent`, `StDev`, `Max`, `Min`,
     `Last`, `Sent`, `Loss%`. The `TTL`, the `Host`, and the `Avg` never drop. A replay whose output
