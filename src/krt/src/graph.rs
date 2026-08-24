@@ -51,6 +51,33 @@ const LOST: Rgba<u8> = Rgba([224, 64, 64, 255]);
 /// bar, whatever a reader sees of the color.
 const DOT_STEP: usize = 2;
 
+/// The part of the height of a cell that stays clear at the top of it.
+///
+/// One tenth. A terminal draws a glyph inside its cell and leaves a row of
+/// pixels around it, so the block elements of the text table already stand
+/// clear of the line above them. A bar that filled its cell would touch the row
+/// above it, and the picture of one hop would then read as a part of the row
+/// above it.
+///
+/// A part and not a count of pixels, because the terminal names the height of a
+/// cell and a cell of ten pixels needs a smaller gap than a cell of forty. The
+/// gap is one pixel at the least, so every cell that holds two rows of pixels
+/// holds a gap.
+const CLEAR_PART: u32 = 10;
+
+/// The number of rows of pixels that stay clear at the top of a cell of
+/// `height` pixels.
+///
+/// One pixel at the least, and never the whole cell: a cell of one row of
+/// pixels draws the bar and no gap, because a gap that took the whole cell
+/// would draw a hop that answered as a hop that answered nothing.
+///
+/// # Arguments
+/// * `height` - The height of the cell in pixels, which is 1 or more.
+fn clear_rows(height: u32) -> u32 {
+    (height / CLEAR_PART).max(1).min(height.saturating_sub(1))
+}
+
 /// The image of one history of round-trip times, as the Recent column of one
 /// row draws it.
 ///
@@ -67,15 +94,19 @@ const DOT_STEP: usize = 2;
 ///
 /// The scale is the scale of the block elements, read over the whole history:
 /// the smallest sample of the history stands at the floor of the cell and the
-/// largest one fills it. A lost probe names no limit of that scale, and neither
-/// does a sample that is not a finite number. `ui::sparkline` states both
-/// reasons, and this module does not restate them.
+/// largest one reaches the top of the bars. A lost probe names no limit of that
+/// scale, and neither does a sample that is not a finite number.
+/// `ui::sparkline` states both reasons, and this module does not restate them.
 ///
-/// The height of a bar is one pixel and then the part of the cell that the
-/// sample takes: `1 + round(part * (height - 1))`. The smallest sample of a
-/// history therefore takes one row of pixels and the largest one fills the
-/// cell. A bar of no pixel would draw nothing, and a sample that the run
-/// measured is not a sample that the run lost.
+/// The bars stop below the top of the cell. [`clear_rows`] names the rows of
+/// pixels that stay clear there and says why, and the column of a lost probe
+/// stops below them as well.
+///
+/// The height of a bar is one pixel and then the part of the bars that the
+/// sample takes: `1 + round(part * (bars - 1))`. The smallest sample of a
+/// history therefore takes one row of pixels and the largest one reaches the
+/// top of the bars. A bar of no pixel would draw nothing, and a sample that the
+/// run measured is not a sample that the run lost.
 ///
 /// A history whose samples are all equal, and a history of one sample, each
 /// give a span of zero, and every bar of such a history stands at the floor.
@@ -88,9 +119,9 @@ const DOT_STEP: usize = 2;
 /// be the red that the table already spends on a lost probe.
 ///
 /// A probe that no hop answered draws a column of [`LOST`], which is that red,
-/// and it draws it dotted: the pixel at an even row is painted and the pixel at
-/// an odd row is clear, down the whole height. The dots are what tell a loss
-/// from a slow answer. A solid red column and a tall teal bar differ by color
+/// and it draws it dotted: one row of pixels is painted and the row under it is
+/// clear, from the top of the bars down to the floor. The dots are what tell a
+/// loss from a slow answer. A solid red column and a tall teal bar differ by color
 /// alone, and the text table already refuses that: the mark of a lost probe
 /// there is `╳` and it is no bar of the set.
 ///
@@ -126,10 +157,15 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
         highest = highest.max(time);
     }
     let span = highest - lowest;
+    // The rows at the top of the cell stay clear, so a picture of one hop never
+    // touches the line above it. Every column below draws inside the rows that
+    // are left.
+    let clear = clear_rows(height);
+    let bars = height - clear;
     for column in 0..width {
         match history[sample_index(column, width, count)] {
             Sample::Lost => {
-                for row in (0..height).step_by(DOT_STEP) {
+                for row in (clear..height).step_by(DOT_STEP) {
                     image.put_pixel(column, row, LOST);
                 }
             }
@@ -146,7 +182,7 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
                 } else {
                     0.0
                 };
-                let pixels = bar_pixels(part, height);
+                let pixels = bar_pixels(part, bars);
                 for row in (height - pixels)..height {
                     image.put_pixel(column, row, BAR);
                 }
@@ -184,21 +220,22 @@ fn sample_index(x: u32, width: u32, count: usize) -> usize {
 ///
 /// The floor takes one pixel and every pixel above it belongs to the span, so
 /// the smallest sample of a history draws one row of pixels and the largest one
-/// fills the cell. A bar of no pixel would draw nothing at all, and a sample
-/// that the run measured is not a sample that the run lost: the reader must be
-/// able to tell the two apart at the floor of the cell as well as at the top of
-/// it.
+/// takes every row that the bars hold. A bar of no pixel would draw nothing at
+/// all, and a sample that the run measured is not a sample that the run lost:
+/// the reader must be able to tell the two apart at the floor of the cell as
+/// well as at the top of the bars.
 ///
 /// # Arguments
 /// * `part` - The place of the sample in the span of the history, from 0 at the
 ///   smallest sample to 1 at the largest one.
-/// * `height` - The height of the image in pixels.
+/// * `bars` - The number of rows of pixels that the bars stand in, which is the
+///   height of the cell without the rows that [`clear_rows`] keeps clear.
 ///
 /// # Returns
 /// The number of pixels of the bar, which is 1 or more and never more than
-/// `height`.
-fn bar_pixels(part: f64, height: u32) -> u32 {
-    let above_the_floor = f64::from(height.saturating_sub(1));
+/// `bars`.
+fn bar_pixels(part: f64, bars: u32) -> u32 {
+    let above_the_floor = f64::from(bars.saturating_sub(1));
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -245,9 +282,22 @@ mod tests {
 
     /// The height in pixels of the small images below.
     ///
-    /// Four rows are enough to tell a bar of one pixel from a bar that fills
-    /// the cell, and few enough that a test names every row of the column.
+    /// Four rows are enough to tell a bar of one pixel from a bar that reaches
+    /// the top of the bars, and few enough that a test names every row of the
+    /// column.
     const SHORT: u32 = 4;
+
+    /// The number of rows of pixels that the bars of such a cell stand in.
+    ///
+    /// The top of a cell stays clear, and the gap is one row at the least, so
+    /// the bars of a cell of four rows stand in three of them. The test spells
+    /// the count, and the module reads it off the height. That is on purpose,
+    /// as the word of the pause is: this gap is what holds the picture of one
+    /// hop off the line above it.
+    const SHORT_BARS: u32 = 3;
+
+    /// The first row of pixels that the bars of such a cell stand in.
+    const SHORT_TOP: u32 = SHORT - SHORT_BARS;
 
     /// One answer of a hop, in milliseconds.
     const ONE_TIME: f64 = 1.0;
@@ -351,11 +401,14 @@ mod tests {
         let image = plot(&[Sample::Lost], ONE_COLUMN, SHORT);
 
         for row in 0..SHORT {
-            let wanted = if row.is_multiple_of(2) { RED } else { CLEAR };
+            // The column starts at the top of the bars, and it paints every
+            // second row from there down.
+            let painted = row >= SHORT_TOP && (row - SHORT_TOP).is_multiple_of(2);
+            let wanted = if painted { RED } else { CLEAR };
             assert_eq!(
                 pixel(&image, 0, row),
                 wanted,
-                "the column of a lost probe paints its even rows and leaves its odd rows clear, down the whole height"
+                "the column of a lost probe paints every second row, from the top of the bars down to the floor"
             );
         }
     }
@@ -372,7 +425,7 @@ mod tests {
     const FIVE_COLUMNS: u32 = 5;
 
     #[test]
-    fn the_smallest_sample_of_the_history_stands_at_the_floor_and_the_largest_fills_the_cell() {
+    fn the_smallest_sample_stands_at_the_floor_and_the_largest_reaches_the_top_of_the_bars() {
         // The scale is the scale of the block elements, read over the whole
         // history. A lost probe measured no time, so it names no limit of that
         // scale, and a time that is not a finite number does not compare, so it
@@ -409,8 +462,8 @@ mod tests {
         );
         assert_eq!(
             bar(&image, FIVE_COLUMNS - 1),
-            SHORT,
-            "and the largest sample of the history fills the cell"
+            SHORT_BARS,
+            "and the largest sample of the history reaches the top of the bars"
         );
     }
 
@@ -456,27 +509,32 @@ mod tests {
     /// The height in pixels of the image that reads the height of a bar.
     ///
     /// Ten rows are enough that the bar of a sample at the middle of the span
-    /// stands clear of the bar at the floor and clear of the bar that fills the
-    /// cell.
+    /// stands clear of the bar at the floor and clear of the bar that reaches
+    /// the top of the bars.
     const TALL: u32 = 10;
+
+    /// The number of rows of pixels that the bars of that cell stand in.
+    ///
+    /// One row of the ten stays clear at the top, so nine are left.
+    const TALL_BARS: u32 = 9;
 
     /// The answer at the middle of the span of that image, in milliseconds.
     ///
     /// The three answers are 10, 20, and 30, so the middle one takes half of
-    /// the span. Half of the nine rows above the floor is 4.5, which rounds to
-    /// 5, so the bar of it stands 6 pixels tall.
+    /// the span. Half of the eight rows above the floor is 4, so the bar of it
+    /// stands 5 pixels tall.
     const MIDDLE: f64 = 15.0;
 
     /// The height in pixels of the bar of that middle answer.
-    const MIDDLE_PIXELS: u32 = 6;
+    const MIDDLE_PIXELS: u32 = 5;
 
     #[test]
-    fn the_height_of_a_bar_is_its_part_of_the_cell_and_never_no_pixel_at_all() {
+    fn the_height_of_a_bar_is_its_part_of_the_bars_and_never_no_pixel_at_all() {
         // A bar of no pixel would draw nothing, and a sample that the run
         // measured is not a sample that the run lost. The smallest sample
-        // therefore takes one row of pixels and the largest fills the cell, and
-        // every sample between them takes its part of the rows that stand above
-        // that floor.
+        // therefore takes one row of pixels and the largest reaches the top of
+        // the bars, and every sample between them takes its part of the rows
+        // that stand above that floor.
         let image = plot(
             &[
                 Sample::Time(QUICKEST),
@@ -499,8 +557,8 @@ mod tests {
         );
         assert_eq!(
             bar(&image, 2),
-            TALL,
-            "and the largest sample fills the cell"
+            TALL_BARS,
+            "and the largest sample reaches the top of the bars"
         );
     }
 
@@ -518,6 +576,14 @@ mod tests {
     /// samples gives each sample one or two columns of pixels.
     const WIDE: u32 = 90;
 
+    /// The height in pixels of an image that draws that whole history.
+    ///
+    /// The top of a cell stays clear, and the gap is one tenth of the height,
+    /// so a cell of 67 pixels holds 61 rows of bars. Sixty samples take sixty
+    /// heights of their own in those rows, and a test therefore reads which
+    /// sample a column drew.
+    const TALL_ENOUGH: u32 = 67;
+
     #[test]
     fn every_sample_of_the_history_draws() {
         // The block elements show nine of the sixty samples that the fold
@@ -525,29 +591,39 @@ mod tests {
         // at `x` draws the sample at `x * count / width`, so no sample of the
         // history goes undrawn.
         //
-        // The image is as tall as the history is long, so each of the sixty
-        // samples takes a bar of its own height and a test reads which sample a
-        // column drew.
+        // The history climbs, so the bar of one sample stands higher than the
+        // bar of the sample in front of it. Two columns that draw one sample
+        // therefore draw one height, and a column that draws the next sample
+        // draws a taller one. The test reads the two rules and no pixel count:
+        // the height of a bar belongs to the test above this one.
         let history: Vec<Sample> = (0..HISTORY)
             .map(|step| Sample::Time(f64::from(step)))
             .collect();
-        let image = plot(&history, WIDE, HISTORY);
+        let image = plot(&history, WIDE, TALL_ENOUGH);
 
+        let mut drawn: Vec<(u32, u32)> = Vec::new();
         for column in 0..WIDE {
             let index = column * HISTORY / WIDE;
-            assert_eq!(
-                bar(&image, column),
-                index + 1,
-                "the column of pixels at {column} draws the sample at {index}"
-            );
+            let pixels = bar(&image, column);
+            if let Some(&(last_index, last_pixels)) = drawn.last() {
+                if last_index == index {
+                    assert_eq!(
+                        pixels, last_pixels,
+                        "the columns that draw the sample at {index} draw one bar"
+                    );
+                    continue;
+                }
+                assert!(
+                    pixels > last_pixels,
+                    "the column at {column} draws the sample at {index}, which stands above the sample in front of it"
+                );
+            }
+            drawn.push((index, pixels));
         }
 
-        let mut heights: Vec<u32> = (0..WIDE).map(|column| bar(&image, column)).collect();
-        heights.sort_unstable();
-        heights.dedup();
         assert_eq!(
-            heights,
-            (1..=HISTORY).collect::<Vec<u32>>(),
+            drawn.len(),
+            usize::try_from(HISTORY).expect("sixty samples count in a `usize`"),
             "and every sample of the history draws a bar of its own"
         );
     }
