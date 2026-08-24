@@ -105,11 +105,48 @@ pub(crate) enum PrivilegeError {
     },
 }
 
-/// The source port that a UDP trace holds while the destination port varies.
+/// The first source port that a UDP trace of `krt` takes.
 ///
 /// A fixed source port to a varying destination port is the direction of a UDP
-/// trace, and 33434 is the first port of the range that traceroute probes.
-const UDP_SOURCE_PORT: u16 = 33_434;
+/// trace. A traceroute probes the destination ports 33434 through 33534, so the
+/// source port of `krt` starts one above that range and never wears the number
+/// of a destination that a firewall reads as a traceroute.
+const UDP_FIRST_SOURCE_PORT: u16 = 33_535;
+
+/// The last source port that a UDP trace of `krt` takes.
+///
+/// 49151 is the last registered port. Above it stands the range that macOS
+/// hands to a socket which asks for any port, so a source port of that higher
+/// range would stand where an outgoing connection of any program can already
+/// be.
+const UDP_LAST_SOURCE_PORT: u16 = 49_151;
+
+/// The number of source ports that a UDP trace of `krt` chooses from.
+const UDP_SOURCE_PORTS: u32 = (UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) as u32 + 1;
+
+/// The source port that a UDP trace of one process holds.
+///
+/// The port is what tells two UDP runs of one machine apart, and it does so
+/// twice over. The unprivileged path of macOS binds the source port for each
+/// probe it sends, so two runs of one port cannot both send, and the tracer of
+/// the second one stops on the port it cannot take. The answers carry the port
+/// too: the tracer drops an answer whose original datagram left from another
+/// port.
+///
+/// The process identifier is the source, for the reason that
+/// [`probe_identifier`] states. The fold maps no two process identifiers of one
+/// window of [`UDP_SOURCE_PORTS`] onto one port, so two runs that a user starts
+/// one after the other take two ports.
+///
+/// A port of the range that another program already holds stops the run, as the
+/// one fixed port of every run did before. The next run holds another process
+/// identifier and takes another port.
+fn udp_source_port(process: u32) -> u16 {
+    // The remainder stands below `UDP_SOURCE_PORTS`, which is far inside the
+    // range of a `u16`, so the conversion of it takes nothing away.
+    let offset = (process % UDP_SOURCE_PORTS) as u16;
+    UDP_FIRST_SOURCE_PORT + offset
+}
 
 /// The destination port that a TCP trace holds while the source port varies.
 ///
@@ -239,9 +276,9 @@ fn tracer_of(config: &TraceConfig) -> Result<trippy_core::Tracer, TraceError> {
         // run start.
         .port_direction(match config.protocol {
             crate::Protocol::Icmp => trippy_core::PortDirection::None,
-            crate::Protocol::Udp => {
-                trippy_core::PortDirection::FixedSrc(trippy_core::Port(UDP_SOURCE_PORT))
-            }
+            crate::Protocol::Udp => trippy_core::PortDirection::FixedSrc(trippy_core::Port(
+                udp_source_port(std::process::id()),
+            )),
             crate::Protocol::Tcp => {
                 trippy_core::PortDirection::FixedDest(trippy_core::Port(TCP_DESTINATION_PORT))
             }
@@ -599,7 +636,7 @@ fn to_lookup(entry: &DnsEntry) -> Lookup {
 mod tests {
     use super::{
         choose_privilege, icmp_kind, next_seq, probe_identifier, to_lookup, to_round_record,
-        tracer_of, IcmpKind, PrivilegeError, TraceConfig, TraceError,
+        tracer_of, udp_source_port, IcmpKind, PrivilegeError, TraceConfig, TraceError,
     };
     use crate::names::Lookup;
     use crate::record::{Privilege, Record, RoundRecord, RunId};
@@ -1119,9 +1156,17 @@ this platform needs raw socket privileges to send probes.
     /// The last TTL that a test run probes.
     const A_MAX_TTL: u8 = 20;
 
-    /// The source port that a UDP trace holds while the destination port
-    /// varies. It is the first port of the range that traceroute probes.
-    const UDP_SOURCE_PORT: u16 = 33_434;
+    /// The first source port that a UDP trace of `krt` takes. It stands one
+    /// above the last destination port that a traceroute probes.
+    const UDP_FIRST_SOURCE_PORT: u16 = 33_535;
+
+    /// The last source port that a UDP trace of `krt` takes. It is the last
+    /// registered port, under the range that macOS hands out on its own.
+    const UDP_LAST_SOURCE_PORT: u16 = 49_151;
+
+    /// The port that every UDP trace of `krt` held before it held one of its
+    /// own. A traceroute probes it first, as a destination.
+    const THE_CLASSIC_SOURCE_PORT: u16 = 33_434;
 
     /// The destination port that a TCP trace holds while the source port
     /// varies. It is the port of HTTP.
@@ -1350,11 +1395,67 @@ this platform needs raw socket privileges to send probes.
     /// `Builder::build` refuses a UDP trace whose port direction is `None`,
     /// and `None` is the direction that the builder holds by default, so this
     /// run reaches a tracer only because the mapping names a direction.
+    ///
+    /// The port is the one of this process. Two UDP runs of one machine that
+    /// held one port could not both send, because the unprivileged path of
+    /// macOS binds the source port for each probe.
     #[test]
-    fn a_udp_trace_fixes_the_source_port() {
+    fn a_udp_trace_fixes_the_source_port_of_its_process() {
         assert_eq!(
             tracer_of_protocol(Protocol::Udp).port_direction(),
-            trippy_core::PortDirection::FixedSrc(Port(UDP_SOURCE_PORT))
+            trippy_core::PortDirection::FixedSrc(Port(udp_source_port(process::id())))
+        );
+    }
+
+    /// A process identifier of every shape maps onto a source port of the
+    /// range.
+    ///
+    /// The rows walk the fold onto its edges: the first process, the last port
+    /// of the range, and the value that wraps back onto the first port. The
+    /// last row is a process identifier of the size that macOS hands out.
+    #[test]
+    fn every_process_identifier_maps_onto_a_source_port_of_the_range() {
+        let ports = u32::from(UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) + 1;
+        for (process, expected) in [
+            (0_u32, UDP_FIRST_SOURCE_PORT),
+            (ports - 1, UDP_LAST_SOURCE_PORT),
+            (ports, UDP_FIRST_SOURCE_PORT),
+            (42_659, 44_960),
+        ] {
+            assert_eq!(udp_source_port(process), expected, "process {process}");
+        }
+    }
+
+    /// No process identifier maps onto the port that a traceroute probes first.
+    ///
+    /// That port is the one every UDP run of `krt` held before this fold, and
+    /// it is the one that `a_live_udp_run_stands_while_another_program_holds_
+    /// the_port_of_a_traceroute` holds while it measures. The walk covers the
+    /// whole range of the fold and one value past it, so it reaches every port
+    /// the function can give.
+    #[test]
+    fn no_process_identifier_maps_onto_the_port_that_a_traceroute_probes_first() {
+        let ports = u32::from(UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) + 1;
+        for process in 0..=ports {
+            assert_ne!(
+                udp_source_port(process),
+                THE_CLASSIC_SOURCE_PORT,
+                "process {process}"
+            );
+        }
+    }
+
+    /// Two processes of one window of the fold hold two source ports.
+    ///
+    /// This is the property that lets two UDP runs of one machine both send.
+    #[test]
+    fn two_processes_of_one_window_hold_two_source_ports() {
+        let ports = u32::from(UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) + 1;
+        let taken: std::collections::HashSet<u16> = (0..ports).map(udp_source_port).collect();
+        assert_eq!(
+            taken.len(),
+            ports as usize,
+            "the fold maps two processes of one window onto one port"
         );
     }
 

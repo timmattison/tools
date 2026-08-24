@@ -220,6 +220,10 @@ const THE_CLASSIC_SOURCE_PORT: u16 = 33_434;
 #[cfg(target_os = "macos")]
 const ONE: &str = "1";
 
+/// The number of rounds of the run that measures a UDP source port.
+#[cfg(target_os = "macos")]
+const TWO: &str = "2";
+
 /// The number of rounds that each run of the collision test records.
 ///
 /// The two runs start at one moment and each round of each of them sends one
@@ -1272,6 +1276,13 @@ fn two_live_tcp_runs_of_one_machine_each_record_only_the_answers_of_its_own_prob
 /// above the ports a traceroute probes and under the ports that macOS hands to
 /// a socket asking for any port. `src/krt/src/trace.rs` states the range and
 /// the fold onto it.
+///
+/// The run records two rounds, and the first of them reports no hop. A UDP
+/// trace carries the sequence of a probe in the destination port, and the first
+/// sequence of a run is 33434, so the first probe of the run arrives at the
+/// socket that this test holds. That socket takes the datagram, the machine
+/// answers no port unreachable for it, and the hop of that round is therefore
+/// absent. The second probe carries 33435, which nothing holds.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_live_udp_run_stands_while_another_program_holds_the_port_of_a_traceroute() {
@@ -1286,9 +1297,11 @@ fn a_live_udp_run_stands_while_another_program_holds_the_port_of_a_traceroute() 
         FLAG_PROTOCOL,
         UDP,
         FLAG_ROUNDS,
-        ONE,
+        TWO,
         FLAG_MAX_TTL,
         ONE,
+        FLAG_INTERVAL,
+        A_SHORT_INTERVAL,
         FLAG_HEADLESS,
     ];
 
@@ -1316,7 +1329,7 @@ fn a_live_udp_run_stands_while_another_program_holds_the_port_of_a_traceroute() 
     );
     assert!(
         recording.hop_addresses().iter().any(|hop| hop == LOOPBACK),
-        "and the run records the answer of the probe it sent: {:?}",
+        "and the run records the answer of the probe that the held socket did not take: {:?}",
         recording.hop_addresses()
     );
 }
