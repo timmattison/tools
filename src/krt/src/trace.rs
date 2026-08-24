@@ -120,6 +120,44 @@ const TCP_DESTINATION_PORT: u16 = 80;
 /// The number of the first round of a run. The schema counts from one.
 const FIRST_ROUND: u64 = 1;
 
+/// The number of identifiers that a probe of `krt` can carry.
+///
+/// The field is 16 bits wide, and zero is not one of the values that `krt`
+/// takes: the tracer reads a zero identifier as the answer of any run. The
+/// range is therefore 1 through 65535, which is 65535 values.
+const PROBE_IDENTIFIERS: u32 = u16::MAX as u32;
+
+/// The identifier that the probes of one process carry.
+///
+/// macOS hands the ICMP answers of one process to the socket of every other
+/// process that reads that protocol, so a tracer there reads the answer of a
+/// probe that another tracer sent. The identifier is what tells the two apart.
+/// The tracer drops an answer whose identifier is neither zero nor the one that
+/// the run holds, so a run of an identifier of its own reads its own answers
+/// and no other run's.
+///
+/// Zero is the one value that the answer must never take. The tracer reads a
+/// zero as the answer of any run, which is what a UDP trace and a TCP trace
+/// need, because those two carry no identifier and the ports tell them apart. A
+/// run of `krt` that held zero would read every ICMP answer of the machine, and
+/// that is the defect this function exists to close.
+///
+/// The process identifier is the source, because two processes that stand at
+/// one moment hold two of them. The fold keeps the answer inside the range and
+/// away from zero, and it maps no two process identifiers of one window of
+/// 65535 onto one value. Two runs that a user starts one after the other hold
+/// two process identifiers a few apart, so they never land on one value. Two
+/// runs whose process identifiers differ by exactly 65535 do land on one, and
+/// those two read each other as they did before this fold.
+const fn probe_identifier(process: u32) -> u16 {
+    // The remainder stands in 0 through 65534, which is inside the range of a
+    // `u16`, so the conversion of it takes nothing away, and clippy reads the
+    // remainder and raises no truncation of its own. The one that the sum adds
+    // then puts the answer in 1 through 65535.
+    let folded = (process % PROBE_IDENTIFIERS) as u16;
+    folded + 1
+}
+
 /// The configuration of one tracing run, in the words that `krt` owns.
 ///
 /// No field holds a type of a trippy crate, so a caller states a whole run
@@ -173,6 +211,9 @@ pub(crate) enum TraceError {
 /// Returns [`TraceError::Build`] when the tracer refuses the configuration.
 fn tracer_of(config: &TraceConfig) -> Result<trippy_core::Tracer, TraceError> {
     trippy_core::Builder::new(config.target)
+        // The identifier of the process, so the run reads the answers of its
+        // own probes and no other run's. [`probe_identifier`] states why.
+        .trace_identifier(probe_identifier(std::process::id()))
         .min_round_duration(config.interval)
         .max_round_duration(config.interval)
         .first_ttl(config.first_ttl)
@@ -557,14 +598,15 @@ fn to_lookup(entry: &DnsEntry) -> Lookup {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_privilege, icmp_kind, next_seq, to_lookup, to_round_record, tracer_of, IcmpKind,
-        PrivilegeError, TraceConfig, TraceError,
+        choose_privilege, icmp_kind, next_seq, probe_identifier, to_lookup, to_round_record,
+        tracer_of, IcmpKind, PrivilegeError, TraceConfig, TraceError,
     };
     use crate::names::Lookup;
     use crate::record::{Privilege, Record, RoundRecord, RunId};
     use crate::testing::address;
     use crate::{Multipath, Protocol, PROGRAM};
     use chrono::{DateTime, Utc};
+    use std::process;
     use std::sync::atomic::AtomicU64;
     use std::time::{Duration, SystemTime};
     use trippy_core::{
@@ -1144,6 +1186,70 @@ this platform needs raw socket privileges to send probes.
         assert_ne!(
             identifier, ANY_RUN,
             "a run of this identifier reads the answers of every other run of the machine"
+        );
+    }
+
+    /// That identifier is the one of this process. Two tracers of one process
+    /// therefore hold one identifier, and the answers of a run reach the tracer
+    /// of that run whichever of them read the socket.
+    #[test]
+    fn the_identifier_of_a_run_is_the_identifier_of_its_process() {
+        assert_eq!(
+            tracer_from(&a_config()).trace_identifier(),
+            TraceId(probe_identifier(process::id()))
+        );
+    }
+
+    /// A process identifier of every shape maps onto an identifier that a probe
+    /// can carry.
+    ///
+    /// The first four rows walk the fold onto its edges: the first process, the
+    /// last value of the range, the value one past it that wraps onto the first
+    /// one, and the value that a plain mask of the low sixteen bits would map
+    /// onto zero. The last row is a process identifier of the size that macOS
+    /// hands out.
+    #[test]
+    fn every_process_identifier_maps_onto_an_identifier_that_a_probe_carries() {
+        for (process, expected) in [
+            (1_u32, 2_u16),
+            (65_534, 65_535),
+            (65_535, 1),
+            (65_536, 2),
+            (42_659, 42_660),
+        ] {
+            assert_eq!(probe_identifier(process), expected, "process {process}");
+        }
+    }
+
+    /// No process identifier maps onto the identifier that the tracer reads as
+    /// the answer of any run.
+    ///
+    /// The walk covers the whole range of the fold and one value past it, so it
+    /// reaches every answer the function can give.
+    #[test]
+    fn no_process_identifier_maps_onto_the_identifier_of_any_run() {
+        for process in 0..=u32::from(u16::MAX) + 1 {
+            assert_ne!(
+                TraceId(probe_identifier(process)),
+                ANY_RUN,
+                "process {process}"
+            );
+        }
+    }
+
+    /// Two processes of one window of the fold hold two identifiers.
+    ///
+    /// This is the property that closes the defect. A machine that hands out
+    /// two process identifiers at one moment hands out two different ones, and
+    /// the two runs then read two different sets of answers.
+    #[test]
+    fn two_processes_of_one_window_hold_two_identifiers() {
+        let identifiers: std::collections::HashSet<u16> =
+            (0..u32::from(u16::MAX)).map(probe_identifier).collect();
+        assert_eq!(
+            identifiers.len(),
+            u32::from(u16::MAX) as usize,
+            "the fold maps two processes of one window onto one identifier"
         );
     }
 
