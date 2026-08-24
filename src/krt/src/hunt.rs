@@ -460,7 +460,7 @@ pub(crate) struct Plan {
     pub(crate) rounds: u64,
     /// The number of probe rounds that each destination takes.
     pub(crate) probes_per_round: u64,
-    /// The time that stops a destination which answers nothing.
+    /// The longest that one destination takes, whether it answers or not.
     pub(crate) target_timeout: Duration,
     /// The longest that each run waits, after its last round, for the names
     /// that its lookups have not given yet.
@@ -490,9 +490,11 @@ pub(crate) struct Sources<'a> {
 /// it stays that way only while the hunt is serial.
 ///
 /// Each destination takes one run of `run::record`, with a round limit of the
-/// probe rounds of the plan and a deadline of the target timeout. A destination
-/// that answers nothing therefore holds the hunt for that timeout and no
-/// longer.
+/// probe rounds of the plan and a deadline of the target timeout. The deadline
+/// bounds every destination, and not the quiet ones alone: no destination holds
+/// the hunt for longer than that timeout. The round limit is what stops a
+/// destination that answers, because `Cli::resolve` refuses a plan whose probe
+/// rounds run past its timeout.
 ///
 /// `stop` answers whether the user asked the hunt to stop, and it reaches both
 /// this loop and the run of the destination that stands. A destination that the
@@ -599,8 +601,8 @@ fn trace_one<W: Write>(
     };
     let limits = run::Limits {
         rounds: Some(plan.probes_per_round),
-        // A destination that answers nothing holds the hunt for this long and
-        // no longer. A limit too large to add to the clock leaves the
+        // No destination holds the hunt for longer than this, whether it
+        // answers or not. A limit too large to add to the clock leaves the
         // destination without a moment, and the round limit then stops it.
         deadline: Instant::now().checked_add(plan.target_timeout),
         name_grace: plan.name_grace,
@@ -1602,10 +1604,11 @@ mod tests {
     /// The address that the probes of a test hunt leave from.
     const SOURCE: &str = "1.2.3.4";
 
-    /// The time that stops a destination of a test hunt which answers nothing.
+    /// The longest that one destination of a test hunt takes.
     ///
     /// The value is short, because a test that waited the real timeout would
-    /// hold the suite for ten seconds for each such destination.
+    /// hold the suite for ten seconds for each destination whose rounds stop
+    /// arriving.
     const TARGET_TIMEOUT: Duration = Duration::from_millis(20);
 
     /// The hops of one round that a test scripts: the TTL of a hop, the
@@ -1890,10 +1893,16 @@ mod tests {
         assert_eq!(run.rounds().len(), 1, "the plan names one probe round");
     }
 
-    /// A destination that answers nothing holds the hunt for the target
-    /// timeout and no longer.
+    /// A destination whose rounds stop arriving stops on the deadline.
+    ///
+    /// The tracer of this destination sends no round at all, so the round limit
+    /// of the run never counts down and the deadline is the one limit that
+    /// stops it. A real tracer sends the rounds of a quiet destination as it
+    /// sends the rounds of any other one, with a lost probe in the place of
+    /// each answer, so the round limit stops that destination first. The
+    /// deadline covers the tracer that stops giving rounds.
     #[test]
-    fn a_destination_that_answers_nothing_stops_on_the_target_timeout() {
+    fn a_destination_whose_rounds_stop_arriving_stops_on_the_deadline() {
         let started = Instant::now();
         let hunted = hunted(&[QUIET], &[&[]], 1, &never_stops()).expect("the hunt must finish");
         assert!(

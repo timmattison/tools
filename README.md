@@ -638,7 +638,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     | ---- | ------- | ------- |
     | `--rounds <N>` | `64` | Stop after this many destinations. One round is one destination. |
     | `--probes-per-round <N>` | `3` | The number of probe rounds that each destination takes. One probe round is one sweep of the TTLs. |
-    | `--target-timeout <DUR>` | `10s` | Stop a destination that answers nothing after this much time. |
+    | `--target-timeout <DUR>` | `10s` | The longest that one destination takes, whether it answers or not. `krt` refuses a hunt whose probe rounds run past this time, because such a hunt cuts every destination short of its last round. |
     | `--seed <N>` | the clock | The seed of the draw. A hunt of one seed visits the same addresses in the same order, for one build of `krt`. The resolved configuration prints the seed of every hunt. |
     | `--include-partial` | off | Let a partial path compete for a row of the table. |
   - Every flag of a trace takes a default. `krt replay <FILE>` takes `--run <ID>` alone, which

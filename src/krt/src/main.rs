@@ -113,8 +113,12 @@ const HUNT_ROUNDS_DEFAULT: u64 = 64;
 /// too few to read a round-trip time from.
 const PROBES_PER_ROUND_DEFAULT: u64 = 3;
 
-/// The time that stops a destination of a hunt which answers nothing, when the
-/// user names none.
+/// The longest that one destination of a hunt takes, when the user names none.
+///
+/// The time bounds every destination, and not the quiet ones alone. It stands
+/// above the time that the default probe rounds take at the default interval,
+/// because a timeout below that time cuts a destination short of its last
+/// round.
 const TARGET_TIMEOUT_DEFAULT: &str = "10s";
 
 /// The lowest number of rounds that stops a run. A run of zero rounds records
@@ -476,7 +480,7 @@ enum Command {
         )]
         probes_per_round: u64,
 
-        /// Stop a destination that answers nothing after this much time.
+        /// The longest that one destination takes, whether it answers or not.
         #[arg(
             long,
             value_name = "DUR",
@@ -506,7 +510,7 @@ struct HuntConfig {
     rounds: u64,
     /// The number of probe rounds that each destination takes.
     probes_per_round: u64,
-    /// The time that stops a destination which answers nothing.
+    /// The longest that one destination takes, whether it answers or not.
     target_timeout: Duration,
     /// The seed of the draw of the addresses.
     ///
@@ -601,7 +605,9 @@ impl Cli {
     /// change a packet. ICMP carries no port to hold or to vary. A TCP probe
     /// puts the probe number in its source port under every mode, so the mode
     /// changes nothing, and the record then names a mode that the run did not
-    /// use.
+    /// use. A target timeout that the probe rounds of the same hunt run past
+    /// cuts every destination short of its last round, so such a line asks for
+    /// two things at once.
     fn resolve(self) -> Result<ResolvedConfig, String> {
         let probe = self.probe_args();
         if probe.first_ttl > probe.max_ttl {
@@ -618,6 +624,24 @@ impl Cli {
                 value_name(&self.multipath),
                 value_name(&probe.protocol)
             ));
+        }
+
+        if let Some(Command::Hunt {
+            probes_per_round,
+            target_timeout,
+            ..
+        }) = &self.command
+        {
+            let needed = probe_time(probe.interval, *probes_per_round);
+            if needed.is_none_or(|needed| *target_timeout <= needed) {
+                let needs =
+                    needed.map_or_else(|| TIME_BEYOND_A_DURATION.to_owned(), ui::render_duration);
+                return Err(format!(
+                    "`--target-timeout {}` cannot hold `--probes-per-round {probes_per_round}` at an interval of {}, which needs {needs}: raise the timeout or lower the probe rounds",
+                    ui::render_duration(*target_timeout),
+                    ui::render_duration(probe.interval)
+                ));
+            }
         }
 
         // The parser rejects the two flags of the address family together, so
@@ -886,6 +910,23 @@ fn command_named(destination: &str) -> Option<String> {
         .get_subcommands()
         .map(|command| command.get_name().to_owned())
         .find(|name| name == destination)
+}
+
+/// What the refusal of a target timeout names in the place of a time that no
+/// duration holds.
+const TIME_BEYOND_A_DURATION: &str = "more time than a duration holds";
+
+/// The time that the probe rounds of one destination of a hunt take.
+///
+/// The tracer sends one probe round each interval, so the destination takes
+/// the interval once for each probe round. `--probes-per-round` counts up to
+/// the width of a `u64`, and a duration multiplies by a `u32`, so a large count
+/// gives a product that no duration holds. The answer is then none, and the
+/// caller reads that as a time that no timeout reaches.
+fn probe_time(interval: Duration, probes_per_round: u64) -> Option<Duration> {
+    u32::try_from(probes_per_round)
+        .ok()
+        .and_then(|rounds| interval.checked_mul(rounds))
 }
 
 /// The seed of a hunt that named none.
@@ -1870,7 +1911,7 @@ mod tests {
         value_name, AddressFamily, Cli, Command, Display, EndReason, Family, HuntConfig, Multipath,
         Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, Target,
         HUNT_ROUNDS_DEFAULT, PROBES_PER_ROUND_DEFAULT, RESOLVE_PORT, SOURCE_FALLBACK,
-        TARGET_TIMEOUT_DEFAULT, UNKNOWN,
+        TARGET_TIMEOUT_DEFAULT, TIME_BEYOND_A_DURATION, UNKNOWN,
     };
     use crate::record::{
         Hop, Privilege, Record, RoundRecord, RunConfig, RunId, RunRecord, TtlRange, Writer,
@@ -3840,8 +3881,8 @@ resolved configuration:
     #[test]
     fn a_hunt_takes_the_timeout_of_a_destination_that_the_command_line_named() {
         assert_eq!(
-            hunt(&["krt", HUNT, "--target-timeout", "2s"]).target_timeout,
-            Duration::from_secs(2)
+            hunt(&["krt", HUNT, "--target-timeout", "5s"]).target_timeout,
+            Duration::from_secs(5)
         );
     }
 
@@ -3981,6 +4022,26 @@ resolved configuration:
         }
     }
 
+    /// A count of probe rounds whose time no duration holds is rejected.
+    ///
+    /// `--probes-per-round` counts up to the width of a `u64`, and the time
+    /// that such a count takes runs past every duration. The check reads that
+    /// time as one that no timeout reaches, so it refuses the line in the place
+    /// of a panic or a product that wrapped.
+    #[test]
+    fn a_count_of_probe_rounds_that_no_duration_holds_is_rejected() {
+        let count = u64::MAX.to_string();
+        let reason = contradiction(&["krt", HUNT, "--probes-per-round", &count]);
+        assert!(
+            reason.contains(&count),
+            "the reason names the count: {reason}"
+        );
+        assert!(
+            reason.contains(TIME_BEYOND_A_DURATION),
+            "the reason says that no duration holds the time it needs: {reason}"
+        );
+    }
+
     /// A timeout raised for the probe rounds of its line holds them.
     #[test]
     fn a_target_timeout_that_holds_the_probe_rounds_resolves() {
@@ -4006,7 +4067,9 @@ resolved configuration:
     #[test]
     fn the_default_timeout_of_a_hunt_holds_the_default_probe_rounds() {
         let config = resolve(&["krt", HUNT]);
-        let plan = config.hunt.expect("the command line must resolve to a hunt");
+        let plan = config
+            .hunt
+            .expect("the command line must resolve to a hunt");
         let rounds = u32::try_from(plan.probes_per_round).expect("the default counts a few rounds");
         assert!(
             plan.target_timeout > config.interval * rounds,
@@ -4105,7 +4168,7 @@ resolved configuration:
             "--probes-per-round",
             "5",
             "--target-timeout",
-            "2s",
+            "20s",
             "--seed",
             "12345",
         ])
@@ -4116,7 +4179,7 @@ resolved configuration:
             "probes per round:",
             "5",
             "target timeout:",
-            "2s",
+            "20s",
             "seed:",
             "12345",
         ] {
