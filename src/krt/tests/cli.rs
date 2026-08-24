@@ -525,6 +525,11 @@ fn the_help_of_the_hunt_names_the_two_flags_that_count_a_round() {
 }
 
 /// The help of the whole tool names the command.
+///
+/// The `Commands:` list of `clap` names it, and the paragraph above the usage
+/// line names it too. That paragraph is the first text a reader of the page
+/// meets, and it says what `krt` does, so it covers all three of the modes and
+/// not two of them.
 #[test]
 fn the_long_help_names_the_command_that_hunts() {
     let result = run(&[FLAG_HELP]);
@@ -532,6 +537,14 @@ fn the_long_help_names_the_command_that_hunts() {
         result.stdout.contains(HUNT),
         "the help page names the `{HUNT}` command: {}",
         result.stdout
+    );
+    let (about, _) = result
+        .stdout
+        .split_once(USAGE_HEADING)
+        .unwrap_or_else(|| panic!("the help page holds a usage line: {}", result.stdout));
+    assert!(
+        about.contains(HUNT),
+        "the paragraph above the usage line names the `{HUNT}` command: {about}"
     );
 }
 
