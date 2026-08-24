@@ -333,7 +333,7 @@ fn close<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{record, Limits, Outcome, RunError};
-    use crate::live::{Command, RunFacts, Screen, Table};
+    use crate::live::{Command, RunFacts, Screen, Table, Window};
     use crate::names::{Lookup, Namer, NoLookups};
     use crate::record::{
         EndReason, EndRecord, Family, Hop, NameRecord, Privilege, Record, Recording, RoundRecord,
@@ -459,6 +459,14 @@ mod tests {
     /// The nominal frame is 97 columns wide: every column of the table, with a
     /// Host column of 30.
     const WIDTH: u16 = 97;
+
+    /// The rows of the window that the live table of a test draws in.
+    ///
+    /// No probe measured that window, so the table fits its frames to no
+    /// height and draws every line of them. A test of this file reads what a
+    /// frame holds, and a height that left rows out would take those lines off
+    /// the frame.
+    const NO_ROWS: Option<u16> = None;
 
     /// The period of one round of the run that a live table shows.
     const AN_INTERVAL: Duration = Duration::from_secs(1);
@@ -1651,7 +1659,7 @@ mod tests {
             },
             painted.clone(),
             FakeKeys::of(&[&[Command::Pause], &[], &[], &[Command::Pause]]),
-            WIDTH,
+            Window::new(WIDTH, NO_ROWS),
         );
         let outcome = ran_on(
             file.path(),

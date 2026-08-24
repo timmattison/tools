@@ -1256,6 +1256,10 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
 /// The guard comes before the table, because the table draws into the terminal
 /// that the guard takes.
 ///
+/// The table takes the columns and the rows of that terminal one time, at the
+/// start of the run. A window that changes size while the run stands leaves the
+/// frame at the size it started with.
+///
 /// # Errors
 ///
 /// Returns the reason and [`EXIT_FAILURE`] when the terminal refused the hold.
@@ -1285,11 +1289,12 @@ fn screen_of(
         interval: config.interval,
         path: path.to_owned(),
     };
+    let (columns, rows) = ui::frame_size();
     let table = live::Table::new(
         facts,
         std::io::stdout(),
         live::Keyboard,
-        ui::frame_columns(),
+        live::Window::new(columns, rows),
     );
     Ok((Box::new(table), Some(guard)))
 }

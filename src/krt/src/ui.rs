@@ -841,6 +841,35 @@ pub(crate) fn frame_columns() -> u16 {
     frame_columns_of(termsize::controlling_columns())
 }
 
+/// The number of terminal columns that a frame draws in, and the number of
+/// rows that the window holds.
+///
+/// The columns follow the rule of [`frame_columns`], and the rows come straight
+/// off the probe. The rows are `None` for a window that no probe measured: a
+/// run whose standard output is no terminal, a terminal that the probe failed
+/// to read, and a terminal that carries no window. A caller that holds no row
+/// count holds no height to fit a frame to, and it draws every line of that
+/// frame.
+///
+/// One probe answers both numbers, because the terminal answers both of them in
+/// one ioctl. A second call would ask the same terminal the same question, and
+/// a window that changed size between the two would answer with a width of one
+/// window and a height of another.
+///
+/// A live table asks this question, because it draws its frames into a window
+/// that holds a fixed number of rows. A replay asks [`frame_columns`], because
+/// it prints its lines into whatever scrollback the terminal keeps.
+pub(crate) fn frame_size() -> (u16, Option<u16>) {
+    if !std::io::stdout().is_terminal() {
+        return (frame_columns_of(None), None);
+    }
+    let size = termsize::controlling_size();
+    (
+        frame_columns_of(size.map(|(columns, _)| columns)),
+        size.map(|(_, rows)| rows),
+    )
+}
+
 /// The number of terminal columns that a frame draws in, from the answer that
 /// the terminal gave.
 ///

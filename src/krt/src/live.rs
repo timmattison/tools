@@ -234,15 +234,46 @@ pub(crate) struct RunFacts {
     pub(crate) path: PathBuf,
 }
 
+/// The window that a live table draws its frames in.
+///
+/// The two numbers travel as one value, because the table reads both of them
+/// for one purpose: a frame stands in the window of the terminal, and a frame
+/// that ran past either edge of that window would lose the part that ran past
+/// it.
+pub(crate) struct Window {
+    /// The number of terminal columns that a frame draws in.
+    columns: u16,
+    /// The number of rows that the window holds, and `None` for a window that
+    /// no probe measured.
+    rows: Option<u16>,
+}
+
+impl Window {
+    /// A window of these columns, and of these rows.
+    ///
+    /// `rows` is `None` for a window that no probe measured. Such a window
+    /// holds every line of a frame, which is the rule of the columns applied to
+    /// the height: a run that cannot measure the terminal draws the whole frame
+    /// and lets the terminal decide what it shows.
+    pub(crate) fn new(columns: u16, rows: Option<u16>) -> Self {
+        Self { columns, rows }
+    }
+}
+
 /// The live table of a run.
 ///
 /// The table folds every round that arrives, and it draws the frame of that
 /// fold. A run that draws this table holds the terminal in raw mode on the
 /// alternate screen, so each draw clears the screen and moves the cursor to the
-/// origin first, and every line ends with a carriage return and a line feed.
-/// Raw mode returns no carriage on a bare line feed, and a frame of bare line
-/// feeds walks down the screen one column further to the right for each line of
-/// it.
+/// origin first, and one carriage return with one line feed stands between two
+/// lines of a frame. Raw mode returns no carriage on a bare line feed, and a
+/// frame of bare line feeds walks down the screen one column further to the
+/// right for each line of it.
+///
+/// The frame fits the window of the terminal. A frame of more lines than that
+/// window holds keeps its head and its footer and drops the rows of the highest
+/// TTLs, because a frame that ran past the foot of the window scrolls its own
+/// header line off the top of an alternate screen that keeps no scrollback.
 pub(crate) struct Table<W: Write, K: Keys> {
     /// The facts of the run that the header line names.
     facts: RunFacts,
@@ -275,8 +306,8 @@ pub(crate) struct Table<W: Write, K: Keys> {
     sink: W,
     /// Where the commands come from.
     keys: K,
-    /// The number of terminal columns that a frame draws in.
-    width: u16,
+    /// The window that the frames draw in.
+    window: Window,
 }
 
 impl<W: Write, K: Keys> Table<W, K> {
@@ -285,7 +316,7 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// The names start on. A reader who wants the raw addresses asks for them
     /// with a key, and a run that resolves no name shows the addresses anyway,
     /// because the map of the names then stays empty.
-    pub(crate) fn new(facts: RunFacts, sink: W, keys: K, width: u16) -> Self {
+    pub(crate) fn new(facts: RunFacts, sink: W, keys: K, window: Window) -> Self {
         Self {
             file: crate::file_name(&facts.path),
             facts,
@@ -298,7 +329,7 @@ impl<W: Write, K: Keys> Table<W, K> {
             help: false,
             sink,
             keys,
-            width,
+            window,
         }
     }
 
@@ -341,7 +372,7 @@ impl<W: Write, K: Keys> Table<W, K> {
             },
             destination: Some(self.facts.address),
         };
-        let mut lines = frame.lines(self.width);
+        let mut lines = frame.lines(self.window.columns);
         if self.paused {
             lines.push(String::new());
             lines.push(PAUSED.to_owned());
@@ -729,7 +760,7 @@ impl Drop for TerminalGuard {
 mod tests {
     use super::{
         classify, install_panic_hook, restore_panic_hook, status_line, Clock, Command, Headless,
-        Keys, NoKeys, PanicHook, RunFacts, Screen, SystemClock, Table,
+        Keys, NoKeys, PanicHook, RunFacts, Screen, SystemClock, Table, Window,
     };
     use crate::record::{NameRecord, RoundRecord, RunId};
     use crate::testing::{address, round, FakeKeys};
@@ -755,6 +786,13 @@ mod tests {
     /// Host column of 30. The rows of `tests/replay.rs` stand at that same
     /// width, so a row of this file reads as a row of that one.
     const WIDTH: u16 = 97;
+
+    /// The rows of a window that no probe measured.
+    ///
+    /// Such a window fits a frame to no height, so the table draws every line
+    /// of it. Every table below takes this window, and the tests of the height
+    /// name a window of their own.
+    const NO_ROWS: Option<u16> = None;
 
     /// The destination of every table below.
     const DESTINATION: &str = "example.com";
@@ -901,7 +939,7 @@ mod tests {
     /// A table that draws into bytes, reads `keys`, and heads its frames with
     /// the recorded file at `path`.
     fn table_at<K: Keys>(path: PathBuf, keys: K) -> Table<Vec<u8>, K> {
-        Table::new(facts_at(path), Vec::new(), keys, WIDTH)
+        Table::new(facts_at(path), Vec::new(), keys, Window::new(WIDTH, NO_ROWS))
     }
 
     /// A sink that counts the calls of [`Write::write`] that reach it.
@@ -936,7 +974,7 @@ mod tests {
             facts_at(temp_path("writes")),
             Counted { writes: 0 },
             FakeKeys::of(&[]),
-            WIDTH,
+            Window::new(WIDTH, NO_ROWS),
         )
     }
 
@@ -992,6 +1030,123 @@ mod tests {
     /// One round of one TTL, which the router answered.
     fn one_round() -> RoundRecord {
         round(TTL, TTL, &[(TTL, ROUTER, RTT)])
+    }
+
+    /// The number of lines that stand above the rows of the path: the header
+    /// line, the blank line under it, and the column header.
+    ///
+    /// The test spells the count, and the module reads it off the two
+    /// constants of `ui.rs`. That is on purpose, as the word of the pause is:
+    /// these three lines are what a reader of a clamped frame keeps.
+    const HEAD_LINES: usize = 3;
+
+    /// The start of the column header of every frame.
+    ///
+    /// The TTL column and the Host column never drop, so this text starts the
+    /// column header at every width.
+    const COLUMN_HEADER_START: &str = " TTL  Host";
+
+    /// The number of columns that the TTL of a row takes, with the one column
+    /// that stands to the left of it.
+    const TTL_COLUMNS: usize = 4;
+
+    /// The text between two columns of a frame.
+    const COLUMN_GAP: &str = "  ";
+
+    /// The number of TTLs of the path that the tall table below folds.
+    ///
+    /// The head takes three lines and this path takes twenty, so the frame of
+    /// it stands inside a window of [`WINDOW_ROWS`] rows on its own, and it
+    /// runs past the foot of that window the moment a key asks for the pause
+    /// and the list of the keys.
+    const TALL_PATH: u8 = 20;
+
+    /// The network of the address that answers at each TTL of that path.
+    const TALL_NETWORK: &str = "10.0.0";
+
+    /// The number of rows of a window too short for that path.
+    ///
+    /// The head takes three of these rows, and the line that counts the rows
+    /// which went out of the frame takes one, so six rows of the path stand.
+    const SHORT_ROWS: u16 = 10;
+
+    /// The last TTL of the tall path that a window of [`SHORT_ROWS`] rows
+    /// holds.
+    const LAST_KEPT_TTL: u8 = 6;
+
+    /// The first TTL of that path that such a window leaves out.
+    const FIRST_DROPPED_TTL: u8 = 7;
+
+    /// The line that closes the rows of a frame in a window of [`SHORT_ROWS`]
+    /// rows.
+    ///
+    /// Six of the twenty rows of the path stand, so fourteen of them go out of
+    /// the frame.
+    ///
+    /// The test spells the line, and the module builds the same line out of a
+    /// count and the name of a row. That is on purpose, as the word of the
+    /// pause is: this line is what a reader of the screen sees.
+    const DROPPED_LINE: &str = "+14 rows";
+
+    /// The number of rows of the window of a common terminal.
+    ///
+    /// The head and the tall path take 23 of these 24 rows. The pause and the
+    /// list of the keys take eight lines more, so a frame that carries both of
+    /// them runs past the foot of this window.
+    const WINDOW_ROWS: u16 = 24;
+
+    /// The line that closes the rows of that crowded frame.
+    ///
+    /// The head takes three rows, the pause and the list of the keys take
+    /// eight, and this line takes one, so twelve of the twenty rows of the path
+    /// stand and eight go out of the frame.
+    const CROWDED_LINE: &str = "+8 rows";
+
+    /// The mark that opens the line which counts the rows that a frame left
+    /// out.
+    ///
+    /// No other line of a frame opens with it: the header line opens with the
+    /// name of the tool, and a row of the path opens with the number of a TTL.
+    const MORE_MARK: char = '+';
+
+    /// The address that answers at one TTL of the tall path.
+    fn tall_host(ttl: u8) -> String {
+        format!("{TALL_NETWORK}.{ttl}")
+    }
+
+    /// The start of the row of one TTL of that path: the number of the TTL, and
+    /// the address that answered at it.
+    fn tall_row(ttl: u8) -> String {
+        format!("{ttl:>TTL_COLUMNS$}{COLUMN_GAP}{}", tall_host(ttl))
+    }
+
+    /// One round that answered at every TTL of the tall path.
+    fn a_tall_round() -> RoundRecord {
+        let hosts: Vec<String> = (TTL..=TALL_PATH).map(tall_host).collect();
+        let hops: Vec<(u8, &str, f64)> = (TTL..=TALL_PATH)
+            .zip(hosts.iter())
+            .map(|(ttl, host)| (ttl, host.as_str(), RTT))
+            .collect();
+        round(TTL, TALL_PATH, &hops)
+    }
+
+    /// A table that draws into bytes in a window of `rows` rows, and that takes
+    /// the keys of a script.
+    fn table_in(rows: Option<u16>, script: &[&[Command]]) -> Table<Vec<u8>, FakeKeys> {
+        Table::new(
+            facts_at(temp_path("window")),
+            Vec::new(),
+            FakeKeys::of(script),
+            Window::new(WIDTH, rows),
+        )
+    }
+
+    /// A table of the tall path in a window of `rows` rows, which drew the
+    /// frame of that path already.
+    fn tall_table(rows: Option<u16>, script: &[&[Command]]) -> Table<Vec<u8>, FakeKeys> {
+        let mut screen = table_in(rows, script);
+        screen.round(&a_tall_round());
+        screen
     }
 
     /// The TTL that the destination answered at.
@@ -1163,6 +1318,135 @@ mod tests {
         assert!(
             lines.iter().any(|line| line == ONE_ROUND_ROW),
             "the row of the TTL stands under that header: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_taller_than_the_window_keeps_the_near_hops_and_counts_the_rest() {
+        // The alternate screen keeps no scrollback. A frame of more lines than
+        // the window holds scrolls its own header line off the top of that
+        // window at every draw, and nothing brings the line back.
+        let screen = tall_table(Some(SHORT_ROWS), &[]);
+        let lines = painted(&screen.sink);
+
+        assert!(
+            lines.len() <= usize::from(SHORT_ROWS),
+            "the frame stands inside the {SHORT_ROWS} rows of the window: {lines:?}"
+        );
+        assert!(
+            lines
+                .first()
+                .is_some_and(|line| line.starts_with(ONE_ROUND_HEADER)),
+            "the header line stands, so the reader keeps the destination, the round, and the file: {lines:?}"
+        );
+        assert!(
+            lines
+                .get(HEAD_LINES - 1)
+                .is_some_and(|line| line.starts_with(COLUMN_HEADER_START)),
+            "the column header stands under it, so every row that is left reads: {lines:?}"
+        );
+        for (index, ttl) in (TTL..=LAST_KEPT_TTL).enumerate() {
+            assert!(
+                lines
+                    .get(HEAD_LINES + index)
+                    .is_some_and(|line| line.starts_with(&tall_row(ttl))),
+                "the hops nearest the source stand under that header, in TTL order: {lines:?}"
+            );
+        }
+        for ttl in FIRST_DROPPED_TTL..=TALL_PATH {
+            assert!(
+                !lines.iter().any(|line| line.starts_with(&tall_row(ttl))),
+                "the TTLs that the window does not hold go out of the frame: {lines:?}"
+            );
+        }
+        assert_eq!(
+            last_lines(&lines, 1),
+            [DROPPED_LINE],
+            "and one line says how many rows the frame left out: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_window_that_no_probe_measured_leaves_every_row_standing() {
+        // A run that cannot measure the terminal knows no height to fit a
+        // frame to. It draws the whole frame and lets the terminal decide what
+        // it shows, which is the rule of the columns applied to the height.
+        let screen = tall_table(NO_ROWS, &[]);
+        let lines = painted(&screen.sink);
+
+        for ttl in TTL..=TALL_PATH {
+            assert!(
+                lines.iter().any(|line| line.starts_with(&tall_row(ttl))),
+                "the row of TTL {ttl} stands: {lines:?}"
+            );
+        }
+        assert!(
+            !lines.iter().any(|line| line.starts_with(MORE_MARK)),
+            "and no line counts a row that went out of the frame: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_fits_its_window_counts_no_row() {
+        let mut screen = table_in(Some(WINDOW_ROWS), &[]);
+        screen.round(&one_round());
+        let lines = painted(&screen.sink);
+
+        assert!(
+            lines.iter().any(|line| line == ONE_ROUND_ROW),
+            "the one row of the path stands: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with(MORE_MARK)),
+            "and a frame that the window holds whole leaves nothing out: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_clamped_frame_keeps_the_pause_and_the_list_of_the_keys() {
+        // The two of them are what the reader asked for with a key. A frame
+        // that dropped them answers that key press with nothing.
+        let mut screen = tall_table(Some(WINDOW_ROWS), &[&[Command::Pause, Command::Help]]);
+        screen.sink.clear();
+
+        screen.poll();
+        let lines = painted(&screen.sink);
+        let mut wanted = vec!["", PAUSED, ""];
+        wanted.extend(HELP_LINES);
+        assert_eq!(
+            last_lines(&lines, wanted.len()),
+            wanted,
+            "the mark of the pause and the list of the keys close the frame: {lines:?}"
+        );
+        assert!(
+            lines.len() <= usize::from(WINDOW_ROWS),
+            "the frame stands inside the {WINDOW_ROWS} rows of the window: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == CROWDED_LINE),
+            "and the rows of the path give up the lines that those two take: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_writes_no_line_end_under_its_last_line() {
+        // A frame of as many lines as the window holds ends with a line feed
+        // on the last row of that window, and the terminal then scrolls the
+        // whole window by one line. The header line goes off the top of an
+        // alternate screen that keeps no scrollback.
+        let mut screen = table(&[]);
+        screen.round(&one_round());
+        let text = glyphs(&screen.sink);
+        let lines = painted(&screen.sink);
+
+        assert!(
+            !text.ends_with(super::LINE_END),
+            "no line end closes the last line of a frame: {text:?}"
+        );
+        assert_eq!(
+            text.matches(super::LINE_END).count(),
+            lines.len().saturating_sub(1),
+            "and one line end stands between two lines of it: {lines:?}"
         );
     }
 
