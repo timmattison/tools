@@ -150,6 +150,33 @@ const FLAG_NO_DNS: &str = "--no-dns";
 #[cfg(target_os = "macos")]
 const FLAG_OUTPUT: &str = "--output";
 
+/// The flag that names the period of one round.
+#[cfg(target_os = "macos")]
+const FLAG_INTERVAL: &str = "--interval";
+
+/// The period of one round of a run whose first round no test waits for.
+///
+/// `src/krt/src/trace.rs` hands this period to the tracer as the shortest round
+/// and as the longest one, so the first round of such a run lands two minutes
+/// after the start. That is four times [`PATIENCE`], so every frame that a test
+/// of this period reads is a frame that stands in front of the first round.
+#[cfg(target_os = "macos")]
+const A_LONG_INTERVAL: &str = "2m";
+
+/// The start of the header line of a live table that folded no round.
+///
+/// The line names the destination, the address it resolved to, the source, the
+/// count of the rounds, and the period of one round. The name of the recorded
+/// file ends it, and each run of a test names a file of its own, so the text
+/// holds the start of the line and not the whole of it.
+///
+/// The test spells the line, and the table builds it out of the fields it
+/// holds. That is on purpose: `round 0` is what says that the frame stands in
+/// front of the first round of the run, and this line is what a reader of the
+/// terminal sees.
+#[cfg(target_os = "macos")]
+const NO_ROUND_HEADER: &str = " krt  127.0.0.1 → 127.0.0.1   src 127.0.0.1   round 0   2m   ";
+
 /// The byte that a terminal sends for Ctrl-C.
 ///
 /// Raw mode clears `ISIG`, so this byte reaches the process as a key press and
@@ -613,19 +640,29 @@ struct LiveRun {
 /// [`FLAG_NO_DNS`] looks nothing up.
 #[cfg(target_os = "macos")]
 fn live_run(recording: &Recording) -> LiveRun {
+    live_run_with(recording, &[])
+}
+
+/// Starts such a run with `flags` behind the flags that every live run of this
+/// file takes, and waits until the table draws its first frame.
+///
+/// A test that needs one more flag names that flag alone. The flags of the run
+/// which keep it offline stand here, in one place, so no test of this file can
+/// start a run that reaches the network.
+#[cfg(target_os = "macos")]
+fn live_run_with(recording: &Recording, flags: &[&str]) -> LiveRun {
     let lock = TracerLock::take();
     let output = recording.argument();
-    let terminal = Terminal::open(
-        WIDE,
-        &[
-            LOOPBACK,
-            FLAG_SOURCE,
-            LOOPBACK,
-            FLAG_NO_DNS,
-            FLAG_OUTPUT,
-            &output,
-        ],
-    );
+    let mut arguments = vec![
+        LOOPBACK,
+        FLAG_SOURCE,
+        LOOPBACK,
+        FLAG_NO_DNS,
+        FLAG_OUTPUT,
+        &output,
+    ];
+    arguments.extend_from_slice(flags);
+    let terminal = Terminal::open(WIDE, &arguments);
     // The table draws its first frame at the first round. A key that arrived in
     // front of the terminal going into raw mode reaches the line discipline and
     // not the run, so every test below presses its key after this wait.
@@ -737,5 +774,36 @@ fn a_live_run_gives_the_terminal_back_when_it_stops() {
     assert!(
         cursor < closing,
         "and the cursor stands again in front of that line: {shown:?}"
+    );
+}
+
+/// A live run draws its table when it takes the terminal, in front of the first
+/// round of that run.
+///
+/// The period of the run is what makes this a test. A run of
+/// [`A_LONG_INTERVAL`] takes its first round two minutes after the start, which
+/// is four times [`PATIENCE`], so the frame that this test reads is a frame
+/// that no round drew. A table that drew at the first round alone leaves the
+/// reader in front of an empty alternate screen for those two minutes, and that
+/// screen hides the lines which the run printed in front of it, so nothing at
+/// all says that the run started.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_run_draws_its_table_in_front_of_the_first_round() {
+    let recording = Recording::at("krt-terminal-opening-frame");
+    let mut run = live_run_with(&recording, &[FLAG_INTERVAL, A_LONG_INTERVAL]);
+    let shown = run.terminal.shown();
+
+    assert!(
+        shown.contains(NO_ROUND_HEADER),
+        "the header line of that frame names the run and the round it stands in front of: {shown:?}"
+    );
+
+    run.terminal.press(Q);
+    assert_eq!(
+        run.terminal.wait_for_exit(),
+        EXIT_SUCCESS,
+        "and the key of the reader stops the run, so the test leaves no tracer behind: {:?}",
+        run.terminal.shown()
     );
 }
