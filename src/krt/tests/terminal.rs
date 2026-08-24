@@ -618,6 +618,29 @@ fn stale(path: &Path) -> bool {
         .is_some_and(|age| age > STALE_LOCK)
 }
 
+/// A waiter that takes a stale lock over keeps patience for the run it starts.
+///
+/// The waiter of a file that a killed run left behind pays [`STALE_LOCK`] in
+/// front of the moment that file counts as stale. It removes the file then, and
+/// it takes the lock on the turn after that, so the patience it has left is
+/// [`LOCK_PATIENCE`] less the age. [`TracerLock::take`] reads its deadline after
+/// the removal, so a waiter of no patience left fails on the very turn that
+/// freed the lock, and the turn it fails on is one it never controlled: the
+/// clock of the age starts when the dead holder made the file, and the clock of
+/// the patience starts when the waiter arrives.
+///
+/// Twice the age is therefore the bound. A waiter that pays the whole wait for
+/// a stale file keeps half of its patience at the least, and that half is what
+/// it holds the lock with.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_waiter_that_takes_a_stale_lock_over_keeps_patience_for_the_run_it_starts() {
+    assert!(
+        LOCK_PATIENCE >= STALE_LOCK * 2,
+        "the patience of a waiter must stand clear of the age of a stale lock: {LOCK_PATIENCE:?} against {STALE_LOCK:?}"
+    );
+}
+
 /// One live run of the loopback, and the hold that run takes on the machine.
 #[cfg(target_os = "macos")]
 struct LiveRun {
