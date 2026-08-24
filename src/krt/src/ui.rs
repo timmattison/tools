@@ -86,23 +86,43 @@
 //!
 //! The render draws through `ratatui`, into a buffer that no terminal ever
 //! sees, and reads the lines back out of it. A `ratatui` buffer keeps the style
-//! of a cell beside the symbol of that cell and never inside it, so the lines
-//! that come back hold glyphs alone. No test of this render therefore needs
-//! `testcolor`, and this crate takes no `colored` dependency.
+//! of a cell beside the symbol of that cell and never inside it, so a read of
+//! the symbols alone gives glyphs alone. The read is therefore the one place
+//! that writes a color code, and it writes one only for the one cell of the
+//! table that carries a color: a probe that no hop answered, which the Recent
+//! column draws red. Nothing else of the render holds a code, and no code ever
+//! reaches the buffer, where it would take columns of the table that no reader
+//! sees.
+//!
+//! The color is a decision of the caller, which [`Paint`] carries, and not a
+//! decision that this module takes off the terminal. A live table asks for the
+//! color, because it draws on a terminal that the run holds in raw mode on the
+//! alternate screen. A live table of a reader who set `NO_COLOR` asks for the
+//! plain lines, and a replay asks for them too. This crate thus takes no
+//! `colored` dependency, and no test of this render needs `testcolor`: the two
+//! codes are constants of this module, and a test names them.
+//!
+//! The loss carries a glyph of its own as well as the color, because the run
+//! that prints no color is the normal one. A headless run, a pipe, a file, a
+//! run that the reader set `NO_COLOR` for, and a replay each print text with no
+//! color, and a red `▇` alone would read on every one of them as the slowest
+//! sample of the window.
 //!
 //! The module also writes the one duration text of the crate. The resolved
 //! configuration, the status line of a round, and the header line of the frame
 //! each name a period of time, and a second writer of a duration would print
 //! `1s` in one of those three places and `1000ms` in another.
 
-use crate::stats::{Address, HopStats, TtlRow};
+use crate::stats::{Address, HopStats, Sample, TtlRow};
 use crate::{ROUND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE, UNKNOWN};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Rect};
-use ratatui::style::Style;
-use ratatui::text::Text;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, Row, Table, Widget};
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::fmt;
 use std::io::IsTerminal;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -346,25 +366,158 @@ pub(crate) fn truncate_to_width(text: &str, width: usize) -> String {
     kept
 }
 
+/// The control sequence that paints what follows it red.
+const RED: &str = "\u{1b}[31m";
+
+/// The control sequence that gives the foreground of the terminal back.
+///
+/// The code names the default foreground of the terminal, and not a reset of
+/// every attribute, so it takes the red back and touches nothing else that the
+/// terminal holds.
+const PLAIN: &str = "\u{1b}[39m";
+
+/// Whether the lines of a frame carry the color of a terminal.
+///
+/// The caller decides, because the caller knows where its lines go and what the
+/// reader asked for. A live table draws on a terminal, and it drops the color
+/// for a reader who set `NO_COLOR`. A replay prints into whatever scrollback
+/// the terminal keeps, with no color at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Paint {
+    /// The lines hold glyphs alone.
+    Plain,
+    /// The mark of a lost probe stands between the codes that paint it red.
+    Colored,
+}
+
 /// The number of bars that the sparkline draws with.
-const LEVEL_COUNT: usize = 8;
+const LEVEL_COUNT: usize = 7;
 
 /// The bars of the sparkline, lowest first.
+///
+/// The set stops at `▇` and holds no `█`. A `█` paints the whole height of its
+/// cell, and the rows of the table stand one under the other, so a `█` of one
+/// row touches the bar of the row above it. The line between the two rows goes
+/// away, and a reader reads one block of ink. The empty top eighth that `▇`
+/// leaves is that line. The scale runs from the smallest sample of a window to
+/// the largest one, so the drop costs one step of resolution and no range at
+/// all.
 ///
 /// There is no ASCII fallback, and `CLAUDE.md` asks for it that way. A fallback
 /// of `.:|#` characters would draw a second, coarser picture of the same
 /// numbers, so a reader of one terminal and a reader of another would argue
 /// over a hop that the two pictures disagree about. Every terminal that this
-/// tool draws a table on prints these eight glyphs, and each of them takes one
+/// tool draws a table on prints these seven glyphs, and each of them takes one
 /// column, so the Recent column holds one sample for each column it is wide.
-const BARS: [char; LEVEL_COUNT] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+const BARS: [char; LEVEL_COUNT] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
+
+/// The mark of a probe that no hop answered.
+///
+/// The mark is no bar of [`BARS`], and that is what it is for. The color of a
+/// terminal is not always there: a headless run, a pipe, a file, a run that the
+/// reader set `NO_COLOR` for, and a replay each print text with no color. A red
+/// `▇` alone would read as the slowest sample of the window on every one of
+/// those runs, and a reader would take a lost probe for a slow answer.
+///
+/// The glyph takes one terminal column, as each bar does, so one sample of the
+/// history stands in one column of the Recent column either way.
+const NO_ANSWER: char = '╳';
 
 /// The count of the bars, as the arithmetic of the scale reads it.
 #[expect(
     clippy::cast_precision_loss,
-    reason = "the count of the bars is 8, and an `f64` holds every whole number below 2^53"
+    reason = "the count of the bars is 7, and an `f64` holds every whole number below 2^53"
 )]
 const LEVELS: f64 = LEVEL_COUNT as f64;
+
+/// One glyph of the Recent column, and what that glyph stands for.
+///
+/// The mark carries the meaning and not the color, so the one place that names
+/// a color is [`Mark::style`]. A column of glyphs alone would have to carry the
+/// codes of the color inside its text, and those codes would then reach the
+/// `ratatui` buffer as glyphs and take columns of the table that no reader ever
+/// sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// A glyph that stands in the foreground of the terminal: a bar of a
+    /// round-trip time, or a character of the heading of the column.
+    Glyph(char),
+    /// A probe that no hop answered.
+    Lost,
+}
+
+impl Mark {
+    /// The glyph that the mark draws.
+    fn glyph(self) -> char {
+        match self {
+            Self::Glyph(glyph) => glyph,
+            Self::Lost => NO_ANSWER,
+        }
+    }
+
+    /// The style that the mark draws in.
+    ///
+    /// A bar takes the foreground of the terminal, whatever that is. A reader
+    /// sets the colors of their own terminal, and a table that painted every
+    /// bar would argue with that choice for no gain: the height of the bar
+    /// already says what the bar says.
+    fn style(self) -> Style {
+        match self {
+            Self::Glyph(_) => Style::default(),
+            Self::Lost => Style::default().fg(Color::Red),
+        }
+    }
+}
+
+/// The Recent column of one row: one mark for each sample of the window.
+///
+/// The column travels as marks and not as text, because the glyphs of it do not
+/// all share a color. It is the one column of the table that carries a color at
+/// all.
+pub(crate) struct Recent(Vec<Mark>);
+
+impl Recent {
+    /// The column of a row that draws no sample at all.
+    fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    /// The column that draws one text in the foreground of the terminal.
+    ///
+    /// The column header takes this. Its heading is a word and not a picture of
+    /// a history, so every glyph of it stands in the color the reader set.
+    fn text(text: &str) -> Self {
+        Self(text.chars().map(Mark::Glyph).collect())
+    }
+
+    /// The cell of the table that draws this column.
+    ///
+    /// One span for each mark, so the `ratatui` buffer keeps the color of a
+    /// loss beside the symbol of it, and the read of the buffer finds the color
+    /// there. A cell of one style would paint the whole column or none of it.
+    fn cell(&self, alignment: Alignment) -> Cell<'static> {
+        let spans: Vec<Span<'static>> = self
+            .0
+            .iter()
+            .map(|mark| Span::styled(mark.glyph().to_string(), mark.style()))
+            .collect();
+        Cell::from(Text::from(Line::from(spans)).alignment(alignment))
+    }
+}
+
+/// The glyphs of the column, with no color at all.
+///
+/// The tests are the one caller. The render reaches the text of the column
+/// through [`Recent::cell`], which keeps the color of each mark.
+#[cfg(test)]
+impl fmt::Display for Recent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for mark in &self.0 {
+            write!(formatter, "{}", mark.glyph())?;
+        }
+        Ok(())
+    }
+}
 
 /// The recent round-trip times of one key, as a bar for each of them.
 ///
@@ -375,7 +528,7 @@ const LEVELS: f64 = LEVEL_COUNT as f64;
 ///
 /// The scale runs from the smallest to the largest sample **of the shown
 /// window**, and not of the whole history: the smallest takes `▁` and the
-/// largest takes `█`. A scale over the whole history would flatten the window
+/// largest takes `▇`. A scale over the whole history would flatten the window
 /// of a hop that was once slow and is not slow now, and that window is the part
 /// a reader is looking at.
 ///
@@ -383,7 +536,11 @@ const LEVELS: f64 = LEVEL_COUNT as f64;
 /// varies, and a flat line at the floor says that. The alternative, a flat line
 /// at the top, would draw the quietest hop of the path as the loudest one.
 ///
-/// A key with no sample, and a `width` of zero, each draw an empty string.
+/// A probe that no hop answered draws [`NO_ANSWER`] at the place of that probe,
+/// and it takes no part in the scale: such a probe measured no time, so no
+/// limit of the window can read it.
+///
+/// A key with no sample, and a `width` of zero, each draw an empty column.
 ///
 /// A sample that is not a finite number — `f64::NAN`, or an infinity — draws
 /// the lowest bar, and the scale does not read it at all. Such a sample does
@@ -391,9 +548,9 @@ const LEVELS: f64 = LEVEL_COUNT as f64;
 /// stand on, and every bar of the key would then read the same. One bad sample
 /// would hide the whole history of the hop, which is a worse answer than one
 /// bar that reads low.
-pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = f64>, width: usize) -> String {
+pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = Sample>, width: usize) -> Recent {
     if width == 0 {
-        return String::new();
+        return Recent::empty();
     }
 
     // The iterator states its length before it gives a sample, so the oldest
@@ -401,32 +558,50 @@ pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = f64>, width: usiz
     // copy that this function makes, and the history of the key stays where it
     // is.
     let skipped = samples.len().saturating_sub(width);
-    let shown: Vec<f64> = samples.skip(skipped).collect();
+    let shown: Vec<Sample> = samples.skip(skipped).collect();
 
-    // The scale reads only the samples that compare.
+    // The scale reads only the answers that compare. A lost probe measured no
+    // time, so it names no limit of the window.
     let mut lowest = f64::INFINITY;
     let mut highest = f64::NEG_INFINITY;
-    for sample in shown.iter().copied().filter(|sample| sample.is_finite()) {
-        lowest = lowest.min(sample);
-        highest = highest.max(sample);
+    for time in shown.iter().filter_map(finite_time) {
+        lowest = lowest.min(time);
+        highest = highest.max(time);
     }
     let span = highest - lowest;
 
-    shown
-        .iter()
-        .map(|&sample| {
-            // A window of one sample, and a window whose samples are all equal,
-            // each give a span of zero. A window that holds no sample which
-            // compares gives a span below zero, because the two limits stayed
-            // at the infinities that the fold started them at. Neither window
-            // divides.
-            if span <= 0.0 || !sample.is_finite() {
-                BARS[0]
-            } else {
-                bar_at((sample - lowest) / span)
-            }
-        })
-        .collect()
+    Recent(
+        shown
+            .iter()
+            .map(|sample| {
+                let Sample::Time(time) = *sample else {
+                    return Mark::Lost;
+                };
+                // A window of one sample, and a window whose samples are all
+                // equal, each give a span of zero. A window that holds no
+                // sample which compares gives a span below zero, because the
+                // two limits stayed at the infinities that the fold started
+                // them at. Neither window divides.
+                if span <= 0.0 || !time.is_finite() {
+                    Mark::Glyph(BARS[0])
+                } else {
+                    Mark::Glyph(bar_at((time - lowest) / span))
+                }
+            })
+            .collect(),
+    )
+}
+
+/// The round-trip time of one sample, when that sample holds a time which
+/// compares.
+///
+/// A lost probe measured no time, and a time that is not a finite number does
+/// not compare, so the scale of a window reads neither of them.
+fn finite_time(sample: &Sample) -> Option<f64> {
+    match *sample {
+        Sample::Time(time) if time.is_finite() => Some(time),
+        _ => None,
+    }
 }
 
 /// The bar of one sample, at its part of the span of the window.
@@ -719,22 +894,26 @@ enum Field {
 }
 
 impl Field {
-    /// The text that the field takes out of one row.
+    /// The cell that the field draws out of one row.
     ///
     /// A time reads the place it stands among the times, and
     /// [`standing_slots`] takes that place from [`TIME_HEADERS`]. The times of
     /// a row stand in the order of that same list, so the heading of a time and
     /// the number under it always name the same statistic.
-    fn text(self, row: &RowText) -> String {
-        match self {
+    ///
+    /// The Recent column builds its own cell. It is the one column of the table
+    /// whose glyphs do not all share a color, so it holds marks and not text.
+    fn cell(self, row: &RowText, alignment: Alignment) -> Cell<'static> {
+        let text = match self {
             Self::Ttl => row.ttl.clone(),
             Self::Host => row.host.clone(),
             Self::Counts { sent } => {
                 counts_text(&row.percent, row.mark, sent.then_some(row.sent.as_str()))
             }
             Self::Time(index) => row.times[index].clone(),
-            Self::Recent => row.recent.clone(),
-        }
+            Self::Recent => return row.recent.cell(alignment),
+        };
+        cell(text, alignment)
     }
 }
 
@@ -970,7 +1149,7 @@ impl Layout {
         Row::new(
             self.slots
                 .iter()
-                .map(|slot| cell(slot.field.text(text), slot.alignment))
+                .map(|slot| slot.field.cell(text, slot.alignment))
                 .collect::<Vec<Cell<'static>>>(),
         )
     }
@@ -1002,8 +1181,8 @@ struct RowText {
     sent: String,
     /// The five round-trip times, in the order the columns stand.
     times: [String; TIME_COLUMNS],
-    /// The sparkline of the recent round-trip times.
-    recent: String,
+    /// The sparkline of the recent samples.
+    recent: Recent,
 }
 
 /// The headings that stand above the rows of the path.
@@ -1019,7 +1198,7 @@ fn column_header() -> RowText {
         mark: LOSS_MARK,
         sent: SENT_HEADER.to_owned(),
         times: TIME_HEADERS.map(str::to_owned),
-        recent: RECENT_HEADER.to_owned(),
+        recent: Recent::text(RECENT_HEADER),
     }
 }
 
@@ -1087,7 +1266,11 @@ impl Frame<'_> {
     /// layout.
     ///
     /// Every line drops its trailing spaces. A terminal prints them as nothing.
-    pub(crate) fn lines(&self, width: u16) -> Vec<String> {
+    ///
+    /// `paint` says whether the lines carry the color of a terminal. The one
+    /// cell of the table that holds a color is the mark of a lost probe, which
+    /// [`Paint::Colored`] stands between the two codes that paint it red.
+    pub(crate) fn lines(&self, width: u16, paint: Paint) -> Vec<String> {
         let header_line = self.header.line();
         let layout = Layout::at(width);
         let table_width = layout.width();
@@ -1113,7 +1296,7 @@ impl Frame<'_> {
         );
 
         (0..height)
-            .map(|line| read_line(&buffer, line, buffer_width))
+            .map(|line| read_line(&buffer, line, buffer_width, paint))
             .collect()
     }
 
@@ -1269,7 +1452,7 @@ fn others_row(row: &TtlRow) -> RowText {
         mark: SHARE_MARK,
         sent: row.untracked().to_string(),
         times: TIME_HEADERS.map(|_| NO_NUMBER.to_owned()),
-        recent: String::new(),
+        recent: Recent::empty(),
     }
 }
 
@@ -1280,18 +1463,36 @@ fn others_row(row: &TtlRow) -> RowText {
 /// left there. The walk therefore steps over as many cells as the symbol is
 /// wide, or the line would grow one column for every wide glyph of it and a
 /// Japanese host name would push the numbers of its own row to the right.
-fn read_line(buffer: &Buffer, line: u16, width: u16) -> String {
+///
+/// A `ratatui` buffer keeps the style of a cell beside the symbol of that cell,
+/// so this walk is where a color of the table reaches the text. A run of red
+/// cells opens with one code and closes with one, and a line that ends inside
+/// such a run closes it at the end. No code ever stands where a cell holds
+/// none, so a `Paint::Plain` line reads character for character as it always
+/// did.
+fn read_line(buffer: &Buffer, line: u16, width: u16, paint: Paint) -> String {
     let mut text = String::new();
     let mut column = 0;
+    let mut red = false;
     while column < width {
-        let symbol = buffer
-            .cell((column, line))
-            .map_or(" ", ratatui::buffer::Cell::symbol);
+        let held = buffer.cell((column, line));
+        let symbol = held.map_or(" ", ratatui::buffer::Cell::symbol);
+        let wanted = paint == Paint::Colored && held.is_some_and(|cell| cell.fg == Color::Red);
+        if wanted != red {
+            text.push_str(if wanted { RED } else { PLAIN });
+            red = wanted;
+        }
         text.push_str(symbol);
         // A symbol that prints nothing still holds its cell, so the walk moves
         // on by one and never stands still.
         column += buffer_columns(symbol).max(1);
     }
+    if red {
+        text.push_str(PLAIN);
+    }
+    // The trailing spaces go away, and no code goes with them: a red cell holds
+    // the mark of a loss and never a space, so the code that closes a run of
+    // them already stands in front of the first space of the line.
     text.trim_end_matches(' ').to_owned()
 }
 
@@ -1299,10 +1500,10 @@ fn read_line(buffer: &Buffer, line: u16, width: u16) -> String {
 mod tests {
     use super::{
         display_width, frame_columns_of, render_duration, render_size, sparkline,
-        truncate_to_width, Frame, Header,
+        truncate_to_width, Frame, Header, Paint,
     };
     use crate::record::RoundRecord;
-    use crate::stats::HopTable;
+    use crate::stats::{HopTable, Sample};
     use crate::testing::{address, round};
     use std::collections::BTreeMap;
     use std::net::IpAddr;
@@ -1794,39 +1995,57 @@ mod tests {
         );
     }
 
-    /// The eight bars of the sparkline, lowest first.
+    /// The seven bars of the sparkline, lowest first.
     ///
     /// The test states them, and the module states them again. The two are on
     /// purpose: a test that read the constant of the module would agree with
     /// every set of glyphs the module ever holds, and the set of glyphs is the
     /// part of the sparkline a reader of the table sees.
-    const BARS: &str = "▁▂▃▄▅▆▇█";
+    const BARS: &str = "▁▂▃▄▅▆▇";
 
-    /// The bar of a set of samples, at a width.
+    /// The glyphs that a set of round-trip times draws, at a width.
+    ///
+    /// The glyphs and not the marks: the set of glyphs is the part of the
+    /// sparkline a reader of the table sees, and the color of a mark is what
+    /// the tests of the frame below read.
     fn bar(samples: &[f64], width: usize) -> String {
-        sparkline(samples.iter().copied(), width)
+        let times: Vec<Sample> = samples.iter().copied().map(Sample::Time).collect();
+        sparkline(times.into_iter(), width).to_string()
     }
 
     #[test]
     fn a_rising_ramp_draws_every_bar_of_the_set() {
-        // The samples run from 1 to 8, so the span is 7. The bar of a sample is
-        // its distance from the smallest one, over the span, times the eight
-        // bars: 0/7, 8/7, 16/7 ... which cut to 0, 1, 2, 3, 4, 5, 6, and the
-        // largest sample gives 8, which the clamp puts on the last bar.
+        // The samples run from 1 to 7, so the span is 6. The bar of a sample is
+        // its distance from the smallest one, over the span, times the seven
+        // bars: 0/6, 7/6, 14/6 ... which cut to 0, 1, 2, 3, 4, 5, and the
+        // largest sample gives 7, which the clamp puts on the last bar.
         assert_eq!(
-            bar(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 9),
+            bar(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], 9),
             BARS,
-            "eight samples one step apart draw each of the eight bars once"
+            "seven samples one step apart draw each of the seven bars once"
+        );
+    }
+
+    #[test]
+    fn the_highest_bar_leaves_the_top_of_its_cell_empty() {
+        // The rows of the table stand one under the other, so a bar that
+        // painted the whole height of its cell would touch the bar of the row
+        // above it. The line between the two rows would then go away, and a
+        // reader would read one block of ink.
+        assert_eq!(
+            bar(&[1.0, 2.0], 9),
+            "▁▇",
+            "the largest sample of a window takes a bar that leaves the top eighth of its cell empty"
         );
     }
 
     #[test]
     fn the_smallest_sample_takes_the_lowest_bar_and_the_largest_takes_the_highest() {
         // The samples run from 10 to 40, so the span is 30. The bar of 20 is
-        // (20 - 10) / 30 * 8 = 2.67, which cuts to the third bar. The bar of 30
-        // is (30 - 10) / 30 * 8 = 5.33, which cuts to the sixth bar.
+        // (20 - 10) / 30 * 7 = 2.33, which cuts to the third bar. The bar of 30
+        // is (30 - 10) / 30 * 7 = 4.67, which cuts to the fifth bar.
         let drawn = bar(&[10.0, 20.0, 30.0, 40.0], 9);
-        assert_eq!(drawn, "▁▃▆█", "the middle samples take the middle bars");
+        assert_eq!(drawn, "▁▃▅▇", "the middle samples take the middle bars");
         assert_eq!(
             drawn.chars().next(),
             Some('▁'),
@@ -1834,7 +2053,7 @@ mod tests {
         );
         assert_eq!(
             drawn.chars().next_back(),
-            Some('█'),
+            Some('▇'),
             "the largest sample takes the highest bar"
         );
     }
@@ -1878,12 +2097,12 @@ mod tests {
     fn the_bar_holds_the_last_samples_of_a_longer_history() {
         // The first two samples are far above the last four. A window of four
         // therefore drops them, and the scale of the window runs from 1 to 4:
-        // (2 - 1) / 3 * 8 = 2.67 cuts to the third bar, and (3 - 1) / 3 * 8 =
-        // 5.33 cuts to the sixth.
+        // (2 - 1) / 3 * 7 = 2.33 cuts to the third bar, and (3 - 1) / 3 * 7 =
+        // 4.67 cuts to the fifth.
         let history = [100.0, 200.0, 1.0, 2.0, 3.0, 4.0];
         assert_eq!(
             bar(&history, 4),
-            "▁▃▆█",
+            "▁▃▅▇",
             "the window holds the last four samples, and its scale reads only them"
         );
 
@@ -1893,7 +2112,7 @@ mod tests {
         // the most recent ones.
         assert_eq!(
             bar(&history, 6),
-            "▄█▁▁▁▁",
+            "▄▇▁▁▁▁",
             "a window that holds the whole history reads the large samples too"
         );
     }
@@ -1908,20 +2127,20 @@ mod tests {
     #[test]
     fn a_sample_that_is_not_a_number_keeps_the_bar_of_every_other_sample() {
         // A sample that does not compare takes the lowest bar and stays out of
-        // the scale. The ramp of eight therefore keeps each of its bars.
+        // the scale. The ramp of seven therefore keeps each of its bars.
         assert_eq!(
-            bar(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, f64::NAN], 9),
-            "▁▂▃▄▅▆▇█▁",
+            bar(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, f64::NAN], 9),
+            "▁▂▃▄▅▆▇▁",
             "the sample that is not a number draws the lowest bar and moves no other bar"
         );
         assert_eq!(
             bar(&[1.0, f64::NAN, 8.0], 9),
-            "▁▁█",
+            "▁▁▇",
             "the smallest and the largest sample keep their bars around a sample that is not a number"
         );
         assert_eq!(
             bar(&[1.0, 8.0], 9),
-            "▁█",
+            "▁▇",
             "the same two samples without it draw the same two bars"
         );
         assert_eq!(
@@ -1931,13 +2150,50 @@ mod tests {
         );
         assert_eq!(
             bar(&[1.0, f64::INFINITY, 8.0], 9),
-            "▁▁█",
+            "▁▁▇",
             "an infinity does not compare either, and it takes the lowest bar"
         );
         assert_eq!(
             bar(&[1.0, f64::NEG_INFINITY, 8.0], 9),
-            "▁▁█",
+            "▁▁▇",
             "an infinity below zero takes the lowest bar and holds the scale off the floor"
+        );
+    }
+
+    #[test]
+    fn the_mark_of_a_loss_is_no_bar_of_a_time() {
+        // A run that prints no color must still show the loss. A headless run,
+        // a pipe, a file, a run that the reader set `NO_COLOR` for, and a
+        // replay each print text with no color, so the mark of a lost probe
+        // stands apart from every bar by its glyph and not by its color alone.
+        // A mark that were one of the bars would read on every one of those
+        // runs as a round-trip time that the hop never gave.
+        let mut window: Vec<Sample> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+            .into_iter()
+            .map(Sample::Time)
+            .collect();
+        window.push(Sample::Lost);
+        let drawn = sparkline(window.into_iter(), 9).to_string();
+
+        let glyphs: Vec<char> = drawn.chars().collect();
+        let (bars, loss) = glyphs.split_at(glyphs.len().saturating_sub(1));
+        assert_eq!(
+            bars.iter().collect::<String>(),
+            BARS,
+            "the seven times of the window draw the seven bars: {drawn}"
+        );
+        let mark = loss
+            .first()
+            .copied()
+            .expect("the window holds the lost probe");
+        assert!(
+            !BARS.contains(mark),
+            "the mark {mark} of a lost probe is one of the bars {BARS}, so a run that prints no color reads that loss as a time"
+        );
+        assert_eq!(
+            UnicodeWidthChar::width(mark),
+            Some(1),
+            "the mark {mark} of a lost probe takes one terminal column, as each bar does, so one sample of the history stands in one column of the Recent column"
         );
     }
 
@@ -1948,7 +2204,7 @@ mod tests {
         for character in drawn.chars() {
             assert!(
                 BARS.contains(character),
-                "the bar {drawn} holds {character}, which is not one of the eight block elements"
+                "the bar {drawn} holds {character}, which is not one of the seven block elements"
             );
         }
         assert!(
@@ -2061,18 +2317,18 @@ mod tests {
     /// The rounds of [`golden_table`] state the arithmetic of every number
     /// here. The frame holds a named host, a TTL that never answered, a bare
     /// address, a TTL of two routers with an address row for each of them, the
-    /// star of the destination, and a sparkline.
+    /// star of the destination, a sparkline, and the mark of a lost probe.
     const GOLDEN_FRAME: [&str; 10] = [
         " krt  example.com → 93.184.216.34   src 1.2.3.4   round 4   1s   1.2.3.4-example.com.jsonl (2.1 MB)",
         "",
         " TTL  Host                             Loss%   Sent   Last    Min    Avg    Max  StDev  Recent",
-        "   1  router.lan (192.168.1.1)          0.0%      4    5.0    1.0    3.0    5.0    2.0  ▁▁██",
-        "   2  ???                             100.0%      4      -      -      -      -      -",
-        "   3  10.0.0.1                         50.0%      4   12.0    8.0   10.0   12.0    2.0  ▁█",
-        "   4  ae1.net (203.0.113.8) (+1)        0.0%      4   70.0   10.0   40.0   70.0   22.4  ▁▆▃█",
-        "      ├ ae1.net (203.0.113.8)          50.0%▹     2   30.0   10.0   20.0   30.0   10.0  ▁█",
-        "      └ 203.0.113.9                    50.0%▹     2   70.0   50.0   60.0   70.0   10.0  ▁█",
-        "   5  example.com (93.184.216.34) ★     0.0%      4   60.0   40.0   50.0   60.0   10.0  ▁▁██",
+        "   1  router.lan (192.168.1.1)          0.0%      4    5.0    1.0    3.0    5.0    2.0  ▁▁▇▇",
+        "   2  ???                             100.0%      4      -      -      -      -      -  ╳╳╳╳",
+        "   3  10.0.0.1                         50.0%      4   12.0    8.0   10.0   12.0    2.0  ▁╳▇╳",
+        "   4  ae1.net (203.0.113.8) (+1)        0.0%      4   70.0   10.0   40.0   70.0   22.4  ▁▅▃▇",
+        "      ├ ae1.net (203.0.113.8)          50.0%▹     2   30.0   10.0   20.0   30.0   10.0  ▁▇",
+        "      └ 203.0.113.9                    50.0%▹     2   70.0   50.0   60.0   70.0   10.0  ▁▇",
+        "   5  example.com (93.184.216.34) ★     0.0%      4   60.0   40.0   50.0   60.0   10.0  ▁▁▇▇",
     ];
 
     /// Folds every round into one table.
@@ -2106,12 +2362,15 @@ mod tests {
     /// lowest bar and the two largest take the highest.
     ///
     /// TTL 2 answers no round. The loss is 4 / 4 = 100.0 percent, and every
-    /// statistic of it holds no value.
+    /// statistic of it holds no value. Its window holds four lost probes, so
+    /// its sparkline draws four marks of a loss and no bar.
     ///
-    /// TTL 3 answers two of the four rounds, from `10.0.0.1`, at 8.0 and 12.0.
-    /// The loss is 2 / 4 = 50.0 percent. The mean is 20 / 2 = 10.0, the
-    /// distances are -2 and 2, whose squares sum to 8, so the variance is
-    /// 8 / 2 = 4.0 and the deviation is 2.0.
+    /// TTL 3 answers the first and the third round, from `10.0.0.1`, at 8.0 and
+    /// 12.0, and it loses the second and the fourth. The loss is
+    /// 2 / 4 = 50.0 percent. The mean is 20 / 2 = 10.0, the distances are -2
+    /// and 2, whose squares sum to 8, so the variance is 8 / 2 = 4.0 and the
+    /// deviation is 2.0. Its window holds the two answers and the two lost
+    /// probes in the order the rounds arrived.
     ///
     /// TTL 4 answers each round, from two routers. `203.0.113.8` answers the
     /// first and the third round at 10.0 and 30.0, and `203.0.113.9` answers
@@ -2190,12 +2449,30 @@ mod tests {
             .collect()
     }
 
-    /// The lines of a frame over one table, at a width.
+    /// The lines of a frame over one table, at a width, with no color at all.
+    ///
+    /// Most tests below read the glyphs of a frame, so the plain paint is the
+    /// one they ask for.
     fn lines_of(
         table: &HopTable,
         names: &BTreeMap<IpAddr, String>,
         destination: Option<IpAddr>,
         width: u16,
+    ) -> Vec<String> {
+        painted_lines_of(table, names, destination, width, Paint::Plain)
+    }
+
+    /// The lines of a frame over one table, at a width, in a paint.
+    ///
+    /// Every frame of these tests comes out of this one call. A test of the
+    /// glyphs and a test of the color therefore read the same render, and a
+    /// frame that the two of them compare differs in the paint alone.
+    fn painted_lines_of(
+        table: &HopTable,
+        names: &BTreeMap<IpAddr, String>,
+        destination: Option<IpAddr>,
+        width: u16,
+        paint: Paint,
     ) -> Vec<String> {
         Frame {
             header: golden_header(),
@@ -2203,7 +2480,7 @@ mod tests {
             names,
             destination,
         }
-        .lines(width)
+        .lines(width, paint)
     }
 
     /// The lines of the golden frame at a width.
@@ -2274,6 +2551,17 @@ mod tests {
     /// no such line.
     fn line(lines: &[String], index: usize) -> &str {
         lines.get(index).map_or("", String::as_str)
+    }
+
+    /// The Recent column of one row, which is the last field of its line.
+    ///
+    /// Every row that draws a sparkline ends its line with that sparkline, and
+    /// a sparkline holds no space, so the last field of the line is the whole
+    /// of the column.
+    fn recent_of(line: &str) -> String {
+        fields_with_columns(line)
+            .pop()
+            .map_or_else(String::new, |(_, text)| text)
     }
 
     /// The lines of a frame from an index, or none when the frame is shorter
@@ -2432,7 +2720,7 @@ mod tests {
     /// 10.0 from the mean, so the deviation is 10.0. The window of the
     /// sparkline runs from 10.0 to 30.0, so the first sample takes the lowest
     /// bar and the second takes the highest.
-    const TWO_ROUND_TAIL: &str = "  0.0%      2   30.0   10.0   20.0   30.0   10.0  ▁█";
+    const TWO_ROUND_TAIL: &str = "  0.0%      2   30.0   10.0   20.0   30.0   10.0  ▁▇";
 
     #[test]
     fn a_cut_host_keeps_the_star_of_the_destination() {
@@ -2497,6 +2785,92 @@ mod tests {
             display_width(&host_column(row, HOST_WIDTH)),
             HOST_WIDTH,
             "the printed cell of the host fills the Host column and no more"
+        );
+    }
+
+    #[test]
+    fn a_lost_probe_draws_a_mark_of_its_own_and_no_address_row_draws_it() {
+        // Four rounds probe TTL 1. The left router answers the first round and
+        // the fourth, the right router answers the second, and the third round
+        // gets nothing back. The Recent column of the TTL therefore draws four
+        // marks, and the third of them is the loss. A column of three bars
+        // would read as the column of a TTL that lost nothing, and the Loss%
+        // beside it would contradict the one picture of the recent behavior of
+        // that TTL.
+        //
+        // The times of the window are 10, 30, and 20, so its scale runs from 10
+        // to 30: 10 takes the lowest bar, 30 takes the highest, and 20 stands
+        // at half of the span, which is the fourth bar of the seven. The loss
+        // takes no part in the scale, because a lost probe measures no time.
+        //
+        // Neither address row draws a loss. The round that the right router
+        // answered is no loss of the left one, and the round that no router
+        // answered is a loss of the TTL and of neither of them. A mark on an
+        // address row would report a loss that the Share% beside it
+        // contradicts.
+        let table = table_of(&[
+            round(1, 1, &[(1, LEFT_ROUTER, 10.0)]),
+            round(1, 1, &[(1, RIGHT_ROUTER, 30.0)]),
+            round(1, 1, &[]),
+            round(1, 1, &[(1, LEFT_ROUTER, 20.0)]),
+        ]);
+        let lines = lines_of(&table, &BTreeMap::new(), None, NOMINAL_WIDTH);
+        assert_eq!(
+            recent_of(line(&lines, 3)),
+            "▁▇╳▄",
+            "the ttl draws one mark for each probe, and the lost probe takes a mark of its own"
+        );
+        assert_eq!(
+            recent_of(line(&lines, 4)),
+            "▁▇",
+            "the left router draws its two answers and no loss"
+        );
+        assert_eq!(
+            recent_of(line(&lines, 5)),
+            "▁",
+            "the right router draws its one answer and no loss"
+        );
+    }
+
+    #[test]
+    fn the_mark_of_a_loss_is_the_one_cell_of_the_table_that_carries_a_color() {
+        // The color of this table has one job: it says which row of the path
+        // drops its probes. A color anywhere else takes that meaning away. The
+        // host, the numbers, the bars, and the column header all stand in the
+        // foreground the reader set, and this test is the one that fails when
+        // one of them takes a color of its own.
+        //
+        // The golden run lost probes, so its colored lines carry codes that its
+        // plain lines do not. That half comes first, because it holds the other
+        // half honest: a render that painted nothing at all would pass the
+        // claim below and prove nothing.
+        let golden = golden_table();
+        let names = golden_names();
+        let destination = Some(address(TARGET));
+        assert_ne!(
+            painted_lines_of(&golden, &names, destination, NOMINAL_WIDTH, Paint::Colored),
+            painted_lines_of(&golden, &names, destination, NOMINAL_WIDTH, Paint::Plain),
+            "the mark of a lost probe carries a color that the plain lines hold nowhere"
+        );
+        // Every TTL of this run answered every round, so no cell of its table
+        // holds a loss. The two sets of lines therefore agree character for
+        // character. A color that reached a bar, a name, a number, or the
+        // heading of a column stands in the colored lines alone, and the two
+        // sets part company.
+        let answered = table_of(&[
+            round(1, 2, &[(1, FIRST_HOP, 1.0), (2, TARGET, 40.0)]),
+            round(1, 2, &[(1, FIRST_HOP, 5.0), (2, TARGET, 60.0)]),
+        ]);
+        assert_eq!(
+            painted_lines_of(
+                &answered,
+                &names,
+                destination,
+                NOMINAL_WIDTH,
+                Paint::Colored
+            ),
+            painted_lines_of(&answered, &names, destination, NOMINAL_WIDTH, Paint::Plain),
+            "a frame that lost no probe reads the same with the color as without it"
         );
     }
 

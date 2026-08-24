@@ -375,6 +375,12 @@ pub(crate) struct Table<W: Write, K: Keys> {
     keys: K,
     /// The window that the frames draw in.
     window: Window,
+    /// Whether the frames carry the color of a terminal.
+    ///
+    /// The reader of the terminal decides, and the caller reads that answer
+    /// off the environment of the run. A reader who set `NO_COLOR` gets the
+    /// frames with glyphs alone.
+    paint: ui::Paint,
 }
 
 impl<W: Write, K: Keys> Table<W, K> {
@@ -397,7 +403,11 @@ impl<W: Write, K: Keys> Table<W, K> {
     ///
     /// A table that exists holds a frame, and no caller can forget to ask for
     /// one.
-    pub(crate) fn new(facts: RunFacts, sink: W, keys: K, window: Window) -> Self {
+    ///
+    /// `paint` says whether the frames carry the color of a terminal. The
+    /// caller reads that answer off the environment of the run, because a
+    /// reader who wants no color says so with `NO_COLOR`.
+    pub(crate) fn new(facts: RunFacts, sink: W, keys: K, window: Window, paint: ui::Paint) -> Self {
         let mut table = Self {
             file: crate::file_name(&facts.path),
             facts,
@@ -411,6 +421,7 @@ impl<W: Write, K: Keys> Table<W, K> {
             sink,
             keys,
             window,
+            paint,
         };
         table.draw();
         table
@@ -458,7 +469,7 @@ impl<W: Write, K: Keys> Table<W, K> {
             },
             destination: Some(self.facts.address),
         };
-        let mut body = frame.lines(self.window.columns);
+        let mut body = frame.lines(self.window.columns, self.paint);
         // The head comes off the front of the frame, because a frame that the
         // window does not hold keeps the head and drops rows of the path. A
         // frame holds those lines at every width, and the `min` says so anyway.
@@ -871,6 +882,7 @@ mod tests {
     };
     use crate::record::{NameRecord, RoundRecord, RunId};
     use crate::testing::{address, round, FakeKeys};
+    use crate::ui::Paint;
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::cell::Cell;
@@ -973,6 +985,20 @@ mod tests {
     /// The escape character that starts every control sequence of a draw.
     const ESCAPE: char = '\u{1b}';
 
+    /// The mark that the Recent column draws for a probe that no hop answered.
+    ///
+    /// The test spells the glyph, and `ui.rs` spells it again. That is on
+    /// purpose, as the word of the pause is: a test that read the constant of
+    /// that module would agree with every mark the module ever holds, and this
+    /// mark is what a reader of the table sees.
+    const NO_ANSWER: &str = "╳";
+
+    /// The control sequence that paints what follows it red.
+    const RED: &str = "\u{1b}[31m";
+
+    /// The control sequence that gives the foreground of the terminal back.
+    const PLAIN: &str = "\u{1b}[39m";
+
     /// Builds a path under the temporary directory that no other run reaches.
     ///
     /// Two runs of one test can overlap, because `cargo test` runs on many
@@ -1055,6 +1081,7 @@ mod tests {
             Vec::new(),
             keys,
             Window::new(WIDTH, NO_ROWS),
+            Paint::Colored,
         );
         table.sink.clear();
         table
@@ -1096,6 +1123,7 @@ mod tests {
             Counted { writes: 0 },
             FakeKeys::of(&[]),
             Window::new(WIDTH, NO_ROWS),
+            Paint::Colored,
         );
         table.sink.writes = 0;
         table
@@ -1107,6 +1135,25 @@ mod tests {
     /// names no size. The one test that reads a size writes a file of its own.
     fn table(script: &[&[Command]]) -> Table<Vec<u8>, FakeKeys> {
         table_at(temp_path("frame"), FakeKeys::of(script))
+    }
+
+    /// A table that draws into bytes with no color at all, and that reads no
+    /// key.
+    ///
+    /// This is the table of a reader who set `NO_COLOR`. It folds the same
+    /// rounds as the table above, and it writes the glyphs of them alone.
+    ///
+    /// The sink comes back empty, for the reason that [`table_at`] states.
+    fn plain_table() -> Table<Vec<u8>, FakeKeys> {
+        let mut table = Table::new(
+            facts_at(temp_path("plain")),
+            Vec::new(),
+            FakeKeys::of(&[]),
+            Window::new(WIDTH, NO_ROWS),
+            Paint::Plain,
+        );
+        table.sink.clear();
+        table
     }
 
     /// The text that a terminal prints for what the draws wrote, with the
@@ -1153,6 +1200,11 @@ mod tests {
     /// One round of one TTL, which the router answered.
     fn one_round() -> RoundRecord {
         round(TTL, TTL, &[(TTL, ROUTER, RTT)])
+    }
+
+    /// One round of the same TTL that no hop answered.
+    fn one_lost_round() -> RoundRecord {
+        round(TTL, TTL, &[])
     }
 
     /// The number of lines that stand above the rows of the path: the header
@@ -1263,6 +1315,7 @@ mod tests {
             Vec::new(),
             FakeKeys::of(script),
             Window::new(WIDTH, rows),
+            Paint::Colored,
         );
         table.sink.clear();
         table
@@ -1444,6 +1497,7 @@ mod tests {
             Vec::new(),
             FakeKeys::of(&[]),
             Window::new(WIDTH, NO_ROWS),
+            Paint::Colored,
         );
         let lines = painted(&screen.sink);
 
@@ -1458,6 +1512,51 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with(COLUMN_HEADER_START)),
             "and the column header stands under it: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_lost_probe_reaches_the_terminal_in_red() {
+        // A live table draws on a terminal: the run holds that terminal in raw
+        // mode on the alternate screen in front of the first draw. The loss of
+        // a probe is the one thing the table paints, and the color says at a
+        // glance which row of the path drops its probes. The table below takes
+        // the color, as the table of a reader who set nothing does.
+        //
+        // The test reads the bytes of the sink and not the glyphs of them,
+        // because the codes of the color are what it is about.
+        let mut screen = table(&[]);
+        screen.round(&one_lost_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        assert!(
+            drawn.contains(&format!("{RED}{NO_ANSWER}")),
+            "the mark of the lost probe carries the code that paints it red: {drawn:?}"
+        );
+        assert!(
+            drawn.contains(&format!("{NO_ANSWER}{PLAIN}")),
+            "and the code that gives the foreground of the terminal back stands behind that mark: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_table_of_no_color_paints_a_lost_probe_with_no_code_at_all() {
+        // A reader who set `NO_COLOR` asks every tool for the glyphs alone,
+        // and this table is what such a reader gets. The mark of the loss
+        // stays, because the mark is no bar of a time, and the codes that
+        // paint it red go away.
+        //
+        // The test reads the bytes of the sink and not the glyphs of them,
+        // because the codes of the color are what it is about.
+        let mut screen = plain_table();
+        screen.round(&one_lost_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        assert!(
+            !drawn.contains(RED),
+            "no code of the red reaches a table that the reader asked for no color in: {drawn:?}"
+        );
+        assert!(
+            drawn.contains(NO_ANSWER),
+            "and the mark of the lost probe stands in that table anyway: {drawn:?}"
         );
     }
 
