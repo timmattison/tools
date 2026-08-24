@@ -35,12 +35,35 @@ use image::{Rgba, RgbaImage};
 /// is not the red that the table already spends on a lost probe.
 const BAR: Rgba<u8> = Rgba([64, 176, 192, 255]);
 
+/// The color of the column of a lost probe.
+///
+/// The table already spends this red on the mark of a lost probe, and a reader
+/// of the live table reads that red as a loss.
+const LOST: Rgba<u8> = Rgba([224, 64, 64, 255]);
+
+/// The number of rows between two painted pixels of the column of a lost probe.
+///
+/// Two, so the pixel at an even row is painted and the pixel at an odd row is
+/// clear. The mark of a lost probe in the text table is `╳`, and it is no bar
+/// of the set, because a run that prints no color must still tell a loss from a
+/// slow answer. A solid red column and a tall teal bar differ by color alone,
+/// so the dots carry that same argument into the image: a dotted column is no
+/// bar, whatever a reader sees of the color.
+const DOT_STEP: usize = 2;
+
 /// The image of one history of round-trip times, as the Recent column of one
 /// row draws it.
 ///
 /// A sample that the run measured draws a bar of [`BAR`], which is a mid teal.
 /// One color must read on a light terminal and on a dark one, and it must not
 /// be the red that the table already spends on a lost probe.
+///
+/// A probe that no hop answered draws a column of [`LOST`], which is that red,
+/// and it draws it dotted: the pixel at an even row is painted and the pixel at
+/// an odd row is clear, down the whole height. The dots are what tell a loss
+/// from a slow answer. A solid red column and a tall teal bar differ by color
+/// alone, and the text table already refuses that: the mark of a lost probe
+/// there is `╳` and it is no bar of the set.
 ///
 /// The background is transparent. A transparent background lets the terminal
 /// show its own background through the cell, and the column then reads as a
@@ -56,9 +79,17 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
     // Every channel of a new image is zero, and an alpha of zero is a pixel
     // that paints nothing at all.
     let mut image = RgbaImage::new(width, height);
-    let _ = history;
+    let count = history.len();
     for column in 0..width {
-        image.put_pixel(column, height - 1, BAR);
+        let index = usize::try_from(column).unwrap_or(usize::MAX).min(count - 1);
+        match history[index] {
+            Sample::Lost => {
+                for row in (0..height).step_by(DOT_STEP) {
+                    image.put_pixel(column, row, LOST);
+                }
+            }
+            Sample::Time(_) => image.put_pixel(column, height - 1, BAR),
+        }
     }
     image
 }
