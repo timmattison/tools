@@ -473,7 +473,7 @@ enum Command {
         )]
         probes_per_round: u64,
 
-        /// Give up on a destination that answers nothing after this much time.
+        /// Stop a destination that answers nothing after this much time.
         #[arg(
             long,
             value_name = "DUR",
