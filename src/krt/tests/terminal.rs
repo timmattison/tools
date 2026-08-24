@@ -7,13 +7,13 @@
 //! on. A pseudo terminal is a terminal, so these tests give the binary one and
 //! drive it through that.
 //!
-//! Two tests below give the binary a pipe on purpose. One covers the answer a
-//! pipe produces, which is that such a run draws no table. The other starts two
-//! runs at one moment and reads what each of them recorded. Both stand here
-//! beside the runs of a terminal for the other reason of this file. Every test
-//! of a live run holds the lock of the live runs of the machine while that run
-//! stands. A second lock in a second file locks nothing, so a live run belongs
-//! here whatever its standard output is.
+//! Some tests below give the binary a pipe on purpose. One covers the answer a
+//! pipe produces, which is that such a run draws no table. The others read a
+//! recorded file in place of a drawn table, and a terminal gives them nothing.
+//! They all stand here beside the runs of a terminal for the other reason of
+//! this file. Every test of a live run holds the lock of the live runs of the
+//! machine while that run stands. A second lock in a second file locks nothing,
+//! so a live run belongs here whatever its standard output is.
 //!
 //! Every pseudo terminal below carries a size. A pseudo terminal that nobody
 //! sized answers the `TIOCGWINSZ` ioctl with zero columns, and that ioctl
@@ -713,9 +713,9 @@ const STALE_LOCK: Duration = Duration::from_secs(90);
 
 /// The hold of one test on the live runs of the machine.
 ///
-/// A test that holds this lock knows the number of live runs of the machine:
-/// it is the number of runs that the test itself started. Every other test of
-/// this file waits.
+/// A test that holds this lock knows the live runs that `cargo test` started.
+/// They are the runs that the test itself started, and every other test of this
+/// file waits. A `krt` that a user started by hand stands outside that count.
 ///
 /// The lock started as a workaround, and that is no longer the reason it
 /// stands. macOS hands the ICMP replies of one process to the socket of every
@@ -726,11 +726,11 @@ const STALE_LOCK: Duration = Duration::from_secs(90);
 /// each run carries the identifier of its process, and the tracer drops every
 /// answer that carries another one.
 ///
-/// What the lock gives now is the count above, and one test reads that count.
-/// [`two_live_runs_of_one_machine_each_record_only_the_answers_of_its_own_probes`]
-/// starts two runs and asks what each of them recorded. A third run beside them
-/// would make a failure of that test read as a defect of `krt`, when it was a
-/// test of this file running at the same moment.
+/// What the lock gives now is the count above, and three tests read it. Each of
+/// them calls [`two_live_runs_of`], which starts two runs of one protocol and
+/// asks what each of them recorded. A third run of this file beside them can
+/// make a failure read as a defect of `krt`. The cause is then a test of this
+/// file that stands at the same moment.
 ///
 /// The lock is a file, and not a mutex of the process. `cargo test` runs the
 /// tests of one binary on many threads, and more than one `cargo test` can run
@@ -1045,7 +1045,7 @@ fn a_live_run_draws_its_table_in_front_of_the_first_round() {
 
 /// A live run whose standard output is a pipe draws no table.
 ///
-/// This is the one test of this file that gives the binary a pipe. The run has
+/// This is the one test of this file that reads what a pipe holds. The run has
 /// no terminal to hold, no key to read, and no screen to clear, so it writes
 /// one status line for the round it made and nothing else. A table there would
 /// write a whole frame of control sequences into the file of the reader for
