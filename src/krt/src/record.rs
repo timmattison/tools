@@ -8,7 +8,9 @@
 //! writes the `run` record, one `round` record for each round, and the `end`
 //! record through the writer, and every write flushes. Two runs of one
 //! destination from one machine append to one file, so every write of the
-//! writer holds the exclusive lock of the file.
+//! writer holds the exclusive lock of the file. A write that fails part way
+//! gives back the bytes that it already put on the file, still under that lock,
+//! so a fault leaves no fragment of a record for the next run to append onto.
 
 use crate::{Multipath, Protocol};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -705,6 +707,10 @@ pub(crate) enum ReadError {
 /// bytes of one write stay together. The wait for the lock is bounded, and a
 /// wait that runs out fails and names the file.
 ///
+/// A write that fails part way gives its bytes back before it releases the
+/// lock. The file therefore holds every byte of a record or no byte of it, and
+/// a disk that fills costs the record that met the fault and no other record.
+///
 /// One record is one append. The rule holds at every size of a record, and
 /// under every setting of a run. The lock covers one append, so a record that
 /// left as two appends would release the lock in the middle of itself, and the
@@ -776,6 +782,14 @@ const LOCK_RETRY_PAUSE: Duration = Duration::from_millis(1);
 /// file. Each write takes the exclusive lock of the file, writes, and releases
 /// the lock. A record of one run therefore never lands inside a record of
 /// another run.
+///
+/// A write that fails part way keeps the bytes that it already put on the file.
+/// Such a write leaves a fragment that carries no newline, and the next record
+/// of the other run lands on the same line. One line then holds half of one
+/// record and the whole of another, the reader refuses that line, and both runs
+/// lose every record of the file. The file therefore reads its own length under
+/// the lock, and it cuts the file back to that length when the write fails. See
+/// [`append_whole`].
 ///
 /// The type holds no buffer of its own, so every write goes straight to the
 /// file. A buffer would break the guarantee: it decides on its own where one
@@ -849,6 +863,11 @@ impl RecordFile {
 /// The lock goes away with this value. A write that fails therefore releases
 /// the lock as well as a write that holds, and no fault leaves the file locked
 /// against the next run.
+///
+/// The bytes of a write that failed go away before the lock does.
+/// [`append_whole`] cuts the file back inside the span that this guard holds,
+/// so the next writer of the file takes the lock and finds no fragment of the
+/// record that met the fault.
 struct LockGuard<'a> {
     /// The file that holds the lock.
     ///
@@ -929,13 +948,34 @@ impl Appendable for &File {
     }
 }
 
-/// Appends the whole buffer to the sink.
+/// Appends the whole buffer to the sink, or leaves the sink as it was.
+///
+/// The function reads the length of the sink first. An append that fails part
+/// way keeps the bytes that it already put on the sink, so the function cuts
+/// the sink back to that length before it returns the fault. The caller holds
+/// the exclusive lock of the file across the whole span, so no other writer
+/// appends inside it, and the cut therefore drops the bytes of the failed
+/// append and no other byte.
+///
+/// The bytes must go away together. A fragment that stays carries no newline,
+/// and the next record of another run then lands on the same line. That line
+/// holds half of one record and the whole of another, and the reader refuses
+/// the file for it.
+///
+/// A cut that fails leaves the fragment, and the caller reads the fault of the
+/// append and not the fault of the cut. The fault of the append is the one that
+/// says why the record did not reach the file.
 ///
 /// # Errors
 ///
-/// Returns the reason when the append fails.
+/// Returns the reason when the length does not read, and when the append fails.
 fn append_whole(sink: &mut impl Appendable, buf: &[u8]) -> std::io::Result<()> {
-    sink.append(buf)
+    let length = sink.length()?;
+    if let Err(fault) = sink.append(buf) {
+        let _ = sink.shorten(length);
+        return Err(fault);
+    }
+    Ok(())
 }
 
 impl Write for RecordFile {
@@ -947,6 +987,11 @@ impl Write for RecordFile {
     /// buffer therefore becomes one append, and that is what keeps the records
     /// of two runs of one file apart.
     ///
+    /// A write that fails part way cuts the file back to the length that this
+    /// function read under the lock. The file therefore keeps no byte of a
+    /// record that did not reach it whole, and the next writer of the file
+    /// appends onto the last whole line. See [`append_whole`].
+    ///
     /// The lock goes away with the guard, at the end of this function. A second
     /// writer of the same file therefore goes on as soon as the bytes are on
     /// the file.
@@ -954,7 +999,8 @@ impl Write for RecordFile {
     /// # Errors
     ///
     /// Returns the reason when the lock does not come inside the bound on the
-    /// wait, and when the write fails.
+    /// wait, when the length of the file does not read, and when the write
+    /// fails. A write that fails leaves the file as it was.
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let _guard = self.lock()?;
         append_whole(&mut &self.file, buf)?;
@@ -1009,7 +1055,8 @@ impl<W: Write> Writer<W> {
     ///
     /// Returns the reason when the record does not become JSON, when the append
     /// fails, and when the flush fails. A [`RecordFile`] fails the append when
-    /// the lock of the file does not come inside the bound on the wait.
+    /// the lock of the file does not come inside the bound on the wait, and it
+    /// leaves the file as it was when the append itself fails.
     pub(crate) fn write(&mut self, record: &Record) -> std::io::Result<()> {
         let mut line = record
             .to_line()
@@ -2086,7 +2133,8 @@ mod tests {
         ///
         /// Never fails. The sink counts the bytes in memory.
         fn length(&self) -> std::io::Result<u64> {
-            Ok(u64::try_from(self.held.len()).expect("the sink holds fewer bytes than a u64 counts"))
+            Ok(u64::try_from(self.held.len())
+                .expect("the sink holds fewer bytes than a u64 counts"))
         }
 
         /// Takes the bytes that the room holds, and fails when the buffer needs
