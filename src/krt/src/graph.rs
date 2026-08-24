@@ -346,6 +346,57 @@ mod tests {
         );
     }
 
+    /// The height in pixels of the image that reads the height of a bar.
+    ///
+    /// Ten rows are enough that the bar of a sample at the middle of the span
+    /// stands clear of the bar at the floor and clear of the bar that fills the
+    /// cell.
+    const TALL: u32 = 10;
+
+    /// The answer at the middle of the span of that image, in milliseconds.
+    ///
+    /// The three answers are 10, 20, and 30, so the middle one takes half of
+    /// the span. Half of the nine rows above the floor is 4.5, which rounds to
+    /// 5, so the bar of it stands 6 pixels tall.
+    const MIDDLE: f64 = 15.0;
+
+    /// The height in pixels of the bar of that middle answer.
+    const MIDDLE_PIXELS: u32 = 6;
+
+    #[test]
+    fn the_height_of_a_bar_is_its_part_of_the_cell_and_never_no_pixel_at_all() {
+        // A bar of no pixel would draw nothing, and a sample that the run
+        // measured is not a sample that the run lost. The smallest sample
+        // therefore takes one row of pixels and the largest fills the cell, and
+        // every sample between them takes its part of the rows that stand above
+        // that floor.
+        let image = plot(
+            &[
+                Sample::Time(QUICKEST),
+                Sample::Time(MIDDLE),
+                Sample::Time(SLOWEST),
+            ],
+            THREE_COLUMNS,
+            TALL,
+        );
+
+        assert_eq!(
+            bar(&image, 0),
+            1,
+            "the smallest sample takes one row of pixels and never none"
+        );
+        assert_eq!(
+            bar(&image, 1),
+            MIDDLE_PIXELS,
+            "a sample at the middle of the span takes half of the rows above that floor"
+        );
+        assert_eq!(
+            bar(&image, 2),
+            TALL,
+            "and the largest sample fills the cell"
+        );
+    }
+
     #[test]
     fn the_background_of_the_image_is_transparent() {
         // A transparent background lets the terminal show its own background
