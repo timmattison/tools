@@ -60,6 +60,12 @@ const DOT_STEP: usize = 2;
 /// does a sample that is not a finite number. `ui::sparkline` states both
 /// reasons, and this module does not restate them.
 ///
+/// The height of a bar is one pixel and then the part of the cell that the
+/// sample takes: `1 + round(part * (height - 1))`. The smallest sample of a
+/// history therefore takes one row of pixels and the largest one fills the
+/// cell. A bar of no pixel would draw nothing, and a sample that the run
+/// measured is not a sample that the run lost.
+///
 /// A history whose samples are all equal, and a history of one sample, each
 /// give a span of zero, and every bar of such a history stands at the floor.
 /// `ui::sparkline` draws the lowest block element for such a window, for the
@@ -116,12 +122,14 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
                 // sample which compares gives a span below zero, because the
                 // two limits stayed at the infinities that the fold started
                 // them at. Neither history divides, and both of them draw at
-                // the floor.
-                let pixels = if span > 0.0 && time.is_finite() && time >= highest {
-                    height
+                // the floor. A time that is not a finite number draws there as
+                // well, because such a time compares with nothing.
+                let part = if span > 0.0 && time.is_finite() {
+                    (time - lowest) / span
                 } else {
-                    1
+                    0.0
                 };
+                let pixels = bar_pixels(part, height);
                 for row in (height - pixels)..height {
                     image.put_pixel(column, row, BAR);
                 }
@@ -129,6 +137,34 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
         }
     }
     image
+}
+
+/// The height of one bar in pixels, at its part of the span of the history.
+///
+/// The floor takes one pixel and every pixel above it belongs to the span, so
+/// the smallest sample of a history draws one row of pixels and the largest one
+/// fills the cell. A bar of no pixel would draw nothing at all, and a sample
+/// that the run measured is not a sample that the run lost: the reader must be
+/// able to tell the two apart at the floor of the cell as well as at the top of
+/// it.
+///
+/// # Arguments
+/// * `part` - The place of the sample in the span of the history, from 0 at the
+///   smallest sample to 1 at the largest one.
+/// * `height` - The height of the image in pixels.
+///
+/// # Returns
+/// The number of pixels of the bar, which is 1 or more and never more than
+/// `height`.
+fn bar_pixels(part: f64, height: u32) -> u32 {
+    let above_the_floor = f64::from(height.saturating_sub(1));
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the part runs from 0 to 1, so the product stays inside the rows above the floor and never runs below zero. The cast of a float to an integer saturates in Rust anyway: a number below zero and a number that is not a number each give 0, and a number too large gives `u32::MAX`"
+    )]
+    let raised = (part * above_the_floor).round() as u32;
+    raised.saturating_add(1)
 }
 
 /// The round-trip time of one sample, when that sample holds a time which
