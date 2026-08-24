@@ -16,7 +16,14 @@
 //! construction.
 
 use crate::live::Screen;
-use crate::record::{NameRecord, RoundRecord, RunId};
+use crate::names;
+use crate::names::Namer;
+use crate::record::{
+    Family, HuntId, NameRecord, RoundRecord, RunConfig, RunId, RunRecord, SourceLabel, Target,
+    Writer,
+};
+use crate::run;
+use crate::run::RunError;
 use crate::stats::{HopTable, TtlRow};
 use crate::ui;
 use crate::{counted, REACHED, ROUND};
@@ -24,8 +31,11 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
+use std::rc::Rc;
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
 /// The number of candidates that one draw reads before it gives up.
 ///
@@ -142,6 +152,9 @@ pub(crate) struct Draw {
     candidates: Box<dyn Iterator<Item = Ipv4Addr>>,
     /// Every address that this draw already gave.
     visited: HashSet<Ipv4Addr>,
+    /// The address that a peek took out of the source and that no ask has
+    /// taken yet.
+    peeked: Option<Ipv4Addr>,
 }
 
 impl Draw {
@@ -150,6 +163,7 @@ impl Draw {
         Self {
             candidates,
             visited: HashSet::new(),
+            peeked: None,
         }
     }
 
@@ -158,13 +172,30 @@ impl Draw {
         Self::new(Box::new(random(seed)))
     }
 
-    /// The next address to trace.
+    /// The next address to trace, without taking it.
     ///
-    /// The draw reads candidates until one of them routes and is new to this
-    /// hunt. A source that ran out, and a source that gave [`ATTEMPTS`]
-    /// candidates that the draw rejected, both give no address, and the hunt
-    /// then stops.
+    /// The search for the source address of a hunt reads the route to one
+    /// destination, and the first destination of the hunt is that one. The
+    /// address stays in the draw, so the hunt traces it as its first round and
+    /// the search costs the hunt no round.
+    pub(crate) fn peek(&mut self) -> Option<Ipv4Addr> {
+        if self.peeked.is_none() {
+            self.peeked = self.take();
+        }
+        self.peeked
+    }
+
+    /// The next address to trace.
     pub(crate) fn address(&mut self) -> Option<Ipv4Addr> {
+        self.peeked.take().or_else(|| self.take())
+    }
+
+    /// The next candidate that routes and that this hunt has not visited.
+    ///
+    /// The draw reads candidates until one of them passes. A source that ran
+    /// out, and a source that gave [`ATTEMPTS`] candidates that the draw
+    /// rejected, both give no address, and the hunt then stops.
+    fn take(&mut self) -> Option<Ipv4Addr> {
         for _ in 0..ATTEMPTS {
             let candidate = self.candidates.next()?;
             if reserved(candidate).is_none() && self.visited.insert(candidate) {
@@ -350,6 +381,120 @@ impl Screen for Scorer {
     }
 }
 
+/// The source of the rounds of one destination.
+///
+/// A hunt of the command line spawns the tracer of `trace.rs`. A test hands
+/// back a channel that it filled, so no test of the hunt sends a packet.
+pub(crate) trait Probes {
+    /// Starts the trace of one destination, and answers with the channel that
+    /// its rounds arrive on.
+    ///
+    /// The run identifier is the identifier that the rounds of this
+    /// destination carry.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason as text when the tracer does not start.
+    fn start(&mut self, target: Ipv4Addr, run: &RunId) -> Result<Receiver<RoundRecord>, String>;
+}
+
+/// The fault that stopped a hunt.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HuntError {
+    /// A run of the hunt failed.
+    #[error("{0}")]
+    Run(
+        /// The fault that the run reported.
+        #[from]
+        RunError,
+    ),
+    /// The tracer of one destination did not start.
+    #[error("the tracer of {target} did not start: {reason}")]
+    Tracer {
+        /// The destination whose tracer did not start.
+        target: Ipv4Addr,
+        /// The reason that the tracer gave.
+        reason: String,
+    },
+}
+
+/// What every run of one hunt has in common.
+pub(crate) struct Facts {
+    /// The identifier of the hunt, which every run of it carries.
+    pub(crate) id: HuntId,
+    /// The build string of the `krt` that makes the hunt.
+    pub(crate) krt: String,
+    /// The address that the probes leave from.
+    pub(crate) source: SourceLabel,
+    /// The configuration that every run of the hunt records.
+    pub(crate) config: RunConfig,
+    /// The name of the machine that makes the hunt.
+    pub(crate) host: String,
+}
+
+/// The numbers that bound one hunt.
+pub(crate) struct Plan {
+    /// The number of destinations that the hunt traces.
+    pub(crate) rounds: u64,
+    /// The number of probe rounds that each destination takes.
+    pub(crate) probes_per_round: u64,
+    /// The time that stops a destination which answers nothing.
+    pub(crate) target_timeout: Duration,
+    /// The longest that each run waits, after its last round, for the names
+    /// that its lookups have not given yet.
+    pub(crate) name_grace: Duration,
+    /// True when a partial path competes for a row of the summary.
+    pub(crate) include_partial: bool,
+}
+
+/// The three things that a hunt draws on: the addresses, the rounds, and the
+/// names.
+pub(crate) struct Sources<'a> {
+    /// The addresses that the hunt traces.
+    pub(crate) draw: Draw,
+    /// The rounds of each destination.
+    pub(crate) probes: &'a mut dyn Probes,
+    /// The resolver that every namer of the hunt asks.
+    ///
+    /// One resolver serves every destination, so a hunt starts the system
+    /// resolver once and not once for each address it draws.
+    pub(crate) resolver: Rc<dyn names::Resolver>,
+}
+
+/// Records one hunt: one run for each destination, and the summary of them all.
+///
+/// The hunt traces one destination at a time and never two at once. A
+/// measurement of 64 destinations at the normal interval is a small load, and
+/// it stays that way only while the hunt is serial.
+///
+/// Each destination takes one run of `run::record`, with a round limit of the
+/// probe rounds of the plan and a deadline of the target timeout. A destination
+/// that answers nothing therefore holds the hunt for that timeout and no
+/// longer.
+///
+/// `stop` answers whether the user asked the hunt to stop, and it reaches both
+/// this loop and the run of the destination that stands. A destination that the
+/// user cut short takes no row and no count of the summary: the summary counts
+/// the rounds that finished.
+///
+/// # Errors
+///
+/// Returns [`HuntError::Run`] when a record does not reach the file, and
+/// [`HuntError::Tracer`] when the tracer of a destination does not start.
+pub(crate) fn record<W: Write>(
+    _facts: &Facts,
+    plan: &Plan,
+    _sources: &mut Sources<'_>,
+    _stop: &dyn Fn() -> bool,
+    _writer: &mut Writer<W>,
+) -> Result<Summary, HuntError> {
+    Ok(Summary::new(
+        Vec::new(),
+        Duration::ZERO,
+        plan.include_partial,
+    ))
+}
+
 /// The label of the row that names the shortest path.
 const SHORTEST: &str = "shortest";
 
@@ -493,6 +638,7 @@ impl Score {
 /// The summary reads the scores of the destinations that the hunt finished, so
 /// a hunt that `Ctrl-C` stopped prints the same table over the rounds it did
 /// finish.
+#[derive(Debug)]
 pub(crate) struct Summary {
     /// The score of each destination, in the order the hunt traced them.
     scores: Vec<Score>,
@@ -656,16 +802,23 @@ fn pad(cell: &str, width: usize, right: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        random, reserved, Draw, PathKind, Score, Scorer, Summary, ATTEMPTS, FASTEST, LONGEST,
-        NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
+        random, record, reserved, Draw, Facts, HuntError, PathKind, Plan, Probes, Score, Scorer,
+        Sources, Summary, ATTEMPTS, FASTEST, LONGEST, NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
     };
     use crate::live::Screen;
-    use crate::record::{NameRecord, RunId};
-    use crate::testing::round;
+    use crate::record::{
+        EndReason, Family, HuntId, NameRecord, Privilege, Record, Recording, RoundRecord,
+        RunConfig, RunId, SourceKind, SourceLabel, Writer,
+    };
+    use crate::testing::{named, round};
+    use crate::{Multipath, Protocol};
     use chrono::Utc;
     use std::collections::HashSet;
+    use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::rc::Rc;
     use std::time::Duration;
+    use std::time::Instant;
 
     /// An address that a packet routes to, and that no test rejects.
     const ROUTABLE: &str = "93.184.216.34";
@@ -1305,4 +1458,408 @@ mod tests {
         "",
         "3 rounds   2 reached   1 partial   192s",
     ];
+    /// The identifier of the hunt that every test of the loop makes.
+    const HUNT_ID: &str = "2026-08-18T11:59:00.000Z";
+
+    /// The build string of the `krt` that makes a test hunt.
+    const KRT: &str = "0.1.0 (abc1234, clean)";
+
+    /// The name of the machine that makes a test hunt.
+    const HOST: &str = "tims-mac";
+
+    /// The address that the probes of a test hunt leave from.
+    const SOURCE: &str = "1.2.3.4";
+
+    /// The time that stops a destination of a test hunt which answers nothing.
+    ///
+    /// The value is short, because a test that waited the real timeout would
+    /// hold the suite for ten seconds for each such destination.
+    const TARGET_TIMEOUT: Duration = Duration::from_millis(20);
+
+    /// A source of rounds that a test scripts.
+    ///
+    /// The fake stamps every scripted round with the run that the hunt made, so
+    /// the file groups the rounds of one destination under that run, as a real
+    /// tracer does. It keeps every sender alive, so no channel closes and no
+    /// run reads a closed channel as a tracer that died.
+    struct FakeProbes {
+        /// The rounds of each destination, the next destination first.
+        scripts: VecDeque<Vec<RoundRecord>>,
+        /// The destinations that the hunt asked for, in order.
+        asked: Vec<Ipv4Addr>,
+        /// The senders of the channels, held so that none of them closes.
+        senders: Vec<std::sync::mpsc::Sender<RoundRecord>>,
+        /// The reason that the next start gives, when the tracer must fail.
+        refuses: Option<String>,
+    }
+
+    impl FakeProbes {
+        /// A source that hands each destination the rounds of its script.
+        fn of(scripts: &[&[&[(u8, &str, f64)]]]) -> Self {
+            Self {
+                scripts: scripts
+                    .iter()
+                    .map(|rounds| {
+                        rounds
+                            .iter()
+                            .map(|hops| round(FIRST_TTL, MAX_TTL, hops))
+                            .collect()
+                    })
+                    .collect(),
+                asked: Vec::new(),
+                senders: Vec::new(),
+                refuses: None,
+            }
+        }
+
+        /// A source whose tracer never starts.
+        fn that_refuses(reason: &str) -> Self {
+            let mut probes = Self::of(&[]);
+            probes.refuses = Some(reason.to_owned());
+            probes
+        }
+    }
+
+    impl Probes for FakeProbes {
+        fn start(
+            &mut self,
+            target: Ipv4Addr,
+            run: &RunId,
+        ) -> Result<std::sync::mpsc::Receiver<RoundRecord>, String> {
+            self.asked.push(target);
+            if let Some(reason) = &self.refuses {
+                return Err(reason.clone());
+            }
+            let (sender, receiver) = std::sync::mpsc::channel();
+            for mut record in self.scripts.pop_front().unwrap_or_default() {
+                record.run = run.clone();
+                sender.send(record).expect("the receiver stands");
+            }
+            self.senders.push(sender);
+            Ok(receiver)
+        }
+    }
+
+    /// What one test hunt wrote, and what it found.
+    struct Hunted {
+        /// The summary that the hunt printed.
+        summary: Summary,
+        /// The records that the hunt wrote, as one recorded file reads them.
+        recording: Recording,
+        /// The destinations that the hunt asked its source for, in order.
+        asked: Vec<Ipv4Addr>,
+    }
+
+    /// Runs one hunt over a scripted draw and a scripted source of rounds.
+    ///
+    /// `stop` answers whether the user asked the hunt to stop, as the flag of
+    /// the signal handler does in a run of the command line.
+    fn hunted(
+        addresses: &[&str],
+        scripts: &[&[&[(u8, &str, f64)]]],
+        rounds: u64,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Hunted, HuntError> {
+        let mut probes = FakeProbes::of(scripts);
+        let outcome = run_hunt(addresses, &mut probes, rounds, stop, &[]);
+        outcome.map(|(summary, recording)| Hunted {
+            summary,
+            recording,
+            asked: probes.asked.clone(),
+        })
+    }
+
+    /// Runs one hunt and reads back the file it wrote.
+    fn run_hunt(
+        addresses: &[&str],
+        probes: &mut FakeProbes,
+        rounds: u64,
+        stop: &dyn Fn() -> bool,
+        names: &[(&str, &[crate::names::Lookup])],
+    ) -> Result<(Summary, Recording), HuntError> {
+        let list: Vec<Ipv4Addr> = addresses.iter().copied().map(address).collect();
+        let facts = Facts {
+            id: HuntId::from(HUNT_ID),
+            krt: KRT.to_owned(),
+            source: SourceLabel {
+                addr: IpAddr::V4(address(SOURCE)),
+                kind: SourceKind::Local,
+            },
+            config: RunConfig {
+                interval_ms: 1000,
+                protocol: Protocol::Icmp,
+                first_ttl: FIRST_TTL,
+                max_ttl: MAX_TTL,
+                multipath: Multipath::Classic,
+                privilege: Privilege::Unprivileged,
+                dns: !names.is_empty(),
+            },
+            host: HOST.to_owned(),
+        };
+        let plan = Plan {
+            rounds,
+            probes_per_round: 1,
+            target_timeout: TARGET_TIMEOUT,
+            name_grace: Duration::ZERO,
+            include_partial: false,
+        };
+        let resolver: Rc<dyn crate::names::Resolver> = if names.is_empty() {
+            Rc::new(crate::names::NoLookups)
+        } else {
+            crate::testing::FakeResolver::new(names)
+        };
+        let mut sources = Sources {
+            draw: Draw::new(Box::new(list.into_iter())),
+            probes,
+            resolver,
+        };
+        let mut sink = Vec::new();
+        let summary = {
+            let mut writer = Writer::to_sink(&mut sink);
+            record(&facts, &plan, &mut sources, stop, &mut writer)?
+        };
+        Ok((summary, read_back(&sink)))
+    }
+
+    /// Reads the records that a hunt wrote back out of the sink.
+    fn read_back(sink: &[u8]) -> Recording {
+        let text = String::from_utf8(sink.to_vec()).expect("the file holds text");
+        let path = scratch_file();
+        std::fs::write(&path, text).expect("the scratch file must take the records");
+        let recording = Recording::read(&path).expect("the records must read back");
+        std::fs::remove_file(&path).ok();
+        recording
+    }
+
+    /// The path of a scratch file that no other run of this test touches.
+    ///
+    /// Two copies of one test run at the same time under `cargo test`, so the
+    /// name carries the process and the moment.
+    fn scratch_file() -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        std::env::temp_dir().join(format!("krt-hunt-{}-{nanos}.jsonl", std::process::id()))
+    }
+
+    /// A hunt that nothing stops.
+    fn never_stops() -> impl Fn() -> bool {
+        || false
+    }
+
+    /// One round that reached the destination at TTL 5.
+    const REACHED_AT_FIVE: &[&[(u8, &str, f64)]] = &[&[(1, FIRST_HOP, 1.0), (5, NEAR, 20.0)]];
+
+    /// One round that answered to TTL 4 and no further.
+    const PARTIAL_AT_FOUR: &[&[(u8, &str, f64)]] = &[&[(1, FIRST_HOP, 1.0), (4, LAST_ANSWER, 9.0)]];
+
+    #[test]
+    fn a_hunt_traces_the_addresses_that_the_draw_gives_in_the_order_it_gives_them() {
+        let hunted = hunted(
+            &[NEAR, FAR],
+            &[REACHED_AT_FIVE, REACHED_AT_FIVE],
+            2,
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked, vec![address(NEAR), address(FAR)]);
+    }
+
+    #[test]
+    fn a_hunt_stops_after_the_number_of_rounds_that_the_plan_names() {
+        let hunted = hunted(
+            &[NEAR, FAR, QUIET],
+            &[REACHED_AT_FIVE, REACHED_AT_FIVE, REACHED_AT_FIVE],
+            2,
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 2);
+    }
+
+    #[test]
+    fn a_hunt_stops_when_the_draw_runs_out_of_addresses() {
+        let hunted =
+            hunted(&[NEAR], &[REACHED_AT_FIVE], 8, &never_stops()).expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 1);
+    }
+
+    #[test]
+    fn each_destination_of_a_hunt_writes_one_run_into_the_file() {
+        let hunted = hunted(
+            &[NEAR, FAR],
+            &[REACHED_AT_FIVE, REACHED_AT_FIVE],
+            2,
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.recording.run_ids().len(), 2);
+    }
+
+    /// The run record of each destination names the hunt that holds it.
+    #[test]
+    fn the_run_record_of_each_destination_names_the_hunt() {
+        let hunted = hunted(
+            &[NEAR, FAR],
+            &[REACHED_AT_FIVE, REACHED_AT_FIVE],
+            2,
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        let hunts: Vec<Option<HuntId>> = hunted
+            .recording
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::Run(start) => Some(start.hunt.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hunts,
+            vec![Some(HuntId::from(HUNT_ID)), Some(HuntId::from(HUNT_ID))]
+        );
+    }
+
+    /// The run record of a destination names the address that the hunt drew.
+    #[test]
+    fn the_run_record_of_a_destination_names_the_address_that_the_hunt_drew() {
+        let hunted =
+            hunted(&[NEAR], &[REACHED_AT_FIVE], 1, &never_stops()).expect("the hunt must finish");
+        let start = hunted
+            .recording
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                Record::Run(start) => Some(start.clone()),
+                _ => None,
+            })
+            .expect("the file holds the record that opens the run");
+        assert_eq!(start.target.addr, IpAddr::V4(address(NEAR)));
+        assert_eq!(start.target.arg, NEAR);
+        assert_eq!(start.target.family, Family::Ipv4);
+    }
+
+    /// A destination takes the number of probe rounds that the plan names.
+    #[test]
+    fn a_destination_takes_the_number_of_probe_rounds_that_the_plan_names() {
+        let mut probes =
+            FakeProbes::of(&[&[&[(5, NEAR, 20.0)], &[(5, NEAR, 21.0)], &[(5, NEAR, 22.0)]]]);
+        let (_, recording) =
+            run_hunt(&[NEAR], &mut probes, 1, &never_stops(), &[]).expect("the hunt must finish");
+        let run = recording.last_run().expect("the file holds one run");
+        assert_eq!(run.rounds().len(), 1, "the plan names one probe round");
+    }
+
+    /// A destination that answers nothing holds the hunt for the target
+    /// timeout and no longer.
+    #[test]
+    fn a_destination_that_answers_nothing_stops_on_the_target_timeout() {
+        let started = Instant::now();
+        let hunted = hunted(&[QUIET], &[&[]], 1, &never_stops()).expect("the hunt must finish");
+        assert!(
+            started.elapsed() < TARGET_TIMEOUT * 20,
+            "the destination held the hunt for {:?}",
+            started.elapsed()
+        );
+        let end = hunted
+            .recording
+            .last_run()
+            .expect("the file holds one run")
+            .end()
+            .expect("the run closed")
+            .reason;
+        assert_eq!(end, EndReason::Duration);
+    }
+
+    /// `Ctrl-C` stops the hunt, and the summary counts the rounds that
+    /// finished.
+    #[test]
+    fn a_hunt_that_the_user_stopped_counts_the_rounds_that_finished() {
+        let hunted = hunted(
+            &[NEAR, FAR],
+            &[REACHED_AT_FIVE, REACHED_AT_FIVE],
+            2,
+            &|| true,
+        )
+        .expect("the hunt must finish");
+        assert!(hunted.asked.is_empty(), "the hunt traced no destination");
+        assert_eq!(
+            counts(&hunted.summary),
+            "0 rounds   0 reached   0 partial   0ms"
+        );
+    }
+
+    /// The summary of a hunt reads the destinations that the hunt traced.
+    #[test]
+    fn the_summary_of_a_hunt_ranks_the_destinations_that_it_traced() {
+        let hunted = hunted(
+            &[NEAR, QUIET],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR],
+            2,
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert!(row(&hunted.summary, SHORTEST).contains(NEAR));
+        assert!(counts(&hunted.summary).contains("1 reached"));
+        assert!(counts(&hunted.summary).contains("1 partial"));
+    }
+
+    /// A tracer that will not start stops the hunt and names the destination.
+    #[test]
+    fn a_tracer_that_does_not_start_stops_the_hunt_and_names_the_destination() {
+        let mut probes = FakeProbes::that_refuses("no raw socket");
+        let error = run_hunt(&[NEAR], &mut probes, 1, &never_stops(), &[])
+            .expect_err("a tracer that will not start stops the hunt");
+        let reason = error.to_string();
+        assert!(
+            reason.contains(NEAR),
+            "the reason names the address: {reason}"
+        );
+        assert!(
+            reason.contains("no raw socket"),
+            "the reason names the fault: {reason}"
+        );
+    }
+
+    /// The name of an address of a destination reaches the file.
+    #[test]
+    fn the_name_of_an_address_of_a_destination_reaches_the_file() {
+        let mut probes = FakeProbes::of(&[REACHED_AT_FIVE]);
+        let (_, recording) = run_hunt(
+            &[NEAR],
+            &mut probes,
+            1,
+            &never_stops(),
+            &[(NEAR, &[named(DESTINATION_NAME)])],
+        )
+        .expect("the hunt must finish");
+        let named: Vec<String> = recording
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::Name(name) => Some(name.host.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            named.contains(&DESTINATION_NAME.to_owned()),
+            "the file holds the name of the destination: {named:?}"
+        );
+    }
+
+    /// A peek gives the address that the next ask gives.
+    #[test]
+    fn a_peek_gives_the_address_that_the_next_ask_gives() {
+        let mut draw = draw_of(&[ROUTABLE, OTHER_ROUTABLE]);
+        assert_eq!(draw.peek(), Some(address(ROUTABLE)));
+        assert_eq!(draw.address(), Some(address(ROUTABLE)));
+        assert_eq!(draw.address(), Some(address(OTHER_ROUTABLE)));
+    }
+
+    /// A peek of a draw that ran out gives no address.
+    #[test]
+    fn a_peek_of_a_draw_that_ran_out_gives_no_address() {
+        assert_eq!(draw_of(&[]).peek(), None);
+    }
 }

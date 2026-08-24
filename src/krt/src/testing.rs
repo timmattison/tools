@@ -146,7 +146,7 @@ impl FakeResolver {
     }
 }
 
-impl Resolver for Rc<FakeResolver> {
+impl Resolver for FakeResolver {
     fn lookup(&self, addr: IpAddr) -> Lookup {
         self.answer(addr)
     }
