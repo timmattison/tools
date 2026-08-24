@@ -301,9 +301,7 @@ impl Scorer {
     fn gaps(&self, length: u8) -> usize {
         self.table
             .rows()
-            .filter(|row| {
-                (self.first_ttl..=length).contains(&row.ttl()) && row.stats().recv() == 0
-            })
+            .filter(|row| (self.first_ttl..=length).contains(&row.ttl()) && row.stats().recv() == 0)
             .count()
     }
 }
