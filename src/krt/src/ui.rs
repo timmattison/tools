@@ -367,6 +367,18 @@ const LEVEL_COUNT: usize = 7;
 /// column, so the Recent column holds one sample for each column it is wide.
 const BARS: [char; LEVEL_COUNT] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
 
+/// The mark of a probe that no hop answered.
+///
+/// The mark is no bar of [`BARS`], and that is what it is for. The color of a
+/// terminal is not always there: a headless run, a pipe, a file, and a replay
+/// each print text with no color. A red `▇` alone would read as the slowest
+/// sample of the window on every one of those runs, and a reader would take a
+/// lost probe for a slow answer.
+///
+/// The glyph takes one terminal column, as each bar does, so one sample of the
+/// history stands in one column of the Recent column either way.
+const NO_ANSWER: char = '╳';
+
 /// The count of the bars, as the arithmetic of the scale reads it.
 #[expect(
     clippy::cast_precision_loss,
@@ -391,6 +403,10 @@ const LEVELS: f64 = LEVEL_COUNT as f64;
 /// varies, and a flat line at the floor says that. The alternative, a flat line
 /// at the top, would draw the quietest hop of the path as the loudest one.
 ///
+/// A probe that no hop answered draws [`NO_ANSWER`] at the place of that probe,
+/// and it takes no part in the scale: such a probe measured no time, so no
+/// limit of the window can read it.
+///
 /// A key with no sample, and a `width` of zero, each draw an empty string.
 ///
 /// A sample that is not a finite number — `f64::NAN`, or an infinity — draws
@@ -409,38 +425,48 @@ pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = Sample>, width: u
     // copy that this function makes, and the history of the key stays where it
     // is.
     let skipped = samples.len().saturating_sub(width);
-    let shown: Vec<f64> = samples
-        .skip(skipped)
-        .filter_map(|sample| match sample {
-            Sample::Time(rtt_ms) => Some(rtt_ms),
-            Sample::Lost => None,
-        })
-        .collect();
+    let shown: Vec<Sample> = samples.skip(skipped).collect();
 
-    // The scale reads only the samples that compare.
+    // The scale reads only the answers that compare. A lost probe measured no
+    // time, so it names no limit of the window.
     let mut lowest = f64::INFINITY;
     let mut highest = f64::NEG_INFINITY;
-    for sample in shown.iter().copied().filter(|sample| sample.is_finite()) {
-        lowest = lowest.min(sample);
-        highest = highest.max(sample);
+    for time in shown.iter().filter_map(finite_time) {
+        lowest = lowest.min(time);
+        highest = highest.max(time);
     }
     let span = highest - lowest;
 
     shown
         .iter()
-        .map(|&sample| {
+        .map(|sample| {
+            let Sample::Time(time) = *sample else {
+                return NO_ANSWER;
+            };
             // A window of one sample, and a window whose samples are all equal,
             // each give a span of zero. A window that holds no sample which
             // compares gives a span below zero, because the two limits stayed
             // at the infinities that the fold started them at. Neither window
             // divides.
-            if span <= 0.0 || !sample.is_finite() {
+            if span <= 0.0 || !time.is_finite() {
                 BARS[0]
             } else {
-                bar_at((sample - lowest) / span)
+                bar_at((time - lowest) / span)
             }
         })
         .collect()
+}
+
+/// The round-trip time of one sample, when that sample holds a time which
+/// compares.
+///
+/// A lost probe measured no time, and a time that is not a finite number does
+/// not compare, so the scale of a window reads neither of them.
+fn finite_time(sample: &Sample) -> Option<f64> {
+    match *sample {
+        Sample::Time(time) if time.is_finite() => Some(time),
+        _ => None,
+    }
 }
 
 /// The bar of one sample, at its part of the span of the window.
@@ -2089,14 +2115,14 @@ mod tests {
     /// The rounds of [`golden_table`] state the arithmetic of every number
     /// here. The frame holds a named host, a TTL that never answered, a bare
     /// address, a TTL of two routers with an address row for each of them, the
-    /// star of the destination, and a sparkline.
+    /// star of the destination, a sparkline, and the mark of a lost probe.
     const GOLDEN_FRAME: [&str; 10] = [
         " krt  example.com → 93.184.216.34   src 1.2.3.4   round 4   1s   1.2.3.4-example.com.jsonl (2.1 MB)",
         "",
         " TTL  Host                             Loss%   Sent   Last    Min    Avg    Max  StDev  Recent",
         "   1  router.lan (192.168.1.1)          0.0%      4    5.0    1.0    3.0    5.0    2.0  ▁▁▇▇",
-        "   2  ???                             100.0%      4      -      -      -      -      -",
-        "   3  10.0.0.1                         50.0%      4   12.0    8.0   10.0   12.0    2.0  ▁▇",
+        "   2  ???                             100.0%      4      -      -      -      -      -  ╳╳╳╳",
+        "   3  10.0.0.1                         50.0%      4   12.0    8.0   10.0   12.0    2.0  ▁╳▇╳",
         "   4  ae1.net (203.0.113.8) (+1)        0.0%      4   70.0   10.0   40.0   70.0   22.4  ▁▅▃▇",
         "      ├ ae1.net (203.0.113.8)          50.0%▹     2   30.0   10.0   20.0   30.0   10.0  ▁▇",
         "      └ 203.0.113.9                    50.0%▹     2   70.0   50.0   60.0   70.0   10.0  ▁▇",
@@ -2134,12 +2160,15 @@ mod tests {
     /// lowest bar and the two largest take the highest.
     ///
     /// TTL 2 answers no round. The loss is 4 / 4 = 100.0 percent, and every
-    /// statistic of it holds no value.
+    /// statistic of it holds no value. Its window holds four lost probes, so
+    /// its sparkline draws four marks of a loss and no bar.
     ///
-    /// TTL 3 answers two of the four rounds, from `10.0.0.1`, at 8.0 and 12.0.
-    /// The loss is 2 / 4 = 50.0 percent. The mean is 20 / 2 = 10.0, the
-    /// distances are -2 and 2, whose squares sum to 8, so the variance is
-    /// 8 / 2 = 4.0 and the deviation is 2.0.
+    /// TTL 3 answers the first and the third round, from `10.0.0.1`, at 8.0 and
+    /// 12.0, and it loses the second and the fourth. The loss is
+    /// 2 / 4 = 50.0 percent. The mean is 20 / 2 = 10.0, the distances are -2
+    /// and 2, whose squares sum to 8, so the variance is 8 / 2 = 4.0 and the
+    /// deviation is 2.0. Its window holds the two answers and the two lost
+    /// probes in the order the rounds arrived.
     ///
     /// TTL 4 answers each round, from two routers. `203.0.113.8` answers the
     /// first and the third round at 10.0 and 30.0, and `203.0.113.9` answers
