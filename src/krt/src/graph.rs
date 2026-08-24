@@ -54,6 +54,12 @@ const DOT_STEP: usize = 2;
 /// The image of one history of round-trip times, as the Recent column of one
 /// row draws it.
 ///
+/// Every sample of the history draws. The column of pixels at `x` draws the
+/// sample at `x * count / width`, so a history of sixty samples over ninety
+/// pixels gives each sample one or two columns. The block elements of the text
+/// table show nine of those sixty samples, and this spread is the whole reason
+/// the image exists.
+///
 /// The scale is the scale of the block elements, read over the whole history:
 /// the smallest sample of the history stands at the floor of the cell and the
 /// largest one fills it. A lost probe names no limit of that scale, and neither
@@ -109,8 +115,7 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
     }
     let span = highest - lowest;
     for column in 0..width {
-        let index = usize::try_from(column).unwrap_or(usize::MAX).min(count - 1);
-        match history[index] {
+        match history[sample_index(column, width, count)] {
             Sample::Lost => {
                 for row in (0..height).step_by(DOT_STEP) {
                     image.put_pixel(column, row, LOST);
@@ -137,6 +142,30 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
         }
     }
     image
+}
+
+/// The place in the history that the column of pixels at `x` draws.
+///
+/// The columns of the image spread over the samples of the history, so a
+/// history of sixty samples over ninety columns gives each sample one or two
+/// columns and no sample of it goes undrawn. The block elements of the text
+/// table show nine of those sixty samples, and this spread is the whole reason
+/// the image exists.
+///
+/// The arithmetic runs in 64 bits, because a width in pixels and a count of
+/// samples each fit in 32 bits and their product does not.
+///
+/// # Arguments
+/// * `x` - The column of pixels, which stands below `width`.
+/// * `width` - The width of the image in pixels, which is 1 or more.
+/// * `count` - The number of samples of the history, which is 1 or more.
+///
+/// # Returns
+/// The place in the history, which stands below `count`.
+fn sample_index(x: u32, width: u32, count: usize) -> usize {
+    let count = u64::try_from(count).unwrap_or(u64::MAX);
+    let index = u64::from(x).saturating_mul(count) / u64::from(width);
+    usize::try_from(index).unwrap_or(usize::MAX)
 }
 
 /// The height of one bar in pixels, at its part of the span of the history.
