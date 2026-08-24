@@ -1177,6 +1177,13 @@ this platform needs raw socket privileges to send probes.
     /// own. A traceroute probes it first, as a destination.
     const THE_CLASSIC_SOURCE_PORT: u16 = 33_434;
 
+    /// The last destination port that a traceroute probes.
+    ///
+    /// The range that starts at [`THE_CLASSIC_SOURCE_PORT`] and ends here is
+    /// the range a firewall reads as a traceroute, and the source port of `krt`
+    /// stands above all of it.
+    const THE_LAST_TRACEROUTE_PORT: u16 = 33_534;
+
     /// The destination port that a TCP trace holds while the source port
     /// varies. It is the port of HTTP.
     const TCP_DESTINATION_PORT: u16 = 80;
@@ -1435,21 +1442,24 @@ this platform needs raw socket privileges to send probes.
         }
     }
 
-    /// No process identifier maps onto the port that a traceroute probes first.
+    /// No process identifier maps onto a port that a traceroute probes.
     ///
-    /// That port is the one every UDP run of `krt` held before this fold, and
-    /// it is the one that `a_live_udp_run_stands_while_another_program_holds_
-    /// the_port_of_a_traceroute` holds while it measures. The walk covers the
-    /// whole range of the fold and one value past it, so it reaches every port
-    /// the function can give.
+    /// A traceroute probes the destination ports [`THE_CLASSIC_SOURCE_PORT`]
+    /// through [`THE_LAST_TRACEROUTE_PORT`], and a source port of `krt` never
+    /// wears one of those numbers. A firewall that reads a probe of `krt` thus
+    /// never reads it as a traceroute. The first of the two is the port every
+    /// UDP run of `krt` held before this fold. The live test of a held port
+    /// holds that port while it measures, and `src/krt/tests/terminal.rs` holds
+    /// that test. The walk covers the whole range of the fold and one value
+    /// past it, so it reaches every port the function can give.
     #[test]
-    fn no_process_identifier_maps_onto_the_port_that_a_traceroute_probes_first() {
+    fn no_process_identifier_maps_onto_a_port_that_a_traceroute_probes() {
         let ports = u32::from(UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) + 1;
         for process in 0..=ports {
-            assert_ne!(
-                udp_source_port(process),
-                THE_CLASSIC_SOURCE_PORT,
-                "process {process}"
+            let port = udp_source_port(process);
+            assert!(
+                !(THE_CLASSIC_SOURCE_PORT..=THE_LAST_TRACEROUTE_PORT).contains(&port),
+                "process {process} takes port {port}, which a traceroute probes"
             );
         }
     }
