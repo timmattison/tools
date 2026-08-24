@@ -326,7 +326,7 @@ struct Cli {
     #[arg(long, value_name = "P", value_enum, default_value_t = Protocol::Icmp)]
     protocol: Protocol,
 
-    /// The multipath mode. UDP and TCP only.
+    /// The multipath mode. UDP only.
     #[arg(long, value_name = "M", value_enum, default_value_t = Multipath::Classic)]
     multipath: Multipath,
 
@@ -435,7 +435,11 @@ impl Cli {
     ///
     /// Returns the reason as text when two flags contradict each other. A first
     /// TTL above the max TTL leaves no hop to probe. A multipath mode other
-    /// than `classic` needs UDP or TCP, because ICMP carries no flow to vary.
+    /// than `classic` needs UDP, because no other protocol lets the mode
+    /// change a packet. ICMP carries no port to hold or to vary. A TCP probe
+    /// puts the probe number in its source port under every mode, so the mode
+    /// changes nothing, and the record then names a mode that the run did not
+    /// use.
     fn resolve(self) -> Result<ResolvedConfig, String> {
         if self.first_ttl > self.max_ttl {
             return Err(format!(
@@ -444,10 +448,10 @@ impl Cli {
             ));
         }
 
-        let carries_a_flow = matches!(self.protocol, Protocol::Udp | Protocol::Tcp);
-        if self.multipath != Multipath::Classic && !carries_a_flow {
+        let carries_a_mode = matches!(self.protocol, Protocol::Udp);
+        if self.multipath != Multipath::Classic && !carries_a_mode {
             return Err(format!(
-                "`--multipath {}` needs `--protocol udp` or `--protocol tcp`, but the protocol is `{}`",
+                "`--multipath {}` needs `--protocol udp`, but the protocol is `{}`",
                 value_name(&self.multipath),
                 value_name(&self.protocol)
             ));
@@ -2401,23 +2405,19 @@ resolved configuration:
     }
 
     #[test]
-    fn a_multipath_mode_resolves_with_udp_and_with_tcp() {
-        for (mode, protocol) in [("paris", "udp"), ("dublin", "tcp")] {
+    fn every_multipath_mode_resolves_with_udp() {
+        for (mode, expected) in [("paris", Multipath::Paris), ("dublin", Multipath::Dublin)] {
             let config = resolve(&[
                 "krt",
                 "example.com",
                 "--multipath",
                 mode,
                 "--protocol",
-                protocol,
+                "udp",
             ]);
             assert_eq!(
-                config.multipath,
-                match mode {
-                    "paris" => Multipath::Paris,
-                    _ => Multipath::Dublin,
-                },
-                "`--multipath {mode} --protocol {protocol}`"
+                config.multipath, expected,
+                "`--multipath {mode} --protocol udp`"
             );
         }
     }

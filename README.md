@@ -618,7 +618,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     | `--first-ttl <N>` | `1` | The first TTL that a round probes. |
     | `--max-ttl <N>` | `30` | The last TTL that a round probes. |
     | `--protocol <P>` | `icmp` | `icmp`, `udp`, or `tcp`. |
-    | `--multipath <M>` | `classic` | `classic`, `paris`, or `dublin`. UDP and TCP only. |
+    | `--multipath <M>` | `classic` | `classic`, `paris`, or `dublin`. UDP only. |
     | `-4`, `-6` | the resolver decides | Force the address family. |
     | `--no-dns` | off | Skip every reverse lookup, and show the addresses alone. |
     | `--source <IP>` | discovered | Name the source of the derived filename, and skip the lookup of the public address. |
