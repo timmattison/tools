@@ -311,7 +311,19 @@ pub enum DisplayRoutine {
 /// muxiavelli panels.
 #[must_use]
 pub fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutine {
-    todo!("map the terminal type to the routine that draws for it")
+    match terminal_type {
+        // Zellij and muxiavelli-Sixel both go through the Sixel path.
+        TerminalType::Zellij | TerminalType::Muxiavelli(ImageProtocol::Sixel) => {
+            DisplayRoutine::Sixel
+        }
+        TerminalType::Muxiavelli(ImageProtocol::Iterm2) => DisplayRoutine::Iterm2,
+        TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
+            DisplayRoutine::Kitty
+        }
+        TerminalType::ITerm2 | TerminalType::Alacritty | TerminalType::Unknown => {
+            DisplayRoutine::Iterm2
+        }
+    }
 }
 
 #[cfg(test)]
