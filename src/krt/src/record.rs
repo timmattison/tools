@@ -13,9 +13,10 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The byte that ends one line of a recorded file.
 const NEWLINE: u8 = b'\n';
@@ -705,23 +706,104 @@ pub(crate) enum ReadError {
 ///
 /// The sink of a run is the open file, and that is the sink a caller takes when
 /// it names none.
-pub(crate) struct Writer<W: Write = BufWriter<File>> {
+pub(crate) struct Writer<W: Write = RecordFile> {
     /// The sink that takes every record. A run writes to the open file, in
     /// append mode.
     sink: W,
 }
 
-impl Writer<BufWriter<File>> {
+impl Writer<RecordFile> {
     /// Opens the file for appending, and makes the file when it is absent.
     ///
     /// # Errors
     ///
     /// Returns the reason when the file does not open.
     pub(crate) fn append(path: &Path) -> std::io::Result<Self> {
+        Self::append_within(path, LOCK_WAIT)
+    }
+
+    /// Opens the file for appending, with the bound on the wait that the caller
+    /// names.
+    ///
+    /// A run takes the bound of [`LOCK_WAIT`] through [`Writer::append`]. A
+    /// test names a bound of a few milliseconds, so it proves the refusal of a
+    /// file that another writer holds without a wait of five seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the file does not open.
+    fn append_within(path: &Path, wait: Duration) -> std::io::Result<Self> {
+        Ok(Self {
+            sink: RecordFile::append(path, wait)?,
+        })
+    }
+}
+
+/// The bound on the wait for the lock of a recorded file.
+///
+/// A run writes one record in microseconds, and it takes one round each second
+/// by default, so two runs of one file hold the lock for a very short moment. A
+/// wait of five seconds therefore names a file that some other process holds
+/// and does not release, and not the ordinary meeting of two runs.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// A recorded file that takes one record as one append.
+///
+/// The type holds no buffer of its own, so every write goes straight to the
+/// file.
+pub(crate) struct RecordFile {
+    /// The open file, in append mode.
+    file: File,
+    /// The path of the file, for the message of a wait that ran out.
+    path: PathBuf,
+    /// The bound on the wait for the lock of the file. A wait that runs past it
+    /// fails, so a run never stops forever on a holder that keeps the lock.
+    wait: Duration,
+}
+
+impl RecordFile {
+    /// Opens the file for appending, and makes the file when it is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the file does not open.
+    fn append(path: &Path, wait: Duration) -> std::io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
-            sink: BufWriter::new(file),
+            file,
+            path: path.to_path_buf(),
+            wait,
         })
+    }
+}
+
+impl Write for RecordFile {
+    /// Appends the whole buffer to the file as one write.
+    ///
+    /// The answer is the whole length of the buffer, so [`Write::write_all`]
+    /// calls this function one time. A record that reaches this function as one
+    /// buffer therefore becomes one append.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the write fails.
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut file = &self.file;
+        file.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    /// Flushes the file.
+    ///
+    /// The type holds no buffer of its own, so every byte of a write is already
+    /// with the operating system when the write returns. The call goes to the
+    /// file, which has nothing to empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the flush of the file fails.
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
     }
 }
 
@@ -764,7 +846,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     /// The identifier of the run that every test record belongs to.
     const RUN: &str = "2026-08-18T12:00:00.123Z";
@@ -1665,6 +1747,56 @@ mod tests {
         assert_eq!(recording.records(), records.as_slice());
         let run = recording.last_run().expect("the file holds one run");
         assert_eq!(seqs_of(&run), [1, 2, 3]);
+    }
+
+    /// The bound on the wait for the lock that the test of a held file names.
+    ///
+    /// The test holds the lock for the whole write, so the writer waits the
+    /// whole bound. A few milliseconds keep the test fast, and the bound of a
+    /// run stays at five seconds.
+    const SHORT_WAIT: Duration = Duration::from_millis(5);
+
+    /// Opens a second handle on a file that a test made, and takes the
+    /// exclusive lock of it.
+    ///
+    /// Two handles of one path contend for the lock inside one process, so the
+    /// test needs no second process. The caller releases the lock at the end of
+    /// the test.
+    fn a_held_file(path: &Path) -> fs::File {
+        let holder = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("the test file must open for appending");
+        holder.lock().expect("the test must take the lock");
+        holder
+    }
+
+    /// A run that cannot take the lock inside the bound must stop, and it must
+    /// name the file that it could not take. A writer that wrote anyway would
+    /// put its record inside the record of the holder.
+    #[test]
+    fn a_writer_that_cannot_take_the_lock_names_the_file_and_writes_no_record() {
+        let file = TempFile::absent("held-file");
+        let holder = a_held_file(file.path());
+
+        let mut writer = Writer::append_within(file.path(), SHORT_WAIT)
+            .expect("the test file must open for appending");
+        let message = writer
+            .write(&a_run_record())
+            .expect_err("a writer that cannot take the lock must fail")
+            .to_string();
+        assert!(
+            message.contains(&file.path().display().to_string()),
+            "the message names the path: {message}"
+        );
+        assert_eq!(
+            fs::read(file.path()).expect("the test file must read"),
+            Vec::<u8>::new(),
+            "a writer that cannot take the lock writes no record"
+        );
+
+        holder.unlock().expect("the test must release the lock");
     }
 
     #[test]
