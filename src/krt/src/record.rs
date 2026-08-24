@@ -128,6 +128,13 @@ impl From<&str> for RunId {
 #[serde(transparent)]
 pub(crate) struct HuntId(String);
 
+impl HuntId {
+    /// Builds the identifier of the hunt that starts at this moment.
+    pub(crate) fn at(start: DateTime<Utc>) -> Self {
+        Self(format_millis(start))
+    }
+}
+
 impl fmt::Display for HuntId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)

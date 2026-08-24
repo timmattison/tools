@@ -19,14 +19,15 @@ use crate::live::Screen;
 use crate::names;
 use crate::names::Namer;
 use crate::record::{
-    Family, HuntId, NameRecord, RoundRecord, RunConfig, RunId, RunRecord, SourceLabel, Target,
-    Writer,
+    EndReason, Family, HuntId, NameRecord, RoundRecord, RunConfig, RunId, RunRecord, SourceLabel,
+    Target, Writer,
 };
 use crate::run;
 use crate::run::RunError;
 use crate::stats::{HopTable, TtlRow};
 use crate::ui;
 use crate::{counted, REACHED, ROUND};
+use chrono::{DateTime, Utc};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::{BTreeMap, HashSet};
@@ -95,7 +96,7 @@ impl fmt::Display for Block {
 /// registry, and not as the shortest set of blocks that covers it.
 const RESERVED: [Block; 16] = [
     // This network.
-    Block::new(Ipv4Addr::new(0, 0, 0, 0), 8),
+    Block::new(Ipv4Addr::UNSPECIFIED, 8),
     // Private.
     Block::new(Ipv4Addr::new(10, 0, 0, 0), 8),
     // Shared address space, which a carrier puts behind one public address.
@@ -125,7 +126,7 @@ const RESERVED: [Block; 16] = [
     // Reserved for a use that no standard names.
     Block::new(Ipv4Addr::new(240, 0, 0, 0), 4),
     // The limited broadcast address.
-    Block::new(Ipv4Addr::new(255, 255, 255, 255), 32),
+    Block::new(Ipv4Addr::BROADCAST, 32),
 ];
 
 /// The block that holds an address, when a reserved block does. An address
@@ -482,17 +483,122 @@ pub(crate) struct Sources<'a> {
 /// Returns [`HuntError::Run`] when a record does not reach the file, and
 /// [`HuntError::Tracer`] when the tracer of a destination does not start.
 pub(crate) fn record<W: Write>(
-    _facts: &Facts,
+    facts: &Facts,
     plan: &Plan,
-    _sources: &mut Sources<'_>,
-    _stop: &dyn Fn() -> bool,
-    _writer: &mut Writer<W>,
+    sources: &mut Sources<'_>,
+    stop: &dyn Fn() -> bool,
+    writer: &mut Writer<W>,
 ) -> Result<Summary, HuntError> {
+    let started = Instant::now();
+    let mut scores = Vec::new();
+    let mut previous = None;
+    for _ in 0..plan.rounds {
+        if stop() {
+            break;
+        }
+        let Some(target) = sources.draw.address() else {
+            break;
+        };
+        let moment = next_moment(previous, Utc::now());
+        previous = Some(moment);
+        let run = RunId::at(moment);
+        if let Some(score) = trace_one(facts, plan, sources, stop, writer, target, run)? {
+            scores.push(score);
+        }
+    }
     Ok(Summary::new(
-        Vec::new(),
-        Duration::ZERO,
+        scores,
+        started.elapsed(),
         plan.include_partial,
     ))
+}
+
+/// The moment that names the run of the next destination.
+///
+/// A run identifier holds the moment of the start to the millisecond, and a
+/// hunt traces two destinations inside one millisecond whenever both of them
+/// answer at once. Two runs of one identifier would leave a reader unable to
+/// tell them apart, and `krt replay <file> --run <id>` unable to fold either
+/// one. So the moment of a destination stands at least one millisecond after
+/// the moment of the destination in front of it.
+///
+/// The shift is below the resolution that the identifier states, and the
+/// identifier stays a moment that sorts, so the runs of one hunt still read in
+/// the order the hunt traced them.
+fn next_moment(previous: Option<DateTime<Utc>>, now: DateTime<Utc>) -> DateTime<Utc> {
+    let Some(previous) = previous else {
+        return now;
+    };
+    let least = previous + chrono::TimeDelta::milliseconds(1);
+    if now > least {
+        now
+    } else {
+        least
+    }
+}
+
+/// Records one destination of a hunt, and scores the path it found.
+///
+/// A destination that the user cut short gives no score. The summary counts the
+/// rounds that finished, and a round that stopped in the middle measured a path
+/// that the tool never finished measuring.
+///
+/// # Errors
+///
+/// Returns [`HuntError::Run`] when a record does not reach the file, and
+/// [`HuntError::Tracer`] when the tracer of this destination does not start.
+fn trace_one<W: Write>(
+    facts: &Facts,
+    plan: &Plan,
+    sources: &mut Sources<'_>,
+    stop: &dyn Fn() -> bool,
+    writer: &mut Writer<W>,
+    target: Ipv4Addr,
+    run: RunId,
+) -> Result<Option<Score>, HuntError> {
+    let rounds = sources
+        .probes
+        .start(target, &run)
+        .map_err(|reason| HuntError::Tracer { target, reason })?;
+    let start = RunRecord {
+        run: run.clone(),
+        krt: facts.krt.clone(),
+        source: facts.source.clone(),
+        target: Target {
+            // The hunt drew the address, so the address is what the user
+            // named. A reader of the file thus finds the same text in the
+            // field that a trace of that address by hand would write.
+            arg: target.to_string(),
+            addr: IpAddr::V4(target),
+            family: Family::Ipv4,
+        },
+        config: facts.config,
+        host: facts.host.clone(),
+        hunt: Some(facts.id.clone()),
+    };
+    let limits = run::Limits {
+        rounds: Some(plan.probes_per_round),
+        // A destination that answers nothing holds the hunt for this long and
+        // no longer. A limit too large to add to the clock leaves the
+        // destination without a moment, and the round limit then stops it.
+        deadline: Instant::now().checked_add(plan.target_timeout),
+        name_grace: plan.name_grace,
+    };
+    let mut namer = Namer::new(Box::new(Rc::clone(&sources.resolver)), run.clone());
+    let mut scorer = Scorer::new(target, run, facts.config.first_ttl);
+    let outcome = run::record(
+        &start,
+        &rounds,
+        &limits,
+        stop,
+        &mut namer,
+        writer,
+        &mut scorer,
+    )?;
+    if outcome.reason == EndReason::Quit {
+        return Ok(None);
+    }
+    Ok(Some(scorer.score()))
 }
 
 /// The label of the row that names the shortest path.
@@ -1476,6 +1582,13 @@ mod tests {
     /// hold the suite for ten seconds for each such destination.
     const TARGET_TIMEOUT: Duration = Duration::from_millis(20);
 
+    /// The hops of one round that a test scripts: the TTL of a hop, the
+    /// address that answered at it, and the round-trip time of that answer.
+    type Hops<'a> = &'a [(u8, &'a str, f64)];
+
+    /// The rounds of one destination that a test scripts.
+    type Rounds<'a> = &'a [Hops<'a>];
+
     /// A source of rounds that a test scripts.
     ///
     /// The fake stamps every scripted round with the run that the hunt made, so
@@ -1495,7 +1608,7 @@ mod tests {
 
     impl FakeProbes {
         /// A source that hands each destination the rounds of its script.
-        fn of(scripts: &[&[&[(u8, &str, f64)]]]) -> Self {
+        fn of(scripts: &[Rounds]) -> Self {
             Self {
                 scripts: scripts
                     .iter()
@@ -1556,7 +1669,7 @@ mod tests {
     /// the signal handler does in a run of the command line.
     fn hunted(
         addresses: &[&str],
-        scripts: &[&[&[(u8, &str, f64)]]],
+        scripts: &[Rounds],
         rounds: u64,
         stop: &dyn Fn() -> bool,
     ) -> Result<Hunted, HuntError> {
@@ -1846,6 +1959,32 @@ mod tests {
             named.contains(&DESTINATION_NAME.to_owned()),
             "the file holds the name of the destination: {named:?}"
         );
+    }
+
+    /// Two destinations of one hunt take two run identifiers, in order.
+    ///
+    /// A hunt traces two destinations inside one millisecond whenever both of
+    /// them answer at once, and a run identifier holds the moment to the
+    /// millisecond. Two runs of one identifier would leave `krt replay
+    /// <file> --run <id>` unable to fold either one.
+    #[test]
+    fn every_destination_of_a_hunt_takes_its_own_run_identifier_in_order() {
+        let hunted = hunted(
+            &[NEAR, FAR, QUIET],
+            &[REACHED_AT_FIVE, REACHED_AT_FIVE, REACHED_AT_FIVE],
+            3,
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        let ids = hunted.recording.run_ids();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            ids, sorted,
+            "the runs of a hunt read in the order it traced them"
+        );
+        assert_eq!(ids.len(), 3);
     }
 
     /// A peek gives the address that the next ask gives.

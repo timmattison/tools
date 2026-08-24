@@ -31,7 +31,8 @@ use buildinfo::version_string;
 use chrono::Utc;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use record::{
-    EndReason, Family, Recording, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target,
+    EndReason, Family, HuntId, Recording, RoundRecord, RunConfig, RunId, RunRecord, SourceKind,
+    SourceLabel, Target,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -39,6 +40,7 @@ use std::fmt;
 use std::io::IsTerminal;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -124,6 +126,17 @@ const ROUNDS_LOWEST: u64 = 1;
 ///
 /// The longest key is `address family:`, and one space follows it.
 const CONFIG_KEY_WIDTH: usize = 16;
+
+/// The label that the derived name of a recorded file carries in the place of
+/// a destination, for a hunt.
+///
+/// A hunt traces many destinations, so no one of them names the file. Two hunts
+/// of one machine therefore write into one file, and the identifier of the hunt
+/// in every `run` record is what tells their runs apart.
+const HUNT_FILE_LABEL: &str = "hunt";
+
+/// The reason of a hunt whose draw gave no address at all.
+const NO_ADDRESS_TO_HUNT: &str = "the draw gave no address to trace";
 
 /// The value of a flag that holds no limit and no file.
 const ABSENT: &str = "none";
@@ -1571,6 +1584,133 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
     Ok(outcome)
 }
 
+/// The tracer of a hunt of the command line.
+///
+/// Each destination takes one tracer of `trace.rs`, and the tracer of the
+/// destination before it has already stopped: the hunt traces one destination
+/// at a time.
+struct SystemProbes<'a> {
+    /// The command line that the hunt resolved, which holds the period, the
+    /// range of the TTL, the protocol, and the multipath mode of every probe.
+    config: &'a ResolvedConfig,
+    /// The privilege mode that the platform gave.
+    privilege: record::Privilege,
+}
+
+impl hunt::Probes for SystemProbes<'_> {
+    fn start(
+        &mut self,
+        target: Ipv4Addr,
+        run: &RunId,
+    ) -> Result<std::sync::mpsc::Receiver<RoundRecord>, String> {
+        trace::spawn(&trace::TraceConfig {
+            target: IpAddr::V4(target),
+            run: run.clone(),
+            interval: self.config.interval,
+            first_ttl: self.config.first_ttl,
+            max_ttl: self.config.max_ttl,
+            protocol: self.config.protocol,
+            multipath: self.config.multipath,
+            privilege: self.privilege,
+        })
+        .map_err(|error| error.to_string())
+    }
+}
+
+/// Records one hunt, from the draw of the addresses to the summary of them all.
+///
+/// The order of the steps is the order of a trace, and for the same reasons.
+/// The privilege gate comes first, so a platform that cannot probe says so
+/// before the hunt makes a file. The reverse resolver starts next, so a hunt
+/// that cannot start its resolver makes no file. The recorded file opens before
+/// the first tracer starts, so no probe leaves the machine for a hunt that
+/// cannot record it.
+///
+/// The search for the source address reads the route to one destination, and
+/// the first address of the draw is that destination. The draw keeps that
+/// address, so the hunt traces it as its first round and the search costs the
+/// hunt no round. A draw that gives no address at all leaves the hunt nothing
+/// to trace, and the run says so.
+///
+/// The hunt draws no live table. It prints the summary when it stops, and a
+/// hunt that `Ctrl-C` stopped prints the summary of the rounds that finished.
+///
+/// # Errors
+///
+/// Returns the reason and the exit code of the fault that stopped the hunt.
+fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, TraceFailure> {
+    let privilege = trace::acquire_privilege()
+        .map_err(|error| TraceFailure::new(&error, EXIT_NO_PRIVILEGES))?;
+    let resolver = resolver_of(config.reverse_dns).map_err(|error| {
+        TraceFailure::new(
+            &format!("the reverse resolver did not start: {error}"),
+            EXIT_FAILURE,
+        )
+    })?;
+
+    let mut draw = hunt::Draw::seeded(plan.seed);
+    let first = draw
+        .peek()
+        .ok_or_else(|| TraceFailure::new(&NO_ADDRESS_TO_HUNT.to_owned(), EXIT_FAILURE))?;
+    let (source, warning) = source_from(
+        source::discover(config.source, IpAddr::V4(first)),
+        IpAddr::V4(first),
+    );
+    if let Some(warning) = warning {
+        eprintln!("{PROGRAM}: {warning}");
+    }
+    let path = source::output_path(config.output.as_deref(), source.addr, HUNT_FILE_LABEL);
+    let mut writer = record::Writer::append(&path).map_err(|error| {
+        TraceFailure::new(&format!("{}: {error}", path.display()), EXIT_WRITE_FAILED)
+    })?;
+    println!("{RECORDING_TO} {}", path.display());
+
+    let flag = stop_flag().map_err(|error| {
+        TraceFailure::new(
+            &format!("the stop signal did not register: {error}"),
+            EXIT_FAILURE,
+        )
+    })?;
+    let mut probes = SystemProbes { config, privilege };
+    let facts = hunt::Facts {
+        id: HuntId::at(Utc::now()),
+        krt: version_string!().to_owned(),
+        source,
+        config: run_config(config, privilege),
+        host: host_name(),
+    };
+    let hunt_plan = hunt::Plan {
+        rounds: plan.rounds,
+        probes_per_round: plan.probes_per_round,
+        target_timeout: plan.target_timeout,
+        name_grace: name_grace(),
+        include_partial: plan.include_partial,
+    };
+    let mut sources = hunt::Sources {
+        draw,
+        probes: &mut probes,
+        resolver: Rc::from(resolver),
+    };
+    let summary = hunt::record(
+        &facts,
+        &hunt_plan,
+        &mut sources,
+        &|| user_stopped(&flag),
+        &mut writer,
+    )
+    .map_err(|error| {
+        let code = match error {
+            hunt::HuntError::Run(run::RunError::Write(_)) => EXIT_WRITE_FAILED,
+            hunt::HuntError::Run(run::RunError::Tracer { .. }) | hunt::HuntError::Tracer { .. } => {
+                EXIT_TRACER_FAILED
+            }
+        };
+        TraceFailure::new(&error, code)
+    })?;
+    println!("{RECORDED} {}", path.display());
+    Ok(summary)
+}
+
 /// The screen of one run, and the hold that screen takes on the terminal.
 ///
 /// The table holds the terminal, so it travels with the guard that gives that
@@ -1656,6 +1796,22 @@ fn main() {
             .error(clap::error::ErrorKind::ValueValidation, message)
             .exit(),
     };
+    if let Some(plan) = config.hunt {
+        // The block names what the hunt will do, and then the hunt does it.
+        print!("{config}");
+        match hunt(&config, &plan) {
+            Ok(summary) => {
+                for line in summary.lines() {
+                    println!("{line}");
+                }
+            }
+            Err(failure) => {
+                eprintln!("{PROGRAM}: {}", failure.reason);
+                std::process::exit(failure.code);
+            }
+        }
+        return;
+    }
     let Some(path) = config.replay.as_deref() else {
         // The block names what the run will do, and then the run does it.
         print!("{config}");
