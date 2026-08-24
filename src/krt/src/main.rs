@@ -1307,6 +1307,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         target,
         config: run_config(config, privilege),
         host: host_name(),
+        hunt: None,
     };
 
     let flag = stop_flag().map_err(|error| {
@@ -3265,6 +3266,7 @@ resolved configuration:
                 dns: false,
             },
             host: A_SHARED_MACHINE.to_owned(),
+            hunt: None,
         })
     }
 

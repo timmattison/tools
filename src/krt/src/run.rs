@@ -546,6 +546,7 @@ mod tests {
                 dns: true,
             },
             host: HOST.to_owned(),
+            hunt: None,
         }
     }
 

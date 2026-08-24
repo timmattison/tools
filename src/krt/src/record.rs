@@ -113,6 +113,33 @@ impl From<&str> for RunId {
     }
 }
 
+/// The identifier of one hunt: the RFC 3339 start time, to the millisecond, in
+/// UTC.
+///
+/// A hunt traces many destinations, and it writes one run for each of them into
+/// one file. The `run` record of each destination carries this identifier, so a
+/// reader groups the runs of one hunt and tells them from the runs of another.
+///
+/// The type stands apart from [`RunId`] because the two name different things.
+/// One identifier names one trace of one destination, and this one names the
+/// hunt that holds many such traces. A single type would let a reader compare
+/// the two and find them equal.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct HuntId(String);
+
+impl fmt::Display for HuntId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl From<&str> for HuntId {
+    fn from(text: &str) -> Self {
+        Self(text.to_owned())
+    }
+}
+
 /// One line of a recorded file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -187,6 +214,14 @@ pub(crate) struct RunRecord {
     pub(crate) config: RunConfig,
     /// The name of the machine that made the run.
     pub(crate) host: String,
+    /// The hunt that holds this run. A run that no hunt made holds none.
+    ///
+    /// The field stands last and it goes away when it is absent, so the `run`
+    /// line of a normal run reads and writes exactly as it did before the hunt
+    /// existed. A file that an earlier build recorded therefore folds with no
+    /// change, and it reads as a run that no hunt holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hunt: Option<HuntId>,
 }
 
 /// The source address of a run, and how `krt` found it.
@@ -1184,6 +1219,7 @@ mod tests {
                 dns: true,
             },
             host: "tims-mac".to_owned(),
+            hunt: None,
         })
     }
 
@@ -2602,6 +2638,7 @@ mod tests {
                 dns: false,
             },
             host: MACHINE.to_owned(),
+            hunt: None,
         })
     }
 
