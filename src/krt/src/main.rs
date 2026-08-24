@@ -202,14 +202,25 @@ enum Protocol {
 }
 
 /// The way a probe keeps or varies the flow of a packet.
+// `paris` and `dublin` each hold one flow for one round, and not for one run,
+// because a UDP run of `krt` holds the source port and lets the destination
+// port vary. The tracer writes the number of the round into that free port for
+// both of the two modes, and it carries the number of the probe in another
+// field: the UDP checksum for `paris`, and the IP header for `dublin`. A run
+// that held both ports would hold one flow for the whole run, and `krt` builds
+// no such direction. `trace.rs` holds the three sentences below beside the
+// direction of the ports, in
+// `the_multipath_help_stands_beside_the_port_direction_that_makes_it_true`.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Multipath {
     /// Let each probe take its own flow, as traceroute always did.
     Classic,
-    /// Hold one flow for every probe, as Paris traceroute does.
+    /// Hold one flow for each round, and carry the probe number in the UDP
+    /// checksum.
     Paris,
-    /// Walk the flows to find every path, as Dublin traceroute does.
+    /// Hold one flow for each round, and carry the probe number in the IP
+    /// header.
     Dublin,
 }
 
