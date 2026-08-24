@@ -928,15 +928,19 @@ impl<W: Write> Writer<W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EndReason, EndRecord, Family, Hop, NameRecord, Privilege, ReadError, Record, Recording,
-        RoundRecord, Run, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange,
-        Writer,
+        EndReason, EndRecord, Family, Hop, NameRecord, Privilege, ReadError, Record, RecordFile,
+        Recording, RoundRecord, Run, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target,
+        TtlRange, Writer, LOCK_WAIT,
     };
-    use crate::testing::address;
+    use crate::testing::{address, SecondRunBetweenWrites};
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};
+    use std::cell::RefCell;
     use std::fs;
+    use std::io::Write;
+    use std::net::IpAddr;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     /// The identifier of the run that every test record belongs to.
@@ -1899,6 +1903,259 @@ mod tests {
             "a path under an absent directory must fail: {}",
             path.display()
         );
+    }
+
+    /// A sink that remembers the buffer of every write that reached it.
+    ///
+    /// The writer holds the exclusive lock of the file for one write and no
+    /// longer, so the number of writes that one record takes is the whole of
+    /// the guarantee. A file cannot report that number, because a file holds
+    /// the bytes and not the writes that carried them. This sink holds the
+    /// writes, so a test reads the guarantee directly.
+    #[derive(Clone, Default)]
+    struct Appends {
+        /// The buffer of every write, in the order that the writes came.
+        ///
+        /// The handle is shared, because a writer takes its sink, and the test
+        /// reads the writes after that.
+        calls: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl Appends {
+        /// The buffer of every write that reached the sink.
+        fn calls(&self) -> Vec<Vec<u8>> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Write for Appends {
+        /// Takes the whole buffer, and remembers it.
+        ///
+        /// The answer is the whole length of the buffer, as the answer of a
+        /// recorded file is, so [`Write::write_all`] calls this function one
+        /// time for one buffer. The sink therefore counts the writes that the
+        /// writer makes, and not the writes that `write_all` makes.
+        ///
+        /// # Errors
+        ///
+        /// Never fails. The sink holds every buffer in memory.
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.calls.borrow_mut().push(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        /// Empties nothing, because the sink holds no buffer of its own.
+        ///
+        /// # Errors
+        ///
+        /// Never fails.
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The first TTL that a run probes.
+    const FIRST_TTL: u8 = 1;
+
+    /// The last TTL that a run probes.
+    ///
+    /// The tracer takes no TTL above this one, so a round of this range is the
+    /// widest range of TTLs that a run records.
+    const LAST_TTL: u8 = 254;
+
+    /// The number of routers that answer at one TTL of the largest round.
+    ///
+    /// The `paris` and the `dublin` modes vary the flow of a probe, so more
+    /// than one router answers at one TTL. The hops of such a round therefore
+    /// outnumber the TTLs that the round probed.
+    const HOPS_AT_ONE_TTL: usize = 2;
+
+    /// The smallest number of bytes that the line of the largest round holds.
+    ///
+    /// The bound guards the two tests that write the largest round. Both of
+    /// them need a record that takes a long moment to write, because that
+    /// moment is the moment that a second run meets the first one in. A later
+    /// schema that shrank a record to a few hundred bytes would leave the two
+    /// runs almost no moment to meet in, and the tests would then pass because
+    /// they raced nothing.
+    const LARGEST_ROUND_BYTES: usize = 49_000;
+
+    /// The first six groups of every hop address of the first run of a shared
+    /// file.
+    ///
+    /// Each group holds four hex digits and no group is zero, so `Display`
+    /// compresses nothing and the address writes its full 39 characters. A
+    /// wide address makes a wide record.
+    const A_HOP_PREFIX: &str = "abcd:ef01:2345:6789:abcd:ef01";
+
+    /// The first six groups of every hop address of the second run of a shared
+    /// file.
+    ///
+    /// The prefix differs from `A_HOP_PREFIX`, so a reader of the file tells
+    /// the hops of one run from the hops of the other.
+    const OTHER_HOP_PREFIX: &str = "bcde:f012:3456:789a:bcde:f012";
+
+    /// The number of rounds that each run of a shared file records.
+    const ROUNDS_OF_A_SHARED_FILE: u64 = 8;
+
+    /// The address of one hop of the largest round.
+    ///
+    /// The prefix names the run. The two groups at the end hold the TTL and
+    /// the number of the router at that TTL, and each of them starts with a
+    /// digit that is not zero, so `Display` writes all four digits of it.
+    fn hop_address(prefix: &str, ttl: u8, router: usize) -> IpAddr {
+        address(&format!("{prefix}:1{ttl:03x}:2{router:03x}"))
+    }
+
+    /// The largest round that one run can record.
+    ///
+    /// Two settings reach past the size of an ordinary round. The run probes
+    /// every TTL up to the last one that the tracer takes, and a multipath
+    /// mode reports more than one router at each of those TTLs. Each hop
+    /// carries an address of the full width of IP version 6.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the line of the round holds fewer bytes than
+    /// [`LARGEST_ROUND_BYTES`]. Such a round no longer races anything, and a
+    /// test that raced nothing passes for the wrong reason.
+    fn the_largest_round_record(run: &str, seq: u64, prefix: &str) -> Record {
+        let mut hops = Vec::new();
+        for ttl in FIRST_TTL..=LAST_TTL {
+            for router in 0..HOPS_AT_ONE_TTL {
+                hops.push(Hop {
+                    ttl,
+                    addr: hop_address(prefix, ttl, router),
+                    rtt_ms: 1.23,
+                    icmp: TIME_EXCEEDED.to_owned(),
+                });
+            }
+        }
+        let record = Record::Round(RoundRecord {
+            run: RunId::from(run),
+            seq,
+            ts: moment("2026-08-18T12:34:56.789Z"),
+            dur_ms: 1004,
+            ttl_range: TtlRange::new(FIRST_TTL, LAST_TTL).expect("the test range must hold"),
+            reached: true,
+            hops,
+        });
+        let bytes = line_of(&record).len();
+        assert!(
+            bytes >= LARGEST_ROUND_BYTES,
+            "the largest round holds {LARGEST_ROUND_BYTES} bytes at least, and this one holds {bytes}"
+        );
+        record
+    }
+
+    /// The number of hops that the largest round holds.
+    fn hops_of_the_largest_round() -> usize {
+        usize::from(LAST_TTL - FIRST_TTL + 1) * HOPS_AT_ONE_TTL
+    }
+
+    /// A record must reach the sink of the writer as one write.
+    ///
+    /// The writer takes the exclusive lock of the file for one write and
+    /// releases it after that write. A record that leaves as two writes
+    /// therefore releases the lock in the middle of itself, and a whole record
+    /// of another run lands in the gap.
+    #[test]
+    fn one_record_leaves_the_writer_as_one_append() {
+        let sink = Appends::default();
+        let record = the_largest_round_record(RUN, 1, A_HOP_PREFIX);
+        let mut writer = Writer::to_sink(sink.clone());
+        writer.write(&record).expect("the record must be written");
+
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 1, "one record reaches the sink as one write");
+        let written = calls.first().expect("the record reaches the sink");
+        let mut expected = line_of(&record).into_bytes();
+        expected.push(super::NEWLINE);
+        assert_eq!(
+            written.len(),
+            expected.len(),
+            "the one write carries the whole line and the newline"
+        );
+        assert!(
+            written == &expected,
+            "the one write carries the line first and the newline after it"
+        );
+    }
+
+    /// The address of every hop of one round, as the file holds them.
+    fn hop_addresses_of(round: &RoundRecord) -> Vec<String> {
+        round.hops.iter().map(|hop| hop.addr.to_string()).collect()
+    }
+
+    /// Two runs of one destination from one machine append to one file at one
+    /// moment. Every line of that file must hold one record and no more.
+    ///
+    /// A record that leaves the writer as two writes releases the lock of the
+    /// file in the middle of itself, and the second run then appends a whole
+    /// record into the gap. The line of the first run holds two records after
+    /// that, the reader refuses the whole file, and both runs are lost.
+    ///
+    /// The second run appends after every write of the first one, so the test
+    /// reads that meeting every time. See [`SecondRunBetweenWrites`] for why
+    /// two threads read it almost never.
+    #[test]
+    fn two_runs_that_share_one_file_leave_every_line_whole() {
+        let file = TempFile::absent("two-runs-one-file");
+        let other: Vec<Record> = (1..=ROUNDS_OF_A_SHARED_FILE)
+            .map(|seq| the_largest_round_record(OTHER_RUN, seq, OTHER_HOP_PREFIX))
+            .collect();
+        let first = RecordFile::append(file.path(), LOCK_WAIT)
+            .expect("the test file must open for appending");
+        let sink = SecondRunBetweenWrites::on(first, file.path(), other)
+            .expect("the second run must open the same file");
+        let mut writer = Writer::to_sink(sink);
+        for seq in 1..=ROUNDS_OF_A_SHARED_FILE {
+            writer
+                .write(&the_largest_round_record(RUN, seq, A_HOP_PREFIX))
+                .expect("the record must be written");
+        }
+        drop(writer);
+
+        let recording = Recording::read(file.path())
+            .expect("a file that two runs shared must hold one record on each line");
+        assert_eq!(
+            recording.truncated(),
+            None,
+            "every run ended its last line with a newline"
+        );
+        assert_eq!(
+            recording.run_ids(),
+            [RunId::from(RUN), RunId::from(OTHER_RUN)],
+            "the file holds the rounds of both runs"
+        );
+
+        let expected: Vec<u64> = (1..=ROUNDS_OF_A_SHARED_FILE).collect();
+        for (run, prefix) in [(RUN, A_HOP_PREFIX), (OTHER_RUN, OTHER_HOP_PREFIX)] {
+            let held = recording
+                .run(&RunId::from(run))
+                .expect("the file holds the run");
+            assert_eq!(
+                seqs_of(&held),
+                expected,
+                "the file holds every round of {run}"
+            );
+            for round in held.rounds() {
+                let addresses = hop_addresses_of(round);
+                assert_eq!(
+                    addresses.len(),
+                    hops_of_the_largest_round(),
+                    "round {} of {run} holds every hop that the run wrote",
+                    round.seq
+                );
+                for addr in &addresses {
+                    assert!(
+                        addr.starts_with(prefix),
+                        "round {} of {run} holds the hops of that run alone: {addr}",
+                        round.seq
+                    );
+                }
+            }
+        }
     }
 
     // The golden fixture. The repository holds one recorded file of two runs,
