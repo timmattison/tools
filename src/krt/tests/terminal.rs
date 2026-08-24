@@ -1,10 +1,18 @@
-//! Black-box coverage for the parts of `krt` that a pipe cannot reach.
+//! Black-box coverage for the parts of `krt` that need a real terminal, and
+//! for the parts that need the one tracer of the machine.
 //!
 //! `cargo test` hands a test binary a pipe, and three parts of `krt` answer
 //! nothing without a terminal: the width that a frame draws in, the keys that a
 //! live run reads, and the hold that a live run takes on the terminal it draws
 //! on. A pseudo terminal is a terminal, so these tests give the binary one and
 //! drive it through that.
+//!
+//! One test below gives the binary a pipe on purpose, because the answer it
+//! covers is the one a pipe produces: such a run draws no table. It stands here
+//! beside the runs of a terminal for the other reason of this file. Every live
+//! run takes the one tracer of the machine, and every test of a live run holds
+//! the lock of that tracer while it does. A second lock in a second file locks
+//! nothing, so a live run belongs here whatever its standard output is.
 //!
 //! Every pseudo terminal below carries a size. A pseudo terminal that nobody
 //! sized answers the `TIOCGWINSZ` ioctl with zero columns, and that ioctl
@@ -154,6 +162,37 @@ const FLAG_OUTPUT: &str = "--output";
 #[cfg(target_os = "macos")]
 const FLAG_INTERVAL: &str = "--interval";
 
+/// The flag that names the number of rounds which stops a run.
+#[cfg(target_os = "macos")]
+const FLAG_ROUNDS: &str = "--rounds";
+
+/// The flag that names the last TTL that a round probes.
+#[cfg(target_os = "macos")]
+const FLAG_MAX_TTL: &str = "--max-ttl";
+
+/// The flag that asks for the status lines in the place of the table.
+#[cfg(target_os = "macos")]
+const FLAG_HEADLESS: &str = "--headless";
+
+/// The number one, as a limit of rounds and as a limit of TTLs.
+#[cfg(target_os = "macos")]
+const ONE: &str = "1";
+
+/// The flags of a run that records one round of one TTL and then stops.
+///
+/// The round limit is what stops such a run, and it is what bounds the wait of
+/// each test that takes these flags. One of those waits carries no deadline of
+/// its own, so a reader who takes the round limit away leaves a test that holds
+/// every commit of the repository.
+///
+/// The TTL limit is what makes the status line of that round read the same in
+/// each run. The tracer holds more than one TTL in the air at a time, and the
+/// loopback answers every one of them, so a round of the whole range reports
+/// one hop in one run and two hops in the next. A round of one TTL reports one
+/// hop always.
+#[cfg(target_os = "macos")]
+const ONE_ROUND_OF_ONE_TTL: [&str; 4] = [FLAG_ROUNDS, ONE, FLAG_MAX_TTL, ONE];
+
 /// The period of one round of a run whose first round no test waits for.
 ///
 /// `src/krt/src/trace.rs` hands this period to the tracer as the shortest round
@@ -223,6 +262,25 @@ const REASON_FIELD: &str = "reason";
 /// The reason of a run that the user stopped.
 #[cfg(target_os = "macos")]
 const QUIT_REASON: &str = "quit";
+
+/// The reason of a run that the round limit stopped.
+#[cfg(target_os = "macos")]
+const ROUNDS_REASON: &str = "rounds";
+
+/// The start of the status line of the first round of a run of the loopback.
+///
+/// The line names the round, the number of the TTLs that answered, whether the
+/// round reached the target, and the time that round took. A probe of the
+/// loopback answers at the first TTL and reaches the target, so the first three
+/// fields of the line stand as this text spells them. The time is different in
+/// each run, so the text stops in front of it.
+///
+/// The test spells the line, and `src/krt/src/live.rs` builds it out of the
+/// fields of the round. That is on purpose: this line is the whole picture that
+/// a run without a table gives of one round, and it is what a reader of such a
+/// run sees.
+#[cfg(target_os = "macos")]
+const STATUS_LINE_START: &str = "round 1  1 hop  reached  ";
 
 /// One run of `krt` under a pseudo terminal, and the text that terminal showed.
 ///
@@ -665,46 +723,74 @@ struct LiveRun {
     _lock: TracerLock,
 }
 
-/// Starts a live run of the loopback under a terminal of [`WIDE`] columns, and
-/// waits until the table draws its first frame.
-///
-/// The run stays offline for the reason that the file documentation states: the
-/// destination is the loopback, [`FLAG_SOURCE`] names the loopback, and
-/// [`FLAG_NO_DNS`] looks nothing up.
-#[cfg(target_os = "macos")]
-fn live_run(recording: &Recording) -> LiveRun {
-    live_run_with(recording, &[])
-}
-
-/// Starts such a run with `flags` behind the flags that every live run of this
-/// file takes, and waits until the table draws its first frame.
+/// The command line of a live run of the loopback, with `flags` behind the
+/// flags that every live run of this file takes.
 ///
 /// A test that needs one more flag names that flag alone. The flags of the run
 /// which keep it offline stand here, in one place, so no test of this file can
-/// start a run that reaches the network.
+/// start a run that reaches the network. The run stays offline for the reason
+/// that the file documentation states: the destination is the loopback,
+/// [`FLAG_SOURCE`] names the loopback, and [`FLAG_NO_DNS`] looks nothing up.
 #[cfg(target_os = "macos")]
-fn live_run_with(recording: &Recording, flags: &[&str]) -> LiveRun {
-    let lock = TracerLock::take();
-    let output = recording.argument();
+fn live_arguments<'a>(output: &'a str, flags: &[&'a str]) -> Vec<&'a str> {
     let mut arguments = vec![
         LOOPBACK,
         FLAG_SOURCE,
         LOOPBACK,
         FLAG_NO_DNS,
         FLAG_OUTPUT,
-        &output,
+        output,
     ];
     arguments.extend_from_slice(flags);
-    let terminal = Terminal::open(WIDE, &arguments);
+    arguments
+}
+
+/// Starts a live run of the loopback under a terminal of [`WIDE`] columns, and
+/// waits until the table draws its first frame.
+#[cfg(target_os = "macos")]
+fn live_run(recording: &Recording) -> LiveRun {
+    live_run_with(recording, &[])
+}
+
+/// Starts such a run with `flags`, and waits until the table draws its first
+/// frame.
+#[cfg(target_os = "macos")]
+fn live_run_with(recording: &Recording, flags: &[&str]) -> LiveRun {
+    let run = live_run_under(recording, flags);
     // The table draws its first frame at the moment the run takes the
     // terminal, so a frame on the screen says that raw mode stands. A key that
     // arrived in front of raw mode reaches the line discipline and not the run,
     // so every test below presses its key after this wait.
-    terminal.wait_for(COLUMN_HEADER_START);
+    run.terminal.wait_for(COLUMN_HEADER_START);
+    run
+}
+
+/// Starts such a run with `flags`, and waits for nothing.
+///
+/// A run that draws no table shows no frame, so a test of that run waits for a
+/// text of its own. Every other caller takes [`live_run_with`], which waits for
+/// the first frame of the table.
+#[cfg(target_os = "macos")]
+fn live_run_under(recording: &Recording, flags: &[&str]) -> LiveRun {
+    let lock = TracerLock::take();
+    let output = recording.argument();
+    let terminal = Terminal::open(WIDE, &live_arguments(&output, flags));
     LiveRun {
         terminal,
         _lock: lock,
     }
+}
+
+/// The number of status lines that `text` holds.
+///
+/// A terminal returns a carriage at the end of each line it shows, and a pipe
+/// returns none, so the reader takes every carriage off the end of a line. What
+/// stays is the line that a reader of either one sees.
+#[cfg(target_os = "macos")]
+fn status_lines(text: &str) -> usize {
+    text.split('\n')
+        .filter(|line| line.trim_end_matches('\r').starts_with(STATUS_LINE_START))
+        .count()
 }
 
 /// Asserts that a live run which one key stopped exits with success and closes
@@ -840,4 +926,95 @@ fn a_live_run_draws_its_table_in_front_of_the_first_round() {
         "and the key of the reader stops the run, so the test leaves no tracer behind: {:?}",
         run.terminal.shown()
     );
+}
+
+/// A live run whose standard output is a pipe draws no table.
+///
+/// This is the one test of this file that gives the binary a pipe. The run has
+/// no terminal to hold, no key to read, and no screen to clear, so it writes
+/// one status line for the round it made and nothing else. A table there would
+/// write a whole frame of control sequences into the file of the reader for
+/// each round, and the alternate screen is the first of those sequences.
+///
+/// The recorded file carries the other half of the answer. Standard output says
+/// what the reader of a pipe sees, and the reason in that file says how the run
+/// stopped: the round limit stopped it, and no fault did.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_run_whose_standard_output_is_a_pipe_draws_no_table() {
+    let recording = Recording::at("krt-terminal-piped");
+    // The lock stands under the recording, so the drop of the lock comes first
+    // and the removal of the file comes after it. That is the order of every
+    // other live test of this file.
+    let _lock = TracerLock::take();
+    let output = recording.argument();
+    // `wait_with_output` waits with no deadline, and the round limit of
+    // [`ONE_ROUND_OF_ONE_TTL`] is what bounds it: the run stops on its own.
+    let finished = process::Command::new(env!("CARGO_BIN_EXE_krt"))
+        .args(live_arguments(&output, &ONE_ROUND_OF_ONE_TTL))
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::piped())
+        .stderr(process::Stdio::piped())
+        .spawn()
+        .expect("the binary must start with its standard output on a pipe")
+        .wait_with_output()
+        .expect("the run must answer with the text it wrote");
+    let shown = String::from_utf8_lossy(&finished.stdout).into_owned();
+
+    assert!(
+        finished.status.success(),
+        "the round limit stops the run, and it showed {shown:?}"
+    );
+    assert_eq!(
+        status_lines(&shown),
+        1,
+        "the run writes one status line for the one round it made: {shown:?}"
+    );
+    for sequence in [ENTER_ALTERNATE_SCREEN, LEAVE_ALTERNATE_SCREEN] {
+        assert!(
+            !shown.contains(sequence),
+            "and it writes no control sequence of the alternate screen into a pipe: {shown:?}"
+        );
+    }
+    assert_eq!(
+        recording.end_reason().as_deref(),
+        Some(ROUNDS_REASON),
+        "the recorded file closes with the reason of the round limit, and the run showed {shown:?}"
+    );
+}
+
+/// The `--headless` flag draws no table under a terminal either.
+///
+/// The terminal of this run is a real one, so the flag is the only thing that
+/// keeps the table away. That is what makes this a test of the flag: a run
+/// which read the terminal alone would draw its table here, and the reader who
+/// asked for the status lines would get a screen that clears itself instead.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_headless_flag_draws_no_table_under_a_terminal() {
+    let recording = Recording::at("krt-terminal-headless");
+    // The test presses no key, so the round limit of [`ONE_ROUND_OF_ONE_TTL`]
+    // is what stops this run.
+    let mut flags = ONE_ROUND_OF_ONE_TTL.to_vec();
+    flags.push(FLAG_HEADLESS);
+    let mut run = live_run_under(&recording, &flags);
+
+    let code = run.terminal.wait_for_exit();
+    let shown = run.terminal.shown();
+
+    assert_eq!(
+        code, EXIT_SUCCESS,
+        "the round limit stops the run, and it showed {shown:?}"
+    );
+    assert_eq!(
+        status_lines(&shown),
+        1,
+        "the run writes one status line for the one round it made: {shown:?}"
+    );
+    for sequence in [ENTER_ALTERNATE_SCREEN, LEAVE_ALTERNATE_SCREEN] {
+        assert!(
+            !shown.contains(sequence),
+            "and the flag keeps it off the alternate screen of the terminal it holds: {shown:?}"
+        );
+    }
 }
