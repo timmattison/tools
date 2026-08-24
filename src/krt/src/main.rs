@@ -36,7 +36,7 @@ use record::{
     SourceLabel, Target,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::IsTerminal;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
@@ -656,8 +656,19 @@ impl Cli {
 
         if let Some(destination) = self.destination.as_deref() {
             if let Some(command) = command_named(destination) {
+                let outside = flags_outside(&command);
+                let refused = if outside.is_empty() {
+                    String::new()
+                } else {
+                    let named: Vec<String> =
+                        outside.iter().map(|flag| format!("`{flag}`")).collect();
+                    format!(
+                        " `{command}` takes none of these flags: {}.",
+                        named.join(", ")
+                    )
+                };
                 return Err(format!(
-                    "`{destination}` is the name of a command, and this line reads it as a destination: write `{PROGRAM} {command}` first, because every flag of a probe stands behind the command"
+                    "`{destination}` is the name of a command, and this line reads it as a destination: write `{PROGRAM} {command}` first, because every flag of a probe stands behind the command.{refused}"
                 ));
             }
         }
@@ -910,6 +921,50 @@ fn command_named(destination: &str) -> Option<String> {
         .get_subcommands()
         .map(|command| command.get_name().to_owned())
         .find(|name| name == destination)
+}
+
+/// The flags of the top level that the command does not take, as a user writes
+/// them.
+///
+/// The guard of a command read as a destination tells the reader to write the
+/// command first. That repair works for a flag the command shares, and it fails
+/// for a flag that stands on the top level alone: the command then answers that
+/// the flag is unknown. The message therefore names the flags of the second
+/// kind.
+///
+/// The two sets come from the parser and never from a list of this file. A flag
+/// that a later slice moves onto [`SharedArgs`] leaves this set on its own, and
+/// a flag that a later slice adds to the top level joins it.
+///
+/// A flag that carries a short name and no long name — the two flags of the
+/// address family — reads by its short name. A positional argument is no flag,
+/// so the set holds none. The order is the order of the text, so one command
+/// line always reads one message.
+fn flags_outside(command: &str) -> Vec<String> {
+    let top = Cli::command();
+    let Some(inner) = top.find_subcommand(command) else {
+        return Vec::new();
+    };
+    let long_names: BTreeSet<&str> = inner
+        .get_arguments()
+        .filter_map(clap::Arg::get_long)
+        .collect();
+    let short_names: BTreeSet<char> = inner
+        .get_arguments()
+        .filter_map(clap::Arg::get_short)
+        .collect();
+    let mut outside: Vec<String> = top
+        .get_arguments()
+        .filter_map(
+            |argument| match (argument.get_long(), argument.get_short()) {
+                (Some(long), _) if !long_names.contains(long) => Some(format!("--{long}")),
+                (None, Some(short)) if !short_names.contains(&short) => Some(format!("-{short}")),
+                _ => None,
+            },
+        )
+        .collect();
+    outside.sort();
+    outside
 }
 
 /// What the refusal of a target timeout names in the place of a time that no
