@@ -1713,6 +1713,60 @@ mod tests {
         }
     }
 
+    /// The terminal column that the Recent column of a frame of [`WIDTH`]
+    /// columns starts in.
+    ///
+    /// The nominal frame is 97 columns wide and the Recent column is the last
+    /// one of it, 9 columns wide, so it starts in column 88. The test spells
+    /// the number, and `ui.rs` sums it out of the list of columns that the
+    /// render draws: a column that changes width must move the image with it,
+    /// and this number is what says the sum still lands where the heading does.
+    const RECENT_COLUMN: u16 = 88;
+
+    /// The bytes that move the cursor to one row of the Recent column.
+    ///
+    /// A terminal counts its rows and its columns from one, and `crossterm`
+    /// counts from zero, so both numbers gain one on the way out.
+    fn moved_to(row: usize) -> String {
+        format!("\x1b[{};{}H", HEAD_LINES + row + 1, RECENT_COLUMN + 1)
+    }
+
+    /// The keys that name the placement of the image of one row.
+    ///
+    /// Every image of one frame carries an id of its own, so a later frame
+    /// replaces each of them where it stands. One id for every row would put
+    /// the last row of the frame over the first one.
+    fn placement(id: usize) -> String {
+        format!(",i={id},p={id},")
+    }
+
+    #[test]
+    fn a_table_of_graphics_draws_one_image_for_each_row_of_the_path() {
+        // The image of a row stands over the Recent column of that row, and the
+        // row at index `i` stands on the line under the head of the frame plus
+        // `i`.
+        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        screen.round(&a_tall_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+
+        assert_eq!(
+            image_count(&screen.sink),
+            usize::from(TALL_PATH),
+            "one image stands for each row of the path: {drawn:?}"
+        );
+        for ttl in TTL..=TALL_PATH {
+            let row = usize::from(ttl - TTL);
+            assert!(
+                drawn.contains(&format!("{}{KITTY_IMAGE}", moved_to(row))),
+                "the cursor moves to the Recent column of the row of TTL {ttl}, and the image of that row follows it: {drawn:?}"
+            );
+            assert!(
+                drawn.contains(&placement(row + 1)),
+                "and the image of that row carries a placement id of its own: {drawn:?}"
+            );
+        }
+    }
+
     /// The last `count` lines of a frame, or every line of a frame that holds
     /// fewer than that.
     ///
