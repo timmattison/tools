@@ -436,7 +436,7 @@ enum Command {
     /// Hunt for the longest path. Draw an address, trace it, score it, and
     /// take the next round.
     Hunt {
-        /// Stop after this many.
+        /// Stop after this many destinations. One round is one destination.
         #[arg(
             long,
             value_name = "N",
@@ -445,7 +445,8 @@ enum Command {
         )]
         rounds: u64,
 
-        /// The number of them.
+        /// The number of probe rounds that each destination takes. One probe
+        /// round is one sweep of the TTLs.
         #[arg(
             long,
             value_name = "N",
@@ -551,6 +552,19 @@ struct ResolvedConfig {
 }
 
 impl Cli {
+    /// The six shared flags of the side of the command line that probes.
+    ///
+    /// A `hunt` carries its own copy of them, because the parser rejects a flag
+    /// of a probe in front of a command. Every other line carries them at the
+    /// top. The two checks that read a flag before the run resolves therefore
+    /// read the same values that the run will use.
+    fn probe_args(&self) -> &SharedArgs {
+        match &self.command {
+            Some(Command::Hunt { shared, .. }) => shared,
+            _ => &self.shared,
+        }
+    }
+
     /// Resolves the command line into the configuration of one run.
     ///
     /// The two flags of the address family collapse into one value, and the
@@ -568,19 +582,20 @@ impl Cli {
     /// changes nothing, and the record then names a mode that the run did not
     /// use.
     fn resolve(self) -> Result<ResolvedConfig, String> {
-        if self.shared.first_ttl > self.shared.max_ttl {
+        let probe = self.probe_args();
+        if probe.first_ttl > probe.max_ttl {
             return Err(format!(
                 "`--first-ttl {}` is above `--max-ttl {}`: the first TTL starts the probe and the max TTL ends it",
-                self.shared.first_ttl, self.shared.max_ttl
+                probe.first_ttl, probe.max_ttl
             ));
         }
 
-        let carries_a_mode = matches!(self.shared.protocol, Protocol::Udp);
+        let carries_a_mode = matches!(probe.protocol, Protocol::Udp);
         if self.multipath != Multipath::Classic && !carries_a_mode {
             return Err(format!(
                 "`--multipath {}` needs `--protocol udp`, but the protocol is `{}`",
                 value_name(&self.multipath),
-                value_name(&self.shared.protocol)
+                value_name(&probe.protocol)
             ));
         }
 
@@ -594,29 +609,62 @@ impl Cli {
             AddressFamily::Auto
         };
 
+        if let Some(destination) = self.destination.as_deref() {
+            if let Some(command) = command_named(destination) {
+                return Err(format!(
+                    "`{destination}` is the name of a command, and this line reads it as a destination: write `{PROGRAM} {command}` first, because every flag of a probe stands behind the command"
+                ));
+            }
+        }
+
         let (replay, run) = match &self.command {
             Some(Command::Replay { file, run }) => (Some(file.clone()), run.clone()),
             Some(Command::Hunt { .. }) | None => (None, None),
         };
 
+        // A hunt carries its own copy of the six shared flags, because the
+        // parser rejects a flag of a probe in front of a command. The hunt
+        // therefore wins over the flags of the line that stands in front of it,
+        // which hold their defaults for a line that names a command.
+        let (hunt, shared) = match self.command {
+            Some(Command::Hunt {
+                rounds,
+                probes_per_round,
+                target_timeout,
+                seed,
+                include_partial,
+                shared,
+            }) => (
+                Some(HuntConfig {
+                    rounds,
+                    probes_per_round,
+                    target_timeout,
+                    seed: seed.unwrap_or_else(seed_from_clock),
+                    include_partial,
+                }),
+                shared,
+            ),
+            _ => (None, self.shared),
+        };
+
         Ok(ResolvedConfig {
             destination: self.destination,
-            output: self.shared.output,
+            output: shared.output,
             interval: self.interval,
-            first_ttl: self.shared.first_ttl,
-            max_ttl: self.shared.max_ttl,
-            protocol: self.shared.protocol,
+            first_ttl: shared.first_ttl,
+            max_ttl: shared.max_ttl,
+            protocol: shared.protocol,
             multipath: self.multipath,
             address_family,
-            reverse_dns: !self.shared.no_dns,
-            source: self.shared.source,
+            reverse_dns: !shared.no_dns,
+            source: shared.source,
             headless: self.headless,
             graphics: self.graphics,
             duration: self.duration,
             rounds: self.rounds,
             replay,
             run,
-            hunt: None,
+            hunt,
         })
     }
 }
@@ -629,56 +677,90 @@ impl Cli {
 /// prints the table of the run it folded in the place of the block.
 impl fmt::Display for ResolvedConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let path_or = |path: Option<&PathBuf>, absent: &str| {
-            path.map_or_else(|| absent.to_owned(), |path| path.display().to_string())
-        };
-        let rows = [
-            (
-                "destination",
-                self.destination
-                    .clone()
-                    .unwrap_or_else(|| ABSENT.to_owned()),
-            ),
-            ("output", path_or(self.output.as_ref(), OUTPUT_DERIVED)),
-            ("interval", ui::render_duration(self.interval)),
-            ("first ttl", self.first_ttl.to_string()),
-            ("max ttl", self.max_ttl.to_string()),
-            ("protocol", value_name(&self.protocol)),
-            ("multipath", value_name(&self.multipath)),
-            ("address family", self.address_family.to_string()),
-            (
-                "reverse dns",
-                if self.reverse_dns { "on" } else { "off" }.to_owned(),
-            ),
-            (
-                "source",
-                self.source.map_or_else(
-                    || SOURCE_DISCOVERED.to_owned(),
-                    |address| address.to_string(),
-                ),
-            ),
-            (
-                "display",
-                if self.headless { "headless" } else { "table" }.to_owned(),
-            ),
-            (
-                "duration limit",
-                self.duration
-                    .map_or_else(|| ABSENT.to_owned(), ui::render_duration),
-            ),
-            (
-                "round limit",
-                self.rounds
-                    .map_or_else(|| ABSENT.to_owned(), |rounds| rounds.to_string()),
-            ),
-        ];
-
         writeln!(formatter, "resolved configuration:")?;
-        for (key, value) in rows {
+        for (key, value) in self.rows() {
             let key = format!("{key}:");
             writeln!(formatter, "  {key:<CONFIG_KEY_WIDTH$}{value}")?;
         }
         Ok(())
+    }
+}
+
+impl ResolvedConfig {
+    /// The rows of the block that a run prints before it probes.
+    ///
+    /// A hunt and a trace hold different rows, because a hunt draws its own
+    /// destination, draws addresses of ip version 4 alone, and draws no live
+    /// table. A block that named a destination, an address family, and a
+    /// display would state three things that the hunt does not do.
+    ///
+    /// The six rows that both of them hold read one expression each, and the
+    /// two lists then name those rows in the order each block wants. A second
+    /// expression for one of those rows would print the source one way in a
+    /// trace and another way in a hunt.
+    fn rows(&self) -> Vec<(&'static str, String)> {
+        let output = || {
+            self.output.as_ref().map_or_else(
+                || OUTPUT_DERIVED.to_owned(),
+                |path| path.display().to_string(),
+            )
+        };
+        let reverse_dns = || if self.reverse_dns { "on" } else { "off" }.to_owned();
+        let source = || {
+            self.source.map_or_else(
+                || SOURCE_DISCOVERED.to_owned(),
+                |address| address.to_string(),
+            )
+        };
+        let Some(hunt) = &self.hunt else {
+            return vec![
+                (
+                    "destination",
+                    self.destination
+                        .clone()
+                        .unwrap_or_else(|| ABSENT.to_owned()),
+                ),
+                ("output", output()),
+                ("interval", ui::render_duration(self.interval)),
+                ("first ttl", self.first_ttl.to_string()),
+                ("max ttl", self.max_ttl.to_string()),
+                ("protocol", value_name(&self.protocol)),
+                ("multipath", value_name(&self.multipath)),
+                ("address family", self.address_family.to_string()),
+                ("reverse dns", reverse_dns()),
+                ("source", source()),
+                (
+                    "display",
+                    if self.headless { "headless" } else { "table" }.to_owned(),
+                ),
+                (
+                    "duration limit",
+                    self.duration
+                        .map_or_else(|| ABSENT.to_owned(), ui::render_duration),
+                ),
+                (
+                    "round limit",
+                    self.rounds
+                        .map_or_else(|| ABSENT.to_owned(), |rounds| rounds.to_string()),
+                ),
+            ];
+        };
+        vec![
+            ("output", output()),
+            ("first ttl", self.first_ttl.to_string()),
+            ("max ttl", self.max_ttl.to_string()),
+            ("protocol", value_name(&self.protocol)),
+            ("reverse dns", reverse_dns()),
+            ("source", source()),
+            ("rounds", hunt.rounds.to_string()),
+            ("probes per round", hunt.probes_per_round.to_string()),
+            ("target timeout", ui::render_duration(hunt.target_timeout)),
+            ("seed", hunt.seed.to_string()),
+            (
+                "include partial",
+                if hunt.include_partial { "on" } else { "off" }.to_owned(),
+            ),
+        ]
     }
 }
 
@@ -756,6 +838,39 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
         ));
     }
     Ok(duration)
+}
+
+/// The command that a destination names, when the destination is the name of
+/// one.
+///
+/// A line that names a flag in front of a command reads the command as the
+/// destination, because the parser takes the first free word as the
+/// destination and every flag of a probe conflicts with a command. Such a line
+/// would trace a host named `hunt`.
+///
+/// The list of the names comes from the parser and never from a list of this
+/// file. A command that a later slice adds is a command that this guard covers,
+/// with nothing to remember.
+fn command_named(destination: &str) -> Option<String> {
+    Cli::command()
+        .get_subcommands()
+        .map(|command| command.get_name().to_owned())
+        .find(|name| name == destination)
+}
+
+/// The seed of a hunt that named none.
+///
+/// The moment that the hunt starts makes the seed, so two hunts of one machine
+/// draw different addresses. The block of the resolved configuration prints the
+/// number, so a reader who wants that hunt back names it to `--seed`.
+///
+/// The nanoseconds of the moment run past the width of the seed, and the low
+/// bits are the ones that move, so the seed takes those.
+fn seed_from_clock() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    u64::try_from(nanos & u128::from(u64::MAX)).unwrap_or_default()
 }
 
 /// Picks the address of the version that the run asked for.
