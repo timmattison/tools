@@ -335,16 +335,6 @@ struct Cli {
     #[arg(value_name = "DESTINATION", required = true)]
     destination: Option<String>,
 
-    /// The round period. Accepts `500ms`, `1s`, `2m`.
-    #[arg(
-        short,
-        long,
-        value_name = "DUR",
-        default_value = "1s",
-        value_parser = parse_duration,
-    )]
-    interval: Duration,
-
     /// The multipath mode. UDP only.
     #[arg(long, value_name = "M", value_enum, default_value_t = Multipath::Classic)]
     multipath: Multipath,
@@ -389,22 +379,34 @@ struct Cli {
 
 /// The flags that a trace and a hunt both take.
 ///
-/// A hunt probes as a trace does, so the same six flags set the file, the range
-/// of the TTL, the protocol, the lookups, and the source. One definition serves
-/// both, because two definitions of one flag drift: `--max-ttl` would take one
-/// default from a trace and another from a hunt, and nothing would say so.
+/// A hunt probes as a trace does, so the same seven flags set the file, the
+/// period of a round, the range of the TTL, the protocol, the lookups, and the
+/// source. One definition serves both, because two definitions of one flag
+/// drift: `--max-ttl` would take one default from a trace and another from a
+/// hunt, and nothing would say so.
 ///
 /// The flags that a hunt does not take stay on [`Cli`] alone. A hunt draws its
 /// own destination, so it takes none. It draws addresses of ip version 4 alone,
 /// so the two flags of the address family say nothing about it. It prints one
 /// table at the end and no live table, so `--headless` says nothing either. Its
 /// own `--rounds` counts destinations, so the round limit and the time limit of
-/// a trace stay where they are.
+/// a trace stay where they are. A hunt draws no multipath mode of its own, so
+/// `--multipath` stays there as well.
 #[derive(clap::Args, Debug, PartialEq, Eq)]
 struct SharedArgs {
     /// The JSONL path. Overrides the derived name.
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
+
+    /// The round period. Accepts `500ms`, `1s`, `2m`.
+    #[arg(
+        short,
+        long,
+        value_name = "DUR",
+        default_value = "1s",
+        value_parser = parse_duration,
+    )]
+    interval: Duration,
 
     /// The first TTL to probe.
     #[arg(
@@ -571,7 +573,7 @@ struct ResolvedConfig {
 }
 
 impl Cli {
-    /// The six shared flags of the side of the command line that probes.
+    /// The seven shared flags of the side of the command line that probes.
     ///
     /// A `hunt` carries its own copy of them, because the parser rejects a flag
     /// of a probe in front of a command. Every other line carries them at the
@@ -641,7 +643,7 @@ impl Cli {
             Some(Command::Hunt { .. }) | None => (None, None),
         };
 
-        // A hunt carries its own copy of the six shared flags, because the
+        // A hunt carries its own copy of the seven shared flags, because the
         // parser rejects a flag of a probe in front of a command. The hunt
         // therefore wins over the flags of the line that stands in front of it,
         // which hold their defaults for a line that names a command.
@@ -669,7 +671,7 @@ impl Cli {
         Ok(ResolvedConfig {
             destination: self.destination,
             output: shared.output,
-            interval: self.interval,
+            interval: shared.interval,
             first_ttl: shared.first_ttl,
             max_ttl: shared.max_ttl,
             protocol: shared.protocol,
@@ -720,7 +722,7 @@ impl ResolvedConfig {
     /// table. A block that named a destination, an address family, and a
     /// display would state three things that the hunt does not do.
     ///
-    /// The six rows that both of them hold read one expression each, and the
+    /// The seven rows that both of them hold read one expression each, and the
     /// two lists then name those rows in the order each block wants. A second
     /// expression for one of those rows would print the source one way in a
     /// trace and another way in a hunt.
@@ -731,6 +733,7 @@ impl ResolvedConfig {
                 |path| path.display().to_string(),
             )
         };
+        let interval = || ui::render_duration(self.interval);
         let reverse_dns = || if self.reverse_dns { "on" } else { "off" }.to_owned();
         let source = || {
             self.source.map_or_else(
@@ -747,7 +750,7 @@ impl ResolvedConfig {
                         .unwrap_or_else(|| ABSENT.to_owned()),
                 ),
                 ("output", output()),
-                ("interval", ui::render_duration(self.interval)),
+                ("interval", interval()),
                 ("first ttl", self.first_ttl.to_string()),
                 ("max ttl", self.max_ttl.to_string()),
                 ("protocol", value_name(&self.protocol)),
@@ -773,6 +776,7 @@ impl ResolvedConfig {
         };
         vec![
             ("output", output()),
+            ("interval", interval()),
             ("first ttl", self.first_ttl.to_string()),
             ("max ttl", self.max_ttl.to_string()),
             ("protocol", value_name(&self.protocol)),
@@ -2205,7 +2209,7 @@ resolved configuration:
         let cli = parse(&["krt", "example.com"]);
         assert_eq!(cli.destination.as_deref(), Some("example.com"));
         assert_eq!(cli.shared.output, None);
-        assert_eq!(cli.interval, Duration::from_secs(1));
+        assert_eq!(cli.shared.interval, Duration::from_secs(1));
         assert_eq!(cli.shared.first_ttl, 1);
         assert_eq!(cli.shared.max_ttl, 30);
         assert_eq!(cli.shared.protocol, Protocol::Icmp);
@@ -2298,13 +2302,13 @@ resolved configuration:
     #[test]
     fn parses_an_interval_in_milliseconds() {
         let cli = parse(&["krt", "example.com", "--interval", "500ms"]);
-        assert_eq!(cli.interval, Duration::from_millis(500));
+        assert_eq!(cli.shared.interval, Duration::from_millis(500));
     }
 
     #[test]
     fn parses_an_interval_in_minutes() {
         let cli = parse(&["krt", "example.com", "--interval", "2m"]);
-        assert_eq!(cli.interval, Duration::from_mins(2));
+        assert_eq!(cli.shared.interval, Duration::from_mins(2));
     }
 
     #[test]
@@ -2708,10 +2712,10 @@ resolved configuration:
             "500ms",
         ]);
         assert_eq!(short.shared.output, Some(PathBuf::from("path.jsonl")));
-        assert_eq!(short.interval, Duration::from_millis(500));
+        assert_eq!(short.shared.interval, Duration::from_millis(500));
         assert!(short.ipv4, "`-4` is the only form of the flag");
         assert_eq!(short.shared.output, long.shared.output);
-        assert_eq!(short.interval, long.interval);
+        assert_eq!(short.shared.interval, long.shared.interval);
     }
 
     #[test]

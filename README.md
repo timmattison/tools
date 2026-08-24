@@ -631,9 +631,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Each destination of a hunt writes one run into one file, with the records that a normal run
     writes. The `run` record of each destination carries the identifier of the hunt, so a reader
     groups the runs of one hunt, and `replay` folds any one of them with no change.
-  - `krt hunt` takes these flags, and the six flags of a trace that still apply: `--output`,
-    `--first-ttl`, `--max-ttl`, `--protocol`, `--no-dns`, and `--source`. Every flag stands behind
-    the command, because a flag in front of it reads `hunt` as the destination.
+  - `krt hunt` takes these flags, and the seven flags of a trace that still apply: `--output`,
+    `--interval`, `--first-ttl`, `--max-ttl`, `--protocol`, `--no-dns`, and `--source`. Every flag
+    stands behind the command, because a flag in front of it reads `hunt` as the destination.
     | Flag | Default | Meaning |
     | ---- | ------- | ------- |
     | `--rounds <N>` | `64` | Stop after this many destinations. One round is one destination. |
