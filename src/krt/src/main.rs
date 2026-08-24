@@ -4019,6 +4019,59 @@ resolved configuration:
         }
     }
 
+    /// The column that every value of a block stands in.
+    ///
+    /// The key of a row ends at the first colon of the line. A value that holds
+    /// a colon of its own — an address of ip version 6, and a path on some
+    /// machines — therefore takes no part in the answer.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a row that holds no colon. Such a row is a defect of the
+    /// block, not an answer that a test names.
+    fn value_columns(block: &str) -> Vec<usize> {
+        block
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let colon = line.find(':').expect("every row of the block holds a key");
+                let value = &line[colon + 1..];
+                colon + 1 + (value.len() - value.trim_start().len())
+            })
+            .collect()
+    }
+
+    /// Asserts that every value of a block stands in one column, one space
+    /// clear of the longest key.
+    fn values_line_up(arguments: &[&str]) {
+        let block = resolve(arguments).to_string();
+        let columns = value_columns(&block);
+        let first = *columns.first().expect("the block holds a row");
+        assert!(
+            columns.iter().all(|column| *column == first),
+            "every value of the block stands in one column: {block}"
+        );
+        for line in block.lines().skip(1) {
+            let colon = line.find(':').expect("every row of the block holds a key");
+            assert!(
+                line[colon + 1..].starts_with(' '),
+                "one space at the least stands between a key and its value: {line}"
+            );
+        }
+    }
+
+    /// The keys of a hunt are longer than the keys of a trace, so a width that
+    /// a constant fixed would run the longest of them into its value.
+    #[test]
+    fn every_value_of_the_block_of_a_hunt_stands_in_one_column() {
+        values_line_up(&["krt", HUNT]);
+    }
+
+    #[test]
+    fn every_value_of_the_block_of_a_trace_stands_in_one_column() {
+        values_line_up(&["krt", "example.com"]);
+    }
+
     /// The block of a hunt names no field that says nothing about a hunt.
     ///
     /// A hunt draws its own destination, it draws addresses of ip version 4

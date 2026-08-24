@@ -509,7 +509,12 @@ fn the_help_of_the_hunt_names_the_two_flags_that_count_a_round() {
         "`krt {HUNT} {FLAG_HELP}` must exit with success; stderr: {}",
         result.stderr
     );
-    for flag in ["--rounds", "--probes-per-round", "--target-timeout", "--seed"] {
+    for flag in [
+        "--rounds",
+        "--probes-per-round",
+        "--target-timeout",
+        "--seed",
+    ] {
         assert!(
             result.stdout.contains(flag),
             "the help of `{HUNT}` names `{flag}`: {}",
