@@ -1901,6 +1901,51 @@ mod tests {
         }
     }
 
+    /// The number of columns of a terminal that dropped the Recent column.
+    ///
+    /// Sixty-seven columns hold every column of the table but the Recent one
+    /// and the deviation. The test spells the number, and `ui.rs` drops the
+    /// columns out of its own list: a terminal of this width holds no place for
+    /// an image of a history.
+    const NO_RECENT_COLUMN: u16 = 67;
+
+    #[test]
+    fn a_table_of_graphics_draws_no_image_for_a_row_that_went_out_of_the_frame() {
+        // A frame of more lines than the window holds drops the rows of the
+        // highest TTLs. An image of one of those rows would stand over the line
+        // that counts them, or over a line of another frame, and nothing on the
+        // screen would say which row it belongs to.
+        let mut screen = graphics_table(WIDTH, Some(SHORT_ROWS));
+        screen.round(&a_tall_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+
+        assert_eq!(
+            image_count(&screen.sink),
+            usize::from(LAST_KEPT_TTL),
+            "one image stands for each row of the path that reached the frame: {drawn:?}"
+        );
+        assert!(
+            !drawn.contains(&moved_to(usize::from(LAST_KEPT_TTL))),
+            "and no image stands on the line under the last row that the window held: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_table_of_graphics_whose_terminal_dropped_the_recent_column_draws_no_image() {
+        // A narrow terminal drops the Recent column, and a column that no line
+        // of the frame holds is a column that no image can stand over. The
+        // render says so: it names no place for a column that went away.
+        let mut screen = graphics_table(NO_RECENT_COLUMN, NO_ROWS);
+        screen.round(&one_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+
+        assert_eq!(
+            image_count(&screen.sink),
+            0,
+            "a frame that holds no Recent column holds no image of a history: {drawn:?}"
+        );
+    }
+
     /// The last `count` lines of a frame, or every line of a frame that holds
     /// fewer than that.
     ///
