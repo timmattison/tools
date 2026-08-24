@@ -3956,6 +3956,67 @@ resolved configuration:
         assert_eq!(error.kind(), ErrorKind::ValueValidation);
     }
 
+    /// A timeout that cannot hold the probe rounds of its own line contradicts
+    /// that line.
+    ///
+    /// The tracer sends one probe round each interval, so a destination of 20
+    /// probe rounds at a period of one second needs 20 seconds. A timeout of
+    /// ten seconds cuts such a destination short after ten of its rounds, and
+    /// the record of it says nothing about the eleven that never went out.
+    #[test]
+    fn a_target_timeout_that_cannot_hold_the_probe_rounds_is_rejected() {
+        let reason = contradiction(&["krt", HUNT, "--probes-per-round", "20"]);
+        for expected in [
+            "--target-timeout",
+            "10s",
+            "--probes-per-round",
+            "20",
+            "1s",
+            "20s",
+        ] {
+            assert!(
+                reason.contains(expected),
+                "the reason names `{expected}`: {reason}"
+            );
+        }
+    }
+
+    /// A timeout raised for the probe rounds of its line holds them.
+    #[test]
+    fn a_target_timeout_that_holds_the_probe_rounds_resolves() {
+        assert_eq!(
+            hunt(&[
+                "krt",
+                HUNT,
+                "--probes-per-round",
+                "20",
+                "--target-timeout",
+                "30s",
+            ])
+            .probes_per_round,
+            20
+        );
+    }
+
+    /// The defaults of a hunt hold each other, so `krt hunt` alone resolves.
+    ///
+    /// The timeout of a destination must hold the probe rounds that the same
+    /// line asks for. A pair of defaults that broke that rule would reject the
+    /// plainest line of the command.
+    #[test]
+    fn the_default_timeout_of_a_hunt_holds_the_default_probe_rounds() {
+        let config = resolve(&["krt", HUNT]);
+        let plan = config.hunt.expect("the command line must resolve to a hunt");
+        let rounds = u32::try_from(plan.probes_per_round).expect("the default counts a few rounds");
+        assert!(
+            plan.target_timeout > config.interval * rounds,
+            "a timeout of {:?} holds {} probe rounds at a period of {:?}",
+            plan.target_timeout,
+            plan.probes_per_round,
+            config.interval
+        );
+    }
+
     /// A flag of a probe stands behind the command and never in front of it.
     ///
     /// A line that names a flag in front of the command reads the command as
