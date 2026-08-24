@@ -440,6 +440,20 @@ pub(crate) enum HuntError {
     },
 }
 
+/// A hunt that a fault stopped: what it found before the fault, and the fault.
+///
+/// The rounds that finished measured what they measured, and a fault at round
+/// 40 of 64 takes nothing away from the 39 in front of it. The two travel
+/// together so the caller prints the table of those rounds and then the reason
+/// that the hunt stopped.
+#[derive(Debug)]
+pub(crate) struct HuntStopped {
+    /// The summary of the rounds that finished.
+    pub(crate) summary: Summary,
+    /// The fault that stopped the hunt.
+    pub(crate) fault: HuntError,
+}
+
 /// What every run of one hunt has in common.
 pub(crate) struct Facts {
     /// The identifier of the hunt, which every run of it carries.
@@ -511,7 +525,7 @@ pub(crate) fn record<W: Write>(
     sources: &mut Sources<'_>,
     stop: &dyn Fn() -> bool,
     writer: &mut Writer<W>,
-) -> Result<Summary, HuntError> {
+) -> Result<Summary, HuntStopped> {
     let started = Instant::now();
     let mut scores = Vec::new();
     let mut previous = None;
@@ -525,8 +539,15 @@ pub(crate) fn record<W: Write>(
         let moment = next_moment(previous, Utc::now());
         previous = Some(moment);
         let run = RunId::at(moment);
-        if let Some(score) = trace_one(facts, plan, sources, stop, writer, target, run)? {
-            scores.push(score);
+        match trace_one(facts, plan, sources, stop, writer, target, run) {
+            Ok(Some(score)) => scores.push(score),
+            Ok(None) => {}
+            Err(fault) => {
+                return Err(HuntStopped {
+                    summary: Summary::new(Vec::new(), Duration::ZERO, plan.include_partial),
+                    fault,
+                })
+            }
         }
     }
     Ok(Summary::new(
@@ -936,8 +957,9 @@ fn pad(cell: &str, width: usize, right: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        random, record, reserved, Draw, Facts, HuntError, PathKind, Plan, Probes, Score, Scorer,
-        Sources, Summary, ATTEMPTS, FASTEST, LONGEST, NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
+        random, record, reserved, Draw, Facts, HuntError, HuntStopped, PathKind, Plan, Probes,
+        RunError, Score, Scorer, Sources, Summary, ATTEMPTS, FASTEST, LONGEST, NOTHING_TO_RANK,
+        PARTIAL, SHORTEST, SLOWEST,
     };
     use crate::live::Screen;
     use crate::record::{
@@ -1631,8 +1653,11 @@ mod tests {
         asked: Vec<Ipv4Addr>,
         /// The senders of the channels, held so that none of them closes.
         senders: Vec<std::sync::mpsc::Sender<RoundRecord>>,
-        /// The reason that the next start gives, when the tracer must fail.
+        /// The reason that a start gives, when the tracer must fail.
         refuses: Option<String>,
+        /// The number of destinations that the source serves before it
+        /// refuses. A source that refuses nothing never reads it.
+        serves: usize,
     }
 
     impl FakeProbes {
@@ -1651,13 +1676,24 @@ mod tests {
                 asked: Vec::new(),
                 senders: Vec::new(),
                 refuses: None,
+                serves: 0,
             }
         }
 
         /// A source whose tracer never starts.
         fn that_refuses(reason: &str) -> Self {
-            let mut probes = Self::of(&[]);
+            Self::refuses_after(&[], 0, reason)
+        }
+
+        /// A source that serves this many destinations and then refuses.
+        ///
+        /// The scripts are the rounds of the destinations that it serves. A
+        /// hunt of more destinations than that reads the refusal on the one
+        /// that follows them.
+        fn refuses_after(scripts: &[Rounds], serves: usize, reason: &str) -> Self {
+            let mut probes = Self::of(scripts);
             probes.refuses = Some(reason.to_owned());
+            probes.serves = serves;
             probes
         }
     }
@@ -1670,7 +1706,11 @@ mod tests {
         ) -> Result<std::sync::mpsc::Receiver<RoundRecord>, String> {
             self.asked.push(target);
             if let Some(reason) = &self.refuses {
-                return Err(reason.clone());
+                // The push above counts this destination, so the length is the
+                // number of the destination that stands.
+                if self.asked.len() > self.serves {
+                    return Err(reason.clone());
+                }
             }
             let (sender, receiver) = std::sync::mpsc::channel();
             for mut record in self.scripts.pop_front().unwrap_or_default() {
@@ -1701,7 +1741,7 @@ mod tests {
         scripts: &[Rounds],
         rounds: u64,
         stop: &dyn Fn() -> bool,
-    ) -> Result<Hunted, HuntError> {
+    ) -> Result<Hunted, HuntStopped> {
         let mut probes = FakeProbes::of(scripts);
         let outcome = run_hunt(addresses, &mut probes, rounds, stop, &[]);
         outcome.map(|(summary, recording)| Hunted {
@@ -1711,14 +1751,34 @@ mod tests {
         })
     }
 
-    /// Runs one hunt and reads back the file it wrote.
+    /// Runs one hunt into a sink of bytes, and reads back the file it wrote.
     fn run_hunt(
         addresses: &[&str],
         probes: &mut FakeProbes,
         rounds: u64,
         stop: &dyn Fn() -> bool,
         names: &[(&str, &[crate::names::Lookup])],
-    ) -> Result<(Summary, Recording), HuntError> {
+    ) -> Result<(Summary, Recording), HuntStopped> {
+        let mut sink = Vec::new();
+        let summary = {
+            let mut writer = Writer::to_sink(&mut sink);
+            hunt_into(addresses, probes, rounds, stop, names, &mut writer)
+        }?;
+        Ok((summary, read_back(&sink)))
+    }
+
+    /// Runs one hunt into the writer that a test names.
+    ///
+    /// The sink of that writer is what a test of a write that fails hands in.
+    /// Every other test takes [`run_hunt`], which reads its bytes back.
+    fn hunt_into<W: std::io::Write>(
+        addresses: &[&str],
+        probes: &mut FakeProbes,
+        rounds: u64,
+        stop: &dyn Fn() -> bool,
+        names: &[(&str, &[crate::names::Lookup])],
+        writer: &mut Writer<W>,
+    ) -> Result<Summary, HuntStopped> {
         let list: Vec<Ipv4Addr> = addresses.iter().copied().map(address).collect();
         let facts = Facts {
             id: HuntId::from(HUNT_ID),
@@ -1755,12 +1815,54 @@ mod tests {
             probes,
             resolver,
         };
-        let mut sink = Vec::new();
-        let summary = {
-            let mut writer = Writer::to_sink(&mut sink);
-            record(&facts, &plan, &mut sources, stop, &mut writer)?
-        };
-        Ok((summary, read_back(&sink)))
+        record(&facts, &plan, &mut sources, stop, writer)
+    }
+
+    /// The byte that ends every record of a file.
+    const NEWLINE: u8 = b'\n';
+
+    /// The reason that a sink which took its fill gives.
+    const THE_SINK_IS_FULL: &str = "the sink is full";
+
+    /// A sink that takes a number of records and then fails every write.
+    ///
+    /// A file fails a write when the disk fills or the device goes away, and no
+    /// test makes either one happen. This sink makes that fault on demand, as
+    /// the sink of `run.rs` does for one run.
+    struct Sink {
+        /// The number of records that the sink takes before it fails.
+        takes: usize,
+        /// The number of whole records that reached the sink. Every record ends
+        /// with one newline.
+        written: usize,
+    }
+
+    impl Sink {
+        /// A sink that takes this many records.
+        const fn that_takes(takes: usize) -> Self {
+            Self { takes, written: 0 }
+        }
+    }
+
+    impl std::io::Write for Sink {
+        /// Takes the bytes of a record, until the sink holds the number of
+        /// records that it takes.
+        #[allow(
+            clippy::naive_bytecount,
+            reason = "the sink of a test holds a few hundred bytes, which is no reason to take the bytecount crate as a dependency"
+        )]
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.written >= self.takes {
+                return Err(std::io::Error::other(THE_SINK_IS_FULL));
+            }
+            self.written += buf.iter().filter(|byte| **byte == NEWLINE).count();
+            Ok(buf.len())
+        }
+
+        /// The sink counts the bytes and keeps none, so it flushes nothing.
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     /// Reads the records that a hunt wrote back out of the sink.
@@ -1956,17 +2058,80 @@ mod tests {
     /// A tracer that will not start stops the hunt and names the destination.
     #[test]
     fn a_tracer_that_does_not_start_stops_the_hunt_and_names_the_destination() {
-        let mut probes = FakeProbes::that_refuses("no raw socket");
-        let error = run_hunt(&[NEAR], &mut probes, 1, &never_stops(), &[])
+        let mut probes = FakeProbes::that_refuses(NO_RAW_SOCKET);
+        let stopped = run_hunt(&[NEAR], &mut probes, 1, &never_stops(), &[])
             .expect_err("a tracer that will not start stops the hunt");
-        let reason = error.to_string();
+        let reason = stopped.fault.to_string();
         assert!(
             reason.contains(NEAR),
             "the reason names the address: {reason}"
         );
         assert!(
-            reason.contains("no raw socket"),
+            reason.contains(NO_RAW_SOCKET),
             "the reason names the fault: {reason}"
+        );
+    }
+
+    /// The reason that the tracer of a test gives when it will not start.
+    const NO_RAW_SOCKET: &str = "no raw socket";
+
+    /// The number of records that one destination of a test hunt writes: the
+    /// record that opens the run, one round, and the record that closes it.
+    const RECORDS_OF_ONE_DESTINATION: usize = 3;
+
+    /// A tracer that will not start keeps the summary of the rounds in front of
+    /// it.
+    ///
+    /// A hunt of 64 destinations whose tracer stops at round 40 measured 39
+    /// paths, and the reader who asked for the hunt wants them. The runs stand
+    /// in the file, so a reader who loses the summary reads them back with one
+    /// `krt replay <file> --run <id>` for each of them.
+    #[test]
+    fn a_hunt_that_a_tracer_stopped_keeps_the_summary_of_the_rounds_that_finished() {
+        let mut probes =
+            FakeProbes::refuses_after(&[REACHED_AT_FIVE, REACHED_AT_FIVE], 2, NO_RAW_SOCKET);
+        let stopped = run_hunt(&[NEAR, FAR, QUIET], &mut probes, 3, &never_stops(), &[])
+            .expect_err("the tracer of the third destination stops the hunt");
+        assert!(
+            stopped.fault.to_string().contains(QUIET),
+            "the fault names the destination that stopped the hunt: {}",
+            stopped.fault
+        );
+        // The wall time of the hunt stays out of the assertion, because the two
+        // runs take whatever the machine gives them.
+        let counts = counts(&stopped.summary);
+        assert!(
+            counts.starts_with("2 rounds   2 reached   0 partial"),
+            "the summary counts the two rounds that finished: {counts}"
+        );
+    }
+
+    /// A write that fails keeps the summary of the rounds in front of it.
+    ///
+    /// The disk that fills is the fault that this covers, and it is the one
+    /// where the reader most wants the rounds that the hunt already measured.
+    #[test]
+    fn a_hunt_that_a_write_stopped_keeps_the_summary_of_the_rounds_that_finished() {
+        let mut probes = FakeProbes::of(&[REACHED_AT_FIVE, REACHED_AT_FIVE]);
+        let mut writer = Writer::to_sink(Sink::that_takes(RECORDS_OF_ONE_DESTINATION));
+        let stopped = hunt_into(
+            &[NEAR, FAR],
+            &mut probes,
+            2,
+            &never_stops(),
+            &[],
+            &mut writer,
+        )
+        .expect_err("a write that fails stops the hunt");
+        assert!(
+            matches!(stopped.fault, HuntError::Run(RunError::Write(_))),
+            "the fault is the write that failed: {}",
+            stopped.fault
+        );
+        let counts = counts(&stopped.summary);
+        assert!(
+            counts.starts_with("1 round   1 reached   0 partial"),
+            "the summary counts the one round that finished: {counts}"
         );
     }
 

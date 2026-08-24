@@ -1827,14 +1827,14 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Tra
         &|| user_stopped(&flag),
         &mut writer,
     )
-    .map_err(|error| {
-        let code = match error {
+    .map_err(|stopped| {
+        let code = match stopped.fault {
             hunt::HuntError::Run(run::RunError::Write(_)) => EXIT_WRITE_FAILED,
             hunt::HuntError::Run(run::RunError::Tracer { .. }) | hunt::HuntError::Tracer { .. } => {
                 EXIT_TRACER_FAILED
             }
         };
-        TraceFailure::new(&error, code)
+        TraceFailure::new(&stopped.fault, code)
     })?;
     println!("{RECORDED} {}", path.display());
     Ok(summary)
