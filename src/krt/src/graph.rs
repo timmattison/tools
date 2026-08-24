@@ -292,6 +292,45 @@ mod tests {
         );
     }
 
+    /// One answer that a hop gave over and over, in milliseconds.
+    const A_STEADY_TIME: f64 = 5.0;
+
+    /// The number of columns of a history of three steady answers.
+    const THREE_COLUMNS: u32 = 3;
+
+    #[test]
+    fn a_history_that_varies_by_nothing_draws_at_the_floor() {
+        // A history whose samples are all equal, and a history of one sample,
+        // each give a span of zero. `ui::sparkline` draws the lowest block
+        // element for such a window, and the image draws the lowest bar, for
+        // the same reason: a flat line at the top of the cell would draw the
+        // quietest hop of a path as the loudest one.
+        let steady = plot(
+            &[
+                Sample::Time(A_STEADY_TIME),
+                Sample::Time(A_STEADY_TIME),
+                Sample::Time(A_STEADY_TIME),
+            ],
+            THREE_COLUMNS,
+            SHORT,
+        );
+
+        for column in 0..THREE_COLUMNS {
+            assert_eq!(
+                bar(&steady, column),
+                1,
+                "every bar of a history that varies by nothing stands at the floor"
+            );
+        }
+
+        let one = plot(&[Sample::Time(A_STEADY_TIME)], ONE_COLUMN, SHORT);
+        assert_eq!(
+            bar(&one, 0),
+            1,
+            "and a history of one sample varies by nothing either"
+        );
+    }
+
     #[test]
     fn the_background_of_the_image_is_transparent() {
         // A transparent background lets the terminal show its own background
