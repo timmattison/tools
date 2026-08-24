@@ -155,6 +155,35 @@ impl Capabilities {
         out.flush()?;
         Ok(())
     }
+
+    /// Take every image that this crate placed off the screen.
+    ///
+    /// The call writes the delete command of the Kitty graphics protocol when
+    /// the terminal reads that protocol, and it writes nothing at all for the
+    /// Sixel protocol and the iTerm2 protocol. Those two paint their pixels
+    /// into the screen and keep no handle on them, so a clear of the screen
+    /// already takes them off. Kitty keeps a placement instead, and a placement
+    /// outlives a clear of the screen, so a caller that draws one image for
+    /// each frame stacks the frames of the whole run on the screen unless it
+    /// deletes them.
+    ///
+    /// `krt` calls this at the head of every frame. `ic` draws one image and
+    /// then gives the terminal back to the shell, so it calls this never.
+    ///
+    /// The Kitty half is the half that a test of this crate can read, because
+    /// it writes bytes. The Sixel half and the iTerm2 half write nothing, and
+    /// what they promise is a screen with no image left on it. Only a real
+    /// terminal shows that, so the user of issue #393 is the one who tests
+    /// those two halves.
+    ///
+    /// # Arguments
+    /// * `out` - The stream that takes the bytes.
+    ///
+    /// # Errors
+    /// Gives the error of the write to `out` when the write fails.
+    pub fn clear_images<W: Write>(&self, _out: &mut W) -> io::Result<()> {
+        todo!("no routine states what it leaves on the screen yet")
+    }
 }
 
 /// Give the cursor contract that one request asks for.
@@ -432,6 +461,37 @@ mod tests {
             cursor: Cursor::BelowImage,
             preserve_aspect: true,
         }
+    }
+
+    /// The Kitty graphics command that takes every image off the screen. The
+    /// test spells the bytes out, so a change of the command fails the test
+    /// instead of moving with it.
+    const KITTY_DELETE_ALL_BYTES: &str = "\x1b_Ga=d,d=A\x1b\\";
+
+    /// Clear the images of one terminal and give back the bytes.
+    fn cleared(terminal_type: TerminalType) -> String {
+        let mut out = Vec::new();
+        Capabilities::new(terminal_type, true, true)
+            .clear_images(&mut out)
+            .expect("a write to a vector never fails");
+
+        String::from_utf8(out).expect("the delete command is ASCII")
+    }
+
+    #[test]
+    fn a_kitty_terminal_deletes_the_placements_it_holds() {
+        // A Kitty placement outlives a clear of the screen, so a caller that
+        // draws one image for each frame stacks the whole run on the screen.
+        assert_eq!(cleared(TerminalType::Kitty), KITTY_DELETE_ALL_BYTES);
+    }
+
+    #[test]
+    fn a_terminal_that_paints_into_the_screen_needs_no_delete_command() {
+        // The iTerm2 protocol and the Sixel protocol both paint their pixels
+        // into the screen and hold no handle on them. A delete command would
+        // therefore say nothing that the terminal can act on.
+        assert_eq!(cleared(TerminalType::ITerm2), "");
+        assert_eq!(cleared(TerminalType::Zellij), "");
     }
 
     #[test]
