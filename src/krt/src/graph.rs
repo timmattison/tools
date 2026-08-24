@@ -54,6 +54,11 @@ const DOT_STEP: usize = 2;
 /// The image of one history of round-trip times, as the Recent column of one
 /// row draws it.
 ///
+/// A history of no sample gives an image of no painted pixel. A width of zero
+/// and a height of zero each give an empty image, and none of the three stops
+/// the run: the recording is the purpose of the tool, and a panic of the
+/// display would take the recording with it.
+///
 /// Every sample of the history draws. The column of pixels at `x` draws the
 /// sample at `x * count / width`, so a history of sixty samples over ninety
 /// pixels gives each sample one or two columns. The block elements of the text
@@ -104,6 +109,13 @@ pub(crate) fn plot(history: &[Sample], width: u32, height: u32) -> RgbaImage {
     // that paints nothing at all.
     let mut image = RgbaImage::new(width, height);
     let count = history.len();
+    // A hop that answered no probe of a run holds no sample, and a frame whose
+    // terminal reports a cell of no pixel draws an image of no pixel. Each of
+    // the three counts below divides or indexes further down, so each of them
+    // stops here.
+    if count == 0 || width == 0 || height == 0 {
+        return image;
+    }
     // The scale reads only the answers that compare. A lost probe measured no
     // time, and a time that is not a finite number does not compare, so neither
     // of them names a limit of the scale.
@@ -486,7 +498,9 @@ mod tests {
         // The image is as tall as the history is long, so each of the sixty
         // samples takes a bar of its own height and a test reads which sample a
         // column drew.
-        let history: Vec<Sample> = (0..HISTORY).map(|step| Sample::Time(f64::from(step))).collect();
+        let history: Vec<Sample> = (0..HISTORY)
+            .map(|step| Sample::Time(f64::from(step)))
+            .collect();
         let image = plot(&history, WIDE, HISTORY);
 
         for column in 0..WIDE {
