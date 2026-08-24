@@ -4561,6 +4561,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "image",
  "mockito",
  "portable-pty",
  "ratatui",

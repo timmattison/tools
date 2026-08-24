@@ -15,6 +15,7 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+mod graph;
 mod live;
 mod names;
 mod record;
