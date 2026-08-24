@@ -4151,6 +4151,23 @@ resolved configuration:
         );
     }
 
+    /// The guard of a command read as a destination runs in front of every
+    /// other check.
+    ///
+    /// `krt --multipath paris hunt` breaks two rules at once: the mode needs
+    /// UDP, and the line reads `hunt` as a destination. The second one is the
+    /// fault, because the mode reaches no probe of a hunt at all. A message
+    /// about the protocol sends the reader after a flag that the line must
+    /// drop.
+    #[test]
+    fn a_multipath_mode_in_front_of_a_command_names_the_command() {
+        let reason = contradiction(&["krt", "--multipath", "paris", HUNT]);
+        assert!(
+            reason.contains(HUNT),
+            "the reason names the command that the line read as a destination: {reason}"
+        );
+    }
+
     /// The guard covers every command and not the one that prompted it.
     #[test]
     fn a_flag_of_a_probe_in_front_of_the_replay_is_rejected() {
