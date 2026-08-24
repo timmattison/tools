@@ -1953,6 +1953,58 @@ mod tests {
         }
     }
 
+
+    /// The number of terminal rows that one line of a frame takes in a window
+    /// of `columns` columns.
+    ///
+    /// A terminal wraps a line wider than its window onto the row under it, so
+    /// such a line takes two rows or more. A line of no glyph still takes one.
+    fn rows_of(line: &str, columns: u16) -> usize {
+        crate::ui::display_width(line)
+            .div_ceil(usize::from(columns))
+            .max(1)
+    }
+
+    /// The terminal row that the line at `index` stands on, in a window of
+    /// `columns` columns.
+    ///
+    /// A terminal counts its rows from one, and a line that wrapped moves every
+    /// line under it down by the rows it took.
+    fn row_of(lines: &[String], index: usize, columns: u16) -> usize {
+        lines
+            .iter()
+            .take(index)
+            .map(|line| rows_of(line, columns))
+            .sum::<usize>()
+            + 1
+    }
+
+    #[test]
+    fn the_image_of_a_row_stands_on_the_terminal_row_that_the_row_draws_in() {
+        // The head of a frame holds the recorded file, and a reader who names a
+        // long file gets a head that no window holds on one line. A terminal
+        // wraps such a line, every line under it stands one row lower, and an
+        // image that counted the lines of the frame then stands over the
+        // heading of the Recent column and never over the last row of the path.
+        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        screen.round(&one_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        let index = lines
+            .iter()
+            .position(|line| line == ONE_ROUND_ROW_OF_GRAPHICS)
+            .unwrap_or_else(|| panic!("the frame holds the row of the TTL: {lines:?}"));
+        let row = row_of(&lines, index, WIDTH);
+        assert!(
+            drawn.contains(&format!(
+                "\x1b[{row};{}H{KITTY_IMAGE}",
+                RECENT_COLUMN + 1
+            )),
+            "the image of the row stands on row {row}, which is the row that the frame draws it in: {drawn:?}"
+        );
+    }
+
     /// The number of columns of a terminal that dropped the Recent column.
     ///
     /// Sixty-seven columns hold every column of the table but the Recent one
