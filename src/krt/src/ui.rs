@@ -96,16 +96,17 @@
 //!
 //! The color is a decision of the caller, which [`Paint`] carries, and not a
 //! decision that this module takes off the terminal. A live table asks for the
-//! color, because it draws on a terminal by construction: the run holds that
-//! terminal in raw mode on the alternate screen. A replay asks for the plain
-//! lines. This crate thus takes no `colored` dependency, and no test of this
-//! render needs `testcolor`: the two codes are constants of this module, and a
-//! test names them.
+//! color, because it draws on a terminal that the run holds in raw mode on the
+//! alternate screen. A live table of a reader who set `NO_COLOR` asks for the
+//! plain lines, and a replay asks for them too. This crate thus takes no
+//! `colored` dependency, and no test of this render needs `testcolor`: the two
+//! codes are constants of this module, and a test names them.
 //!
 //! The loss carries a glyph of its own as well as the color, because the run
-//! that prints no color is the normal one. A headless run, a pipe, a file, and
-//! a replay each print text with no color, and a red `▇` alone would read on
-//! every one of them as the slowest sample of the window.
+//! that prints no color is the normal one. A headless run, a pipe, a file, a
+//! run that the reader set `NO_COLOR` for, and a replay each print text with no
+//! color, and a red `▇` alone would read on every one of them as the slowest
+//! sample of the window.
 //!
 //! The module also writes the one duration text of the crate. The resolved
 //! configuration, the status line of a round, and the header line of the frame
@@ -376,9 +377,10 @@ const PLAIN: &str = "\u{1b}[39m";
 
 /// Whether the lines of a frame carry the color of a terminal.
 ///
-/// The caller decides, because the caller knows where its lines go. A live
-/// table draws on a terminal by construction, and a replay prints into whatever
-/// scrollback the terminal keeps.
+/// The caller decides, because the caller knows where its lines go and what the
+/// reader asked for. A live table draws on a terminal, and it drops the color
+/// for a reader who set `NO_COLOR`. A replay prints into whatever scrollback
+/// the terminal keeps, with no color at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Paint {
     /// The lines hold glyphs alone.
@@ -411,10 +413,10 @@ const BARS: [char; LEVEL_COUNT] = ['▁', '▂', '▃', '▄', '▅', '▆', '�
 /// The mark of a probe that no hop answered.
 ///
 /// The mark is no bar of [`BARS`], and that is what it is for. The color of a
-/// terminal is not always there: a headless run, a pipe, a file, and a replay
-/// each print text with no color. A red `▇` alone would read as the slowest
-/// sample of the window on every one of those runs, and a reader would take a
-/// lost probe for a slow answer.
+/// terminal is not always there: a headless run, a pipe, a file, a run that the
+/// reader set `NO_COLOR` for, and a replay each print text with no color. A red
+/// `▇` alone would read as the slowest sample of the window on every one of
+/// those runs, and a reader would take a lost probe for a slow answer.
 ///
 /// The glyph takes one terminal column, as each bar does, so one sample of the
 /// history stands in one column of the Recent column either way.
@@ -2156,10 +2158,11 @@ mod tests {
     #[test]
     fn the_mark_of_a_loss_is_no_bar_of_a_time() {
         // A run that prints no color must still show the loss. A headless run,
-        // a pipe, a file, and a replay each print text with no color, so the
-        // mark of a lost probe stands apart from every bar by its glyph and not
-        // by its color alone. A mark that were one of the bars would read on
-        // every one of those runs as a round-trip time that the hop never gave.
+        // a pipe, a file, a run that the reader set `NO_COLOR` for, and a
+        // replay each print text with no color, so the mark of a lost probe
+        // stands apart from every bar by its glyph and not by its color alone.
+        // A mark that were one of the bars would read on every one of those
+        // runs as a round-trip time that the hop never gave.
         let mut window: Vec<Sample> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
             .into_iter()
             .map(Sample::Time)

@@ -469,7 +469,7 @@ impl<W: Write, K: Keys> Table<W, K> {
             },
             destination: Some(self.facts.address),
         };
-        let mut body = frame.lines(self.window.columns, ui::Paint::Colored);
+        let mut body = frame.lines(self.window.columns, self.paint);
         // The head comes off the front of the frame, because a frame that the
         // window does not hold keeps the head and drops rows of the path. A
         // frame holds those lines at every width, and the `min` says so anyway.
@@ -1517,10 +1517,11 @@ mod tests {
 
     #[test]
     fn a_lost_probe_reaches_the_terminal_in_red() {
-        // A live table draws on a terminal by construction: the run holds the
-        // terminal in raw mode on the alternate screen in front of the first
-        // draw. The loss of a probe is the one thing the table paints, and the
-        // color says at a glance which row of the path drops its probes.
+        // A live table draws on a terminal: the run holds that terminal in raw
+        // mode on the alternate screen in front of the first draw. The loss of
+        // a probe is the one thing the table paints, and the color says at a
+        // glance which row of the path drops its probes. The table below takes
+        // the color, as the table of a reader who set nothing does.
         //
         // The test reads the bytes of the sink and not the glyphs of them,
         // because the codes of the color are what it is about.

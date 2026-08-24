@@ -726,8 +726,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     with a `└`. An address row holds the share of the answers of its TTL that the row took, and a
     `▹` behind that percentage says that it is a share and not a loss. A `???` in the Host column is
     a TTL that never answered. A `╳` in the `Recent` column is a probe that no hop answered, and a
-    live run under a terminal draws it red. A run that prints no color — a headless run, a pipe, a
-    file, and every replay — still shows the mark, because the mark is no bar of a time.
+    live run under a terminal draws it red. `krt` honors `NO_COLOR`: a reader who sets that variable
+    to any value gets the table with no color at all. A run that prints no color — a headless run, a
+    pipe, a file, a run under `NO_COLOR`, and every replay — still shows the mark, because the mark
+    is no bar of a time. The red is the one color the tool prints, so `krt` needs no flag of its own
+    for it.
   - The table takes the width of the terminal, and the `Host` column absorbs the change. A terminal
     too narrow for every column drops columns, first dropped first: `Recent`, `StDev`, `Max`, `Min`,
     `Last`, `Sent`, `Loss%`. The `TTL`, the `Host`, and the `Avg` never drop. A replay whose output

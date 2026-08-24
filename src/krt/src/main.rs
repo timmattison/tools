@@ -1162,7 +1162,9 @@ fn display_of(headless: bool, is_terminal: bool) -> Display {
 /// The read of the environment stands apart from this decision, so a test names
 /// the answer of a reader without a variable to name it with.
 fn paint_of(no_color: bool) -> ui::Paint {
-    let _ = no_color;
+    if no_color {
+        return ui::Paint::Plain;
+    }
     ui::Paint::Colored
 }
 
@@ -1302,6 +1304,10 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
 /// start of the run. A window that changes size while the run stands leaves the
 /// frame at the size it started with.
 ///
+/// The read of `NO_COLOR` stands here, beside that read of the terminal, and
+/// [`paint_of`] holds the decision it feeds. Any value of the variable counts,
+/// as the convention of it says.
+///
 /// # Errors
 ///
 /// Returns the reason and [`EXIT_FAILURE`] when the terminal refused the hold.
@@ -1337,7 +1343,7 @@ fn screen_of(
         std::io::stdout(),
         live::Keyboard,
         live::Window::new(columns, rows),
-        ui::Paint::Colored,
+        paint_of(std::env::var_os("NO_COLOR").is_some()),
     );
     Ok((Box::new(table), Some(guard)))
 }
