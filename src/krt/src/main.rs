@@ -1359,9 +1359,9 @@ fn main() {
 mod tests {
     use super::{
         closing_line, display_of, host_name_or, name_grace, parse_duration, pick_address,
-        resolve_target, run_config, source_from, stop_reason, user_stopped, AddressFamily, Cli,
-        Command, Display, EndReason, Family, Multipath, Protocol, ResolveError, ResolvedConfig,
-        SourceKind, SourceLabel, RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
+        resolve_target, run_config, source_from, stop_reason, user_stopped, value_name,
+        AddressFamily, Cli, Command, Display, EndReason, Family, Multipath, Protocol, ResolveError,
+        ResolvedConfig, SourceKind, SourceLabel, RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
     };
     use crate::record::{Privilege, RunConfig};
     use crate::run::Outcome;
@@ -1369,7 +1369,7 @@ mod tests {
     use crate::testing::address;
     use crate::ui::render_duration;
     use clap::error::{ContextKind, ContextValue, ErrorKind};
-    use clap::{CommandFactory, Parser};
+    use clap::{CommandFactory, Parser, ValueEnum};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::Path;
     use std::path::PathBuf;
@@ -2338,6 +2338,64 @@ resolved configuration:
             assert!(
                 message.contains(part),
                 "the message names `{part}`: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_multipath_mode_beside_tcp() {
+        let message = contradiction(&[
+            "krt",
+            "example.com",
+            "--multipath",
+            "dublin",
+            "--protocol",
+            "tcp",
+        ]);
+        for part in ["--multipath", "dublin", "--protocol", "tcp"] {
+            assert!(
+                message.contains(part),
+                "the message names `{part}`: {message}"
+            );
+        }
+    }
+
+    /// The help of one flag of the command line, by the id of that flag. The
+    /// long help stands when the flag carries one, and the short help stands
+    /// otherwise.
+    fn flag_help(id: &str) -> String {
+        let command = Cli::command();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == id)
+            .expect("the command line carries the flag");
+        argument
+            .get_long_help()
+            .or_else(|| argument.get_help())
+            .expect("the flag carries help")
+            .to_string()
+    }
+
+    #[test]
+    fn the_help_of_the_multipath_flag_names_every_protocol_that_carries_a_mode() {
+        let help = flag_help("multipath");
+        for protocol in Protocol::value_variants() {
+            let name = value_name(protocol);
+            let accepted = parse(&[
+                "krt",
+                "example.com",
+                "--multipath",
+                "paris",
+                "--protocol",
+                name.as_str(),
+            ])
+            .resolve()
+            .is_ok();
+            let in_the_help = name.to_uppercase();
+            assert_eq!(
+                help.contains(&in_the_help),
+                accepted,
+                "the help names `{in_the_help}` when `--multipath paris` takes `--protocol {name}`: {help}"
             );
         }
     }
