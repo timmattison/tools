@@ -493,3 +493,59 @@ fn a_replay_needs_no_destination() {
         result.stderr
     );
 }
+
+/// The name of the command that hunts for the longest path.
+///
+/// No test of this file runs a hunt. A hunt draws a random address and probes
+/// it, so a test that ran one would send packets to a stranger. Every test
+/// below stops at the parser or at the help page.
+const HUNT: &str = "hunt";
+
+#[test]
+fn the_help_of_the_hunt_names_the_two_flags_that_count_a_round() {
+    let result = run(&[HUNT, FLAG_HELP]);
+    assert!(
+        result.success,
+        "`krt {HUNT} {FLAG_HELP}` must exit with success; stderr: {}",
+        result.stderr
+    );
+    for flag in ["--rounds", "--probes-per-round", "--target-timeout", "--seed"] {
+        assert!(
+            result.stdout.contains(flag),
+            "the help of `{HUNT}` names `{flag}`: {}",
+            result.stdout
+        );
+    }
+}
+
+/// The help of the whole tool names the command.
+#[test]
+fn the_long_help_names_the_command_that_hunts() {
+    let result = run(&[FLAG_HELP]);
+    assert!(
+        result.stdout.contains(HUNT),
+        "the help page names the `{HUNT}` command: {}",
+        result.stdout
+    );
+}
+
+/// A hunt of no round records nothing, so the run stops at the parser.
+#[test]
+fn a_hunt_of_no_round_fails_and_names_the_flag() {
+    let message = failure(&[HUNT, "--rounds", "0"]);
+    assert!(
+        message.contains("--rounds"),
+        "the message names the flag: {message}"
+    );
+}
+
+/// A flag of a probe in front of the command reads the command as a
+/// destination, and the run says so.
+#[test]
+fn a_flag_of_a_probe_in_front_of_the_hunt_fails_and_names_the_command() {
+    let message = failure(&["--no-dns", HUNT]);
+    assert!(
+        message.contains(HUNT),
+        "the message names the command: {message}"
+    );
+}
