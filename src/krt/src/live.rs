@@ -90,6 +90,15 @@ const PAUSED: &str = "paused";
 /// The number of keys that a live table reads.
 const KEY_COUNT: usize = 5;
 
+/// The key that shows the list of the keys, and hides it again.
+///
+/// The long help of `krt` names this key, and it names no other key of the
+/// table, because a doc comment of `clap` is a string literal that reads
+/// [`KEYS`] at no time. This name therefore stands here, beside the one list,
+/// and `the_long_help_names_the_key_that_lists_the_keys` holds the two of them
+/// together.
+const KEY_THAT_LISTS_THE_KEYS: &str = "?";
+
 /// Each key of a live table, and what that key does.
 ///
 /// This list is the one place that says what a key does, and the help builds
@@ -101,7 +110,7 @@ const KEYS: [(&str, &str); KEY_COUNT] = [
     ("p", "hold the table, or let it move"),
     ("n", "show the names, or show the addresses"),
     ("r", "empty the table"),
-    ("?", "show these keys, or hide them"),
+    (KEY_THAT_LISTS_THE_KEYS, "show these keys, or hide them"),
 ];
 
 /// The text between a key and what that key does.
@@ -858,6 +867,7 @@ mod tests {
     use super::{
         classify, install_panic_hook, restore_panic_hook, status_line, Clock, Command, Headless,
         Keys, NoKeys, PanicHook, RunFacts, Screen, SystemClock, Table, Window,
+        KEY_THAT_LISTS_THE_KEYS,
     };
     use crate::record::{NameRecord, RoundRecord, RunId};
     use crate::testing::{address, round, FakeKeys};
@@ -1718,6 +1728,26 @@ mod tests {
                 .iter()
                 .any(|line| HELP_LINES.contains(&line.as_str())),
             "a second press takes the list back off the screen: {hidden:?}"
+        );
+    }
+
+    /// The long help of `krt` names the key that opens the list of the keys.
+    ///
+    /// [`KEYS`] is the one list that says what a key does, and a doc comment
+    /// of `clap` is a string literal that reads that list at no time. The long
+    /// help therefore writes the name of one key by hand. This test holds that
+    /// name and the list together: a list that gives the work to another key
+    /// fails here, and no reader of the help then presses a key which does
+    /// nothing.
+    #[test]
+    fn the_long_help_names_the_key_that_lists_the_keys() {
+        use clap::CommandFactory;
+
+        let help = crate::Cli::command().render_long_help().to_string();
+        let name = format!("`{KEY_THAT_LISTS_THE_KEYS}`");
+        assert!(
+            help.contains(&name),
+            "the long help names the {name} key, which opens the list of the keys: {help}"
         );
     }
 
