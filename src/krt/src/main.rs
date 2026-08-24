@@ -1151,6 +1151,21 @@ fn display_of(headless: bool, is_terminal: bool) -> Display {
     Display::Table
 }
 
+/// Whether the frames of a live table carry the color of a terminal, from
+/// whether the reader set `NO_COLOR`.
+///
+/// A reader who sets that variable asks every tool for the glyphs alone, and
+/// the one color of this table is the red of a lost probe. The mark of that
+/// probe stays, because the mark is no bar of a time, and the codes that paint
+/// it red go away.
+///
+/// The read of the environment stands apart from this decision, so a test names
+/// the answer of a reader without a variable to name it with.
+fn paint_of(no_color: bool) -> ui::Paint {
+    let _ = no_color;
+    ui::Paint::Colored
+}
+
 /// Records one trace, from the destination of the command line to the record
 /// that closes the run.
 ///
@@ -1322,6 +1337,7 @@ fn screen_of(
         std::io::stdout(),
         live::Keyboard,
         live::Window::new(columns, rows),
+        ui::Paint::Colored,
     );
     Ok((Box::new(table), Some(guard)))
 }
@@ -1373,7 +1389,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        closing_line, display_of, host_name_or, name_grace, parse_duration, pick_address,
+        closing_line, display_of, host_name_or, name_grace, paint_of, parse_duration, pick_address,
         resolve_target, run_config, source_from, stop_reason, user_stopped, value_name,
         AddressFamily, Cli, Command, Display, EndReason, Family, Multipath, Protocol, ResolveError,
         ResolvedConfig, SourceKind, SourceLabel, RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
@@ -1382,7 +1398,7 @@ mod tests {
     use crate::run::Outcome;
     use crate::source::Discovery;
     use crate::testing::address;
-    use crate::ui::render_duration;
+    use crate::ui::{render_duration, Paint};
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser, ValueEnum};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -2287,6 +2303,23 @@ resolved configuration:
             display_of(true, false),
             Display::Headless,
             "and the flag leaves such a run where it stands"
+        );
+    }
+
+    #[test]
+    fn a_run_paints_the_table_only_for_a_reader_who_set_no_color_on_nothing() {
+        // The one color of the table is the red of a lost probe. A reader who
+        // set `NO_COLOR` asks every tool for the glyphs alone, so the table of
+        // such a reader carries no code of a color.
+        assert_eq!(
+            paint_of(true),
+            Paint::Plain,
+            "a reader who set NO_COLOR gets the table with glyphs alone"
+        );
+        assert_eq!(
+            paint_of(false),
+            Paint::Colored,
+            "and a reader who set nothing gets the mark of a lost probe in red"
         );
     }
 

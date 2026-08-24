@@ -340,6 +340,7 @@ mod tests {
         RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange, Writer,
     };
     use crate::testing::{address, named, FakeKeys, FakeResolver};
+    use crate::ui::Paint;
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};
     use std::cell::{Cell, RefCell};
@@ -1663,6 +1664,7 @@ mod tests {
             painted.clone(),
             FakeKeys::of(&[&[Command::Pause], &[], &[], &[Command::Pause]]),
             Window::new(WIDTH, NO_ROWS),
+            Paint::Colored,
         );
         let outcome = ran_on(
             file.path(),
