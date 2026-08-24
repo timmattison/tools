@@ -705,6 +705,13 @@ pub(crate) enum ReadError {
 /// bytes of one write stay together. The wait for the lock is bounded, and a
 /// wait that runs out fails and names the file.
 ///
+/// One record is one append. The rule holds at every size of a record, and
+/// under every setting of a run. The lock covers one append, so a record that
+/// left as two appends would release the lock in the middle of itself, and the
+/// other run would put a whole record of its own into that gap. See
+/// [`Writer::write`], which builds the line and its newline as one buffer, and
+/// [`RecordFile::write`], which turns that one buffer into one append.
+///
 /// Every record reaches the operating system before the call returns, so a
 /// `kill -9` loses at most one round. The flush is enough. A `kill -9` ends the
 /// process, and the operating system keeps the bytes that the process already
