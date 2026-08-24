@@ -57,7 +57,7 @@
 //! which is why the list is one list and not a rule to obey.
 //!
 //! A terminal too narrow even for the last set of columns gets the frame at the
-//! floor of the Host column, and the terminal clips it. Nothing narrower says
+//! floor of the Host column, and the terminal wraps it. Nothing narrower says
 //! more, and a frame of no columns tells a reader nothing.
 //!
 //! The terminal says how wide the frame is, and a run whose standard output is
@@ -69,6 +69,17 @@
 //! drop columns into a file that nothing ever gets back. It also makes the
 //! output of one recorded file one text on every machine, which is what a test
 //! of the binary reads.
+//!
+//! The head of a frame runs past no window. The head is the part that wants the
+//! columns: the reader names the recorded file, and a name of any length is a
+//! name. So a window that holds no whole head takes the fields that are left
+//! onto the lines under it, one whole field at a time, and the head says how
+//! many lines it took. A terminal wraps a line that runs past its window, every
+//! line under that one then stands one row lower than the frame counts, and a
+//! caller that draws over the frame stands its picture over the wrong row: the
+//! images of `--graphics` stood over the heading of the Recent column and over
+//! the wrong row of every hop. [`Header::lines`] states the rule, and
+//! [`Rendered::head`] carries the count to that caller.
 //!
 //! The address rows of one TTL line their Share% up under the Loss% of the row
 //! above them, digit for digit. The drawing this table came from puts those
@@ -1137,7 +1148,7 @@ const HOST_NOMINAL: u16 = 30;
 /// such a terminal, and `script -q /dev/null` makes one. `termsize` gives `None`
 /// for both, which is why the probe of this function is `termsize` and not the
 /// raw call. The nominal frame then stands too wide or too narrow for the one
-/// window, and the terminal clips it, where a frame of no columns would drop
+/// window, and the terminal wraps it, where a frame of no columns would drop
 /// every column that drops and cut the Host column to its floor.
 pub(crate) fn frame_columns() -> u16 {
     if !std::io::stdout().is_terminal() {
@@ -1218,7 +1229,7 @@ impl Layout {
     /// number whose widest print the run already knows.
     ///
     /// A terminal too narrow even for the last set of columns gets the frame at
-    /// the floor, and the terminal clips it. A table that is one column too
+    /// the floor, and the terminal wraps it. A table that is one column too
     /// wide still reads, a table whose hosts are three characters long does
     /// not, and a table of no columns says nothing at all.
     fn at(width: u16) -> Self {
@@ -3602,7 +3613,7 @@ mod tests {
         assert!(
             display_width(line(&narrow, column_header_line(&narrow)))
                 > usize::from(NARROW_TERMINAL),
-            "the frame at the floor is wider than the terminal, and the terminal clips it"
+            "the frame at the floor is wider than the terminal, and the terminal wraps it"
         );
     }
 
