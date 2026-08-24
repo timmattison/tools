@@ -1650,6 +1650,57 @@ mod tests {
         );
     }
 
+    /// The seven block elements of the Recent column, lowest first.
+    ///
+    /// The test spells them, and `ui.rs` spells them again. That is on purpose,
+    /// as the word of the pause is: these glyphs are the picture of a hop that
+    /// a reader of the text table sees, and a frame that draws an image draws
+    /// none of them.
+    const BARS: &str = "▁▂▃▄▅▆▇";
+
+    /// The heading of the Recent column.
+    const RECENT_HEADING: &str = "Recent";
+
+    /// The row of a table of graphics that folded one round of one TTL.
+    ///
+    /// The row of [`ONE_ROUND_ROW`] without its block element and without the
+    /// two spaces in front of that element, because a line of a frame drops its
+    /// trailing spaces and the Recent column is the last column of the table.
+    const ONE_ROUND_ROW_OF_GRAPHICS: &str =
+        "   1  10.0.0.1                          0.0%      1    0.9    0.9    0.9    0.9    0.0";
+
+    #[test]
+    fn a_table_of_graphics_draws_no_block_element_in_the_body_of_its_recent_column() {
+        // The block elements are one picture of a hop and the image is a second
+        // one. A reader who sees both has two answers to one question, so the
+        // body cells of the column go blank and the image stands over them.
+        //
+        // The heading stays, because it names the column and it is no picture of
+        // a hop.
+        let mut screen = graphics_table(WIDTH, NO_ROWS);
+        screen.round(&one_round());
+        let lines = painted(&screen.sink);
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.ends_with(&format!("{COLUMN_GAP}{RECENT_HEADING}"))),
+            "the heading of the Recent column stands: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == ONE_ROUND_ROW_OF_GRAPHICS),
+            "the row of the TTL keeps every number and gives up its block element: {lines:?}"
+        );
+        for line in lines.iter().skip(HEAD_LINES) {
+            for glyph in BARS.chars().chain(NO_ANSWER.chars()) {
+                assert!(
+                    !line.contains(glyph),
+                    "no row of the path draws a block element or a mark of a loss: {line:?}"
+                );
+            }
+        }
+    }
+
     /// The last `count` lines of a frame, or every line of a frame that holds
     /// fewer than that.
     ///
