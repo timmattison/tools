@@ -18,11 +18,14 @@
 use crate::live::Screen;
 use crate::record::{NameRecord, RoundRecord, RunId};
 use crate::stats::{HopTable, TtlRow};
+use crate::ui;
+use crate::{counted, REACHED, ROUND};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
 
 /// The number of candidates that one draw reads before it gives up.
 ///
@@ -347,15 +350,177 @@ impl Screen for Scorer {
     }
 }
 
+/// The label of the row that names the shortest path.
+const SHORTEST: &str = "shortest";
+
+/// The label of the row that names the longest path.
+const LONGEST: &str = "longest";
+
+/// The label of the row that names the fastest path.
+const FASTEST: &str = "fastest";
+
+/// The label of the row that names the slowest path.
+const SLOWEST: &str = "slowest";
+
+/// The word that a row of a path the destination answered nothing for carries.
+const PARTIAL: &str = "partial";
+
+/// The one column that a row of the summary stands in from the left edge.
+///
+/// The table of a folded run stands one column in, and this one stands beside
+/// it in the same terminal.
+const ROW_START: &str = " ";
+
+/// The text between two columns of the summary table.
+///
+/// Two columns, as the table of a folded run holds between two of its columns,
+/// and for the reason that `ui::COLUMN_SPACING` gives: a number one column from
+/// the number beside it reads as one longer number.
+const COLUMN_GAP: &str = "  ";
+
+/// What the summary says when no destination gave a path that the table ranks.
+const NOTHING_TO_RANK: &str = "no destination gave a path to rank";
+
+/// One row of the summary table: what the row ranks, and the destination that
+/// holds it.
+struct Row<'a> {
+    /// The label of the row.
+    label: &'static str,
+    /// The destination that holds the row.
+    score: &'a Score,
+}
+
+/// One column of the summary table.
+///
+/// The entry holds the heading, the side that the cell stands on, and the cell
+/// of one row. One list therefore holds all three, so a column that leaves the
+/// table takes its heading and its cells with it. Three lists would agree until
+/// one of them changed, and then every cell behind the changed column would
+/// stand under the heading of another column.
+struct Column {
+    /// The heading of the column.
+    heading: &'static str,
+    /// True when the cell stands against the right edge of the column.
+    right: bool,
+    /// The cell of one row.
+    cell: fn(&Row) -> String,
+}
+
+/// The columns of the summary table, in the order they print.
+const COLUMNS: [Column; 8] = [
+    Column {
+        heading: "Row",
+        right: false,
+        cell: |row| row.label.to_owned(),
+    },
+    Column {
+        heading: "Host",
+        right: false,
+        cell: |row| row.score.host_text(),
+    },
+    Column {
+        heading: "Len",
+        right: true,
+        cell: |row| row.score.length.to_string(),
+    },
+    Column {
+        heading: "Path",
+        right: false,
+        cell: |row| row.score.kind.to_string(),
+    },
+    Column {
+        heading: "Avg",
+        right: true,
+        cell: |row| ui::render_time(row.score.rtt_ms),
+    },
+    Column {
+        heading: "Loss%",
+        right: true,
+        cell: |row| {
+            row.score
+                .loss
+                .map_or_else(|| ui::NO_NUMBER.to_owned(), ui::render_percent)
+        },
+    },
+    Column {
+        heading: "Gaps",
+        right: true,
+        cell: |row| row.score.gaps.to_string(),
+    },
+    Column {
+        heading: "Run",
+        right: false,
+        cell: |row| row.score.run.to_string(),
+    },
+];
+
+impl fmt::Display for PathKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Reached => REACHED,
+            Self::Partial => PARTIAL,
+        })
+    }
+}
+
+impl Score {
+    /// The name of the destination with its address beside it, or the address
+    /// alone.
+    ///
+    /// The address stays beside the name for the reason a row of a folded run
+    /// keeps it: a name is what a resolver said, and an address is what
+    /// answered. A run of `--no-dns` reads no name, and the cell then holds the
+    /// address by itself.
+    fn host_text(&self) -> String {
+        self.host
+            .as_ref()
+            .map_or_else(|| self.addr.to_string(), |host| format!("{host} ({})", self.addr))
+    }
+}
+
+/// What a hunt found, and what it cost.
+///
+/// The summary reads the scores of the destinations that the hunt finished, so
+/// a hunt that `Ctrl-C` stopped prints the same table over the rounds it did
+/// finish.
+pub(crate) struct Summary {
+    /// The score of each destination, in the order the hunt traced them.
+    scores: Vec<Score>,
+    /// The time that the whole hunt took.
+    elapsed: Duration,
+    /// True when a partial path competes for a row of the table.
+    include_partial: bool,
+}
+
+impl Summary {
+    /// Builds the summary of one hunt.
+    pub(crate) fn new(scores: Vec<Score>, elapsed: Duration, include_partial: bool) -> Self {
+        Self {
+            scores,
+            elapsed,
+            include_partial,
+        }
+    }
+
+    /// The lines of the summary: the table, a blank line, and the counts.
+    pub(crate) fn lines(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{random, reserved, Draw, PathKind, Score, Scorer, ATTEMPTS};
+    use super::{
+        random, reserved, Draw, PathKind, Score, Scorer, Summary, ATTEMPTS, FASTEST, LONGEST,
+        NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
+    };
     use crate::live::Screen;
     use crate::record::{NameRecord, RunId};
     use crate::testing::round;
     use chrono::Utc;
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
 
     /// An address that a packet routes to, and that no test rejects.
     const ROUTABLE: &str = "93.184.216.34";
@@ -595,7 +760,7 @@ mod tests {
     const FIRST_TTL: u8 = 1;
 
     /// The last TTL that every scored trace of a test probes.
-    const MAX_TTL: u8 = 8;
+    const MAX_TTL: u8 = 20;
 
     /// The address of the destination of every scored trace of a test.
     const DESTINATION: &str = "93.184.216.34";
@@ -619,14 +784,25 @@ mod tests {
 
     /// The score of a trace whose rounds and names a test scripts.
     fn scored(rounds: &[&[(u8, &str, f64)]], names: &[(&str, &str)]) -> Score {
-        let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL);
+        traced(DESTINATION, RUN, rounds, names)
+    }
+
+    /// The score of one destination whose address, run, rounds, and names a
+    /// test scripts.
+    fn traced(
+        destination: &str,
+        run: &str,
+        rounds: &[&[(u8, &str, f64)]],
+        names: &[(&str, &str)],
+    ) -> Score {
+        let mut scorer = Scorer::new(address(destination), RunId::from(run), FIRST_TTL);
         for hops in rounds {
             scorer.round(&round(FIRST_TTL, MAX_TTL, hops));
         }
         let records: Vec<NameRecord> = names
             .iter()
             .map(|(addr, host)| NameRecord {
-                run: RunId::from(RUN),
+                run: RunId::from(run),
                 ts: Utc::now(),
                 addr: IpAddr::V4(address(addr)),
                 host: (*host).to_owned(),
@@ -784,4 +960,196 @@ mod tests {
         let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL);
         assert!(!scorer.poll());
     }
+
+    /// The address of the destination that holds the shortest reached path.
+    const NEAR: &str = "93.184.216.34";
+
+    /// The run that recorded the trace of the near destination.
+    const NEAR_RUN: &str = "2026-08-18T12:00:00.123Z";
+
+    /// The address of the destination that holds the longest reached path.
+    const FAR: &str = "72.14.200.1";
+
+    /// The run that recorded the trace of the far destination.
+    const FAR_RUN: &str = "2026-08-18T12:01:00.000Z";
+
+    /// The address of the destination that answered nothing.
+    const QUIET: &str = "1.1.1.1";
+
+    /// The run that recorded the trace of the quiet destination.
+    const QUIET_RUN: &str = "2026-08-18T12:02:00.000Z";
+
+    /// The time that the hunt of every summary test took.
+    const ELAPSED: Duration = Duration::from_secs(192);
+
+    /// The summary of a hunt of three destinations, as the tests read it.
+    ///
+    /// The near destination answered at TTL 5 and the far one at TTL 18, so the
+    /// two of them hold the four rows of a summary that ranks the reached paths
+    /// alone. The quiet destination answered nothing past TTL 4, and it holds a
+    /// path shorter and faster than either of them, so a summary that lets a
+    /// partial path compete gives it the shortest row and the fastest one.
+    fn a_hunt(include_partial: bool) -> Summary {
+        let scores = vec![
+            traced(
+                NEAR,
+                NEAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (5, NEAR, 20.0)]],
+                &[(NEAR, DESTINATION_NAME)],
+            ),
+            traced(FAR, FAR_RUN, &[&[(1, FIRST_HOP, 1.0), (18, FAR, 85.0)]], &[]),
+            traced(
+                QUIET,
+                QUIET_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (4, LAST_ANSWER, 9.0)]],
+                &[],
+            ),
+        ];
+        Summary::new(scores, ELAPSED, include_partial)
+    }
+
+    /// The row of the summary that carries one label.
+    fn row(summary: &Summary, label: &str) -> String {
+        summary
+            .lines()
+            .into_iter()
+            .find(|line| line.trim_start().starts_with(label))
+            .unwrap_or_else(|| panic!("the summary must hold the `{label}` row"))
+    }
+
+    /// The last line of the summary, which counts what the hunt did.
+    fn counts(summary: &Summary) -> String {
+        summary
+            .lines()
+            .last()
+            .cloned()
+            .expect("the summary must hold the line that counts the hunt")
+    }
+
+    #[test]
+    fn the_shortest_row_names_the_destination_of_the_shortest_reached_path() {
+        assert!(row(&a_hunt(false), SHORTEST).contains(NEAR));
+    }
+
+    #[test]
+    fn the_longest_row_names_the_destination_of_the_longest_reached_path() {
+        assert!(row(&a_hunt(false), LONGEST).contains(FAR));
+    }
+
+    #[test]
+    fn the_fastest_row_names_the_destination_of_the_smallest_mean_time() {
+        assert!(row(&a_hunt(false), FASTEST).contains(NEAR));
+    }
+
+    #[test]
+    fn the_slowest_row_names_the_destination_of_the_largest_mean_time() {
+        assert!(row(&a_hunt(false), SLOWEST).contains(FAR));
+    }
+
+    /// A partial path competes for no row of a summary that did not ask for it.
+    ///
+    /// The quiet destination holds the shortest path and the fastest one of the
+    /// three, and neither row names it.
+    #[test]
+    fn a_partial_path_competes_for_no_row_by_default() {
+        let summary = a_hunt(false);
+        assert!(!row(&summary, SHORTEST).contains(QUIET));
+        assert!(!row(&summary, FASTEST).contains(QUIET));
+    }
+
+    #[test]
+    fn a_partial_path_that_the_hunt_included_takes_the_shortest_row() {
+        assert!(row(&a_hunt(true), SHORTEST).contains(QUIET));
+    }
+
+    #[test]
+    fn a_partial_path_that_the_hunt_included_takes_the_fastest_row() {
+        assert!(row(&a_hunt(true), FASTEST).contains(QUIET));
+    }
+
+    #[test]
+    fn the_row_of_a_partial_path_says_that_the_path_is_partial() {
+        assert!(row(&a_hunt(true), SHORTEST).contains(PARTIAL));
+    }
+
+    #[test]
+    fn the_row_of_a_reached_path_says_that_the_path_is_reached() {
+        assert!(row(&a_hunt(false), SHORTEST).contains("reached"));
+    }
+
+    /// One destination holds more than one row.
+    #[test]
+    fn a_destination_that_holds_two_rows_stands_in_both_of_them() {
+        let summary = a_hunt(false);
+        assert!(row(&summary, SHORTEST).contains(NEAR));
+        assert!(row(&summary, FASTEST).contains(NEAR));
+    }
+
+    #[test]
+    fn a_row_names_the_run_that_recorded_the_trace() {
+        assert!(row(&a_hunt(false), SHORTEST).contains(NEAR_RUN));
+    }
+
+    #[test]
+    fn a_row_names_the_name_of_the_address_when_a_lookup_gave_one() {
+        assert!(row(&a_hunt(false), SHORTEST).contains(DESTINATION_NAME));
+    }
+
+    /// A row of an address that no lookup named holds the address alone.
+    #[test]
+    fn a_row_of_an_address_that_no_lookup_named_holds_the_address_alone() {
+        let line = row(&a_hunt(false), LONGEST);
+        assert!(line.contains(FAR));
+        assert!(!line.contains('('), "the row holds no name: {line}");
+    }
+
+    #[test]
+    fn the_counts_hold_the_rounds_the_reached_the_partial_and_the_wall_time() {
+        assert_eq!(counts(&a_hunt(false)), "3 rounds   2 reached   1 partial   192s");
+    }
+
+    /// A hunt of one round writes the singular name of a round.
+    #[test]
+    fn the_counts_of_one_round_name_that_round_in_the_singular() {
+        let scores = vec![traced(NEAR, NEAR_RUN, &[&[(5, NEAR, 20.0)]], &[])];
+        let summary = Summary::new(scores, ELAPSED, false);
+        assert!(counts(&summary).starts_with("1 round "));
+    }
+
+    /// A hunt whose destinations all answered nothing ranks no path.
+    ///
+    /// The table then says so, and the counts still print: a hunt that reached
+    /// nothing still tells the reader how many rounds it spent.
+    #[test]
+    fn a_summary_of_no_ranked_path_says_so_and_still_counts_the_hunt() {
+        let scores = vec![traced(QUIET, QUIET_RUN, &[&[(1, FIRST_HOP, 1.0)]], &[])];
+        let summary = Summary::new(scores, ELAPSED, false);
+        let lines = summary.lines();
+        assert!(
+            lines.iter().any(|line| line.contains(NOTHING_TO_RANK)),
+            "the summary must say that it ranked nothing: {lines:?}"
+        );
+        assert_eq!(counts(&summary), "1 round   0 reached   1 partial   192s");
+    }
+
+    /// The summary of a hunt reads as the table of the design.
+    ///
+    /// Every column of the table lines up under its heading, the numbers stand
+    /// against the right edge of their columns, and the counts stand under a
+    /// blank line.
+    #[test]
+    fn the_summary_reads_as_the_table_of_the_design() {
+        assert_eq!(a_hunt(false).lines(), GOLDEN_SUMMARY);
+    }
+
+    /// The summary of a hunt of three destinations, as the design writes it.
+    const GOLDEN_SUMMARY: [&str; 7] = [
+        " Row       Host                          Len  Path       Avg  Loss%  Gaps  Run",
+        " shortest  example.com (93.184.216.34)     5  reached   20.0   0.0%     3  2026-08-18T12:00:00.123Z",
+        " longest   72.14.200.1                    18  reached   85.0   0.0%    16  2026-08-18T12:01:00.000Z",
+        " fastest   example.com (93.184.216.34)     5  reached   20.0   0.0%     3  2026-08-18T12:00:00.123Z",
+        " slowest   72.14.200.1                    18  reached   85.0   0.0%    16  2026-08-18T12:01:00.000Z",
+        "",
+        "3 rounds   2 reached   1 partial   192s",
+    ];
 }

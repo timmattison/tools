@@ -833,7 +833,7 @@ fn head_lines(header_lines: usize) -> u16 {
 const NO_HOST: &str = "???";
 
 /// The value of a number that the run holds none of.
-const NO_NUMBER: &str = "-";
+pub(crate) const NO_NUMBER: &str = "-";
 
 /// The sign that ends a percentage.
 const PERCENT_SIGN: &str = "%";
@@ -953,7 +953,7 @@ fn buffer_columns(text: &str) -> u16 {
 ///
 /// A key that holds no such time takes one word in its place. A TTL that
 /// answered no probe holds none of the times.
-fn render_time(value: Option<f64>) -> String {
+pub(crate) fn render_time(value: Option<f64>) -> String {
     value.map_or_else(
         || NO_NUMBER.to_owned(),
         |value| format!("{value:.DECIMALS$}"),
@@ -961,7 +961,7 @@ fn render_time(value: Option<f64>) -> String {
 }
 
 /// Writes one percentage, to `DECIMALS` decimal places.
-fn render_percent(value: f64) -> String {
+pub(crate) fn render_percent(value: f64) -> String {
     format!("{value:.DECIMALS$}{PERCENT_SIGN}")
 }
 
