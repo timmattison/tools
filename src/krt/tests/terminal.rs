@@ -526,20 +526,30 @@ const TRACER_LOCK: &str = "krt-live-tracer.lock";
 
 /// The longest that a wait for the tracer of the machine runs.
 ///
-/// One holder takes a few seconds, and [`PATIENCE`] bounds the longest one. Two
-/// test binaries of three live runs each therefore take well under this bound,
-/// and a wait that reaches it says that something outside these tests holds the
-/// lock.
+/// One holder takes a few seconds. A live test carries two waits of
+/// [`PATIENCE`], one for the first frame and one for the stop, so twice
+/// PATIENCE bounds a holder that passes. Two test binaries of four live runs
+/// each therefore take well under this bound, and a wait that reaches it says
+/// that something outside these tests holds the lock.
+///
+/// The bound is more than twice [`STALE_LOCK`], so a waiter that pays the whole
+/// wait for a stale file keeps most of its patience for the lock it then takes.
 #[cfg(target_os = "macos")]
-const LOCK_PATIENCE: Duration = Duration::from_mins(2);
+const LOCK_PATIENCE: Duration = Duration::from_mins(4);
 
 /// The age at which a lock file belongs to a run that is no longer there.
 ///
 /// A holder gives the lock back at the end of its test, and the panic of a test
 /// gives it back too. A file that a killed process left behind never comes
 /// back, so a file older than any holder ever lives is a file to take over.
+///
+/// Ninety seconds is three times [`PATIENCE`], and twice PATIENCE bounds the
+/// longest holder that passes, so no live test takes the lock of another one.
+/// The age also stands well inside [`LOCK_PATIENCE`]: a waiter pays this
+/// age at the most for the file of a killed run, and the rest of its patience
+/// then holds the lock that it took.
 #[cfg(target_os = "macos")]
-const STALE_LOCK: Duration = Duration::from_mins(2);
+const STALE_LOCK: Duration = Duration::from_secs(90);
 
 /// The hold of one test on the tracer of the machine.
 ///
