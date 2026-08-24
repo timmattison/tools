@@ -1506,7 +1506,7 @@ this platform needs raw socket privileges to send probes.
 
         assert_eq!(
             tracer_of_protocol(Protocol::Udp).port_direction(),
-            trippy_core::PortDirection::FixedSrc(Port(UDP_SOURCE_PORT)),
+            trippy_core::PortDirection::FixedSrc(Port(udp_source_port(process::id()))),
             "the free destination port of a UDP run carries the number of the round, and that is what makes `one flow for each round` true. A direction that held both ports would hold one flow for the whole run, and the help of `paris` and of `dublin` would then be false"
         );
 
