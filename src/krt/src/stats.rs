@@ -12,7 +12,15 @@
 //! Every part of the fold holds a bounded amount of memory, so a run of any
 //! length over a path of any shape holds the same amount: one row for each TTL
 //! of the path, `TRACKED_ADDRESSES` entries for each row, and
-//! `RECENT_CAPACITY` round-trip times for each entry.
+//! `RECENT_CAPACITY` samples for each entry.
+//!
+//! A sample of a TTL is a round-trip time or a lost probe, and a sample of an
+//! address is a round-trip time alone. The history of a TTL therefore holds one
+//! sample for each probe of it, so a picture of that history reads the loss of
+//! the TTL as well as the times. A probe reaches a TTL and not a router, so no
+//! loss belongs to one address of the TTL: a round that answered from another
+//! address of the same TTL is no loss of this address, and a history that kept
+//! it as one would report a loss that the share beside it contradicts.
 
 use crate::record;
 use std::collections::{BTreeMap, VecDeque};
@@ -24,7 +32,7 @@ use std::net::IpAddr;
 /// that part as a percentage.
 const PERCENT: f64 = 100.0;
 
-/// The number of round-trip times that one key keeps.
+/// The number of samples that one key keeps.
 const RECENT_CAPACITY: usize = 60;
 
 /// The number of addresses that one TTL keeps an entry for.
@@ -49,6 +57,20 @@ fn count_as_f64(count: u64) -> f64 {
     count as f64
 }
 
+/// One probe of one key, as the history of that key keeps it.
+///
+/// The history of a TTL holds both of these, and the history of an address
+/// holds the time alone. A reader of the history thus reads the loss of a TTL
+/// at the place of the probe that was lost, and no loss of a TTL reaches the
+/// history of one router of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Sample {
+    /// The round-trip time of an answer, in milliseconds.
+    Time(f64),
+    /// A probe that no hop answered.
+    Lost,
+}
+
 /// The statistics of one key, over the round-trip times it observed.
 ///
 /// A key is one TTL of the path, or one address that answered at a TTL.
@@ -68,8 +90,8 @@ pub(crate) struct HopStats {
     mean: f64,
     /// The sum of the squared distances from the mean, as Welford keeps it.
     m2: f64,
-    /// The last `RECENT_CAPACITY` round-trip times, oldest first.
-    recent: VecDeque<f64>,
+    /// The last `RECENT_CAPACITY` samples, oldest first.
+    recent: VecDeque<Sample>,
 }
 
 impl HopStats {
@@ -97,12 +119,30 @@ impl HopStats {
         self.mean += from_old_mean / count;
         self.m2 += from_old_mean * (rtt_ms - self.mean);
 
-        // The buffer holds a bounded amount of memory, so a run of any length
-        // holds the same amount.
+        self.keep(Sample::Time(rtt_ms));
+    }
+
+    /// Folds one probe that no hop answered into the statistics.
+    ///
+    /// The loss reaches the history and nothing else. The count of the answers,
+    /// the times, the mean, and the deviation each read the answers of the key,
+    /// and a probe that no hop answered gave none of them. [`TtlRow::sent`]
+    /// counts the probe, and [`TtlRow::loss`] reads that count against the
+    /// answers, so the loss of the row already stands without this call.
+    fn observe_loss(&mut self) {
+        self.keep(Sample::Lost);
+    }
+
+    /// Keeps one more sample in the history, and drops the oldest one when the
+    /// history is full.
+    ///
+    /// The buffer holds a bounded amount of memory, so a run of any length
+    /// holds the same amount.
+    fn keep(&mut self, sample: Sample) {
         if self.recent.len() == RECENT_CAPACITY {
             self.recent.pop_front();
         }
-        self.recent.push_back(rtt_ms);
+        self.recent.push_back(sample);
     }
 
     /// The number of round-trip times that the key observed.
@@ -152,8 +192,8 @@ impl HopStats {
         Some((last - previous).abs())
     }
 
-    /// The last `RECENT_CAPACITY` round-trip times, oldest first.
-    pub(crate) fn recent(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+    /// The last `RECENT_CAPACITY` samples, oldest first.
+    pub(crate) fn recent(&self) -> impl ExactSizeIterator<Item = Sample> + '_ {
         self.recent.iter().copied()
     }
 }
@@ -184,6 +224,13 @@ impl HopTable {
     /// address or not, so the bound of `TRACKED_ADDRESSES` takes no answer away
     /// from the numbers of the TTL. An answer that no tracked address holds
     /// counts in [`TtlRow::untracked`].
+    ///
+    /// A TTL of the range that no hop of this round answered lost its probe,
+    /// and the history of that TTL keeps the loss at the place of the probe.
+    /// The walk that finds those TTLs comes last, so every answer of the round
+    /// stands in the history before the losses of the same round reach it. One
+    /// round leaves one sample in the history of one TTL either way, so the two
+    /// walks put the samples of that TTL in the order the rounds arrived.
     pub(crate) fn observe(&mut self, round: &record::RoundRecord) {
         for ttl in round.ttl_range.first()..=round.ttl_range.last() {
             self.row_mut(ttl).sent += 1;
@@ -193,6 +240,11 @@ impl HopTable {
             row.stats.observe(hop.rtt_ms);
             if let Some(stats) = row.address_mut(hop.addr) {
                 stats.observe(hop.rtt_ms);
+            }
+        }
+        for ttl in round.ttl_range.first()..=round.ttl_range.last() {
+            if !round.hops.iter().any(|hop| hop.ttl == ttl) {
+                self.row_mut(ttl).stats.observe_loss();
             }
         }
     }
@@ -369,7 +421,7 @@ impl Address<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Address, HopStats, HopTable, TtlRow, RECENT_CAPACITY, TRACKED_ADDRESSES};
+    use super::{Address, HopStats, HopTable, Sample, TtlRow, RECENT_CAPACITY, TRACKED_ADDRESSES};
     use crate::record::RoundRecord;
     use crate::testing::{address, round};
     use std::net::IpAddr;
@@ -481,13 +533,17 @@ mod tests {
         let samples: Vec<f64> = (1..=MANY).map(f64::from).collect();
         let stats = stats_of(&samples);
         assert_eq!(stats.recv(), u64::from(MANY), "the fold took every sample");
-        let history: Vec<f64> = stats.recent().collect();
+        let history: Vec<Sample> = stats.recent().collect();
         assert_eq!(
             history.len(),
             RECENT_CAPACITY,
             "the history keeps {RECENT_CAPACITY} samples"
         );
-        let expected: Vec<f64> = samples[samples.len() - RECENT_CAPACITY..].to_vec();
+        let expected: Vec<Sample> = samples[samples.len() - RECENT_CAPACITY..]
+            .iter()
+            .copied()
+            .map(Sample::Time)
+            .collect();
         assert_eq!(history, expected, "the history keeps the last samples");
     }
 

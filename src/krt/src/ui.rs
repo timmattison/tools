@@ -95,7 +95,7 @@
 //! each name a period of time, and a second writer of a duration would print
 //! `1s` in one of those three places and `1000ms` in another.
 
-use crate::stats::{Address, HopStats, TtlRow};
+use crate::stats::{Address, HopStats, Sample, TtlRow};
 use crate::{ROUND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE, UNKNOWN};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Rect};
@@ -399,7 +399,7 @@ const LEVELS: f64 = LEVEL_COUNT as f64;
 /// stand on, and every bar of the key would then read the same. One bad sample
 /// would hide the whole history of the hop, which is a worse answer than one
 /// bar that reads low.
-pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = f64>, width: usize) -> String {
+pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = Sample>, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
@@ -409,7 +409,13 @@ pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = f64>, width: usiz
     // copy that this function makes, and the history of the key stays where it
     // is.
     let skipped = samples.len().saturating_sub(width);
-    let shown: Vec<f64> = samples.skip(skipped).collect();
+    let shown: Vec<f64> = samples
+        .skip(skipped)
+        .filter_map(|sample| match sample {
+            Sample::Time(rtt_ms) => Some(rtt_ms),
+            Sample::Lost => None,
+        })
+        .collect();
 
     // The scale reads only the samples that compare.
     let mut lowest = f64::INFINITY;
@@ -1310,7 +1316,7 @@ mod tests {
         truncate_to_width, Frame, Header,
     };
     use crate::record::RoundRecord;
-    use crate::stats::HopTable;
+    use crate::stats::{HopTable, Sample};
     use crate::testing::{address, round};
     use std::collections::BTreeMap;
     use std::net::IpAddr;
@@ -1810,9 +1816,10 @@ mod tests {
     /// part of the sparkline a reader of the table sees.
     const BARS: &str = "▁▂▃▄▅▆▇";
 
-    /// The bar of a set of samples, at a width.
+    /// The bar of a set of round-trip times, at a width.
     fn bar(samples: &[f64], width: usize) -> String {
-        sparkline(samples.iter().copied(), width)
+        let times: Vec<Sample> = samples.iter().copied().map(Sample::Time).collect();
+        sparkline(times.into_iter(), width)
     }
 
     #[test]
