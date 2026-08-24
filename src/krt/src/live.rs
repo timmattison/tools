@@ -728,6 +728,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::cell::Cell;
     use std::fs;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -874,19 +875,58 @@ mod tests {
         }
     }
 
+    /// The facts of a run whose recorded file stands at `path`.
+    ///
+    /// Every table below heads its frames with these facts, and each of those
+    /// tables holds a sink of its own, so the facts stand apart from the sink.
+    fn facts_at(path: PathBuf) -> RunFacts {
+        RunFacts {
+            destination: DESTINATION.to_owned(),
+            address: address(DESTINATION_ADDRESS),
+            source: address(SOURCE),
+            interval: INTERVAL,
+            path,
+        }
+    }
+
     /// A table that draws into bytes, reads `keys`, and heads its frames with
     /// the recorded file at `path`.
     fn table_at<K: Keys>(path: PathBuf, keys: K) -> Table<Vec<u8>, K> {
+        Table::new(facts_at(path), Vec::new(), keys, WIDTH)
+    }
+
+    /// A sink that counts the calls of [`Write::write`] that reach it.
+    ///
+    /// A test holds no terminal, so it reads nothing of how many times a draw
+    /// crossed into the kernel. This count is what such a test reads in the
+    /// place of that. The sink keeps none of the bytes, because the tests that
+    /// read the glyphs of a frame draw into bytes above.
+    struct Counted {
+        /// The number of calls that reached this sink.
+        writes: usize,
+    }
+
+    impl Write for Counted {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            // The whole buffer counts as taken, so `write_all` hands one
+            // buffer over in one call. A sink that took less of it would count
+            // the calls of its own refusal.
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A table that draws into a sink which counts the calls, and that takes
+    /// the keys of an empty script.
+    fn counted_table() -> Table<Counted, FakeKeys> {
         Table::new(
-            RunFacts {
-                destination: DESTINATION.to_owned(),
-                address: address(DESTINATION_ADDRESS),
-                source: address(SOURCE),
-                interval: INTERVAL,
-                path,
-            },
-            Vec::new(),
-            keys,
+            facts_at(temp_path("writes")),
+            Counted { writes: 0 },
+            FakeKeys::of(&[]),
             WIDTH,
         )
     }
@@ -1114,6 +1154,21 @@ mod tests {
         assert!(
             lines.iter().any(|line| line == ONE_ROUND_ROW),
             "the row of the TTL stands under that header: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn one_frame_of_the_live_table_reaches_the_sink_in_one_write() {
+        // The sink of a live run is `std::io::Stdout`, which is a
+        // `LineWriter`. Such a writer flushes at every line feed, so one call
+        // for each line of a frame is one `write(2)` for each line of it. The
+        // terminal draws what arrives, and the reader then sees a half-drawn
+        // frame between two of those writes.
+        let mut screen = counted_table();
+        screen.round(&one_round());
+        assert_eq!(
+            screen.sink.writes, 1,
+            "the whole frame reaches the sink in one call"
         );
     }
 
