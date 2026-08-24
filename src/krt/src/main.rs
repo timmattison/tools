@@ -9,6 +9,8 @@
 //! asked, print one status line each minute in the place of the table. The
 //! `replay` command reads a recorded file, folds one run of it, and prints the
 //! table of that path: a head that names the run, and one row for each TTL.
+//! The `hunt` command looks for the longest path it can find: it draws a
+//! random address, traces it, scores the path, and takes the next round.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -309,7 +311,9 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 /// table. A run whose standard output is a pipe or a file, and a run that
 /// `--headless` asked, print one status line each minute. The `replay` command
 /// reads a file that an earlier run wrote, so it takes no destination and no
-/// flag of a probe.
+/// flag of a probe. The `hunt` command looks for the longest path it can find:
+/// it draws a random address, traces it, scores the path, and takes the next
+/// round.
 // The help names the `?` key and no other key of the live table, because
 // `live::KEYS` is the one list that says what a key does and a doc comment of
 // `clap` is a string literal that reads that list at no time. A help page that
