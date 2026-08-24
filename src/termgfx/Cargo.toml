@@ -6,6 +6,7 @@ description = "The one reader of the terminal that says whether it draws an imag
 license = "MIT"
 
 [dependencies]
+image.workspace = true
 libc.workspace = true
 termsize.workspace = true
 

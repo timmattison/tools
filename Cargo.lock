@@ -3984,7 +3984,6 @@ dependencies = [
  "notify",
  "termgfx",
  "termion",
- "termsize",
  "unicode-width",
 ]
 
@@ -7471,6 +7470,7 @@ dependencies = [
 name = "termgfx"
 version = "0.1.0"
 dependencies = [
+ "image",
  "libc",
  "termsize",
 ]

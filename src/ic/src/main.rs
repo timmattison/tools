@@ -5,7 +5,6 @@ use clap::Parser;
 use icy_sixel::{sixel_encode, EncodeOptions};
 use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
@@ -15,60 +14,16 @@ use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
-use termgfx::{display_routine_for, terminal_pixels, Capabilities, DisplayRoutine, TerminalType};
+use termgfx::{
+    calculate_aspect_preserving_size, calculate_sixel_dimensions, cell_aspect_ratio,
+    cell_pixels_or_estimate, display_routine_for, downscale_to_display_pixels, image_rows,
+    image_rows_in_cells, sixel_pixel_budget, terminal_cells, terminal_pixels,
+    write_image_with_cursor_contract, Capabilities, CursorContract, DisplayRoutine, TerminalType,
+};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use unicode_width::UnicodeWidthStr;
-
-// ============================================================================
-// Constants for Sixel and terminal display calculations
-// ============================================================================
-
-/// Estimated pixel width per terminal character cell.
-/// Used as fallback when actual pixel dimensions cannot be queried via ioctl.
-/// Value of 10px is typical for modern terminals with default fonts.
-const ESTIMATED_CELL_WIDTH_PX: u32 = 10;
-
-/// Estimated pixel height per terminal character cell.
-/// Used as fallback when actual pixel dimensions cannot be queried via ioctl.
-/// Value of 20px is typical for modern terminals with default fonts (roughly 2:1 aspect).
-const ESTIMATED_CELL_HEIGHT_PX: u32 = 20;
-
-/// Default Sixel output width in pixels when no size information is available.
-/// Used as final fallback when both ioctl and character cell estimates fail.
-const DEFAULT_SIXEL_WIDTH_PX: u32 = 800;
-
-/// Default Sixel output height in pixels when no size information is available.
-/// Used as final fallback when both ioctl and character cell estimates fail.
-const DEFAULT_SIXEL_HEIGHT_PX: u32 = 600;
-
-/// Horizontal margin factor for Sixel output (95% of terminal width).
-/// Leaves some margin to avoid horizontal overflow.
-///
-/// The margin is one of the two bounds on the size of a Sixel image, and it is
-/// not the bound that keeps the image inside the rows that `ic` gives it. See
-/// [`sixel_pixel_budget`], which takes the smaller of the margin and the budget
-/// of the caller in character cells.
-const SIXEL_HORIZONTAL_MARGIN: f64 = 0.95;
-
-/// Vertical margin factor for Sixel output (90% of terminal height).
-/// Leaves more vertical margin as some terminals have status bars or prompts.
-///
-/// The margin knows nothing about the header rows that `ic` prints above the
-/// image, and it is not the bound that keeps the prompt on the screen. See
-/// [`sixel_pixel_budget`], which takes the smaller of the margin and the budget
-/// of the caller in character cells.
-const SIXEL_VERTICAL_MARGIN: f64 = 0.90;
-
-/// Control sequence introducer. It starts a CSI escape sequence.
-const CSI: &str = "\x1b[";
-
-/// DECSC. It saves the position of the cursor.
-const SAVE_CURSOR: &str = "\x1b7";
-
-/// DECRC. It restores the saved position of the cursor.
-const RESTORE_CURSOR: &str = "\x1b8";
 
 /// The row that the shell prompt returns to below an image.
 const PROMPT_ROWS: u32 = 1;
@@ -827,17 +782,17 @@ fn process_frame_display(
     }
 
     // Check terminal size and decide on clearing strategy
-    let current_terminal_size = get_terminal_size().ok();
+    let current_terminal_size = terminal_cells();
     let should_clear_screen = if *first_frame {
         // Always clear for first frame
         *first_frame = false;
         true
-    } else if let (Some(current), Some(previous)) = (current_terminal_size, *previous_terminal_size)
-    {
+    } else if let Some(previous) = *previous_terminal_size {
         // Clear if terminal dimensions changed at all
-        current.0 != previous.0 || current.1 != previous.1
+        current_terminal_size != previous
     } else {
-        // If we can't get terminal size, just use cursor positioning
+        // The first frame of a run is the only frame with no size to compare
+        // against, and that frame cleared the screen already.
         false
     };
 
@@ -852,12 +807,11 @@ fn process_frame_display(
     display_image(img, args, true, HeaderRows(0))?;
 
     // Draw progress bar
-    if let Some((term_width, term_height)) = current_terminal_size {
-        draw_progress_bar(current_time, duration, fps, term_width, term_height)?;
-    }
+    let (term_width, term_height) = current_terminal_size;
+    draw_progress_bar(current_time, duration, fps, term_width, term_height)?;
 
     // Update previous terminal size for next comparison
-    *previous_terminal_size = current_terminal_size;
+    *previous_terminal_size = Some(current_terminal_size);
 
     Ok(())
 }
@@ -1544,23 +1498,6 @@ fn draw_progress_bar(
     Ok(())
 }
 
-/// The width of the terminal that `ic` assumes when it cannot read the real
-/// width.
-const FALLBACK_TERMINAL_COLS: u32 = 80;
-
-/// The height of the terminal that `ic` assumes when it cannot read the real
-/// height.
-const FALLBACK_TERMINAL_ROWS: u32 = 24;
-
-fn get_terminal_size() -> Result<(u32, u32)> {
-    if let Some((cols, rows)) = termsize::stdout_size() {
-        Ok((u32::from(cols), u32::from(rows)))
-    } else {
-        // Fallback to common terminal size if detection fails
-        Ok((FALLBACK_TERMINAL_COLS, FALLBACK_TERMINAL_ROWS))
-    }
-}
-
 /// Print a header and then display an image file.
 ///
 /// The function prints the header itself and then counts the rows that it
@@ -1584,7 +1521,7 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
     let img = image::open(file_path)
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
-    let term_width = get_terminal_size().map_or(FALLBACK_TERMINAL_COLS, |(cols, _)| cols);
+    let (term_width, _) = terminal_cells();
     display_image(img, args, args.no_newline, header_rows(header, term_width))
 }
 
@@ -1641,7 +1578,7 @@ fn display_image(
         (args.width, args.height)
     } else {
         // Auto-fit to terminal window size
-        let (term_width, term_height) = get_terminal_size()?;
+        let (term_width, term_height) = terminal_cells();
         // Leave some margin for terminal chrome
         let safe_width = if term_width > 4 {
             term_width - 2
@@ -1705,131 +1642,6 @@ fn display_image(
     }
 }
 
-/// Calculate display dimensions that preserve aspect ratio within the given bounds.
-///
-/// Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
-/// via the `cell_aspect` parameter (cell height / cell width in pixels). Callers
-/// obtain this from `get_cell_pixel_dimensions()`, which uses actual terminal
-/// dimensions when available and falls back to
-/// `ESTIMATED_CELL_HEIGHT_PX / ESTIMATED_CELL_WIDTH_PX`. This function works in
-/// terminal character cells, not pixels.
-///
-/// The casts from f64 to u32 are intentional - display dimensions are always positive
-/// and will never exceed u32::MAX for any reasonable terminal size.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "display dimensions are always positive and fit in u32"
-)]
-fn calculate_aspect_preserving_size(
-    img_width: u32,
-    img_height: u32,
-    max_width: Option<u32>,
-    max_height: Option<u32>,
-    preserve_aspect: bool,
-    cell_aspect: f64,
-) -> (Option<u32>, Option<u32>) {
-    if !preserve_aspect {
-        return (max_width, max_height);
-    }
-
-    // Guard against division by zero. Valid images always have height > 0,
-    // but we handle this defensively to avoid panics on malformed input.
-    if img_height == 0 {
-        return (max_width, max_height);
-    }
-
-    match (max_width, max_height) {
-        (Some(max_w), Some(max_h)) => {
-            let effective_max_h_pixels = max_h as f64 * cell_aspect;
-            let effective_max_w_pixels = max_w as f64;
-
-            let img_aspect = img_width as f64 / img_height as f64;
-            let box_aspect = effective_max_w_pixels / effective_max_h_pixels;
-
-            if img_aspect > box_aspect {
-                // Image is wider than box - constrain by width
-                let display_width = max_w;
-                let display_height = ((max_w as f64 / img_aspect) / cell_aspect).round() as u32;
-                (Some(display_width), Some(display_height.max(1)))
-            } else {
-                // Image is taller than box - constrain by height
-                let display_height = max_h;
-                let display_width = (max_h as f64 * cell_aspect * img_aspect).round() as u32;
-                (Some(display_width.max(1)), Some(display_height))
-            }
-        }
-        (Some(w), None) => (Some(w), None),
-        (None, Some(h)) => (None, Some(h)),
-        (None, None) => (None, None),
-    }
-}
-
-/// Calculate the pixel dimensions of a single terminal character cell.
-///
-/// Tries to determine actual cell dimensions via ioctl (TIOCGWINSZ). Falls back to
-/// estimated constants if the ioctl fails or the terminal reports zero dimensions.
-fn get_cell_pixel_dimensions() -> (u32, u32) {
-    if let Some((total_px_w, total_px_h)) = terminal_pixels() {
-        let (term_cols, term_rows) =
-            get_terminal_size().unwrap_or((FALLBACK_TERMINAL_COLS, FALLBACK_TERMINAL_ROWS));
-        if term_cols > 0 && term_rows > 0 {
-            return (total_px_w / term_cols, total_px_h / term_rows);
-        }
-    }
-    (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX)
-}
-
-/// Returns the cell aspect ratio (height / width in pixels).
-/// Uses actual terminal cell dimensions when available, falling back to estimates.
-fn get_cell_aspect_ratio() -> f64 {
-    let (cell_w, cell_h) = get_cell_pixel_dimensions();
-    cell_h as f64 / cell_w as f64
-}
-
-/// Convert character cell display dimensions to target pixel dimensions.
-///
-/// Returns `None` if either dimension is missing (meaning no downscale target can
-/// be computed). Uses actual terminal cell pixel dimensions when available, falling
-/// back to estimated constants.
-fn cells_to_pixels(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> (u32, u32) {
-    (cols * cell_w, rows * cell_h)
-}
-
-/// Downscale an image to fit the display pixel dimensions if it exceeds them.
-///
-/// Converts character cell display dimensions to pixel dimensions using either the
-/// actual terminal pixel size (via ioctl) or estimated cell dimensions, then resizes
-/// the image if it's larger than the target. This prevents sending hundreds of megabytes
-/// of pixel data to the terminal for very large images (e.g., panoramas).
-///
-/// Returns a borrowed reference to the original image when no downscaling is needed
-/// (dimensions unspecified or image already fits), avoiding an unnecessary clone.
-/// Returns an owned downscaled image when the original exceeds the target pixel dimensions.
-fn downscale_to_display_pixels<'a>(
-    img: &'a DynamicImage,
-    display_width: Option<u32>,
-    display_height: Option<u32>,
-) -> Cow<'a, DynamicImage> {
-    let (target_pixel_w, target_pixel_h) = match (display_width, display_height) {
-        (Some(cols), Some(rows)) => {
-            let (cell_w, cell_h) = get_cell_pixel_dimensions();
-            cells_to_pixels(cols, rows, cell_w, cell_h)
-        }
-        _ => return Cow::Borrowed(img),
-    };
-
-    if img.width() <= target_pixel_w && img.height() <= target_pixel_h {
-        return Cow::Borrowed(img);
-    }
-
-    Cow::Owned(img.resize(
-        target_pixel_w,
-        target_pixel_h,
-        image::imageops::FilterType::Lanczos3,
-    ))
-}
-
 /// Kitty terminal display with better performance for video.
 ///
 /// Also used for WezTerm and Ghostty, which support the Kitty graphics protocol.
@@ -1850,7 +1662,7 @@ fn display_image_kitty(
         width,
         height,
         args.preserve_aspect,
-        get_cell_aspect_ratio(),
+        cell_aspect_ratio(),
     );
 
     // Downscale the image to the target pixel size before sending to avoid
@@ -1870,313 +1682,6 @@ fn display_image_kitty(
         display_height,
         no_newline,
     )
-}
-
-/// Calculate pixel dimensions for Sixel output, preserving aspect ratio.
-///
-/// Unlike `calculate_aspect_preserving_size` which works in terminal character cells,
-/// this function works directly in pixels for Sixel output. The aspect ratio calculation
-/// is intentionally different because Sixel doesn't need to account for cell aspect ratio.
-///
-/// The casts from f64 to u32 are intentional - pixel dimensions are always positive
-/// and will never exceed u32::MAX for any reasonable display.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "pixel dimensions are always positive and fit in u32"
-)]
-fn calculate_sixel_dimensions(
-    img_width: u32,
-    img_height: u32,
-    target_pixel_width: u32,
-    target_pixel_height: u32,
-    preserve_aspect: bool,
-) -> (u32, u32) {
-    if !preserve_aspect {
-        return (target_pixel_width, target_pixel_height);
-    }
-
-    let img_aspect = img_width as f64 / img_height as f64;
-    let target_aspect = target_pixel_width as f64 / target_pixel_height as f64;
-
-    if img_aspect > target_aspect {
-        // Image is wider - constrain by width
-        let w = target_pixel_width;
-        let h = (target_pixel_width as f64 / img_aspect) as u32;
-        (w, h.max(1))
-    } else {
-        // Image is taller - constrain by height
-        let h = target_pixel_height;
-        let w = (target_pixel_height as f64 * img_aspect) as u32;
-        (w.max(1), h)
-    }
-}
-
-/// Give the size in pixels that a Sixel image can occupy.
-///
-/// Two bounds hold the image, and the image must obey both. The margin bounds
-/// the image by the pixel size that the terminal reports, which keeps the image
-/// off the edge of the screen. The budget of the caller bounds the image by a
-/// count of character cells, which is the size of the terminal less the header
-/// rows and the prompt row, or the `--width` and the `--height` that the user
-/// asks for. The smaller of the two wins on each axis, so the header, the image
-/// and the prompt all fit inside the terminal.
-///
-/// The two bounds come from different sources, and each one can be absent. A
-/// terminal in Zellij or in ttyd reports no pixel size, and the budget of the
-/// caller is then the only bound. An axis of the budget is absent when the user
-/// gives only one of `--width` and `--height`, and the margin is then the only
-/// bound on that axis. With no pixel size and only one axis of the budget there
-/// is nothing to compute a size from, so a default size becomes the answer.
-///
-/// # Arguments
-/// * `terminal_pixel_size` - The width and the height of the terminal in
-///   pixels, when the terminal reports them.
-/// * `cell_cols` - The width of the budget of the caller in character cells.
-/// * `cell_rows` - The height of the budget of the caller in character cells.
-/// * `cell_width_px` - The width of one character cell in pixels.
-/// * `cell_height_px` - The height of one character cell in pixels.
-///
-/// # Returns
-/// The width and the height of the budget in pixels. Each axis is 1 or more, so
-/// a degenerate terminal cannot ask the encoder for an image of no size.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "pixel dimensions are always positive and fit in u32"
-)]
-fn sixel_pixel_budget(
-    terminal_pixel_size: Option<(u32, u32)>,
-    cell_cols: Option<u32>,
-    cell_rows: Option<u32>,
-    cell_width_px: u32,
-    cell_height_px: u32,
-) -> (u32, u32) {
-    // A count of cells that is absurdly large overflows the product. The
-    // product saturates instead, and a saturated product bounds nothing.
-    let cell_budget_px =
-        |cells: Option<u32>, cell_px: u32| cells.map(|count| count.saturating_mul(cell_px));
-    let cols_px = cell_budget_px(cell_cols, cell_width_px);
-    let rows_px = cell_budget_px(cell_rows, cell_height_px);
-
-    let (width_px, height_px) = if let Some((px_w, px_h)) = terminal_pixel_size {
-        let margin_width_px = (f64::from(px_w) * SIXEL_HORIZONTAL_MARGIN) as u32;
-        let margin_height_px = (f64::from(px_h) * SIXEL_VERTICAL_MARGIN) as u32;
-        (
-            cols_px.map_or(margin_width_px, |budget| margin_width_px.min(budget)),
-            rows_px.map_or(margin_height_px, |budget| margin_height_px.min(budget)),
-        )
-    } else if let (Some(width_px), Some(height_px)) = (cols_px, rows_px) {
-        (width_px, height_px)
-    } else {
-        (DEFAULT_SIXEL_WIDTH_PX, DEFAULT_SIXEL_HEIGHT_PX)
-    };
-
-    (width_px.max(1), height_px.max(1))
-}
-
-/// Calculate the number of terminal rows that an image fills.
-///
-/// The image height in pixels divides by the height of one character cell, and
-/// the result rounds up, because a partial row still uses a full row.
-///
-/// # Arguments
-/// * `height_px` - The height of the image in pixels.
-/// * `cell_height_px` - The height of one character cell in pixels.
-///
-/// # Returns
-/// The row count. The result is always 1 or more, so the caller never asks the
-/// terminal for a movement of zero rows. A `cell_height_px` of 0 counts as 1,
-/// because `get_cell_pixel_dimensions` divides the terminal pixel height by the
-/// row count and can give 0.
-fn image_rows(height_px: u32, cell_height_px: u32) -> u32 {
-    height_px.div_ceil(cell_height_px.max(1)).max(1)
-}
-
-/// Calculate the number of terminal rows that a rendered image fills, for the
-/// protocols that take the size of the image in character cells.
-///
-/// The Kitty graphics protocol and the iTerm2 inline image protocol both take a
-/// width and a height in character cells, and both make their own decision when
-/// one of the two is absent. There are four cases, and each one follows a rule
-/// of the protocols:
-///
-/// * `display_height` is `Some(h)`, with or without a width. Both protocols
-///   scale the image into the rows that `ic` asks for, so the answer is `h`.
-/// * Only `display_width` is `Some(w)`. Both protocols then compute the other
-///   dimension to keep the aspect ratio of the image. The rendered height in
-///   pixels is `img_height_px * (w * cell_width_px) / img_width_px`.
-/// * Neither is given. Both protocols render the image at its own pixel size,
-///   so the answer comes from the pixel height of the image.
-///
-/// # Arguments
-/// * `img_width_px` - The width of the image in pixels.
-/// * `img_height_px` - The height of the image in pixels.
-/// * `display_width` - The width that `ic` asks for, in character cells.
-/// * `display_height` - The height that `ic` asks for, in character cells.
-/// * `cell_width_px` - The width of one character cell in pixels.
-/// * `cell_height_px` - The height of one character cell in pixels.
-///
-/// # Returns
-/// The row count. The result is always 1 or more, so the caller never asks the
-/// terminal for a movement of zero rows, which a terminal reads as one row. An
-/// `img_width_px` of 0 gives no scale factor, so the width-only case falls back
-/// to the pixel height of the image.
-fn image_rows_in_cells(
-    img_width_px: u32,
-    img_height_px: u32,
-    display_width: Option<u32>,
-    display_height: Option<u32>,
-    cell_width_px: u32,
-    cell_height_px: u32,
-) -> u32 {
-    if let Some(rows) = display_height {
-        return rows.max(1);
-    }
-
-    match display_width {
-        // The arithmetic runs in u64, because a wide image and a tall image
-        // together overflow u32 long before they overflow u64.
-        Some(cols) if img_width_px > 0 => {
-            let rendered_height_px =
-                u64::from(img_height_px) * u64::from(cols) * u64::from(cell_width_px)
-                    / u64::from(img_width_px);
-            image_rows(
-                u32::try_from(rendered_height_px).unwrap_or(u32::MAX),
-                cell_height_px,
-            )
-        }
-        _ => image_rows(img_height_px, cell_height_px),
-    }
-}
-
-/// Calculate the number of rows that the cursor contract reserves for an image.
-///
-/// The reservation is one newline for each row of the image, but the height of
-/// the terminal bounds it. An image taller than the screen has no row below it,
-/// and CUU and CUD both stop at the edge of the screen, so no reservation can
-/// put the cursor below such an image. A reservation larger than the screen only
-/// scrolls the content of the user out of view and gives nothing back for it.
-/// The bound therefore holds the scroll to one screen.
-///
-/// # Arguments
-/// * `image_rows` - The height of the image in terminal rows.
-/// * `term_height` - The height of the terminal in rows.
-///
-/// # Returns
-/// The number of rows to reserve. The result leaves one row for the cursor to
-/// land on, and it is always 1 or more, so the contract never asks the terminal
-/// for a movement of zero rows, which a terminal reads as one row.
-fn reservation_rows(image_rows: u32, term_height: u32) -> u32 {
-    image_rows.min(term_height.saturating_sub(1)).max(1)
-}
-
-/// Where a display routine must leave the cursor after it writes an image.
-///
-/// Sixel gives no contract for the position of the cursor after the string
-/// terminator, and each renderer decides for itself. The Kitty protocol and the
-/// iTerm2 protocol each have a flag that holds the cursor still, but then the
-/// caller must move it. `ic` therefore states the position of the cursor
-/// instead of a guess.
-enum CursorContract {
-    /// The caller puts the cursor where it wants it (`--no-newline`, video
-    /// playback). The routine writes the payload and nothing else.
-    CallerManaged,
-    /// Column 1 of the first row below the image.
-    BelowImage {
-        /// The number of rows that the contract reserves, which is the height
-        /// of the image in terminal rows bounded by the height of the terminal.
-        /// [`reservation_rows`] gives the value.
-        rows: u32,
-    },
-}
-
-impl CursorContract {
-    /// Give the contract for one image of a display routine.
-    ///
-    /// This is the one place that reads the height of the terminal and bounds
-    /// the reservation with [`reservation_rows`], so no display routine can
-    /// reserve more rows than the terminal has.
-    ///
-    /// The row count of the image arrives as a closure, because the caller must
-    /// read the size of a character cell from the terminal to compute it. Video
-    /// playback asks for [`CursorContract::CallerManaged`] one time for each
-    /// frame, and the closure keeps that path clear of the terminal.
-    ///
-    /// # Arguments
-    /// * `no_newline` - True when the caller puts the cursor where it wants it.
-    /// * `image_rows` - Gives the height of the image in terminal rows.
-    ///
-    /// # Returns
-    /// The promise that the display routine must keep.
-    fn below_image(no_newline: bool, image_rows: impl FnOnce() -> u32) -> Self {
-        if no_newline {
-            return CursorContract::CallerManaged;
-        }
-
-        let term_height = get_terminal_size().map_or(FALLBACK_TERMINAL_ROWS, |(_, rows)| rows);
-
-        CursorContract::BelowImage {
-            rows: reservation_rows(image_rows(), term_height),
-        }
-    }
-}
-
-/// Write an image payload and keep the promise of a [`CursorContract`].
-///
-/// Every display routine of `ic` owes the caller the same promise: the cursor
-/// ends at column 1 of the first row below the image, unless the caller asked
-/// for no newline. This function holds the one implementation of that promise,
-/// so a new display routine cannot forget it.
-///
-/// [`CursorContract::BelowImage`] writes four parts:
-///
-/// 1. One newline for each row of the image, bounded by the height of the
-///    terminal. The reservation makes an image at the bottom of the screen
-///    scroll the terminal instead of run off it. An image taller than the
-///    screen cannot have a row below it, so the bound holds the scroll to one
-///    screen. [`CursorContract::below_image`] applies the bound.
-/// 2. CUU, which goes back to the top of the reservation.
-/// 3. DECSC, the payload and DECRC. The brackets make sure that cursor motion
-///    inside the payload cannot change the final position of the cursor.
-/// 4. CUD by the row count and a carriage return, which together put the cursor
-///    at column 1 of the first row below the image.
-///
-/// The payload arrives as a closure, because the Kitty routine writes its
-/// payload in more than one chunk and cannot make one string.
-///
-/// # Arguments
-/// * `out` - The stream that takes the bytes.
-/// * `contract` - The promise that the routine must keep.
-/// * `payload` - A closure that writes the image payload to `out`.
-///
-/// # Returns
-/// An error when a write to `out` fails.
-fn write_image_with_cursor_contract<W, F>(
-    out: &mut W,
-    contract: CursorContract,
-    payload: F,
-) -> io::Result<()>
-where
-    W: Write,
-    F: FnOnce(&mut W) -> io::Result<()>,
-{
-    let CursorContract::BelowImage { rows } = contract else {
-        return payload(out);
-    };
-
-    // The row count is always 1 or more, so this never asks the terminal for a
-    // movement of zero rows.
-    for _ in 0..rows {
-        writeln!(out)?;
-    }
-    write!(out, "{CSI}{rows}A")?;
-
-    write!(out, "{SAVE_CURSOR}")?;
-    payload(out)?;
-    write!(out, "{RESTORE_CURSOR}")?;
-
-    write!(out, "{CSI}{rows}B\r")
 }
 
 /// Sixel display for terminals that support Sixel graphics (e.g., Zellij passthrough).
@@ -2200,7 +1705,7 @@ fn display_image_sixel(
 ) -> Result<()> {
     // The cell size comes from the terminal when it reports a pixel size, and
     // from the estimates when it does not.
-    let (cell_width_px, cell_height_px) = get_cell_pixel_dimensions();
+    let (cell_width_px, cell_height_px) = cell_pixels_or_estimate();
 
     let (target_pixel_width, target_pixel_height) = sixel_pixel_budget(
         terminal_pixels(),
@@ -2273,7 +1778,7 @@ fn display_image_iterm2(
         width,
         height,
         args.preserve_aspect,
-        get_cell_aspect_ratio(),
+        cell_aspect_ratio(),
     );
 
     // Downscale the image to the target pixel size before encoding to avoid
@@ -2752,7 +2257,7 @@ fn print_kitty_image(
     let chunk_size = 4096; // Kitty recommended chunk size
 
     let contract = CursorContract::below_image(no_newline, || {
-        let (cell_width_px, cell_height_px) = get_cell_pixel_dimensions();
+        let (cell_width_px, cell_height_px) = cell_pixels_or_estimate();
         image_rows_in_cells(
             img_width,
             img_height,
@@ -2835,7 +2340,7 @@ fn print_iterm2_image(
     let mut stdout = io::stdout().lock();
 
     let contract = CursorContract::below_image(no_newline, || {
-        let (cell_width_px, cell_height_px) = get_cell_pixel_dimensions();
+        let (cell_width_px, cell_height_px) = cell_pixels_or_estimate();
         image_rows_in_cells(
             img_width_px,
             img_height_px,
@@ -2866,358 +2371,6 @@ fn print_iterm2_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // =========================================================================
-    // Tests for calculate_aspect_preserving_size
-    // =========================================================================
-
-    /// Standard cell aspect ratio used in tests (typical terminal: cells ~2x tall as wide).
-    const TEST_CELL_ASPECT: f64 = 2.0;
-
-    #[test]
-    fn aspect_preserving_returns_original_when_disabled() {
-        let result =
-            calculate_aspect_preserving_size(100, 100, Some(50), Some(50), false, TEST_CELL_ASPECT);
-        assert_eq!(result, (Some(50), Some(50)));
-    }
-
-    #[test]
-    fn aspect_preserving_handles_zero_height_defensively() {
-        // Zero height should not panic (division by zero), returns original dimensions
-        let result =
-            calculate_aspect_preserving_size(100, 0, Some(50), Some(50), true, TEST_CELL_ASPECT);
-        assert_eq!(result, (Some(50), Some(50)));
-    }
-
-    #[test]
-    fn aspect_preserving_square_image_in_square_box() {
-        // Square image (100x100) in square box (50x50)
-        // With cell aspect ratio of 2:1, effective box is 50x100 pixels
-        // Image aspect = 1.0, box aspect = 50/100 = 0.5
-        // Image is wider than box, constrain by width
-        let result =
-            calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
-        // display_width = 50, display_height = (50/1.0)/2.0 = 25
-        assert_eq!(result, (Some(50), Some(25)));
-    }
-
-    #[test]
-    fn aspect_preserving_wide_image() {
-        // Wide image (200x100) in square box (50x50)
-        // Image aspect = 2.0
-        // Constrain by width
-        let result =
-            calculate_aspect_preserving_size(200, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
-        // display_width = 50, display_height = (50/2.0)/2.0 = 12.5 -> 13 (rounded)
-        assert_eq!(result, (Some(50), Some(13)));
-    }
-
-    #[test]
-    fn aspect_preserving_tall_image() {
-        // Tall image (100x400) in square box (50x50)
-        // Image aspect = 0.25
-        // Constrain by height
-        let result =
-            calculate_aspect_preserving_size(100, 400, Some(50), Some(50), true, TEST_CELL_ASPECT);
-        // display_height = 50, display_width = 50 * 2.0 * 0.25 = 25
-        assert_eq!(result, (Some(25), Some(50)));
-    }
-
-    #[test]
-    fn aspect_preserving_only_width_specified() {
-        let result =
-            calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT);
-        assert_eq!(result, (Some(50), None));
-    }
-
-    #[test]
-    fn aspect_preserving_only_height_specified() {
-        let result =
-            calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT);
-        assert_eq!(result, (None, Some(50)));
-    }
-
-    #[test]
-    fn aspect_preserving_no_dimensions_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, None, None, true, TEST_CELL_ASPECT);
-        assert_eq!(result, (None, None));
-    }
-
-    #[test]
-    fn aspect_preserving_minimum_dimension_is_one() {
-        // Very wide image that would result in height < 1
-        let result =
-            calculate_aspect_preserving_size(10000, 1, Some(10), Some(10), true, TEST_CELL_ASPECT);
-        // Should clamp height to at least 1
-        assert!(result.1.unwrap() >= 1);
-
-        // Very tall image that would result in width < 1
-        let result =
-            calculate_aspect_preserving_size(1, 10000, Some(10), Some(10), true, TEST_CELL_ASPECT);
-        // Should clamp width to at least 1
-        assert!(result.0.unwrap() >= 1);
-    }
-
-    // =========================================================================
-    // Tests for calculate_sixel_dimensions
-    // =========================================================================
-
-    #[test]
-    fn sixel_returns_target_when_aspect_disabled() {
-        let result = calculate_sixel_dimensions(100, 100, 800, 600, false);
-        assert_eq!(result, (800, 600));
-    }
-
-    #[test]
-    fn sixel_square_image_in_landscape_target() {
-        // Square image (100x100) in landscape target (800x600)
-        // Image aspect = 1.0, target aspect = 800/600 = 1.33
-        // Image is taller than target, constrain by height
-        let result = calculate_sixel_dimensions(100, 100, 800, 600, true);
-        // h = 600, w = 600 * 1.0 = 600
-        assert_eq!(result, (600, 600));
-    }
-
-    #[test]
-    fn sixel_wide_image_in_landscape_target() {
-        // Wide image (1600x900, 16:9) in landscape target (800x600)
-        // Image aspect = 1.78, target aspect = 1.33
-        // Image is wider, constrain by width
-        let result = calculate_sixel_dimensions(1600, 900, 800, 600, true);
-        // w = 800, h = 800 / 1.78 = 450
-        assert_eq!(result, (800, 450));
-    }
-
-    #[test]
-    fn sixel_tall_image_in_landscape_target() {
-        // Tall image (100x400) in landscape target (800x600)
-        // Image aspect = 0.25, target aspect = 1.33
-        // Image is taller, constrain by height
-        let result = calculate_sixel_dimensions(100, 400, 800, 600, true);
-        // h = 600, w = 600 * 0.25 = 150
-        assert_eq!(result, (150, 600));
-    }
-
-    #[test]
-    fn sixel_minimum_dimension_is_one() {
-        // Very wide image
-        let result = calculate_sixel_dimensions(10000, 1, 100, 100, true);
-        assert!(result.1 >= 1);
-
-        // Very tall image
-        let result = calculate_sixel_dimensions(1, 10000, 100, 100, true);
-        assert!(result.0 >= 1);
-    }
-
-    #[test]
-    fn sixel_handles_zero_height_defensively() {
-        // Zero height should produce infinity aspect, which comparing > target_aspect
-        // will be true, so we'll constrain by width
-        // w = 100, h = 100 / infinity = 0, clamped to 1
-        let result = calculate_sixel_dimensions(100, 0, 100, 100, true);
-        assert_eq!(result.1, 1); // Height should be clamped to 1
-    }
-
-    // =========================================================================
-    // Tests for sixel_pixel_budget
-    // =========================================================================
-
-    /// The width of the terminal in pixels that the budget tests use. Over 80
-    /// columns it gives cells of 12 pixels, because 1000 / 80 is 12.5.
-    const TEST_TERM_WIDTH_PX: u32 = 1000;
-
-    /// The height of the terminal in pixels that the budget tests use. Over 24
-    /// rows it gives cells of 47 pixels, because 1150 / 24 is 47.9.
-    const TEST_TERM_HEIGHT_PX: u32 = 1150;
-
-    /// The width of one character cell of the terminal in the budget tests.
-    const TEST_TERM_CELL_WIDTH_PX: u32 = 12;
-
-    /// The height of one character cell of the terminal in the budget tests.
-    const TEST_TERM_CELL_HEIGHT_PX: u32 = 47;
-
-    /// The width that the margin gives, which is 1000 * 0.95.
-    const TEST_MARGIN_WIDTH_PX: u32 = 950;
-
-    /// The height that the margin gives, which is 1150 * 0.90.
-    const TEST_MARGIN_HEIGHT_PX: u32 = 1035;
-
-    /// Call `sixel_pixel_budget` with the terminal of the budget tests.
-    fn budget_with_cells(cols: Option<u32>, rows: Option<u32>) -> (u32, u32) {
-        sixel_pixel_budget(
-            Some((TEST_TERM_WIDTH_PX, TEST_TERM_HEIGHT_PX)),
-            cols,
-            rows,
-            TEST_TERM_CELL_WIDTH_PX,
-            TEST_TERM_CELL_HEIGHT_PX,
-        )
-    }
-
-    #[test]
-    fn sixel_pixel_budget_holds_the_image_inside_the_row_budget() {
-        // The terminal has 24 rows of 47 pixels, so the margin gives 1035
-        // pixels, which is 23 rows. One header row, 23 image rows and one
-        // prompt row are 25 rows in a terminal of 24. The caller therefore
-        // gives the image 22 rows, which is 1034 pixels, and that budget must
-        // win over the margin.
-        let (_, height) = budget_with_cells(None, Some(22));
-        assert_eq!(height, 1034);
-    }
-
-    #[test]
-    fn sixel_pixel_budget_holds_the_image_inside_the_column_budget() {
-        // The terminal has 80 columns of 12 pixels, so the margin gives 950
-        // pixels. The caller keeps 2 columns for the chrome of the terminal and
-        // gives the image 78 columns, which is 936 pixels.
-        let (width, _) = budget_with_cells(Some(78), None);
-        assert_eq!(width, 936);
-    }
-
-    #[test]
-    fn sixel_pixel_budget_keeps_the_margin_when_the_cell_budget_is_larger() {
-        // The margin keeps the image off the edge of the screen. A cell budget
-        // larger than the screen must not push the image past that edge.
-        assert_eq!(
-            budget_with_cells(Some(200), Some(100)),
-            (TEST_MARGIN_WIDTH_PX, TEST_MARGIN_HEIGHT_PX)
-        );
-    }
-
-    #[test]
-    fn sixel_pixel_budget_keeps_the_margin_on_an_axis_with_no_cell_budget() {
-        // The user gives only --width, so there is no budget for the rows.
-        assert_eq!(
-            budget_with_cells(Some(20), None),
-            (240, TEST_MARGIN_HEIGHT_PX)
-        );
-        // The user gives only --height, so there is no budget for the columns.
-        assert_eq!(
-            budget_with_cells(None, Some(10)),
-            (TEST_MARGIN_WIDTH_PX, 470)
-        );
-        // Neither axis has a budget, so the margin stands on both.
-        assert_eq!(
-            budget_with_cells(None, None),
-            (TEST_MARGIN_WIDTH_PX, TEST_MARGIN_HEIGHT_PX)
-        );
-    }
-
-    #[test]
-    fn sixel_pixel_budget_uses_the_cell_budget_without_a_pixel_size() {
-        // Zellij and ttyd report no pixel size, so the cells give the budget.
-        assert_eq!(
-            sixel_pixel_budget(
-                None,
-                Some(80),
-                Some(24),
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            (800, 480)
-        );
-    }
-
-    #[test]
-    fn sixel_pixel_budget_falls_back_to_the_default_size() {
-        // Without a pixel size and without both axes of the cell budget there
-        // is nothing to compute a size from.
-        let default_size = (DEFAULT_SIXEL_WIDTH_PX, DEFAULT_SIXEL_HEIGHT_PX);
-        assert_eq!(
-            sixel_pixel_budget(
-                None,
-                Some(80),
-                None,
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            default_size
-        );
-        assert_eq!(
-            sixel_pixel_budget(
-                None,
-                None,
-                Some(24),
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            default_size
-        );
-        assert_eq!(
-            sixel_pixel_budget(None, None, None, TEST_CELL_WIDTH_PX, TEST_CELL_HEIGHT_PX),
-            default_size
-        );
-    }
-
-    #[test]
-    fn sixel_pixel_budget_never_gives_an_axis_of_zero() {
-        // A budget of zero pixels asks the encoder for an image of no size, so
-        // each axis keeps a floor of one pixel.
-        assert_eq!(budget_with_cells(Some(0), Some(0)), (1, 1));
-        assert_eq!(
-            sixel_pixel_budget(
-                Some((TEST_TERM_WIDTH_PX, TEST_TERM_HEIGHT_PX)),
-                Some(80),
-                Some(24),
-                0,
-                0
-            ),
-            (1, 1)
-        );
-        assert_eq!(
-            sixel_pixel_budget(
-                None,
-                Some(0),
-                Some(0),
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            (1, 1)
-        );
-        // A terminal of one pixel gives a margin of less than one pixel.
-        assert_eq!(sixel_pixel_budget(Some((1, 1)), None, None, 1, 1), (1, 1));
-    }
-
-    #[test]
-    fn sixel_pixel_budget_survives_a_cell_budget_that_overflows() {
-        // A terminal that reports an absurd size must not panic the tool. The
-        // product saturates, so the margin wins.
-        assert_eq!(
-            budget_with_cells(Some(u32::MAX), Some(u32::MAX)),
-            (TEST_MARGIN_WIDTH_PX, TEST_MARGIN_HEIGHT_PX)
-        );
-        assert_eq!(
-            sixel_pixel_budget(None, Some(u32::MAX), Some(u32::MAX), u32::MAX, u32::MAX),
-            (u32::MAX, u32::MAX)
-        );
-    }
-
-    // =========================================================================
-    // Tests verifying constants are reasonable
-    // =========================================================================
-
-    #[test]
-    fn constants_have_reasonable_values() {
-        // Derived cell aspect ratio (from fallback constants) should be reasonable (1.5 to 3.0)
-        let fallback_aspect = ESTIMATED_CELL_HEIGHT_PX as f64 / ESTIMATED_CELL_WIDTH_PX as f64;
-        assert!(fallback_aspect > 1.0);
-        assert!(fallback_aspect < 4.0);
-
-        // Cell pixel estimates should be positive and reasonable
-        const { assert!(ESTIMATED_CELL_WIDTH_PX >= 6) };
-        const { assert!(ESTIMATED_CELL_WIDTH_PX <= 20) };
-        const { assert!(ESTIMATED_CELL_HEIGHT_PX >= 12) };
-        const { assert!(ESTIMATED_CELL_HEIGHT_PX <= 40) };
-
-        // Default sixel dimensions should be reasonable screen sizes
-        const { assert!(DEFAULT_SIXEL_WIDTH_PX >= 640) };
-        const { assert!(DEFAULT_SIXEL_HEIGHT_PX >= 480) };
-
-        // Margins should be between 0.5 and 1.0
-        const { assert!(SIXEL_HORIZONTAL_MARGIN > 0.5) };
-        const { assert!(SIXEL_HORIZONTAL_MARGIN <= 1.0) };
-        const { assert!(SIXEL_VERTICAL_MARGIN > 0.5) };
-        const { assert!(SIXEL_VERTICAL_MARGIN <= 1.0) };
-    }
 
     // =========================================================================
     // Tests for comm_basename
@@ -3787,111 +2940,6 @@ not_a_number zellij a work
     }
 
     // =========================================================================
-    // Tests for cells_to_pixels
-    // =========================================================================
-
-    #[test]
-    fn cells_to_pixels_basic() {
-        assert_eq!(cells_to_pixels(80, 24, 10, 20), (800, 480));
-    }
-
-    #[test]
-    fn cells_to_pixels_single_cell() {
-        assert_eq!(cells_to_pixels(1, 1, 10, 20), (10, 20));
-    }
-
-    #[test]
-    fn cells_to_pixels_custom_cell_dimensions() {
-        assert_eq!(cells_to_pixels(40, 12, 16, 32), (640, 384));
-    }
-
-    // =========================================================================
-    // Tests for downscale_to_display_pixels
-    // =========================================================================
-
-    /// Helper to create a test image of the given dimensions.
-    fn make_test_image(width: u32, height: u32) -> DynamicImage {
-        DynamicImage::ImageRgb8(image::RgbImage::new(width, height))
-    }
-
-    #[test]
-    fn downscale_returns_borrowed_when_no_dimensions() {
-        let img = make_test_image(100, 100);
-        let result = downscale_to_display_pixels(&img, None, None);
-        assert!(matches!(result, Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn downscale_returns_borrowed_when_only_width() {
-        let img = make_test_image(100, 100);
-        let result = downscale_to_display_pixels(&img, Some(50), None);
-        assert!(matches!(result, Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn downscale_returns_borrowed_when_only_height() {
-        let img = make_test_image(100, 100);
-        let result = downscale_to_display_pixels(&img, None, Some(50));
-        assert!(matches!(result, Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn downscale_returns_borrowed_when_image_fits() {
-        // With estimated cell dimensions (10x20), 80 cols x 24 rows = 800x480 pixels.
-        // A 100x100 image fits within that, so no downscale needed.
-        // Note: in CI/test environments, terminal_pixels() returns None,
-        // so estimated constants are used.
-        let img = make_test_image(100, 100);
-        let result = downscale_to_display_pixels(&img, Some(80), Some(24));
-        assert!(matches!(result, Cow::Borrowed(_)));
-        assert_eq!(result.width(), 100);
-        assert_eq!(result.height(), 100);
-    }
-
-    #[test]
-    fn downscale_shrinks_oversized_image() {
-        // 10 cols x 5 rows, pixel target depends on actual cell dimensions
-        let (cell_w, cell_h) = get_cell_pixel_dimensions();
-        let (max_w, max_h) = cells_to_pixels(10, 5, cell_w, cell_h);
-        // Image must be larger than the target to trigger downscaling
-        let img = make_test_image(max_w * 5, max_h * 5);
-        let result = downscale_to_display_pixels(&img, Some(10), Some(5));
-        assert!(matches!(result, Cow::Owned(_)));
-        assert!(result.width() <= max_w);
-        assert!(result.height() <= max_h);
-    }
-
-    #[test]
-    fn downscale_preserves_aspect_ratio() {
-        // Wide image with 5:1 aspect ratio, larger than any reasonable target
-        let (cell_w, cell_h) = get_cell_pixel_dimensions();
-        let (max_w, max_h) = cells_to_pixels(10, 5, cell_w, cell_h);
-        let img = make_test_image(max_w * 10, max_h * 2);
-        let result = downscale_to_display_pixels(&img, Some(10), Some(5));
-        assert!(matches!(result, Cow::Owned(_)));
-        assert!(result.width() <= max_w);
-        assert!(result.height() <= max_h);
-        // Aspect ratio should be roughly maintained (5:1)
-        let aspect = result.width() as f64 / result.height() as f64;
-        assert!(
-            (aspect - 5.0).abs() < 0.5,
-            "aspect ratio {aspect} should be close to 5.0"
-        );
-    }
-
-    #[test]
-    fn downscale_handles_panoramic_image() {
-        // Very large panorama, target depends on actual cell dimensions
-        let (cell_w, cell_h) = get_cell_pixel_dimensions();
-        let (max_w, max_h) = cells_to_pixels(80, 24, cell_w, cell_h);
-        let img = make_test_image(16384, 4096);
-        let result = downscale_to_display_pixels(&img, Some(80), Some(24));
-        assert!(matches!(result, Cow::Owned(_)));
-        assert!(result.width() <= max_w);
-        assert!(result.height() <= max_h);
-    }
-
-    // =========================================================================
     // Tests for parse_video_dimensions
     // =========================================================================
 
@@ -4054,214 +3102,6 @@ not_a_number zellij a work
         // The running test binary is a regular file that is guaranteed to exist.
         let real_file = std::env::current_exe().expect("current exe path");
         assert!(ensure_file_exists(&real_file).is_ok());
-    }
-
-    // =========================================================================
-    // Tests for image_rows
-    // =========================================================================
-
-    #[test]
-    fn image_rows_divides_an_exact_multiple() {
-        assert_eq!(image_rows(100, 20), 5);
-        assert_eq!(image_rows(20, 20), 1);
-    }
-
-    #[test]
-    fn image_rows_rounds_up_a_partial_row() {
-        // A partial row still uses a full row.
-        assert_eq!(image_rows(101, 20), 6);
-        assert_eq!(image_rows(21, 20), 2);
-        assert_eq!(image_rows(1, 20), 1);
-    }
-
-    #[test]
-    fn image_rows_never_gives_zero() {
-        // A movement of zero rows means one row to a terminal, so the row count
-        // must stay at 1 or more.
-        assert_eq!(image_rows(0, 20), 1);
-        assert_eq!(image_rows(0, 0), 1);
-    }
-
-    #[test]
-    fn image_rows_survives_a_zero_cell_height() {
-        // get_cell_pixel_dimensions divides the terminal pixel height by the row
-        // count, so it can give 0. A cell height of 0 counts as 1 pixel.
-        assert_eq!(image_rows(100, 0), 100);
-    }
-
-    // =========================================================================
-    // Tests for image_rows_in_cells
-    // =========================================================================
-
-    /// The width of one character cell in the tests below, in pixels.
-    const TEST_CELL_WIDTH_PX: u32 = 10;
-
-    /// The height of one character cell in the tests below, in pixels.
-    const TEST_CELL_HEIGHT_PX: u32 = 20;
-
-    #[test]
-    fn image_rows_in_cells_takes_a_given_height() {
-        // Both protocols scale the image into the rows that ic asks for, so a
-        // given height is the answer, with or without a width.
-        assert_eq!(
-            image_rows_in_cells(
-                100,
-                100,
-                Some(10),
-                Some(5),
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            5
-        );
-        assert_eq!(
-            image_rows_in_cells(
-                100,
-                100,
-                None,
-                Some(7),
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            7
-        );
-    }
-
-    #[test]
-    fn image_rows_in_cells_keeps_the_aspect_ratio_of_a_width() {
-        // A width of 10 cells is 100 pixels. The image is twice as wide as it
-        // is tall, so it renders 50 pixels high, which is 3 rows of 20 pixels.
-        assert_eq!(
-            image_rows_in_cells(
-                100,
-                50,
-                Some(10),
-                None,
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            3
-        );
-        // A width of 20 cells is 200 pixels, which doubles the image to 200
-        // pixels high, which is 10 rows.
-        assert_eq!(
-            image_rows_in_cells(
-                100,
-                100,
-                Some(20),
-                None,
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            10
-        );
-    }
-
-    #[test]
-    fn image_rows_in_cells_falls_back_to_the_pixel_height() {
-        // With no width and no height both protocols render the image at its
-        // own pixel size.
-        assert_eq!(
-            image_rows_in_cells(
-                100,
-                100,
-                None,
-                None,
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            5
-        );
-        // A partial row still uses a full row.
-        assert_eq!(
-            image_rows_in_cells(
-                100,
-                101,
-                None,
-                None,
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            6
-        );
-    }
-
-    #[test]
-    fn image_rows_in_cells_survives_a_zero_image_width() {
-        // A width of zero pixels gives no scale factor, so the width-only case
-        // falls back to the pixel height of the image.
-        assert_eq!(
-            image_rows_in_cells(
-                0,
-                100,
-                Some(10),
-                None,
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            5
-        );
-    }
-
-    #[test]
-    fn image_rows_in_cells_never_gives_zero() {
-        // A movement of zero rows means one row to a terminal, so the row count
-        // must stay at 1 or more.
-        assert_eq!(
-            image_rows_in_cells(
-                100,
-                100,
-                None,
-                Some(0),
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            1
-        );
-        assert_eq!(
-            image_rows_in_cells(100, 0, None, None, TEST_CELL_WIDTH_PX, TEST_CELL_HEIGHT_PX),
-            1
-        );
-        assert_eq!(
-            image_rows_in_cells(
-                100,
-                1,
-                Some(1),
-                None,
-                TEST_CELL_WIDTH_PX,
-                TEST_CELL_HEIGHT_PX
-            ),
-            1
-        );
-    }
-
-    // =========================================================================
-    // Tests for reservation_rows
-    // =========================================================================
-
-    #[test]
-    fn reservation_rows_takes_the_whole_image_when_it_fits() {
-        // An image that leaves room for the row below it keeps every row.
-        assert_eq!(reservation_rows(5, 24), 5);
-        assert_eq!(reservation_rows(23, 24), 23);
-    }
-
-    #[test]
-    fn reservation_rows_stops_at_the_height_of_the_terminal() {
-        // An image taller than the screen has no row below it, so the
-        // reservation keeps the scroll to one screen.
-        assert_eq!(reservation_rows(39, 24), 23);
-        assert_eq!(reservation_rows(100, 24), 23);
-        assert_eq!(reservation_rows(24, 24), 23);
-    }
-
-    #[test]
-    fn reservation_rows_never_gives_zero() {
-        // A movement of zero rows means one row to a terminal, so the
-        // reservation must stay at 1 or more, even in a terminal of no height.
-        assert_eq!(reservation_rows(1, 1), 1);
-        assert_eq!(reservation_rows(5, 0), 1);
-        assert_eq!(reservation_rows(0, 24), 1);
     }
 
     // =========================================================================
