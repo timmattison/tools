@@ -181,15 +181,22 @@ fn fitted(head: Vec<String>, body: Vec<String>, footer: Vec<String>, rows: Optio
     let budget = rows.map_or(usize::MAX, usize::from);
     let mut lines = head;
     if lines.len() + body.len() + footer.len() <= budget {
+        let rows = body.len();
         lines.extend(body);
         lines.extend(footer);
-        return Fitted { lines, rows: 0 };
+        return Fitted { lines, rows };
     }
     // The head, the footer, and the one line that counts the rows which went
     // out of the frame keep their lines. The rows of the path take what is
     // left.
     let kept = budget.saturating_sub(lines.len() + footer.len() + 1);
     let dropped = body.len() - kept.min(body.len());
+    // The count of the rows that reached the frame reads the same number that
+    // the take below reads. The truncate at the foot of this function cuts the
+    // head, the count of the dropped rows, and the footer, and it reaches no
+    // row of the path: a window too short for the head takes no row of the path
+    // at all, because `kept` is then zero.
+    let reached = kept.min(body.len());
     lines.extend(body.into_iter().take(kept));
     // A table of no row leaves no row out, and a line that counted zero rows
     // would name a table the reader can already see the whole of.
@@ -198,7 +205,10 @@ fn fitted(head: Vec<String>, body: Vec<String>, footer: Vec<String>, rows: Optio
     }
     lines.extend(footer);
     lines.truncate(budget);
-    Fitted { lines, rows: 0 }
+    Fitted {
+        lines,
+        rows: reached,
+    }
 }
 
 /// The text between two lines that a draw writes.

@@ -513,6 +513,22 @@ impl Recent {
         }
     }
 
+    /// The column of a row whose picture is an image and not a set of glyphs.
+    ///
+    /// The cell carries [`RECENT_WIDTH`] spaces, so it takes the columns of the
+    /// Recent column and draws nothing in them. A caller then puts an image
+    /// over those columns, and the reader reads one picture of the hop. A cell
+    /// that kept its block elements would give the reader two.
+    ///
+    /// The column holds no history, because the caller already read the history
+    /// out of [`Rendered::recent`] before the blank went in.
+    fn blank() -> Self {
+        Self {
+            marks: std::iter::repeat_n(Mark::Glyph(' '), usize::from(RECENT_WIDTH)).collect(),
+            history: Vec::new(),
+        }
+    }
+
     /// Every sample that the key of this column holds, oldest first.
     pub(crate) fn history(&self) -> &[Sample] {
         &self.history
@@ -568,6 +584,12 @@ impl fmt::Display for Recent {
 /// and it takes no part in the scale: such a probe measured no time, so no
 /// limit of the window can read it.
 ///
+/// The whole history travels with the marks, and this one walk of the samples
+/// fills both. A run that draws the column as an image needs every sample that
+/// the fold holds, and a second walk of the table for that history could count
+/// a different set of rows: an image of a row of one walk would then stand over
+/// a row of the other.
+///
 /// A key with no sample, and a `width` of zero, each draw an empty column.
 ///
 /// A sample that is not a finite number — `f64::NAN`, or an infinity — draws
@@ -577,16 +599,17 @@ impl fmt::Display for Recent {
 /// would hide the whole history of the hop, which is a worse answer than one
 /// bar that reads low.
 pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = Sample>, width: usize) -> Recent {
-    if width == 0 {
-        return Recent::empty();
-    }
+    // The whole history travels with the marks, and one walk of the table fills
+    // both. A caller that walked the table a second time for the history could
+    // count a different set of rows, and an image of a row of one walk would
+    // then stand over a row of the other.
+    let history: Vec<Sample> = samples.collect();
 
-    // The iterator states its length before it gives a sample, so the oldest
-    // samples go away as the iterator runs. The window is therefore the only
-    // copy that this function makes, and the history of the key stays where it
-    // is.
-    let skipped = samples.len().saturating_sub(width);
-    let shown: Vec<Sample> = samples.skip(skipped).collect();
+    // The window holds the most recent samples, because the column is as wide
+    // as the terminal gives it and the recent samples are the ones that say
+    // what the hop is doing now.
+    let skipped = history.len().saturating_sub(width);
+    let shown = history.get(skipped..).unwrap_or_default();
 
     // The scale reads only the answers that compare. A lost probe measured no
     // time, so it names no limit of the window.
@@ -617,10 +640,7 @@ pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = Sample>, width: u
         })
         .collect();
 
-    Recent {
-        marks,
-        history: Vec::new(),
-    }
+    Recent { marks, history }
 }
 
 /// The round-trip time of one sample, when that sample holds a time which
@@ -1171,7 +1191,19 @@ impl Layout {
     /// this offset with it. No line of this function counts a column or a gap
     /// by hand.
     fn recent_column(&self) -> Option<u16> {
-        todo!("the layout says where the Recent column stands")
+        let mut column: u16 = 0;
+        for slot in &self.slots {
+            if matches!(slot.field, Field::Recent) {
+                return Some(column);
+            }
+            // One gap stands behind every column that another column follows,
+            // and the Recent column is never the first one, so the gap of each
+            // column in front of it counts.
+            column = column
+                .saturating_add(slot.width)
+                .saturating_add(COLUMN_SPACING);
+        }
+        None
     }
 
     /// The width of every column that stands, in the order the columns stand.
@@ -1330,16 +1362,6 @@ impl Frame<'_> {
     /// One rendered frame: the lines of it, and where the Recent column of it
     /// stands.
     ///
-    /// # Arguments
-    /// * `width` - The number of terminal columns that the frame draws in.
-    /// * `paint` - Whether the lines carry the color of a terminal.
-    /// * `picture` - Which picture the Recent column draws.
-    pub(crate) fn render(&self, width: u16, paint: Paint, picture: RecentPicture) -> Rendered {
-        todo!("a frame answers its lines and the place of its Recent column")
-    }
-
-    /// The lines of the frame at a terminal width.
-    ///
     /// The header line stands first, one blank line stands under it, and the
     /// table stands under that. The header line is no part of the table and it
     /// never gets cut: a long file name would lose the size that stands behind
@@ -1353,14 +1375,39 @@ impl Frame<'_> {
     ///
     /// Every line drops its trailing spaces. A terminal prints them as nothing.
     ///
-    /// `paint` says whether the lines carry the color of a terminal. The one
-    /// cell of the table that holds a color is the mark of a lost probe, which
-    /// [`Paint::Colored`] stands between the two codes that paint it red.
-    pub(crate) fn lines(&self, width: u16, paint: Paint) -> Vec<String> {
+    /// The place of the Recent column and the history of every row travel with
+    /// the lines, out of this one walk of the table. A caller that draws that
+    /// column as an image needs both, and a second walk for them could count a
+    /// different set of rows: an image of a row of one walk would then stand
+    /// over a row of the other.
+    ///
+    /// [`RecentPicture::Image`] blanks the body cells of the Recent column, and
+    /// each of them then carries [`RECENT_WIDTH`] spaces. The heading stays,
+    /// because it names the column and it is no picture of a hop.
+    ///
+    /// # Arguments
+    /// * `width` - The number of terminal columns that the frame draws in.
+    /// * `paint` - Whether the lines carry the color of a terminal. The one cell
+    ///   of the table that holds a color is the mark of a lost probe, which
+    ///   [`Paint::Colored`] stands between the two codes that paint it red.
+    /// * `picture` - Which picture the Recent column draws.
+    pub(crate) fn render(&self, width: u16, paint: Paint, picture: RecentPicture) -> Rendered {
         let header_line = self.header.line();
         let layout = Layout::at(width);
         let table_width = layout.width();
-        let rows = self.rows(layout.host());
+        let mut rows = self.rows(layout.host());
+        let recent = layout.recent_column().map(|column| RecentColumn {
+            column,
+            rows: rows
+                .iter()
+                .map(|row| row.recent.history().to_vec())
+                .collect(),
+        });
+        if picture == RecentPicture::Image {
+            for row in &mut rows {
+                row.recent = Recent::blank();
+            }
+        }
         // A path holds 255 TTLs at most, and one TTL holds a bounded number of
         // rows, so the height of the frame stays far below the limit. The
         // arithmetic below says so anyway: a height that ran over would be a
@@ -1381,9 +1428,22 @@ impl Frame<'_> {
             &mut buffer,
         );
 
-        (0..height)
-            .map(|line| read_line(&buffer, line, buffer_width, paint))
-            .collect()
+        Rendered {
+            lines: (0..height)
+                .map(|line| read_line(&buffer, line, buffer_width, paint))
+                .collect(),
+            recent,
+        }
+    }
+
+    /// The lines of the frame at a terminal width, with the block elements in
+    /// the Recent column.
+    ///
+    /// This is [`Frame::render`] for a caller that draws no image: a replay,
+    /// and every test of the text table. Such a caller reads the lines and
+    /// nothing else.
+    pub(crate) fn lines(&self, width: u16, paint: Paint) -> Vec<String> {
+        self.render(width, paint, RecentPicture::Bars).lines
     }
 
     /// Every row of the table, in TTL order.
@@ -2749,10 +2809,6 @@ mod tests {
     /// short frame keeps.
     const HEAD_LINES: usize = 3;
 
-    /// The number of rounds that the golden run folded, which is also the
-    /// number of samples that the history of each of its rows holds.
-    const GOLDEN_SAMPLES: usize = 4;
-
     /// The mark that the Recent column draws for a probe that no hop answered.
     ///
     /// The test spells the glyph, and the module spells it again, as it does
@@ -2799,10 +2855,16 @@ mod tests {
             "one history stands for each row of the path, in the order the rows stand"
         );
         for (index, history) in recent.rows.iter().enumerate() {
+            // The window of a row draws one mark for each sample of it, and no
+            // row of the golden run holds more samples than the column is wide,
+            // so the marks of a line count the samples of the row that the line
+            // draws. The history of a row therefore stands beside the marks of
+            // that same row, and the two can never name different rows.
+            let row = line(&rendered.lines, HEAD_LINES + index);
             assert_eq!(
                 history.len(),
-                GOLDEN_SAMPLES,
-                "the row at {index} holds one sample for each round of the run"
+                recent_of(row).chars().count(),
+                "the history of the row at {index} holds one sample for each mark of {row:?}"
             );
         }
     }
