@@ -1740,6 +1740,18 @@ mod tests {
     /// The start of a Sixel payload, which is a device control string.
     const SIXEL_IMAGE: &str = "\x1bP";
 
+    /// The look of a table that draws the Recent column as an image on one
+    /// terminal.
+    fn image_look(capabilities: termgfx::Capabilities) -> Look {
+        Look {
+            paint: Paint::Colored,
+            graphics: Some(Graphics {
+                capabilities,
+                cell: CELL,
+            }),
+        }
+    }
+
     /// A table that draws into bytes on a terminal that draws images, in a
     /// window of `rows` rows and `columns` columns.
     ///
@@ -1755,17 +1767,38 @@ mod tests {
             Vec::new(),
             FakeKeys::of(&[]),
             Window::new(columns, rows),
-            Look {
-                paint: Paint::Colored,
-                graphics: Some(Graphics {
-                    capabilities: termgfx::Capabilities::new(
-                        termgfx::TerminalType::Kitty,
-                        true,
-                        true,
-                    ),
-                    cell: CELL,
-                }),
-            },
+            image_look(termgfx::Capabilities::new(
+                termgfx::TerminalType::Kitty,
+                true,
+                true,
+            )),
+        );
+        table.sink.clear();
+        table
+    }
+
+    /// A table whose terminal refuses every image of its frames.
+    ///
+    /// No run of the tool builds this look. `main::graphics_of` hands an image
+    /// path back only for a terminal that draws images, so a live run never
+    /// asks a terminal of this kind for an image. The refusal that a live run
+    /// does reach comes out of the encoder of the Sixel protocol, which answers
+    /// a fault for an image it will not encode, and a test that draws into a
+    /// vector cannot make that encoder refuse. This table names the refusal
+    /// that a test can name, and the rule it covers is the rule of both.
+    ///
+    /// The sink comes back empty, for the reason that [`table_at`] states.
+    fn refusing_table() -> Table<Vec<u8>, FakeKeys> {
+        let mut table = Table::new(
+            facts_at(temp_path("refused")),
+            Vec::new(),
+            FakeKeys::of(&[]),
+            Window::new(WIDTH, NO_ROWS),
+            image_look(termgfx::Capabilities::new(
+                termgfx::TerminalType::Alacritty,
+                false,
+                true,
+            )),
         );
         table.sink.clear();
         table
@@ -1947,6 +1980,29 @@ mod tests {
             !drawn.contains(&moved_to(usize::from(LAST_KEPT_TTL))),
             "and no image stands on the line under the last row that the window held: {drawn:?}"
         );
+    }
+
+    #[test]
+    fn a_frame_whose_terminal_refuses_an_image_prints_its_lines_anyway() {
+        // A frame that does not print stops nothing, and one image of a frame
+        // is a smaller thing than a frame. The recording is the purpose of the
+        // tool, so a terminal that refuses an image costs the reader that
+        // picture and costs the run nothing.
+        let mut screen = refusing_table();
+        screen.round(&a_tall_round());
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            image_count(&screen.sink),
+            0,
+            "the terminal that refused the image took none of them: {lines:?}"
+        );
+        for ttl in TTL..=TALL_PATH {
+            assert!(
+                lines.iter().any(|line| line.starts_with(&tall_row(ttl))),
+                "and every row of the path still stands in the frame: {lines:?}"
+            );
+        }
     }
 
     #[test]
