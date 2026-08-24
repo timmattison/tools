@@ -608,6 +608,35 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     flag of a probe. `--run` picks which run in that file to read, and the last run of the file is
     the default. A recorded file holds one JSON record on each line. A file that holds more than
     one run names the run of the table on standard error, so standard output stays the table alone.
+  - Every flag of a trace takes a default. `krt replay <FILE>` takes `--run <ID>` alone, which
+    picks the run of the file to fold, and the last run of the file is the default there. The
+    flags of a trace are:
+    | Flag | Default | Meaning |
+    | ---- | ------- | ------- |
+    | `-o`, `--output <FILE>` | derived | The path of the recorded file. It overrides the derived name. |
+    | `-i`, `--interval <DUR>` | `1s` | The round period. It takes `500ms`, `1s`, or `2m`. |
+    | `--first-ttl <N>` | `1` | The first TTL that a round probes. |
+    | `--max-ttl <N>` | `30` | The last TTL that a round probes. |
+    | `--protocol <P>` | `icmp` | `icmp`, `udp`, or `tcp`. |
+    | `--multipath <M>` | `classic` | `classic`, `paris`, or `dublin`. UDP and TCP only. |
+    | `-4`, `-6` | the resolver decides | Force the address family. |
+    | `--no-dns` | off | Skip every reverse lookup, and show the addresses alone. |
+    | `--source <IP>` | discovered | Name the source of the derived filename, and skip the lookup of the public address. |
+    | `--headless` | off | Draw no table and take no key. Print one status line each minute. |
+    | `--duration <DUR>` | none | Stop the run after this much time. |
+    | `--rounds <N>` | none | Stop the run after this many rounds. |
+    | `-V`, `--version` | | Print the version, the git hash, and whether the build was clean. |
+    | `-h`, `--help` | | Print the usage. |
+  - The interval sets what a run costs on disk. A round writes one record for each hop. The
+    round period and the length of the path together set the growth of the file. The default is
+    `1s`, which is the default of `mtr` too. A run that must last for days takes a longer
+    interval, because a loss rate and a standard deviation each need samples. `krt` rotates no
+    file and compresses none, so a long run at `1s` needs the disk that this table names:
+    | `--interval` | Samples per hop per minute | File growth, 20-hop path |
+    | ------------ | -------------------------- | ------------------------ |
+    | `1s` | 60 | ~85 MB per day |
+    | `5s` | 12 | ~17 MB per day |
+    | `30s` | 2 | ~3 MB per day |
   - A run probes every hop once per round and appends one record for each round to the file. The
     file opens in append mode, so one source and one destination keep one file across many runs,
     and the `run` field separates the runs inside it. The run flushes after every record, so a
@@ -706,7 +735,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     elevated prompt. A platform that needs privileges and does not hold them prints the remedy and
     stops, and `krt` never falls back to a degraded trace without saying so.
   - `krt` takes its tracer from [`trippy-core`](https://trippy.rs) and its resolver from
-    [`trippy-dns`](https://trippy.rs), and both of them are Apache-2.0.
+    [`trippy-dns`](https://trippy.rs), and both of them are Apache-2.0. This repository is MIT.
+    Apache-2.0 is permissive, and it imposes no copyleft on a binary that links it, so the two
+    licenses stand together in one binary. `krt` writes no ICMP plumbing of its own: the
+    tracer sends the probes, and `krt` owns the schema, the filename, the fold, and the table.
   - Usage: `krt example.com`, `krt example.com --rounds 3`, `krt example.com --duration 1h`,
     `krt example.com --interval 500ms --protocol udp --multipath paris`,
     `krt replay trace.jsonl`, `krt replay trace.jsonl --run 2026-08-19T12:00:00.000Z`
