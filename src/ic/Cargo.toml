@@ -15,7 +15,6 @@ buildinfo.workspace = true
 clap.workspace = true
 icy_sixel.workspace = true
 image.workspace = true
-libc.workspace = true
 notify.workspace = true
 termion.workspace = true
 termgfx.workspace = true

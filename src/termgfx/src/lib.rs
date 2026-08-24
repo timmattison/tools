@@ -53,7 +53,7 @@ use std::io;
 
 mod geometry;
 
-pub use geometry::cell_pixels;
+pub use geometry::{cell_pixels, terminal_pixels};
 
 /// An inline-image protocol that a caller emits into a muxiavelli panel.
 ///

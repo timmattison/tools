@@ -15,7 +15,7 @@ use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
-use termgfx::{display_routine_for, Capabilities, DisplayRoutine, TerminalType};
+use termgfx::{display_routine_for, terminal_pixels, Capabilities, DisplayRoutine, TerminalType};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
@@ -1770,7 +1770,7 @@ fn calculate_aspect_preserving_size(
 /// Tries to determine actual cell dimensions via ioctl (TIOCGWINSZ). Falls back to
 /// estimated constants if the ioctl fails or the terminal reports zero dimensions.
 fn get_cell_pixel_dimensions() -> (u32, u32) {
-    if let Some((total_px_w, total_px_h)) = get_terminal_pixel_size() {
+    if let Some((total_px_w, total_px_h)) = terminal_pixels() {
         let (term_cols, term_rows) =
             get_terminal_size().unwrap_or((FALLBACK_TERMINAL_COLS, FALLBACK_TERMINAL_ROWS));
         if term_cols > 0 && term_rows > 0 {
@@ -1870,41 +1870,6 @@ fn display_image_kitty(
         display_height,
         no_newline,
     )
-}
-
-/// Get terminal pixel dimensions using ioctl if available.
-///
-/// Uses the TIOCGWINSZ ioctl to query the terminal's pixel dimensions.
-/// Returns None if the ioctl fails or reports zero dimensions.
-fn get_terminal_pixel_size() -> Option<(u32, u32)> {
-    use std::os::unix::io::AsRawFd;
-
-    #[repr(C)]
-    struct Winsize {
-        ws_row: libc::c_ushort,
-        ws_col: libc::c_ushort,
-        ws_xpixel: libc::c_ushort,
-        ws_ypixel: libc::c_ushort,
-    }
-
-    let mut ws = Winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-
-    let fd = io::stdout().as_raw_fd();
-    // SAFETY: TIOCGWINSZ is a standard ioctl that only reads the terminal window size
-    // into the provided Winsize struct. It does not modify any other state and the
-    // Winsize struct is properly initialized.
-    let result = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
-
-    if result == 0 && ws.ws_xpixel > 0 && ws.ws_ypixel > 0 {
-        Some((ws.ws_xpixel as u32, ws.ws_ypixel as u32))
-    } else {
-        None
-    }
 }
 
 /// Calculate pixel dimensions for Sixel output, preserving aspect ratio.
@@ -2238,7 +2203,7 @@ fn display_image_sixel(
     let (cell_width_px, cell_height_px) = get_cell_pixel_dimensions();
 
     let (target_pixel_width, target_pixel_height) = sixel_pixel_budget(
-        get_terminal_pixel_size(),
+        terminal_pixels(),
         budget_cols,
         budget_rows,
         cell_width_px,
@@ -3874,7 +3839,7 @@ not_a_number zellij a work
     fn downscale_returns_borrowed_when_image_fits() {
         // With estimated cell dimensions (10x20), 80 cols x 24 rows = 800x480 pixels.
         // A 100x100 image fits within that, so no downscale needed.
-        // Note: in CI/test environments, get_terminal_pixel_size() returns None,
+        // Note: in CI/test environments, terminal_pixels() returns None,
         // so estimated constants are used.
         let img = make_test_image(100, 100);
         let result = downscale_to_display_pixels(&img, Some(80), Some(24));

@@ -3981,7 +3981,6 @@ dependencies = [
  "clap",
  "icy_sixel",
  "image",
- "libc",
  "notify",
  "termgfx",
  "termion",
@@ -7473,6 +7472,7 @@ name = "termgfx"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "termsize",
 ]
 
 [[package]]
