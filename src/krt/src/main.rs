@@ -1410,6 +1410,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser, ValueEnum};
+    use std::collections::HashSet;
     use std::fs::OpenOptions;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::Path;
@@ -3064,6 +3065,21 @@ resolved configuration:
             .collect()
     }
 
+    /// Every word that the lines of a frame hold.
+    ///
+    /// The table writes one address in one column, and it puts a space on each
+    /// side of that column, so a word of a frame is a whole address. A test
+    /// that joins the lines and searches the text for an address finds a
+    /// longer address as well, because `10.0.1.1` is part of `10.0.1.10` and
+    /// part of `10.0.1.100`. A test that reads these words finds the address
+    /// that the frame names, and no other one.
+    fn words_of(lines: &[String]) -> HashSet<&str> {
+        lines
+            .iter()
+            .flat_map(|line| line.split_whitespace())
+            .collect()
+    }
+
     /// The record that opens one shared run.
     ///
     /// The last hop of the path is the target, as a run that reached its
@@ -3175,16 +3191,16 @@ resolved configuration:
                 Ok(folded) => folded,
                 Err(reason) => panic!("the replay of {run} must fold that run: {reason}"),
             };
-            let frame = folded.lines.join("\n");
+            let named = words_of(&folded.lines);
             for hop in held {
                 assert!(
-                    frame.contains(hop),
+                    named.contains(hop.as_str()),
                     "the frame of {run} names the hop {hop} that the run probed"
                 );
             }
             for hop in absent {
                 assert!(
-                    !frame.contains(hop),
+                    !named.contains(hop.as_str()),
                     "the frame of {run} names no hop of the other run: {hop}"
                 );
             }
