@@ -765,13 +765,6 @@ impl fmt::Display for PathKind {
 }
 
 impl Score {
-    /// The name of the destination with its address beside it, or the address
-    /// alone.
-    ///
-    /// The address stays beside the name for the reason a row of a folded run
-    /// keeps it: a name is what a resolver said, and an address is what
-    /// answered. A run of `--no-dns` reads no name, and the cell then holds the
-    /// address by itself.
     /// The mean round-trip time that ranks this path.
     ///
     /// A path that no hop answered ranks after every path that one did. The
@@ -781,6 +774,13 @@ impl Score {
         self.rtt_ms.unwrap_or(f64::INFINITY)
     }
 
+    /// The name of the destination with its address beside it, or the address
+    /// alone.
+    ///
+    /// The address stays beside the name for the reason a row of a folded run
+    /// keeps it: a name is what a resolver said, and an address is what
+    /// answered. A run of `--no-dns` reads no name, and the cell then holds the
+    /// address by itself.
     fn host_text(&self) -> String {
         self.host.as_ref().map_or_else(
             || self.addr.to_string(),
