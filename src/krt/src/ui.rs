@@ -2154,6 +2154,42 @@ mod tests {
     }
 
     #[test]
+    fn the_mark_of_a_loss_is_no_bar_of_a_time() {
+        // A run that prints no color must still show the loss. A headless run,
+        // a pipe, a file, and a replay each print text with no color, so the
+        // mark of a lost probe stands apart from every bar by its glyph and not
+        // by its color alone. A mark that were one of the bars would read on
+        // every one of those runs as a round-trip time that the hop never gave.
+        let mut window: Vec<Sample> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+            .into_iter()
+            .map(Sample::Time)
+            .collect();
+        window.push(Sample::Lost);
+        let drawn = sparkline(window.into_iter(), 9).to_string();
+
+        let glyphs: Vec<char> = drawn.chars().collect();
+        let (bars, loss) = glyphs.split_at(glyphs.len().saturating_sub(1));
+        assert_eq!(
+            bars.iter().collect::<String>(),
+            BARS,
+            "the seven times of the window draw the seven bars: {drawn}"
+        );
+        let mark = loss
+            .first()
+            .copied()
+            .expect("the window holds the lost probe");
+        assert!(
+            !BARS.contains(mark),
+            "the mark {mark} of a lost probe is one of the bars {BARS}, so a run that prints no color reads that loss as a time"
+        );
+        assert_eq!(
+            UnicodeWidthChar::width(mark),
+            Some(1),
+            "the mark {mark} of a lost probe takes one terminal column, as each bar does, so one sample of the history stands in one column of the Recent column"
+        );
+    }
+
+    #[test]
     fn the_bar_holds_no_character_outside_the_set() {
         let drawn = bar(&[3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, f64::NAN], 9);
         assert_eq!(drawn.chars().count(), 9, "one bar stands for one sample");
