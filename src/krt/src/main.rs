@@ -1151,6 +1151,41 @@ fn display_of(headless: bool, is_terminal: bool) -> Display {
     Display::Table
 }
 
+/// The pixel size of one character cell, when the run draws the Recent column
+/// as an image of the whole history.
+///
+/// Four questions stand between a run and that image, and the answer is the
+/// size of a cell only when all four of them answer yes.
+///
+/// The reader asked for it. The flag is off by default, because the block
+/// elements are one picture of a hop and an image is a second one, and the
+/// documentation of [`crate::ui`] argues that two readers must never argue over
+/// a hop. A terminal that draws the image over a cell that also holds a bar
+/// gives a reader two pictures of one history.
+///
+/// The run draws the live table at all. A replay, a headless run, a run whose
+/// standard output is a pipe, and a run whose standard output is a file each
+/// draw the block elements. This question needs no test of its own: the image
+/// path lives in [`crate::live`], and [`screen_of`] reaches
+/// [`crate::live::Table`] only when [`display_of`] answers [`Display::Table`].
+///
+/// The terminal draws images. Three inline-image protocols are in service, no
+/// terminal reads all three, and a terminal that reads none of them puts the
+/// escape sequence of an image on the screen as text.
+///
+/// The terminal reports a pixel size. A terminal that answers the `TIOCGWINSZ`
+/// ioctl with zero pixels reports no pixel size, exactly as `termsize` argues
+/// that a terminal with no window reports no width. The image path takes no
+/// guess there: an image at a guessed size stands over the wrong cells, and the
+/// block elements say the same thing at the size the terminal already agreed
+/// to.
+///
+/// The reads of the world stand apart from this decision, so a test names the
+/// answers without a terminal to name them with.
+fn graphics_of(asked: bool, draws_images: bool, cell: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    todo!("the gate of the image path answers the size of a cell")
+}
+
 /// Whether the frames of a live table carry the color of a terminal, from
 /// whether the reader set `NO_COLOR`.
 ///
@@ -1395,10 +1430,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        closing_line, display_of, host_name_or, name_grace, paint_of, parse_duration, pick_address,
-        replay, resolve_target, run_config, source_from, stop_reason, user_stopped, value_name,
-        AddressFamily, Cli, Command, Display, EndReason, Family, Multipath, Protocol, ResolveError,
-        ResolvedConfig, SourceKind, SourceLabel, Target, RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
+        closing_line, display_of, graphics_of, host_name_or, name_grace, paint_of, parse_duration,
+        pick_address, replay, resolve_target, run_config, source_from, stop_reason, user_stopped,
+        value_name, AddressFamily, Cli, Command, Display, EndReason, Family, Multipath, Protocol,
+        ResolveError, ResolvedConfig, SourceKind, SourceLabel, Target, RESOLVE_PORT,
+        SOURCE_FALLBACK, UNKNOWN,
     };
     use crate::record::{
         Hop, Privilege, Record, RoundRecord, RunConfig, RunId, RunRecord, TtlRange, Writer,
@@ -2314,6 +2350,63 @@ resolved configuration:
             display_of(true, false),
             Display::Headless,
             "and the flag leaves such a run where it stands"
+        );
+    }
+
+    /// The pixel size of one character cell that the terminal of every test of
+    /// the gate reports.
+    ///
+    /// Ten pixels by twenty is about the cell of a modern terminal at its
+    /// default font. The numbers say nothing about the gate, which hands the
+    /// size of a cell back or hands nothing back, so one pair of numbers serves
+    /// every test below.
+    const CELL: (u32, u32) = (10, 20);
+
+    #[test]
+    fn a_run_that_asked_for_the_image_on_a_terminal_that_draws_one_takes_the_size_of_a_cell() {
+        // The image of the Recent column draws in pixels, and the terminal lays
+        // the table out in cells, so the run needs the size of one cell before
+        // it draws one pixel.
+        assert_eq!(
+            graphics_of(true, true, Some(CELL)),
+            Some(CELL),
+            "a reader who asked for the image on a terminal that reports a pixel size gets it"
+        );
+    }
+
+    #[test]
+    fn a_run_that_asked_for_no_image_draws_the_block_elements() {
+        // The flag is off by default. The block elements are one picture of a
+        // hop and an image is a second one, and two pictures of one hop is what
+        // the table must never show.
+        assert_eq!(
+            graphics_of(false, true, Some(CELL)),
+            None,
+            "a terminal that draws images draws no image for a run that asked for none"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_draws_no_image_draws_the_block_elements() {
+        // Every inline-image protocol carries its image in an escape sequence,
+        // and a terminal that reads none of them puts that sequence on the
+        // screen as text.
+        assert_eq!(
+            graphics_of(true, false, Some(CELL)),
+            None,
+            "the flag draws no image on a terminal that reads no image protocol"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_reports_no_pixel_size_draws_the_block_elements() {
+        // A terminal that answers the `TIOCGWINSZ` ioctl with zero pixels
+        // reports no pixel size. The image path takes no guess there, because an
+        // image at a guessed size stands over the wrong cells of the table.
+        assert_eq!(
+            graphics_of(true, true, None),
+            None,
+            "the flag draws no image on a terminal that measures no cell"
         );
     }
 
