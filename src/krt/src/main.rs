@@ -256,10 +256,18 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 /// A trace resolves the destination, opens the recorded file, and probes every
 /// hop to the destination once per round. It appends one record for each round.
 /// A run under a terminal draws the live table of that path, and it takes the
-/// keys of the terminal. A run whose standard output is a pipe or a file, and a
-/// run that `--headless` asked, print one status line each minute. The `replay`
-/// command reads a file that an earlier run wrote, so it takes no destination
-/// and no flag of a probe.
+/// keys of the terminal. The `?` key shows the list of those keys under the
+/// table. A run whose standard output is a pipe or a file, and a run that
+/// `--headless` asked, print one status line each minute. The `replay` command
+/// reads a file that an earlier run wrote, so it takes no destination and no
+/// flag of a probe.
+// The help names the `?` key and no other key of the live table, because
+// `live::KEYS` is the one list that says what a key does and a doc comment of
+// `clap` is a string literal that reads that list at no time. A help page that
+// named all five keys would be a second list of them, and the second list
+// drifts. One key name opens the first list from inside the table, and
+// `live::tests::the_long_help_names_the_key_that_lists_the_keys` holds that
+// name and the list together.
 #[derive(Parser, Debug)]
 // `args_conflicts_with_subcommands` rejects a flag of a probe beside a command,
 // because a replay probes nothing. `subcommand_negates_reqs` lifts the demand
