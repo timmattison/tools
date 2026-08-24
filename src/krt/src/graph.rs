@@ -86,6 +86,25 @@ mod tests {
         image.get_pixel_checked(x, y).copied().unwrap_or(CLEAR)
     }
 
+    /// The color of a bar, as a reader of a graphics terminal sees it.
+    ///
+    /// The test spells the four numbers, and the module spells them again, for
+    /// the reason that [`CLEAR`] states.
+    const TEAL: Rgba<u8> = Rgba([64, 176, 192, 255]);
+
+    #[test]
+    fn a_bar_is_teal() {
+        // One color must read on a light terminal and on a dark one, and it
+        // must not be the red that the table already spends on a loss.
+        let image = plot(&[Sample::Time(ONE_TIME)], ONE_COLUMN, SHORT);
+
+        assert_eq!(
+            pixel(&image, 0, SHORT - 1),
+            TEAL,
+            "the bar of a sample that the run measured stands in an opaque mid teal"
+        );
+    }
+
     #[test]
     fn the_background_of_the_image_is_transparent() {
         // A transparent background lets the terminal show its own background
