@@ -527,6 +527,16 @@ enum Command {
         )]
         max_targets: u64,
 
+        /// Trace this many destinations at one moment. A larger pool finds the
+        /// paths sooner and sends more probes at once.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = HUNT_CONCURRENCY_DEFAULT,
+            value_parser = parse_concurrency,
+        )]
+        concurrency: NonZeroUsize,
+
         /// The number of probe rounds that each destination takes. One probe
         /// round is one sweep of the TTLs.
         #[arg(
@@ -749,6 +759,7 @@ impl Cli {
             Some(Command::Hunt {
                 rounds,
                 max_targets,
+                concurrency,
                 probes_per_round,
                 target_timeout,
                 seed,
@@ -758,7 +769,7 @@ impl Cli {
                 Some(HuntConfig {
                     rounds,
                     max_targets,
-                    concurrency: HUNT_CONCURRENCY_DEFAULT,
+                    concurrency,
                     probes_per_round,
                     target_timeout,
                     seed: seed.unwrap_or_else(seed_from_clock),
@@ -890,6 +901,7 @@ impl ResolvedConfig {
             ("source", source()),
             ("rounds", hunt.rounds.to_string()),
             ("max targets", hunt.max_targets.to_string()),
+            ("at once", hunt.concurrency.to_string()),
             ("probes per round", hunt.probes_per_round.to_string()),
             ("target timeout", ui::render_duration(hunt.target_timeout)),
             ("seed", hunt.seed.to_string()),
@@ -899,6 +911,30 @@ impl ResolvedConfig {
             ),
         ]
     }
+}
+
+/// Reads the number of destinations that a hunt traces at one moment.
+///
+/// The number stands from one to the lanes that one process holds. A pool above
+/// that ceiling would put two destinations of one moment in one lane, and two
+/// tracers of one lane read each other's answers, so a hop of one destination
+/// would land in the path of another.
+///
+/// # Errors
+///
+/// Returns the reason as text when the number does not read, when it is zero,
+/// and when it stands above the ceiling.
+fn parse_concurrency(text: &str) -> Result<NonZeroUsize, String> {
+    let ceiling = usize::from(trace::Lane::COUNT);
+    let count: NonZeroUsize = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a number of destinations from 1 to {ceiling}"))?;
+    if count.get() > ceiling {
+        return Err(format!(
+            "`{text}` is above the {ceiling} destinations that one hunt traces at one moment: two destinations of one lane read each other's answers"
+        ));
+    }
+    Ok(count)
 }
 
 /// Reads a duration from the text of a command line flag.
