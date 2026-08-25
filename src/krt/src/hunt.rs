@@ -56,10 +56,10 @@ use crate::record::{
     Target, Writer,
 };
 use crate::run;
-use crate::run::RunError;
+use crate::run::{RunError, Turn};
 use crate::stats::{HopTable, TtlRow};
-use crate::trace::Lane;
 use crate::status::{Event, Status};
+use crate::trace::Lane;
 use crate::ui;
 use crate::{REACHED, TARGETS};
 use chrono::{DateTime, Utc};
@@ -68,8 +68,8 @@ use rand::{Rng, SeedableRng};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::io::Write;
-use std::num::NonZeroUsize;
 use std::net::{IpAddr, Ipv4Addr};
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -289,10 +289,14 @@ pub(crate) struct Score {
 /// The screen of one destination of a hunt.
 ///
 /// A hunt draws no table. This screen folds the rounds of one destination into
-/// the numbers that the summary ranks, and it ticks the indicator of the hunt.
-/// The run loop hands every round and every name to the screen already, so the
-/// fold rides on the door that is there and the hunt reads no file back.
-pub(crate) struct Scorer<'a> {
+/// the numbers that the summary ranks. The run loop hands every round and every
+/// name to the screen already, so the fold rides on the door that is there and
+/// the hunt reads no file back.
+///
+/// The screen ticks no indicator. A hunt holds many destinations at once, and
+/// the sweep of the whole pool is the heartbeat that the indicator reads, not
+/// the turn of any one destination in it.
+pub(crate) struct Scorer {
     /// The address that this destination stands at.
     addr: Ipv4Addr,
     /// The run that records the trace of it.
@@ -305,23 +309,11 @@ pub(crate) struct Scorer<'a> {
     reached_at: Option<u8>,
     /// The name of each address that a reverse lookup gave.
     names: BTreeMap<IpAddr, String>,
-    /// The indicator of the hunt that this destination belongs to.
-    ///
-    /// The turns of one destination are the heartbeat of the whole hunt, and
-    /// this screen is what the run loop of that destination knocks on. The
-    /// indicator therefore hears every turn without the hunt loop asking the
-    /// run loop for one.
-    status: &'a mut dyn Status,
 }
 
-impl<'a> Scorer<'a> {
+impl Scorer {
     /// Builds the screen of one destination.
-    pub(crate) fn new(
-        addr: Ipv4Addr,
-        run: RunId,
-        first_ttl: u8,
-        status: &'a mut dyn Status,
-    ) -> Self {
+    pub(crate) fn new(addr: Ipv4Addr, run: RunId, first_ttl: u8) -> Self {
         Self {
             addr,
             run,
@@ -329,7 +321,6 @@ impl<'a> Scorer<'a> {
             table: HopTable::new(),
             reached_at: None,
             names: BTreeMap::new(),
-            status,
         }
     }
 
@@ -390,30 +381,23 @@ impl<'a> Scorer<'a> {
     }
 }
 
-impl Screen for Scorer<'_> {
+impl Screen for Scorer {
     /// A hunt takes no key of the terminal, so this screen asks for no stop.
     ///
-    /// `Ctrl-C` reaches a hunt through the signal flag, which stops the trace
-    /// of the destination that stands and the hunt that holds it.
-    ///
-    /// The run loop takes ten turns each second, and each of them reaches this
-    /// call. The tick therefore turns the spinner of the indicator at that
-    /// rate, which is what tells a reader that a destination which answers
-    /// nothing is still a destination the hunt is working on.
+    /// `Ctrl-C` reaches a hunt through the signal flag, which stops every
+    /// destination the hunt holds and the hunt itself.
     fn poll(&mut self) -> bool {
-        self.status.show(Event::Tick);
         false
     }
 
-    /// Folds one round into the table, ticks the indicator, and keeps the TTL
-    /// of the destination when the destination answered.
+    /// Folds one round into the table, and keeps the TTL of the destination
+    /// when the destination answered.
     ///
     /// The smallest such TTL wins. A path that changes under a load balancer
     /// reaches the destination at one TTL in one round and at another in the
     /// next, and a packet did reach the destination in the smaller number of
     /// hops.
     fn round(&mut self, round: &RoundRecord) {
-        self.status.show(Event::Tick);
         self.table.observe(round);
         let answered = round
             .hops
@@ -570,35 +554,294 @@ pub(crate) struct Sources<'a> {
     pub(crate) resolver: Rc<dyn names::Resolver>,
 }
 
+/// One destination that a hunt holds in flight.
+///
+/// The hunt sweeps every flight it holds, one turn of each, and takes a flight
+/// out when its run closes. The lane then goes back to the pool, and the next
+/// destination the hunt draws takes it.
+struct Flight {
+    /// The lane that its tracer probes in.
+    lane: Lane,
+    /// The run that records it.
+    run: run::Run,
+    /// The screen that folds its rounds into a score.
+    scorer: Scorer,
+}
+
+/// One hunt while it runs: the destinations it holds, the scores it took, and
+/// the two counts that stop it.
+///
+/// The value is the loop of the hunt. [`record`] builds one, drives it, and
+/// reads the scores off it, so the three steps of a turn — fill the pool, sweep
+/// it, sleep — each stand as a method of their own.
+struct Hunt<'a, 's, W: Write> {
+    /// What every run of this hunt has in common.
+    facts: &'a Facts,
+    /// The numbers that bound it.
+    plan: &'a Plan,
+    /// The addresses, the rounds, and the names that it draws on.
+    sources: &'a mut Sources<'s>,
+    /// Whether the user asked the hunt to stop.
+    stop: &'a dyn Fn() -> bool,
+    /// The file that it writes.
+    writer: &'a mut Writer<W>,
+    /// The indicator that it shows itself on.
+    status: &'a mut dyn Status,
+    /// The destinations that it holds in flight.
+    flights: Vec<Flight>,
+    /// The lanes that no destination holds.
+    free: Vec<Lane>,
+    /// The score of each destination that finished.
+    scores: Vec<Score>,
+    /// The number of destinations that answered.
+    reached: u64,
+    /// The number of destinations that the hunt started.
+    targets: u64,
+    /// The moment of the run of the destination that it started last.
+    previous: Option<DateTime<Utc>>,
+    /// True when the draw gave no further address.
+    drawn_out: bool,
+}
+
+impl<'a, 's, W: Write> Hunt<'a, 's, W> {
+    /// Builds the hunt of these facts, this plan, and these sources.
+    fn new(
+        facts: &'a Facts,
+        plan: &'a Plan,
+        sources: &'a mut Sources<'s>,
+        stop: &'a dyn Fn() -> bool,
+        writer: &'a mut Writer<W>,
+        status: &'a mut dyn Status,
+    ) -> Self {
+        // The lanes go in backwards, so the pop of the first destination gives
+        // the first lane and a hunt of one destination at a time reads the lane
+        // that a trace of one destination reads.
+        let mut free = Lane::pool(plan.concurrency.get());
+        free.reverse();
+        Self {
+            facts,
+            plan,
+            sources,
+            stop,
+            writer,
+            status,
+            flights: Vec::new(),
+            free,
+            scores: Vec::new(),
+            reached: 0,
+            targets: 0,
+            previous: None,
+            drawn_out: false,
+        }
+    }
+
+    /// Whether the hunt starts another destination now.
+    ///
+    /// The pool stays full until the rounds the hunt wants answer. It never
+    /// shrinks to the rounds that are left, because the tail of such a hunt
+    /// runs one destination at a time and that tail is most of the time the
+    /// hunt takes.
+    fn room(&self) -> bool {
+        !self.drawn_out
+            && !(self.stop)()
+            && self.reached < self.plan.bounds.rounds
+            && self.targets < self.plan.bounds.max_targets
+            && self.flights.len() < self.plan.concurrency.get()
+    }
+
+    /// Draws destinations and starts them, until the pool is full or a bound
+    /// stops the hunt from drawing another.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HuntError::Run`] when a record does not reach the file, and
+    /// [`HuntError::Tracer`] when the tracer of a destination does not start.
+    fn fill(&mut self) -> Result<(), HuntError> {
+        while self.room() {
+            let Some(lane) = self.free.pop() else {
+                return Ok(());
+            };
+            let Some(target) = self.sources.draw.address() else {
+                self.free.push(lane);
+                self.drawn_out = true;
+                return Ok(());
+            };
+            self.targets += 1;
+            self.status.show(Event::Target(target));
+            match self.start(target, lane) {
+                Ok(flight) => self.flights.push(flight),
+                Err(fault) => {
+                    self.free.push(lane);
+                    return Err(fault);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Starts the trace of one destination in one lane.
+    ///
+    /// The run takes a round limit of the probe rounds of the plan and a
+    /// deadline of the target timeout. The deadline bounds every destination,
+    /// and not the quiet ones alone: no destination holds its lane for longer
+    /// than that timeout. The round limit is what stops a destination that
+    /// answers, because `Cli::resolve` refuses a plan whose timeout holds fewer
+    /// than one probe round more than the plan asks for. The last round lands
+    /// past the time of the rounds, so a timeout of exactly that time would cut
+    /// every destination short.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HuntError::Run`] when a record does not reach the file, and
+    /// [`HuntError::Tracer`] when the tracer of this destination does not
+    /// start.
+    fn start(&mut self, target: Ipv4Addr, lane: Lane) -> Result<Flight, HuntError> {
+        let moment = next_moment(self.previous, Utc::now());
+        self.previous = Some(moment);
+        let id = RunId::at(moment);
+        let rounds = self
+            .sources
+            .probes
+            .start(target, &id, lane)
+            .map_err(|reason| HuntError::Tracer { target, reason })?;
+        let record = RunRecord {
+            run: id.clone(),
+            krt: self.facts.krt.clone(),
+            source: self.facts.source.clone(),
+            target: Target {
+                // The hunt drew the address, so the address is what the user
+                // named. A reader of the file thus finds the same text in the
+                // field that a trace of that address by hand would write.
+                arg: target.to_string(),
+                addr: IpAddr::V4(target),
+                family: Family::Ipv4,
+            },
+            config: self.facts.config,
+            host: self.facts.host.clone(),
+            hunt: Some(self.facts.id.clone()),
+        };
+        let limits = run::Limits {
+            rounds: Some(self.plan.probes_per_round),
+            // A limit too large to add to the clock leaves the destination
+            // without a moment, and the round limit then stops it.
+            deadline: Instant::now().checked_add(self.plan.target_timeout),
+            name_grace: self.plan.name_grace,
+        };
+        let namer = Namer::new(Box::new(Rc::clone(&self.sources.resolver)), id.clone());
+        let scorer = Scorer::new(target, id, self.facts.config.first_ttl);
+        let run = run::Run::open(&record, rounds, limits, namer, self.writer)?;
+        Ok(Flight { lane, run, scorer })
+    }
+
+    /// Takes one turn of every destination in flight, and closes the ones that
+    /// finished.
+    ///
+    /// Each turn waits for nothing, so one destination that answers slowly
+    /// holds up no other. The sweep answers whether the hunt moved: a turn that
+    /// recorded a round and a destination that closed both move it, and a sweep
+    /// that moved nothing is what the hunt sleeps after.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunError::Write`] when a record does not reach the file, and
+    /// [`RunError::Tracer`] when the tracer thread of a destination stops
+    /// before a limit does.
+    fn sweep(&mut self) -> Result<bool, RunError> {
+        self.status.show(Event::Tick);
+        let mut moved = false;
+        let mut place = 0;
+        while place < self.flights.len() {
+            let turn = {
+                let flight = &mut self.flights[place];
+                flight
+                    .run
+                    .turn(Duration::ZERO, self.stop, self.writer, &mut flight.scorer)?
+            };
+            match turn {
+                Turn::Round => {
+                    moved = true;
+                    place += 1;
+                }
+                Turn::Quiet => place += 1,
+                Turn::Closed(outcome) => {
+                    self.close(place, outcome.reason);
+                    moved = true;
+                }
+            }
+        }
+        Ok(moved)
+    }
+
+    /// Takes the destination at this place out of the pool and scores it.
+    ///
+    /// A destination that the user cut short takes no row and no count of the
+    /// summary, and the indicator hears no answer for it: a round that stopped
+    /// in the middle measured a path that the tool never finished measuring.
+    /// The lane goes back to the pool either way.
+    fn close(&mut self, place: usize, reason: EndReason) {
+        let flight = self.flights.remove(place);
+        self.free.push(flight.lane);
+        if reason == EndReason::Quit {
+            return;
+        }
+        let score = flight.scorer.score();
+        let answered = score.kind == PathKind::Reached;
+        if answered {
+            self.reached += 1;
+        }
+        self.status.show(Event::Scored { reached: answered });
+        self.scores.push(score);
+    }
+
+    /// The longest that the hunt sleeps after a sweep that moved nothing.
+    ///
+    /// The sleep ends at the nearest deadline of the destinations in flight, so
+    /// a destination stops at the moment of its target timeout and not one
+    /// sleep after it.
+    fn nap(&self) -> Duration {
+        self.flights
+            .iter()
+            .map(|flight| flight.run.wait())
+            .min()
+            .unwrap_or_default()
+    }
+}
+
 /// Records one hunt: one run for each destination, and the summary of them all.
 ///
-/// The hunt stops when `Bounds::rounds` destinations answered. A destination
-/// that answered nothing costs no round, so the hunt keeps drawing until it
-/// holds the paths that the user asked for. It gives up at
+/// The hunt holds `Plan::concurrency` destinations in flight. It starts that
+/// many at once, and it starts another one each time one of them stops, so the
+/// time that a destination which answers nothing costs is time the hunt spends
+/// on the other destinations of the pool. Most of the address space answers
+/// nothing, so that time is most of the time a hunt takes.
+///
+/// The hunt stops drawing when `Bounds::rounds` destinations answered. A
+/// destination that answered nothing costs no round, so the hunt keeps drawing
+/// until it holds the paths that the user asked for. It gives up at
 /// `Bounds::max_targets` destinations, which is what stops a hunt that finds
 /// fewer answers than it wants: the draw never runs out on its own.
 ///
-/// The hunt traces one destination at a time and never two at once. A
-/// measurement of a few dozen destinations at the normal interval is a small
-/// load, and it stays that way only while the hunt is serial.
+/// The pool stays full until that moment and never shrinks to the rounds that
+/// are left. The destinations that stood when the last round answered finish
+/// and count, so a hunt can hold a few more rounds than it asked for, and each
+/// of them is a measurement the hunt already paid for.
 ///
-/// Each destination takes one run of `run::record`, with a round limit of the
-/// probe rounds of the plan and a deadline of the target timeout. The deadline
-/// bounds every destination, and not the quiet ones alone: no destination holds
-/// the hunt for longer than that timeout. The round limit is what stops a
-/// destination that answers, because `Cli::resolve` refuses a plan whose
-/// timeout holds fewer than one probe round more than the plan asks for. The
-/// last round lands past the time of the rounds, so a timeout of exactly that
-/// time would cut every destination short.
+/// Each destination takes one run of `run.rs`, and every one of them writes
+/// into the one file. The records of two destinations therefore stand between
+/// each other, and the records of one destination stay in order, which is what
+/// `krt replay <file> --run <id>` folds.
 ///
 /// `stop` answers whether the user asked the hunt to stop, and it reaches both
-/// this loop and the run of the destination that stands. A destination that the
-/// user cut short takes no row and no count of the summary: the summary counts
-/// the rounds that finished.
+/// this loop and every run in flight. A destination that the user cut short
+/// takes no row and no count of the summary: the summary counts the rounds that
+/// finished.
 ///
-/// A fault stops the hunt where the user does, and it keeps the same summary.
-/// The rounds in front of the fault measured what they measured, and the caller
-/// prints their table before it prints the reason.
+/// A tracer that does not start stops the hunt, and the destinations that stood
+/// at that moment finish first. A fault of the file stops it where it stands,
+/// because a file that takes no record takes none of theirs either. Both keep
+/// the summary of the rounds that finished: the rounds in front of the fault
+/// measured what they measured, and the caller prints their table before it
+/// prints the reason.
 ///
 /// # Errors
 ///
@@ -615,66 +858,53 @@ pub(crate) fn record<W: Write>(
     status: &mut dyn Status,
 ) -> Result<Summary, HuntStopped> {
     let started = Instant::now();
-    // Both ways out of the loop build the same summary over the scores that the
-    // hunt holds at that point, so the fault and the finish read alike.
-    let summarize = |scores: Vec<Score>| {
-        Summary::new(scores, started.elapsed(), plan.bounds, plan.include_partial)
-    };
-    let mut scores = Vec::new();
-    let mut previous = None;
-    let mut reached: u64 = 0;
-    let mut targets: u64 = 0;
-    while reached < plan.bounds.rounds && targets < plan.bounds.max_targets {
-        if stop() {
+    let mut hunt = Hunt::new(facts, plan, sources, stop, writer, status);
+    let mut fault = None;
+    loop {
+        if fault.is_none() {
+            if let Err(refused) = hunt.fill() {
+                fault = Some(refused);
+            }
+        }
+        if hunt.flights.is_empty() {
             break;
         }
-        let Some(target) = sources.draw.address() else {
-            break;
-        };
-        targets += 1;
-        status.show(Event::Target(target));
-        let moment = next_moment(previous, Utc::now());
-        previous = Some(moment);
-        let run = RunId::at(moment);
-        match trace_one(facts, plan, sources, stop, writer, target, run, status) {
-            Ok(Some(score)) => {
-                let answered = score.kind == PathKind::Reached;
-                if answered {
-                    reached += 1;
-                }
-                status.show(Event::Scored { reached: answered });
-                scores.push(score);
-            }
-            // A destination that the user cut short takes no row and no count
-            // of the summary, so the indicator hears no answer for it either.
-            Ok(None) => {}
-            Err(fault) => {
-                // The line goes back before the caller prints the table of the
-                // rounds that finished and the reason that stopped the hunt.
-                status.show(Event::Stop);
-                return Err(HuntStopped {
-                    summary: summarize(scores),
-                    fault,
-                });
+        match hunt.sweep() {
+            Ok(true) => {}
+            Ok(false) => std::thread::sleep(hunt.nap()),
+            Err(broke) => {
+                fault = Some(HuntError::Run(broke));
+                break;
             }
         }
     }
-    status.show(Event::Stop);
-    Ok(summarize(scores))
+    // The line goes back before the caller prints the table of the rounds that
+    // finished and, when a fault stopped the hunt, the reason.
+    hunt.status.show(Event::Stop);
+    let summary = Summary::new(
+        hunt.scores,
+        started.elapsed(),
+        plan.bounds,
+        plan.include_partial,
+    );
+    match fault {
+        Some(fault) => Err(HuntStopped { summary, fault }),
+        None => Ok(summary),
+    }
 }
 
 /// The moment that names the run of the next destination.
 ///
 /// A run identifier holds the moment of the start to the millisecond, and a
-/// hunt traces two destinations inside one millisecond whenever both of them
-/// answer at once. Two runs of one identifier would leave a reader unable to
-/// tell them apart, and `krt replay <file> --run <id>` unable to fold either
-/// one. So the moment of a destination stands at least one millisecond after
-/// the moment of the destination in front of it.
+/// hunt starts two destinations inside one millisecond whenever its pool fills.
+/// Two runs of one identifier would leave a reader unable to tell them apart,
+/// and `krt replay <file> --run <id>` unable to fold either one. So the moment
+/// of a destination stands at least one millisecond after the moment of the
+/// destination in front of it.
 ///
 /// The shift is below the resolution that the identifier states, and the
 /// identifier stays a moment that sorts, so the runs of one hunt still read in
-/// the order the hunt traced them.
+/// the order the hunt started them.
 fn next_moment(previous: Option<DateTime<Utc>>, now: DateTime<Utc>) -> DateTime<Utc> {
     let Some(previous) = previous else {
         return now;
@@ -685,70 +915,6 @@ fn next_moment(previous: Option<DateTime<Utc>>, now: DateTime<Utc>) -> DateTime<
     } else {
         least
     }
-}
-
-/// Records one destination of a hunt, and scores the path it found.
-///
-/// A destination that the user cut short gives no score. The summary counts the
-/// rounds that finished, and a round that stopped in the middle measured a path
-/// that the tool never finished measuring.
-///
-/// # Errors
-///
-/// Returns [`HuntError::Run`] when a record does not reach the file, and
-/// [`HuntError::Tracer`] when the tracer of this destination does not start.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the loop of the hunt holds one of these and hands every one of them to this step; a struct of the eight would be the loop itself"
-)]
-fn trace_one<W: Write>(
-    facts: &Facts,
-    plan: &Plan,
-    sources: &mut Sources<'_>,
-    stop: &dyn Fn() -> bool,
-    writer: &mut Writer<W>,
-    target: Ipv4Addr,
-    run: RunId,
-    status: &mut dyn Status,
-) -> Result<Option<Score>, HuntError> {
-    let rounds = sources
-        .probes
-        .start(target, &run, Lane::FIRST)
-        .map_err(|reason| HuntError::Tracer { target, reason })?;
-    let start = RunRecord {
-        run: run.clone(),
-        krt: facts.krt.clone(),
-        source: facts.source.clone(),
-        target: Target {
-            // The hunt drew the address, so the address is what the user
-            // named. A reader of the file thus finds the same text in the
-            // field that a trace of that address by hand would write.
-            arg: target.to_string(),
-            addr: IpAddr::V4(target),
-            family: Family::Ipv4,
-        },
-        config: facts.config,
-        host: facts.host.clone(),
-        hunt: Some(facts.id.clone()),
-    };
-    let limits = run::Limits {
-        rounds: Some(plan.probes_per_round),
-        // No destination holds the hunt for longer than this, whether it
-        // answers or not. The moment bounds the whole run of the destination,
-        // and the wait for the names of that run fits inside it, so a
-        // destination whose reverse zone never answers costs the timeout and
-        // no more. A limit too large to add to the clock leaves the
-        // destination without a moment, and the round limit then stops it.
-        deadline: Instant::now().checked_add(plan.target_timeout),
-        name_grace: plan.name_grace,
-    };
-    let namer = Namer::new(Box::new(Rc::clone(&sources.resolver)), run.clone());
-    let mut scorer = Scorer::new(target, run, facts.config.first_ttl, status);
-    let outcome = run::record(&start, rounds, limits, stop, namer, writer, &mut scorer)?;
-    if outcome.reason == EndReason::Quit {
-        return Ok(None);
-    }
-    Ok(Some(scorer.score()))
 }
 
 /// The label of the row that names the shortest path.
@@ -1094,8 +1260,8 @@ mod tests {
         RunConfig, RunId, SourceKind, SourceLabel, Writer,
     };
     use crate::status::{Event, Status};
-    use crate::trace::Lane;
     use crate::testing::{named, round};
+    use crate::trace::Lane;
     use crate::{Multipath, Protocol};
     use chrono::Utc;
     use std::collections::HashSet;
@@ -1103,6 +1269,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::num::NonZeroUsize;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
     use std::time::Instant;
 
@@ -1379,13 +1546,7 @@ mod tests {
         rounds: &[&[(u8, &str, f64)]],
         names: &[(&str, &str)],
     ) -> Score {
-        let mut recorder = Recorder::default();
-        let mut scorer = Scorer::new(
-            address(destination),
-            RunId::from(run),
-            FIRST_TTL,
-            &mut recorder,
-        );
+        let mut scorer = Scorer::new(address(destination), RunId::from(run), FIRST_TTL);
         for hops in rounds {
             scorer.round(&round(FIRST_TTL, MAX_TTL, hops));
         }
@@ -1547,13 +1708,7 @@ mod tests {
     /// A hunt takes no key of the terminal.
     #[test]
     fn the_screen_of_a_destination_asks_for_no_stop() {
-        let mut recorder = Recorder::default();
-        let mut scorer = Scorer::new(
-            address(DESTINATION),
-            RunId::from(RUN),
-            FIRST_TTL,
-            &mut recorder,
-        );
+        let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL);
         assert!(!scorer.poll());
     }
 
@@ -2175,15 +2330,29 @@ mod tests {
         recording
     }
 
+    /// The number of scratch files that this process already named.
+    ///
+    /// The process and the clock are not enough on their own. `cargo test` runs
+    /// the tests of one binary on many threads, and two of those threads read
+    /// the clock inside one nanosecond. The two then write one path, and each
+    /// of them reads the records of the other or reads a file that the other
+    /// already removed.
+    static SCRATCH_FILES: AtomicU64 = AtomicU64::new(0);
+
     /// The path of a scratch file that no other run of this test touches.
     ///
     /// Two copies of one test run at the same time under `cargo test`, so the
-    /// name carries the process and the moment.
+    /// name carries the process, the moment, and the count of the files that
+    /// the process named.
     fn scratch_file() -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos());
-        std::env::temp_dir().join(format!("krt-hunt-{}-{nanos}.jsonl", std::process::id()))
+        let count = SCRATCH_FILES.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "krt-hunt-{}-{nanos}-{count}.jsonl",
+            std::process::id()
+        ))
     }
 
     /// The events that a hunt showed its indicator, as a recorder reads them.
@@ -2203,6 +2372,10 @@ mod tests {
 
     /// A third destination that answers, for a test that fills a pool of three.
     const ANOTHER_NEAR: &str = "9.9.9.9";
+
+    /// One round that reached that third destination at TTL 7.
+    const ANOTHER_NEAR_REACHED_AT_SEVEN: &[&[(u8, &str, f64)]] =
+        &[&[(1, FIRST_HOP, 1.0), (7, ANOTHER_NEAR, 30.0)]];
 
     /// One round that reached the far destination at TTL 18.
     ///
@@ -2249,24 +2422,19 @@ mod tests {
         );
     }
 
-    /// The trace of one destination is the heartbeat of the hunt that holds it.
+    /// The sweep of the pool is the heartbeat of the hunt that holds it.
+    ///
+    /// A hunt holds many destinations at once, so no one of them can be the
+    /// heartbeat. The sweep of the whole pool is what turns the spinner, and it
+    /// turns at the pace of the hunt whatever the destinations of the pool do.
     #[test]
-    fn the_screen_of_a_destination_ticks_the_indicator() {
-        let mut recorder = Recorder::default();
-        {
-            let mut scorer = Scorer::new(
-                address(DESTINATION),
-                RunId::from(RUN),
-                FIRST_TTL,
-                &mut recorder,
-            );
-            scorer.poll();
-            scorer.round(&round(FIRST_TTL, MAX_TTL, &[(1, FIRST_HOP, 1.0)]));
-        }
-        assert_eq!(
-            recorder.events,
-            vec![Event::Tick, Event::Tick],
-            "a poll and a round must each tick the indicator"
+    fn the_sweep_of_the_pool_ticks_the_indicator() {
+        let hunted =
+            hunted(&[NEAR], &[REACHED_AT_FIVE], 1, &never_stops()).expect("the hunt must finish");
+        assert!(
+            hunted.shown.contains(&Event::Tick),
+            "a sweep must tick the indicator: {:?}",
+            hunted.shown
         );
     }
 
@@ -2359,7 +2527,11 @@ mod tests {
     fn a_hunt_holds_its_pool_full_until_the_rounds_it_wants_answer() {
         let hunted = hunted_bounded(
             &[NEAR, FAR, ANOTHER_NEAR],
-            &[REACHED_AT_FIVE, FAR_REACHED_AT_EIGHTEEN, REACHED_AT_FIVE],
+            &[
+                REACHED_AT_FIVE,
+                FAR_REACHED_AT_EIGHTEEN,
+                ANOTHER_NEAR_REACHED_AT_SEVEN,
+            ],
             wanting(1).at_once(3),
             &never_stops(),
         )
@@ -2709,6 +2881,12 @@ mod tests {
     ///
     /// The disk that fills is the fault that this covers, and it is the one
     /// where the reader most wants the rounds that the hunt already measured.
+    ///
+    /// The hunt traces one destination at a time here, so the sink takes the
+    /// records of exactly one destination and fails on the record that opens
+    /// the next. A hunt of a pool writes the records of its destinations
+    /// between each other, and a count of records would then name no
+    /// destination in particular.
     #[test]
     fn a_hunt_that_a_write_stopped_keeps_the_summary_of_the_rounds_that_finished() {
         let mut probes = FakeProbes::of(&[REACHED_AT_FIVE, REACHED_AT_FIVE]);
@@ -2716,7 +2894,7 @@ mod tests {
         let stopped = hunt_into(
             &[NEAR, FAR],
             &mut probes,
-            wanting(2),
+            wanting(2).serial(),
             &never_stops(),
             &[],
             &mut writer,

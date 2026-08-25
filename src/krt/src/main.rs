@@ -1879,24 +1879,27 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
 
 /// The tracer of a hunt of the command line.
 ///
-/// Each destination takes one tracer of `trace.rs`, and no two of those tracers
-/// ever probe at once. Two tracers of one process hold one source port, and the
-/// second one dies on the port it cannot bind.
+/// Each destination takes one tracer of `trace.rs`, and the hunt holds many of
+/// them at once. Every one of those tracers probes in a lane of its own, which
+/// is what keeps two of them from reading each other's answers and what keeps
+/// two UDP tracers from binding one source port.
 ///
-/// The round limit of a destination is what stops its tracer, and `start` waits
-/// for that stop before it starts the tracer of the next destination. The wait
-/// is what the run loop cannot give: a destination that stops at its target
-/// timeout stops while its tracer still probes.
+/// Two tracers of one lane still cannot probe at once, so `start` waits for the
+/// tracer that ran last in the lane it is handed. The wait is what the run loop
+/// cannot give: a destination that stops at its target timeout stops while its
+/// tracer still probes. The wait ends at the round limit of that destination,
+/// which the command line holds under the target timeout of every destination.
 struct SystemProbes<'a> {
     /// The command line that the hunt resolved, which holds the period, the
     /// range of the TTL, the protocol, and the multipath mode of every probe.
     config: &'a ResolvedConfig,
     /// The privilege mode that the platform gave.
     privilege: record::Privilege,
-    /// The thread of the tracer of the destination that the hunt traced last.
+    /// The thread of the tracer that ran last in each lane.
     ///
-    /// The hunt traces its first destination with no such thread behind it.
-    running: Option<trace::TracerThread>,
+    /// A lane whose first destination the hunt has not started yet holds no
+    /// such thread.
+    running: Vec<Option<trace::TracerThread>>,
 }
 
 impl SystemProbes<'_> {
@@ -1929,6 +1932,21 @@ impl SystemProbes<'_> {
     }
 }
 
+impl SystemProbes<'_> {
+    /// The thread of the tracer that ran last in this lane.
+    ///
+    /// A lane past the end of the list holds no thread, and the list grows to
+    /// reach it. The hunt builds the list at the size of its pool, so the growth
+    /// is the guard behind that size and never the normal case.
+    fn thread_of(&mut self, lane: trace::Lane) -> &mut Option<trace::TracerThread> {
+        let place = lane.place();
+        if self.running.len() <= place {
+            self.running.resize_with(place + 1, || None);
+        }
+        &mut self.running[place]
+    }
+}
+
 impl hunt::Probes for SystemProbes<'_> {
     fn start(
         &mut self,
@@ -1936,15 +1954,15 @@ impl hunt::Probes for SystemProbes<'_> {
         run: &RunId,
         lane: trace::Lane,
     ) -> Result<std::sync::mpsc::Receiver<RoundRecord>, String> {
-        // The tracer of the destination before this one stops first. The wait
-        // ends at the round limit of that destination, which the command line
-        // holds under the target timeout of every destination.
-        if let Some(running) = self.running.take() {
+        // The tracer that ran last in this lane stops first. Two tracers of one
+        // lane carry one probe identifier and one source port, so the second
+        // one would read the answers of the first.
+        if let Some(running) = self.thread_of(lane).take() {
             running.wait();
         }
         let (rounds, running) =
             trace::spawn(&self.config_of(target, run, lane)).map_err(|error| error.to_string())?;
-        self.running = Some(running);
+        *self.thread_of(lane) = Some(running);
         Ok(rounds)
     }
 }
@@ -2009,7 +2027,7 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
     let mut probes = SystemProbes {
         config,
         privilege,
-        running: None,
+        running: (0..HUNT_CONCURRENCY.get()).map(|_| None).collect(),
     };
     let facts = hunt::Facts {
         id: HuntId::at(Utc::now()),
@@ -4142,7 +4160,7 @@ resolved configuration:
         let probes = SystemProbes {
             config: &config,
             privilege: Privilege::Unprivileged,
-            running: None,
+            running: Vec::new(),
         };
         let traced = probes.config_of(
             A_HUNT_DESTINATION,
