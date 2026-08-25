@@ -33,6 +33,7 @@ not have to re-derive which guard belongs to which test.
 | `never_fires_a_hook_from_the_developer_s_repository` | `core.hooksPath` → the scratch's empty hooks directory | `src/git.rs`, `Git::safety_config()` — drop the chained `core.hooksPath=` argument | remove |
 | `never_touches_the_real_working_tree_or_index` | The scratch worktree itself | `src/scratch.rs`, `Scratch::create` — have it hand back a `Git` rooted in the real repository instead of adding a worktree | redirect |
 | `never_leaves_a_scratch_worktree_registered_in_the_real_repository` | `worktree remove --force` in teardown | `src/scratch.rs`, `impl Drop for Scratch` — drop the removal | remove |
+| `never_leaves_a_scratch_worktree_registered_in_the_real_repository` | `rebase.backend=merge` | `src/git.rs`, `Git::safety_config()` — drop the `"rebase.backend=merge"` entry | remove |
 | `replays_without_hanging_or_failing_when_commit_signing_is_enabled` | `commit.gpgsign=false` | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 
 ## What keeps each test honest
@@ -77,13 +78,13 @@ registry that reports everything as fine is worth less than no registry at all.
 
 | Test | Start-state control | Armed control |
 | --- | --- | --- |
-| `never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled` | `repo.rev_parse` panics on a ref that does not resolve, so `main`, `left` and `right` provably exist before the replay; the baseline is then re-read *after* the control has unwound, so the control's own rebase cannot be charged to the replay. Plus the `conflicts` assertions proving a genuine conflict was replayed. | **Full.** The control builds a branch of its own off `main`, commits a file nothing else touches, checks it out **detached** — `--update-refs` skips a branch checked out somewhere, so detaching is what puts the ref at risk, and is exactly what the replay does — and rebases it onto `left` through plain git. That ref must have moved: ``"`rebase.updateRefs` is not live in <path>, so this test could only pass vacuously; a plain rebase of a detached branch pointing into the replayed range left 'updaterefs-control' sitting at <sha>"``. The fixture is then put back — `checkout main`, `update-ref -d refs/heads/updaterefs-control` — and the restoration is asserted byte-exact against the pre-control ref snapshot plus an empty `status --porcelain`, for the rerere test's reason: the closing assertion cannot tell the control's damage from the replay's. Non-conflicting on purpose; a rebase that halts never reaches the point of updating refs. |
+| `never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled` | `repo.rev_parse` panics on a ref that does not resolve, so `main`, `left` and `right` provably exist before the replay; the baseline is then re-read *after* the control has unwound, so the control's own rebase cannot be charged to the replay. Plus the `conflicts` assertions proving a genuine conflict was replayed. | **Full.** The control builds a branch of its own off `main`, commits a file nothing else touches, checks it out **detached** — `--update-refs` skips a branch checked out somewhere, so detaching is what puts the ref at risk, and is exactly what the replay does — and rebases it onto `left` through plain git, with `-c rebase.backend=merge` pinned on that one command, because `--update-refs` is a merge-backend feature and a control that inherited the apply backend would report a dead config key rather than the backend that silenced it. That ref must have moved: ``"`rebase.updateRefs` is not live in <path>, so this test could only pass vacuously; a plain rebase of a detached branch pointing into the replayed range left 'updaterefs-control' sitting at <sha>"``. The fixture is then put back — `checkout main`, `update-ref -d refs/heads/updaterefs-control` — and the restoration is asserted byte-exact against the pre-control ref snapshot plus an empty `status --porcelain`, for the rerere test's reason: the closing assertion cannot tell the control's damage from the replay's. Non-conflicting on purpose; a rebase that halts never reaches the point of updating refs. The fixture also arms `rebase.backend = apply` before any of this and leaves it standing through the replay: it is the backend that would silence `--update-refs`, which is why the control pins its own, and `Git::safety_config` overrides it for everything the harness runs — so what stays armed is a developer rebase configuration the replay has to tolerate and be unaffected by. |
 | `works_when_the_branches_are_checked_out_in_other_worktrees` | The two `repo.add_worktree` calls panic if git refuses, so both branches provably are checked out elsewhere when the replay starts. | **Structural, unasserted.** Those worktrees *are* the arming: git physically refuses a non-detached checkout of a branch held in another worktree, so dropping `--detach` cannot pass. `conflicts.files() == Files::new(1)`, `shared.txt` and `hunks() > Hunks::new(0)` stop an empty replay passing. But no assertion states the branches are held, so a change to `add_worktree` in `src/testing.rs` would disarm this silently. |
 | `never_disturbs_other_worktrees_whose_directories_are_temporarily_missing` | `assert!(admin_dir.is_dir(), "fixture must start with worktree state that could be lost")`. | **Partial.** The `expect("park the worktree directory")` rename physically creates the missing-directory condition a prune destroys, and the closing restore-then-`git status` proves what survived is a working worktree rather than a leftover directory. Nothing asserts git regarded the parked worktree as prunable while the replay ran; asserting `prunable` in `git worktree list` at that moment would close it. |
-| `never_records_a_rerere_preimage_even_when_rerere_is_enabled` | `assert!(!rr_cache.exists(), "fixture must start with nothing recorded, or this proves nothing")`, plus the `conflicts` assertions proving a genuine conflict was resolved. | **Full.** A plain `git merge left` on `right`, through the fixture's own git, must conflict *and* fill the cache — `"rerere is not recording ... so this test could only pass vacuously; a plain conflicting merge left nothing at <path>"` — before anything under test runs. Then the fixture is put back: `merge --abort`, back to `main`, and the whole `rr-cache` directory removed, because `merge --abort` pointedly leaves the recording alone and the closing assertion is `!rr_cache.exists()`. The re-assert after clearing is the hooks test's, for the hooks test's reason: the real assertion must not be able to read the control's evidence as the replay's. |
+| `never_records_a_rerere_preimage_even_when_rerere_is_enabled` | `assert!(!rr_cache.exists(), "fixture must start with nothing recorded, or this proves nothing")`, plus the `conflicts` assertions proving a genuine conflict was resolved. | **Full.** A `git merge --no-ff left` on `right`, through the fixture's own git, must conflict *and* fill the cache — `"rerere is not recording ... so this test could only pass vacuously; a plain conflicting merge left nothing at <path>"` — before anything under test runs. The `--no-ff` answers the `merge.ff = only` the fixture arms and leaves standing: without it git refuses the diverging merge outright, exit 128 with no merge started and no preimage written, and the control's own assertion asks only that the merge *failed*, so it cannot tell a refusal from a conflict. So the control states the shape of its failure as well as the fact of it — `git diff --name-only --diff-filter=U` must be non-empty, which is what a conflict leaves in the index and what no other merge failure produces. Then the fixture is put back: `merge --abort`, back to `main`, and the whole `rr-cache` directory removed, because `merge --abort` pointedly leaves the recording alone and the closing assertion is `!rr_cache.exists()`. The re-assert after clearing is the hooks test's, for the hooks test's reason: the real assertion must not be able to read the control's evidence as the replay's. |
 | `never_fires_a_hook_from_the_developer_s_repository` | The sentinel directory is created empty, and after the control run `describe_tree(&sentinels)` is re-asserted `""` so the real assertion cannot mistake the control's evidence for the replay's. | **Full, and the model for the rest.** A `repo.checkout` pair through the fixture's own git must leave `post-checkout` behind — `"the planted hooks are not armed, so this test could only pass vacuously"` — before anything under test runs. Caveat: only `post-checkout` is proven to fire. `pre-rebase`, `post-rewrite` and `pre-merge-commit` are planted identically but never individually armed, and the last cannot fire from a rebase-only replay at all, which its own doc comment says. Non-Unix skips the test rather than passing it vacuously. |
 | `never_touches_the_real_working_tree_or_index` | Three, all explicit: `!before_status.is_empty()`, `!before_index.is_empty()`, and `before_branch == "main"` so a stray detach is visible. Plus the `conflicts` assertions. | **Structural, and un-armable in-test by design.** The file dirtied on purpose is `shared.txt`, the exact file both replayed branches rewrite, so a replay that escaped its scratch would have to collide with it. Arming that in-test means performing the damage the test exists to forbid; the mutation record below is the out-of-band substitute, and it is the reason this row is acceptable rather than merely unfinished. |
-| `never_leaves_a_scratch_worktree_registered_in_the_real_repository` | `before.lines().count() == 1` and `describe_tree(&worktrees_dir) == ""` — "or a leak has somewhere to hide". | **Full, twice over.** While the first `Scratch` is alive, `while_alive.lines().count() == 2` and `assert_ne!(describe_tree(&worktrees_dir), "")` — "or this test can only pass vacuously" — prove the harness really registers what teardown must remove. The third scope arms its own harder case separately: `!halted.success` and the `rebase-merge` path existing prove the scratch really was dropped mid-rebase. Only the first scope proves registration, though all three build a `Scratch` the same way. |
+| `never_leaves_a_scratch_worktree_registered_in_the_real_repository` | `before.lines().count() == 1` and `describe_tree(&worktrees_dir) == ""` — "or a leak has somewhere to hide". | **Full, twice over.** While the first `Scratch` is alive, `while_alive.lines().count() == 2` and `assert_ne!(describe_tree(&worktrees_dir), "")` — "or this test can only pass vacuously" — prove the harness really registers what teardown must remove. The third scope arms its own harder case separately: `!halted.success` and the `rebase-merge` path existing prove the scratch really was dropped mid-rebase. That `rebase-merge` assertion is now the armed control for a second guard as well — the fixture arms `rebase.backend = apply` and leaves it standing, so the path the assertion names is the one `Git::safety_config`'s `rebase.backend=merge` chooses over the fixture's, and dropping that pin sends the state to `rebase-apply`. Only the first scope proves registration, though all three build a `Scratch` the same way. |
 | `replays_without_hanging_or_failing_when_commit_signing_is_enabled` | Implicit: `TestRepo::init` pins `commit.gpgsign=false` while building the fixture and signing is switched on afterwards, so the control below doubles as proof the config took. | **Full.** A plain `git commit --allow-empty` through the fixture must *fail* — `"commit signing is not armed ... a plain commit succeeded"` — and fail for the stated reason, `gpg failed to sign`. `--allow-empty` means arming leaves the fixture exactly as it found it. A second control lives inside `replay_under_signing`: the replayed commit must still be in `left..HEAD`, which catches a signing failure that came back disguised as a plausible answer. The hang branch cannot be armed at all — see the record below. |
 
 ### The rule for the next test
@@ -107,8 +108,11 @@ and the test keeps reporting green about a hazard that is no longer there.
 
 ## Why one of these runs backwards
 
-Seven of the eight guards are things the crate *does*, so breaking them means
-taking something away. The third is different: the guard is something the crate
+Eight of the nine guards are things the crate *does*, so breaking them means
+taking something away. Nine, not eight: the map above is one row per guard
+rather than one per test, so the `rerere` pair counts once — one mutation
+removes both entries — and the worktree test carries two rows, one for each
+guard it pins. The third row is different: the guard is something the crate
 deliberately **does not do**, and you cannot remove an absence. Teardown removes
 the scratch worktree by path and pointedly never runs `git worktree prune`,
 because pruning is repo-wide and immediate — it deletes the administrative state
@@ -295,6 +299,32 @@ test result: FAILED. 7 passed; 1 failed
 
 No collateral.
 
+### `rebase.backend=merge`, through `never_leaves_a_scratch_worktree_registered_in_the_real_repository`
+
+Mutation: removed `"rebase.backend=merge"` from `Git::safety_config()`. The
+fixture arms `rebase.backend = apply`, so with the harness's pin gone the replay
+inherits the developer's backend, and the rebase that halts files its state at
+`rebase-apply` instead. The block that drops a `Scratch` mid-rebase looks for
+`rebase-merge`, so it reports a scratch that is not mid-rebase at all:
+
+```text
+thread 'never_leaves_a_scratch_worktree_registered_in_the_real_repository'
+panicked at src/gitscratch/tests/safety.rs:
+the scratch should be mid-rebase at .../worktrees/worktree/rebase-merge when it is dropped
+
+test result: FAILED. 7 passed; 1 failed
+```
+
+No collateral: this is the only test the mutation reddens.
+
+The pin earns its keep in the sibling test as well, which is the point of adding
+it. With the backend pinned, removing `"rebase.updateRefs=false"` reddens
+`never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled` at
+`replay moved branch 'right'` even on a machine carrying a global
+`[rebase] backend = apply` — the case where that mutation used to come back
+green, because the backend the replay inherited ignored `--update-refs`, so the
+ref stayed put and the missing guard looked harmless.
+
 ### `replays_without_hanging_or_failing_when_commit_signing_is_enabled`
 
 Mutation: removed `commit.gpgsign=false` from `Git::safety_config()`. This test
@@ -326,7 +356,7 @@ No collateral.
 The record above describes the code as it stands, and it decays the moment the
 code moves. Three places are load-bearing for the whole table:
 
-- **`Git::safety_config()`** — five of the eight guards are entries in that
+- **`Git::safety_config()`** — five of the nine guards are entries in that
   list. Adding, reordering, or removing one changes what the suite covers.
 - **`Scratch::create`** — the scratch worktree and its detached `worktree add`.
 - **The `Drop` teardown** — both the removal that must happen and the prune that

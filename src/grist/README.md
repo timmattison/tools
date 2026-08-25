@@ -107,14 +107,16 @@ cargo build --release -p grist
 ```
 
 Most of the safety guarantees above belong to the shared harness, so that is
-where they are pinned. `gitscratch`'s `tests/safety.rs` holds eight of them —
-`rebase.updateRefs=false`, the detached checkout, `rerere` recording nothing, no
-hook firing, the real working tree and index surviving untouched, both halves of
-teardown, and a replay neither hanging nor failing under commit signing — and
-every one has been watched to fail: break the guard, confirm that specific test
-goes red for the stated reason, put it back. A guard nobody has ever seen fail
-is indistinguishable from one that is quietly broken, since both report green
-forever. [`MUTATIONS.md`](../gitscratch/MUTATIONS.md) is where that evidence
+where they are pinned. `gitscratch`'s `tests/safety.rs` holds nine of them —
+`rebase.updateRefs=false`, the pinned `rebase.backend=merge` that keeps it
+falsifiable on a developer who prefers the apply backend, the detached checkout,
+`rerere` recording nothing, no hook firing, the real working tree and index
+surviving untouched, both halves of teardown, and a replay neither hanging nor
+failing under commit signing — and every one has been watched to fail: break the
+guard, confirm that specific test goes red for the stated reason, put it back. A
+guard nobody has ever seen fail is indistinguishable from one that is quietly
+broken, since both report green forever.
+[`MUTATIONS.md`](../gitscratch/MUTATIONS.md) is where that evidence
 lives, guard by guard, alongside the failure output captured at the time.
 
 `grist` keeps a `tests/safety.rs` of its own for the part `gitscratch` cannot

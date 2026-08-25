@@ -45,7 +45,8 @@ index measured under identical rules, not as an exact prediction.
 
 | Guard | Why |
 | --- | --- |
-| `rebase.updateRefs=false` | Without it, rebasing a detached HEAD still rewrites every branch ref pointing into the replayed range — including the branch being simulated. Not paranoia: with the setting enabled and the guard removed, a dry run *destroys the branch it is replaying*. |
+| `rebase.updateRefs=false` | Without it, rebasing a detached HEAD still rewrites every branch ref pointing into the replayed range — including the branch being simulated. Not paranoia: with the setting enabled and the guard removed, a dry run *destroys the branch it is replaying*. The claim holds on every machine only because the row below pins the backend alongside it; under the apply backend the setting is inert either way. |
+| `rebase.backend=merge` | `--update-refs` is a merge-backend feature, and the apply backend ignores it outright. Left unpinned, the row above is unfalsifiable on a developer who prefers apply — it could be deleted and nothing on that machine would notice, because the backend already silences what it overrides. The backend also decides where a halted rebase files its state, `rebase-merge` rather than `rebase-apply`, so a consumer inspecting an interrupted replay reads the same repository everywhere. |
 | `rerere.enabled=false`, `rerere.autoupdate=false` | A simulated resolution would otherwise land in the shared `rr-cache` and silently pre-resolve the developer's real merges later. |
 | `core.hooksPath` → an empty directory | No hook fires. An empty *value* is not "hooks off" — git still resolves lookups against it — so the path is a real, empty, temporary directory, validated once at creation. |
 | `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `GIT_TERMINAL_PROMPT` | A halted rebase would otherwise open an editor and hang forever. |
@@ -64,11 +65,15 @@ cost the developer a worktree.
 
 ## Testing
 
-`tests/safety.rs` pins eight properties, each verified by mutation — break the
-guard, watch that specific test fail, put it back:
+`tests/safety.rs` pins nine properties across eight tests, each verified by
+mutation — break the guard, watch that specific test fail, put it back. The two
+counts differ because the teardown test pins two of them, the removal itself and
+the backend its halted rebase is inspected under, and each gets a bullet:
 
 - **`rebase.updateRefs=false`**, asserted with the setting deliberately turned
-  *on* in the repository being replayed.
+  *on* in the repository being replayed — and with `rebase.backend = apply`
+  armed beside it and left armed through the replay, since the harness picks
+  its own backend rather than inheriting the developer's.
 - **The detached checkout**, which is what lets a branch already checked out in
   another worktree be replayed at all. It is spelled out in the test rather than
   hidden behind a library call precisely because it is a guard.
@@ -87,11 +92,15 @@ guard, watch that specific test fail, put it back:
 - **`worktree remove --force` in teardown**, asserted after a clean run, after a
   resolved conflict, and after a `Scratch` dropped while a rebase was still
   halted — the path most likely to leak a registration.
+- **`rebase.backend=merge`**, pinned by that same halted-rebase case: it locates
+  the halted rebase at `rebase-merge` in a fixture that arms
+  `rebase.backend = apply`, so removing the harness's pin sends the state to
+  `rebase-apply` and turns the test red.
 - **`commit.gpgsign=false`**, asserted with signing turned on and a key that
   cannot resolve. The replay runs under a timeout, so the test catches a hang on
   a passphrase prompt and not only an outright failure.
 
-A ninth guarantee — **the `user.name`/`user.email` identity**, the last row
+A tenth guarantee — **the `user.name`/`user.email` identity**, the last row
 above — is pinned by a unit test in `src/git.rs` instead, which reads back
 `git var GIT_AUTHOR_IDENT` rather than building a repository to commit into.
 
