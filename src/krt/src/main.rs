@@ -1804,6 +1804,9 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         protocol: config.protocol,
         multipath: config.multipath,
         privilege,
+        // A trace of one destination probes in the first lane. The lanes
+        // beyond it are for a hunt, which traces many destinations at once.
+        lane: trace::Lane::FIRST,
         // The run loop stops at this number too, so the tracer sends no probe
         // behind the run that asked for it.
         rounds: config.rounds,
@@ -1901,7 +1904,7 @@ impl SystemProbes<'_> {
     /// The build of the configuration stands apart from the start of the
     /// tracer, because a tracer that starts sends packets and a test of this
     /// wiring sends none.
-    fn config_of(&self, target: Ipv4Addr, run: &RunId) -> trace::TraceConfig {
+    fn config_of(&self, target: Ipv4Addr, run: &RunId, lane: trace::Lane) -> trace::TraceConfig {
         trace::TraceConfig {
             target: IpAddr::V4(target),
             run: run.clone(),
@@ -1911,6 +1914,7 @@ impl SystemProbes<'_> {
             protocol: self.config.protocol,
             multipath: self.config.multipath,
             privilege: self.privilege,
+            lane,
             rounds: self.config.hunt.map(|hunt| hunt.probes_per_round),
         }
     }
@@ -1928,8 +1932,8 @@ impl hunt::Probes for SystemProbes<'_> {
         if let Some(running) = self.running.take() {
             running.wait();
         }
-        let (rounds, running) =
-            trace::spawn(&self.config_of(target, run)).map_err(|error| error.to_string())?;
+        let (rounds, running) = trace::spawn(&self.config_of(target, run, trace::Lane::FIRST))
+            .map_err(|error| error.to_string())?;
         self.running = Some(running);
         Ok(rounds)
     }
@@ -4129,7 +4133,8 @@ resolved configuration:
             privilege: Privilege::Unprivileged,
             running: None,
         };
-        let traced = probes.config_of(A_HUNT_DESTINATION, &RunId::at(Utc::now()));
+        let traced =
+            probes.config_of(A_HUNT_DESTINATION, &RunId::at(Utc::now()), crate::trace::Lane::FIRST);
         assert_eq!(traced.rounds, Some(PROBES_OF_A_TEST_HUNT));
     }
 
