@@ -22,7 +22,7 @@
 use crate::hunt::{Bounds, PARTIAL};
 use crate::live::Clock;
 use crate::ui;
-use crate::{REACHED, TARGETS, UNKNOWN};
+use crate::{REACHED, TARGETS};
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
@@ -152,6 +152,10 @@ fn share(done: u64, whole: u64, cells: usize) -> usize {
     let filled = u128::from(done) * width / u128::from(whole);
     usize::try_from(filled).unwrap_or(usize::MAX).min(cells)
 }
+
+/// The text between the destination that a line names and the number of the
+/// destinations that stand beside it.
+const MORE_STANDING: &str = " +";
 
 /// The control text that puts the cursor back at the left edge of the line.
 const CARRIAGE_RETURN: &str = "\r";
@@ -308,7 +312,7 @@ impl<W: Write, C: Clock> Indicator<W, C> {
         // and [`TIME`] name, and [`DROP_ORDER`] reads them by that name.
         let mut fields = [
             Some(self.rounds_field()),
-            self.target.map(|addr| addr.to_string()),
+            self.address_field(),
             Some(self.targets_field()),
             Some(ui::render_duration(self.elapsed())),
         ];
@@ -319,6 +323,26 @@ impl<W: Write, C: Clock> Indicator<W, C> {
             fields[dropped] = None;
         }
         join(&fields)
+    }
+
+    /// The destination that the hunt started last, and the number of the
+    /// others that stand beside it.
+    ///
+    /// A hunt that drew no address yet holds no destination, and the field is
+    /// then absent rather than empty between two separators.
+    ///
+    /// The hunt holds many destinations at once, and the line has room for one
+    /// address. The count is what tells a reader that the others are there: a
+    /// line of one address alone reads as a hunt of one destination at a time.
+    /// A hunt that holds one destination has none beside it, so that line
+    /// carries the address alone.
+    fn address_field(&self) -> Option<String> {
+        let target = self.target?;
+        let beside = self.flying.saturating_sub(1);
+        if beside == 0 {
+            return Some(target.to_string());
+        }
+        Some(format!("{target}{MORE_STANDING}{beside}"))
     }
 
     /// The rounds that the hunt holds, of the rounds it wants.
@@ -357,13 +381,16 @@ impl<W: Write, C: Clock> Indicator<W, C> {
     /// carries the destination and the answer of that one destination beside
     /// them. A reader of the file counts the answers from the lines, and the
     /// summary at the end counts them again.
-    fn log(&mut self, reached: bool) {
+    ///
+    /// The destination comes off the event and never off the field of the
+    /// indicator. A hunt holds many destinations at once, so the one that
+    /// finishes is rarely the one that started last.
+    fn log(&mut self, target: Ipv4Addr, reached: bool) {
         let answer = if reached { REACHED } else { PARTIAL };
         let fields = [
             self.rounds_field(),
             self.targets_field(),
-            self.target
-                .map_or_else(|| UNKNOWN.to_owned(), |addr| addr.to_string()),
+            target.to_string(),
             answer.to_owned(),
             ui::render_duration(self.elapsed()),
         ];
@@ -413,7 +440,7 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
             // destination that finished is the pace of the hunt itself, and a
             // frame of every turn would fill the file with the same line ten
             // times a second.
-            (Style::Log, Event::Scored { reached, .. }) => self.log(reached),
+            (Style::Log, Event::Scored { target, reached }) => self.log(target, reached),
             (Style::Log, _) => {}
         }
     }
@@ -804,7 +831,7 @@ mod tests {
         });
         indicator.show(Event::Target(address(ANOTHER_TARGET)));
         indicator.show(Event::Scored {
-            target: address(TARGET),
+            target: address(ANOTHER_TARGET),
             reached: false,
         });
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
