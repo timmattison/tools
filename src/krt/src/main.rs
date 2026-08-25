@@ -968,15 +968,41 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 /// destination and every flag of a probe conflicts with a command. Such a line
 /// would trace a host named `hunt`.
 ///
-/// The list of the names comes from the parser and never from a list of this
-/// file. A command that a later slice adds is a command that this guard covers,
-/// with nothing to remember.
+/// The list of the names comes from a built parser and never from a list of
+/// this file. A command that a later slice adds is a command that this guard
+/// covers, with nothing to remember.
+///
+/// The parser must be built, because clap writes the `help` command into it as
+/// it builds it. A parser straight from the derive macro therefore holds the
+/// commands of this file alone, and `krt --headless help` went to the network
+/// and looked for a host named `help`.
 fn command_named(destination: &str) -> Option<String> {
-    Cli::command()
+    built_parser()
         .get_subcommands()
         .map(|command| command.get_name().to_owned())
         .find(|name| name == destination)
 }
+
+/// The parser of the tool, as clap holds it once it is ready to read a command
+/// line.
+///
+/// Clap adds the `help` command and the `--help` and `--version` flags as it
+/// builds the parser, and the derive macro alone adds none of the three. A
+/// reader of the parser that skips this step therefore reads a list that the
+/// tool never gives a user.
+fn built_parser() -> clap::Command {
+    let mut parser = Cli::command();
+    parser.build();
+    parser
+}
+
+/// The flags that clap writes into the parser as it builds it.
+///
+/// A built parser carries `--help` on every command, and `--version` on the top
+/// level alone, because the version stands on [`Cli`]. Neither is a flag of a
+/// probe, so a message about the flags of a probe names neither. The names are
+/// the ids that clap gives the two arguments.
+const GENERATED_FLAGS: [&str; 2] = ["help", "version"];
 
 /// The flags of the top level that the command does not take, as a user writes
 /// them.
@@ -987,16 +1013,23 @@ fn command_named(destination: &str) -> Option<String> {
 /// the flag is unknown. The message therefore names the flags of the second
 /// kind.
 ///
-/// The two sets come from the parser and never from a list of this file. A flag
-/// that a later slice moves onto [`SharedArgs`] leaves this set on its own, and
-/// a flag that a later slice adds to the top level joins it.
+/// The two sets come from a built parser and never from a list of this file. A
+/// flag that a later slice moves onto [`SharedArgs`] leaves this set on its
+/// own, and a flag that a later slice adds to the top level joins it.
+///
+/// The parser must be built, for the reason that [`command_named`] gives: the
+/// `help` command exists only in a built parser, and this function finds the
+/// command of a name that guard gave it. A built parser also carries the two
+/// flags that clap writes itself, so the top level drops
+/// [`GENERATED_FLAGS`] first. `--version` stands on the top level alone, and
+/// the message would otherwise name it as a flag that the command refuses.
 ///
 /// A flag that carries a short name and no long name — the two flags of the
 /// address family — reads by its short name. A positional argument is no flag,
 /// so the set holds none. The order is the order of the text, so one command
 /// line always reads one message.
 fn flags_outside(command: &str) -> Vec<String> {
-    let top = Cli::command();
+    let top = built_parser();
     let Some(inner) = top.find_subcommand(command) else {
         return Vec::new();
     };
@@ -1010,6 +1043,7 @@ fn flags_outside(command: &str) -> Vec<String> {
         .collect();
     let mut outside: Vec<String> = top
         .get_arguments()
+        .filter(|argument| !GENERATED_FLAGS.contains(&argument.get_id().as_str()))
         .filter_map(
             |argument| match (argument.get_long(), argument.get_short()) {
                 (Some(long), _) if !long_names.contains(long) => Some(format!("--{long}")),
