@@ -4133,8 +4133,11 @@ resolved configuration:
             privilege: Privilege::Unprivileged,
             running: None,
         };
-        let traced =
-            probes.config_of(A_HUNT_DESTINATION, &RunId::at(Utc::now()), crate::trace::Lane::FIRST);
+        let traced = probes.config_of(
+            A_HUNT_DESTINATION,
+            &RunId::at(Utc::now()),
+            crate::trace::Lane::FIRST,
+        );
         assert_eq!(traced.rounds, Some(PROBES_OF_A_TEST_HUNT));
     }
 

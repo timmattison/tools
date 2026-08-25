@@ -225,11 +225,13 @@ const UDP_SOURCE_PORTS: u32 = (UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) as 
 /// two probe at the same time and one port takes one of them. [`Lane`] states
 /// how the stride keeps every lane of one process on a port of its own.
 const fn udp_source_port(process: u32, lane: Lane) -> u16 {
-    let _ = lane;
-    // The remainder stands below `UDP_SOURCE_PORTS`, which is far inside the
-    // range of a `u16`, so the conversion of it takes nothing away.
-    let offset = (process % UDP_SOURCE_PORTS) as u16;
-    UDP_FIRST_SOURCE_PORT + offset
+    // The fold of the process runs first, so the sum of it and the shift of the
+    // lane stands far below the range of a `u32` and overflows for no process
+    // identifier. The remainder of that sum then stands below
+    // `UDP_SOURCE_PORTS`, which is far inside the range of a `u16`, so the
+    // conversion of it takes nothing away.
+    let offset = ((process % UDP_SOURCE_PORTS) + lane.shift(UDP_SOURCE_PORTS)) % UDP_SOURCE_PORTS;
+    UDP_FIRST_SOURCE_PORT + offset as u16
 }
 
 /// The destination port that a TCP trace holds while the source port varies.
@@ -276,13 +278,16 @@ const PROBE_IDENTIFIERS: u32 = u16::MAX as u32;
 /// of the other. [`Lane`] states how the stride keeps every lane of one process
 /// on an identifier of its own.
 const fn probe_identifier(process: u32, lane: Lane) -> u16 {
-    let _ = lane;
-    // The remainder stands in 0 through 65534, which is inside the range of a
-    // `u16`, so the conversion of it takes nothing away, and clippy reads the
-    // remainder and raises no truncation of its own. The one that the sum adds
-    // then puts the answer in 1 through 65535.
-    let folded = (process % PROBE_IDENTIFIERS) as u16;
-    folded + 1
+    // The fold of the process runs first, so the sum of it and the shift of the
+    // lane stands far below the range of a `u32` and overflows for no process
+    // identifier. The remainder of that sum then stands in 0 through 65534,
+    // which is inside the range of a `u16`, so the conversion of it takes
+    // nothing away, and clippy reads the remainder and raises no truncation of
+    // its own. The one that the sum adds then puts the answer in 1 through
+    // 65535.
+    let folded =
+        ((process % PROBE_IDENTIFIERS) + lane.shift(PROBE_IDENTIFIERS)) % PROBE_IDENTIFIERS;
+    folded as u16 + 1
 }
 
 /// The configuration of one tracing run, in the words that `krt` owns.
@@ -779,8 +784,8 @@ fn to_lookup(entry: &DnsEntry) -> Lookup {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_privilege, icmp_kind, next_seq, probe_identifier, to_lookup, to_round_record, Lane,
-        tracer_of, udp_source_port, IcmpKind, PrivilegeError, TraceConfig, TraceError,
+        choose_privilege, icmp_kind, next_seq, probe_identifier, to_lookup, to_round_record,
+        tracer_of, udp_source_port, IcmpKind, Lane, PrivilegeError, TraceConfig, TraceError,
         TracerThread,
     };
     use crate::names::Lookup;
@@ -1455,10 +1460,9 @@ this platform needs raw socket privileges to send probes.
     /// the two runs then read two different sets of answers.
     #[test]
     fn two_processes_of_one_window_hold_two_identifiers() {
-        let identifiers: std::collections::HashSet<u16> =
-            (0..u32::from(u16::MAX))
-                .map(|process| probe_identifier(process, Lane::FIRST))
-                .collect();
+        let identifiers: std::collections::HashSet<u16> = (0..u32::from(u16::MAX))
+            .map(|process| probe_identifier(process, Lane::FIRST))
+            .collect();
         assert_eq!(
             identifiers.len(),
             u32::from(u16::MAX) as usize,
@@ -1589,10 +1593,7 @@ this platform needs raw socket privileges to send probes.
     #[test]
     fn the_lane_of_a_configuration_reaches_the_identifier_of_its_tracer() {
         let lane = *every_lane().last().expect("a process holds a lane");
-        let tracer = tracer_from(&TraceConfig {
-            lane,
-            ..a_config()
-        });
+        let tracer = tracer_from(&TraceConfig { lane, ..a_config() });
         assert_eq!(
             tracer.trace_identifier(),
             TraceId(probe_identifier(process::id(), lane))
