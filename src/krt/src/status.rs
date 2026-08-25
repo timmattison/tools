@@ -343,6 +343,12 @@ mod tests {
     /// The width of a terminal that leaves the bar no room.
     const A_NARROW_TERMINAL: u16 = 40;
 
+    /// The second destination that the hunt of a test traces.
+    const ANOTHER_TARGET: &str = "198.51.100.9";
+
+    /// The number of destinations that the hunt of a log test finishes.
+    const LOGGED_ROUNDS: usize = 3;
+
     /// Reads an address that a test names.
     fn address(text: &str) -> Ipv4Addr {
         text.parse().expect("the test address must parse")
@@ -580,6 +586,87 @@ mod tests {
             frames[2].is_empty(),
             "the cursor must end at the left edge: {frames:?}"
         );
+    }
+
+    #[test]
+    fn a_log_writes_one_whole_line_for_each_destination_that_finished() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Log, &clock);
+        for _ in 0..LOGGED_ROUNDS {
+            indicator.show(&Event::Target(address(TARGET)));
+            indicator.show(&Event::Tick);
+            indicator.show(&Event::Scored { reached: true });
+        }
+        indicator.show(&Event::Stop);
+        let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
+        assert_eq!(
+            text.lines().count(),
+            LOGGED_ROUNDS,
+            "a log must write one line for each destination: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_log_line_names_the_round_the_destination_and_whether_it_answered() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Log, &clock);
+        indicator.show(&Event::Target(address(TARGET)));
+        indicator.show(&Event::Scored { reached: true });
+        indicator.show(&Event::Target(address(ANOTHER_TARGET)));
+        indicator.show(&Event::Scored { reached: false });
+        let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines[0].contains("round 1/64") && lines[0].contains(TARGET),
+            "the line must name the round and the destination: {lines:?}"
+        );
+        assert!(
+            lines[0].contains(crate::REACHED),
+            "the line of a destination that answered must say so: {lines:?}"
+        );
+        assert!(
+            lines[1].contains("round 2/64") && lines[1].contains(ANOTHER_TARGET),
+            "the line must name the round and the destination: {lines:?}"
+        );
+        assert!(
+            lines[1].contains(crate::hunt::PARTIAL) && !lines[1].contains(crate::REACHED),
+            "the line of a destination that answered nothing must say so: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_log_writes_nothing_while_a_destination_traces() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Log, &clock);
+        indicator.show(&Event::Target(address(TARGET)));
+        indicator.show(&Event::Tick);
+        indicator.show(&Event::Tick);
+        assert!(
+            indicator.sink.is_empty(),
+            "a log must write nothing until a destination finishes: {:?}",
+            indicator.sink
+        );
+    }
+
+    #[test]
+    fn a_log_holds_no_control_text() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Log, &clock);
+        indicator.show(&Event::Target(address(TARGET)));
+        indicator.show(&Event::Tick);
+        indicator.show(&Event::Scored { reached: true });
+        indicator.show(&Event::Stop);
+        let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
+        assert!(
+            !text.contains(CARRIAGE_RETURN),
+            "a pipe and a file keep every byte, so a log must hold no carriage return: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_terminal_takes_the_line_and_a_pipe_takes_the_log() {
+        assert_eq!(super::style_of(true), Style::Line);
+        assert_eq!(super::style_of(false), Style::Log);
     }
 
     #[test]
