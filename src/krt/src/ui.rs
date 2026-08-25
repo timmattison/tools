@@ -120,9 +120,9 @@
 //! sample of the window.
 //!
 //! The module also writes the one duration text of the crate. The resolved
-//! configuration, the status line of a round, and the header line of the frame
-//! each name a period of time, and a second writer of a duration would print
-//! `1s` in one of those three places and `1000ms` in another.
+//! configuration, the status line of a round, and the head of the frame each
+//! name a period of time, and a second writer of a duration would print `1s` in
+//! one of those three places and `1000ms` in another.
 
 use crate::stats::{Address, HopStats, Sample, TtlRow};
 use crate::{ROUND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE, UNKNOWN};
@@ -174,14 +174,14 @@ const SOURCE: &str = "src";
 /// list and its length can never part company.
 const HEADER_FIELDS: usize = 5;
 
-/// What the header line of the frame names.
+/// What the head of the frame names.
 ///
-/// The line stands above the table, and it holds what every row of the table
+/// The head stands above the table, and it holds what every row of the table
 /// has in common: what the run probed, where it probed from, how many rounds it
 /// folded, how often it probed, and which file holds the record. A reader who
-/// asks "what am I looking at" reads this one line, and a reader who asks "how
-/// is hop 7 doing" reads the table below it. The split is what keeps the table
-/// to one column for each number it prints.
+/// asks "what am I looking at" reads the head, and a reader who asks "how is
+/// hop 7 doing" reads the table below it. The split is what keeps the table to
+/// one column for each number it prints.
 ///
 /// Every field that a replay can fail to fill is an `Option`. A recorded file
 /// whose `run` record is absent — a file that a run was still writing when the
@@ -1388,11 +1388,11 @@ fn untracked_share(row: &TtlRow) -> f64 {
 /// One rendered view of one folded run.
 ///
 /// The frame holds what a reader needs and nothing that the reader must give
-/// back: the header line names the run, the table folds it, and the map of
-/// names says what each address is called. A caller builds one of these and
-/// asks for the lines at the width of its terminal.
+/// back: the head names the run, the table folds it, and the map of names says
+/// what each address is called. A caller builds one of these and asks for the
+/// lines at the width of its terminal.
 pub(crate) struct Frame<'a> {
-    /// What the line above the table names.
+    /// What the head above the table names.
     pub(crate) header: Header<'a>,
     /// The folded aggregate of the run.
     pub(crate) table: &'a crate::stats::HopTable,
@@ -1465,7 +1465,7 @@ impl Frame<'_> {
     ///
     /// A terminal too narrow for the whole table drops columns, in the order
     /// the module documentation states. The [`Layout`] holds that answer, and
-    /// the header line, the widths, the headings, and the rows all read the one
+    /// the head, the widths, the headings, and the rows all read the one
     /// layout.
     ///
     /// Every line drops its trailing spaces. A terminal prints them as nothing.
@@ -3027,9 +3027,9 @@ mod tests {
         .render(width, Paint::Plain, picture)
     }
 
-    /// The number of columns of a terminal that holds no whole header line.
+    /// The number of columns of a terminal that holds no whole head.
     ///
-    /// The header line of the golden run takes 99 columns, so a window of
+    /// The head of the golden run takes 99 columns on one line, so a window of
     /// sixty columns holds two of its five fields and no more. The table drops
     /// columns at this width as well, so the frame here is the frame of a
     /// narrow window and no part of it stands at the nominal width.

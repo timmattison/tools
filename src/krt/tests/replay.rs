@@ -1,10 +1,9 @@
 //! Black-box coverage for `krt replay`, driving the real binary.
 //!
 //! A replay reads a recorded file and folds one run of it into one frame: the
-//! header line that names the run, one blank line, the column header, and one
-//! row for each TTL of the path. The tests read the lines that the binary
-//! printed, so they cover the whole path from the command line to standard
-//! output.
+//! head that names the run, one blank line, the column header, and one row for
+//! each TTL of the path. The tests read the lines that the binary printed, so
+//! they cover the whole path from the command line to standard output.
 //!
 //! The binary writes to a pipe here and never to a terminal, so every frame
 //! below draws at the nominal width of 97 columns. That rule is what makes
@@ -441,7 +440,7 @@ impl TempFile {
             .into_owned()
     }
 
-    /// The size that the header line prints for the file.
+    /// The size that the head prints for the file.
     ///
     /// The count is the length of the text that the test wrote, and never a
     /// number that the binary printed. A size below one step reads as whole

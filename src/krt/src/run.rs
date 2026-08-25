@@ -1649,7 +1649,7 @@ mod tests {
     /// takes the terminal, and that frame counts no round and marks no pause.
     #[test]
     fn a_run_whose_table_is_paused_keeps_writing_every_round() {
-        // The name of the file stands in the header line of every frame, so
+        // The name of the file stands in the head of every frame, so
         // the label of it holds no word that a frame is read for.
         let file = TempFile::absent("held-table");
         let painted = Shared::new();
