@@ -4546,6 +4546,46 @@ resolved configuration:
         );
     }
 
+    /// The name of the command that prints the help of another command.
+    ///
+    /// Clap writes this command into the parser as it builds it, so the
+    /// derive macro alone names it nowhere.
+    const HELP: &str = "help";
+
+    /// The guard covers the command that clap itself adds.
+    ///
+    /// Clap puts the `help` command into the parser at build time, so a guard
+    /// that reads the commands of a parser it did not build sees `replay` and
+    /// `hunt` alone. `krt --headless help` then goes to the network and looks
+    /// for a host named `help`.
+    #[test]
+    fn a_flag_of_a_probe_in_front_of_the_help_is_rejected() {
+        let reason = contradiction(&["krt", "--headless", HELP]);
+        assert!(
+            reason.contains(HELP),
+            "the reason names the command: {reason}"
+        );
+    }
+
+    /// The reason names no flag that clap itself adds.
+    ///
+    /// Clap puts `--help` on every command and `--version` on the top level as
+    /// it builds the parser. A reason that read those two as flags of a probe
+    /// would name `--version` as a flag that the command refuses, and the
+    /// reader would look for a flag that no line of a trace holds.
+    #[test]
+    fn the_reason_of_a_command_read_as_a_destination_names_no_generated_flag() {
+        let reason = contradiction(&["krt", "--headless", HUNT]);
+        assert!(
+            !reason.contains("--version"),
+            "clap adds `--version`, and the reason names it nowhere: {reason}"
+        );
+        assert!(
+            !reason.contains("--help"),
+            "clap adds `--help`, and the reason names it nowhere: {reason}"
+        );
+    }
+
     /// The reason names every flag of the top level that the command refuses.
     ///
     /// The repair that the reason offers — write the command first — works for
