@@ -106,8 +106,13 @@ const FIRST_TTL_DEFAULT: u8 = 1;
 /// The last TTL of a run, when the user names none.
 const MAX_TTL_DEFAULT: u8 = 30;
 
-/// The number of destinations that a hunt traces, when the user names none.
-const HUNT_ROUNDS_DEFAULT: u64 = 64;
+/// The number of destinations that must answer a hunt, when the user names
+/// none.
+///
+/// Eight reached destinations make a hunt that measured something. The address
+/// space answers at a low rate, so a default far above eight spends minutes on
+/// addresses that answer nothing.
+const HUNT_ROUNDS_DEFAULT: u64 = 8;
 
 /// The number of probe rounds that each destination of a hunt takes, when the
 /// user names none.
@@ -466,7 +471,8 @@ enum Command {
     /// Hunt for the longest path. Draw an address, trace it, score it, and
     /// take the next round.
     Hunt {
-        /// Stop after this many destinations. One round is one destination.
+        /// Stop after this many destinations answer. A destination that
+        /// answers nothing costs no round.
         #[arg(
             long,
             value_name = "N",
@@ -511,7 +517,7 @@ enum Command {
 /// The configuration of one hunt, after the command line resolves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HuntConfig {
-    /// The number of destinations that the hunt traces.
+    /// The number of destinations that must answer before the hunt stops.
     rounds: u64,
     /// The number of probe rounds that each destination takes.
     probes_per_round: u64,
@@ -2017,8 +2023,8 @@ fn main() {
         // The block names what the hunt will do, and then the hunt does it.
         print!("{config}");
         // The table of the rounds that finished prints either way, and the
-        // reason that stopped the hunt follows it. A fault at round 40 of 64
-        // took nothing away from the 39 rounds in front of it.
+        // reason that stopped the hunt follows it. A fault at the fifth round
+        // of eight took nothing away from the four rounds in front of it.
         let (summary, failure) = match hunt(&config, &plan) {
             Ok(summary) => (Some(summary), None),
             Err(stopped) => (stopped.summary, Some(stopped.failure)),

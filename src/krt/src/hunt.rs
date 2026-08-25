@@ -1,15 +1,19 @@
 //! The hunt: many destinations, one file, and the table that ranks them.
 //!
 //! A hunt draws an address, traces it, scores the path it found, and takes the
-//! next round. It stops when it runs out of rounds, and it prints one table of
-//! four rows: the shortest path, the longest path, the fastest path, and the
-//! slowest path.
+//! next round. It stops when it holds the rounds it wants, and it prints one
+//! table of four rows: the shortest path, the longest path, the fastest path,
+//! and the slowest path.
 //!
 //! The word `round` carries two meanings around this module, and the two names
-//! keep them apart. A round of the hunt is one destination, and `Plan::rounds`
-//! counts those. A probe round is one sweep of the TTLs, and
+//! keep them apart. A round of the hunt is one destination that answered, and
+//! `Plan::rounds` counts those. A probe round is one sweep of the TTLs, and
 //! `Plan::probes_per_round` counts the probe rounds that each destination
 //! takes. The run loop of `run.rs` knows the second meaning alone.
+//!
+//! A destination that answered nothing costs no round. Most of the address
+//! space answers nothing, so a hunt that counted every draw would spend itself
+//! on addresses that measure no path at all.
 //!
 //! Both sources that a hunt draws on are seams, so no test of this module sends
 //! a packet:
@@ -497,7 +501,11 @@ pub(crate) struct Facts {
 
 /// The numbers that bound one hunt.
 pub(crate) struct Plan {
-    /// The number of destinations that the hunt traces.
+    /// The number of destinations that must answer before the hunt stops.
+    ///
+    /// A destination that answered nothing costs no round. Most of the address
+    /// space answers nothing, so a count of every draw would spend the hunt on
+    /// addresses that measure no path at all.
     pub(crate) rounds: u64,
     /// The number of probe rounds that each destination takes.
     pub(crate) probes_per_round: u64,
@@ -526,9 +534,13 @@ pub(crate) struct Sources<'a> {
 
 /// Records one hunt: one run for each destination, and the summary of them all.
 ///
+/// The hunt stops when `Plan::rounds` destinations answered. A destination that
+/// answered nothing costs no round, so the hunt keeps drawing until it holds
+/// the paths that the user asked for.
+///
 /// The hunt traces one destination at a time and never two at once. A
-/// measurement of 64 destinations at the normal interval is a small load, and
-/// it stays that way only while the hunt is serial.
+/// measurement of a few dozen destinations at the normal interval is a small
+/// load, and it stays that way only while the hunt is serial.
 ///
 /// Each destination takes one run of `run::record`, with a round limit of the
 /// probe rounds of the plan and a deadline of the target timeout. The deadline
@@ -567,7 +579,8 @@ pub(crate) fn record<W: Write>(
         |scores: Vec<Score>| Summary::new(scores, started.elapsed(), plan.include_partial);
     let mut scores = Vec::new();
     let mut previous = None;
-    for _ in 0..plan.rounds {
+    let mut reached: u64 = 0;
+    while reached < plan.rounds {
         if stop() {
             break;
         }
@@ -580,9 +593,11 @@ pub(crate) fn record<W: Write>(
         let run = RunId::at(moment);
         match trace_one(facts, plan, sources, stop, writer, target, run, status) {
             Ok(Some(score)) => {
-                status.show(Event::Scored {
-                    reached: score.kind == PathKind::Reached,
-                });
+                let answered = score.kind == PathKind::Reached;
+                if answered {
+                    reached += 1;
+                }
+                status.show(Event::Scored { reached: answered });
                 scores.push(score);
             }
             // A destination that the user cut short takes no row and no count
@@ -2157,10 +2172,10 @@ mod tests {
     }
 
     #[test]
-    fn a_hunt_stops_after_the_number_of_rounds_that_the_plan_names() {
+    fn a_hunt_stops_after_the_number_of_destinations_that_answered() {
         let hunted = hunted(
             &[NEAR, FAR, QUIET],
-            &[REACHED_AT_FIVE, REACHED_AT_FIVE, REACHED_AT_FIVE],
+            &[REACHED_AT_FIVE, FAR_REACHED_AT_EIGHTEEN, REACHED_AT_FIVE],
             2,
             &never_stops(),
         )
