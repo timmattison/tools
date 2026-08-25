@@ -1014,11 +1014,11 @@ mod tests {
         PARTIAL, SHORTEST, SLOWEST,
     };
     use crate::live::Screen;
-    use crate::status::{Event, Status};
     use crate::record::{
         EndReason, Family, HuntId, NameRecord, Privilege, Record, Recording, RoundRecord,
         RunConfig, RunId, SourceKind, SourceLabel, Writer,
     };
+    use crate::status::{Event, Status};
     use crate::testing::{named, round};
     use crate::{Multipath, Protocol};
     use chrono::Utc;
@@ -1471,7 +1471,12 @@ mod tests {
     #[test]
     fn the_screen_of_a_destination_asks_for_no_stop() {
         let mut recorder = Recorder::default();
-        let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL, &mut recorder);
+        let mut scorer = Scorer::new(
+            address(DESTINATION),
+            RunId::from(RUN),
+            FIRST_TTL,
+            &mut recorder,
+        );
         assert!(!scorer.poll());
     }
 
@@ -2057,8 +2062,12 @@ mod tests {
     fn the_screen_of_a_destination_ticks_the_indicator() {
         let mut recorder = Recorder::default();
         {
-            let mut scorer =
-                Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL, &mut recorder);
+            let mut scorer = Scorer::new(
+                address(DESTINATION),
+                RunId::from(RUN),
+                FIRST_TTL,
+                &mut recorder,
+            );
             scorer.poll();
             scorer.round(&round(FIRST_TTL, MAX_TTL, &[(1, FIRST_HOP, 1.0)]));
         }
@@ -2283,7 +2292,7 @@ mod tests {
             &[],
             &mut Recorder::default(),
         )
-            .expect_err("a tracer that will not start stops the hunt");
+        .expect_err("a tracer that will not start stops the hunt");
         let reason = stopped.fault.to_string();
         assert!(
             reason.contains(NEAR),
@@ -2324,7 +2333,7 @@ mod tests {
             &[],
             &mut Recorder::default(),
         )
-            .expect_err("the tracer of the third destination stops the hunt");
+        .expect_err("the tracer of the third destination stops the hunt");
         assert!(
             stopped.fault.to_string().contains(QUIET),
             "the fault names the destination that stopped the hunt: {}",

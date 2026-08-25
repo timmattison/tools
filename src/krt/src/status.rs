@@ -22,7 +22,7 @@
 use crate::hunt::PARTIAL;
 use crate::live::Clock;
 use crate::ui;
-use crate::{ROUND, REACHED, UNKNOWN};
+use crate::{REACHED, ROUND, UNKNOWN};
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
@@ -512,8 +512,14 @@ mod tests {
     fn the_line_counts_the_destinations_that_answered_and_the_ones_that_did_not() {
         let clock = FakeClock::new();
         let line = painted(hunting(&clock, 2, 3));
-        assert!(line.contains("2 reached"), "the line must count the reached: {line:?}");
-        assert!(line.contains("3 partial"), "the line must count the partial: {line:?}");
+        assert!(
+            line.contains("2 reached"),
+            "the line must count the reached: {line:?}"
+        );
+        assert!(
+            line.contains("3 partial"),
+            "the line must count the partial: {line:?}"
+        );
     }
 
     /// The number of cells that the bar of a wide terminal holds.
@@ -759,7 +765,6 @@ mod tests {
         assert_eq!(super::style_of(false), Style::Log);
     }
 
-
     #[test]
     fn a_terminal_too_narrow_for_the_counts_drops_them_whole() {
         let clock = FakeClock::new();
@@ -803,7 +808,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn the_line_names_the_time_that_the_hunt_took() {
         let clock = FakeClock::new();
@@ -812,6 +816,9 @@ mod tests {
         clock.advance(Duration::from_millis(42_500));
         indicator.show(Event::Tick);
         let line = painted(indicator);
-        assert!(line.contains("42s"), "the line must name the time: {line:?}");
+        assert!(
+            line.contains("42s"),
+            "the line must name the time: {line:?}"
+        );
     }
 }
