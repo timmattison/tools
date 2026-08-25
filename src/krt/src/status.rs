@@ -6,8 +6,8 @@
 //! hunt stands in, which address it traces, how many destinations answered, and
 //! how long the hunt took so far.
 //!
-//! Two looks serve two kinds of standard output, as the two screens of `live.rs`
-//! do for a run:
+//! Two styles serve two kinds of standard output, as the two screens of
+//! `live.rs` do for a run:
 //!
 //! - [`Style::Line`] is for a terminal. One line redraws in place, and the stop
 //!   of the hunt takes that line back, so the summary prints on a clean line.
@@ -17,7 +17,7 @@
 //!
 //! The [`Status`] trait is the seam. A test of the hunt hands the loop a status
 //! that records the events, so no test of `hunt.rs` needs a terminal, and the
-//! hunt itself knows nothing about which look it drives.
+//! hunt itself knows nothing about which style it drives.
 
 use crate::hunt::PARTIAL;
 use crate::live::Clock;
@@ -107,14 +107,15 @@ const BAR_WIDTH: usize = 24;
 /// this gets those numbers and no bar.
 const BAR_FLOOR: usize = 4;
 
-/// The place of the counts of the hunt among the fields of the line.
+/// The place of the destination that the hunt traces among the fields of the
+/// line, as [`Indicator::fields`] builds them.
+const TARGET: usize = 1;
+
+/// The place of the counts of the hunt among those same fields.
 const COUNTS: usize = 2;
 
-/// The place of the time that the hunt took among the fields of the line.
+/// The place of the time that the hunt took among those same fields.
 const TIME: usize = 3;
-
-/// The place of the destination that the hunt traces among the fields.
-const TARGET: usize = 1;
 
 /// The order that the fields of the line go away in, first dropped first.
 ///
@@ -284,6 +285,8 @@ impl<W: Write, C: Clock> Indicator<W, C> {
     /// A hunt that drew no address yet holds no destination, and that field is
     /// absent rather than empty between two separators.
     fn fields(&self, width: usize) -> String {
+        // The order of these four is the order that [`TARGET`], [`COUNTS`], and
+        // [`TIME`] name, and [`DROP_ORDER`] reads them by that name.
         let mut fields = [
             Some(format!("{}/{}", self.round, self.rounds)),
             self.target.map(|addr| addr.to_string()),
