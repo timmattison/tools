@@ -169,8 +169,154 @@ impl<W: Write, C: Clock> Indicator<W, C> {
     }
 }
 
+impl<W: Write, C: Clock> Indicator<W, C> {
+    /// The time that the hunt took so far, to the whole second.
+    ///
+    /// The line redraws ten times a second, and a duration that carries a
+    /// remainder of milliseconds prints as milliseconds. A field that reads
+    /// `42137ms` at one frame and `42238ms` at the next says the same thing
+    /// twice and asks the reader to read four digits to see it.
+    fn elapsed(&self) -> Duration {
+        Duration::from_secs(self.clock.now().duration_since(self.started).as_secs())
+    }
+
+    /// The glyph of the spinner at the turn that the hunt stands on.
+    fn spinner(&self) -> char {
+        SPINNER[self.frame % SPINNER.len()]
+    }
+
+    /// The bar of the rounds, in `width` columns.
+    ///
+    /// The bar fills in eighths of a cell, so a hunt of many rounds moves it on
+    /// most of its rounds. A bar of whole cells alone would stand still for
+    /// three rounds of a hunt of 64 in a bar of 24 cells.
+    fn bar(&self, width: usize) -> String {
+        let cells = width * EIGHTHS;
+        let filled = self.filled(cells);
+        let mut bar: String = std::iter::repeat_n(BAR_FULL, filled / EIGHTHS).collect();
+        if filled % EIGHTHS > 0 {
+            bar.push(BAR_PARTS[filled % EIGHTHS - 1]);
+        }
+        while ui::display_width(&bar) < width {
+            bar.push(BAR_EMPTY);
+        }
+        bar
+    }
+
+    /// The number of eighths of the bar that the rounds filled, of `cells`.
+    ///
+    /// A hunt of no round at all fills the bar whole. Such a hunt asked for
+    /// nothing and it did all of it, and a division by its round count has no
+    /// answer.
+    fn filled(&self, cells: usize) -> usize {
+        if self.rounds == 0 {
+            return cells;
+        }
+        let cells = u128::try_from(cells).unwrap_or(u128::MAX);
+        let filled = u128::from(self.round) * cells / u128::from(self.rounds);
+        usize::try_from(filled).unwrap_or(usize::MAX)
+    }
+
+    /// The line that a terminal shows.
+    ///
+    /// The fields come first and the bar takes the columns they leave, up to
+    /// [`BAR_WIDTH`]. A terminal that leaves less room than [`BAR_FLOOR`] gets
+    /// the fields alone: the numbers say what the bar says, and they say it in
+    /// every width.
+    fn line(&self) -> String {
+        let head = format!("{} ", self.spinner());
+        let tail = self.fields();
+        let room = usize::from(self.columns).saturating_sub(
+            ui::display_width(&head)
+                + ui::display_width(&tail)
+                + ui::display_width(ui::FIELD_SEPARATOR),
+        );
+        let width = room.min(BAR_WIDTH);
+        let line = if width < BAR_FLOOR {
+            format!("{head}{tail}")
+        } else {
+            format!(
+                "{head}{}{}{tail}",
+                self.bar(width),
+                ui::FIELD_SEPARATOR
+            )
+        };
+        ui::truncate_to_width(&line, usize::from(self.columns))
+    }
+
+    /// The fields of the line, in the order they print.
+    ///
+    /// A hunt that drew no address yet holds no destination, and the field of
+    /// it goes away rather than standing empty between two separators.
+    fn fields(&self) -> String {
+        let target = self.target.map(|addr| addr.to_string());
+        [
+            Some(format!("{}/{}", self.round, self.rounds)),
+            target,
+            Some(format!("{} {REACHED}", self.reached)),
+            Some(format!("{} {PARTIAL}", self.partial)),
+            Some(ui::render_duration(self.elapsed())),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<String>>()
+        .join(ui::FIELD_SEPARATOR)
+    }
+
+    /// Paints the line, and wipes the tail of a longer line in front of it.
+    ///
+    /// A frame that does not reach the terminal loses that frame and nothing
+    /// else. The recording is the purpose of the tool, and the line is one view
+    /// of it, so a reader who closes the pipe of the display keeps the hunt.
+    fn paint(&mut self) {
+        let line = self.line();
+        let width = ui::display_width(&line);
+        let wipe = " ".repeat(self.painted.saturating_sub(width));
+        self.painted = width;
+        drop(write!(self.sink, "{CARRIAGE_RETURN}{line}{wipe}"));
+        drop(self.sink.flush());
+    }
+
+    /// Takes the line back, so the text that follows starts on a clean line.
+    fn wipe(&mut self) {
+        if self.painted == 0 {
+            return;
+        }
+        let blanks = " ".repeat(self.painted);
+        self.painted = 0;
+        drop(write!(
+            self.sink,
+            "{CARRIAGE_RETURN}{blanks}{CARRIAGE_RETURN}"
+        ));
+        drop(self.sink.flush());
+    }
+}
+
 impl<W: Write, C: Clock> Status for Indicator<W, C> {
-    fn show(&mut self, _event: &Event) {}
+    fn show(&mut self, event: &Event) {
+        match *event {
+            Event::Target(target) => {
+                self.round += 1;
+                self.target = Some(target);
+            }
+            Event::Tick => self.frame += 1,
+            Event::Scored { reached } => {
+                if reached {
+                    self.reached += 1;
+                } else {
+                    self.partial += 1;
+                }
+            }
+            Event::Stop => {}
+        }
+        match self.style {
+            Style::Line => match *event {
+                Event::Stop => self.wipe(),
+                _ => self.paint(),
+            },
+            Style::Log => {}
+        }
+    }
 }
 
 #[cfg(test)]
