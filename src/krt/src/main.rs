@@ -1678,6 +1678,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         protocol: config.protocol,
         multipath: config.multipath,
         privilege,
+        rounds: None,
     })
     .map_err(|error| TraceFailure::new(&error, EXIT_TRACER_FAILED))?;
 
@@ -1764,6 +1765,7 @@ impl hunt::Probes for SystemProbes<'_> {
             protocol: self.config.protocol,
             multipath: self.config.multipath,
             privilege: self.privilege,
+            rounds: None,
         })
         .map_err(|error| error.to_string())
     }

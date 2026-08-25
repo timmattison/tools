@@ -227,6 +227,11 @@ pub(crate) struct TraceConfig {
     pub(crate) multipath: crate::Multipath,
     /// The privilege mode of the run.
     pub(crate) privilege: record::Privilege,
+    /// The number of probe rounds that the tracer sends before its thread
+    /// stops.
+    ///
+    /// A run that names no number takes rounds until the process ends.
+    pub(crate) rounds: Option<u64>,
 }
 
 /// Why the tracer of a run does not start.
@@ -1188,6 +1193,12 @@ this platform needs raw socket privileges to send probes.
     /// varies. It is the port of HTTP.
     const TCP_DESTINATION_PORT: u16 = 80;
 
+    /// The number of probe rounds of a test run.
+    ///
+    /// A tracer holds no round limit by default, so a mapping that dropped the
+    /// field fails the test that reads this number back.
+    const A_ROUND_LIMIT: u64 = 3;
+
     /// A last TTL above the largest one that the tracer takes.
     ///
     /// The command line of `krt` accepts a TTL up to 255, and `trippy_core`
@@ -1207,6 +1218,7 @@ this platform needs raw socket privileges to send probes.
             protocol: Protocol::Icmp,
             multipath: Multipath::Classic,
             privilege: Privilege::Unprivileged,
+            rounds: Some(A_ROUND_LIMIT),
         }
     }
 
@@ -1559,12 +1571,30 @@ this platform needs raw socket privileges to send probes.
         );
     }
 
-    /// `krt` owns the round limit and the time limit, and the run loop enforces
-    /// them. A tracer that stopped itself would close the channel, and the run
-    /// loop reads a closed channel as a dead tracer.
+    /// The tracer of a run stops at the round limit of that run.
+    ///
+    /// `trippy` gives no way to stop a tracer, so the round limit is the one
+    /// thing that ends the thread of one. A hunt starts one tracer for each
+    /// destination of one process, and a tracer that outlives its destination
+    /// probes beside the tracer of the destination after it. Two UDP tracers of
+    /// one process hold one source port, so the second one dies on the port it
+    /// cannot bind.
     #[test]
-    fn the_tracer_holds_no_round_limit() {
+    fn a_run_of_a_round_limit_stops_the_tracer_at_that_limit() {
         let limit = tracer_from(&a_config()).max_rounds();
+        let expected = usize::try_from(A_ROUND_LIMIT).expect("the round limit must fit a `usize`");
+        assert_eq!(limit.map(|rounds| rounds.0.get()), Some(expected));
+    }
+
+    /// A run that names no round limit leaves the tracer without one, and the
+    /// thread of that tracer then sends rounds until the process ends.
+    #[test]
+    fn a_run_of_no_round_limit_leaves_the_tracer_without_one() {
+        let config = TraceConfig {
+            rounds: None,
+            ..a_config()
+        };
+        let limit = tracer_from(&config).max_rounds();
         assert!(limit.is_none(), "the tracer holds a round limit: {limit:?}");
     }
 
