@@ -402,7 +402,12 @@ struct Drawn {
     /// the heading of the Recent column.
     head: u16,
     /// The Recent column of the frame, and the history of every row of the path
-    /// that reached it. `None` when a narrow terminal dropped that column.
+    /// that reached it.
+    ///
+    /// `None` for two reasons. A run that draws the block elements asks the
+    /// render for no such column, because it draws every history in the lines
+    /// and reads nothing else. And a narrow terminal that dropped the column
+    /// names no place for an image to stand.
     recent: Option<ui::RecentColumn>,
 }
 
@@ -607,6 +612,12 @@ impl<W: Write, K: Keys> Table<W, K> {
     /// body cells in that column. The block elements are one picture of a hop
     /// and the image is a second one, and a reader who sees both has two answers
     /// to one question.
+    ///
+    /// That one ask is what brings the Recent column back with the lines. A run
+    /// of the block elements asks for neither, and [`Drawn::recent`] is then
+    /// `None`: such a run draws every history in the lines and reads nothing
+    /// else, so a copy of those histories beside the lines is a copy that this
+    /// file never looks at.
     fn drawn(&self) -> Drawn {
         let frame = ui::Frame {
             header: ui::Header {
@@ -722,6 +733,14 @@ impl<W: Write, K: Keys> Table<W, K> {
     ///
     /// The clear comes next, so a frame of fewer lines than the frame before
     /// it leaves none of the older lines on the screen.
+    ///
+    /// The lines follow, and the images stand over them. Both answers have to
+    /// hold for one image to reach the buffer: the terminal reads a picture,
+    /// and the frame carries the Recent column that the image stands in. A run
+    /// of the block elements gives up the first, and it asks the render for
+    /// none of the second, so [`Drawn::recent`] is `None` there. A terminal too
+    /// narrow for the Recent column gives up the second on its own, and the
+    /// frame of such a terminal draws its lines and no image.
     ///
     /// The whole frame stands in one buffer, and that buffer reaches the sink
     /// in one call. The sink of a live run is `std::io::Stdout`, which is a

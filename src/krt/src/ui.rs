@@ -1437,8 +1437,17 @@ pub(crate) struct Rendered {
     /// an image of a row over the heading of the Recent column.
     pub(crate) head: u16,
     /// The terminal column that the Recent column starts at, and the history of
-    /// every row of the path in the order the rows stand. `None` when a narrow
-    /// terminal dropped the column.
+    /// every row of the path in the order the rows stand.
+    ///
+    /// The field stands here because one walk of the table has to answer both
+    /// the lines and the images: a second walk for the histories could count a
+    /// different set of rows, and an image of a row of one walk would then
+    /// stand over a row of the other.
+    ///
+    /// `None` for two reasons. A frame of [`RecentPicture::Bars`] carries none
+    /// of it, because that frame draws every history in its own lines and no
+    /// caller of that picture reads this field. And a narrow terminal that
+    /// dropped the column names no place for an image to stand.
     pub(crate) recent: Option<RecentColumn>,
 }
 
@@ -1467,6 +1476,12 @@ impl Frame<'_> {
     /// different set of rows: an image of a row of one walk would then stand
     /// over a row of the other.
     ///
+    /// They travel with a frame of [`RecentPicture::Image`] alone, because that
+    /// is the one picture whose caller draws them. A frame of
+    /// [`RecentPicture::Bars`] answers `None` for [`Rendered::recent`]: such a
+    /// frame draws every history in its own lines, so a copy of those histories
+    /// beside the lines is a copy that nobody reads.
+    ///
     /// [`RecentPicture::Image`] blanks the body cells of the Recent column, and
     /// each of them then carries [`RECENT_WIDTH`] spaces. The heading stays,
     /// because it names the column and it is no picture of a hop.
@@ -1482,18 +1497,29 @@ impl Frame<'_> {
         let layout = Layout::at(width);
         let table_width = layout.width();
         let mut rows = self.rows(layout.host());
-        let recent = layout.recent_column().map(|column| RecentColumn {
-            column,
-            rows: rows
-                .iter()
-                .map(|row| row.recent.history().to_vec())
-                .collect(),
-        });
-        if picture == RecentPicture::Image {
+        // The Recent column travels with the lines of a frame of images alone,
+        // because that is the one picture whose caller draws it. A frame of
+        // bars draws every history in its own lines, so a copy of those
+        // histories beside the lines is a copy that nobody reads: every replay,
+        // and every live run without the images, would pay it for each row of
+        // each frame.
+        let recent = if picture == RecentPicture::Image {
+            let recent = layout.recent_column().map(|column| RecentColumn {
+                column,
+                rows: rows
+                    .iter()
+                    .map(|row| row.recent.history().to_vec())
+                    .collect(),
+            });
+            // The blank goes in behind the read of the history, because the
+            // blank cell of a row holds none of it.
             for row in &mut rows {
                 row.recent = Recent::blank();
             }
-        }
+            recent
+        } else {
+            None
+        };
         let head = head_lines(header_lines.len());
         // A path holds 255 TTLs at most, and one TTL holds a bounded number of
         // rows, so the height of the frame stays far below the limit. The
