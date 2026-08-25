@@ -748,7 +748,7 @@ const TTL_WIDTH: u16 = 4;
 ///
 /// A host cut to fewer columns than this names no router: `ae-1.core.exam` is
 /// already a guess, and half of that is a shape. A terminal too narrow to hold
-/// the frame at this floor gets the frame at the floor anyway, and it clips the
+/// the frame at this floor gets the frame at the floor anyway, and it wraps the
 /// rest. A frame that shrank the column further would print a table that reads
 /// as though the path had changed.
 const HOST_MIN: u16 = 12;
@@ -3880,7 +3880,7 @@ mod tests {
         );
         assert!(
             display_width(header) > usize::from(BELOW_THE_LAST_SET),
-            "the terminal clips the frame, and a frame of no columns says nothing"
+            "the terminal wraps the frame, and a frame of no columns says nothing"
         );
     }
 
