@@ -491,6 +491,47 @@ mod tests {
         String::from_utf8(out).expect("the delete command is ASCII")
     }
 
+    /// Draw one image on a Kitty terminal and give back the control data of
+    /// the command, which is the part between `ESC _ G` and the semicolon.
+    ///
+    /// The cursor is [`Cursor::Held`], which takes the caller managed cursor
+    /// contract. That contract reads nothing off the terminal, so the command
+    /// is the same in every terminal that runs the suite. [`Cursor::BelowImage`]
+    /// reads the height of the terminal, so no test here draws with it.
+    fn kitty_control_data() -> String {
+        let request = Request {
+            cursor: Cursor::Held { id: 1 },
+            ..test_request()
+        };
+
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::Kitty, true, true)
+            .draw(&mut out, &test_image(), &request)
+            .expect("a write to a vector never fails");
+
+        let command = String::from_utf8(out).expect("a Kitty command is ASCII");
+        let (control_data, _payload) = command
+            .split_once(';')
+            .expect("a Kitty command holds a semicolon between the keys and the payload");
+
+        String::from(control_data)
+    }
+
+    #[test]
+    fn a_kitty_image_asks_the_terminal_for_no_answer() {
+        // A Kitty terminal answers an image command that names an image id, and
+        // the answer is an APC sequence on the terminal itself. A tool that
+        // holds that terminal in raw mode reads the answer as key presses, so
+        // the image of one row of a frame arrives at the tool as a command of
+        // the user. `q=2` takes both answers of the terminal away.
+        let control_data = kitty_control_data();
+
+        assert!(
+            control_data.contains("q=2"),
+            "the keys of a Kitty image must hold q=2, but they are {control_data:?}"
+        );
+    }
+
     #[test]
     fn a_kitty_terminal_deletes_the_placements_it_holds() {
         // A Kitty placement outlives a clear of the screen, so a caller that
