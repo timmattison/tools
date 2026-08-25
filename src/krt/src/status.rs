@@ -321,7 +321,7 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Event, Indicator, Status, Style};
+    use super::{Event, Indicator, Status, Style, BAR_EMPTY, BAR_FULL, CARRIAGE_RETURN};
     use crate::testing::FakeClock;
     use std::net::Ipv4Addr;
     use std::rc::Rc;
@@ -337,6 +337,12 @@ mod tests {
     /// The destination that the hunt of a test traces.
     const TARGET: &str = "203.0.113.7";
 
+    /// The number of rounds that a hunt finishes before its last one.
+    const ROUNDS_BEFORE_THE_LAST: usize = 63;
+
+    /// The width of a terminal that leaves the bar no room.
+    const A_NARROW_TERMINAL: u16 = 40;
+
     /// Reads an address that a test names.
     fn address(text: &str) -> Ipv4Addr {
         text.parse().expect("the test address must parse")
@@ -345,6 +351,19 @@ mod tests {
     /// The indicator of a test, over bytes and a clock the test moves.
     fn indicator(style: Style, clock: &Rc<FakeClock>) -> Indicator<Vec<u8>, Rc<FakeClock>> {
         Indicator::new(style, ROUNDS, COLUMNS, Vec::new(), Rc::clone(clock))
+    }
+
+    /// The frames that the indicator wrote, in the order it wrote them.
+    ///
+    /// A frame starts at the carriage return that puts the cursor back at the
+    /// left edge, so the text in front of the first one is empty and the split
+    /// drops it.
+    fn frames(sink: &[u8]) -> Vec<String> {
+        let text = String::from_utf8(sink.to_vec()).expect("the indicator writes text");
+        text.split(CARRIAGE_RETURN)
+            .skip(1)
+            .map(ToOwned::to_owned)
+            .collect()
     }
 
     /// The text of the line that the indicator painted last.
@@ -399,6 +418,168 @@ mod tests {
         let line = painted(hunting(&clock, 2, 3));
         assert!(line.contains("2 reached"), "the line must count the reached: {line:?}");
         assert!(line.contains("3 partial"), "the line must count the partial: {line:?}");
+    }
+
+    /// The number of cells that the bar of a wide terminal holds.
+    const BAR_CELLS: usize = 24;
+
+    #[test]
+    fn the_bar_fills_in_proportion_to_the_rounds() {
+        let clock = FakeClock::new();
+        // The hunt stands on round 16 of 64, which is one quarter of the bar.
+        let line = painted(hunting(&clock, 15, 0));
+        assert_eq!(
+            line.matches(BAR_FULL).count(),
+            BAR_CELLS / 4,
+            "the bar of a quarter of the rounds must fill a quarter of its cells: {line:?}"
+        );
+    }
+
+    #[test]
+    fn the_bar_of_the_last_round_holds_no_empty_cell() {
+        let clock = FakeClock::new();
+        let line = painted(hunting(&clock, ROUNDS_BEFORE_THE_LAST, 0));
+        assert_eq!(
+            line.matches(BAR_FULL).count(),
+            BAR_CELLS,
+            "the bar of the last round must fill every cell: {line:?}"
+        );
+        assert!(
+            !line.contains(BAR_EMPTY),
+            "the bar of the last round must hold no empty cell: {line:?}"
+        );
+    }
+
+    #[test]
+    fn the_bar_fills_a_cell_in_eighths() {
+        let clock = FakeClock::new();
+        // The first round of 64 fills three eighths of the first cell of a bar
+        // of 24 cells, and a bar of whole cells alone would show nothing at all.
+        let line = painted(hunting(&clock, 0, 0));
+        assert!(
+            line.contains('▍'),
+            "the bar must fill the first cell in part: {line:?}"
+        );
+        assert_eq!(
+            line.matches(BAR_FULL).count(),
+            0,
+            "the bar of the first round must fill no whole cell: {line:?}"
+        );
+    }
+
+    #[test]
+    fn the_spinner_turns_on_a_tick() {
+        let clock = FakeClock::new();
+        let mut first = indicator(Style::Line, &clock);
+        first.show(&Event::Target(address(TARGET)));
+        let mut second = indicator(Style::Line, &clock);
+        second.show(&Event::Target(address(TARGET)));
+        second.show(&Event::Tick);
+        assert_ne!(
+            painted(first).chars().next(),
+            painted(second).chars().next(),
+            "a tick must turn the spinner"
+        );
+    }
+
+    #[test]
+    fn the_line_never_runs_past_the_columns_of_the_terminal() {
+        let clock = FakeClock::new();
+        for columns in 0..=COLUMNS {
+            let mut indicator =
+                Indicator::new(Style::Line, ROUNDS, columns, Vec::new(), Rc::clone(&clock));
+            indicator.show(&Event::Target(address(TARGET)));
+            let line = painted(indicator);
+            assert!(
+                crate::ui::display_width(&line) <= usize::from(columns),
+                "a line of {columns} columns must not run past them: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_terminal_too_narrow_for_the_bar_shows_the_fields_alone() {
+        let clock = FakeClock::new();
+        let mut indicator = Indicator::new(
+            Style::Line,
+            ROUNDS,
+            A_NARROW_TERMINAL,
+            Vec::new(),
+            Rc::clone(&clock),
+        );
+        indicator.show(&Event::Target(address(TARGET)));
+        let line = painted(indicator);
+        assert!(
+            !line.contains(BAR_EMPTY) && !line.contains(BAR_FULL),
+            "a narrow terminal must get no bar: {line:?}"
+        );
+        assert!(
+            line.contains("1/64"),
+            "a narrow terminal must still get the round of the hunt: {line:?}"
+        );
+    }
+
+    #[test]
+    fn the_line_redraws_in_place() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Line, &clock);
+        indicator.show(&Event::Target(address(TARGET)));
+        indicator.show(&Event::Tick);
+        let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
+        assert!(
+            !text.contains('\n'),
+            "a line that redraws in place holds no newline: {text:?}"
+        );
+        assert_eq!(
+            text.matches(CARRIAGE_RETURN).count(),
+            2,
+            "each frame must start at the left edge: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_wipes_the_tail_of_a_wider_frame_in_front_of_it() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Line, &clock);
+        indicator.show(&Event::Target(address(TARGET)));
+        // The time field reads `59s` at one frame and `1m` at the next, so the
+        // second frame is one column narrower than the first.
+        clock.advance(Duration::from_secs(59));
+        indicator.show(&Event::Tick);
+        clock.advance(Duration::from_secs(1));
+        indicator.show(&Event::Tick);
+        let frames = frames(&indicator.sink);
+        assert!(
+            crate::ui::display_width(&frames[1]) > crate::ui::display_width(frames[2].trim_end()),
+            "the test must make a narrower frame follow a wider one: {frames:?}"
+        );
+        assert_eq!(
+            crate::ui::display_width(&frames[2]),
+            crate::ui::display_width(&frames[1]),
+            "the narrower frame must wipe the tail of the wider one: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn the_stop_takes_the_line_back() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Line, &clock);
+        indicator.show(&Event::Target(address(TARGET)));
+        indicator.show(&Event::Stop);
+        let frames = frames(&indicator.sink);
+        assert!(
+            frames[1].chars().all(|glyph| glyph == ' '),
+            "the stop must write blanks over the line: {frames:?}"
+        );
+        assert_eq!(
+            crate::ui::display_width(&frames[1]),
+            crate::ui::display_width(&frames[0]),
+            "the blanks must cover the whole line: {frames:?}"
+        );
+        assert!(
+            frames[2].is_empty(),
+            "the cursor must end at the left edge: {frames:?}"
+        );
     }
 
     #[test]
