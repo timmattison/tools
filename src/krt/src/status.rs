@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 /// and a test of the hunt records them.
 pub(crate) trait Status {
     /// Takes one event of the hunt.
-    fn show(&mut self, event: &Event);
+    fn show(&mut self, event: Event);
 }
 
 /// One thing that happened inside a hunt.
@@ -194,7 +194,7 @@ impl<W: Write, C: Clock> Indicator<W, C> {
         let cells = width * EIGHTHS;
         let filled = self.filled(cells);
         let mut bar: String = std::iter::repeat_n(BAR_FULL, filled / EIGHTHS).collect();
-        if filled % EIGHTHS > 0 {
+        if !filled.is_multiple_of(EIGHTHS) {
             bar.push(BAR_PARTS[filled % EIGHTHS - 1]);
         }
         while ui::display_width(&bar) < width {
@@ -312,8 +312,8 @@ impl<W: Write, C: Clock> Indicator<W, C> {
 }
 
 impl<W: Write, C: Clock> Status for Indicator<W, C> {
-    fn show(&mut self, event: &Event) {
-        match *event {
+    fn show(&mut self, event: Event) {
+        match event {
             Event::Target(target) => {
                 self.round += 1;
                 self.target = Some(target);
@@ -328,7 +328,7 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
             }
             Event::Stop => {}
         }
-        match (self.style, *event) {
+        match (self.style, event) {
             // A terminal puts the cursor back where the carriage return sends
             // it, so every event redraws the one line and the stop takes it
             // back.
@@ -412,14 +412,14 @@ mod tests {
     fn hunting(clock: &Rc<FakeClock>, reached: usize, partial: usize) -> Indicator<Vec<u8>, Rc<FakeClock>> {
         let mut indicator = indicator(Style::Line, clock);
         for _ in 0..reached {
-            indicator.show(&Event::Target(address(TARGET)));
-            indicator.show(&Event::Scored { reached: true });
+            indicator.show(Event::Target(address(TARGET)));
+            indicator.show(Event::Scored { reached: true });
         }
         for _ in 0..partial {
-            indicator.show(&Event::Target(address(TARGET)));
-            indicator.show(&Event::Scored { reached: false });
+            indicator.show(Event::Target(address(TARGET)));
+            indicator.show(Event::Scored { reached: false });
         }
-        indicator.show(&Event::Target(address(TARGET)));
+        indicator.show(Event::Target(address(TARGET)));
         indicator
     }
 
@@ -502,10 +502,10 @@ mod tests {
     fn the_spinner_turns_on_a_tick() {
         let clock = FakeClock::new();
         let mut first = indicator(Style::Line, &clock);
-        first.show(&Event::Target(address(TARGET)));
+        first.show(Event::Target(address(TARGET)));
         let mut second = indicator(Style::Line, &clock);
-        second.show(&Event::Target(address(TARGET)));
-        second.show(&Event::Tick);
+        second.show(Event::Target(address(TARGET)));
+        second.show(Event::Tick);
         assert_ne!(
             painted(first).chars().next(),
             painted(second).chars().next(),
@@ -519,7 +519,7 @@ mod tests {
         for columns in 0..=COLUMNS {
             let mut indicator =
                 Indicator::new(Style::Line, ROUNDS, columns, Vec::new(), Rc::clone(&clock));
-            indicator.show(&Event::Target(address(TARGET)));
+            indicator.show(Event::Target(address(TARGET)));
             let line = painted(indicator);
             assert!(
                 crate::ui::display_width(&line) <= usize::from(columns),
@@ -538,7 +538,7 @@ mod tests {
             Vec::new(),
             Rc::clone(&clock),
         );
-        indicator.show(&Event::Target(address(TARGET)));
+        indicator.show(Event::Target(address(TARGET)));
         let line = painted(indicator);
         assert!(
             !line.contains(BAR_EMPTY) && !line.contains(BAR_FULL),
@@ -554,8 +554,8 @@ mod tests {
     fn the_line_redraws_in_place() {
         let clock = FakeClock::new();
         let mut indicator = indicator(Style::Line, &clock);
-        indicator.show(&Event::Target(address(TARGET)));
-        indicator.show(&Event::Tick);
+        indicator.show(Event::Target(address(TARGET)));
+        indicator.show(Event::Tick);
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
         assert!(
             !text.contains('\n'),
@@ -572,13 +572,13 @@ mod tests {
     fn a_frame_wipes_the_tail_of_a_wider_frame_in_front_of_it() {
         let clock = FakeClock::new();
         let mut indicator = indicator(Style::Line, &clock);
-        indicator.show(&Event::Target(address(TARGET)));
+        indicator.show(Event::Target(address(TARGET)));
         // The time field reads `59s` at one frame and `1m` at the next, so the
         // second frame is one column narrower than the first.
         clock.advance(Duration::from_secs(59));
-        indicator.show(&Event::Tick);
+        indicator.show(Event::Tick);
         clock.advance(Duration::from_secs(1));
-        indicator.show(&Event::Tick);
+        indicator.show(Event::Tick);
         let frames = frames(&indicator.sink);
         assert!(
             crate::ui::display_width(&frames[1]) > crate::ui::display_width(frames[2].trim_end()),
@@ -595,8 +595,8 @@ mod tests {
     fn the_stop_takes_the_line_back() {
         let clock = FakeClock::new();
         let mut indicator = indicator(Style::Line, &clock);
-        indicator.show(&Event::Target(address(TARGET)));
-        indicator.show(&Event::Stop);
+        indicator.show(Event::Target(address(TARGET)));
+        indicator.show(Event::Stop);
         let frames = frames(&indicator.sink);
         assert!(
             frames[1].chars().all(|glyph| glyph == ' '),
@@ -618,11 +618,11 @@ mod tests {
         let clock = FakeClock::new();
         let mut indicator = indicator(Style::Log, &clock);
         for _ in 0..LOGGED_ROUNDS {
-            indicator.show(&Event::Target(address(TARGET)));
-            indicator.show(&Event::Tick);
-            indicator.show(&Event::Scored { reached: true });
+            indicator.show(Event::Target(address(TARGET)));
+            indicator.show(Event::Tick);
+            indicator.show(Event::Scored { reached: true });
         }
-        indicator.show(&Event::Stop);
+        indicator.show(Event::Stop);
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
         assert_eq!(
             text.lines().count(),
@@ -635,10 +635,10 @@ mod tests {
     fn a_log_line_names_the_round_the_destination_and_whether_it_answered() {
         let clock = FakeClock::new();
         let mut indicator = indicator(Style::Log, &clock);
-        indicator.show(&Event::Target(address(TARGET)));
-        indicator.show(&Event::Scored { reached: true });
-        indicator.show(&Event::Target(address(ANOTHER_TARGET)));
-        indicator.show(&Event::Scored { reached: false });
+        indicator.show(Event::Target(address(TARGET)));
+        indicator.show(Event::Scored { reached: true });
+        indicator.show(Event::Target(address(ANOTHER_TARGET)));
+        indicator.show(Event::Scored { reached: false });
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
         let lines: Vec<&str> = text.lines().collect();
         assert!(
@@ -663,9 +663,9 @@ mod tests {
     fn a_log_writes_nothing_while_a_destination_traces() {
         let clock = FakeClock::new();
         let mut indicator = indicator(Style::Log, &clock);
-        indicator.show(&Event::Target(address(TARGET)));
-        indicator.show(&Event::Tick);
-        indicator.show(&Event::Tick);
+        indicator.show(Event::Target(address(TARGET)));
+        indicator.show(Event::Tick);
+        indicator.show(Event::Tick);
         assert!(
             indicator.sink.is_empty(),
             "a log must write nothing until a destination finishes: {:?}",
@@ -677,10 +677,10 @@ mod tests {
     fn a_log_holds_no_control_text() {
         let clock = FakeClock::new();
         let mut indicator = indicator(Style::Log, &clock);
-        indicator.show(&Event::Target(address(TARGET)));
-        indicator.show(&Event::Tick);
-        indicator.show(&Event::Scored { reached: true });
-        indicator.show(&Event::Stop);
+        indicator.show(Event::Target(address(TARGET)));
+        indicator.show(Event::Tick);
+        indicator.show(Event::Scored { reached: true });
+        indicator.show(Event::Stop);
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
         assert!(
             !text.contains(CARRIAGE_RETURN),
@@ -698,9 +698,9 @@ mod tests {
     fn the_line_names_the_time_that_the_hunt_took() {
         let clock = FakeClock::new();
         let mut indicator = indicator(Style::Line, &clock);
-        indicator.show(&Event::Target(address(TARGET)));
+        indicator.show(Event::Target(address(TARGET)));
         clock.advance(Duration::from_millis(42_500));
-        indicator.show(&Event::Tick);
+        indicator.show(Event::Tick);
         let line = painted(indicator);
         assert!(line.contains("42s"), "the line must name the time: {line:?}");
     }

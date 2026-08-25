@@ -28,9 +28,15 @@
 //! Each destination takes one run of `run::record`, so a hunt writes the
 //! records that a trace writes and a replay folds any one of its runs with no
 //! change. The screen of that run is the [`Scorer`], which folds the rounds
-//! into the numbers that the table ranks and draws nothing: a hunt shows one
-//! table at the end and no live table. The fold therefore rides on the door
-//! that the run loop already knocks on, and the hunt reads no file back.
+//! into the numbers that the table ranks: a hunt shows one table at the end and
+//! no live table. The fold therefore rides on the door that the run loop
+//! already knocks on, and the hunt reads no file back.
+//!
+//! The [`Scorer`] also ticks the indicator of `status.rs` on every turn of that
+//! run loop, because the turns of one destination are the heartbeat of the
+//! whole hunt. The loop of the hunt names the destination of each round, the
+//! answer of each one, and the stop. The hunt itself draws nothing and knows
+//! nothing about which look the indicator wears.
 //!
 //! The hunt traces one destination at a time and never two at once. A
 //! measurement of 64 destinations at the normal interval is a small load, and
@@ -275,9 +281,9 @@ pub(crate) struct Score {
 /// The screen of one destination of a hunt.
 ///
 /// A hunt draws no table. This screen folds the rounds of one destination into
-/// the numbers that the summary ranks, and it shows nothing. The run loop
-/// hands every round and every name to the screen already, so the fold rides
-/// on the door that is there and the hunt reads no file back.
+/// the numbers that the summary ranks, and it ticks the indicator of the hunt.
+/// The run loop hands every round and every name to the screen already, so the
+/// fold rides on the door that is there and the hunt reads no file back.
 pub(crate) struct Scorer<'a> {
     /// The address that this destination stands at.
     addr: Ipv4Addr,
@@ -381,20 +387,25 @@ impl Screen for Scorer<'_> {
     ///
     /// `Ctrl-C` reaches a hunt through the signal flag, which stops the trace
     /// of the destination that stands and the hunt that holds it.
+    ///
+    /// The run loop takes ten turns each second, and each of them reaches this
+    /// call. The tick therefore turns the spinner of the indicator at that
+    /// rate, which is what tells a reader that a destination which answers
+    /// nothing is still a destination the hunt is working on.
     fn poll(&mut self) -> bool {
-        self.status.show(&Event::Tick);
+        self.status.show(Event::Tick);
         false
     }
 
-    /// Folds one round into the table, and keeps the TTL of the destination
-    /// when the destination answered.
+    /// Folds one round into the table, ticks the indicator, and keeps the TTL
+    /// of the destination when the destination answered.
     ///
     /// The smallest such TTL wins. A path that changes under a load balancer
     /// reaches the destination at one TTL in one round and at another in the
     /// next, and a packet did reach the destination in the smaller number of
     /// hops.
     fn round(&mut self, round: &RoundRecord) {
-        self.status.show(&Event::Tick);
+        self.status.show(Event::Tick);
         self.table.observe(round);
         let answered = round
             .hops
@@ -563,13 +574,13 @@ pub(crate) fn record<W: Write>(
         let Some(target) = sources.draw.address() else {
             break;
         };
-        status.show(&Event::Target(target));
+        status.show(Event::Target(target));
         let moment = next_moment(previous, Utc::now());
         previous = Some(moment);
         let run = RunId::at(moment);
         match trace_one(facts, plan, sources, stop, writer, target, run, status) {
             Ok(Some(score)) => {
-                status.show(&Event::Scored {
+                status.show(Event::Scored {
                     reached: score.kind == PathKind::Reached,
                 });
                 scores.push(score);
@@ -580,7 +591,7 @@ pub(crate) fn record<W: Write>(
             Err(fault) => {
                 // The line goes back before the caller prints the table of the
                 // rounds that finished and the reason that stopped the hunt.
-                status.show(&Event::Stop);
+                status.show(Event::Stop);
                 return Err(HuntStopped {
                     summary: summarize(scores),
                     fault,
@@ -588,7 +599,7 @@ pub(crate) fn record<W: Write>(
             }
         }
     }
-    status.show(&Event::Stop);
+    status.show(Event::Stop);
     Ok(summarize(scores))
 }
 
@@ -1818,8 +1829,8 @@ mod tests {
     }
 
     impl Status for Recorder {
-        fn show(&mut self, event: &Event) {
-            self.events.push(*event);
+        fn show(&mut self, event: Event) {
+            self.events.push(event);
         }
     }
 
