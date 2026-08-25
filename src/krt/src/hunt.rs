@@ -58,6 +58,7 @@ use crate::record::{
 use crate::run;
 use crate::run::RunError;
 use crate::stats::{HopTable, TtlRow};
+use crate::trace::Lane;
 use crate::status::{Event, Status};
 use crate::ui;
 use crate::{REACHED, TARGETS};
@@ -67,6 +68,7 @@ use rand::{Rng, SeedableRng};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::net::{IpAddr, Ipv4Addr};
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
@@ -447,10 +449,21 @@ pub(crate) trait Probes {
     /// The run identifier is the identifier that the rounds of this
     /// destination carry.
     ///
+    /// The lane is the lane that this tracer probes in. A hunt holds one lane
+    /// for each destination it traces at one moment, and no two destinations of
+    /// one moment hold one lane, so no tracer of the hunt reads the answers of
+    /// another. The lane comes back to the hunt when the destination stops, and
+    /// the tracer of the destination that held it before must stop first.
+    ///
     /// # Errors
     ///
     /// Returns the reason as text when the tracer does not start.
-    fn start(&mut self, target: Ipv4Addr, run: &RunId) -> Result<Receiver<RoundRecord>, String>;
+    fn start(
+        &mut self,
+        target: Ipv4Addr,
+        run: &RunId,
+        lane: Lane,
+    ) -> Result<Receiver<RoundRecord>, String>;
 }
 
 /// The fault that stopped a hunt.
@@ -525,6 +538,13 @@ pub(crate) struct Bounds {
 pub(crate) struct Plan {
     /// The two numbers that stop the hunt.
     pub(crate) bounds: Bounds,
+    /// The number of destinations that the hunt traces at one moment.
+    ///
+    /// The hunt starts this many destinations at once and starts another one
+    /// each time one of them stops, so the time that a destination which
+    /// answers nothing costs is a time that the hunt spends on the other
+    /// destinations of the pool.
+    pub(crate) concurrency: NonZeroUsize,
     /// The number of probe rounds that each destination takes.
     pub(crate) probes_per_round: u64,
     /// The longest that one destination takes, whether it answers or not.
@@ -693,7 +713,7 @@ fn trace_one<W: Write>(
 ) -> Result<Option<Score>, HuntError> {
     let rounds = sources
         .probes
-        .start(target, &run)
+        .start(target, &run, Lane::FIRST)
         .map_err(|reason| HuntError::Tracer { target, reason })?;
     let start = RunRecord {
         run: run.clone(),
@@ -1074,12 +1094,14 @@ mod tests {
         RunConfig, RunId, SourceKind, SourceLabel, Writer,
     };
     use crate::status::{Event, Status};
+    use crate::trace::Lane;
     use crate::testing::{named, round};
     use crate::{Multipath, Protocol};
     use chrono::Utc;
     use std::collections::HashSet;
     use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::num::NonZeroUsize;
     use std::rc::Rc;
     use std::time::Duration;
     use std::time::Instant;
@@ -1779,6 +1801,8 @@ mod tests {
         scripts: VecDeque<Vec<RoundRecord>>,
         /// The destinations that the hunt asked for, in order.
         asked: Vec<Ipv4Addr>,
+        /// The lane of each of those destinations, in the same order.
+        lanes: Vec<Lane>,
         /// The senders of the channels, held so that none of them closes.
         senders: Vec<std::sync::mpsc::Sender<RoundRecord>>,
         /// The reason that a start gives, when the tracer must fail.
@@ -1802,6 +1826,7 @@ mod tests {
                     })
                     .collect(),
                 asked: Vec::new(),
+                lanes: Vec::new(),
                 senders: Vec::new(),
                 refuses: None,
                 serves: 0,
@@ -1831,8 +1856,10 @@ mod tests {
             &mut self,
             target: Ipv4Addr,
             run: &RunId,
+            lane: Lane,
         ) -> Result<std::sync::mpsc::Receiver<RoundRecord>, String> {
             self.asked.push(target);
+            self.lanes.push(lane);
             if let Some(reason) = &self.refuses {
                 // The push above counts this destination, so the length is the
                 // number of the destination that stands.
@@ -1858,6 +1885,8 @@ mod tests {
         recording: Recording,
         /// The destinations that the hunt asked its source for, in order.
         asked: Vec<Ipv4Addr>,
+        /// The lane of each of those destinations, in the same order.
+        lanes: Vec<Lane>,
         /// The events that the hunt showed its indicator, in order.
         shown: Vec<Event>,
     }
@@ -1882,6 +1911,28 @@ mod tests {
                     _ => None,
                 })
                 .collect()
+        }
+
+        /// The greatest number of destinations that the hunt held at one
+        /// moment.
+        ///
+        /// A `Target` event names a destination that the hunt started, and a
+        /// `Scored` event names one that it finished. The difference between
+        /// the two counts is the number that stood at that point of the hunt.
+        fn most_at_once(&self) -> usize {
+            let mut standing: usize = 0;
+            let mut most: usize = 0;
+            for event in &self.events {
+                match event {
+                    Event::Target(_) => {
+                        standing += 1;
+                        most = most.max(standing);
+                    }
+                    Event::Scored { .. } => standing = standing.saturating_sub(1),
+                    Event::Tick | Event::Stop => {}
+                }
+            }
+            most
         }
 
         /// Whether each destination that the hunt scored answered, in order.
@@ -1921,30 +1972,77 @@ mod tests {
     /// stops no hunt but the one that names its own.
     const A_GENEROUS_CAP: u64 = 64;
 
-    /// The bounds of a test hunt that wants this many rounds, and that traces
-    /// as many destinations as it must to find them.
-    const fn wanting(rounds: u64) -> Bounds {
-        Bounds {
-            rounds,
-            max_targets: A_GENEROUS_CAP,
+    /// The number of destinations that a test hunt traces at one moment.
+    ///
+    /// The number stands above one, so every test that names no other number
+    /// reads the loop of a hunt that holds a pool. A test of the pool itself
+    /// names the number it needs.
+    const TEST_CONCURRENCY: usize = 2;
+
+    /// The shape of one test hunt: the two bounds that stop it, and the number
+    /// of destinations it traces at one moment.
+    #[derive(Debug, Clone, Copy)]
+    struct Shape {
+        /// The two numbers that stop the hunt.
+        bounds: Bounds,
+        /// The number of destinations that the hunt traces at one moment.
+        concurrency: usize,
+    }
+
+    impl Shape {
+        /// The same hunt, tracing this many destinations at one moment.
+        const fn at_once(self, concurrency: usize) -> Self {
+            Self {
+                bounds: self.bounds,
+                concurrency,
+            }
+        }
+
+        /// The same hunt, tracing one destination at a time.
+        const fn serial(self) -> Self {
+            self.at_once(1)
+        }
+    }
+
+    /// The shape of a test hunt that wants this many rounds, and that traces as
+    /// many destinations as it must to find them.
+    const fn wanting(rounds: u64) -> Shape {
+        Shape {
+            bounds: Bounds {
+                rounds,
+                max_targets: A_GENEROUS_CAP,
+            },
+            concurrency: TEST_CONCURRENCY,
+        }
+    }
+
+    /// The shape of a test hunt that gives up after this many destinations.
+    const fn giving_up_after(rounds: u64, max_targets: u64) -> Shape {
+        Shape {
+            bounds: Bounds {
+                rounds,
+                max_targets,
+            },
+            concurrency: TEST_CONCURRENCY,
         }
     }
 
     /// Runs one hunt over a scripted draw, a scripted source of rounds, and the
-    /// bounds that the test names.
+    /// shape that the test names.
     fn hunted_bounded(
         addresses: &[&str],
         scripts: &[Rounds],
-        bounds: Bounds,
+        shape: Shape,
         stop: &dyn Fn() -> bool,
     ) -> Result<Hunted, HuntStopped> {
         let mut probes = FakeProbes::of(scripts);
         let mut recorder = Recorder::default();
-        let outcome = run_hunt(addresses, &mut probes, bounds, stop, &[], &mut recorder);
+        let outcome = run_hunt(addresses, &mut probes, shape, stop, &[], &mut recorder);
         outcome.map(|(summary, recording)| Hunted {
             summary,
             recording,
             asked: probes.asked.clone(),
+            lanes: probes.lanes.clone(),
             shown: recorder.events.clone(),
         })
     }
@@ -1953,7 +2051,7 @@ mod tests {
     fn run_hunt(
         addresses: &[&str],
         probes: &mut FakeProbes,
-        bounds: Bounds,
+        shape: Shape,
         stop: &dyn Fn() -> bool,
         names: &[(&str, &[crate::names::Lookup])],
         status: &mut dyn Status,
@@ -1961,7 +2059,7 @@ mod tests {
         let mut sink = Vec::new();
         let summary = {
             let mut writer = Writer::to_sink(&mut sink);
-            hunt_into(addresses, probes, bounds, stop, names, &mut writer, status)
+            hunt_into(addresses, probes, shape, stop, names, &mut writer, status)
         }?;
         Ok((summary, read_back(&sink)))
     }
@@ -1973,7 +2071,7 @@ mod tests {
     fn hunt_into<W: std::io::Write>(
         addresses: &[&str],
         probes: &mut FakeProbes,
-        bounds: Bounds,
+        shape: Shape,
         stop: &dyn Fn() -> bool,
         names: &[(&str, &[crate::names::Lookup])],
         writer: &mut Writer<W>,
@@ -1999,7 +2097,9 @@ mod tests {
             host: HOST.to_owned(),
         };
         let plan = Plan {
-            bounds,
+            bounds: shape.bounds,
+            concurrency: NonZeroUsize::new(shape.concurrency)
+                .expect("a test hunt traces at least one destination at a time"),
             probes_per_round: 1,
             target_timeout: TARGET_TIMEOUT,
             name_grace: Duration::ZERO,
@@ -2100,6 +2200,9 @@ mod tests {
 
     /// One round that reached the destination at TTL 5.
     const REACHED_AT_FIVE: &[&[(u8, &str, f64)]] = &[&[(1, FIRST_HOP, 1.0), (5, NEAR, 20.0)]];
+
+    /// A third destination that answers, for a test that fills a pool of three.
+    const ANOTHER_NEAR: &str = "9.9.9.9";
 
     /// One round that reached the far destination at TTL 18.
     ///
@@ -2204,6 +2307,124 @@ mod tests {
         );
     }
 
+    /// A hunt starts the destinations of its pool at once.
+    ///
+    /// This is what makes a hunt fast. Most of the address space answers
+    /// nothing, and a destination that answers nothing costs the whole target
+    /// timeout, so a hunt that waited out one such destination before it drew
+    /// the next spent that time on nothing at all.
+    #[test]
+    fn a_hunt_starts_the_destinations_of_its_pool_at_once() {
+        let hunted = hunted_bounded(
+            &[QUIET, ANOTHER_QUIET, NEAR],
+            &[&[&[]], &[&[]], &[&[]]],
+            wanting(3).at_once(3),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            shown(&hunted).most_at_once(),
+            3,
+            "the hunt held one destination at a time: {:?}",
+            hunted.shown
+        );
+    }
+
+    /// A hunt holds no more destinations at once than its pool.
+    #[test]
+    fn a_hunt_holds_no_more_destinations_at_once_than_its_pool() {
+        let hunted = hunted_bounded(
+            &[QUIET, ANOTHER_QUIET, NEAR, FAR],
+            &[&[&[]], &[&[]], &[&[]], &[&[]]],
+            wanting(4).at_once(2),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            shown(&hunted).most_at_once(),
+            2,
+            "the hunt held more destinations than its pool: {:?}",
+            hunted.shown
+        );
+    }
+
+    /// A hunt holds its pool full until the rounds it wants answer.
+    ///
+    /// The pool never shrinks to the rounds that are left, because the tail of
+    /// such a hunt runs one destination at a time and that tail is most of the
+    /// time the hunt takes. The destinations that stood when the last round
+    /// answered finish and count, so a hunt can hold a few more rounds than it
+    /// asked for, and each of them is a measurement the hunt already paid for.
+    #[test]
+    fn a_hunt_holds_its_pool_full_until_the_rounds_it_wants_answer() {
+        let hunted = hunted_bounded(
+            &[NEAR, FAR, ANOTHER_NEAR],
+            &[REACHED_AT_FIVE, FAR_REACHED_AT_EIGHTEEN, REACHED_AT_FIVE],
+            wanting(1).at_once(3),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            shown(&hunted).most_at_once(),
+            3,
+            "the hunt shrank its pool to the one round it wanted: {:?}",
+            hunted.shown
+        );
+        assert!(
+            counts(&hunted.summary).starts_with("3/1 reached"),
+            "every destination that stood counts: {}",
+            counts(&hunted.summary)
+        );
+    }
+
+    /// No two destinations that a hunt holds at one moment hold one lane.
+    ///
+    /// Two tracers of one lane read each other's answers, so a hop of one
+    /// destination would land in the path of another.
+    #[test]
+    fn no_two_destinations_of_one_moment_hold_one_lane() {
+        let hunted = hunted_bounded(
+            &[QUIET, ANOTHER_QUIET, NEAR],
+            &[&[&[]], &[&[]], &[&[]]],
+            wanting(3).at_once(3),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        let held: HashSet<Lane> = hunted.lanes.iter().copied().collect();
+        assert_eq!(
+            held.len(),
+            3,
+            "two destinations of one moment held one lane: {:?}",
+            hunted.lanes
+        );
+    }
+
+    /// A hunt takes the lane of a destination back when that destination stops.
+    ///
+    /// A hunt of a hundred destinations holds no hundred lanes. It holds the
+    /// lanes of its pool, and each of them serves one destination after
+    /// another.
+    #[test]
+    fn a_hunt_takes_the_lane_of_a_destination_back_when_it_stops() {
+        let hunted = hunted_bounded(
+            &[NEAR, FAR],
+            &[REACHED_AT_FIVE, FAR_REACHED_AT_EIGHTEEN],
+            wanting(2).serial(),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            hunted.lanes.len(),
+            2,
+            "the hunt traced two destinations: {:?}",
+            hunted.lanes
+        );
+        assert_eq!(
+            hunted.lanes[0], hunted.lanes[1],
+            "a pool of one lane gives that lane to every destination in turn"
+        );
+    }
+
     #[test]
     fn a_hunt_traces_the_addresses_that_the_draw_gives_in_the_order_it_gives_them() {
         let hunted = hunted(
@@ -2252,10 +2473,7 @@ mod tests {
         let hunted = hunted_bounded(
             &[QUIET, ANOTHER_QUIET, NEAR, FAR],
             &[&[&[]], &[&[]], REACHED_AT_FIVE, FAR_REACHED_AT_EIGHTEEN],
-            Bounds {
-                rounds: 2,
-                max_targets: 2,
-            },
+            giving_up_after(2, 2),
             &never_stops(),
         )
         .expect("the hunt must finish");

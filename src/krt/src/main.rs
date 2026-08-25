@@ -122,6 +122,15 @@ const HUNT_ROUNDS_DEFAULT: u64 = 8;
 /// because most of the address space answers nothing.
 const MAX_TARGETS_DEFAULT: u64 = 128;
 
+/// The number of destinations that a hunt traces at one moment.
+///
+/// The number matches [`HUNT_ROUNDS_DEFAULT`], so a hunt of the default rounds
+/// starts every destination it needs at once.
+const HUNT_CONCURRENCY: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(8) {
+    Some(count) => count,
+    None => std::num::NonZeroUsize::MIN,
+};
+
 /// The number of probe rounds that each destination of a hunt takes, when the
 /// user names none.
 ///
@@ -1925,6 +1934,7 @@ impl hunt::Probes for SystemProbes<'_> {
         &mut self,
         target: Ipv4Addr,
         run: &RunId,
+        lane: trace::Lane,
     ) -> Result<std::sync::mpsc::Receiver<RoundRecord>, String> {
         // The tracer of the destination before this one stops first. The wait
         // ends at the round limit of that destination, which the command line
@@ -1932,8 +1942,8 @@ impl hunt::Probes for SystemProbes<'_> {
         if let Some(running) = self.running.take() {
             running.wait();
         }
-        let (rounds, running) = trace::spawn(&self.config_of(target, run, trace::Lane::FIRST))
-            .map_err(|error| error.to_string())?;
+        let (rounds, running) =
+            trace::spawn(&self.config_of(target, run, lane)).map_err(|error| error.to_string())?;
         self.running = Some(running);
         Ok(rounds)
     }
@@ -2016,6 +2026,7 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
     };
     let hunt_plan = hunt::Plan {
         bounds,
+        concurrency: HUNT_CONCURRENCY,
         probes_per_round: plan.probes_per_round,
         target_timeout: plan.target_timeout,
         name_grace: name_grace(),
