@@ -107,6 +107,35 @@ const BAR_WIDTH: usize = 24;
 /// this gets those numbers and no bar.
 const BAR_FLOOR: usize = 4;
 
+/// The place of the counts of the hunt among the fields of the line.
+const COUNTS: usize = 2;
+
+/// The place of the time that the hunt took among the fields of the line.
+const TIME: usize = 3;
+
+/// The place of the destination that the hunt traces among the fields.
+const TARGET: usize = 1;
+
+/// The order that the fields of the line go away in, first dropped first.
+///
+/// A terminal too narrow for every field keeps the fields that say the most to
+/// a reader who is watching a hunt: the round it stands in, and the address it
+/// traces. The counts go first, because they are the widest pair of the line
+/// and the summary at the end counts the same thing. The time goes next, for
+/// the second half of that reason. The round of the hunt is in no order at all,
+/// because it never goes away.
+const DROP_ORDER: [usize; 3] = [COUNTS, TIME, TARGET];
+
+/// The fields that stand, as one line.
+fn join(fields: &[Option<String>]) -> String {
+    fields
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .collect::<Vec<&str>>()
+        .join(ui::FIELD_SEPARATOR)
+}
+
 /// The control text that puts the cursor back at the left edge of the line.
 const CARRIAGE_RETURN: &str = "\r";
 
@@ -219,14 +248,18 @@ impl<W: Write, C: Clock> Indicator<W, C> {
 
     /// The line that a terminal shows.
     ///
-    /// The fields come first and the bar takes the columns they leave, up to
-    /// [`BAR_WIDTH`]. A terminal that leaves less room than [`BAR_FLOOR`] gets
-    /// the fields alone: the numbers say what the bar says, and they say it in
-    /// every width.
+    /// The fields take the width first, and the bar takes the columns they
+    /// leave, up to [`BAR_WIDTH`]. A terminal that leaves the bar less room
+    /// than [`BAR_FLOOR`] gets the fields alone: the numbers say what the bar
+    /// says, and they say it in every width.
+    ///
+    /// The cut at the end is the last resort. It catches a terminal too narrow
+    /// even for the one field that never goes away.
     fn line(&self) -> String {
         let head = format!("{} ", self.spinner());
-        let tail = self.fields();
-        let room = usize::from(self.columns).saturating_sub(
+        let columns = usize::from(self.columns);
+        let tail = self.fields(columns.saturating_sub(ui::display_width(&head)));
+        let room = columns.saturating_sub(
             ui::display_width(&head)
                 + ui::display_width(&tail)
                 + ui::display_width(ui::FIELD_SEPARATOR),
@@ -235,32 +268,40 @@ impl<W: Write, C: Clock> Indicator<W, C> {
         let line = if width < BAR_FLOOR {
             format!("{head}{tail}")
         } else {
-            format!(
-                "{head}{}{}{tail}",
-                self.bar(width),
-                ui::FIELD_SEPARATOR
-            )
+            format!("{head}{}{}{tail}", self.bar(width), ui::FIELD_SEPARATOR)
         };
-        ui::truncate_to_width(&line, usize::from(self.columns))
+        ui::truncate_to_width(&line, columns)
     }
 
-    /// The fields of the line, in the order they print.
+    /// The fields of the line that stand in `width` columns.
     ///
-    /// A hunt that drew no address yet holds no destination, and the field of
-    /// it goes away rather than standing empty between two separators.
-    fn fields(&self) -> String {
-        let target = self.target.map(|addr| addr.to_string());
-        [
+    /// A field goes away whole. A line that cut one in the middle would print
+    /// `0 reached   11` and leave a reader reading a count that says nothing.
+    /// The fields therefore go away in the order of [`DROP_ORDER`], one at a
+    /// time, while the line is too wide, and the round of the hunt never goes
+    /// away.
+    ///
+    /// A hunt that drew no address yet holds no destination, and that field is
+    /// absent rather than empty between two separators.
+    fn fields(&self, width: usize) -> String {
+        let mut fields = [
             Some(format!("{}/{}", self.round, self.rounds)),
-            target,
-            Some(format!("{} {REACHED}", self.reached)),
-            Some(format!("{} {PARTIAL}", self.partial)),
+            self.target.map(|addr| addr.to_string()),
+            Some(format!(
+                "{} {REACHED}{}{} {PARTIAL}",
+                self.reached,
+                ui::FIELD_SEPARATOR,
+                self.partial
+            )),
             Some(ui::render_duration(self.elapsed())),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<String>>()
-        .join(ui::FIELD_SEPARATOR)
+        ];
+        for dropped in DROP_ORDER {
+            if ui::display_width(&join(&fields)) <= width {
+                break;
+            }
+            fields[dropped] = None;
+        }
+        join(&fields)
     }
 
     /// Paints the line, and wipes the tail of a longer line in front of it.
@@ -366,7 +407,10 @@ mod tests {
     const ROUNDS_BEFORE_THE_LAST: usize = 63;
 
     /// The width of a terminal that leaves the bar no room.
-    const A_NARROW_TERMINAL: u16 = 40;
+    ///
+    /// Every field but the round of the hunt goes away at this width, and the
+    /// four columns that the round takes still leave the bar under its floor.
+    const A_NARROW_TERMINAL: u16 = 12;
 
     /// The second destination that the hunt of a test traces.
     const ANOTHER_TARGET: &str = "198.51.100.9";

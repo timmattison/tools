@@ -731,3 +731,7 @@
 2026-08-25T13:00:16.001Z [DEBUG] Protecting locked version from cleanup: 2.1.243
 2026-08-25T13:00:16.007Z [DEBUG] Protecting locked version from cleanup: 2.1.241
 2026-08-25T13:00:16.012Z [DEBUG] Protecting locked version from cleanup: 2.1.240
+2026-08-25T13:02:57.558Z [DEBUG] [awaySummary] skipped: at or near rate limit
+2026-08-25T13:02:57.559Z [DEBUG] [awaySummary] skipped: at or near rate limit
+2026-08-25T13:03:23.731Z [DEBUG] wheel accel: window (native) · base=1 · platform=darwin · TERM_PROGRAM=unset
+2026-08-25T13:03:23.749Z [DEBUG] High write ratio: blit=654, write=1058 (61.8% writes), screen=23x109
