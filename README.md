@@ -609,25 +609,34 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the default. A recorded file holds one JSON record on each line. A file that holds more than
     one run names the run of the table on standard error, so standard output stays the table alone.
   - The `hunt` command looks for the longest path it can find. It draws a random address, traces
-    it, scores the path, and takes the next round. One round is one destination. The hunt stops
-    when it runs out of rounds, and it then prints one table of four rows: the shortest path, the
-    longest path, the fastest path, and the slowest path. One destination can hold more than one
-    row. Each row carries the address with its name, the length of the path, whether the
-    destination answered, the mean round-trip time and the loss of the last hop that answered, the
-    number of TTLs inside the path that answered nothing, and the run that recorded the trace, so
-    `krt replay <FILE> --run <ID>` prints the whole path. Under the table stand the number of
-    rounds, the number of reached destinations, the number of partial ones, and the wall time.
-    `Ctrl-C` stops the hunt and still prints the summary of the rounds that finished. A fault
-    that stops the hunt — a write that the file refuses, a tracer that does not start — prints
-    that same summary, and it then names the reason on standard error.
+    it, scores the path, and takes the next round. **One round is one destination that answered.**
+    A destination that answered nothing costs no round, so the hunt keeps drawing until it holds
+    the paths that the user asked for. Most of the address space answers nothing, and a hunt that
+    counted every draw spent itself on addresses that measured no path at all. The draw never runs
+    out, so `--max-targets` is what stops a hunt that finds fewer answers than it wants: the hunt
+    gives up after that many destinations, answered or not.
+  - The hunt then prints one table of four rows: the shortest path, the longest path, the fastest
+    path, and the slowest path. One destination can hold more than one row. Each row carries the
+    address with its name, the length of the path, whether the destination answered, the mean
+    round-trip time and the loss of the last hop that answered, the number of TTLs inside the path
+    that answered nothing, and the run that recorded the trace, so `krt replay <FILE> --run <ID>`
+    prints the whole path. Under the table stand the rounds against the rounds the hunt wanted,
+    the destinations it traced against the ones it could trace, the number of partial paths, and
+    the wall time, as in `8/8 reached   17/128 targets   9 partial   192s`. The two ratios tell a
+    hunt that held every round it wanted from one that gave up on its targets. `Ctrl-C` stops the
+    hunt and still prints the summary of the rounds that finished. A fault that stops the hunt — a
+    write that the file refuses, a tracer that does not start — prints that same summary, and it
+    then names the reason on standard error.
   - A hunt shows what it is doing while it runs. A hunt whose standard output is a terminal draws
     one status line, which redraws in place: a spinner that turns on every turn of the trace, a
-    bar of the rounds, the round that the hunt stands in, the address it traces, the number of
-    reached and partial destinations so far, and the time the hunt took. The stop of the hunt
-    takes the line back, so the summary prints on a clean line. A terminal too narrow for every
-    field drops the counts first, then the time, then the address, and it never cuts a field in
-    the middle. A hunt whose standard output is a pipe or a file writes one whole line for each
-    destination it finished, with no control text, because a file keeps every byte it takes.
+    bar of the hunt, the rounds it holds of the rounds it wants, the address it traces, the
+    destinations it drew of the ones it may draw, and the time the hunt took. The bar reads
+    whichever of the two bounds the hunt stands closer to, because the hunt stops on the first one
+    it meets. The stop of the hunt takes the line back, so the summary prints on a clean line. A
+    terminal too narrow for every field drops the targets first, then the time, then the address,
+    and it never cuts a field in the middle. A hunt whose standard output is a pipe or a file
+    writes one whole line for each destination it finished, with no control text, because a file
+    keeps every byte it takes.
   - The draw of a hunt is of ip version 4 alone, because the space of ip version 6 is far too
     sparse for a random address to reach a host. It rejects every address that no packet routes
     to — the private blocks, the loopback block, the documentation blocks, the multicast block,
@@ -637,7 +646,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     destination answered at. A destination that answered nothing gives a **partial** path, whose
     length is the highest TTL that any hop answered at. The table ranks the reached paths, and it
     counts the partial ones under the table. `--include-partial` lets a partial path compete for
-    every row of the table, and the row of such a path says `partial`.
+    every row of the table, and the row of such a path says `partial`. It changes what the table
+    ranks and never what a round costs: a round is a destination that answered, under that flag as
+    under every other one.
   - Each destination of a hunt writes one run into one file, with the records that a normal run
     writes. The `run` record of each destination carries the identifier of the hunt, so a reader
     groups the runs of one hunt, and `replay` folds any one of them with no change.
@@ -646,7 +657,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     stands behind the command, because a flag in front of it reads `hunt` as the destination.
     | Flag | Default | Meaning |
     | ---- | ------- | ------- |
-    | `--rounds <N>` | `64` | Stop after this many destinations. One round is one destination. |
+    | `--rounds <N>` | `8` | Stop after this many destinations answer. A destination that answers nothing costs no round. |
+    | `--max-targets <N>` | `128` | Give up after tracing this many destinations, answered or not. The draw of a hunt never runs out, so this is what stops a hunt that finds fewer answers than it wants. `krt` refuses a cap below the `--rounds` of the same line, because such a hunt gives up before it can hold the rounds it wants. |
     | `--probes-per-round <N>` | `3` | The number of probe rounds that each destination takes. One probe round is one sweep of the TTLs. |
     | `--target-timeout <DUR>` | `10s` | The longest that one destination takes, whether it answers or not. `krt` refuses a hunt whose probe rounds run past this time, because such a hunt cuts every destination short of its last round. |
     | `--seed <N>` | the clock | The seed of the draw. A hunt of one seed visits the same addresses in the same order, for one build of `krt`. The resolved configuration prints the seed of every hunt. |
@@ -837,7 +849,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     tracer sends the probes, and `krt` owns the schema, the filename, the fold, and the table.
   - Usage: `krt example.com`, `krt example.com --rounds 3`, `krt example.com --duration 1h`,
     `krt example.com --interval 500ms --protocol udp --multipath paris`,
-    `krt replay trace.jsonl`, `krt replay trace.jsonl --run 2026-08-19T12:00:00.000Z`
+    `krt replay trace.jsonl`, `krt replay trace.jsonl --run 2026-08-19T12:00:00.000Z`,
+    `krt hunt`, `krt hunt --rounds 16 --max-targets 256`
   - To install: `cargo install --git https://github.com/timmattison/tools krt`
 
 ## dirhash
