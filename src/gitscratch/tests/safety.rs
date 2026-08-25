@@ -832,6 +832,20 @@ fn never_touches_the_real_working_tree_or_index() {
 #[test]
 fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
     let repo = conflicting_repo();
+    // Armed on purpose, and hostile on purpose. The third block below halts a
+    // rebase inside the scratch and then asserts that git really is sitting on
+    // rebase state, at the `rebase-merge` path the merge backend writes. The
+    // apply backend writes `rebase-apply` instead, so a developer carrying
+    // `rebase.backend = apply` in their global config watches that assertion
+    // fire over a rebase that halted exactly as it was asked to, reading a
+    // message that names a path and never mentions the backend that moved it.
+    // Which backend a replay runs on is the harness's business rather than the
+    // developer's - it is the harness that decides where a consumer inspecting
+    // a halted replay has to look - so arming the hostile setting here, inside
+    // the fixture's own `TempDir` where no concurrent run can see it, turns a
+    // fragility that only some machines carry into a property this suite pins
+    // on every machine.
+    repo.git(&["config", "rebase.backend", "apply"]);
 
     // `worktrees/` under the common dir is where `git worktree add` files the
     // administrative state that outlives the worktree's directory. Everything
