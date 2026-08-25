@@ -8,8 +8,7 @@
 //! whose standard output is a pipe or a file, and a run that `--headless`
 //! asked, print one status line each minute in the place of the table. The
 //! `replay` command reads a recorded file, folds one run of it, and prints the
-//! table of that path: a header line that names the run, and one row for each
-//! TTL.
+//! table of that path: a head that names the run, and one row for each TTL.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -589,7 +588,7 @@ impl fmt::Display for ResolvedConfig {
 /// for hours. `500ms`, `1s`, `2m`, and `3h` are examples.
 ///
 /// `ui::render_duration` writes the text that this function reads. The two live
-/// apart because the header line of the frame writes a duration as well, and one
+/// apart because the head of the frame writes a duration as well, and one
 /// writer keeps the three places that print a period in agreement. A test below
 /// asserts that the pair agrees over every accepted form.
 ///
