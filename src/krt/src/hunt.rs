@@ -714,7 +714,10 @@ fn trace_one<W: Write>(
     let limits = run::Limits {
         rounds: Some(plan.probes_per_round),
         // No destination holds the hunt for longer than this, whether it
-        // answers or not. A limit too large to add to the clock leaves the
+        // answers or not. The moment bounds the whole run of the destination,
+        // and the wait for the names of that run fits inside it, so a
+        // destination whose reverse zone never answers costs the timeout and
+        // no more. A limit too large to add to the clock leaves the
         // destination without a moment, and the round limit then stops it.
         deadline: Instant::now().checked_add(plan.target_timeout),
         name_grace: plan.name_grace,

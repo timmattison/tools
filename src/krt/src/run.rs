@@ -60,7 +60,32 @@ pub(crate) struct Limits {
     /// value is the timeout of the resolver, because every lookup settles when
     /// that time runs out. A grace of that length therefore outlives every
     /// lookup that can still answer.
+    ///
+    /// The deadline caps this grace, and [`Limits::grace_now`] is where the two
+    /// meet. The deadline bounds the whole run, so the wait for a name fits
+    /// inside it and never stands after it.
     pub(crate) name_grace: Duration,
+}
+
+impl Limits {
+    /// The grace that the names of the run get at this moment.
+    ///
+    /// A run that names no deadline gets the whole grace. A run that still
+    /// stands in front of its deadline gets whichever of the two is shorter. A
+    /// run that reached its deadline gets nothing, and the drain asks one time
+    /// whatever the grace, so the names that already arrived still reach the
+    /// file.
+    ///
+    /// The deadline is the one bound that a caller states as the longest that
+    /// the whole run takes. A grace that ran after it would put every run past
+    /// that time by as much as the grace, which is why the drain reads this and
+    /// not the field.
+    fn grace_now(&self) -> Duration {
+        self.deadline.map_or(self.name_grace, |deadline| {
+            self.name_grace
+                .min(deadline.saturating_duration_since(Instant::now()))
+        })
+    }
 }
 
 /// What a run produced.
@@ -109,10 +134,12 @@ pub(crate) enum RunError {
 /// turn stand before the `round` record of that turn.
 ///
 /// The run asks the namer one last time before it writes the `end` record, and
-/// again until no address waits or `limits.name_grace` runs out. The first ask
-/// of an address starts the lookup of that address, so the name of an address
-/// that the last round reported arrives after that round, and this last ask is
-/// what puts it in the file.
+/// again until no address waits or the grace of [`Limits::grace_now`] runs out.
+/// The first ask of an address starts the lookup of that address, so the name
+/// of an address that the last round reported arrives after that round, and
+/// this last ask is what puts it in the file. The deadline of the run caps that
+/// grace, so a run that reached its deadline stops there and writes the names
+/// that already arrived.
 ///
 /// Each round that the run records also reaches `screen`, and the recording
 /// comes first: a round reaches the file before it reaches the screen, so a
@@ -144,7 +171,7 @@ pub(crate) fn record<W: Write>(
         // then travels to the decision as a value.
         let asked = screen.poll();
         if let Some(reason) = stopped(recorded, limits, stop, asked) {
-            drain_names(writer, namer, limits.name_grace)?;
+            drain_names(writer, namer, limits.grace_now())?;
             close(writer, &start.run, recorded, reason)?;
             return Ok(Outcome {
                 rounds: recorded,

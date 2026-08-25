@@ -1572,6 +1572,10 @@ fn resolver_of(reverse_dns: bool) -> std::io::Result<Box<dyn names::Resolver>> {
 /// answer, and a hop whose name server answers slowly still takes a `name`
 /// record. The wait ends at the moment that no address waits, so a run whose
 /// addresses settled pays none of it.
+///
+/// The time limit of a run caps this grace, and the deadline of a destination
+/// of a hunt caps it the same way. A run therefore takes the time that its
+/// limit names, and no more.
 fn name_grace() -> Duration {
     trace::resolver_timeout()
 }
