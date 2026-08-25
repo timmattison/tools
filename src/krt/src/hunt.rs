@@ -1495,6 +1495,9 @@ mod tests {
     /// The address of the destination that answered nothing.
     const QUIET: &str = "1.1.1.1";
 
+    /// The address of a second destination that answered nothing.
+    const ANOTHER_QUIET: &str = "8.8.8.8";
+
     /// The run that recorded the trace of the quiet destination.
     const QUIET_RUN: &str = "2026-08-18T12:02:00.000Z";
 
@@ -2125,6 +2128,32 @@ mod tests {
         )
         .expect("the hunt must finish");
         assert_eq!(hunted.asked, vec![address(NEAR), address(FAR)]);
+    }
+
+    /// A destination that answered nothing costs the hunt no round.
+    ///
+    /// `Plan::rounds` counts the destinations that answered. Most of the
+    /// address space answers nothing, so a hunt that counted every draw spent
+    /// its rounds on addresses that measured no path at all.
+    #[test]
+    fn a_destination_that_answered_nothing_costs_no_round() {
+        let hunted = hunted(
+            &[QUIET, NEAR, ANOTHER_QUIET, FAR],
+            &[&[&[]], REACHED_AT_FIVE, &[&[]], FAR_REACHED_AT_EIGHTEEN],
+            2,
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            hunted.asked,
+            vec![
+                address(QUIET),
+                address(NEAR),
+                address(ANOTHER_QUIET),
+                address(FAR),
+            ],
+            "the hunt traces destinations until two of them answer"
+        );
     }
 
     #[test]

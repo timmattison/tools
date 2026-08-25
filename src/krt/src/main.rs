@@ -4045,9 +4045,19 @@ resolved configuration:
         assert_eq!(hunt(&["krt", HUNT]).rounds, HUNT_ROUNDS_DEFAULT);
     }
 
+    /// The default asks for eight destinations that answered.
+    ///
+    /// Eight reached destinations make a hunt that measured something. The
+    /// address space answers at a low rate, so a default far above eight spends
+    /// minutes on addresses that answer nothing.
+    #[test]
+    fn the_default_hunt_asks_for_eight_destinations_that_answered() {
+        assert_eq!(hunt(&["krt", HUNT]).rounds, 8);
+    }
+
     #[test]
     fn a_hunt_takes_the_number_of_destinations_that_the_command_line_named() {
-        assert_eq!(hunt(&["krt", HUNT, "--rounds", "8"]).rounds, 8);
+        assert_eq!(hunt(&["krt", HUNT, "--rounds", "12"]).rounds, 12);
     }
 
     #[test]
