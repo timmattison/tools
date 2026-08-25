@@ -426,8 +426,9 @@ struct Cli {
 /// so the two flags of the address family say nothing about it. It prints one
 /// table at the end and no live table, so `--headless` says nothing either. Its
 /// own `--rounds` counts destinations, so the round limit and the time limit of
-/// a trace stay where they are. A hunt draws no multipath mode of its own, so
-/// `--multipath` stays there as well.
+/// a trace stay where they are. `--multipath` stays there as well, so a hunt
+/// names no mode and always probes the classic one. The block of a hunt prints
+/// that mode, so the reader sees which one the probes take.
 #[derive(clap::Args, Debug, PartialEq, Eq)]
 struct SharedArgs {
     /// The JSONL path. Overrides the derived name.
@@ -805,7 +806,11 @@ impl ResolvedConfig {
     /// table. A block that named a destination, an address family, and a
     /// display would state three things that the hunt does not do.
     ///
-    /// The seven rows that both of them hold read one expression each, and the
+    /// The multipath mode stands in both blocks, because a hunt probes with a
+    /// mode as a trace does. A hunt names no mode of its own, so its block
+    /// always reads `classic`, and the row is what tells the reader so.
+    ///
+    /// The eight rows that both of them hold read one expression each, and the
     /// two lists then name those rows in the order each block wants. A second
     /// expression for one of those rows would print the source one way in a
     /// trace and another way in a hunt.
@@ -863,6 +868,7 @@ impl ResolvedConfig {
             ("first ttl", self.first_ttl.to_string()),
             ("max ttl", self.max_ttl.to_string()),
             ("protocol", value_name(&self.protocol)),
+            ("multipath", value_name(&self.multipath)),
             ("reverse dns", reverse_dns()),
             ("source", source()),
             ("rounds", hunt.rounds.to_string()),
@@ -4730,7 +4736,7 @@ resolved configuration:
     #[test]
     fn the_resolved_block_of_a_hunt_names_no_field_of_a_trace_alone() {
         let block = resolve(&["krt", HUNT]).to_string();
-        for absent in ["destination:", "address family:", "display:", "multipath:"] {
+        for absent in ["destination:", "address family:", "display:"] {
             assert!(
                 !block.contains(absent),
                 "the block of a hunt names no `{absent}`: {block}"
