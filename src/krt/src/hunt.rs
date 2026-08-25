@@ -595,8 +595,14 @@ pub(crate) fn record<W: Write>(
     let started = Instant::now();
     // Both ways out of the loop build the same summary over the scores that the
     // hunt holds at that point, so the fault and the finish read alike.
-    let summarize =
-        |scores: Vec<Score>| Summary::new(scores, started.elapsed(), plan.include_partial);
+    let summarize = |scores: Vec<Score>| {
+        Summary::new(
+            scores,
+            started.elapsed(),
+            plan.bounds,
+            plan.include_partial,
+        )
+    };
     let mut scores = Vec::new();
     let mut previous = None;
     let mut reached: u64 = 0;
@@ -883,16 +889,27 @@ pub(crate) struct Summary {
     scores: Vec<Score>,
     /// The time that the whole hunt took.
     elapsed: Duration,
+    /// The two numbers that stopped the hunt.
+    ///
+    /// The counts stand against them, so a reader tells a hunt that held every
+    /// round it wanted from one that gave up on its targets.
+    bounds: Bounds,
     /// True when a partial path competes for a row of the table.
     include_partial: bool,
 }
 
 impl Summary {
     /// Builds the summary of one hunt.
-    pub(crate) fn new(scores: Vec<Score>, elapsed: Duration, include_partial: bool) -> Self {
+    pub(crate) fn new(
+        scores: Vec<Score>,
+        elapsed: Duration,
+        bounds: Bounds,
+        include_partial: bool,
+    ) -> Self {
         Self {
             scores,
             elapsed,
+            bounds,
             include_partial,
         }
     }
@@ -1542,6 +1559,12 @@ mod tests {
     /// The time that the hunt of every summary test took.
     const ELAPSED: Duration = Duration::from_secs(192);
 
+    /// The bounds of the hunt of every summary test.
+    const SUMMARY_BOUNDS: Bounds = Bounds {
+        rounds: 8,
+        max_targets: 128,
+    };
+
     /// The summary of a hunt of three destinations, as the tests read it.
     ///
     /// The near destination answered at TTL 5 and the far one at TTL 18, so the
@@ -1570,7 +1593,7 @@ mod tests {
                 &[],
             ),
         ];
-        Summary::new(scores, ELAPSED, include_partial)
+        Summary::new(scores, ELAPSED, SUMMARY_BOUNDS, include_partial)
     }
 
     /// The row of the summary that carries one label.
@@ -1668,20 +1691,16 @@ mod tests {
         assert!(!line.contains('('), "the row holds no name: {line}");
     }
 
+    /// The counts stand against the bounds that stopped the hunt.
+    ///
+    /// A reader who sees `2/8 reached` knows that the hunt stopped short of
+    /// what it wanted, and `3/128 targets` says what it spent looking.
     #[test]
-    fn the_counts_hold_the_rounds_the_reached_the_partial_and_the_wall_time() {
+    fn the_counts_hold_the_rounds_the_targets_the_partial_and_the_wall_time() {
         assert_eq!(
             counts(&a_hunt(false)),
-            "3 rounds   2 reached   1 partial   192s"
+            "2/8 reached   3/128 targets   1 partial   192s"
         );
-    }
-
-    /// A hunt of one round writes the singular name of a round.
-    #[test]
-    fn the_counts_of_one_round_name_that_round_in_the_singular() {
-        let scores = vec![traced(NEAR, NEAR_RUN, &[&[(5, NEAR, 20.0)]], &[])];
-        let summary = Summary::new(scores, ELAPSED, false);
-        assert!(counts(&summary).starts_with("1 round "));
     }
 
     /// A hunt whose destinations all answered nothing ranks no path.
@@ -1691,13 +1710,16 @@ mod tests {
     #[test]
     fn a_summary_of_no_ranked_path_says_so_and_still_counts_the_hunt() {
         let scores = vec![traced(QUIET, QUIET_RUN, &[&[(1, FIRST_HOP, 1.0)]], &[])];
-        let summary = Summary::new(scores, ELAPSED, false);
+        let summary = Summary::new(scores, ELAPSED, SUMMARY_BOUNDS, false);
         let lines = summary.lines();
         assert!(
             lines.iter().any(|line| line.contains(NOTHING_TO_RANK)),
             "the summary must say that it ranked nothing: {lines:?}"
         );
-        assert_eq!(counts(&summary), "1 round   0 reached   1 partial   192s");
+        assert_eq!(
+            counts(&summary),
+            "0/8 reached   1/128 targets   1 partial   192s"
+        );
     }
 
     /// The summary of a hunt reads as the table of the design.
@@ -1718,7 +1740,7 @@ mod tests {
         " fastest   example.com (93.184.216.34)    5  reached  20.0   0.0%     3  2026-08-18T12:00:00.123Z",
         " slowest   72.14.200.1                   18  reached  85.0   0.0%    16  2026-08-18T12:01:00.000Z",
         "",
-        "3 rounds   2 reached   1 partial   192s",
+        "2/8 reached   3/128 targets   1 partial   192s",
     ];
     /// The identifier of the hunt that every test of the loop makes.
     const HUNT_ID: &str = "2026-08-18T11:59:00.000Z";
@@ -2378,7 +2400,7 @@ mod tests {
         assert!(hunted.asked.is_empty(), "the hunt traced no destination");
         assert_eq!(
             counts(&hunted.summary),
-            "0 rounds   0 reached   0 partial   0ms"
+            "0/2 reached   0/64 targets   0 partial   0ms"
         );
     }
 
@@ -2393,7 +2415,7 @@ mod tests {
         )
         .expect("the hunt must finish");
         assert!(row(&hunted.summary, SHORTEST).contains(NEAR));
-        assert!(counts(&hunted.summary).contains("1 reached"));
+        assert!(counts(&hunted.summary).contains("1/2 reached"));
         assert!(counts(&hunted.summary).contains("1 partial"));
     }
 
@@ -2460,7 +2482,7 @@ mod tests {
         // runs take whatever the machine gives them.
         let counts = counts(&stopped.summary);
         assert!(
-            counts.starts_with("2 rounds   2 reached   0 partial"),
+            counts.starts_with("2/3 reached   2/64 targets   0 partial"),
             "the summary counts the two rounds that finished: {counts}"
         );
     }
@@ -2490,7 +2512,7 @@ mod tests {
         );
         let counts = counts(&stopped.summary);
         assert!(
-            counts.starts_with("1 round   1 reached   0 partial"),
+            counts.starts_with("1/2 reached   1/64 targets   0 partial"),
             "the summary counts the one round that finished: {counts}"
         );
     }

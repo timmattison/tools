@@ -216,6 +216,13 @@ const ROW: &str = "row";
 /// The last field of the status line of one round that reached the target.
 pub(crate) const REACHED: &str = "reached";
 
+/// The name of the destinations that a hunt traces, in the line of its
+/// indicator and in the counts of its summary.
+///
+/// The word stands beside a bound of many, as in `17/128 targets`, so it never
+/// takes the singular.
+pub(crate) const TARGETS: &str = "targets";
+
 /// The last field of the status line of one round that did not reach the
 /// target.
 ///
@@ -1929,11 +1936,14 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
         config: run_config(config, privilege),
         host: host_name(),
     };
+    // One value carries both bounds, so the loop of the hunt and the indicator
+    // that shows it can hold no numbers that disagree.
+    let bounds = hunt::Bounds {
+        rounds: plan.rounds,
+        max_targets: plan.max_targets,
+    };
     let hunt_plan = hunt::Plan {
-        bounds: hunt::Bounds {
-            rounds: plan.rounds,
-            max_targets: plan.max_targets,
-        },
+        bounds,
         probes_per_round: plan.probes_per_round,
         target_timeout: plan.target_timeout,
         name_grace: name_grace(),
@@ -1944,12 +1954,12 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
         probes: &mut probes,
         resolver: Rc::from(resolver),
     };
-    // The indicator shows what the hunt is doing while it runs. A hunt of 64
-    // destinations takes minutes and draws no live table, so a hunt without one
-    // prints nothing between the line above and the summary at the end.
+    // The indicator shows what the hunt is doing while it runs. A hunt takes
+    // minutes and draws no live table, so a hunt without one prints nothing
+    // between the line above and the summary at the end.
     let mut status = status::Indicator::new(
         status::style_of(std::io::stdout().is_terminal()),
-        plan.rounds,
+        bounds,
         ui::frame_columns(),
         std::io::stdout(),
         live::SystemClock,

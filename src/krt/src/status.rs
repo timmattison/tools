@@ -19,7 +19,7 @@
 //! that records the events, so no test of `hunt.rs` needs a terminal, and the
 //! hunt itself knows nothing about which style it drives.
 
-use crate::hunt::PARTIAL;
+use crate::hunt::{Bounds, PARTIAL};
 use crate::live::Clock;
 use crate::ui;
 use crate::{REACHED, ROUND, UNKNOWN};
@@ -156,8 +156,8 @@ pub(crate) struct Indicator<W: Write, C: Clock> {
     started: Instant,
     /// The number of columns that the line prints in.
     columns: u16,
-    /// The number of destinations that the hunt will trace.
-    rounds: u64,
+    /// The two numbers that stop the hunt.
+    bounds: Bounds,
     /// The number of destinations that the hunt started, the one that stands
     /// included.
     round: u64,
@@ -175,12 +175,12 @@ pub(crate) struct Indicator<W: Write, C: Clock> {
 }
 
 impl<W: Write, C: Clock> Indicator<W, C> {
-    /// Builds the indicator of a hunt of `rounds` destinations.
+    /// Builds the indicator of a hunt of these bounds.
     ///
     /// The width comes from the caller and the indicator keeps it, as the live
     /// table of a run keeps the size it started with. A window that changes
     /// size while the hunt runs leaves the line at the width it started with.
-    pub(crate) fn new(style: Style, rounds: u64, columns: u16, sink: W, clock: C) -> Self {
+    pub(crate) fn new(style: Style, bounds: Bounds, columns: u16, sink: W, clock: C) -> Self {
         let started = clock.now();
         Self {
             style,
@@ -188,7 +188,7 @@ impl<W: Write, C: Clock> Indicator<W, C> {
             clock,
             started,
             columns,
-            rounds,
+            bounds,
             round: 0,
             target: None,
             reached: 0,
@@ -239,11 +239,11 @@ impl<W: Write, C: Clock> Indicator<W, C> {
     /// nothing and it did all of it, and a division by its round count has no
     /// answer.
     fn filled(&self, cells: usize) -> usize {
-        if self.rounds == 0 {
+        if self.bounds.rounds == 0 {
             return cells;
         }
         let cells = u128::try_from(cells).unwrap_or(u128::MAX);
-        let filled = u128::from(self.round) * cells / u128::from(self.rounds);
+        let filled = u128::from(self.round) * cells / u128::from(self.bounds.rounds);
         usize::try_from(filled).unwrap_or(usize::MAX)
     }
 
@@ -288,7 +288,7 @@ impl<W: Write, C: Clock> Indicator<W, C> {
         // The order of these four is the order that [`TARGET`], [`COUNTS`], and
         // [`TIME`] name, and [`DROP_ORDER`] reads them by that name.
         let mut fields = [
-            Some(format!("{}/{}", self.round, self.rounds)),
+            Some(format!("{}/{}", self.round, self.bounds.rounds)),
             self.target.map(|addr| addr.to_string()),
             Some(format!(
                 "{} {REACHED}{}{} {PARTIAL}",
@@ -330,7 +330,7 @@ impl<W: Write, C: Clock> Indicator<W, C> {
     fn log(&mut self, reached: bool) {
         let answer = if reached { REACHED } else { PARTIAL };
         let fields = [
-            format!("{ROUND} {}/{}", self.round, self.rounds),
+            format!("{ROUND} {}/{}", self.round, self.bounds.rounds),
             self.target
                 .map_or_else(|| UNKNOWN.to_owned(), |addr| addr.to_string()),
             answer.to_owned(),
@@ -391,13 +391,20 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
 #[cfg(test)]
 mod tests {
     use super::{Event, Indicator, Status, Style, BAR_EMPTY, BAR_FULL, CARRIAGE_RETURN};
+    use crate::hunt::{Bounds, PARTIAL};
     use crate::testing::FakeClock;
+    use crate::ui::FIELD_SEPARATOR;
+    use crate::REACHED;
     use std::net::Ipv4Addr;
     use std::rc::Rc;
     use std::time::Duration;
 
-    /// The number of destinations that the hunt of a test traces.
-    const ROUNDS: u64 = 64;
+    /// The bounds of the hunt of a test: eight rounds, and 64 destinations to
+    /// find them in.
+    const BOUNDS: Bounds = Bounds {
+        rounds: 8,
+        max_targets: 64,
+    };
 
     /// The width of the terminal of a test. The width leaves room for the bar
     /// and every field beside it.
@@ -406,14 +413,11 @@ mod tests {
     /// The destination that the hunt of a test traces.
     const TARGET: &str = "203.0.113.7";
 
-    /// The number of rounds that a hunt finishes before its last one.
-    const ROUNDS_BEFORE_THE_LAST: usize = 63;
-
     /// The width of a terminal that leaves the bar no room.
     ///
-    /// Every field but the round of the hunt goes away at this width, and the
-    /// four columns that the round takes still leave the bar under its floor.
-    const A_NARROW_TERMINAL: u16 = 12;
+    /// Every field but the rounds of the hunt goes away at this width, and the
+    /// columns that they take still leave the bar under its floor.
+    const A_NARROW_TERMINAL: u16 = 19;
 
     /// The second destination that the hunt of a test traces.
     const ANOTHER_TARGET: &str = "198.51.100.9";
@@ -421,11 +425,15 @@ mod tests {
     /// The number of destinations that the hunt of a log test finishes.
     const LOGGED_ROUNDS: usize = 3;
 
-    /// The width of a terminal that leaves no room for the two counts.
-    const WITHOUT_THE_COUNTS: u16 = 45;
+    /// The number of rounds that the hunt of a test wants, as a count of the
+    /// destinations that a test scripts.
+    const WANTED_ROUNDS: usize = 8;
+
+    /// The width of a terminal that leaves no room for the targets of the hunt.
+    const WITHOUT_THE_TARGETS: u16 = 45;
 
     /// The width of a terminal that leaves no room for the time either.
-    const WITHOUT_THE_TIME: u16 = 24;
+    const WITHOUT_THE_TIME: u16 = 32;
 
     /// Reads an address that a test names.
     fn address(text: &str) -> Ipv4Addr {
@@ -434,7 +442,7 @@ mod tests {
 
     /// The indicator of a test, over bytes and a clock the test moves.
     fn indicator(style: Style, clock: &Rc<FakeClock>) -> Indicator<Vec<u8>, Rc<FakeClock>> {
-        Indicator::new(style, ROUNDS, COLUMNS, Vec::new(), Rc::clone(clock))
+        Indicator::new(style, BOUNDS, COLUMNS, Vec::new(), Rc::clone(clock))
     }
 
     /// The frames that the indicator wrote, in the order it wrote them.
@@ -478,7 +486,7 @@ mod tests {
         partial: usize,
     ) -> Indicator<Vec<u8>, Rc<FakeClock>> {
         let mut indicator =
-            Indicator::new(Style::Line, ROUNDS, columns, Vec::new(), Rc::clone(clock));
+            Indicator::new(Style::Line, BOUNDS, columns, Vec::new(), Rc::clone(clock));
         for _ in 0..reached {
             indicator.show(Event::Target(address(TARGET)));
             indicator.show(Event::Scored { reached: true });
@@ -492,12 +500,26 @@ mod tests {
     }
 
     #[test]
-    fn the_line_names_the_round_that_the_hunt_stands_in_and_the_rounds_it_will_take() {
+    fn the_line_names_the_rounds_that_the_hunt_holds_and_the_rounds_it_wants() {
         let clock = FakeClock::new();
+        let line = painted(hunting(&clock, 1, 1));
         assert!(
-            painted(hunting(&clock, 1, 1)).contains("3/64"),
-            "the line must name the round of the hunt: {:?}",
-            painted(hunting(&clock, 1, 1))
+            line.contains("1/8 reached"),
+            "the line must name the rounds of the hunt: {line:?}"
+        );
+    }
+
+    /// The line names what the hunt spent looking for those rounds.
+    ///
+    /// A reader who sees one round of eight after 40 of 64 targets knows that
+    /// the hunt will give up long before it holds what it wants.
+    #[test]
+    fn the_line_names_the_targets_that_the_hunt_traced_and_the_ones_it_may_trace() {
+        let clock = FakeClock::new();
+        let line = painted(hunting(&clock, 1, 1));
+        assert!(
+            line.contains("3/64 targets"),
+            "the line must name the targets of the hunt: {line:?}"
         );
     }
 
@@ -511,17 +533,21 @@ mod tests {
         );
     }
 
+    /// The two ratios count the destinations that answered and every draw.
+    ///
+    /// The count of the destinations that answered nothing is the difference of
+    /// the two, and the summary at the end prints it.
     #[test]
-    fn the_line_counts_the_destinations_that_answered_and_the_ones_that_did_not() {
+    fn the_line_counts_the_destinations_that_answered_and_every_one_it_drew() {
         let clock = FakeClock::new();
         let line = painted(hunting(&clock, 2, 3));
         assert!(
-            line.contains("2 reached"),
+            line.contains("2/8 reached"),
             "the line must count the reached: {line:?}"
         );
         assert!(
-            line.contains("3 partial"),
-            "the line must count the partial: {line:?}"
+            line.contains("6/64 targets"),
+            "the line must count every destination it drew: {line:?}"
         );
     }
 
@@ -531,8 +557,9 @@ mod tests {
     #[test]
     fn the_bar_fills_in_proportion_to_the_rounds() {
         let clock = FakeClock::new();
-        // The hunt stands on round 16 of 64, which is one quarter of the bar.
-        let line = painted(hunting(&clock, 15, 0));
+        // The hunt holds two rounds of eight, which is one quarter of the bar.
+        // It drew three targets of 64, which is a smaller share.
+        let line = painted(hunting(&clock, 2, 0));
         assert_eq!(
             line.matches(BAR_FULL).count(),
             BAR_CELLS / 4,
@@ -543,7 +570,7 @@ mod tests {
     #[test]
     fn the_bar_of_the_last_round_holds_no_empty_cell() {
         let clock = FakeClock::new();
-        let line = painted(hunting(&clock, ROUNDS_BEFORE_THE_LAST, 0));
+        let line = painted(hunting(&clock, WANTED_ROUNDS, 0));
         assert_eq!(
             line.matches(BAR_FULL).count(),
             BAR_CELLS,
@@ -558,7 +585,7 @@ mod tests {
     #[test]
     fn the_bar_fills_a_cell_in_eighths() {
         let clock = FakeClock::new();
-        // The first round of 64 fills three eighths of the first cell of a bar
+        // The first target of 64 fills three eighths of the first cell of a bar
         // of 24 cells, and a bar of whole cells alone would show nothing at all.
         let line = painted(hunting(&clock, 0, 0));
         assert!(
@@ -569,6 +596,23 @@ mod tests {
             line.matches(BAR_FULL).count(),
             0,
             "the bar of the first round must fill no whole cell: {line:?}"
+        );
+    }
+
+    /// The bar reads whichever bound the hunt stands closer to.
+    ///
+    /// A hunt that answers nothing holds no round, and a bar of the rounds
+    /// alone would stand still while the hunt spent every target it has.
+    #[test]
+    fn the_bar_reads_the_targets_when_they_stand_closer_than_the_rounds() {
+        let clock = FakeClock::new();
+        // The hunt holds no round of eight, and it drew 48 targets of 64, which
+        // is three quarters of the bar.
+        let line = painted(hunting(&clock, 0, 47));
+        assert_eq!(
+            line.matches(BAR_FULL).count(),
+            BAR_CELLS * 3 / 4,
+            "the bar must read the targets of a hunt that answered nothing: {line:?}"
         );
     }
 
@@ -592,7 +636,7 @@ mod tests {
         let clock = FakeClock::new();
         for columns in 0..=COLUMNS {
             let mut indicator =
-                Indicator::new(Style::Line, ROUNDS, columns, Vec::new(), Rc::clone(&clock));
+                Indicator::new(Style::Line, BOUNDS, columns, Vec::new(), Rc::clone(&clock));
             indicator.show(Event::Target(address(TARGET)));
             let line = painted(indicator);
             assert!(
@@ -607,7 +651,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut indicator = Indicator::new(
             Style::Line,
-            ROUNDS,
+            BOUNDS,
             A_NARROW_TERMINAL,
             Vec::new(),
             Rc::clone(&clock),
@@ -619,8 +663,8 @@ mod tests {
             "a narrow terminal must get no bar: {line:?}"
         );
         assert!(
-            line.contains("1/64"),
-            "a narrow terminal must still get the round of the hunt: {line:?}"
+            line.contains("0/8"),
+            "a narrow terminal must still get the rounds of the hunt: {line:?}"
         );
     }
 
@@ -705,8 +749,12 @@ mod tests {
         );
     }
 
+    /// The place of the answer of one destination among the fields of a log
+    /// line.
+    const ANSWER: usize = 3;
+
     #[test]
-    fn a_log_line_names_the_round_the_destination_and_whether_it_answered() {
+    fn a_log_line_names_the_bounds_the_destination_and_whether_it_answered() {
         let clock = FakeClock::new();
         let mut indicator = indicator(Style::Log, &clock);
         indicator.show(Event::Target(address(TARGET)));
@@ -716,21 +764,32 @@ mod tests {
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
         let lines: Vec<&str> = text.lines().collect();
         assert!(
-            lines[0].contains("round 1/64") && lines[0].contains(TARGET),
-            "the line must name the round and the destination: {lines:?}"
+            lines[0].contains("1/8 reached")
+                && lines[0].contains("1/64 targets")
+                && lines[0].contains(TARGET),
+            "the line must name both bounds and the destination: {lines:?}"
         );
-        assert!(
-            lines[0].contains(crate::REACHED),
+        assert_eq!(
+            fields(lines[0])[ANSWER],
+            REACHED,
             "the line of a destination that answered must say so: {lines:?}"
         );
         assert!(
-            lines[1].contains("round 2/64") && lines[1].contains(ANOTHER_TARGET),
-            "the line must name the round and the destination: {lines:?}"
+            lines[1].contains("1/8 reached")
+                && lines[1].contains("2/64 targets")
+                && lines[1].contains(ANOTHER_TARGET),
+            "the line must name both bounds and the destination: {lines:?}"
         );
-        assert!(
-            lines[1].contains(crate::hunt::PARTIAL) && !lines[1].contains(crate::REACHED),
+        assert_eq!(
+            fields(lines[1])[ANSWER],
+            PARTIAL,
             "the line of a destination that answered nothing must say so: {lines:?}"
         );
+    }
+
+    /// The fields of one line, as the separator divides them.
+    fn fields(line: &str) -> Vec<&str> {
+        line.split(FIELD_SEPARATOR).collect()
     }
 
     #[test]
@@ -769,16 +828,16 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_too_narrow_for_the_counts_drops_them_whole() {
+    fn a_terminal_too_narrow_for_the_targets_drops_them_whole() {
         let clock = FakeClock::new();
-        let line = painted(hunting_at(&clock, WITHOUT_THE_COUNTS, 0, 11));
+        let line = painted(hunting_at(&clock, WITHOUT_THE_TARGETS, 0, 11));
         assert!(
-            line.contains("12/64") && line.contains(TARGET),
-            "the round and the destination must stand: {line:?}"
+            line.contains("0/8 reached") && line.contains(TARGET),
+            "the rounds and the destination must stand: {line:?}"
         );
         assert!(
-            !line.contains(crate::REACHED) && !line.contains(crate::hunt::PARTIAL),
-            "the counts must go away whole and never in part: {line:?}"
+            !line.contains(crate::TARGETS),
+            "the targets must go away whole and never in part: {line:?}"
         );
     }
 
@@ -789,25 +848,25 @@ mod tests {
         indicator.show(Event::Tick);
         let line = painted(indicator);
         assert!(
-            line.contains("12/64") && line.contains(TARGET),
-            "the round and the destination must stand: {line:?}"
+            line.contains("0/8 reached") && line.contains(TARGET),
+            "the rounds and the destination must stand: {line:?}"
         );
         assert!(
-            !line.contains('s') && !line.contains('m'),
+            !line.contains("0ms"),
             "the time must go away before the destination: {line:?}"
         );
     }
 
     #[test]
-    fn the_time_stands_while_the_counts_are_gone() {
+    fn the_time_stands_while_the_targets_are_gone() {
         let clock = FakeClock::new();
-        let mut indicator = hunting_at(&clock, WITHOUT_THE_COUNTS, 0, 11);
+        let mut indicator = hunting_at(&clock, WITHOUT_THE_TARGETS, 0, 11);
         clock.advance(Duration::from_secs(41));
         indicator.show(Event::Tick);
         let line = painted(indicator);
         assert!(
             line.contains("41s"),
-            "the counts go away in front of the time: {line:?}"
+            "the targets go away in front of the time: {line:?}"
         );
     }
 
