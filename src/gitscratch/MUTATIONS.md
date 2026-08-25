@@ -290,7 +290,7 @@ assertion `left == right` failed: after a clean replay, the real repository's wo
    after: /private/var/folders/.../T/.tmpQLZnP2          30f5aa1 [main]
 /private/var/folders/.../T/.tmpJFLfi5/worktree ae9d15c (detached HEAD) prunable
 
-test result: FAILED. 6 passed; 1 failed
+test result: FAILED. 7 passed; 1 failed
 ```
 
 No collateral.
