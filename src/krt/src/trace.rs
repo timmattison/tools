@@ -695,6 +695,7 @@ mod tests {
     use super::{
         choose_privilege, icmp_kind, next_seq, probe_identifier, to_lookup, to_round_record,
         tracer_of, udp_source_port, IcmpKind, PrivilegeError, TraceConfig, TraceError,
+        TracerThread,
     };
     use crate::names::Lookup;
     use crate::record::{Privilege, Record, RoundRecord, RunId};
@@ -702,7 +703,9 @@ mod tests {
     use crate::{Multipath, Protocol, PROGRAM};
     use chrono::{DateTime, Utc};
     use std::process;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::thread;
     use std::time::{Duration, SystemTime};
     use trippy_core::{
         CompletionReason, Flags, IcmpPacketType, Port, Probe, ProbeComplete, ProbeStatus, Round,
@@ -1671,6 +1674,40 @@ this platform needs raw socket privileges to send probes.
         let counter = AtomicU64::new(0);
         assert_eq!(next_seq(&counter), 1);
         assert_eq!(next_seq(&counter), 2);
+    }
+
+    /// The time that the thread of the wait test sleeps before it sets its
+    /// flag.
+    ///
+    /// The sleep is short, because every run of the suite pays it. It is long
+    /// enough that a wait which drops the handle in the place of a join reads
+    /// the flag while the thread still sleeps.
+    const A_SHORT_SLEEP: Duration = Duration::from_millis(50);
+
+    /// The wait of a tracer thread holds the caller until that thread stops.
+    ///
+    /// The thread of this test sets a flag after a short sleep. A wait that
+    /// joins the thread reads the flag as set. A wait that drops the handle
+    /// reads the flag as clear, because the thread still sleeps.
+    ///
+    /// The flag lives in this process, so two runs of this test at the same
+    /// time share nothing.
+    #[test]
+    fn the_wait_of_a_tracer_thread_holds_the_caller_until_that_thread_stops() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let of_thread = Arc::clone(&flag);
+        let tracer = TracerThread(thread::spawn(move || {
+            thread::sleep(A_SHORT_SLEEP);
+            of_thread.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        tracer.wait();
+
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "the wait must hold the caller until the thread sets the flag"
+        );
     }
 
     // The reading of one reverse lookup. No test below touches the network, and
