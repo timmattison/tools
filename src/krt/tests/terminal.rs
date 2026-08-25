@@ -459,6 +459,23 @@ const A_TERMINAL_OF_IMAGES_AND_NO_PIXELS: Report = Report {
     term: A_KITTY_TERM_NAME,
 };
 
+/// A terminal that names nothing and reports the pixel size of its window.
+///
+/// Such a terminal sets none of the signals that [`TERMINAL_SIGNALS`] lists, so
+/// `termgfx` names it no terminal at all and guesses which protocol it reads.
+/// The guess is the sequence of iTerm2, and xterm, GNOME Terminal and Konsole
+/// each set none of those signals and each read none of that sequence. A guess
+/// must therefore draw no image: a run that took it would put the escape
+/// sequence of an image on the screen as text, once for each row of each frame.
+///
+/// The window reports a pixel size, so the geometry of the image path answers
+/// yes and the name of the terminal is the one question left.
+#[cfg(target_os = "macos")]
+const A_TERMINAL_OF_NO_NAME: Report = Report {
+    pixels: (WIDE * CELL_WIDTH, ROWS * CELL_HEIGHT),
+    term: A_PLAIN_TERM_NAME,
+};
+
 /// The name of the variable that carries the name of a terminal.
 const TERM: &str = "TERM";
 
@@ -1357,6 +1374,17 @@ const KITTY_DELETE_ALL: &str = "\x1b_Ga=d,d=A\x1b\\";
 #[cfg(target_os = "macos")]
 const KITTY_IMAGE: &str = "\x1b_Ga=T,";
 
+/// The start of one iTerm2 inline-image command.
+///
+/// The test spells the bytes, and `termgfx` spells them again. That is on
+/// purpose, and the reason is the terminal of no name: iTerm2 is the routine
+/// that `termgfx` picks for a terminal it cannot name, so a run that trusted
+/// such a terminal would write these bytes and then the base64 of an image
+/// behind them. A test that refused the two Kitty commands alone would pass on
+/// that run.
+#[cfg(target_os = "macos")]
+const ITERM2_IMAGE: &str = "\x1b]1337;File=inline=1";
+
 /// Starts a live run of one TTL under a terminal that reports `report`, with
 /// `flags` behind the flags of such a run, and waits until the table draws the
 /// row of the hop that answered.
@@ -1490,10 +1518,18 @@ fn a_live_run_of_graphics_draws_no_block_element_under_the_heading_of_its_recent
 /// behind the flags of a run of one TTL, draws the block elements of a history
 /// and writes no command of an image.
 ///
-/// Two runs take this answer, and one thing separates them: one asks for no
-/// image, and the other asks for an image on a terminal that measures no
-/// character cell. The answer of the two is the same picture, and it is the
-/// picture that `krt` drew before the image path arrived.
+/// Three runs take this answer, and one thing separates each of them from the
+/// run that draws an image: one asks for no image, one asks for an image on a
+/// terminal that measures no character cell, and one asks for an image on a
+/// terminal that names itself to nobody. The answer of the three is the same
+/// picture, and it is the picture that `krt` drew before the image path
+/// arrived.
+///
+/// The list of commands the run must not write names one command for each
+/// routine a terminal of this file can reach. `termgfx` sends a Kitty window
+/// the two Kitty commands and a terminal of no name the command of iTerm2, so a
+/// list of the Kitty commands alone would pass on the run that reads no
+/// protocol at all.
 #[cfg(target_os = "macos")]
 fn a_live_run_draws_the_block_elements(name: &str, report: Report, flags: &[&str]) {
     let recording = Recording::at(name);
@@ -1507,7 +1543,7 @@ fn a_live_run_draws_the_block_elements(name: &str, report: Report, flags: &[&str
             .any(|line| line.chars().any(|glyph| BLOCK_ELEMENTS.contains(glyph))),
         "the row of the hop draws its history in block elements: {body:?}"
     );
-    for command in [KITTY_DELETE_ALL, KITTY_IMAGE] {
+    for command in [KITTY_DELETE_ALL, KITTY_IMAGE, ITERM2_IMAGE] {
         assert!(
             !shown.contains(command),
             "and no command of an image protocol reaches the terminal: {shown:?}"
@@ -1543,6 +1579,28 @@ fn a_live_run_of_graphics_under_a_terminal_of_no_pixels_draws_the_block_elements
     a_live_run_draws_the_block_elements(
         "krt-terminal-graphics-no-pixels",
         A_TERMINAL_OF_IMAGES_AND_NO_PIXELS,
+        &[FLAG_GRAPHICS],
+    );
+}
+
+/// A live run of `--graphics` under a terminal that names nothing draws the
+/// block elements.
+///
+/// This is the name of the terminal, proven end to end, and it is the other
+/// half of the answer that the test above gives for the geometry. The window
+/// reports a pixel size, so the run measures a character cell and every
+/// question of geometry answers yes. What the terminal never says is which
+/// escape sequence it reads: it sets none of the signals of
+/// [`TERMINAL_SIGNALS`], and `termgfx` then picks the routine of iTerm2 because
+/// something has to be picked. xterm, GNOME Terminal and Konsole all arrive
+/// this way and all read none of that sequence, so a run that trusted the pick
+/// would write base64 across the screen for each row of each frame.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_run_of_graphics_under_a_terminal_of_no_name_draws_the_block_elements() {
+    a_live_run_draws_the_block_elements(
+        "krt-terminal-graphics-no-name",
+        A_TERMINAL_OF_NO_NAME,
         &[FLAG_GRAPHICS],
     );
 }

@@ -157,6 +157,28 @@ impl Capabilities {
         self.draws_images
     }
 
+    /// Whether this terminal draws an inline image and named itself as well.
+    ///
+    /// A terminal that set none of the signals this crate reads is a
+    /// [`TerminalType::Unknown`], and [`display_routine_for`] sends such a
+    /// terminal the sequence of iTerm2. That is a guess at the protocol, and it
+    /// is the only thing left to do: no terminal answers a question about the
+    /// sequences it reads. So this method answers no for a terminal of no name,
+    /// and it answers [`Capabilities::draws_images`] for every terminal that
+    /// the crate does name.
+    ///
+    /// This is not [`Capabilities::draws_images`]. That method takes the guess,
+    /// and the guess is right for a tool with no second way to show the
+    /// picture, because an image at a guessed protocol beats no image. It is
+    /// wrong for a tool that has one, because an escape sequence that the
+    /// terminal does not read lands on the screen as text. `ic` is the first
+    /// kind of tool and `krt` is the second, and [`crate::cell_pixels`] splits
+    /// the same two audiences over the size of a character cell.
+    #[must_use]
+    pub fn draws_images_by_name(&self) -> bool {
+        self.draws_images
+    }
+
     /// Whether this terminal takes the raw mode that a key press needs.
     #[must_use]
     pub fn raw_mode(&self) -> bool {
@@ -590,6 +612,62 @@ mod tests {
     #[test]
     fn linux_console_does_not_support_graphics() {
         assert!(!terminal_supports_graphics(&TerminalType::Unknown, "linux"));
+    }
+
+    // =========================================================================
+    // Tests for draws_images_by_name
+    // =========================================================================
+
+    #[test]
+    fn a_terminal_that_this_crate_cannot_name_draws_no_image_by_name() {
+        // A terminal that set none of the signals this crate reads carries no
+        // name, so the routine it takes is a guess. `display_routine_for` sends
+        // it the sequence of iTerm2, and xterm, GNOME Terminal and Konsole each
+        // read none of that sequence and print it as text.
+        let no_name = Capabilities::from_env(
+            &TerminalEnv {
+                term: "xterm-256color".to_string(),
+                ..TerminalEnv::default()
+            },
+            false,
+        );
+        assert_eq!(no_name.terminal_type(), &TerminalType::Unknown);
+        assert!(
+            no_name.draws_images(),
+            "the crate takes such a terminal at its word for a caller with no second way to draw"
+        );
+        assert!(
+            !no_name.draws_images_by_name(),
+            "and it draws no image by name, because nothing said which sequence this terminal reads"
+        );
+
+        // A Kitty window named itself, so the routine it takes is the routine
+        // that this terminal reads.
+        let window = Capabilities::from_env(
+            &TerminalEnv {
+                kitty_window_id: true,
+                ..TerminalEnv::default()
+            },
+            false,
+        );
+        assert!(
+            window.draws_images_by_name(),
+            "a terminal that named itself draws the image of the sequence it reads"
+        );
+
+        // An Alacritty window named itself and it draws no image at all, so the
+        // name settles nothing that the protocol left open.
+        let alacritty = Capabilities::from_env(
+            &TerminalEnv {
+                alacritty_socket: true,
+                ..TerminalEnv::default()
+            },
+            false,
+        );
+        assert!(
+            !alacritty.draws_images_by_name(),
+            "a terminal that draws no image draws none under its own name either"
+        );
     }
 
     // =========================================================================
