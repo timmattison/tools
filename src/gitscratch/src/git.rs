@@ -157,6 +157,16 @@ impl Git {
             // simulated. Proven by tests/safety.rs: with the setting enabled and
             // this override removed, a dry run destroys the developer's branch.
             "rebase.updateRefs=false",
+            // The backend is pinned because `--update-refs` is a merge-backend
+            // feature that the apply backend ignores outright. Left unpinned,
+            // the entry directly above is unfalsifiable on a developer who
+            // prefers the apply backend - it could be deleted and nothing on
+            // that machine would notice, because the backend already silences
+            // what it overrides. The path a halted rebase lives at moves with
+            // the backend too, from `rebase-merge` to `rebase-apply`, so a
+            // consumer inspecting an interrupted replay would be reading a
+            // different repository on a different machine.
+            "rebase.backend=merge",
             "rebase.autoStash=false",
             "rebase.autosquash=false",
             // Simulated mains are loose commits nothing references yet; an

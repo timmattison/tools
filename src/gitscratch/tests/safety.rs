@@ -80,13 +80,15 @@ fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
     // it, turns a fragility that only some machines carry into a property this
     // suite pins on every machine.
     //
-    // It is the control's scaffolding and nothing more, so it comes back out
-    // again below, with the rest of the control's damage, before the replay
-    // runs. Leaving it standing would be the very false green this test is
-    // built to refuse: the replay would inherit the apply backend too, and the
-    // apply backend ignores `--update-refs` whether or not the harness pins
-    // `rebase.updateRefs=false` - so the pin could be deleted outright and
-    // every assertion below would still pass.
+    // It stays armed for the rest of the test, and it stays armed precisely
+    // because `Git::safety_config` pins `rebase.backend=merge` for every git
+    // command a replay runs. The harness picks its own backend rather than
+    // inheriting this one, which leaves the hostile setting as exactly what it
+    // ought to be here: a developer rebase configuration sitting in the
+    // repository that the replay below has to tolerate and be unaffected by.
+    // The control keeps a `-c rebase.backend=merge` of its own further down,
+    // because the control runs through plain git rather than through the
+    // harness, so nothing pins a backend on its behalf.
     repo.git(&["config", "rebase.backend", "apply"]);
 
     let branch_refs = || -> Vec<(String, String)> {
@@ -139,20 +141,6 @@ fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
     repo.checkout("main");
     let control_ref = format!("refs/heads/{CONTROL_BRANCH}");
     repo.git(&["update-ref", "-d", &control_ref]);
-    // The hostile backend goes back out with the rest of it, and the fixture
-    // never set it in the first place, so `--unset` restores the default rather
-    // than picking one. `--default ""` is what makes this readable at all: a
-    // plain `--get` exits non-zero on an absent key, which `repo.git` raises as
-    // a panic, so the ordinary answer would arrive as a crash.
-    repo.git(&["config", "--unset", "rebase.backend"]);
-    assert_eq!(
-        repo.git(&["config", "--default", "", "--get", "rebase.backend"]),
-        "",
-        "the control left its hostile rebase backend armed in {}, and the apply \
-         backend ignores `--update-refs` outright, so every assertion below \
-         would pass with the harness's `rebase.updateRefs=false` deleted",
-        repo.path().display()
-    );
     assert_eq!(
         branch_refs(),
         pristine,
@@ -336,17 +324,20 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
     // turns a fragility that only some machines carry into a property this suite
     // pins on every machine.
     //
-    // Unlike the hostile backend the sibling `rebase.updateRefs` test arms, this
+    // Like the hostile backend the sibling `rebase.updateRefs` test arms, this
     // one stays standing for the rest of the test rather than being unwound with
-    // the control's other damage. `merge.ff` is read by `git merge` and by
-    // nothing else here: `merge --abort` ends a merge rather than starting one,
+    // the control's other damage - though the two are safe to leave armed for
+    // different reasons, and the difference is worth stating. The sibling's
+    // backend reaches a replay that overrides it, because `Git::safety_config`
+    // pins `rebase.backend=merge`. `Git::safety_config` names no `merge.ff` at
+    // all, so this setting reaches the replay unopposed and has to be harmless
+    // on its own terms. It is: `merge.ff` is read by `git merge` and by nothing
+    // else here - `merge --abort` ends a merge rather than starting one,
     // `gitscratch` never runs `git merge` at all, and a rebase under
     // `merge.ff = only` still conflicts exactly as it does without it - all
-    // three checked rather than assumed. There is also no harness pin for it to
-    // silence, because `Git::safety_config` names no `merge.ff`, which is the
-    // whole reason the sibling has to unwind its backend and this one does not.
-    // Leaving it armed is the stronger reading anyway: the replay below then
-    // runs under a developer merge config it has to tolerate.
+    // three checked rather than assumed. Leaving it armed is the stronger
+    // reading anyway: the replay below then runs under a developer merge config
+    // it has to tolerate.
     repo.git(&["config", "merge.ff", "only"]);
 
     // `rr-cache` is shared repo-wide, so it is reachable from the common dir
