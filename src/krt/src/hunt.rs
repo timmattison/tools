@@ -46,6 +46,7 @@ use crate::record::{
 use crate::run;
 use crate::run::RunError;
 use crate::stats::{HopTable, TtlRow};
+use crate::status::{Event, Status};
 use crate::ui;
 use crate::{counted, REACHED, ROUND};
 use chrono::{DateTime, Utc};
@@ -277,7 +278,7 @@ pub(crate) struct Score {
 /// the numbers that the summary ranks, and it shows nothing. The run loop
 /// hands every round and every name to the screen already, so the fold rides
 /// on the door that is there and the hunt reads no file back.
-pub(crate) struct Scorer {
+pub(crate) struct Scorer<'a> {
     /// The address that this destination stands at.
     addr: Ipv4Addr,
     /// The run that records the trace of it.
@@ -290,11 +291,23 @@ pub(crate) struct Scorer {
     reached_at: Option<u8>,
     /// The name of each address that a reverse lookup gave.
     names: BTreeMap<IpAddr, String>,
+    /// The indicator of the hunt that this destination belongs to.
+    ///
+    /// The turns of one destination are the heartbeat of the whole hunt, and
+    /// this screen is what the run loop of that destination knocks on. The
+    /// indicator therefore hears every turn without the hunt loop asking the
+    /// run loop for one.
+    status: &'a mut dyn Status,
 }
 
-impl Scorer {
+impl<'a> Scorer<'a> {
     /// Builds the screen of one destination.
-    pub(crate) fn new(addr: Ipv4Addr, run: RunId, first_ttl: u8) -> Self {
+    pub(crate) fn new(
+        addr: Ipv4Addr,
+        run: RunId,
+        first_ttl: u8,
+        status: &'a mut dyn Status,
+    ) -> Self {
         Self {
             addr,
             run,
@@ -302,6 +315,7 @@ impl Scorer {
             table: HopTable::new(),
             reached_at: None,
             names: BTreeMap::new(),
+            status,
         }
     }
 
@@ -362,7 +376,7 @@ impl Scorer {
     }
 }
 
-impl Screen for Scorer {
+impl Screen for Scorer<'_> {
     /// A hunt takes no key of the terminal, so this screen asks for no stop.
     ///
     /// `Ctrl-C` reaches a hunt through the signal flag, which stops the trace
@@ -531,6 +545,7 @@ pub(crate) fn record<W: Write>(
     sources: &mut Sources<'_>,
     stop: &dyn Fn() -> bool,
     writer: &mut Writer<W>,
+    status: &mut dyn Status,
 ) -> Result<Summary, HuntStopped> {
     let started = Instant::now();
     // Both ways out of the loop build the same summary over the scores that the
@@ -549,7 +564,7 @@ pub(crate) fn record<W: Write>(
         let moment = next_moment(previous, Utc::now());
         previous = Some(moment);
         let run = RunId::at(moment);
-        match trace_one(facts, plan, sources, stop, writer, target, run) {
+        match trace_one(facts, plan, sources, stop, writer, target, run, status) {
             Ok(Some(score)) => scores.push(score),
             Ok(None) => {}
             Err(fault) => {
@@ -597,6 +612,10 @@ fn next_moment(previous: Option<DateTime<Utc>>, now: DateTime<Utc>) -> DateTime<
 ///
 /// Returns [`HuntError::Run`] when a record does not reach the file, and
 /// [`HuntError::Tracer`] when the tracer of this destination does not start.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the loop of the hunt holds one of these and hands every one of them to this step; a struct of the eight would be the loop itself"
+)]
 fn trace_one<W: Write>(
     facts: &Facts,
     plan: &Plan,
@@ -605,6 +624,7 @@ fn trace_one<W: Write>(
     writer: &mut Writer<W>,
     target: Ipv4Addr,
     run: RunId,
+    status: &mut dyn Status,
 ) -> Result<Option<Score>, HuntError> {
     let rounds = sources
         .probes
@@ -635,7 +655,7 @@ fn trace_one<W: Write>(
         name_grace: plan.name_grace,
     };
     let mut namer = Namer::new(Box::new(Rc::clone(&sources.resolver)), run.clone());
-    let mut scorer = Scorer::new(target, run, facts.config.first_ttl);
+    let mut scorer = Scorer::new(target, run, facts.config.first_ttl, status);
     let outcome = run::record(
         &start,
         &rounds,
@@ -969,6 +989,7 @@ mod tests {
         PARTIAL, SHORTEST, SLOWEST,
     };
     use crate::live::Screen;
+    use crate::status::{Event, Status};
     use crate::record::{
         EndReason, Family, HuntId, NameRecord, Privilege, Record, Recording, RoundRecord,
         RunConfig, RunId, SourceKind, SourceLabel, Writer,
@@ -1256,7 +1277,13 @@ mod tests {
         rounds: &[&[(u8, &str, f64)]],
         names: &[(&str, &str)],
     ) -> Score {
-        let mut scorer = Scorer::new(address(destination), RunId::from(run), FIRST_TTL);
+        let mut recorder = Recorder::default();
+        let mut scorer = Scorer::new(
+            address(destination),
+            RunId::from(run),
+            FIRST_TTL,
+            &mut recorder,
+        );
         for hops in rounds {
             scorer.round(&round(FIRST_TTL, MAX_TTL, hops));
         }
@@ -1418,7 +1445,8 @@ mod tests {
     /// A hunt takes no key of the terminal.
     #[test]
     fn the_screen_of_a_destination_asks_for_no_stop() {
-        let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL);
+        let mut recorder = Recorder::default();
+        let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL, &mut recorder);
         assert!(!scorer.poll());
     }
 
@@ -1737,6 +1765,48 @@ mod tests {
         recording: Recording,
         /// The destinations that the hunt asked its source for, in order.
         asked: Vec<Ipv4Addr>,
+        /// The events that the hunt showed its indicator, in order.
+        shown: Vec<Event>,
+    }
+
+    /// An indicator that keeps every event the hunt showed it.
+    ///
+    /// A hunt of a test drives this one, so no test of this module needs a
+    /// terminal and every test reads the events as values.
+    #[derive(Default)]
+    struct Recorder {
+        /// The events, in the order the hunt showed them.
+        events: Vec<Event>,
+    }
+
+    impl Recorder {
+        /// The destinations that the hunt named, in order.
+        fn targets(&self) -> Vec<Ipv4Addr> {
+            self.events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Target(target) => Some(*target),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Whether each destination that the hunt scored answered, in order.
+        fn answers(&self) -> Vec<bool> {
+            self.events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Scored { reached } => Some(*reached),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    impl Status for Recorder {
+        fn show(&mut self, event: &Event) {
+            self.events.push(*event);
+        }
     }
 
     /// Runs one hunt over a scripted draw and a scripted source of rounds.
@@ -1750,11 +1820,13 @@ mod tests {
         stop: &dyn Fn() -> bool,
     ) -> Result<Hunted, HuntStopped> {
         let mut probes = FakeProbes::of(scripts);
-        let outcome = run_hunt(addresses, &mut probes, rounds, stop, &[]);
+        let mut recorder = Recorder::default();
+        let outcome = run_hunt(addresses, &mut probes, rounds, stop, &[], &mut recorder);
         outcome.map(|(summary, recording)| Hunted {
             summary,
             recording,
             asked: probes.asked.clone(),
+            shown: recorder.events.clone(),
         })
     }
 
@@ -1765,11 +1837,12 @@ mod tests {
         rounds: u64,
         stop: &dyn Fn() -> bool,
         names: &[(&str, &[crate::names::Lookup])],
+        status: &mut dyn Status,
     ) -> Result<(Summary, Recording), HuntStopped> {
         let mut sink = Vec::new();
         let summary = {
             let mut writer = Writer::to_sink(&mut sink);
-            hunt_into(addresses, probes, rounds, stop, names, &mut writer)
+            hunt_into(addresses, probes, rounds, stop, names, &mut writer, status)
         }?;
         Ok((summary, read_back(&sink)))
     }
@@ -1785,6 +1858,7 @@ mod tests {
         stop: &dyn Fn() -> bool,
         names: &[(&str, &[crate::names::Lookup])],
         writer: &mut Writer<W>,
+        status: &mut dyn Status,
     ) -> Result<Summary, HuntStopped> {
         let list: Vec<Ipv4Addr> = addresses.iter().copied().map(address).collect();
         let facts = Facts {
@@ -1822,7 +1896,7 @@ mod tests {
             probes,
             resolver,
         };
-        record(&facts, &plan, &mut sources, stop, writer)
+        record(&facts, &plan, &mut sources, stop, writer, status)
     }
 
     /// The byte that ends every record of a file.
@@ -1893,6 +1967,13 @@ mod tests {
         std::env::temp_dir().join(format!("krt-hunt-{}-{nanos}.jsonl", std::process::id()))
     }
 
+    /// The events that a hunt showed its indicator, as a recorder reads them.
+    fn shown(hunted: &Hunted) -> Recorder {
+        Recorder {
+            events: hunted.shown.clone(),
+        }
+    }
+
     /// A hunt that nothing stops.
     fn never_stops() -> impl Fn() -> bool {
         || false
@@ -1911,6 +1992,94 @@ mod tests {
 
     /// One round that answered to TTL 4 and no further.
     const PARTIAL_AT_FOUR: &[&[(u8, &str, f64)]] = &[&[(1, FIRST_HOP, 1.0), (4, LAST_ANSWER, 9.0)]];
+
+    #[test]
+    fn a_hunt_shows_the_destination_of_each_round_to_its_indicator() {
+        let hunted = hunted(
+            &[NEAR, FAR],
+            &[REACHED_AT_FIVE, FAR_REACHED_AT_EIGHTEEN],
+            2,
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            shown(&hunted).targets(),
+            vec![address(NEAR), address(FAR)],
+            "the indicator must hear every destination: {:?}",
+            hunted.shown
+        );
+    }
+
+    #[test]
+    fn a_hunt_shows_whether_each_destination_answered() {
+        let hunted = hunted(
+            &[NEAR, QUIET],
+            &[REACHED_AT_FIVE, &[&[]]],
+            2,
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            shown(&hunted).answers(),
+            vec![true, false],
+            "the indicator must hear the answer of every destination: {:?}",
+            hunted.shown
+        );
+    }
+
+    /// The trace of one destination is the heartbeat of the hunt that holds it.
+    #[test]
+    fn the_screen_of_a_destination_ticks_the_indicator() {
+        let mut recorder = Recorder::default();
+        {
+            let mut scorer =
+                Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL, &mut recorder);
+            scorer.poll();
+            scorer.round(&round(FIRST_TTL, MAX_TTL, &[(1, FIRST_HOP, 1.0)]));
+        }
+        assert_eq!(
+            recorder.events,
+            vec![Event::Tick, Event::Tick],
+            "a poll and a round must each tick the indicator"
+        );
+    }
+
+    #[test]
+    fn a_hunt_stops_its_indicator_when_it_ends() {
+        let hunted =
+            hunted(&[NEAR], &[REACHED_AT_FIVE], 1, &never_stops()).expect("the hunt must finish");
+        assert_eq!(
+            hunted.shown.last(),
+            Some(&Event::Stop),
+            "the last event of a hunt must take the line back: {:?}",
+            hunted.shown
+        );
+    }
+
+    #[test]
+    fn a_hunt_that_a_fault_stopped_stops_its_indicator() {
+        let mut probes = FakeProbes::of(&[REACHED_AT_FIVE, REACHED_AT_FIVE]);
+        let mut writer = Writer::to_sink(Sink::that_takes(RECORDS_OF_ONE_DESTINATION));
+        let mut recorder = Recorder::default();
+        drop(
+            hunt_into(
+                &[NEAR, FAR],
+                &mut probes,
+                2,
+                &never_stops(),
+                &[],
+                &mut writer,
+                &mut recorder,
+            )
+            .expect_err("a write that fails stops the hunt"),
+        );
+        assert_eq!(
+            recorder.events.last(),
+            Some(&Event::Stop),
+            "a fault must take the line back too: {:?}",
+            recorder.events
+        );
+    }
 
     #[test]
     fn a_hunt_traces_the_addresses_that_the_draw_gives_in_the_order_it_gives_them() {
@@ -2004,8 +2173,15 @@ mod tests {
     fn a_destination_takes_the_number_of_probe_rounds_that_the_plan_names() {
         let mut probes =
             FakeProbes::of(&[&[&[(5, NEAR, 20.0)], &[(5, NEAR, 21.0)], &[(5, NEAR, 22.0)]]]);
-        let (_, recording) =
-            run_hunt(&[NEAR], &mut probes, 1, &never_stops(), &[]).expect("the hunt must finish");
+        let (_, recording) = run_hunt(
+            &[NEAR],
+            &mut probes,
+            1,
+            &never_stops(),
+            &[],
+            &mut Recorder::default(),
+        )
+        .expect("the hunt must finish");
         let run = recording.last_run().expect("the file holds one run");
         assert_eq!(run.rounds().len(), 1, "the plan names one probe round");
     }
@@ -2074,7 +2250,14 @@ mod tests {
     #[test]
     fn a_tracer_that_does_not_start_stops_the_hunt_and_names_the_destination() {
         let mut probes = FakeProbes::that_refuses(NO_RAW_SOCKET);
-        let stopped = run_hunt(&[NEAR], &mut probes, 1, &never_stops(), &[])
+        let stopped = run_hunt(
+            &[NEAR],
+            &mut probes,
+            1,
+            &never_stops(),
+            &[],
+            &mut Recorder::default(),
+        )
             .expect_err("a tracer that will not start stops the hunt");
         let reason = stopped.fault.to_string();
         assert!(
@@ -2108,7 +2291,14 @@ mod tests {
             2,
             NO_RAW_SOCKET,
         );
-        let stopped = run_hunt(&[NEAR, FAR, QUIET], &mut probes, 3, &never_stops(), &[])
+        let stopped = run_hunt(
+            &[NEAR, FAR, QUIET],
+            &mut probes,
+            3,
+            &never_stops(),
+            &[],
+            &mut Recorder::default(),
+        )
             .expect_err("the tracer of the third destination stops the hunt");
         assert!(
             stopped.fault.to_string().contains(QUIET),
@@ -2139,6 +2329,7 @@ mod tests {
             &never_stops(),
             &[],
             &mut writer,
+            &mut Recorder::default(),
         )
         .expect_err("a write that fails stops the hunt");
         assert!(
@@ -2163,6 +2354,7 @@ mod tests {
             1,
             &never_stops(),
             &[(NEAR, &[named(DESTINATION_NAME)])],
+            &mut Recorder::default(),
         )
         .expect("the hunt must finish");
         let named: Vec<String> = recording

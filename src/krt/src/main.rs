@@ -1894,12 +1894,23 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
         probes: &mut probes,
         resolver: Rc::from(resolver),
     };
+    // The indicator shows what the hunt is doing while it runs. A hunt of 64
+    // destinations takes minutes and draws no live table, so a hunt without one
+    // prints nothing between the line above and the summary at the end.
+    let mut status = status::Indicator::new(
+        status::style_of(std::io::stdout().is_terminal()),
+        plan.rounds,
+        ui::frame_columns(),
+        std::io::stdout(),
+        live::SystemClock,
+    );
     let summary = hunt::record(
         &facts,
         &hunt_plan,
         &mut sources,
         &|| user_stopped(&flag),
         &mut writer,
+        &mut status,
     )
     .map_err(|stopped| {
         let code = match stopped.fault {

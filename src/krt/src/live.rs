@@ -1105,7 +1105,6 @@ mod tests {
     use crate::ui::Paint;
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-    use std::cell::Cell;
     use std::fs;
     use std::io::Write;
     use std::path::{Path, PathBuf};
