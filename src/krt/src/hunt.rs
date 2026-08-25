@@ -566,8 +566,10 @@ pub(crate) struct Sources<'a> {
 /// probe rounds of the plan and a deadline of the target timeout. The deadline
 /// bounds every destination, and not the quiet ones alone: no destination holds
 /// the hunt for longer than that timeout. The round limit is what stops a
-/// destination that answers, because `Cli::resolve` refuses a plan whose probe
-/// rounds run past its timeout.
+/// destination that answers, because `Cli::resolve` refuses a plan whose
+/// timeout holds fewer than one probe round more than the plan asks for. The
+/// last round lands past the time of the rounds, so a timeout of exactly that
+/// time would cut every destination short.
 ///
 /// `stop` answers whether the user asked the hunt to stop, and it reaches both
 /// this loop and the run of the destination that stands. A destination that the

@@ -132,8 +132,9 @@ const PROBES_PER_ROUND_DEFAULT: u64 = 3;
 /// The longest that one destination of a hunt takes, when the user names none.
 ///
 /// The time bounds every destination, and not the quiet ones alone. It stands
-/// above the time that the default probe rounds take at the default interval,
-/// because a timeout below that time cuts a destination short of its last
+/// above the time that one probe round more than the default probe rounds takes
+/// at the default interval, because the last round lands past the time of the
+/// rounds, and a timeout below that time cuts a destination short of its last
 /// round.
 const TARGET_TIMEOUT_DEFAULT: &str = "10s";
 
@@ -650,9 +651,11 @@ impl Cli {
     /// changes nothing, and the record then names a mode that the run did not
     /// use. A target timeout that the probe rounds of the same hunt run past
     /// cuts every destination short of its last round, so such a line asks for
-    /// two things at once. A cap of the targets below the rounds of the same
-    /// hunt asks for two things at once as well: such a hunt gives up before it
-    /// can hold the rounds it wants.
+    /// two things at once. The last round lands past the time of the rounds, so
+    /// the timeout must hold one probe round more than the line asks for. A cap
+    /// of the targets below the rounds of the same hunt asks for two things at
+    /// once as well: such a hunt gives up before it can hold the rounds it
+    /// wants.
     ///
     /// Returns the reason as text as well when the destination is the name of a
     /// command, which a flag in front of that command makes. That check runs
@@ -1038,6 +1041,12 @@ fn probe_time(interval: Duration, probes_per_round: u64) -> Option<Duration> {
 /// lines ask for two things at once, so the tool names the pair in the place of
 /// a hunt that can never do what the line says.
 ///
+/// The timeout must hold one probe round more than the line asks for. The first
+/// round of a destination goes out one interval after the run starts, and each
+/// round after it takes one interval more, so the last of N rounds lands past N
+/// intervals. A timeout of exactly N intervals therefore stops the destination
+/// one round short of the count on its own command line.
+///
 /// A command line that names no hunt holds no such pair, and it gives none.
 fn hunt_contradiction(command: Option<&Command>, interval: Duration) -> Option<String> {
     let Some(Command::Hunt {
@@ -1055,11 +1064,14 @@ fn hunt_contradiction(command: Option<&Command>, interval: Duration) -> Option<S
             "`--max-targets {max_targets}` is below `--rounds {rounds}`: a hunt that traces {max_targets} destinations never holds {rounds} that answered"
         ));
     }
-    let needed = probe_time(interval, *probes_per_round);
+    // The saturating add holds a count of the full width of a `u64`. The
+    // `u32::try_from` of `probe_time` then gives none, which reads as a time
+    // that no timeout reaches.
+    let needed = probe_time(interval, probes_per_round.saturating_add(1));
     if needed.is_none_or(|needed| *target_timeout <= needed) {
         let needs = needed.map_or_else(|| TIME_BEYOND_A_DURATION.to_owned(), ui::render_duration);
         return Some(format!(
-            "`--target-timeout {}` cannot hold `--probes-per-round {probes_per_round}` at an interval of {}, which needs {needs}: raise the timeout or lower the probe rounds",
+            "`--target-timeout {}` cannot hold `--probes-per-round {probes_per_round}` at an interval of {}. The last round lands past the time of the rounds, so the timeout must hold one round more, which is {needs}: raise the timeout or lower the probe rounds",
             ui::render_duration(*target_timeout),
             ui::render_duration(interval)
         ));
