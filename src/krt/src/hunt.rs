@@ -560,6 +560,8 @@ pub(crate) struct Sources<'a> {
 /// out when its run closes. The lane then goes back to the pool, and the next
 /// destination the hunt draws takes it.
 struct Flight {
+    /// The destination that this flight traces.
+    target: Ipv4Addr,
     /// The lane that its tracer probes in.
     lane: Lane,
     /// The run that records it.
@@ -730,7 +732,12 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
         let namer = Namer::new(Box::new(Rc::clone(&self.sources.resolver)), id.clone());
         let scorer = Scorer::new(target, id, self.facts.config.first_ttl);
         let run = run::Run::open(&record, rounds, limits, namer, self.writer)?;
-        Ok(Flight { lane, run, scorer })
+        Ok(Flight {
+            target,
+            lane,
+            run,
+            scorer,
+        })
     }
 
     /// Takes one turn of every destination in flight, and closes the ones that
@@ -789,7 +796,10 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
         if answered {
             self.reached += 1;
         }
-        self.status.show(Event::Scored { reached: answered });
+        self.status.show(Event::Scored {
+            target: flight.target,
+            reached: answered,
+        });
         self.scores.push(score);
     }
 
@@ -2095,7 +2105,7 @@ mod tests {
             self.events
                 .iter()
                 .filter_map(|event| match event {
-                    Event::Scored { reached } => Some(*reached),
+                    Event::Scored { reached, .. } => Some(*reached),
                     _ => None,
                 })
                 .collect()

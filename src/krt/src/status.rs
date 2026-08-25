@@ -44,10 +44,12 @@ pub(crate) enum Event {
     /// The trace of the destination that stands took one turn. A turn is one
     /// probe round that arrived, or one poll of the run loop that read none.
     Tick,
-    /// The hunt finished the destination that stood. `reached` is true when
-    /// that destination answered.
+    /// The hunt finished one destination. A hunt holds many of them at once,
+    /// so the event names which one.
     Scored {
-        /// True when the destination answered.
+        /// The destination that finished.
+        target: Ipv4Addr,
+        /// True when that destination answered.
         reached: bool,
     },
     /// The hunt stopped, and the indicator gives the line back.
@@ -175,8 +177,13 @@ pub(crate) struct Indicator<W: Write, C: Clock> {
     /// The number of destinations that the hunt started, the one that stands
     /// included.
     targets: u64,
-    /// The destination that the hunt traces now.
+    /// The destination that the hunt started last.
     target: Option<Ipv4Addr>,
+    /// The number of destinations that the hunt holds at this moment.
+    ///
+    /// A destination that the user cut short gives no answer, so it stays in
+    /// this count until the stop of the hunt takes the line back.
+    flying: usize,
     /// The number of destinations that answered, which is the number of rounds
     /// that the hunt holds.
     reached: u64,
@@ -204,6 +211,7 @@ impl<W: Write, C: Clock> Indicator<W, C> {
             bounds,
             targets: 0,
             target: None,
+            flying: 0,
             reached: 0,
             frame: 0,
             painted: 0,
@@ -384,14 +392,16 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
             Event::Target(target) => {
                 self.targets += 1;
                 self.target = Some(target);
+                self.flying += 1;
             }
             Event::Tick => self.frame += 1,
-            Event::Scored { reached } => {
+            Event::Scored { reached, .. } => {
+                self.flying = self.flying.saturating_sub(1);
                 if reached {
                     self.reached += 1;
                 }
             }
-            Event::Stop => {}
+            Event::Stop => self.flying = 0,
         }
         match (self.style, event) {
             // A terminal puts the cursor back where the carriage return sends
@@ -403,7 +413,7 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
             // destination that finished is the pace of the hunt itself, and a
             // frame of every turn would fill the file with the same line ten
             // times a second.
-            (Style::Log, Event::Scored { reached }) => self.log(reached),
+            (Style::Log, Event::Scored { reached, .. }) => self.log(reached),
             (Style::Log, _) => {}
         }
     }
@@ -510,11 +520,17 @@ mod tests {
             Indicator::new(Style::Line, BOUNDS, columns, Vec::new(), Rc::clone(clock));
         for _ in 0..reached {
             indicator.show(Event::Target(address(TARGET)));
-            indicator.show(Event::Scored { reached: true });
+            indicator.show(Event::Scored {
+                target: address(TARGET),
+                reached: true,
+            });
         }
         for _ in 0..partial {
             indicator.show(Event::Target(address(TARGET)));
-            indicator.show(Event::Scored { reached: false });
+            indicator.show(Event::Scored {
+                target: address(TARGET),
+                reached: false,
+            });
         }
         indicator.show(Event::Target(address(TARGET)));
         indicator
@@ -759,7 +775,10 @@ mod tests {
         for _ in 0..LOGGED_ROUNDS {
             indicator.show(Event::Target(address(TARGET)));
             indicator.show(Event::Tick);
-            indicator.show(Event::Scored { reached: true });
+            indicator.show(Event::Scored {
+                target: address(TARGET),
+                reached: true,
+            });
         }
         indicator.show(Event::Stop);
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
@@ -779,9 +798,15 @@ mod tests {
         let clock = FakeClock::new();
         let mut indicator = indicator(Style::Log, &clock);
         indicator.show(Event::Target(address(TARGET)));
-        indicator.show(Event::Scored { reached: true });
+        indicator.show(Event::Scored {
+            target: address(TARGET),
+            reached: true,
+        });
         indicator.show(Event::Target(address(ANOTHER_TARGET)));
-        indicator.show(Event::Scored { reached: false });
+        indicator.show(Event::Scored {
+            target: address(TARGET),
+            reached: false,
+        });
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
         let lines: Vec<&str> = text.lines().collect();
         assert!(
@@ -833,12 +858,72 @@ mod tests {
         let mut indicator = indicator(Style::Log, &clock);
         indicator.show(Event::Target(address(TARGET)));
         indicator.show(Event::Tick);
-        indicator.show(Event::Scored { reached: true });
+        indicator.show(Event::Scored {
+            target: address(TARGET),
+            reached: true,
+        });
         indicator.show(Event::Stop);
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
         assert!(
             !text.contains(CARRIAGE_RETURN),
             "a pipe and a file keep every byte, so a log must hold no carriage return: {text:?}"
+        );
+    }
+
+    /// A log line names the destination that finished, and not the one that
+    /// the hunt started last.
+    ///
+    /// A hunt holds many destinations at once, so the one that finishes is
+    /// rarely the one that started last. A line that named the newest address
+    /// would put the answer of one destination beside the address of another.
+    #[test]
+    fn a_log_line_names_the_destination_that_finished() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Log, &clock);
+        indicator.show(Event::Target(address(TARGET)));
+        indicator.show(Event::Target(address(ANOTHER_TARGET)));
+        indicator.show(Event::Scored {
+            target: address(TARGET),
+            reached: true,
+        });
+        let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
+        assert!(
+            text.contains(TARGET) && !text.contains(ANOTHER_TARGET),
+            "the line must name the destination that finished: {text:?}"
+        );
+    }
+
+    /// The line says how many destinations stand beside the one it names.
+    ///
+    /// A hunt of eight destinations at once shows one address, and a reader who
+    /// saw that address alone would read the hunt as a hunt of one destination
+    /// at a time.
+    #[test]
+    fn the_line_says_how_many_destinations_stand_beside_the_one_it_names() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Line, &clock);
+        indicator.show(Event::Target(address(TARGET)));
+        indicator.show(Event::Target(address(ANOTHER_TARGET)));
+        let line = painted(indicator);
+        assert!(
+            line.contains(&format!("{ANOTHER_TARGET} +1")),
+            "the line must say that one more destination stands: {line:?}"
+        );
+    }
+
+    /// A hunt of one destination at a time names that destination and no count.
+    ///
+    /// The count says how many destinations stand beside the one the line
+    /// names, and a hunt that holds one has none beside it.
+    #[test]
+    fn the_line_of_one_destination_holds_no_count_beside_it() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Line, &clock);
+        indicator.show(Event::Target(address(TARGET)));
+        let line = painted(indicator);
+        assert!(
+            line.contains(TARGET) && !line.contains('+'),
+            "the line must name the destination alone: {line:?}"
         );
     }
 
