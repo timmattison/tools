@@ -322,6 +322,20 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
     // The half that stages a recalled resolution without asking, and therefore
     // the half that would do the damage invisibly.
     repo.git(&["config", "rerere.autoupdate", "true"]);
+    // Armed on purpose, and hostile on purpose. The control below has to reach a
+    // conflict, because a conflict is the only thing rerere ever records, and
+    // `merge.ff = only` makes git refuse a diverging merge outright - "fatal:
+    // Not possible to fast-forward, aborting.", exit 128, no merge ever started
+    // and no preimage ever written. The assertion that guards the control only
+    // asks that the merge *failed*, so it cannot tell a refusal from a conflict
+    // and passes for the wrong reason; the recording assertion after it is then
+    // the one that fires, and it blames rerere for a merge that never ran. A
+    // developer carrying `merge.ff = only` globally - a perfectly ordinary thing
+    // to carry - is the one who reads that message. Arming the setting here,
+    // inside the fixture's own `TempDir` where no concurrent run can see it,
+    // turns a fragility that only some machines carry into a property this suite
+    // pins on every machine.
+    repo.git(&["config", "merge.ff", "only"]);
 
     // `rr-cache` is shared repo-wide, so it is reachable from the common dir
     // rather than from any one worktree's git dir - including the scratch's.
