@@ -4276,6 +4276,25 @@ resolved configuration:
         );
     }
 
+    /// The block of a hunt names the multipath mode that its probes take.
+    ///
+    /// `--multipath` stands on the top of the command line alone, and a flag in
+    /// front of `hunt` reads `hunt` as the destination. A hunt therefore always
+    /// probes the classic mode, and a block that leaves the mode out keeps that
+    /// fact from every reader.
+    #[test]
+    fn the_resolved_block_of_a_hunt_names_the_multipath_mode() {
+        let block = resolve(&["krt", HUNT]).to_string();
+        assert!(
+            block.contains("multipath:"),
+            "the block of a hunt names the multipath mode: {block}"
+        );
+        assert!(
+            block.contains("classic"),
+            "a hunt probes the classic multipath mode: {block}"
+        );
+    }
+
     /// The default lets a hunt trace 128 destinations before it gives up.
     #[test]
     fn the_default_hunt_gives_up_after_a_hundred_and_twenty_eight_targets() {
