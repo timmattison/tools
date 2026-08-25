@@ -722,17 +722,9 @@ fn trace_one<W: Write>(
         deadline: Instant::now().checked_add(plan.target_timeout),
         name_grace: plan.name_grace,
     };
-    let mut namer = Namer::new(Box::new(Rc::clone(&sources.resolver)), run.clone());
+    let namer = Namer::new(Box::new(Rc::clone(&sources.resolver)), run.clone());
     let mut scorer = Scorer::new(target, run, facts.config.first_ttl, status);
-    let outcome = run::record(
-        &start,
-        &rounds,
-        &limits,
-        stop,
-        &mut namer,
-        writer,
-        &mut scorer,
-    )?;
+    let outcome = run::record(&start, rounds, limits, stop, namer, writer, &mut scorer)?;
     if outcome.reason == EndReason::Quit {
         return Ok(None);
     }

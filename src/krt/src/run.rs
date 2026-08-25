@@ -114,77 +114,146 @@ pub(crate) enum RunError {
     },
 }
 
-/// Records one run: the record that opens it, one record for each round, and
-/// the record that closes it.
+/// What one turn of a run did.
 ///
-/// `stop` answers whether the user asked the run to stop, and the ask of
-/// `screen` answers the same question. The loop asks both once at the top of
-/// each turn, before it reads a round, so a run that the user stops records no
-/// further round. The ask of the screen also draws that screen, which is why one
-/// turn asks one time.
+/// The driver of one run reads nothing but [`Turn::Closed`], because it takes
+/// turns until the run closes and then answers. The driver of many runs reads
+/// the other two as well: a sweep that read no round anywhere sleeps, and a
+/// sweep that read one takes the next sweep at once.
+#[derive(Debug)]
+pub(crate) enum Turn {
+    /// The turn recorded one round, and the run goes on.
+    Round,
+    /// No round arrived inside the wait of the turn, and the run goes on.
+    Quiet,
+    /// The run closed, and this is what it produced.
+    Closed(
+        /// What the run produced.
+        Outcome,
+    ),
+}
+
+/// One run in flight: the channel of its rounds, the limits that stop it, the
+/// namer of its hops, and the rounds it recorded.
 ///
-/// The `run` record goes first, and a fault there stops the run before it reads
-/// anything. Each round that arrives becomes one `round` record. The `end`
-/// record names the number of rounds that the run recorded and why it stopped.
-///
-/// Every turn also asks `namer` for the names that arrived, and each name
-/// becomes one `name` record. The turn hands the namer the hops of the round it
-/// read, and a turn that read no round hands it nothing, so a lookup that
-/// finishes between two rounds still reaches the file. The `name` records of a
-/// turn stand before the `round` record of that turn.
-///
-/// The run asks the namer one last time before it writes the `end` record, and
-/// again until no address waits or the grace of [`Limits::grace_now`] runs out.
-/// The first ask of an address starts the lookup of that address, so the name
-/// of an address that the last round reported arrives after that round, and
-/// this last ask is what puts it in the file. The deadline of the run caps that
-/// grace, so a run that reached its deadline stops there and writes the names
-/// that already arrived.
-///
-/// Each round that the run records also reaches `screen`, and the recording
-/// comes first: a round reaches the file before it reaches the screen, so a
-/// screen that fails loses one frame and no record.
-///
-/// A failed write of any record stops the run. The recording is the whole
-/// purpose of the tool, and a run that keeps a display while it silently
-/// records nothing is worse than a run that stops.
-///
-/// # Errors
-///
-/// Returns [`RunError::Write`] when a record does not reach the file, and
-/// [`RunError::Tracer`] when the tracer thread stops before a limit does.
-pub(crate) fn record<W: Write>(
-    start: &RunRecord,
-    rounds: &Receiver<RoundRecord>,
-    limits: &Limits,
-    stop: &dyn Fn() -> bool,
-    namer: &mut Namer,
-    writer: &mut Writer<W>,
-    screen: &mut dyn Screen,
-) -> Result<Outcome, RunError> {
-    writer
-        .write(&Record::Run(start.clone()))
-        .map_err(RunError::Write)?;
-    let mut recorded: u64 = 0;
-    loop {
+/// A run takes one turn at a time, and the caller of [`Run::turn`] names how
+/// long that turn waits for a round. One caller takes turns until the run
+/// closes, which is what [`record`] does for a trace of one destination.
+/// Another sweeps many runs with a wait of nothing on each of them and sleeps
+/// once for the whole sweep, which is what a hunt does, so one slow destination
+/// holds up no other.
+pub(crate) struct Run {
+    /// The identifier that every record of this run carries.
+    id: RunId,
+    /// The rounds of the tracer of this run.
+    rounds: Receiver<RoundRecord>,
+    /// The limits that stop the run.
+    limits: Limits,
+    /// The namer that reads the name of each address the run sees.
+    namer: Namer,
+    /// The number of rounds that the run recorded.
+    recorded: u64,
+}
+
+impl Run {
+    /// Opens one run and writes the record that starts it.
+    ///
+    /// The `run` record goes first, and a fault there stops the run before it
+    /// reads anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunError::Write`] when the record does not reach the file.
+    pub(crate) fn open<W: Write>(
+        start: &RunRecord,
+        rounds: Receiver<RoundRecord>,
+        limits: Limits,
+        namer: Namer,
+        writer: &mut Writer<W>,
+    ) -> Result<Self, RunError> {
+        writer
+            .write(&Record::Run(start.clone()))
+            .map_err(RunError::Write)?;
+        Ok(Self {
+            id: start.run.clone(),
+            rounds,
+            limits,
+            namer,
+            recorded: 0,
+        })
+    }
+
+    /// The longest that the next turn of this run waits for a round.
+    ///
+    /// The wait ends at the deadline of the run when that deadline stands
+    /// nearer than [`POLL`], so a run stops at the moment of its time limit and
+    /// not one poll after it.
+    pub(crate) fn wait(&self) -> Duration {
+        wait(self.limits.deadline)
+    }
+
+    /// Takes one turn of the run, waiting at most `wait` for a round.
+    ///
+    /// `stop` answers whether the user asked the run to stop, and the ask of
+    /// `screen` answers the same question. The turn asks both at its top,
+    /// before it reads a round, so a run that the user stops records no further
+    /// round. The ask of the screen also draws that screen, which is why one
+    /// turn asks one time.
+    ///
+    /// Each round that arrives becomes one `round` record. The turn also asks
+    /// the namer for the names that arrived, and each name becomes one `name`
+    /// record. The turn hands the namer the hops of the round it read, and a
+    /// turn that read no round hands it nothing, so a lookup that finishes
+    /// between two rounds still reaches the file. The `name` records of a turn
+    /// stand before the `round` record of that turn.
+    ///
+    /// The turn that closes the run asks the namer again until no address waits
+    /// or the grace of [`Limits::grace_now`] runs out. The first ask of an
+    /// address starts the lookup of that address, so the name of an address
+    /// that the last round reported arrives after that round, and this last ask
+    /// is what puts it in the file. The deadline of the run caps that grace, so
+    /// a run that reached its deadline stops there and writes the names that
+    /// already arrived. The `end` record then names the number of rounds that
+    /// the run recorded and why it stopped.
+    ///
+    /// Each round that the run records also reaches `screen`, and the recording
+    /// comes first: a round reaches the file before it reaches the screen, so a
+    /// screen that fails loses one frame and no record.
+    ///
+    /// A failed write of any record stops the run. The recording is the whole
+    /// purpose of the tool, and a run that keeps a display while it silently
+    /// records nothing is worse than a run that stops.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunError::Write`] when a record does not reach the file, and
+    /// [`RunError::Tracer`] when the tracer thread stops before a limit does.
+    pub(crate) fn turn<W: Write>(
+        &mut self,
+        wait: Duration,
+        stop: &dyn Fn() -> bool,
+        writer: &mut Writer<W>,
+        screen: &mut dyn Screen,
+    ) -> Result<Turn, RunError> {
         // The ask of the screen draws it, so one turn asks one time. The answer
         // then travels to the decision as a value.
         let asked = screen.poll();
-        if let Some(reason) = stopped(recorded, limits, stop, asked) {
-            drain_names(writer, namer, limits.grace_now())?;
-            close(writer, &start.run, recorded, reason)?;
-            return Ok(Outcome {
-                rounds: recorded,
+        if let Some(reason) = stopped(self.recorded, &self.limits, stop, asked) {
+            let grace = self.limits.grace_now();
+            drain_names(writer, &mut self.namer, grace)?;
+            close(writer, &self.id, self.recorded, reason)?;
+            return Ok(Turn::Closed(Outcome {
+                rounds: self.recorded,
                 reason,
-            });
+            }));
         }
-        match rounds.recv_timeout(wait(limits.deadline)) {
+        match self.rounds.recv_timeout(wait) {
             Ok(round) => {
                 // The names that arrived stand before the round of the same
                 // turn. A name always lands on a later turn than the round that
                 // first reported its address, because the first ask of an
                 // address starts the lookup of that address.
-                show_names(writer, screen, &namer.names(&round.hops, Utc::now()))?;
+                show_names(writer, screen, &self.namer.names(&round.hops, Utc::now()))?;
                 // The recording comes first. The round reaches the file before
                 // it reaches the screen, so a screen that fails loses one frame
                 // and no record, and a run whose display the user held still
@@ -194,14 +263,16 @@ pub(crate) fn record<W: Write>(
                     .write(&Record::Round(round.clone()))
                     .map_err(RunError::Write)?;
                 screen.round(&round);
-                recorded += 1;
+                self.recorded += 1;
+                Ok(Turn::Round)
             }
-            // No round arrived inside the wait. The loop takes another turn, so
-            // it reads the stop flag and the deadline again. A lookup that
-            // finished inside the wait lands here, so a name that arrives
+            // No round arrived inside the wait. The caller takes another turn,
+            // so the run reads the stop flag and the deadline again. A lookup
+            // that finished inside the wait lands here, so a name that arrives
             // between two rounds reaches the file at the moment it arrives.
             Err(RecvTimeoutError::Timeout) => {
-                show_names(writer, screen, &namer.names(&[], Utc::now()))?;
+                show_names(writer, screen, &self.namer.names(&[], Utc::now()))?;
+                Ok(Turn::Quiet)
             }
             Err(RecvTimeoutError::Disconnected) => {
                 // The tracer holds the sender for as long as it lives, so a
@@ -215,10 +286,41 @@ pub(crate) fn record<W: Write>(
                 // The grace of this drain is zero. The names that already
                 // arrived still reach the file, and a run that is already
                 // failing waits for nothing.
-                drain_names(writer, namer, Duration::ZERO)?;
-                close(writer, &start.run, recorded, EndReason::Error)?;
-                return Err(RunError::Tracer { rounds: recorded });
+                drain_names(writer, &mut self.namer, Duration::ZERO)?;
+                close(writer, &self.id, self.recorded, EndReason::Error)?;
+                Err(RunError::Tracer {
+                    rounds: self.recorded,
+                })
             }
+        }
+    }
+}
+
+/// Records one run: the record that opens it, one record for each round, and
+/// the record that closes it.
+///
+/// The run takes turns until it closes, and each turn waits [`POLL`] at the
+/// longest, so the run reads the stop flag and its deadline ten times each
+/// second. [`Run::turn`] holds what one turn does.
+///
+/// # Errors
+///
+/// Returns [`RunError::Write`] when a record does not reach the file, and
+/// [`RunError::Tracer`] when the tracer thread stops before a limit does.
+pub(crate) fn record<W: Write>(
+    start: &RunRecord,
+    rounds: Receiver<RoundRecord>,
+    limits: Limits,
+    stop: &dyn Fn() -> bool,
+    namer: Namer,
+    writer: &mut Writer<W>,
+    screen: &mut dyn Screen,
+) -> Result<Outcome, RunError> {
+    let mut run = Run::open(start, rounds, limits, namer, writer)?;
+    loop {
+        let wait = run.wait();
+        if let Turn::Closed(outcome) = run.turn(wait, stop, writer, screen)? {
+            return Ok(outcome);
         }
     }
 }
@@ -943,24 +1045,18 @@ mod tests {
 
     /// Records one run that looks nothing up to a real file, and reads the file
     /// back.
-    fn ran(label: &str, rounds: &[RoundRecord], limits: &Limits, stop: &dyn Fn() -> bool) -> Ran {
-        ran_with(
-            label,
-            &a_stream(rounds),
-            limits,
-            stop,
-            &mut a_nameless_namer(),
-        )
+    fn ran(label: &str, rounds: &[RoundRecord], limits: Limits, stop: &dyn Fn() -> bool) -> Ran {
+        ran_with(label, a_stream(rounds), limits, stop, a_nameless_namer())
     }
 
     /// Records one run that asks this namer to a real file, and reads the file
     /// back.
     fn ran_with(
         label: &str,
-        rounds: &Receiver<RoundRecord>,
-        limits: &Limits,
+        rounds: Receiver<RoundRecord>,
+        limits: Limits,
         stop: &dyn Fn() -> bool,
-        namer: &mut Namer,
+        namer: Namer,
     ) -> Ran {
         ran_seeing(label, rounds, limits, stop, namer, Recorder::new())
     }
@@ -969,10 +1065,10 @@ mod tests {
     /// back.
     fn ran_seeing(
         label: &str,
-        rounds: &Receiver<RoundRecord>,
-        limits: &Limits,
+        rounds: Receiver<RoundRecord>,
+        limits: Limits,
         stop: &dyn Fn() -> bool,
-        namer: &mut Namer,
+        namer: Namer,
         mut screen: Recorder,
     ) -> Ran {
         let file = TempFile::absent(label);
@@ -990,10 +1086,10 @@ mod tests {
     /// a file that holds every record of the run.
     fn ran_on(
         path: &Path,
-        rounds: &Receiver<RoundRecord>,
-        limits: &Limits,
+        rounds: Receiver<RoundRecord>,
+        limits: Limits,
         stop: &dyn Fn() -> bool,
-        namer: &mut Namer,
+        namer: Namer,
         screen: &mut dyn Screen,
     ) -> Result<Outcome, RunError> {
         let mut writer = Writer::append(path).expect("the test file must open");
@@ -1081,7 +1177,7 @@ mod tests {
         let ran = ran(
             "round-limit",
             &rounds_of(&[1, 2, 3]),
-            &after_rounds(3),
+            after_rounds(3),
             &|| false,
         );
         assert_eq!(
@@ -1097,7 +1193,7 @@ mod tests {
         let ran = ran(
             "end-count",
             &rounds_of(&[1, 2, 3]),
-            &after_rounds(3),
+            after_rounds(3),
             &|| false,
         );
         let end = end_of(&ran.recording);
@@ -1113,7 +1209,7 @@ mod tests {
         let ran = ran(
             "past-deadline",
             &rounds_of(&[1, 2]),
-            &a_past_deadline(),
+            a_past_deadline(),
             &|| false,
         );
         assert_eq!(kinds_of(&ran.recording), ["run", "end"]);
@@ -1124,7 +1220,7 @@ mod tests {
 
     #[test]
     fn a_user_who_stops_the_run_at_once_records_no_round() {
-        let ran = ran("quit-at-once", &rounds_of(&[1, 2]), &NO_LIMIT, &|| true);
+        let ran = ran("quit-at-once", &rounds_of(&[1, 2]), NO_LIMIT, &|| true);
         assert_eq!(kinds_of(&ran.recording), ["run", "end"]);
         assert_eq!(outcome_of(&ran).reason, EndReason::Quit);
         assert_eq!(outcome_of(&ran).rounds, 0);
@@ -1144,7 +1240,7 @@ mod tests {
         let ran = ran(
             "quit-after-two",
             &rounds_of(&[1, 2, 3, 4, 5]),
-            &NO_LIMIT,
+            NO_LIMIT,
             &stop,
         );
         assert_eq!(kinds_of(&ran.recording), ["run", "round", "round", "end"]);
@@ -1159,7 +1255,7 @@ mod tests {
         let ran = ran(
             "dead-tracer",
             &rounds_of(&[1, 2]),
-            &after_rounds(10),
+            after_rounds(10),
             &|| false,
         );
         match &ran.outcome {
@@ -1174,7 +1270,7 @@ mod tests {
 
     #[test]
     fn a_stream_that_holds_no_round_still_records_a_run_and_an_end() {
-        let ran = ran("no-round", &[], &after_rounds(10), &|| false);
+        let ran = ran("no-round", &[], after_rounds(10), &|| false);
         assert_eq!(kinds_of(&ran.recording), ["run", "end"]);
         match &ran.outcome {
             Err(RunError::Tracer { rounds }) => assert_eq!(*rounds, 0),
@@ -1189,7 +1285,7 @@ mod tests {
         let ran = ran(
             "round-order",
             &rounds_of(&[7, 3, 9]),
-            &after_rounds(3),
+            after_rounds(3),
             &|| false,
         );
         assert_eq!(seqs_of(&ran.recording), [7, 3, 9]);
@@ -1201,10 +1297,10 @@ mod tests {
         let mut writer = Writer::to_sink(sink.clone());
         let outcome = record(
             &a_run_record(),
-            &a_stream(&rounds_of(&[1])),
-            &after_rounds(1),
+            a_stream(&rounds_of(&[1])),
+            after_rounds(1),
             &|| false,
-            &mut a_nameless_namer(),
+            a_nameless_namer(),
             &mut writer,
             &mut Recorder::new(),
         );
@@ -1225,10 +1321,10 @@ mod tests {
         let mut writer = Writer::to_sink(sink.clone());
         let outcome = record(
             &a_run_record(),
-            &a_stream(&rounds_of(&[1])),
-            &after_rounds(3),
+            a_stream(&rounds_of(&[1])),
+            after_rounds(3),
             &|| false,
-            &mut a_nameless_namer(),
+            a_nameless_namer(),
             &mut writer,
             &mut Recorder::new(),
         );
@@ -1252,10 +1348,10 @@ mod tests {
         let resolver = FakeResolver::new(&[(FIRST_HOP, &[named(FIRST_HOP_NAME)])]);
         let ran = ran_with(
             "name-one",
-            &a_stream(&rounds_of(&[1])),
-            &after_rounds(1),
+            a_stream(&rounds_of(&[1])),
+            after_rounds(1),
             &|| false,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
         );
         assert_eq!(
             kinds_of(&ran.recording),
@@ -1278,10 +1374,10 @@ mod tests {
         let resolver = FakeResolver::new(&[(FIRST_HOP, &[named(FIRST_HOP_NAME)])]);
         let ran = ran_with(
             "name-once",
-            &a_stream(&rounds_of(&[1, 2, 3])),
-            &after_rounds(3),
+            a_stream(&rounds_of(&[1, 2, 3])),
+            after_rounds(3),
             &|| false,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
         );
         assert_eq!(seqs_of(&ran.recording), [1, 2, 3]);
         let names = names_of(&ran.recording);
@@ -1310,10 +1406,10 @@ mod tests {
         let (_sender, stream) = a_held_stream(&rounds_of(&[1, 2, 3]));
         let ran = ran_with(
             "name-slow",
-            &stream,
-            &after_rounds(3),
+            stream,
+            after_rounds(3),
             &|| false,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
         );
         assert_eq!(
             seqs_of(&ran.recording),
@@ -1336,10 +1432,10 @@ mod tests {
         let (_sender, stream) = a_held_stream(&rounds_of(&[1, 2, 3]));
         let ran = ran_with(
             "name-never",
-            &stream,
-            &after_rounds(3),
+            stream,
+            after_rounds(3),
             &|| false,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
         );
         assert_eq!(
             kinds_of(&ran.recording),
@@ -1358,7 +1454,7 @@ mod tests {
         let ran = ran(
             "name-none",
             &rounds_of(&[1, 2, 3]),
-            &after_rounds(3),
+            after_rounds(3),
             &|| false,
         );
         assert_eq!(
@@ -1384,10 +1480,10 @@ mod tests {
         let mut writer = Writer::to_sink(sink.clone());
         let outcome = record(
             &a_run_record(),
-            &a_stream(&rounds_of(&[1, 2])),
-            &after_rounds(2),
+            a_stream(&rounds_of(&[1, 2])),
+            after_rounds(2),
             &|| false,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
             &mut writer,
             &mut Recorder::new(),
         );
@@ -1408,10 +1504,10 @@ mod tests {
         let resolver = FakeResolver::new(&[(FIRST_HOP, &[named(FIRST_HOP_NAME)])]);
         let ran = ran_with(
             "name-no-hop",
-            &a_stream(&[a_silent_round(1)]),
-            &after_rounds(1),
+            a_stream(&[a_silent_round(1)]),
+            after_rounds(1),
             &|| false,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
         );
         assert_eq!(kinds_of(&ran.recording), ["run", "round", "end"]);
         assert!(
@@ -1439,13 +1535,7 @@ mod tests {
             asked.set(asked_before + 1);
             asked_before >= STOP_AFTER
         };
-        let ran = ran_with(
-            "name-late",
-            &stream,
-            &NO_LIMIT,
-            &stop,
-            &mut a_namer(&resolver),
-        );
+        let ran = ran_with("name-late", stream, NO_LIMIT, &stop, a_namer(&resolver));
         assert_eq!(
             kinds_of(&ran.recording),
             ["run", "round", "name", "end"],
@@ -1466,10 +1556,10 @@ mod tests {
         let resolver = FakeResolver::new(&[(FIRST_HOP, &[Lookup::Pending, named(FIRST_HOP_NAME)])]);
         let ran = ran_with(
             "name-drain-rounds",
-            &a_stream(&rounds_of(&[1])),
-            &after_rounds(1),
+            a_stream(&rounds_of(&[1])),
+            after_rounds(1),
             &|| false,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
         );
         assert_eq!(
             kinds_of(&ran.recording),
@@ -1501,10 +1591,10 @@ mod tests {
         };
         let ran = ran_with(
             "name-drain-quit",
-            &stream,
-            &NO_LIMIT,
+            stream,
+            NO_LIMIT,
             &stop,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
         );
         assert_eq!(
             kinds_of(&ran.recording),
@@ -1535,10 +1625,10 @@ mod tests {
         )]);
         let ran = ran_with(
             "name-drain-again",
-            &a_stream(&rounds_of(&[1])),
-            &after_rounds_with_grace(1, A_GRACE),
+            a_stream(&rounds_of(&[1])),
+            after_rounds_with_grace(1, A_GRACE),
             &|| false,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
         );
         assert_eq!(
             kinds_of(&ran.recording),
@@ -1566,10 +1656,10 @@ mod tests {
         let resolver = FakeResolver::new(&[(FIRST_HOP, &[Lookup::Pending])]);
         let ran = ran_with(
             "name-drain-grace",
-            &a_stream(&rounds_of(&[1])),
-            &after_rounds_with_grace(1, A_SHORT_GRACE),
+            a_stream(&rounds_of(&[1])),
+            after_rounds_with_grace(1, A_SHORT_GRACE),
             &|| false,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
         );
         assert_eq!(
             kinds_of(&ran.recording),
@@ -1604,10 +1694,10 @@ mod tests {
         let started = Instant::now();
         let ran = ran_with(
             "past-deadline-grace",
-            &a_stream(&rounds_of(&[1])),
-            &a_past_deadline_with_grace(A_LONG_GRACE),
+            a_stream(&rounds_of(&[1])),
+            a_past_deadline_with_grace(A_LONG_GRACE),
             &|| false,
-            &mut namer,
+            namer,
         );
         let elapsed = started.elapsed();
         assert_eq!(outcome_of(&ran).reason, EndReason::Duration);
@@ -1631,7 +1721,7 @@ mod tests {
         let ran = ran(
             "screen-three",
             &rounds_of(&[1, 2, 3]),
-            &after_rounds(3),
+            after_rounds(3),
             &|| false,
         );
         assert_eq!(ran.screen.seqs(), [1, 2, 3]);
@@ -1640,7 +1730,7 @@ mod tests {
 
     #[test]
     fn a_run_that_records_no_round_hands_the_screen_nothing() {
-        let ran = ran("screen-none", &rounds_of(&[1, 2]), &NO_LIMIT, &|| true);
+        let ran = ran("screen-none", &rounds_of(&[1, 2]), NO_LIMIT, &|| true);
         assert_eq!(outcome_of(&ran).rounds, 0);
         assert!(
             ran.screen.rounds.is_empty(),
@@ -1656,10 +1746,10 @@ mod tests {
     fn a_screen_that_asks_to_stop_ends_the_run_with_a_quit() {
         let ran = ran_seeing(
             "screen-quit",
-            &a_stream(&rounds_of(&[1, 2])),
-            &NO_LIMIT,
+            a_stream(&rounds_of(&[1, 2])),
+            NO_LIMIT,
             &|| false,
-            &mut a_nameless_namer(),
+            a_nameless_namer(),
             Recorder::that_stops_after(SCREEN_STOPS_AFTER),
         );
         assert_eq!(outcome_of(&ran).reason, EndReason::Quit);
@@ -1677,7 +1767,7 @@ mod tests {
         let ran = ran(
             "screen-order",
             &rounds_of(&[7, 3, 9]),
-            &after_rounds(3),
+            after_rounds(3),
             &|| false,
         );
         assert_eq!(ran.screen.seqs(), [7, 3, 9]);
@@ -1690,10 +1780,10 @@ mod tests {
         let resolver = FakeResolver::new(&[(FIRST_HOP, &[named(FIRST_HOP_NAME)])]);
         let ran = ran_with(
             "screen-name",
-            &a_stream(&rounds_of(&[1])),
-            &after_rounds(1),
+            a_stream(&rounds_of(&[1])),
+            after_rounds(1),
             &|| false,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
         );
         let names = &ran.screen.names;
         assert_eq!(names.len(), 1, "the run showed one name: {names:?}");
@@ -1716,10 +1806,10 @@ mod tests {
         let resolver = FakeResolver::new(&[(FIRST_HOP, &[Lookup::Pending, named(FIRST_HOP_NAME)])]);
         let ran = ran_with(
             "screen-name-drain",
-            &a_stream(&rounds_of(&[1])),
-            &after_rounds(1),
+            a_stream(&rounds_of(&[1])),
+            after_rounds(1),
             &|| false,
-            &mut a_namer(&resolver),
+            a_namer(&resolver),
         );
         assert_eq!(
             kinds_of(&ran.recording),
@@ -1769,10 +1859,10 @@ mod tests {
         );
         let outcome = ran_on(
             file.path(),
-            &a_stream(&rounds_of(&[1, 2, 3, 4])),
-            &after_rounds(ROUNDS_OF_A_HELD_RUN),
+            a_stream(&rounds_of(&[1, 2, 3, 4])),
+            after_rounds(ROUNDS_OF_A_HELD_RUN),
             &|| false,
-            &mut a_nameless_namer(),
+            a_nameless_namer(),
             &mut screen,
         );
         let recording = Recording::read(file.path()).expect("the test file must read");

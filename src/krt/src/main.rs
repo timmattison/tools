@@ -1831,7 +1831,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         deadline: deadline_of(config.duration),
         name_grace: name_grace(),
     };
-    let mut namer = names::Namer::new(resolver, start.run.clone());
+    let namer = names::Namer::new(resolver, start.run.clone());
 
     // The screen and the guard stand in a scope of their own, and the closing
     // line stands under it. The guard drops at the end of the scope, which
@@ -1846,10 +1846,10 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         let (mut screen, _guard) = screen_of(config, &start, &path)?;
         run::record(
             &start,
-            &rounds,
-            &limits,
+            rounds,
+            limits,
             &|| user_stopped(&flag),
-            &mut namer,
+            namer,
             &mut writer,
             screen.as_mut(),
         )
