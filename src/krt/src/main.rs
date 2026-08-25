@@ -1678,7 +1678,9 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         protocol: config.protocol,
         multipath: config.multipath,
         privilege,
-        rounds: None,
+        // The run loop stops at this number too, so the tracer sends no probe
+        // behind the run that asked for it.
+        rounds: config.rounds,
     })
     .map_err(|error| TraceFailure::new(&error, EXIT_TRACER_FAILED))?;
 
@@ -1753,6 +1755,14 @@ struct SystemProbes<'a> {
 impl SystemProbes<'_> {
     /// The configuration of the tracer of one destination.
     ///
+    /// The round limit is the number of probe rounds that each destination of
+    /// the hunt takes, so the tracer of a destination stops when that
+    /// destination stops. `hunt::trace_one` gives the run loop the same number.
+    ///
+    /// A `SystemProbes` traces for a hunt alone, so the resolved command line
+    /// always holds a plan. A line that holds none leaves the tracer without a
+    /// round limit, which is what a trace of one destination takes.
+    ///
     /// The build of the configuration stands apart from the start of the
     /// tracer, because a tracer that starts sends packets and a test of this
     /// wiring sends none.
@@ -1766,7 +1776,7 @@ impl SystemProbes<'_> {
             protocol: self.config.protocol,
             multipath: self.config.multipath,
             privilege: self.privilege,
-            rounds: None,
+            rounds: self.config.hunt.map(|hunt| hunt.probes_per_round),
         }
     }
 }
