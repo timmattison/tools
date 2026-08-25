@@ -517,6 +517,7 @@ fn the_help_of_the_hunt_names_the_flags_that_bound_it() {
     for flag in [
         "--rounds",
         "--max-targets",
+        "--concurrency",
         "--probes-per-round",
         "--target-timeout",
         "--seed",

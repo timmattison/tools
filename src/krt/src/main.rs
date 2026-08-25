@@ -43,6 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::IsTerminal;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -122,13 +123,17 @@ const HUNT_ROUNDS_DEFAULT: u64 = 8;
 /// because most of the address space answers nothing.
 const MAX_TARGETS_DEFAULT: u64 = 128;
 
-/// The number of destinations that a hunt traces at one moment.
+/// The number of destinations that a hunt traces at one moment, when the user
+/// names none.
 ///
 /// The number matches [`HUNT_ROUNDS_DEFAULT`], so a hunt of the default rounds
-/// starts every destination it needs at once.
-const HUNT_CONCURRENCY: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(8) {
+/// starts every destination it needs at once. Most of the address space answers
+/// nothing, and a destination that answers nothing costs the whole target
+/// timeout, so the pool is what keeps a hunt from spending that time on one
+/// address at a time.
+const HUNT_CONCURRENCY_DEFAULT: NonZeroUsize = match NonZeroUsize::new(8) {
     Some(count) => count,
-    None => std::num::NonZeroUsize::MIN,
+    None => NonZeroUsize::MIN,
 };
 
 /// The number of probe rounds that each destination of a hunt takes, when the
@@ -562,6 +567,8 @@ struct HuntConfig {
     rounds: u64,
     /// The number of destinations that the hunt traces before it gives up.
     max_targets: u64,
+    /// The number of destinations that the hunt traces at one moment.
+    concurrency: NonZeroUsize,
     /// The number of probe rounds that each destination takes.
     probes_per_round: u64,
     /// The longest that one destination takes, whether it answers or not.
@@ -751,6 +758,7 @@ impl Cli {
                 Some(HuntConfig {
                     rounds,
                     max_targets,
+                    concurrency: HUNT_CONCURRENCY_DEFAULT,
                     probes_per_round,
                     target_timeout,
                     seed: seed.unwrap_or_else(seed_from_clock),
@@ -2027,7 +2035,7 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
     let mut probes = SystemProbes {
         config,
         privilege,
-        running: (0..HUNT_CONCURRENCY.get()).map(|_| None).collect(),
+        running: (0..plan.concurrency.get()).map(|_| None).collect(),
     };
     let facts = hunt::Facts {
         id: HuntId::at(Utc::now()),
@@ -2044,7 +2052,7 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
     };
     let hunt_plan = hunt::Plan {
         bounds,
-        concurrency: HUNT_CONCURRENCY,
+        concurrency: plan.concurrency,
         probes_per_round: plan.probes_per_round,
         target_timeout: plan.target_timeout,
         name_grace: name_grace(),
@@ -2235,8 +2243,8 @@ mod tests {
         pick_address, replay, resolve_target, run_config, source_from, stop_reason, user_stopped,
         value_name, AddressFamily, Cli, Command, Display, EndReason, Family, HuntConfig, Multipath,
         Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, SystemProbes, Target,
-        HUNT_ROUNDS_DEFAULT, PROBES_PER_ROUND_DEFAULT, RESOLVE_PORT, SOURCE_FALLBACK,
-        TARGET_TIMEOUT_DEFAULT, TIME_BEYOND_A_DURATION, UNKNOWN,
+        HUNT_CONCURRENCY_DEFAULT, HUNT_ROUNDS_DEFAULT, PROBES_PER_ROUND_DEFAULT, RESOLVE_PORT,
+        SOURCE_FALLBACK, TARGET_TIMEOUT_DEFAULT, TIME_BEYOND_A_DURATION, UNKNOWN,
     };
     use crate::record::{
         Hop, Privilege, Record, RoundRecord, RunConfig, RunId, RunRecord, TtlRange, Writer,
@@ -4256,6 +4264,75 @@ resolved configuration:
             Duration::from_secs(5)
         );
     }
+
+    /// A hunt that named no pool traces eight destinations at once.
+    ///
+    /// The number matches the default rounds, so a plain `krt hunt` starts
+    /// every destination it needs at once.
+    #[test]
+    fn a_hunt_takes_the_default_number_of_destinations_at_once() {
+        assert_eq!(
+            hunt(&["krt", HUNT]).concurrency,
+            HUNT_CONCURRENCY_DEFAULT,
+            "a hunt of no flag traces the default number of destinations at once"
+        );
+        assert_eq!(HUNT_CONCURRENCY_DEFAULT.get(), 8);
+    }
+
+    #[test]
+    fn a_hunt_takes_the_number_of_destinations_at_once_that_the_command_line_named() {
+        assert_eq!(
+            hunt(&["krt", HUNT, &format!("--{FLAG_CONCURRENCY}"), "5"])
+                .concurrency
+                .get(),
+            5
+        );
+    }
+
+    /// A hunt of no destination at once measures nothing, so the parser refuses
+    /// it.
+    #[test]
+    fn a_hunt_of_no_destination_at_once_fails_at_the_parser() {
+        assert!(
+            Cli::try_parse_from(["krt", HUNT, &format!("--{FLAG_CONCURRENCY}"), "0"]).is_err(),
+            "a hunt that traces no destination at once measures nothing"
+        );
+    }
+
+    /// A hunt of more destinations at once than the process holds lanes for
+    /// fails at the parser.
+    ///
+    /// Two destinations of one lane read each other's answers, so a pool above
+    /// the lanes of the process is a hunt that measures the wrong path. The
+    /// refusal names the ceiling.
+    #[test]
+    fn a_hunt_of_more_destinations_at_once_than_lanes_fails_and_names_the_ceiling() {
+        let over = (crate::trace::Lane::COUNT + 1).to_string();
+        let refused = Cli::try_parse_from(["krt", HUNT, &format!("--{FLAG_CONCURRENCY}"), &over])
+            .expect_err("a pool above the lanes of the process measures the wrong path")
+            .to_string();
+        assert!(
+            refused.contains(&crate::trace::Lane::COUNT.to_string()),
+            "the refusal names the ceiling: {refused}"
+        );
+    }
+
+    /// The block of a hunt names the destinations it traces at once.
+    #[test]
+    fn the_resolved_block_of_a_hunt_names_the_destinations_it_traces_at_once() {
+        let block = resolve(&["krt", HUNT, &format!("--{FLAG_CONCURRENCY}"), "6"]).to_string();
+        assert!(
+            block.contains("at once:"),
+            "the block of a hunt names the destinations it traces at once: {block}"
+        );
+        assert!(
+            block.contains('6'),
+            "the block names the number that the line asked for: {block}"
+        );
+    }
+
+    /// The flag that counts the destinations a hunt traces at once.
+    const FLAG_CONCURRENCY: &str = "concurrency";
 
     #[test]
     fn a_hunt_takes_the_seed_that_the_command_line_named() {
