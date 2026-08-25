@@ -79,6 +79,14 @@ fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
     // here, inside the fixture's own `TempDir` where no concurrent run can see
     // it, turns a fragility that only some machines carry into a property this
     // suite pins on every machine.
+    //
+    // It is the control's scaffolding and nothing more, so it comes back out
+    // again below, with the rest of the control's damage, before the replay
+    // runs. Leaving it standing would be the very false green this test is
+    // built to refuse: the replay would inherit the apply backend too, and the
+    // apply backend ignores `--update-refs` whether or not the harness pins
+    // `rebase.updateRefs=false` - so the pin could be deleted outright and
+    // every assertion below would still pass.
     repo.git(&["config", "rebase.backend", "apply"]);
 
     let branch_refs = || -> Vec<(String, String)> {
@@ -108,7 +116,12 @@ fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
     // demonstrate nothing. Detaching is what makes the ref eligible, which is
     // also why the replay - which detaches for its own reasons - is exposed.
     repo.git(&["checkout", "-q", "--detach", CONTROL_BRANCH]);
-    repo.git(&["rebase", "left"]);
+    // The backend is pinned for this one command because `--update-refs` is a
+    // merge-backend feature: the apply backend ignores it, and a control that
+    // inherited whichever backend the fixture or the developer prefers would
+    // report a dead config key rather than the backend that silenced it. A
+    // control has to ask for the machinery it means to demonstrate.
+    repo.git(&["-c", "rebase.backend=merge", "rebase", "left"]);
     assert_ne!(
         repo.rev_parse(CONTROL_BRANCH),
         planted,
@@ -126,6 +139,20 @@ fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
     repo.checkout("main");
     let control_ref = format!("refs/heads/{CONTROL_BRANCH}");
     repo.git(&["update-ref", "-d", &control_ref]);
+    // The hostile backend goes back out with the rest of it, and the fixture
+    // never set it in the first place, so `--unset` restores the default rather
+    // than picking one. `--default ""` is what makes this readable at all: a
+    // plain `--get` exits non-zero on an absent key, which `repo.git` raises as
+    // a panic, so the ordinary answer would arrive as a crash.
+    repo.git(&["config", "--unset", "rebase.backend"]);
+    assert_eq!(
+        repo.git(&["config", "--default", "", "--get", "rebase.backend"]),
+        "",
+        "the control left its hostile rebase backend armed in {}, and the apply \
+         backend ignores `--update-refs` outright, so every assertion below \
+         would pass with the harness's `rebase.updateRefs=false` deleted",
+        repo.path().display()
+    );
     assert_eq!(
         branch_refs(),
         pristine,
