@@ -131,7 +131,7 @@ branch ref it was simulating.
 
 ```text
 thread 'never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled'
-panicked at src/gitscratch/tests/safety.rs:75:9:
+panicked at src/gitscratch/tests/safety.rs:
 assertion `left == right` failed: replay moved branch 'right'
   left: "e1319cd429e5e7ac8661aad46884c1de7af57875"
  right: "1f107d0331fc2cd47da90214ce95bd234e5e9270"
@@ -149,7 +149,7 @@ has already checked `left` and `right` out in other worktrees, and git refuses:
 
 ```text
 thread 'works_when_the_branches_are_checked_out_in_other_worktrees'
-panicked at src/gitscratch/tests/safety.rs:19:10:
+panicked at src/gitscratch/tests/safety.rs:
 check out the branch detached in the scratch worktree: git checkout -q left failed:
 
 fatal: 'left' is already used by worktree at '/private/var/folders/.../T/.tmp1lHsWT/wt-left'
@@ -209,7 +209,7 @@ all.
 
 ```text
 thread 'never_disturbs_other_worktrees_whose_directories_are_temporarily_missing'
-panicked at src/gitscratch/tests/safety.rs:146:5:
+panicked at src/gitscratch/tests/safety.rs:
 replay deleted an unrelated worktree's administrative state
 
 test result: FAILED. 7 passed; 1 failed
@@ -264,7 +264,7 @@ git refuses before the replay can do any damage:
 
 ```text
 thread 'never_touches_the_real_working_tree_or_index' panicked at
-src/gitscratch/tests/safety.rs:19:10:
+src/gitscratch/tests/safety.rs:
 check out the branch detached in the scratch worktree:
 git checkout -q --detach left failed:
 
