@@ -1396,22 +1396,27 @@ fn main() {
 mod tests {
     use super::{
         closing_line, display_of, host_name_or, name_grace, paint_of, parse_duration, pick_address,
-        resolve_target, run_config, source_from, stop_reason, user_stopped, value_name,
+        replay, resolve_target, run_config, source_from, stop_reason, user_stopped, value_name,
         AddressFamily, Cli, Command, Display, EndReason, Family, Multipath, Protocol, ResolveError,
-        ResolvedConfig, SourceKind, SourceLabel, RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
+        ResolvedConfig, SourceKind, SourceLabel, Target, RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
     };
-    use crate::record::{Privilege, RunConfig};
+    use crate::record::{
+        Hop, Privilege, Record, RoundRecord, RunConfig, RunId, RunRecord, TtlRange, Writer,
+    };
     use crate::run::Outcome;
     use crate::source::Discovery;
-    use crate::testing::address;
+    use crate::testing::{address, SecondRunBetweenWrites};
     use crate::ui::{render_duration, Paint};
+    use chrono::{DateTime, Utc};
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser, ValueEnum};
+    use std::collections::HashSet;
+    use std::fs::OpenOptions;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     /// The accepted units, as `parse_duration` names them for an unknown unit.
     const UNITS_IN_THE_MESSAGE: &str = "the unit must be `ms`, `s`, `m`, or `h`";
@@ -2947,5 +2952,258 @@ resolved configuration:
             warning.contains(SOURCE_FALLBACK),
             "the warning names what the run recorded in its place: {warning}"
         );
+    }
+
+    /// Builds a path under the temporary directory that no other run reaches.
+    ///
+    /// Two runs of one test can overlap, because `cargo test` runs on many
+    /// threads and more than one `cargo test` can run at once. The process
+    /// identifier and the nanosecond keep the two runs apart.
+    fn temp_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock must stand after the epoch")
+            .as_nanos();
+        let process = std::process::id();
+        std::env::temp_dir().join(format!("krt-{label}-{process}-{nanos}.jsonl"))
+    }
+
+    /// A file that one test makes. The file goes away when the test ends, and
+    /// also when the test panics.
+    struct TempFile {
+        /// The path of the file.
+        path: PathBuf,
+    }
+
+    impl TempFile {
+        /// Holds a path that no file uses yet, and that no other run reaches.
+        ///
+        /// The file that a test makes at the path goes away with this value,
+        /// and a path that stays empty is no fault.
+        fn absent(label: &str) -> Self {
+            Self {
+                path: temp_path(label),
+            }
+        }
+
+        /// The path of the file.
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// The number of terminal columns that a replay of a shared file folds
+    /// into.
+    ///
+    /// The test names the width, so the frame that it reads never depends on
+    /// the terminal that ran the test. The width holds every column of the
+    /// table and the whole of an address, so no row cuts the hop it names.
+    const SHARED_REPLAY_COLUMNS: u16 = 200;
+
+    /// The identifier of the first of two runs that share one file.
+    const A_SHARED_RUN: &str = "2026-08-18T12:00:00.000Z";
+
+    /// The identifier of the second of those two runs.
+    const THE_OTHER_SHARED_RUN: &str = "2026-08-18T12:00:30.000Z";
+
+    /// The first two numbers of every address of the first shared run.
+    ///
+    /// The two runs probe two different paths, so a reader of a frame tells
+    /// the hops of one run from the hops of the other.
+    const A_SHARED_NETWORK: &str = "10.0";
+
+    /// The first two numbers of every address of the second shared run.
+    const THE_OTHER_SHARED_NETWORK: &str = "172.16";
+
+    /// The last TTL that each shared run probes.
+    ///
+    /// The tracer takes no TTL above this one. A round that names a hop at
+    /// every one of those TTLs writes a line of more than 17000 bytes, which
+    /// is far past the 8192 bytes that the defect first showed itself at.
+    const SHARED_LAST_TTL: u8 = 254;
+
+    /// The number of rounds that each shared run records.
+    const SHARED_ROUNDS: u64 = 4;
+
+    /// The round trip time of every hop of a shared run.
+    const A_SHARED_RTT: f64 = 1.23;
+
+    /// The name of the ICMP message that a hop below the target answers with.
+    const A_TIME_EXCEEDED: &str = "time_exceeded";
+
+    /// The name of the ICMP message that the target answers with.
+    const AN_ECHO_REPLY: &str = "echo_reply";
+
+    /// The build string that each shared run records.
+    const A_SHARED_BUILD: &str = "0.1.0 (abc1234, clean)";
+
+    /// The name of the machine that made both shared runs.
+    const A_SHARED_MACHINE: &str = "tims-mac";
+
+    /// Reads a moment that a test names, and converts it to UTC.
+    fn moment(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .expect("the test moment must parse")
+            .with_timezone(&Utc)
+    }
+
+    /// The address of the hop of one shared run at one TTL.
+    fn shared_hop(network: &str, ttl: u8) -> IpAddr {
+        address(&format!("{network}.1.{ttl}"))
+    }
+
+    /// The address of every hop of one shared run, in TTL order.
+    fn shared_hops(network: &str) -> Vec<String> {
+        (1..=SHARED_LAST_TTL)
+            .map(|ttl| shared_hop(network, ttl).to_string())
+            .collect()
+    }
+
+    /// Every word that the lines of a frame hold.
+    ///
+    /// The table writes one address in one column, and it puts a space on each
+    /// side of that column, so a word of a frame is a whole address. A test
+    /// that joins the lines and searches the text for an address finds a
+    /// longer address as well, because `10.0.1.1` is part of `10.0.1.10` and
+    /// part of `10.0.1.100`. A test that reads these words finds the address
+    /// that the frame names, and no other one.
+    fn words_of(lines: &[String]) -> HashSet<&str> {
+        lines
+            .iter()
+            .flat_map(|line| line.split_whitespace())
+            .collect()
+    }
+
+    /// The record that opens one shared run.
+    ///
+    /// The last hop of the path is the target, as a run that reached its
+    /// target records it.
+    fn a_shared_run_record(run: &str, network: &str) -> Record {
+        let target = shared_hop(network, SHARED_LAST_TTL);
+        Record::Run(RunRecord {
+            run: RunId::from(run),
+            krt: A_SHARED_BUILD.to_owned(),
+            source: SourceLabel {
+                addr: address(&format!("{network}.0.1")),
+                kind: SourceKind::Local,
+            },
+            target: Target {
+                arg: target.to_string(),
+                addr: target,
+                family: Family::Ipv4,
+            },
+            config: RunConfig {
+                interval_ms: 1000,
+                protocol: Protocol::Icmp,
+                first_ttl: 1,
+                max_ttl: SHARED_LAST_TTL,
+                multipath: Multipath::Classic,
+                privilege: Privilege::Unprivileged,
+                dns: false,
+            },
+            host: A_SHARED_MACHINE.to_owned(),
+        })
+    }
+
+    /// One round of one shared run. Every TTL of the path answered.
+    fn a_shared_round_record(run: &str, network: &str, seq: u64) -> Record {
+        let hops = (1..=SHARED_LAST_TTL)
+            .map(|ttl| Hop {
+                ttl,
+                addr: shared_hop(network, ttl),
+                rtt_ms: A_SHARED_RTT,
+                icmp: if ttl == SHARED_LAST_TTL {
+                    AN_ECHO_REPLY
+                } else {
+                    A_TIME_EXCEEDED
+                }
+                .to_owned(),
+            })
+            .collect();
+        Record::Round(RoundRecord {
+            run: RunId::from(run),
+            seq,
+            ts: moment("2026-08-18T12:00:01.000Z"),
+            dur_ms: 1000,
+            ttl_range: TtlRange::new(1, SHARED_LAST_TTL).expect("the test range must hold"),
+            reached: true,
+            hops,
+        })
+    }
+
+    /// Every record that one shared run writes: the record that opens the run,
+    /// and one record for each round that the run made.
+    fn the_records_of(run: &str, network: &str) -> Vec<Record> {
+        let mut records = vec![a_shared_run_record(run, network)];
+        records.extend((1..=SHARED_ROUNDS).map(|seq| a_shared_round_record(run, network, seq)));
+        records
+    }
+
+    /// Two runs of one destination from one machine append to one file at one
+    /// moment, and a replay of that file must report the path of each of them.
+    ///
+    /// A record that leaves the writer as two writes releases the lock of the
+    /// file in the middle of itself, and the second run then appends a whole
+    /// record into the gap. One line of the file holds two records after that,
+    /// the reader refuses the whole file, and each replay reports the fault in
+    /// the place of a path.
+    ///
+    /// The second run appends after every write of the first one, so the test
+    /// reads that meeting every time.
+    #[test]
+    fn a_replay_of_a_file_that_two_runs_wrote_at_one_moment_reports_the_path_of_each_run() {
+        let file = TempFile::absent("replay-of-a-shared-file");
+        let first = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file.path())
+            .expect("the test file must open for appending");
+        let sink = SecondRunBetweenWrites::on(
+            first,
+            file.path(),
+            the_records_of(THE_OTHER_SHARED_RUN, THE_OTHER_SHARED_NETWORK),
+        )
+        .expect("the second run must open the same file");
+        let mut writer = Writer::to_sink(sink);
+        for record in the_records_of(A_SHARED_RUN, A_SHARED_NETWORK) {
+            writer.write(&record).expect("the record must be written");
+        }
+        drop(writer);
+
+        let ours = shared_hops(A_SHARED_NETWORK);
+        let theirs = shared_hops(THE_OTHER_SHARED_NETWORK);
+        for (run, held, absent) in [
+            (A_SHARED_RUN, &ours, &theirs),
+            (THE_OTHER_SHARED_RUN, &theirs, &ours),
+        ] {
+            let result = replay(file.path(), Some(run), SHARED_REPLAY_COLUMNS);
+            assert_eq!(
+                result.warning, None,
+                "the file holds no line that a cut ended"
+            );
+            let folded = match result.outcome {
+                Ok(folded) => folded,
+                Err(reason) => panic!("the replay of {run} must fold that run: {reason}"),
+            };
+            let named = words_of(&folded.lines);
+            for hop in held {
+                assert!(
+                    named.contains(hop.as_str()),
+                    "the frame of {run} names the hop {hop} that the run probed"
+                );
+            }
+            for hop in absent {
+                assert!(
+                    !named.contains(hop.as_str()),
+                    "the frame of {run} names no hop of the other run: {hop}"
+                );
+            }
+        }
     }
 }

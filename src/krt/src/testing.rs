@@ -16,16 +16,23 @@
 //! table and a test of the run loop both script the keys of a turn, and one
 //! script serves both.
 //!
+//! The sink that puts a second run between the writes of the first one stands
+//! here for the same reason again. A test of the writer and a test of the
+//! replay both need a file that two runs wrote at one moment, and one sink
+//! makes that file for both of them.
+//!
 //! This module compiles under `cfg(test)` alone, so nothing it holds reaches
 //! the binary.
 
 use crate::live::{Command, Keys};
 use crate::names::{Lookup, Resolver};
-use crate::record::{Hop, RoundRecord, RunId, TtlRange};
+use crate::record::{Hop, Record, RecordFile, RoundRecord, RunId, TtlRange, Writer};
 use chrono::{DateTime, Utc};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::io::Write;
 use std::net::IpAddr;
+use std::path::Path;
 use std::rc::Rc;
 
 /// The identifier of the run that every test round belongs to.
@@ -165,5 +172,86 @@ impl FakeKeys {
 impl Keys for FakeKeys {
     fn presses(&mut self) -> Vec<Command> {
         self.turns.pop_front().unwrap_or_default()
+    }
+}
+
+/// A sink that lets a second run append a whole record after every write of
+/// the first run.
+///
+/// The path of a recorded file comes from the source address and the
+/// destination, so two runs of one destination from one machine append to one
+/// file. The two runs can meet at one place alone: the moment that the writer
+/// of the first run releases the file, between two writes of one record.
+///
+/// A test that starts two threads and hopes that they meet there almost never
+/// meets there. A writer that finds the lock of the file taken pauses for a
+/// millisecond, and a whole record takes far less than a millisecond, so the
+/// two runs take turns and pass each other by. Twenty runs of such a test met
+/// at no such moment.
+///
+/// This sink takes the hope out. It puts the second run at every one of those
+/// moments, so a test reads the worst meeting of two runs, and reads it every
+/// time. The second run holds a real writer on the same path, and it therefore
+/// takes the lock of the file as a second process takes it.
+pub(crate) struct SecondRunBetweenWrites<W: Write> {
+    /// The sink of the first run. Every write of that run goes here.
+    first: W,
+    /// The writer of the second run, on the path of the first one.
+    second: Writer<RecordFile>,
+    /// The records that the second run still has to append, the next one
+    /// first.
+    ///
+    /// A queue that runs out appends nothing more. The number of writes that
+    /// one record of the first run takes is what a test of this fixture
+    /// measures, so the number of records that the second run appends is not
+    /// known before the test runs.
+    records: VecDeque<Record>,
+}
+
+impl<W: Write> SecondRunBetweenWrites<W> {
+    /// Opens the writer of the second run on the path that the first run
+    /// writes to.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the file does not open for the second run.
+    pub(crate) fn on(first: W, path: &Path, records: Vec<Record>) -> std::io::Result<Self> {
+        Ok(Self {
+            first,
+            second: Writer::append(path)?,
+            records: records.into(),
+        })
+    }
+}
+
+impl<W: Write> Write for SecondRunBetweenWrites<W> {
+    /// Gives the whole buffer to the first run, then lets the second run
+    /// append one whole record.
+    ///
+    /// The answer is the whole length of the buffer, so [`Write::write_all`]
+    /// calls this function one time for one buffer. Each write of the first
+    /// run therefore makes one meeting of the two runs, and no more than one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the write of the first run fails, and when the
+    /// record of the second run does not reach the file.
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.first.write_all(buf)?;
+        if let Some(record) = self.records.pop_front() {
+            self.second.write(&record)?;
+        }
+        Ok(buf.len())
+    }
+
+    /// Flushes the sink of the first run.
+    ///
+    /// The writer of the second run flushes each of its own records already.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the flush of the sink of the first run fails.
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.first.flush()
     }
 }

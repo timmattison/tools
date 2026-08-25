@@ -6,16 +6,21 @@
 //! one line and back, the reader that loads a whole file, and the writer that
 //! appends to one. The `replay` command reads through this module. The run loop
 //! writes the `run` record, one `round` record for each round, and the `end`
-//! record through the writer, and every write flushes.
+//! record through the writer, and every write flushes. Two runs of one
+//! destination from one machine append to one file, so every write of the
+//! writer holds the exclusive lock of the file. A write that fails part way
+//! gives back the bytes that it already put on the file, still under that lock,
+//! so a fault leaves no fragment of a record for the next run to append onto.
 
 use crate::{Multipath, Protocol};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// The byte that ends one line of a recorded file.
 const NEWLINE: u8 = b'\n';
@@ -697,6 +702,22 @@ pub(crate) enum ReadError {
 /// The file opens in append mode, so one source and one destination keep one
 /// file across many runs.
 ///
+/// Two runs therefore write to one file at the same time. Each write of a run
+/// takes the exclusive lock of the file, writes, and releases the lock, so the
+/// bytes of one write stay together. The wait for the lock is bounded, and a
+/// wait that runs out fails and names the file.
+///
+/// A write that fails part way gives its bytes back before it releases the
+/// lock. The file therefore holds every byte of a record or no byte of it, and
+/// a disk that fills costs the record that met the fault and no other record.
+///
+/// One record is one append. The rule holds at every size of a record, and
+/// under every setting of a run. The lock covers one append, so a record that
+/// left as two appends would release the lock in the middle of itself, and the
+/// other run would put a whole record of its own into that gap. See
+/// [`Writer::write`], which builds the line and its newline as one buffer, and
+/// [`RecordFile::write`], which turns that one buffer into one append.
+///
 /// Every record reaches the operating system before the call returns, so a
 /// `kill -9` loses at most one round. The flush is enough. A `kill -9` ends the
 /// process, and the operating system keeps the bytes that the process already
@@ -705,23 +726,298 @@ pub(crate) enum ReadError {
 ///
 /// The sink of a run is the open file, and that is the sink a caller takes when
 /// it names none.
-pub(crate) struct Writer<W: Write = BufWriter<File>> {
+pub(crate) struct Writer<W: Write = RecordFile> {
     /// The sink that takes every record. A run writes to the open file, in
     /// append mode.
     sink: W,
 }
 
-impl Writer<BufWriter<File>> {
+impl Writer<RecordFile> {
     /// Opens the file for appending, and makes the file when it is absent.
     ///
     /// # Errors
     ///
     /// Returns the reason when the file does not open.
     pub(crate) fn append(path: &Path) -> std::io::Result<Self> {
+        Self::append_within(path, LOCK_WAIT)
+    }
+
+    /// Opens the file for appending, with the bound on the wait that the caller
+    /// names.
+    ///
+    /// A run takes the bound of [`LOCK_WAIT`] through [`Writer::append`]. A
+    /// test names a bound of a few milliseconds, so it proves the refusal of a
+    /// file that another writer holds without a wait of five seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the file does not open.
+    fn append_within(path: &Path, wait: Duration) -> std::io::Result<Self> {
+        Ok(Self {
+            sink: RecordFile::append(path, wait)?,
+        })
+    }
+}
+
+/// The bound on the wait for the lock of a recorded file.
+///
+/// A run writes one record in microseconds, and it takes one round each second
+/// by default, so two runs of one file hold the lock for a very short moment. A
+/// wait of five seconds therefore names a file that some other process holds
+/// and does not release, and not the ordinary meeting of two runs.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// The pause between two tries for the lock of a recorded file.
+///
+/// A holder keeps the lock for the length of one write, which takes
+/// microseconds. A pause of one millisecond therefore gives the holder time to
+/// finish. A shorter pause turns the wait into a spin, and a longer one adds
+/// delay to every record that meets a holder.
+const LOCK_RETRY_PAUSE: Duration = Duration::from_millis(1);
+
+/// A recorded file that takes one record as one append.
+///
+/// The path of a recorded file comes from the source address and the
+/// destination, so two runs of one destination from one machine append to one
+/// file. Each write takes the exclusive lock of the file, writes, and releases
+/// the lock. A record of one run therefore never lands inside a record of
+/// another run.
+///
+/// A write that fails part way keeps the bytes that it already put on the file.
+/// Such a write leaves a fragment that carries no newline, and the next record
+/// of the other run lands on the same line. One line then holds half of one
+/// record and the whole of another, the reader refuses that line, and both runs
+/// lose every record of the file. The file therefore reads its own length under
+/// the lock, and it cuts the file back to that length when the write fails. See
+/// [`append_whole`].
+///
+/// The type holds no buffer of its own, so every write goes straight to the
+/// file. A buffer would break the guarantee: it decides on its own where one
+/// write stops, and a record that leaves as two writes is two appends with a
+/// gap between them.
+pub(crate) struct RecordFile {
+    /// The open file, in append mode.
+    file: File,
+    /// The path of the file, for the message of a wait that ran out.
+    path: PathBuf,
+    /// The bound on the wait for the lock of the file. A wait that runs past it
+    /// fails, so a run never stops forever on a holder that keeps the lock.
+    wait: Duration,
+}
+
+impl RecordFile {
+    /// Opens the file for appending, and makes the file when it is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the file does not open.
+    fn append(path: &Path, wait: Duration) -> std::io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
-            sink: BufWriter::new(file),
+            file,
+            path: path.to_path_buf(),
+            wait,
         })
+    }
+
+    /// Takes the exclusive lock of the file, inside the bound on the wait.
+    ///
+    /// The function tries the lock first, so a file that no other writer holds
+    /// costs no pause at all. A file that another writer holds costs one pause
+    /// for each try, until the bound runs out.
+    ///
+    /// The wait is bounded on purpose. A wait without a bound stops the run for
+    /// as long as some other process keeps the lock, and a run that stops
+    /// forever records nothing and says nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the operating system refuses the lock, and a
+    /// `TimedOut` fault that names the path when the wait runs out.
+    fn lock(&self) -> std::io::Result<LockGuard<'_>> {
+        let start = Instant::now();
+        loop {
+            match self.file.try_lock() {
+                Ok(()) => return Ok(LockGuard { file: &self.file }),
+                // Another writer holds the lock. Give it time to finish.
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Error(fault)) => return Err(fault),
+            }
+            if start.elapsed() >= self.wait {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "{}: another writer holds the file, and the wait of {} milliseconds ran out",
+                        self.path.display(),
+                        self.wait.as_millis()
+                    ),
+                ));
+            }
+            std::thread::sleep(LOCK_RETRY_PAUSE);
+        }
+    }
+}
+
+/// The exclusive lock of one recorded file, for the length of one append.
+///
+/// The lock goes away with this value. A write that fails therefore releases
+/// the lock as well as a write that holds, and no fault leaves the file locked
+/// against the next run.
+///
+/// The bytes of a write that failed go away before the lock does.
+/// [`append_whole`] cuts the file back inside the span that this guard holds,
+/// so the next writer of the file takes the lock and finds no fragment of the
+/// record that met the fault.
+struct LockGuard<'a> {
+    /// The file that holds the lock.
+    ///
+    /// The borrow is not mutable, because `&File` writes as well as `&mut File`
+    /// does. The guard therefore stands beside the write that it protects.
+    file: &'a File,
+}
+
+impl Drop for LockGuard<'_> {
+    fn drop(&mut self) {
+        // A release that fails leaves the lock with this process, and the
+        // operating system gives the lock back when the process closes the
+        // file. There is nothing more to do here, and a write that already
+        // reached the file must not fail on the release.
+        let _ = self.file.unlock();
+    }
+}
+
+/// A sink that a recorded file appends to.
+///
+/// The file of a run is the one sink of the binary, and an append that fails
+/// after some of its bytes reached the file is the one fault that matters here.
+/// A test cannot ask a real file for that fault: a disk that fills and a device
+/// that goes away are faults of the machine, and a test starts neither one.
+/// This trait is therefore the seam. A test writes a sink that takes part of a
+/// buffer and then fails, and it reads what [`append_whole`] leaves on that
+/// sink.
+trait Appendable {
+    /// The number of bytes that the sink holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the sink does not report the number.
+    fn length(&self) -> std::io::Result<u64>;
+
+    /// Appends the whole buffer to the sink.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the append fails. An append that fails part way
+    /// keeps the bytes that it already put on the sink.
+    fn append(&mut self, buf: &[u8]) -> std::io::Result<()>;
+
+    /// Drops every byte of the sink after this number of bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the sink does not shorten.
+    fn shorten(&mut self, length: u64) -> std::io::Result<()>;
+}
+
+impl Appendable for &File {
+    /// The number of bytes that the file holds, from the metadata of the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the metadata does not read.
+    fn length(&self) -> std::io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
+
+    /// Appends the whole buffer to the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the write fails.
+    fn append(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        Write::write_all(self, buf)
+    }
+
+    /// Cuts the file back to this number of bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the file does not cut.
+    fn shorten(&mut self, length: u64) -> std::io::Result<()> {
+        self.set_len(length)
+    }
+}
+
+/// Appends the whole buffer to the sink, or leaves the sink as it was.
+///
+/// The function reads the length of the sink first. An append that fails part
+/// way keeps the bytes that it already put on the sink, so the function cuts
+/// the sink back to that length before it returns the fault. The caller holds
+/// the exclusive lock of the file across the whole span, so no other writer
+/// appends inside it, and the cut therefore drops the bytes of the failed
+/// append and no other byte.
+///
+/// The bytes must go away together. A fragment that stays carries no newline,
+/// and the next record of another run then lands on the same line. That line
+/// holds half of one record and the whole of another, and the reader refuses
+/// the file for it.
+///
+/// A cut that fails leaves the fragment, and the caller reads the fault of the
+/// append and not the fault of the cut. The fault of the append is the one that
+/// says why the record did not reach the file.
+///
+/// # Errors
+///
+/// Returns the reason when the length does not read, and when the append fails.
+fn append_whole(sink: &mut impl Appendable, buf: &[u8]) -> std::io::Result<()> {
+    let length = sink.length()?;
+    if let Err(fault) = sink.append(buf) {
+        let _ = sink.shorten(length);
+        return Err(fault);
+    }
+    Ok(())
+}
+
+impl Write for RecordFile {
+    /// Appends the whole buffer to the file as one write, under the exclusive
+    /// lock of the file.
+    ///
+    /// The answer is the whole length of the buffer, so [`Write::write_all`]
+    /// calls this function one time. A record that reaches this function as one
+    /// buffer therefore becomes one append, and that is what keeps the records
+    /// of two runs of one file apart.
+    ///
+    /// A write that fails part way cuts the file back to the length that this
+    /// function read under the lock. The file therefore keeps no byte of a
+    /// record that did not reach it whole, and the next writer of the file
+    /// appends onto the last whole line. See [`append_whole`].
+    ///
+    /// The lock goes away with the guard, at the end of this function. A second
+    /// writer of the same file therefore goes on as soon as the bytes are on
+    /// the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the lock does not come inside the bound on the
+    /// wait, when the length of the file does not read, and when the write
+    /// fails. A write that fails leaves the file as it was.
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _guard = self.lock()?;
+        append_whole(&mut &self.file, buf)?;
+        Ok(buf.len())
+    }
+
+    /// Flushes the file.
+    ///
+    /// The type holds no buffer of its own, so every byte of a write is already
+    /// with the operating system when the write returns. The call goes to the
+    /// file, which has nothing to empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the flush of the file fails.
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
     }
 }
 
@@ -738,16 +1034,36 @@ impl<W: Write> Writer<W> {
         Self { sink }
     }
 
-    /// Appends one record and one newline, then flushes.
+    /// Appends one record and its newline as one write, then flushes.
+    ///
+    /// The line and the newline go into one buffer, and that buffer makes one
+    /// call. This is the rule of the writer, and not a detail of it. A
+    /// [`RecordFile`] takes the exclusive lock of the file for one write and
+    /// releases it after that write, so a record that left as two writes would
+    /// release the lock in the middle of itself. Two runs of one destination
+    /// from one machine append to one file, and the second run would then put a
+    /// whole record of its own into that gap. One line of the file would hold
+    /// two records, and the reader refuses such a line and with it the whole
+    /// file.
+    ///
+    /// [`Write::write_all`] makes one call for one buffer, because
+    /// [`RecordFile::write`] answers with the whole length of the buffer it
+    /// took. So one record is one buffer, one buffer is one call, and one call
+    /// is one append.
     ///
     /// # Errors
     ///
-    /// Returns the reason when the record does not become JSON, when the write
-    /// fails, and when the flush fails.
+    /// Returns the reason when the record does not become JSON, when the append
+    /// fails, and when the flush fails. A [`RecordFile`] fails the append when
+    /// the lock of the file does not come inside the bound on the wait, and it
+    /// leaves the file as it was when the append itself fails.
     pub(crate) fn write(&mut self, record: &Record) -> std::io::Result<()> {
-        let line = record.to_line().map_err(std::io::Error::other)?;
-        self.sink.write_all(line.as_bytes())?;
-        self.sink.write_all(&[NEWLINE])?;
+        let mut line = record
+            .to_line()
+            .map_err(std::io::Error::other)?
+            .into_bytes();
+        line.push(NEWLINE);
+        self.sink.write_all(&line)?;
         self.sink.flush()
     }
 }
@@ -755,16 +1071,20 @@ impl<W: Write> Writer<W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EndReason, EndRecord, Family, Hop, NameRecord, Privilege, ReadError, Record, Recording,
-        RoundRecord, Run, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange,
-        Writer,
+        append_whole, Appendable, EndReason, EndRecord, Family, Hop, NameRecord, Privilege,
+        ReadError, Record, RecordFile, Recording, RoundRecord, Run, RunConfig, RunId, RunRecord,
+        SourceKind, SourceLabel, Target, TtlRange, Writer, LOCK_WAIT, NEWLINE,
     };
-    use crate::testing::address;
+    use crate::testing::{address, SecondRunBetweenWrites};
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};
+    use std::cell::RefCell;
     use std::fs;
+    use std::io::Write;
+    use std::net::IpAddr;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::rc::Rc;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     /// The identifier of the run that every test record belongs to.
     const RUN: &str = "2026-08-18T12:00:00.123Z";
@@ -1667,6 +1987,56 @@ mod tests {
         assert_eq!(seqs_of(&run), [1, 2, 3]);
     }
 
+    /// The bound on the wait for the lock that the test of a held file names.
+    ///
+    /// The test holds the lock for the whole write, so the writer waits the
+    /// whole bound. A few milliseconds keep the test fast, and the bound of a
+    /// run stays at five seconds.
+    const SHORT_WAIT: Duration = Duration::from_millis(5);
+
+    /// Opens a second handle on a file that a test made, and takes the
+    /// exclusive lock of it.
+    ///
+    /// Two handles of one path contend for the lock inside one process, so the
+    /// test needs no second process. The caller releases the lock at the end of
+    /// the test.
+    fn a_held_file(path: &Path) -> fs::File {
+        let holder = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("the test file must open for appending");
+        holder.lock().expect("the test must take the lock");
+        holder
+    }
+
+    /// A run that cannot take the lock inside the bound must stop, and it must
+    /// name the file that it could not take. A writer that wrote anyway would
+    /// put its record inside the record of the holder.
+    #[test]
+    fn a_writer_that_cannot_take_the_lock_names_the_file_and_writes_no_record() {
+        let file = TempFile::absent("held-file");
+        let holder = a_held_file(file.path());
+
+        let mut writer = Writer::append_within(file.path(), SHORT_WAIT)
+            .expect("the test file must open for appending");
+        let message = writer
+            .write(&a_run_record())
+            .expect_err("a writer that cannot take the lock must fail")
+            .to_string();
+        assert!(
+            message.contains(&file.path().display().to_string()),
+            "the message names the path: {message}"
+        );
+        assert_eq!(
+            fs::read(file.path()).expect("the test file must read"),
+            Vec::<u8>::new(),
+            "a writer that cannot take the lock writes no record"
+        );
+
+        holder.unlock().expect("the test must release the lock");
+    }
+
     #[test]
     fn a_path_whose_directory_is_absent_is_a_fault() {
         let directory = TempFile::absent("absent-directory");
@@ -1676,6 +2046,388 @@ mod tests {
             "a path under an absent directory must fail: {}",
             path.display()
         );
+    }
+
+    /// A sink that remembers the buffer of every write that reached it.
+    ///
+    /// The writer holds the exclusive lock of the file for one write and no
+    /// longer, so the number of writes that one record takes is the whole of
+    /// the guarantee. A file cannot report that number, because a file holds
+    /// the bytes and not the writes that carried them. This sink holds the
+    /// writes, so a test reads the guarantee directly.
+    #[derive(Clone, Default)]
+    struct Appends {
+        /// The buffer of every write, in the order that the writes came.
+        ///
+        /// The handle is shared, because a writer takes its sink, and the test
+        /// reads the writes after that.
+        calls: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl Appends {
+        /// The buffer of every write that reached the sink.
+        fn calls(&self) -> Vec<Vec<u8>> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Write for Appends {
+        /// Takes the whole buffer, and remembers it.
+        ///
+        /// The answer is the whole length of the buffer, as the answer of a
+        /// recorded file is, so [`Write::write_all`] calls this function one
+        /// time for one buffer. The sink therefore counts the writes that the
+        /// writer makes, and not the writes that `write_all` makes.
+        ///
+        /// # Errors
+        ///
+        /// Never fails. The sink holds every buffer in memory.
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.calls.borrow_mut().push(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        /// Empties nothing, because the sink holds no buffer of its own.
+        ///
+        /// # Errors
+        ///
+        /// Never fails.
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A sink that fills up part way through an append.
+    ///
+    /// The sink has room for a number of bytes. An append that needs more room
+    /// than that takes the room that is left and then fails, as a disk that
+    /// fills does. The three methods are honest: the sink reports the bytes it
+    /// holds, it keeps the bytes of an append that failed, and it drops the
+    /// bytes after a length that a caller names.
+    struct SinkThatFills {
+        /// The bytes that the sink holds, in the order that they came.
+        held: Vec<u8>,
+        /// The number of bytes that the sink still takes before it fills.
+        room: usize,
+    }
+
+    impl SinkThatFills {
+        /// A sink that holds these bytes and has room for this many more.
+        fn with_room(held: &[u8], room: usize) -> Self {
+            Self {
+                held: held.to_vec(),
+                room,
+            }
+        }
+
+        /// The bytes that the sink holds.
+        fn held(&self) -> Vec<u8> {
+            self.held.clone()
+        }
+    }
+
+    impl Appendable for SinkThatFills {
+        /// The number of bytes that the sink holds.
+        ///
+        /// # Errors
+        ///
+        /// Never fails. The sink counts the bytes in memory.
+        fn length(&self) -> std::io::Result<u64> {
+            Ok(u64::try_from(self.held.len())
+                .expect("the sink holds fewer bytes than a u64 counts"))
+        }
+
+        /// Takes the bytes that the room holds, and fails when the buffer needs
+        /// more.
+        ///
+        /// # Errors
+        ///
+        /// Returns a `StorageFull` fault when the buffer needs more room than
+        /// the sink has. The sink keeps the bytes that it already took, as a
+        /// file keeps the bytes of a write that failed part way.
+        fn append(&mut self, buf: &[u8]) -> std::io::Result<()> {
+            let taken = buf.len().min(self.room);
+            self.held.extend_from_slice(&buf[..taken]);
+            self.room -= taken;
+            if taken < buf.len() {
+                return Err(std::io::Error::from(std::io::ErrorKind::StorageFull));
+            }
+            Ok(())
+        }
+
+        /// Drops every byte of the sink after this number of bytes.
+        ///
+        /// # Errors
+        ///
+        /// Never fails. The sink cuts the bytes in memory.
+        fn shorten(&mut self, length: u64) -> std::io::Result<()> {
+            self.held
+                .truncate(usize::try_from(length).expect("the length fits the memory of the test"));
+            Ok(())
+        }
+    }
+
+    /// The line that the sink already holds before the append that fails.
+    ///
+    /// The line is whole, and it ends with a newline, as every line of a
+    /// recorded file does.
+    const A_LINE_ALREADY_HELD: &[u8] = b"{\"type\":\"end\",\"run\":\"2026-08-18T12:00:00.123Z\"}\n";
+
+    /// The number of bytes of the next record that fit before the sink fills.
+    ///
+    /// The number is smaller than the record, so the append takes part of the
+    /// record and then fails. That is the one fault that matters: the sink
+    /// holds a fragment of a record, and the fragment carries no newline.
+    const ROOM_LEFT: usize = 5;
+
+    /// A write that fails part way keeps the bytes that it already wrote, and
+    /// the guard then releases the lock. The file ends with a fragment that
+    /// carries no newline.
+    ///
+    /// One run survives that: the fragment is the last line, the reader marks
+    /// the file truncated, and the file still reads. Two runs do not. The
+    /// second run takes the lock and appends its next record onto the same
+    /// line, and that line then holds half of one record and the whole of
+    /// another. The reader answers `Corrupt` for such a line, so `replay`
+    /// refuses the whole file and both runs lose every record in it.
+    #[test]
+    fn a_write_that_fails_part_way_leaves_the_file_as_it_was() {
+        let mut record = a_run_record()
+            .to_line()
+            .expect("the record must become JSON")
+            .into_bytes();
+        record.push(NEWLINE);
+        assert!(
+            record.len() > ROOM_LEFT,
+            "the record must need more room than the sink has"
+        );
+        let mut sink = SinkThatFills::with_room(A_LINE_ALREADY_HELD, ROOM_LEFT);
+
+        let fault = append_whole(&mut sink, &record)
+            .expect_err("a sink that fills part way through the buffer must fail the append");
+
+        assert_eq!(
+            fault.kind(),
+            std::io::ErrorKind::StorageFull,
+            "the fault of the sink reaches the caller"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&sink.held()),
+            String::from_utf8_lossy(A_LINE_ALREADY_HELD),
+            "a write that fails part way leaves the file as it was"
+        );
+    }
+
+    /// The first TTL that a run probes.
+    const FIRST_TTL: u8 = 1;
+
+    /// The last TTL that a run probes.
+    ///
+    /// The tracer takes no TTL above this one, so a round of this range is the
+    /// widest range of TTLs that a run records.
+    const LAST_TTL: u8 = 254;
+
+    /// The number of routers that answer at one TTL of the largest round.
+    ///
+    /// The `paris` and the `dublin` modes vary the flow of a probe, so more
+    /// than one router answers at one TTL. The hops of such a round therefore
+    /// outnumber the TTLs that the round probed.
+    const HOPS_AT_ONE_TTL: usize = 2;
+
+    /// The smallest number of bytes that the line of the largest round holds.
+    ///
+    /// The bound guards the two tests that write the largest round. Both of
+    /// them fail a writer that gives one record to its sink as more than one
+    /// write. A buffer hides such a writer: the writer of this crate made two
+    /// calls, one for the line and one for the newline, and the `BufWriter`
+    /// that this branch took out held both calls and made one write of them.
+    /// A later branch can put a buffer back.
+    ///
+    /// A record larger than the buffer takes that cover away. The sink writes
+    /// such a line straight through, keeps the newline, and writes the newline
+    /// at the flush, and the two tests read those two writes. This bound holds
+    /// the largest round at more than five times the 8192 bytes that a
+    /// `BufWriter` keeps by default. A later schema that shrank a record to a
+    /// few hundred bytes lets a buffer take the whole record and write it
+    /// once, and the two tests then pass with the defect in the writer.
+    const LARGEST_ROUND_BYTES: usize = 49_000;
+
+    /// The first six groups of every hop address of the first run of a shared
+    /// file.
+    ///
+    /// Each group holds four hex digits and no group is zero, so `Display`
+    /// compresses nothing and the address writes its full 39 characters. A
+    /// wide address makes a wide record.
+    const A_HOP_PREFIX: &str = "abcd:ef01:2345:6789:abcd:ef01";
+
+    /// The first six groups of every hop address of the second run of a shared
+    /// file.
+    ///
+    /// The prefix differs from `A_HOP_PREFIX`, so a reader of the file tells
+    /// the hops of one run from the hops of the other.
+    const OTHER_HOP_PREFIX: &str = "bcde:f012:3456:789a:bcde:f012";
+
+    /// The number of rounds that each run of a shared file records.
+    const ROUNDS_OF_A_SHARED_FILE: u64 = 8;
+
+    /// The address of one hop of the largest round.
+    ///
+    /// The prefix names the run. The two groups at the end hold the TTL and
+    /// the number of the router at that TTL, and each of them starts with a
+    /// digit that is not zero, so `Display` writes all four digits of it.
+    fn hop_address(prefix: &str, ttl: u8, router: usize) -> IpAddr {
+        address(&format!("{prefix}:1{ttl:03x}:2{router:03x}"))
+    }
+
+    /// The largest round that one run can record.
+    ///
+    /// Two settings reach past the size of an ordinary round. The run probes
+    /// every TTL up to the last one that the tracer takes, and a multipath
+    /// mode reports more than one router at each of those TTLs. Each hop
+    /// carries an address of the full width of IP version 6.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the line of the round holds fewer bytes than
+    /// [`LARGEST_ROUND_BYTES`]. A buffer takes such a round whole and writes it
+    /// once, so the two tests that write the round pass for the wrong reason.
+    fn the_largest_round_record(run: &str, seq: u64, prefix: &str) -> Record {
+        let mut hops = Vec::new();
+        for ttl in FIRST_TTL..=LAST_TTL {
+            for router in 0..HOPS_AT_ONE_TTL {
+                hops.push(Hop {
+                    ttl,
+                    addr: hop_address(prefix, ttl, router),
+                    rtt_ms: 1.23,
+                    icmp: TIME_EXCEEDED.to_owned(),
+                });
+            }
+        }
+        let record = Record::Round(RoundRecord {
+            run: RunId::from(run),
+            seq,
+            ts: moment("2026-08-18T12:34:56.789Z"),
+            dur_ms: 1004,
+            ttl_range: TtlRange::new(FIRST_TTL, LAST_TTL).expect("the test range must hold"),
+            reached: true,
+            hops,
+        });
+        let bytes = line_of(&record).len();
+        assert!(
+            bytes >= LARGEST_ROUND_BYTES,
+            "the largest round holds {LARGEST_ROUND_BYTES} bytes at least, and this one holds {bytes}"
+        );
+        record
+    }
+
+    /// The number of hops that the largest round holds.
+    fn hops_of_the_largest_round() -> usize {
+        usize::from(LAST_TTL - FIRST_TTL + 1) * HOPS_AT_ONE_TTL
+    }
+
+    /// A record must reach the sink of the writer as one write.
+    ///
+    /// The writer takes the exclusive lock of the file for one write and
+    /// releases it after that write. A record that leaves as two writes
+    /// therefore releases the lock in the middle of itself, and a whole record
+    /// of another run lands in the gap.
+    #[test]
+    fn one_record_leaves_the_writer_as_one_append() {
+        let sink = Appends::default();
+        let record = the_largest_round_record(RUN, 1, A_HOP_PREFIX);
+        let mut writer = Writer::to_sink(sink.clone());
+        writer.write(&record).expect("the record must be written");
+
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 1, "one record reaches the sink as one write");
+        let written = calls.first().expect("the record reaches the sink");
+        let mut expected = line_of(&record).into_bytes();
+        expected.push(super::NEWLINE);
+        assert_eq!(
+            written.len(),
+            expected.len(),
+            "the one write carries the whole line and the newline"
+        );
+        assert!(
+            written == &expected,
+            "the one write carries the line first and the newline after it"
+        );
+    }
+
+    /// The address of every hop of one round, as the file holds them.
+    fn hop_addresses_of(round: &RoundRecord) -> Vec<String> {
+        round.hops.iter().map(|hop| hop.addr.to_string()).collect()
+    }
+
+    /// Two runs of one destination from one machine append to one file at one
+    /// moment. Every line of that file must hold one record and no more.
+    ///
+    /// A record that leaves the writer as two writes releases the lock of the
+    /// file in the middle of itself, and the second run then appends a whole
+    /// record into the gap. The line of the first run holds two records after
+    /// that, the reader refuses the whole file, and both runs are lost.
+    ///
+    /// The second run appends after every write of the first one, so the test
+    /// reads that meeting every time. See [`SecondRunBetweenWrites`] for why
+    /// two threads read it almost never.
+    #[test]
+    fn two_runs_that_share_one_file_leave_every_line_whole() {
+        let file = TempFile::absent("two-runs-one-file");
+        let other: Vec<Record> = (1..=ROUNDS_OF_A_SHARED_FILE)
+            .map(|seq| the_largest_round_record(OTHER_RUN, seq, OTHER_HOP_PREFIX))
+            .collect();
+        let first = RecordFile::append(file.path(), LOCK_WAIT)
+            .expect("the test file must open for appending");
+        let sink = SecondRunBetweenWrites::on(first, file.path(), other)
+            .expect("the second run must open the same file");
+        let mut writer = Writer::to_sink(sink);
+        for seq in 1..=ROUNDS_OF_A_SHARED_FILE {
+            writer
+                .write(&the_largest_round_record(RUN, seq, A_HOP_PREFIX))
+                .expect("the record must be written");
+        }
+        drop(writer);
+
+        let recording = Recording::read(file.path())
+            .expect("a file that two runs shared must hold one record on each line");
+        assert_eq!(
+            recording.truncated(),
+            None,
+            "every run ended its last line with a newline"
+        );
+        assert_eq!(
+            recording.run_ids(),
+            [RunId::from(RUN), RunId::from(OTHER_RUN)],
+            "the file holds the rounds of both runs"
+        );
+
+        let expected: Vec<u64> = (1..=ROUNDS_OF_A_SHARED_FILE).collect();
+        for (run, prefix) in [(RUN, A_HOP_PREFIX), (OTHER_RUN, OTHER_HOP_PREFIX)] {
+            let held = recording
+                .run(&RunId::from(run))
+                .expect("the file holds the run");
+            assert_eq!(
+                seqs_of(&held),
+                expected,
+                "the file holds every round of {run}"
+            );
+            for round in held.rounds() {
+                let addresses = hop_addresses_of(round);
+                assert_eq!(
+                    addresses.len(),
+                    hops_of_the_largest_round(),
+                    "round {} of {run} holds every hop that the run wrote",
+                    round.seq
+                );
+                for addr in &addresses {
+                    assert!(
+                        addr.starts_with(prefix),
+                        "round {} of {run} holds the hops of that run alone: {addr}",
+                        round.seq
+                    );
+                }
+            }
+        }
     }
 
     // The golden fixture. The repository holds one recorded file of two runs,

@@ -641,6 +641,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     file opens in append mode, so one source and one destination keep one file across many runs,
     and the `run` field separates the runs inside it. The run flushes after every record, so a
     `kill -9` loses at most one round.
+  - Two runs of one destination from one machine share one file, and one record is one append.
+    Each run takes the exclusive lock of the file for the length of one record, at every size of
+    a record and under every setting of a run, so no record of one run lands inside a record of
+    the other. A run waits 5 seconds at the most for the lock. A run that waits past that bound
+    stops and names the file, and no run writes a record without the lock. A write that fails part
+    way, on a full disk or a device that goes away, gives its bytes back before it releases the
+    lock, so the file holds every byte of a record or no byte of it. Such a fault costs the record
+    that met it and no other record, and it leaves no half record for the other run to append onto.
   - The default name of the file is `SOURCE-DESTINATION.jsonl` in the working directory, and
     `--output` overrides it. `krt` finds SOURCE in three steps, and the first step that gives an
     address wins. `--source` names the address, and it asks nothing and opens nothing. A run that
