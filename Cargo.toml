@@ -153,6 +153,7 @@ portplz-core = { path = "src/portplz-core" }
 repowalker = { path = "src/repowalker" }
 shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }
+termgfx = { path = "src/termgfx" }
 termsize = { path = "src/termsize" }
 testcolor = { path = "src/testcolor" }
 

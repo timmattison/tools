@@ -9,12 +9,14 @@ buildinfo.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true
+image.workspace = true
 ratatui.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 sysinfo.workspace = true
+termgfx.workspace = true
 termsize.workspace = true
 thiserror.workspace = true
 trippy-core.workspace = true

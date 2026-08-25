@@ -333,7 +333,7 @@ fn close<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{record, Limits, Outcome, RunError};
-    use crate::live::{Command, RunFacts, Screen, Table, Window};
+    use crate::live::{Command, Look, RunFacts, Screen, Table, Window};
     use crate::names::{Lookup, Namer, NoLookups};
     use crate::record::{
         EndReason, EndRecord, Family, Hop, NameRecord, Privilege, Record, Recording, RoundRecord,
@@ -1649,7 +1649,7 @@ mod tests {
     /// takes the terminal, and that frame counts no round and marks no pause.
     #[test]
     fn a_run_whose_table_is_paused_keeps_writing_every_round() {
-        // The name of the file stands in the header line of every frame, so
+        // The name of the file stands in the head of every frame, so
         // the label of it holds no word that a frame is read for.
         let file = TempFile::absent("held-table");
         let painted = Shared::new();
@@ -1664,7 +1664,10 @@ mod tests {
             painted.clone(),
             FakeKeys::of(&[&[Command::Pause], &[], &[], &[Command::Pause]]),
             Window::new(WIDTH, NO_ROWS),
-            Paint::Colored,
+            Look {
+                paint: Paint::Colored,
+                graphics: None,
+            },
         );
         let outcome = ran_on(
             file.path(),

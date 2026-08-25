@@ -623,6 +623,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     | `--no-dns` | off | Skip every reverse lookup, and show the addresses alone. |
     | `--source <IP>` | discovered | Name the source of the derived filename, and skip the lookup of the public address. |
     | `--headless` | off | Draw no table and take no key. Print one status line each minute. |
+    | `--graphics` | off | Draw the `Recent` column of the live table as an image of the whole history. It needs a terminal that names itself and draws images. |
     | `--duration <DUR>` | none | Stop the run after this much time. |
     | `--rounds <N>` | none | Stop the run after this many rounds. |
     | `-V`, `--version` | | Print the version, the git hash, and whether the build was clean. |
@@ -681,20 +682,20 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `launchd` job, or a `systemd` unit. Such a run holds no terminal, and no key of it reaches
     `krt`. A table there writes one whole frame into that pipe or that file for each round, and one
     line each minute says what the run is doing and leaves that file readable.
-  - The live table is the table of `krt replay` below. It holds the same header line, the same
-    columns, the same marks, and the same rule for a terminal too narrow for every column. It takes
-    the width and the height of the terminal at the start of the run, and a window that changes size
-    while the run stands leaves the frame at the size it started with. A frame taller than that
-    window keeps its header line, its column header, the mark of the pause, and the list of the
-    keys. The rows of the path take the lines that those leave, first hop first, and one line under
-    the last row of them counts the rows that went out of the frame, as in `+12 rows`. A run that
-    measures no terminal draws every line of the frame. The table folds every round that arrives and
-    draws the frame of that fold, so the count of the rounds in its header line is the count that
-    the table folded, and the size in that same line is the size the recorded file holds at that
-    draw. The first frame draws at the moment the run takes the terminal, in front of the first
-    round. It counts no round, and its header line already names the destination, the address, the
-    source, the period, and the recorded file, so a run of `--interval 2m` says that it started and
-    holds no empty screen for those two minutes.
+  - The live table is the table of `krt replay` below. It holds the same head, the same columns,
+    the same marks, and the same rule for a terminal too narrow for every column. It takes the width
+    and the height of the terminal at the start of the run, and a window that changes size while the
+    run stands leaves the frame at the size it started with. A frame taller than that window keeps
+    its head, its column header, the mark of the pause, and the list of the keys. The rows of the
+    path take the lines that those leave, first hop first, and one line under the last row of them
+    counts the rows that went out of the frame, as in `+12 rows`. A run that measures no terminal
+    draws every line of the frame. The table folds every round that arrives and draws the frame of
+    that fold, so the count of the rounds in its head is the count that the table folded, and the
+    size in that same head is the size the recorded file holds at that draw. The first frame draws
+    at the moment the run takes the terminal, in front of the first round. It counts no round, and
+    its head already names the destination, the address, the source, the period, and the recorded
+    file, so a run of `--interval 2m` says that it started and holds no empty screen for those two
+    minutes.
   - Five keys drive the live table. `q` and Ctrl-C stop the run, write the record that closes it,
     give the terminal back, and exit with success. `p` holds the table where it stands, and a
     second press lets it move again. A held table holds the display alone: the file still takes
@@ -714,7 +715,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     stood in the terminal before the run. A destination that resolves to no address (exit code 1)
     and a platform that withholds the privilege of a raw socket (exit code 2) both print before the
     run takes the terminal at all.
-  - `krt replay` prints one table of the path. A header line names the destination, the address it
+  - `krt replay` prints one table of the path. The head names the destination, the address it
     resolved to, the source, the count of the rounds, the period of one round, and the recorded
     file with its size. Under it stands one row for each TTL, with the columns `TTL`, `Host`,
     `Loss%`, `Sent`, `Last`, `Min`, `Avg`, `Max`, `StDev`, and `Recent`. The `Recent` column draws
@@ -723,6 +724,27 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     stop below the full block, so a gap stands between the graph of one row and the graph of the row
     above it. An address row draws the answers of its own router alone, because a probe reaches a
     TTL and not a router.
+  - `--graphics` draws the `Recent` column of a live run as an image. The column is nine terminal
+    columns wide, so the block elements show nine of the sixty samples that the fold of a hop keeps.
+    One character cell holds ten pixels or more across, and an image of the same nine columns
+    therefore draws every one of those sixty samples. The scale is the scale of the block elements,
+    read over the whole history: the smallest sample stands at the floor of the cell and the largest
+    fills it. A bar is teal, and it reads on a light terminal and on a dark one, because an image
+    carries its own pixels and cannot take the foreground of the terminal the way a glyph does. A
+    probe that no hop answered draws a dotted red column, and the dots are what tell a loss from a
+    slow answer. The background is transparent, so the terminal shows through the cell.
+  - The flag is off by default, and it draws an image only when the run holds a terminal, that
+    terminal names itself as one that reads an inline-image protocol (Kitty, iTerm2, or Sixel), and
+    that terminal reports a pixel size. The name is what the terminal has to give, and not the
+    protocol alone: no terminal answers a question about the sequences it reads, so `krt` names the
+    terminal from the environment variables that the terminal set. A terminal that set none of them
+    carries no name, and the protocol such a terminal would get is a guess. xterm, GNOME Terminal
+    and Konsole all arrive that way. A run that misses any one of the four draws the block elements,
+    because two pictures of one hop is what the table must never show, an image at a guessed size
+    stands over the wrong cells, and an image in a protocol that the terminal does not read stands
+    on the screen as base64 text. A row that draws an image draws no block element, and the heading
+    of the column stays. `krt replay`, a headless run, a pipe, and a file each draw the block
+    elements, whatever the flag says.
   - The marks of the table each say one thing. A `★` behind a host marks the row that answered from
     the destination, and a run that never reached the destination holds no such row. A `(+N)` behind
     a host says that more than one router answered at that TTL. The host of the row names the first
@@ -745,6 +767,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     goes to a pipe or to a file prints the whole table, because such a run has no terminal to ask. A
     replay under a terminal that carries no window prints the whole table too, because such a
     terminal reports a width of zero, and zero columns measure no window.
+  - The head of the frame runs past no window. A window that holds no whole head takes the fields
+    that are left onto the lines under it, one whole field at a time, and every line after the first
+    one starts under the first field. The break falls between two fields and never inside one,
+    because a field names itself and half a field names nothing. One field alone can still be wider
+    than the window — you name the recorded file, and a name of any length is a name — and such a
+    field loses its tail.
   - A host too wide for the `Host` column loses the tail of its name, and it keeps its `★` and its
     `(+N)`. A name with its address fills that column of a run that resolves names, and the two
     marks say what no other column of the row says.

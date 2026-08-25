@@ -1,10 +1,9 @@
 //! Black-box coverage for `krt replay`, driving the real binary.
 //!
 //! A replay reads a recorded file and folds one run of it into one frame: the
-//! header line that names the run, one blank line, the column header, and one
-//! row for each TTL of the path. The tests read the lines that the binary
-//! printed, so they cover the whole path from the command line to standard
-//! output.
+//! head that names the run, one blank line, the column header, and one row for
+//! each TTL of the path. The tests read the lines that the binary printed, so
+//! they cover the whole path from the command line to standard output.
 //!
 //! The binary writes to a pipe here and never to a terminal, so every frame
 //! below draws at the nominal width of 97 columns. That rule is what makes
@@ -441,7 +440,7 @@ impl TempFile {
             .into_owned()
     }
 
-    /// The size that the header line prints for the file.
+    /// The size that the head prints for the file.
     ///
     /// The count is the length of the text that the test wrote, and never a
     /// number that the binary printed. A size below one step reads as whole
@@ -483,8 +482,12 @@ fn file_of(lines: &[&str]) -> String {
     text
 }
 
-/// The whole text of one frame: the header line, one blank line, the column
-/// header, and one row for each line of the path.
+/// The whole text of one frame: the head, one blank line, the column header,
+/// and one row for each line of the path.
+///
+/// The head is one line for a window that holds every field of it, and more
+/// than one line for a window that does not: `ui::Header::lines` states the
+/// rule, and [`built_header`] says why the head of a built file takes two.
 fn frame(header: &str, rows: &[&str]) -> String {
     let mut text = format!("{header}\n\n{COLUMN_HEADER}\n");
     for row in rows {
@@ -494,28 +497,34 @@ fn frame(header: &str, rows: &[&str]) -> String {
     text
 }
 
-/// The header line of a built file that holds the `run` record.
+/// The head of a built file that holds the `run` record.
 ///
 /// The record names `example.net`, which resolved to `198.51.100.7`, and the
 /// source `1.2.3.4`. Its interval is 1000 milliseconds, which reads `1s`. The
 /// name and the size come off the file that the test wrote, because a built
 /// file carries a process identifier and a nanosecond in its name.
+///
+/// That name is what takes the head onto two lines. The nominal frame of a
+/// replay is 97 columns wide, and no such name fits beside the four fields in
+/// front of it, so the file and its size stand on the line under them. The
+/// second line starts under the first field of the first line.
 fn built_header(file: &TempFile, rounds: usize) -> String {
     format!(
-        " krt  example.net → 198.51.100.7   src 1.2.3.4   round {rounds}   1s   {} ({})",
+        " krt  example.net → 198.51.100.7   src 1.2.3.4   round {rounds}   1s\n      {} ({})",
         file.name(),
         file.size()
     )
 }
 
-/// The header line of a built file that holds no `run` record.
+/// The head of a built file that holds no `run` record.
 ///
 /// Such a file names no destination, no address, no source, and no interval,
-/// and the line writes one word in the place of each of them. It still names
-/// its rounds and its file.
+/// and the head writes one word in the place of each of them. It still names
+/// its rounds and its file, and that file takes the second line for the reason
+/// that [`built_header`] states.
 fn built_header_without_a_target(file: &TempFile, rounds: usize) -> String {
     format!(
-        " krt  unknown   src unknown   round {rounds}   unknown   {} ({})",
+        " krt  unknown   src unknown   round {rounds}   unknown\n      {} ({})",
         file.name(),
         file.size()
     )

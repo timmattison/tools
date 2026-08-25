@@ -8,13 +8,13 @@
 //! whose standard output is a pipe or a file, and a run that `--headless`
 //! asked, print one status line each minute in the place of the table. The
 //! `replay` command reads a recorded file, folds one run of it, and prints the
-//! table of that path: a header line that names the run, and one row for each
-//! TTL.
+//! table of that path: a head that names the run, and one row for each TTL.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+mod graph;
 mod live;
 mod names;
 mod record;
@@ -362,6 +362,11 @@ struct Cli {
     #[arg(long)]
     headless: bool,
 
+    /// Draw the Recent column as an image of the whole history. Needs a
+    /// terminal that names itself and draws images.
+    #[arg(long)]
+    graphics: bool,
+
     /// Stop after this much time.
     #[arg(long, value_name = "DUR", value_parser = parse_duration)]
     duration: Option<Duration>,
@@ -424,6 +429,17 @@ struct ResolvedConfig {
     source: Option<IpAddr>,
     /// True when the tool prints status lines and no table.
     headless: bool,
+    /// True when the live table draws the Recent column as an image of the
+    /// whole history.
+    ///
+    /// The block elements draw nine of the sixty samples that the fold holds,
+    /// and an image of the same nine columns draws every one of them. The
+    /// answer is a switch and not a resolved value, because the run cannot read
+    /// the terminal here: `graphics_of` asks the terminal at the moment the
+    /// screen starts, and it answers the block elements for a terminal that
+    /// draws no image, for a terminal that named itself to nobody, and for a
+    /// terminal that measures no character cell.
+    graphics: bool,
     /// The time that stops the run. An absent time runs until the user stops it.
     duration: Option<Duration>,
     /// The number of rounds that stops the run.
@@ -495,6 +511,7 @@ impl Cli {
             reverse_dns: !self.no_dns,
             source: self.source,
             headless: self.headless,
+            graphics: self.graphics,
             duration: self.duration,
             rounds: self.rounds,
             replay,
@@ -571,7 +588,7 @@ impl fmt::Display for ResolvedConfig {
 /// for hours. `500ms`, `1s`, `2m`, and `3h` are examples.
 ///
 /// `ui::render_duration` writes the text that this function reads. The two live
-/// apart because the header line of the frame writes a duration as well, and one
+/// apart because the head of the frame writes a duration as well, and one
 /// writer keeps the three places that print a period in agreement. A test below
 /// asserts that the pair agrees over every accepted form.
 ///
@@ -1151,6 +1168,54 @@ fn display_of(headless: bool, is_terminal: bool) -> Display {
     Display::Table
 }
 
+/// The pixel size of one character cell, when the run draws the Recent column
+/// as an image of the whole history.
+///
+/// Four questions stand between a run and that image, and the answer is the
+/// size of a cell only when all four of them answer yes.
+///
+/// The reader asked for it. The flag is off by default, because the block
+/// elements are one picture of a hop and an image is a second one, and the
+/// documentation of [`crate::ui`] argues that two readers must never argue over
+/// a hop. A terminal that draws the image over a cell that also holds a bar
+/// gives a reader two pictures of one history.
+///
+/// The run draws the live table at all. A replay, a headless run, a run whose
+/// standard output is a pipe, and a run whose standard output is a file each
+/// draw the block elements. This question needs no test of its own: the image
+/// path lives in [`crate::live`], and [`screen_of`] reaches
+/// [`crate::live::Table`] only when [`display_of`] answers [`Display::Table`].
+///
+/// The terminal draws images, and it named itself as well. Three inline-image
+/// protocols are in service, no terminal reads all three, and a terminal that
+/// reads none of them puts the escape sequence of an image on the screen as
+/// text. No terminal answers a question about the protocols it reads, so
+/// `termgfx` names the terminal from the environment variables that the
+/// terminal set and picks the protocol of that name. A terminal that set none
+/// of those variables carries no name, so the protocol it gets is a guess, and
+/// a guessed protocol is the same escape sequence on the screen as text.
+/// `Capabilities::draws_images_by_name` is the answer that refuses the guess.
+///
+/// The terminal reports a pixel size. A terminal that answers the `TIOCGWINSZ`
+/// ioctl with zero pixels reports no pixel size, exactly as `termsize` argues
+/// that a terminal with no window reports no width. The image path takes no
+/// guess there: an image at a guessed size stands over the wrong cells, and the
+/// block elements say the same thing at the size the terminal already agreed
+/// to.
+///
+/// The reads of the world stand apart from this decision, so a test names the
+/// answers without a terminal to name them with.
+fn graphics_of(
+    asked: bool,
+    draws_images_by_name: bool,
+    cell: Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
+    if !asked || !draws_images_by_name {
+        return None;
+    }
+    cell
+}
+
 /// Whether the frames of a live table carry the color of a terminal, from
 /// whether the reader set `NO_COLOR`.
 ///
@@ -1308,6 +1373,12 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
 /// [`paint_of`] holds the decision it feeds. Any value of the variable counts,
 /// as the convention of it says.
 ///
+/// The reads that the image path needs stand here as well, for the same reason:
+/// which terminal this is, whether that terminal draws an image at all, and how
+/// many pixels one character cell of it holds. [`graphics_of`] holds the
+/// decision that the three of them feed. The reads come after the guard took
+/// the terminal, so they measure the alternate screen that the frames draw on.
+///
 /// # Errors
 ///
 /// Returns the reason and [`EXIT_FAILURE`] when the terminal refused the hold.
@@ -1338,12 +1409,21 @@ fn screen_of(
         path: path.to_owned(),
     };
     let (columns, rows) = ui::frame_size();
+    let capabilities = termgfx::Capabilities::detect();
+    let cell = graphics_of(
+        config.graphics,
+        capabilities.draws_images_by_name(),
+        termgfx::cell_pixels(),
+    );
     let table = live::Table::new(
         facts,
         std::io::stdout(),
         live::Keyboard,
         live::Window::new(columns, rows),
-        paint_of(std::env::var_os("NO_COLOR").is_some()),
+        live::Look {
+            paint: paint_of(std::env::var_os("NO_COLOR").is_some()),
+            graphics: cell.map(|cell| live::Graphics { capabilities, cell }),
+        },
     );
     Ok((Box::new(table), Some(guard)))
 }
@@ -1395,10 +1475,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        closing_line, display_of, host_name_or, name_grace, paint_of, parse_duration, pick_address,
-        replay, resolve_target, run_config, source_from, stop_reason, user_stopped, value_name,
-        AddressFamily, Cli, Command, Display, EndReason, Family, Multipath, Protocol, ResolveError,
-        ResolvedConfig, SourceKind, SourceLabel, Target, RESOLVE_PORT, SOURCE_FALLBACK, UNKNOWN,
+        closing_line, display_of, graphics_of, host_name_or, name_grace, paint_of, parse_duration,
+        pick_address, replay, resolve_target, run_config, source_from, stop_reason, user_stopped,
+        value_name, AddressFamily, Cli, Command, Display, EndReason, Family, Multipath, Protocol,
+        ResolveError, ResolvedConfig, SourceKind, SourceLabel, Target, RESOLVE_PORT,
+        SOURCE_FALLBACK, UNKNOWN,
     };
     use crate::record::{
         Hop, Privilege, Record, RoundRecord, RunConfig, RunId, RunRecord, TtlRange, Writer,
@@ -2284,9 +2365,22 @@ resolved configuration:
 
     #[test]
     fn parses_the_flags_that_hold_no_value() {
-        let cli = parse(&["krt", "example.com", "--no-dns", "--headless"]);
+        let cli = parse(&["krt", "example.com", "--no-dns", "--headless", "--graphics"]);
         assert!(cli.no_dns);
         assert!(cli.headless);
+        assert!(cli.graphics);
+    }
+
+    #[test]
+    fn the_graphics_flag_resolves_to_the_image_of_the_recent_column() {
+        // The flag is the first of the four questions that `graphics_of` asks.
+        // A configuration that dropped it would draw the block elements on
+        // every terminal, and no line of the run would say why.
+        let config = resolve(&["krt", "example.com", "--graphics"]);
+        assert!(
+            config.graphics,
+            "the run that asked for the image carries that answer into its screen"
+        );
     }
 
     #[test]
@@ -2314,6 +2408,65 @@ resolved configuration:
             display_of(true, false),
             Display::Headless,
             "and the flag leaves such a run where it stands"
+        );
+    }
+
+    /// The pixel size of one character cell that the terminal of every test of
+    /// the gate reports.
+    ///
+    /// Ten pixels by twenty is about the cell of a modern terminal at its
+    /// default font. The numbers say nothing about the gate, which hands the
+    /// size of a cell back or hands nothing back, so one pair of numbers serves
+    /// every test below.
+    const CELL: (u32, u32) = (10, 20);
+
+    #[test]
+    fn a_run_that_asked_for_the_image_on_a_terminal_that_draws_one_takes_the_size_of_a_cell() {
+        // The image of the Recent column draws in pixels, and the terminal lays
+        // the table out in cells, so the run needs the size of one cell before
+        // it draws one pixel.
+        assert_eq!(
+            graphics_of(true, true, Some(CELL)),
+            Some(CELL),
+            "a reader who asked for the image on a terminal that reports a pixel size gets it"
+        );
+    }
+
+    #[test]
+    fn a_run_that_asked_for_no_image_draws_the_block_elements() {
+        // The flag is off by default. The block elements are one picture of a
+        // hop and an image is a second one, and two pictures of one hop is what
+        // the table must never show.
+        assert_eq!(
+            graphics_of(false, true, Some(CELL)),
+            None,
+            "a terminal that draws images draws no image for a run that asked for none"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_draws_no_image_draws_the_block_elements() {
+        // Every inline-image protocol carries its image in an escape sequence,
+        // and a terminal that reads none of them puts that sequence on the
+        // screen as text. A terminal that named itself to nobody stands here
+        // too: `termgfx` guesses the protocol of such a terminal, and a guessed
+        // protocol is the same sequence on the screen as text.
+        assert_eq!(
+            graphics_of(true, false, Some(CELL)),
+            None,
+            "the flag draws no image on a terminal that reads no image protocol, and none on a terminal that named none"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_reports_no_pixel_size_draws_the_block_elements() {
+        // A terminal that answers the `TIOCGWINSZ` ioctl with zero pixels
+        // reports no pixel size. The image path takes no guess there, because an
+        // image at a guessed size stands over the wrong cells of the table.
+        assert_eq!(
+            graphics_of(true, true, None),
+            None,
+            "the flag draws no image on a terminal that measures no cell"
         );
     }
 
@@ -2348,6 +2501,10 @@ resolved configuration:
         assert!(config.reverse_dns, "reverse DNS is on by default");
         assert_eq!(config.source, None);
         assert!(!config.headless, "the table is on by default");
+        assert!(
+            !config.graphics,
+            "the block elements of the Recent column are on by default"
+        );
         assert_eq!(config.duration, None);
         assert_eq!(config.rounds, None);
         assert_eq!(config.replay, None);

@@ -3976,15 +3976,12 @@ name = "ic"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "buildinfo",
  "clap",
- "icy_sixel",
  "image",
- "libc",
  "notify",
+ "termgfx",
  "termion",
- "termsize",
  "unicode-width",
 ]
 
@@ -4564,6 +4561,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "image",
  "mockito",
  "portable-pty",
  "ratatui",
@@ -4572,6 +4570,7 @@ dependencies = [
  "serde_json",
  "signal-hook 0.3.18",
  "sysinfo",
+ "termgfx",
  "termsize",
  "thiserror 2.0.20",
  "trippy-core",
@@ -7465,6 +7464,18 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "unicode-width",
+]
+
+[[package]]
+name = "termgfx"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "icy_sixel",
+ "image",
+ "libc",
+ "termsize",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

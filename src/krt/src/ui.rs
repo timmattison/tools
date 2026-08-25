@@ -57,7 +57,7 @@
 //! which is why the list is one list and not a rule to obey.
 //!
 //! A terminal too narrow even for the last set of columns gets the frame at the
-//! floor of the Host column, and the terminal clips it. Nothing narrower says
+//! floor of the Host column, and the terminal wraps it. Nothing narrower says
 //! more, and a frame of no columns tells a reader nothing.
 //!
 //! The terminal says how wide the frame is, and a run whose standard output is
@@ -69,6 +69,17 @@
 //! drop columns into a file that nothing ever gets back. It also makes the
 //! output of one recorded file one text on every machine, which is what a test
 //! of the binary reads.
+//!
+//! The head of a frame runs past no window. The head is the part that wants the
+//! columns: the reader names the recorded file, and a name of any length is a
+//! name. So a window that holds no whole head takes the fields that are left
+//! onto the lines under it, one whole field at a time, and the head says how
+//! many lines it took. A terminal wraps a line that runs past its window, every
+//! line under that one then stands one row lower than the frame counts, and a
+//! caller that draws over the frame stands its picture over the wrong row: the
+//! images of `--graphics` stood over the heading of the Recent column and over
+//! the wrong row of every hop. [`Header::lines`] states the rule, and
+//! [`Rendered::head`] carries the count to that caller.
 //!
 //! The address rows of one TTL line their Share% up under the Loss% of the row
 //! above them, digit for digit. The drawing this table came from puts those
@@ -109,9 +120,9 @@
 //! sample of the window.
 //!
 //! The module also writes the one duration text of the crate. The resolved
-//! configuration, the status line of a round, and the header line of the frame
-//! each name a period of time, and a second writer of a duration would print
-//! `1s` in one of those three places and `1000ms` in another.
+//! configuration, the status line of a round, and the head of the frame each
+//! name a period of time, and a second writer of a duration would print `1s` in
+//! one of those three places and `1000ms` in another.
 
 use crate::stats::{Address, HopStats, Sample, TtlRow};
 use crate::{ROUND, SECONDS_PER_HOUR, SECONDS_PER_MINUTE, UNKNOWN};
@@ -157,14 +168,20 @@ const RESOLVES_TO: &str = " → ";
 /// The name of the field that holds the source address of the run.
 const SOURCE: &str = "src";
 
-/// What the header line of the frame names.
+/// The number of fields that the head of a frame holds.
 ///
-/// The line stands above the table, and it holds what every row of the table
+/// [`Header::fields`] names each of them. The count stands here so that the
+/// list and its length can never part company.
+const HEADER_FIELDS: usize = 5;
+
+/// What the head of the frame names.
+///
+/// The head stands above the table, and it holds what every row of the table
 /// has in common: what the run probed, where it probed from, how many rounds it
 /// folded, how often it probed, and which file holds the record. A reader who
-/// asks "what am I looking at" reads this one line, and a reader who asks "how
-/// is hop 7 doing" reads the table below it. The split is what keeps the table
-/// to one column for each number it prints.
+/// asks "what am I looking at" reads the head, and a reader who asks "how is
+/// hop 7 doing" reads the table below it. The split is what keeps the table to
+/// one column for each number it prints.
 ///
 /// Every field that a replay can fail to fill is an `Option`. A recorded file
 /// whose `run` record is absent — a file that a run was still writing when the
@@ -196,13 +213,14 @@ pub(crate) struct Header<'a> {
 }
 
 impl Header<'_> {
-    /// The one line that stands above the table.
+    /// The fields that stand above the table.
     ///
-    /// Five fields stand in it: the target, the source, the count of the
-    /// rounds, the period of one round, and the recorded file with its size.
-    /// Each of them carries a label of its own, or a value that names itself, so
-    /// no field depends on where it stands. A reader finds the source by the
-    /// word `src`, and not by counting the gaps from the left.
+    /// Five fields: the target, the source, the count of the rounds, the period
+    /// of one round, and the recorded file with its size. Each of them carries
+    /// a label of its own, or a value that names itself, so no field depends on
+    /// where it stands. A reader finds the source by the word `src`, and not by
+    /// counting the gaps from the left. That is what lets [`Header::lines`] put
+    /// a field on a second line without taking anything off it.
     ///
     /// A target names a destination and an address together, or it names
     /// nothing. A destination with no address is a name that this run never
@@ -211,10 +229,10 @@ impl Header<'_> {
     /// target the file holds none of.
     ///
     /// The label of the rounds stays `round` for every count, where a summary
-    /// line writes `142 rounds`. This line is a set of labelled fields and not a
-    /// sentence, and a label that grew with the count would move the text of
+    /// line writes `142 rounds`. The header is a set of labelled fields and not
+    /// a sentence, and a label that grew with the count would move the text of
     /// every field behind it as the run goes on.
-    pub(crate) fn line(&self) -> String {
+    fn fields(&self) -> [String; HEADER_FIELDS] {
         let target = match (self.destination, self.address) {
             (Some(destination), Some(address)) => format!("{destination}{RESOLVES_TO}{address}"),
             _ => UNKNOWN.to_owned(),
@@ -226,14 +244,63 @@ impl Header<'_> {
             .interval
             .map_or_else(|| UNKNOWN.to_owned(), render_duration);
         let size = self.bytes.map_or_else(|| UNKNOWN.to_owned(), render_size);
-        let fields = [
+        [
             target,
             format!("{SOURCE} {source}"),
             format!("{ROUND} {}", self.rounds),
             interval,
             format!("{} ({size})", self.file),
-        ];
-        format!("{HEADER_START}{}", fields.join(FIELD_SEPARATOR))
+        ]
+    }
+
+    /// The lines that stand above the table at a terminal width.
+    ///
+    /// One line holds every field of a window wide enough for them. A narrower
+    /// window takes the fields that do not fit onto the lines under it, one
+    /// whole field at a time, and every line after the first one starts under
+    /// the first field of the head.
+    ///
+    /// No line runs past the width. A terminal wraps a line that does, and
+    /// every line of the frame under that one then stands one row lower than
+    /// the frame counts: a live run draws the image of a row at the row it
+    /// counted, so one wrapped line stands every image of a frame over the
+    /// wrong row of the path. The head is therefore the one part of the frame
+    /// that grows a line, and it says how many lines it took.
+    ///
+    /// The break falls between two fields and never inside one, because a field
+    /// names itself and half a field names nothing. One field alone can still
+    /// be wider than the window — the user names the recorded file, and a name
+    /// of any length is a name — and such a field loses its tail.
+    ///
+    /// # Arguments
+    /// * `width` - The number of terminal columns that the frame draws in.
+    pub(crate) fn lines(&self, width: u16) -> Vec<String> {
+        let width = usize::from(width);
+        let indent = display_width(HEADER_START);
+        let mut lines = Vec::new();
+        let mut line = HEADER_START.to_owned();
+        let mut taken = indent;
+        for field in self.fields() {
+            // The tail of a field goes away only when the field is wider than
+            // the window on a line of its own. Every line but the first one
+            // starts with the same indent, so one cut serves both.
+            let field = truncate_to_width(&field, width.saturating_sub(indent));
+            let columns = display_width(&field);
+            let gap = display_width(FIELD_SEPARATOR);
+            if taken > indent && taken + gap + columns > width {
+                lines.push(line);
+                line = " ".repeat(indent);
+                taken = indent;
+            }
+            if taken > indent {
+                line.push_str(FIELD_SEPARATOR);
+                taken += gap;
+            }
+            line.push_str(&field);
+            taken += columns;
+        }
+        lines.push(line);
+        lines
     }
 }
 
@@ -469,25 +536,69 @@ impl Mark {
     }
 }
 
-/// The Recent column of one row: one mark for each sample of the window.
+/// The Recent column of one row: one mark for each sample of the window, and
+/// the whole history that those marks stand for.
 ///
 /// The column travels as marks and not as text, because the glyphs of it do not
 /// all share a color. It is the one column of the table that carries a color at
 /// all.
-pub(crate) struct Recent(Vec<Mark>);
+///
+/// The history travels beside the marks, because a run that draws the column as
+/// an image needs every sample and the marks hold [`RECENT_WIDTH`] of them. One
+/// walk of the table then gives both pictures, and no second walk can ever
+/// count a different set of rows: the row that a history belongs to is the row
+/// that the marks belong to.
+pub(crate) struct Recent {
+    /// One mark for each sample of the window, oldest first.
+    marks: Vec<Mark>,
+    /// Every sample that the fold of the key holds, oldest first.
+    history: Vec<Sample>,
+}
 
 impl Recent {
     /// The column of a row that draws no sample at all.
+    ///
+    /// Such a column holds no history either. The `others` row of a crowded TTL
+    /// takes this: the fold keeps no time for an answer of a router that the
+    /// row has no entry for, so there is nothing to draw and nothing to plot.
     fn empty() -> Self {
-        Self(Vec::new())
+        Self {
+            marks: Vec::new(),
+            history: Vec::new(),
+        }
     }
 
     /// The column that draws one text in the foreground of the terminal.
     ///
     /// The column header takes this. Its heading is a word and not a picture of
-    /// a history, so every glyph of it stands in the color the reader set.
+    /// a history, so every glyph of it stands in the color the reader set, and
+    /// it stands for no history at all.
     fn text(text: &str) -> Self {
-        Self(text.chars().map(Mark::Glyph).collect())
+        Self {
+            marks: text.chars().map(Mark::Glyph).collect(),
+            history: Vec::new(),
+        }
+    }
+
+    /// The column of a row whose picture is an image and not a set of glyphs.
+    ///
+    /// The cell carries [`RECENT_WIDTH`] spaces, so it takes the columns of the
+    /// Recent column and draws nothing in them. A caller then puts an image
+    /// over those columns, and the reader reads one picture of the hop. A cell
+    /// that kept its block elements would give the reader two.
+    ///
+    /// The column holds no history, because the caller already read the history
+    /// out of [`Rendered::recent`] before the blank went in.
+    fn blank() -> Self {
+        Self {
+            marks: std::iter::repeat_n(Mark::Glyph(' '), usize::from(RECENT_WIDTH)).collect(),
+            history: Vec::new(),
+        }
+    }
+
+    /// Every sample that the key of this column holds, oldest first.
+    pub(crate) fn history(&self) -> &[Sample] {
+        &self.history
     }
 
     /// The cell of the table that draws this column.
@@ -497,7 +608,7 @@ impl Recent {
     /// there. A cell of one style would paint the whole column or none of it.
     fn cell(&self, alignment: Alignment) -> Cell<'static> {
         let spans: Vec<Span<'static>> = self
-            .0
+            .marks
             .iter()
             .map(|mark| Span::styled(mark.glyph().to_string(), mark.style()))
             .collect();
@@ -512,7 +623,7 @@ impl Recent {
 #[cfg(test)]
 impl fmt::Display for Recent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for mark in &self.0 {
+        for mark in &self.marks {
             write!(formatter, "{}", mark.glyph())?;
         }
         Ok(())
@@ -540,6 +651,12 @@ impl fmt::Display for Recent {
 /// and it takes no part in the scale: such a probe measured no time, so no
 /// limit of the window can read it.
 ///
+/// The whole history travels with the marks, and this one walk of the samples
+/// fills both. A run that draws the column as an image needs every sample that
+/// the fold holds, and a second walk of the table for that history could count
+/// a different set of rows: an image of a row of one walk would then stand over
+/// a row of the other.
+///
 /// A key with no sample, and a `width` of zero, each draw an empty column.
 ///
 /// A sample that is not a finite number — `f64::NAN`, or an infinity — draws
@@ -549,16 +666,17 @@ impl fmt::Display for Recent {
 /// would hide the whole history of the hop, which is a worse answer than one
 /// bar that reads low.
 pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = Sample>, width: usize) -> Recent {
-    if width == 0 {
-        return Recent::empty();
-    }
+    // The whole history travels with the marks, and one walk of the table fills
+    // both. A caller that walked the table a second time for the history could
+    // count a different set of rows, and an image of a row of one walk would
+    // then stand over a row of the other.
+    let history: Vec<Sample> = samples.collect();
 
-    // The iterator states its length before it gives a sample, so the oldest
-    // samples go away as the iterator runs. The window is therefore the only
-    // copy that this function makes, and the history of the key stays where it
-    // is.
-    let skipped = samples.len().saturating_sub(width);
-    let shown: Vec<Sample> = samples.skip(skipped).collect();
+    // The window holds the most recent samples, because the column is as wide
+    // as the terminal gives it and the recent samples are the ones that say
+    // what the hop is doing now.
+    let skipped = history.len().saturating_sub(width);
+    let shown = history.get(skipped..).unwrap_or_default();
 
     // The scale reads only the answers that compare. A lost probe measured no
     // time, so it names no limit of the window.
@@ -570,26 +688,26 @@ pub(crate) fn sparkline(samples: impl ExactSizeIterator<Item = Sample>, width: u
     }
     let span = highest - lowest;
 
-    Recent(
-        shown
-            .iter()
-            .map(|sample| {
-                let Sample::Time(time) = *sample else {
-                    return Mark::Lost;
-                };
-                // A window of one sample, and a window whose samples are all
-                // equal, each give a span of zero. A window that holds no
-                // sample which compares gives a span below zero, because the
-                // two limits stayed at the infinities that the fold started
-                // them at. Neither window divides.
-                if span <= 0.0 || !time.is_finite() {
-                    Mark::Glyph(BARS[0])
-                } else {
-                    Mark::Glyph(bar_at((time - lowest) / span))
-                }
-            })
-            .collect(),
-    )
+    let marks = shown
+        .iter()
+        .map(|sample| {
+            let Sample::Time(time) = *sample else {
+                return Mark::Lost;
+            };
+            // A window of one sample, and a window whose samples are all
+            // equal, each give a span of zero. A window that holds no
+            // sample which compares gives a span below zero, because the
+            // two limits stayed at the infinities that the fold started
+            // them at. Neither window divides.
+            if span <= 0.0 || !time.is_finite() {
+                Mark::Glyph(BARS[0])
+            } else {
+                Mark::Glyph(bar_at((time - lowest) / span))
+            }
+        })
+        .collect();
+
+    Recent { marks, history }
 }
 
 /// The round-trip time of one sample, when that sample holds a time which
@@ -630,7 +748,7 @@ const TTL_WIDTH: u16 = 4;
 ///
 /// A host cut to fewer columns than this names no router: `ae-1.core.exam` is
 /// already a guess, and half of that is a shape. A terminal too narrow to hold
-/// the frame at this floor gets the frame at the floor anyway, and it clips the
+/// the frame at this floor gets the frame at the floor anyway, and it wraps the
 /// rest. A frame that shrank the column further would print a table that reads
 /// as though the path had changed.
 const HOST_MIN: u16 = 12;
@@ -676,7 +794,11 @@ const TIME_WIDTH: u16 = 5;
 const TIME_COLUMNS: usize = 5;
 
 /// The number of columns of the sparkline.
-const RECENT_WIDTH: u16 = 9;
+///
+/// A caller that draws the Recent column as an image reads it too: the image is
+/// as wide as the column, and one character cell of it holds the pixels that
+/// the terminal reports.
+pub(crate) const RECENT_WIDTH: u16 = 9;
 
 /// The number of columns between two columns of the table.
 ///
@@ -685,22 +807,27 @@ const RECENT_WIDTH: u16 = 9;
 /// number.
 const COLUMN_SPACING: u16 = 2;
 
-/// The number of lines that stand above the table: the header line, and the
-/// blank line under it.
-const HEADER_LINES: u16 = 2;
+/// The number of blank lines that stand between the head of a frame and the
+/// column header.
+const BLANK_LINES: u16 = 1;
 
 /// The number of lines of the column header.
 const COLUMN_HEADER_LINES: u16 = 1;
 
-/// The number of lines of a frame that stand above the rows of the path.
+/// The number of lines of a frame that stand above the rows of the path, for a
+/// head of `header_lines` lines.
 ///
 /// A caller that fits a frame to the window of a terminal keeps these lines and
 /// drops rows, so the reader keeps the destination, the count of the rounds,
-/// the size of the recorded file, and the name of every column. The count comes
-/// off the two constants above, because a head that grew by one line would
-/// otherwise take one row of the path with it and no line of that caller would
-/// say so.
-pub(crate) const HEAD_LINES: u16 = HEADER_LINES + COLUMN_HEADER_LINES;
+/// the size of the recorded file, and the name of every column. The count is no
+/// constant, because a narrow window takes the head onto more than one line.
+/// [`Header::lines`] says why.
+fn head_lines(header_lines: usize) -> u16 {
+    u16::try_from(header_lines)
+        .unwrap_or(u16::MAX)
+        .saturating_add(BLANK_LINES)
+        .saturating_add(COLUMN_HEADER_LINES)
+}
 
 /// The host of a TTL that never answered.
 const NO_HOST: &str = "???";
@@ -1021,7 +1148,7 @@ const HOST_NOMINAL: u16 = 30;
 /// such a terminal, and `script -q /dev/null` makes one. `termsize` gives `None`
 /// for both, which is why the probe of this function is `termsize` and not the
 /// raw call. The nominal frame then stands too wide or too narrow for the one
-/// window, and the terminal clips it, where a frame of no columns would drop
+/// window, and the terminal wraps it, where a frame of no columns would drop
 /// every column that drops and cut the Host column to its floor.
 pub(crate) fn frame_columns() -> u16 {
     if !std::io::stdout().is_terminal() {
@@ -1102,7 +1229,7 @@ impl Layout {
     /// number whose widest print the run already knows.
     ///
     /// A terminal too narrow even for the last set of columns gets the frame at
-    /// the floor, and the terminal clips it. A table that is one column too
+    /// the floor, and the terminal wraps it. A table that is one column too
     /// wide still reads, a table whose hosts are three characters long does
     /// not, and a table of no columns says nothing at all.
     fn at(width: u16) -> Self {
@@ -1128,6 +1255,31 @@ impl Layout {
     /// instead would print a name over the column behind it.
     fn host(&self) -> u16 {
         self.host
+    }
+
+    /// The terminal column that the Recent column starts in, and `None` when a
+    /// narrow terminal dropped that column.
+    ///
+    /// A caller that draws an image over the Recent column has to put that
+    /// image where the column stands, and the terminal counts the position of
+    /// an image in columns. The sum reads the same list of columns that the
+    /// render draws, so a column that changes width, or that goes away, moves
+    /// this offset with it. No line of this function counts a column or a gap
+    /// by hand.
+    fn recent_column(&self) -> Option<u16> {
+        let mut column: u16 = 0;
+        for slot in &self.slots {
+            if matches!(slot.field, Field::Recent) {
+                return Some(column);
+            }
+            // One gap stands behind every column that another column follows,
+            // and the Recent column is never the first one, so the gap of each
+            // column in front of it counts.
+            column = column
+                .saturating_add(slot.width)
+                .saturating_add(COLUMN_SPACING);
+        }
+        None
     }
 
     /// The width of every column that stands, in the order the columns stand.
@@ -1236,11 +1388,11 @@ fn untracked_share(row: &TtlRow) -> f64 {
 /// One rendered view of one folded run.
 ///
 /// The frame holds what a reader needs and nothing that the reader must give
-/// back: the header line names the run, the table folds it, and the map of
-/// names says what each address is called. A caller builds one of these and
-/// asks for the lines at the width of its terminal.
+/// back: the head names the run, the table folds it, and the map of names says
+/// what each address is called. A caller builds one of these and asks for the
+/// lines at the width of its terminal.
 pub(crate) struct Frame<'a> {
-    /// What the line above the table names.
+    /// What the head above the table names.
     pub(crate) header: Header<'a>,
     /// The folded aggregate of the run.
     pub(crate) table: &'a crate::stats::HopTable,
@@ -1251,53 +1403,171 @@ pub(crate) struct Frame<'a> {
     pub(crate) destination: Option<IpAddr>,
 }
 
-impl Frame<'_> {
-    /// The lines of the frame at a terminal width.
+/// Which picture the Recent column of a frame draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecentPicture {
+    /// The block elements, one for each of the last [`RECENT_WIDTH`] samples.
+    Bars,
+    /// No glyph at all. The caller draws an image over the cell, and two
+    /// pictures of one hop is what the documentation of this module argues
+    /// against: a reader who sees a bar and an image of the same history has
+    /// two answers to one question.
+    Image,
+}
+
+/// The Recent column of one frame: where it stands, and what each row of it
+/// holds.
+pub(crate) struct RecentColumn {
+    /// The terminal column that the Recent column starts in.
+    pub(crate) column: u16,
+    /// The history of every row of the path, in the order the rows stand.
+    pub(crate) rows: Vec<Vec<Sample>>,
+}
+
+/// One rendered frame: its lines, and where the Recent column of it stands.
+pub(crate) struct Rendered {
+    /// The lines of the frame.
+    pub(crate) lines: Vec<String>,
+    /// The number of lines of the frame that stand above the rows of the path.
     ///
-    /// The header line stands first, one blank line stands under it, and the
-    /// table stands under that. The header line is no part of the table and it
-    /// never gets cut: a long file name would lose the size that stands behind
-    /// it, and that size is what tells a reader whether the run recorded
-    /// anything at all. The buffer is therefore as wide as the wider of the two.
+    /// The head is the header, the blank line under it, and the column header.
+    /// A narrow window takes the header onto more than one line, so the count
+    /// belongs to the frame that was rendered and not to the module: a caller
+    /// that spelled the number itself would drop one row of the path, or stand
+    /// an image of a row over the heading of the Recent column.
+    pub(crate) head: u16,
+    /// The terminal column that the Recent column starts at, and the history of
+    /// every row of the path in the order the rows stand.
+    ///
+    /// The field stands here because one walk of the table has to answer both
+    /// the lines and the images: a second walk for the histories could count a
+    /// different set of rows, and an image of a row of one walk would then
+    /// stand over a row of the other.
+    ///
+    /// `None` for two reasons. A frame of [`RecentPicture::Bars`] carries none
+    /// of it, because that frame draws every history in its own lines and no
+    /// caller of that picture reads this field. And a narrow terminal that
+    /// dropped the column names no place for an image to stand.
+    pub(crate) recent: Option<RecentColumn>,
+}
+
+impl Frame<'_> {
+    /// One rendered frame: the lines of it, and where the Recent column of it
+    /// stands.
+    ///
+    /// The header stands first, one blank line stands under it, and the table
+    /// stands under that. The header is no part of the table, and a window that
+    /// holds no whole header takes the fields that are left onto the lines
+    /// under it: a long file name would otherwise lose the size that stands
+    /// behind it, and that size is what tells a reader whether the run recorded
+    /// anything at all. [`Header::lines`] states the rule, and [`Rendered::head`]
+    /// says how many lines the head took.
     ///
     /// A terminal too narrow for the whole table drops columns, in the order
     /// the module documentation states. The [`Layout`] holds that answer, and
-    /// the header line, the widths, the headings, and the rows all read the one
+    /// the head, the widths, the headings, and the rows all read the one
     /// layout.
     ///
     /// Every line drops its trailing spaces. A terminal prints them as nothing.
     ///
-    /// `paint` says whether the lines carry the color of a terminal. The one
-    /// cell of the table that holds a color is the mark of a lost probe, which
-    /// [`Paint::Colored`] stands between the two codes that paint it red.
-    pub(crate) fn lines(&self, width: u16, paint: Paint) -> Vec<String> {
-        let header_line = self.header.line();
+    /// The place of the Recent column and the history of every row travel with
+    /// the lines, out of this one walk of the table. A caller that draws that
+    /// column as an image needs both, and a second walk for them could count a
+    /// different set of rows: an image of a row of one walk would then stand
+    /// over a row of the other.
+    ///
+    /// They travel with a frame of [`RecentPicture::Image`] alone, because that
+    /// is the one picture whose caller draws them. A frame of
+    /// [`RecentPicture::Bars`] answers `None` for [`Rendered::recent`]: such a
+    /// frame draws every history in its own lines, so a copy of those histories
+    /// beside the lines is a copy that nobody reads.
+    ///
+    /// [`RecentPicture::Image`] blanks the body cells of the Recent column, and
+    /// each of them then carries [`RECENT_WIDTH`] spaces. The heading stays,
+    /// because it names the column and it is no picture of a hop.
+    ///
+    /// # Arguments
+    /// * `width` - The number of terminal columns that the frame draws in.
+    /// * `paint` - Whether the lines carry the color of a terminal. The one cell
+    ///   of the table that holds a color is the mark of a lost probe, which
+    ///   [`Paint::Colored`] stands between the two codes that paint it red.
+    /// * `picture` - Which picture the Recent column draws.
+    pub(crate) fn render(&self, width: u16, paint: Paint, picture: RecentPicture) -> Rendered {
+        let header_lines = self.header.lines(width);
         let layout = Layout::at(width);
         let table_width = layout.width();
-        let rows = self.rows(layout.host());
+        let mut rows = self.rows(layout.host());
+        // The Recent column travels with the lines of a frame of images alone,
+        // because that is the one picture whose caller draws it. A frame of
+        // bars draws every history in its own lines, so a copy of those
+        // histories beside the lines is a copy that nobody reads: every replay,
+        // and every live run without the images, would pay it for each row of
+        // each frame.
+        let recent = if picture == RecentPicture::Image {
+            let recent = layout.recent_column().map(|column| RecentColumn {
+                column,
+                rows: rows
+                    .iter()
+                    .map(|row| row.recent.history().to_vec())
+                    .collect(),
+            });
+            // The blank goes in behind the read of the history, because the
+            // blank cell of a row holds none of it.
+            for row in &mut rows {
+                row.recent = Recent::blank();
+            }
+            recent
+        } else {
+            None
+        };
+        let head = head_lines(header_lines.len());
         // A path holds 255 TTLs at most, and one TTL holds a bounded number of
         // rows, so the height of the frame stays far below the limit. The
         // arithmetic below says so anyway: a height that ran over would be a
         // panic in a debug build, over a number no run reaches.
         let height = u16::try_from(rows.len())
             .unwrap_or(u16::MAX)
-            .saturating_add(HEADER_LINES + COLUMN_HEADER_LINES);
-        let buffer_width = table_width.max(buffer_columns(&header_line));
+            .saturating_add(head);
+        let widest = header_lines.iter().map(String::as_str).map(buffer_columns);
+        let buffer_width = widest.fold(table_width, u16::max);
 
         let mut buffer = Buffer::empty(Rect::new(0, 0, buffer_width, height));
-        buffer.set_string(0, 0, &header_line, Style::default());
+        for (line, text) in header_lines.iter().enumerate() {
+            // The head of a frame is never as tall as `u16::MAX` lines: it holds
+            // five fields, and a window of one column would still take one line
+            // for each of them.
+            let line = u16::try_from(line).unwrap_or(u16::MAX);
+            buffer.set_string(0, line, text, Style::default());
+        }
+        // The table draws its column header at the top of the area it takes, so
+        // the area starts one line above the rows of the path.
+        let table_top = head.saturating_sub(COLUMN_HEADER_LINES);
         let table = Table::new(rows.iter().map(|row| layout.row(row)), layout.constraints())
             .header(layout.row(&column_header()))
             .column_spacing(COLUMN_SPACING);
         Widget::render(
             &table,
-            Rect::new(0, HEADER_LINES, table_width, height - HEADER_LINES),
+            Rect::new(0, table_top, table_width, height - table_top),
             &mut buffer,
         );
 
-        (0..height)
-            .map(|line| read_line(&buffer, line, buffer_width, paint))
-            .collect()
+        Rendered {
+            lines: (0..height)
+                .map(|line| read_line(&buffer, line, buffer_width, paint))
+                .collect(),
+            head,
+            recent,
+        }
+    }
+
+    /// The lines of the frame at a terminal width, with the block elements in
+    /// the Recent column.
+    ///
+    /// This is [`Frame::render`] for a caller that draws no image: a replay,
+    /// and every test of the text table. Such a caller reads the lines and
+    /// nothing else.
+    pub(crate) fn lines(&self, width: u16, paint: Paint) -> Vec<String> {
+        self.render(width, paint, RecentPicture::Bars).lines
     }
 
     /// Every row of the table, in TTL order.
@@ -1500,7 +1770,7 @@ fn read_line(buffer: &Buffer, line: u16, width: u16, paint: Paint) -> String {
 mod tests {
     use super::{
         display_width, frame_columns_of, render_duration, render_size, sparkline,
-        truncate_to_width, Frame, Header, Paint,
+        truncate_to_width, Frame, Header, Paint, RecentPicture, Rendered,
     };
     use crate::record::RoundRecord;
     use crate::stats::{HopTable, Sample};
@@ -1535,6 +1805,31 @@ mod tests {
     /// The header line of a run that filled every field, character for
     /// character.
     const WHOLE_LINE: &str = " krt  example.com → 93.184.216.34   src 1.2.3.4   round 142   1s   1.2.3.4-example.com.jsonl (2.1 MB)";
+
+    /// The width of a window that holds every field of a header on one line.
+    ///
+    /// A test that reads one field of the head must read a head of one line,
+    /// and the width of a window is what decides how many lines a head takes.
+    /// No header below runs past 120 columns.
+    const A_WIDE_WINDOW: u16 = 120;
+
+    /// The one line that a header takes in a window wide enough for it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the header takes more than one line. Such a header holds a
+    /// field that [`A_WIDE_WINDOW`] does not hold, and a test that read the
+    /// first line of it would read half of the fields and say nothing about the
+    /// rest.
+    fn header_line(header: &Header) -> String {
+        let lines = header.lines(A_WIDE_WINDOW);
+        assert_eq!(
+            lines.len(),
+            1,
+            "a window of {A_WIDE_WINDOW} columns holds the whole head: {lines:?}"
+        );
+        lines.into_iter().next().expect("the head holds one line")
+    }
 
     /// The header of a run that filled every field of the line.
     fn whole_header() -> Header<'static> {
@@ -1575,7 +1870,7 @@ mod tests {
     #[test]
     fn the_header_line_names_the_target_the_source_the_rounds_the_interval_and_the_file() {
         assert_eq!(
-            whole_header().line(),
+            header_line(&whole_header()),
             WHOLE_LINE,
             "the header line of a whole run reads as the module documentation draws it"
         );
@@ -1593,7 +1888,7 @@ mod tests {
             bytes: Some(FILE_BYTES),
         };
         assert_eq!(
-            header.line(),
+            header_line(&header),
             " krt  unknown   src unknown   round 0   unknown   1.2.3.4-example.com.jsonl (2.1 MB)",
             "a file that holds no `run` record still names its rounds and its file"
         );
@@ -1611,7 +1906,7 @@ mod tests {
                 ..whole_header()
             },
         ] {
-            let line = header.line();
+            let line = header_line(&header);
             assert_eq!(
                 field(&line, 0),
                 "unknown",
@@ -1622,7 +1917,7 @@ mod tests {
 
     #[test]
     fn the_name_of_the_tool_stands_two_spaces_before_the_first_field() {
-        let line = whole_header().line();
+        let line = header_line(&whole_header());
         assert!(
             line.starts_with(HEADER_START),
             "the line starts with one space, the name of the tool, and two more: {line}"
@@ -1635,7 +1930,7 @@ mod tests {
 
     #[test]
     fn three_spaces_stand_between_the_fields() {
-        let line = whole_header().line();
+        let line = header_line(&whole_header());
         assert_eq!(
             fields(&line),
             [
@@ -1657,7 +1952,7 @@ mod tests {
             rounds: 1,
             ..whole_header()
         };
-        let line = header.line();
+        let line = header_line(&header);
         assert_eq!(field(&line, 2), "round 1", "one round reads `round 1`");
     }
 
@@ -1667,7 +1962,7 @@ mod tests {
             interval: Some(Duration::from_millis(500)),
             ..whole_header()
         };
-        let line = header.line();
+        let line = header_line(&header);
         assert_eq!(
             field(&line, 3),
             "500ms",
@@ -1681,7 +1976,7 @@ mod tests {
             bytes: None,
             ..whole_header()
         };
-        let line = header.line();
+        let line = header_line(&header);
         assert_eq!(
             field(&line, 4),
             "1.2.3.4-example.com.jsonl (unknown)",
@@ -2093,6 +2388,57 @@ mod tests {
         );
     }
 
+    /// The number of samples of a history that is longer than the Recent
+    /// column is wide.
+    ///
+    /// The fold of one key holds sixty samples and the column is nine columns
+    /// wide, so a history of this length covers both counts at once.
+    const A_LONG_HISTORY: u16 = 60;
+
+    /// The heading of the Recent column.
+    ///
+    /// The test spells the word, and the module spells it again, as it does for
+    /// the bars of the sparkline: the heading is what a reader of the table
+    /// sees above the column.
+    const RECENT_HEADING: &str = "Recent";
+
+    #[test]
+    fn the_recent_column_of_a_row_travels_with_the_whole_history() {
+        // The marks draw the last nine samples, and a run that draws the column
+        // as an image draws every sample the fold holds. One walk of the table
+        // gives both pictures, so no second walk can count a different set of
+        // rows.
+        let times: Vec<Sample> = (0..A_LONG_HISTORY)
+            .map(|step| Sample::Time(f64::from(step)))
+            .collect();
+        let column = sparkline(times.into_iter(), usize::from(super::RECENT_WIDTH));
+
+        assert_eq!(
+            column.history().len(),
+            usize::from(A_LONG_HISTORY),
+            "the column holds every sample of the history beside its marks"
+        );
+        assert_eq!(
+            column.to_string().chars().count(),
+            usize::from(super::RECENT_WIDTH),
+            "and it draws one mark for each column that the terminal holds"
+        );
+    }
+
+    #[test]
+    fn the_heading_of_the_recent_column_stands_for_no_history() {
+        // The heading is a word and not a picture of a hop, so it plots no
+        // image, and the `others` row of a crowded TTL keeps no time at all.
+        assert!(
+            super::Recent::text(RECENT_HEADING).history().is_empty(),
+            "the heading of the column names the column and no history"
+        );
+        assert!(
+            super::Recent::empty().history().is_empty(),
+            "and a row that draws no sample holds no history either"
+        );
+    }
+
     #[test]
     fn the_bar_holds_the_last_samples_of_a_longer_history() {
         // The first two samples are far above the last four. A window of four
@@ -2297,20 +2643,66 @@ mod tests {
     /// The address of the destination of the golden path.
     const TARGET: &str = "93.184.216.34";
 
-    /// The line of the frame that holds the column header.
-    const COLUMN_HEADER_LINE: usize = 2;
-
-    /// The line of the golden frame that holds the TTL that never answered.
-    const SILENT_TTL_LINE: usize = 4;
-
-    /// The line of the golden frame that holds the TTL of one bare address.
-    const BARE_TTL_LINE: usize = 5;
-
-    /// The line of the golden frame that holds the TTL of two routers.
+    /// The line of the golden frame that holds the column header.
     ///
-    /// The two address rows of that TTL stand under it, in the two lines that
+    /// The head of that frame takes two lines for its header, because the
+    /// nominal frame of 97 columns holds no whole header of the golden run. The
+    /// blank line stands under those two, and the column header stands under
+    /// it.
+    ///
+    /// This is an index into [`GOLDEN_FRAME`] and into no other frame. A test
+    /// that reads a rendered frame takes [`column_header_line`], because the
+    /// window of that frame decides how many lines its header took.
+    const COLUMN_HEADER_LINE: usize = 3;
+
+    /// The start of the column header of a frame at every width.
+    ///
+    /// The TTL column and the Host column never go away, and the Host column
+    /// never falls under twelve columns, so this text opens the column header
+    /// of every frame that the module draws.
+    const COLUMN_HEADER_START: &str = " TTL  Host";
+
+    /// The line of a frame that holds the column header.
+    ///
+    /// The head of a frame takes as many lines as the window leaves its header,
+    /// so a test that spelled the number would read the wrong line of every
+    /// frame whose header took a second line. [`Header::lines`] states the rule.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no line of the frame holds the column header. Such a frame
+    /// holds no table at all, and a test that read a row of it would answer for
+    /// a reason that has nothing to do with the row.
+    fn column_header_line(lines: &[String]) -> usize {
+        lines
+            .iter()
+            .position(|line| line.starts_with(COLUMN_HEADER_START))
+            .unwrap_or_else(|| panic!("a frame holds the column header: {lines:?}"))
+    }
+
+    /// The row of the golden path that holds the TTL that never answered.
+    ///
+    /// The number counts the rows of the path and not the lines of the frame,
+    /// because the head of a frame takes as many lines as the window leaves its
+    /// header. [`path_row`] reads the line that a row stands in.
+    const SILENT_TTL_ROW: usize = 1;
+
+    /// The row of the golden path that holds the TTL of one bare address.
+    const BARE_TTL_ROW: usize = 2;
+
+    /// The row of the golden path that holds the TTL of two routers.
+    ///
+    /// The two address rows of that TTL stand under it, in the two rows that
     /// follow.
-    const SHARED_TTL_LINE: usize = 6;
+    const SHARED_TTL_ROW: usize = 3;
+
+    /// The line of a frame that the row of the path at `row` stands in.
+    ///
+    /// The rows of the path stand under the column header, so the count reads
+    /// the frame that the test holds.
+    fn path_row(lines: &[String], row: usize) -> &str {
+        line(lines, column_header_line(lines) + 1 + row)
+    }
 
     /// The whole golden frame, line for line.
     ///
@@ -2318,8 +2710,9 @@ mod tests {
     /// here. The frame holds a named host, a TTL that never answered, a bare
     /// address, a TTL of two routers with an address row for each of them, the
     /// star of the destination, a sparkline, and the mark of a lost probe.
-    const GOLDEN_FRAME: [&str; 10] = [
-        " krt  example.com → 93.184.216.34   src 1.2.3.4   round 4   1s   1.2.3.4-example.com.jsonl (2.1 MB)",
+    const GOLDEN_FRAME: [&str; 11] = [
+        " krt  example.com → 93.184.216.34   src 1.2.3.4   round 4   1s",
+        "      1.2.3.4-example.com.jsonl (2.1 MB)",
         "",
         " TTL  Host                             Loss%   Sent   Last    Min    Avg    Max  StDev  Recent",
         "   1  router.lan (192.168.1.1)          0.0%      4    5.0    1.0    3.0    5.0    2.0  ▁▁▇▇",
@@ -2599,6 +2992,178 @@ mod tests {
         text.trim_end().to_owned()
     }
 
+    /// The number of rows of the path of the golden frame.
+    ///
+    /// The head takes three lines of the frame, and every line under it is one
+    /// row of the path.
+    const GOLDEN_ROWS: usize = GOLDEN_FRAME.len() - HEAD_LINES;
+
+    /// The number of lines of the golden frame that stand above the rows of the
+    /// path.
+    ///
+    /// The test spells the count, and the module reads it off the header it
+    /// drew. That is on purpose: these lines are what a reader of a short frame
+    /// keeps. The count is four and not three because the header of the golden
+    /// run takes two lines at the nominal width, for the reason that
+    /// [`COLUMN_HEADER_LINE`] states.
+    const HEAD_LINES: usize = 4;
+
+    /// The mark that the Recent column draws for a probe that no hop answered.
+    ///
+    /// The test spells the glyph, and the module spells it again, as it does
+    /// for the bars: this mark is what a reader of the table sees.
+    const NO_ANSWER: char = '╳';
+
+    /// One rendered frame of the golden run, at a width and with a picture.
+    fn golden_render(width: u16, picture: RecentPicture) -> Rendered {
+        let table = golden_table();
+        let names = golden_names();
+        Frame {
+            header: golden_header(),
+            table: &table,
+            names: &names,
+            destination: Some(address(TARGET)),
+        }
+        .render(width, Paint::Plain, picture)
+    }
+
+    /// The number of columns of a terminal that holds no whole head.
+    ///
+    /// The head of the golden run takes 99 columns on one line, so a window of
+    /// sixty columns holds two of its five fields and no more. The table drops
+    /// columns at this width as well, so the frame here is the frame of a
+    /// narrow window and no part of it stands at the nominal width.
+    const A_NARROW_WIDTH: u16 = 60;
+
+    #[test]
+    fn no_line_of_a_frame_runs_past_the_width_it_draws_in() {
+        // A line wider than the terminal wraps onto the row under it, and every
+        // line of the frame under that one then stands one row lower than the
+        // frame counts. A live run draws the image of a row at the row it
+        // counted, so one wrapped line stands every image of the frame over the
+        // wrong row of the path.
+        for width in [A_NARROW_WIDTH, NOMINAL_WIDTH] {
+            for line in golden_lines(width) {
+                assert!(
+                    display_width(&line) <= usize::from(width),
+                    "a frame of {width} columns writes no line wider than that: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_says_where_its_recent_column_stands_and_what_each_row_of_it_holds() {
+        // A run that draws the Recent column as an image has to put that image
+        // where the column stands, and it needs the whole history of the row
+        // that the image belongs to. One render answers both, so the lines and
+        // the images can never stand for a different set of rows.
+        //
+        // Two renders stand here, and each of them answers what the other
+        // cannot. The frame of images carries the Recent column, because that
+        // is the one picture whose caller draws it, so the invariant is proven
+        // where a run reads it. The frame of bars carries the golden lines and
+        // the marks of every row, because the frame of images blanks the body
+        // cells of the column, and those marks are what says that a history
+        // stands beside the row it belongs to.
+        let images = golden_render(NOMINAL_WIDTH, RecentPicture::Image);
+        let bars = golden_render(NOMINAL_WIDTH, RecentPicture::Bars);
+        let column_header = line(&images.lines, column_header_line(&images.lines)).to_owned();
+
+        assert_eq!(
+            bars.lines, GOLDEN_FRAME,
+            "the lines of a frame that draws the bars read as they always did"
+        );
+        let recent = images
+            .recent
+            .expect("a frame of images at the nominal width holds the Recent column");
+        assert_eq!(
+            Some(usize::from(recent.column)),
+            field_start(&column_header, RECENT_HEADING),
+            "the Recent column starts in the column that its heading starts in"
+        );
+        assert_eq!(
+            recent.rows.len(),
+            GOLDEN_ROWS,
+            "one history stands for each row of the path, in the order the rows stand"
+        );
+        for (index, history) in recent.rows.iter().enumerate() {
+            // The window of a row draws one mark for each sample of it, and no
+            // row of the golden run holds more samples than the column is wide,
+            // so the marks of a line count the samples of the row that the line
+            // draws. The history of a row therefore stands beside the marks of
+            // that same row, and the two can never name different rows.
+            let row = line(&bars.lines, HEAD_LINES + index);
+            assert_eq!(
+                history.len(),
+                recent_of(row).chars().count(),
+                "the history of the row at {index} holds one sample for each mark of {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_frame_that_draws_an_image_blanks_the_bars_of_its_recent_column() {
+        // Two pictures of one hop is what the table must never show. The
+        // heading stays, because it names the column and it is no picture of a
+        // hop.
+        let rendered = golden_render(NOMINAL_WIDTH, RecentPicture::Image);
+
+        assert!(
+            line(&rendered.lines, column_header_line(&rendered.lines)).ends_with(RECENT_HEADING),
+            "the heading of the Recent column stands: {:?}",
+            rendered.lines
+        );
+        for row in rendered.lines.iter().skip(HEAD_LINES) {
+            for glyph in BARS.chars().chain([NO_ANSWER]) {
+                assert!(
+                    !row.contains(glyph),
+                    "no row of the path draws a block element or a mark of a loss: {row:?}"
+                );
+            }
+        }
+        assert_eq!(
+            rendered.recent.map(|recent| recent.rows.len()),
+            Some(GOLDEN_ROWS),
+            "and the history of every row still travels with the frame"
+        );
+    }
+
+    #[test]
+    fn a_frame_of_bars_carries_no_recent_column_for_a_caller_to_draw() {
+        // The Recent column travels with the lines for the caller that draws an
+        // image over it, and that caller is the one which asks for the images.
+        // A frame of bars already draws every history in its own lines, so a
+        // copy of those histories beside the lines is a copy that nobody reads:
+        // every replay, and every live run without the images, would pay it for
+        // each row of each frame.
+        let rendered = golden_render(NOMINAL_WIDTH, RecentPicture::Bars);
+
+        assert_eq!(
+            rendered.recent.map(|recent| recent.rows.len()),
+            None,
+            "a frame of bars hands back no Recent column"
+        );
+    }
+
+    #[test]
+    fn the_layout_says_where_the_recent_column_stands_and_when_it_dropped() {
+        // The offset sums the widths and the gaps of the columns in front of
+        // the Recent one, out of the same list of columns that the render
+        // draws. The Recent column is the last one of the frame, so it starts
+        // where the frame ends minus its own width.
+        assert_eq!(
+            super::Layout::at(NOMINAL_WIDTH).recent_column(),
+            Some(NOMINAL_WIDTH - super::RECENT_WIDTH),
+            "a terminal that holds every column says where the Recent column starts"
+        );
+        assert_eq!(
+            super::Layout::at(TWO_DROPPED).recent_column(),
+            None,
+            "and a terminal that dropped the Recent column names no place for it"
+        );
+    }
+
     #[test]
     fn the_frame_reads_as_the_layout_of_the_module_documentation_draws_it() {
         assert_eq!(
@@ -2616,9 +3181,9 @@ mod tests {
             GOLDEN_FRAME.len(),
             "the golden frame holds one line for each row of the folded path"
         );
-        let ttl_row = line(&lines, SHARED_TTL_LINE);
+        let ttl_row = path_row(&lines, SHARED_TTL_ROW);
         for offset in 1..=2 {
-            let address_row = line(&lines, SHARED_TTL_LINE + offset);
+            let address_row = path_row(&lines, SHARED_TTL_ROW + offset);
             assert_eq!(
                 percent_end(address_row),
                 percent_end(ttl_row),
@@ -2642,6 +3207,7 @@ mod tests {
             [
                 GOLDEN_FRAME[0],
                 GOLDEN_FRAME[1],
+                GOLDEN_FRAME[2],
                 GOLDEN_FRAME[COLUMN_HEADER_LINE],
             ],
             "a run that folded no round still names itself and its columns"
@@ -2673,7 +3239,7 @@ mod tests {
         for (name, cut) in cases {
             let names = names_of(&[(FIRST_HOP, name)]);
             let lines = lines_of(&table, &names, None, NOMINAL_WIDTH);
-            let row = line(&lines, COLUMN_HEADER_LINE + 1);
+            let row = line(&lines, column_header_line(&lines) + 1);
             assert_eq!(
                 row,
                 format!("   1  {cut}{COLUMN_SPACES}{ONE_ROUND_TAIL}"),
@@ -2734,7 +3300,7 @@ mod tests {
         let table = table_of(&[round(1, 1, &[(1, TARGET, 1.0)])]);
         let names = names_of(&[(TARGET, LONG_DESTINATION_NAME)]);
         let lines = lines_of(&table, &names, Some(address(TARGET)), NOMINAL_WIDTH);
-        let row = line(&lines, COLUMN_HEADER_LINE + 1);
+        let row = line(&lines, column_header_line(&lines) + 1);
         let cut = "edge-01.lax.example.com (93. ★";
         assert_eq!(
             display_width(cut),
@@ -2769,7 +3335,7 @@ mod tests {
         ]);
         let names = names_of(&[(LEFT_ROUTER, LONG_ROUTER_NAME)]);
         let lines = lines_of(&table, &names, None, NOMINAL_WIDTH);
-        let row = line(&lines, COLUMN_HEADER_LINE + 1);
+        let row = line(&lines, column_header_line(&lines) + 1);
         let cut = "ae-1.core.lax.example.net (+1)";
         assert_eq!(
             display_width(cut),
@@ -2816,17 +3382,17 @@ mod tests {
         ]);
         let lines = lines_of(&table, &BTreeMap::new(), None, NOMINAL_WIDTH);
         assert_eq!(
-            recent_of(line(&lines, 3)),
+            recent_of(line(&lines, column_header_line(&lines) + 1)),
             "▁▇╳▄",
             "the ttl draws one mark for each probe, and the lost probe takes a mark of its own"
         );
         assert_eq!(
-            recent_of(line(&lines, 4)),
+            recent_of(line(&lines, column_header_line(&lines) + 2)),
             "▁▇",
             "the left router draws its two answers and no loss"
         );
         assert_eq!(
-            recent_of(line(&lines, 5)),
+            recent_of(line(&lines, column_header_line(&lines) + 3)),
             "▁",
             "the right router draws its one answer and no loss"
         );
@@ -2897,7 +3463,7 @@ mod tests {
         let names = golden_names();
         let lines = lines_of(&table, &names, Some(address(RIGHT_ROUTER)), NOMINAL_WIDTH);
         assert_eq!(
-            host_column(line(&lines, SHARED_TTL_LINE), HOST_WIDTH),
+            host_column(path_row(&lines, SHARED_TTL_ROW), HOST_WIDTH),
             "ae1.net (203.0.113.8) (+1) ★",
             "the row of a TTL that answered from the destination takes the star"
         );
@@ -2934,7 +3500,7 @@ mod tests {
         let names = BTreeMap::new();
         let lines = lines_of(&table, &names, None, NOMINAL_WIDTH);
         assert_eq!(
-            host_column(line(&lines, COLUMN_HEADER_LINE + 1), HOST_WIDTH),
+            host_column(line(&lines, column_header_line(&lines) + 1), HOST_WIDTH),
             "10.0.0.1 (+2)",
             "the host of the row names the first router and counts the other two"
         );
@@ -2982,7 +3548,7 @@ mod tests {
             "one row for each tracked router, and one for the answers of the rest"
         );
         assert_eq!(
-            host_column(line(&lines, COLUMN_HEADER_LINE + 1), HOST_WIDTH),
+            host_column(line(&lines, column_header_line(&lines) + 1), HOST_WIDTH),
             "10.0.0.1 (+32)",
             "the answers that no tracked address holds count as one more participant"
         );
@@ -3032,13 +3598,13 @@ mod tests {
         let nominal = golden_lines(NOMINAL_WIDTH);
         let wide = golden_lines(WIDE_TERMINAL);
         assert_eq!(
-            field_start(line(&wide, SILENT_TTL_LINE), "100.0%"),
+            field_start(path_row(&wide, SILENT_TTL_ROW), "100.0%"),
             Some(HOST_START + WIDE_HOST + COLUMN_SPACING),
             "the Host column takes every column that the wider terminal added"
         );
         let grew = WIDE_HOST - HOST_WIDTH;
-        let before = columns_of(line(&nominal, BARE_TTL_LINE));
-        let after = columns_of(line(&wide, BARE_TTL_LINE));
+        let before = columns_of(path_row(&nominal, BARE_TTL_ROW));
+        let after = columns_of(path_row(&wide, BARE_TTL_ROW));
         assert_eq!(
             before.len(),
             BARE_TTL_FIELDS,
@@ -3097,8 +3663,9 @@ mod tests {
         );
         let narrow = golden_lines(NARROW_TERMINAL);
         assert!(
-            display_width(line(&narrow, COLUMN_HEADER_LINE)) > usize::from(NARROW_TERMINAL),
-            "the frame at the floor is wider than the terminal, and the terminal clips it"
+            display_width(line(&narrow, column_header_line(&narrow)))
+                > usize::from(NARROW_TERMINAL),
+            "the frame at the floor is wider than the terminal, and the terminal wraps it"
         );
     }
 
@@ -3171,7 +3738,8 @@ mod tests {
 
     /// The heading of every column of the golden frame at a terminal width.
     fn headings(width: u16) -> Vec<String> {
-        headings_of(line(&golden_lines(width), COLUMN_HEADER_LINE))
+        let lines = golden_lines(width);
+        headings_of(line(&lines, column_header_line(&lines)))
     }
 
     /// The number of columns that the Host column takes at a terminal width.
@@ -3182,7 +3750,7 @@ mod tests {
         let table = table_of(&[round(1, 1, &[(1, FIRST_HOP, 1.0)])]);
         let names = names_of(&[(FIRST_HOP, LONG_NAME)]);
         let lines = lines_of(&table, &names, None, width);
-        let row = line(&lines, COLUMN_HEADER_LINE + 1);
+        let row = line(&lines, column_header_line(&lines) + 1);
         let host = fields_with_columns(row)
             .into_iter()
             .find(|(column, _)| *column == HOST_START)
@@ -3304,7 +3872,7 @@ mod tests {
             );
         }
         let lines = golden_lines(BELOW_THE_LAST_SET);
-        let header = line(&lines, COLUMN_HEADER_LINE);
+        let header = line(&lines, column_header_line(&lines));
         assert_eq!(
             display_width(header),
             usize::from(least),
@@ -3312,15 +3880,15 @@ mod tests {
         );
         assert!(
             display_width(header) > usize::from(BELOW_THE_LAST_SET),
-            "the terminal clips the frame, and a frame of no columns says nothing"
+            "the terminal wraps the frame, and a frame of no columns says nothing"
         );
     }
 
     #[test]
     fn the_columns_that_stand_line_up_under_the_column_header() {
         let lines = golden_lines(THREE_DROPPED);
-        let header = line(&lines, COLUMN_HEADER_LINE);
-        let ttl_row = line(&lines, SHARED_TTL_LINE);
+        let header = line(&lines, column_header_line(&lines));
+        let ttl_row = path_row(&lines, SHARED_TTL_ROW);
         assert_eq!(
             headings_of(header),
             ["TTL", "Host", "Loss%", "Sent", "Last", "Min", "Avg"],
@@ -3328,8 +3896,8 @@ mod tests {
         );
         for other in [
             header,
-            line(&lines, SHARED_TTL_LINE + 1),
-            line(&lines, SHARED_TTL_LINE + 2),
+            path_row(&lines, SHARED_TTL_ROW + 1),
+            path_row(&lines, SHARED_TTL_ROW + 2),
         ] {
             assert_eq!(
                 percent_end(other),
@@ -3362,8 +3930,8 @@ mod tests {
         ]);
         let names = BTreeMap::new();
         let lines = lines_of(&table, &names, None, TWO_DROPPED);
-        let header = line(&lines, COLUMN_HEADER_LINE);
-        let row = line(&lines, COLUMN_HEADER_LINE + 1);
+        let header = line(&lines, column_header_line(&lines));
+        let row = line(&lines, column_header_line(&lines) + 1);
         assert_eq!(
             headings_of(header),
             ["TTL", "Host", "Loss%", "Sent", "Last", "Min", "Avg", "Max"],

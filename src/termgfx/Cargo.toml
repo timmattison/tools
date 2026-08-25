@@ -1,0 +1,17 @@
+[package]
+name = "termgfx"
+version = "0.1.0"
+edition.workspace = true
+description = "The one entrance that reads whether a terminal draws an inline image and writes one into it"
+license = "MIT"
+
+[dependencies]
+base64.workspace = true
+icy_sixel.workspace = true
+image.workspace = true
+libc.workspace = true
+termsize.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
