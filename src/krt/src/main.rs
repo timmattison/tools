@@ -1750,13 +1750,14 @@ struct SystemProbes<'a> {
     privilege: record::Privilege,
 }
 
-impl hunt::Probes for SystemProbes<'_> {
-    fn start(
-        &mut self,
-        target: Ipv4Addr,
-        run: &RunId,
-    ) -> Result<std::sync::mpsc::Receiver<RoundRecord>, String> {
-        trace::spawn(&trace::TraceConfig {
+impl SystemProbes<'_> {
+    /// The configuration of the tracer of one destination.
+    ///
+    /// The build of the configuration stands apart from the start of the
+    /// tracer, because a tracer that starts sends packets and a test of this
+    /// wiring sends none.
+    fn config_of(&self, target: Ipv4Addr, run: &RunId) -> trace::TraceConfig {
+        trace::TraceConfig {
             target: IpAddr::V4(target),
             run: run.clone(),
             interval: self.config.interval,
@@ -1766,8 +1767,17 @@ impl hunt::Probes for SystemProbes<'_> {
             multipath: self.config.multipath,
             privilege: self.privilege,
             rounds: None,
-        })
-        .map_err(|error| error.to_string())
+        }
+    }
+}
+
+impl hunt::Probes for SystemProbes<'_> {
+    fn start(
+        &mut self,
+        target: Ipv4Addr,
+        run: &RunId,
+    ) -> Result<std::sync::mpsc::Receiver<RoundRecord>, String> {
+        trace::spawn(&self.config_of(target, run)).map_err(|error| error.to_string())
     }
 }
 
@@ -2016,7 +2026,7 @@ mod tests {
         closing_line, display_of, graphics_of, host_name_or, name_grace, paint_of, parse_duration,
         pick_address, replay, resolve_target, run_config, source_from, stop_reason, user_stopped,
         value_name, AddressFamily, Cli, Command, Display, EndReason, Family, HuntConfig, Multipath,
-        Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, Target,
+        Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, SystemProbes, Target,
         HUNT_ROUNDS_DEFAULT, PROBES_PER_ROUND_DEFAULT, RESOLVE_PORT, SOURCE_FALLBACK,
         TARGET_TIMEOUT_DEFAULT, TIME_BEYOND_A_DURATION, UNKNOWN,
     };
@@ -3915,6 +3925,37 @@ resolved configuration:
 
     /// The flag that counts the probe rounds of one destination.
     const FLAG_PROBES: &str = "probes-per-round";
+
+    /// The number of probe rounds that a test hunt gives each destination.
+    ///
+    /// The number differs from the default, so a wiring that read the default
+    /// instead fails the test that reads this number back.
+    const PROBES_OF_A_TEST_HUNT: u64 = 7;
+
+    /// The destination that a test hands the tracer of a hunt. It is an address
+    /// of the block that documentation takes, and no probe reaches it: the test
+    /// builds the configuration of a tracer and starts none.
+    const A_HUNT_DESTINATION: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+
+    /// A hunt gives the tracer of a destination the probe rounds of its plan.
+    ///
+    /// The number reaches the tracer and the run loop by two paths. The tracer
+    /// reads the resolved command line, and `hunt::Plan` carries the number to
+    /// the limits of the run. A tracer of a smaller number closes its channel
+    /// under a run loop that still waits, and the run then reports a dead
+    /// tracer.
+    #[test]
+    fn a_hunt_gives_the_tracer_of_a_destination_the_probe_rounds_of_its_plan() {
+        let flag = format!("--{FLAG_PROBES}");
+        let count = PROBES_OF_A_TEST_HUNT.to_string();
+        let config = resolve(&["krt", HUNT, &flag, &count]);
+        let probes = SystemProbes {
+            config: &config,
+            privilege: Privilege::Unprivileged,
+        };
+        let traced = probes.config_of(A_HUNT_DESTINATION, &RunId::at(Utc::now()));
+        assert_eq!(traced.rounds, Some(PROBES_OF_A_TEST_HUNT));
+    }
 
     /// The configuration of a hunt that a command line resolves to.
     ///
