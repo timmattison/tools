@@ -335,6 +335,18 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
     // inside the fixture's own `TempDir` where no concurrent run can see it,
     // turns a fragility that only some machines carry into a property this suite
     // pins on every machine.
+    //
+    // Unlike the hostile backend the sibling `rebase.updateRefs` test arms, this
+    // one stays standing for the rest of the test rather than being unwound with
+    // the control's other damage. `merge.ff` is read by `git merge` and by
+    // nothing else here: `merge --abort` ends a merge rather than starting one,
+    // `gitscratch` never runs `git merge` at all, and a rebase under
+    // `merge.ff = only` still conflicts exactly as it does without it - all
+    // three checked rather than assumed. There is also no harness pin for it to
+    // silence, because `Git::safety_config` names no `merge.ff`, which is the
+    // whole reason the sibling has to unwind its backend and this one does not.
+    // Leaving it armed is the stronger reading anyway: the replay below then
+    // runs under a developer merge config it has to tolerate.
     repo.git(&["config", "merge.ff", "only"]);
 
     // `rr-cache` is shared repo-wide, so it is reachable from the common dir
@@ -361,9 +373,15 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
     //
     // Not `repo.git`, which panics on a non-zero exit - conflicting is the whole
     // point of this merge, so its failure has to be inspected rather than raised.
+    //
+    // `--no-ff` for the same reason the sibling control pins its rebase backend:
+    // a control has to ask for the merge it means to demonstrate rather than
+    // inherit whichever one the fixture or the developer prefers. These two
+    // branches diverge, so the merge git performs is the same one either way -
+    // the flag only settles whether git agrees to perform it.
     repo.checkout("right");
     let control = Command::new("git")
-        .args(["merge", "left"])
+        .args(["merge", "--no-ff", "left"])
         .current_dir(repo.path())
         .output()
         .expect("run the control merge in the fixture");
@@ -371,6 +389,24 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
         !control.status.success(),
         "the control merge was supposed to conflict, and rerere only ever records \
          a conflict, so this test could only pass vacuously:\n{}\n{}",
+        String::from_utf8_lossy(&control.stdout),
+        String::from_utf8_lossy(&control.stderr)
+    );
+    // The assertion above asks only that the merge *failed*, and git has more
+    // ways to fail a merge than to conflict one - a refused fast-forward, a
+    // dirty working tree, an unknown ref - every one of which exits non-zero
+    // with an empty index and no preimage. Read against that, the recording
+    // assertion below is the first thing to fire, and it names rerere for a
+    // merge that never ran. So the control states the shape of its failure and
+    // not merely the fact of it: unmerged paths in the index are what a conflict
+    // leaves behind and what no other failure produces, which keeps the blame
+    // where it belongs when some future setting breaks this merge a new way.
+    let unmerged = repo.git(&["diff", "--name-only", "--diff-filter=U"]);
+    assert!(
+        !unmerged.is_empty(),
+        "the control merge failed without conflicting, so it left the index \
+         clean and rerere with nothing to record; the recording assertion below \
+         would blame rerere for a merge that never got that far:\n{}\n{}",
         String::from_utf8_lossy(&control.stdout),
         String::from_utf8_lossy(&control.stderr)
     );
