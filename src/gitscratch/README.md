@@ -95,12 +95,14 @@ A ninth guarantee — **the `user.name`/`user.email` identity**, the last row
 above — is pinned by a unit test in `src/git.rs` instead, which reads back
 `git var GIT_AUTHOR_IDENT` rather than building a repository to commit into.
 
-The remaining rows of the table above — the editor and prompt environment,
-`gpg.format`, `gc.auto`, and the `rebase.autoStash`/`autosquash` pair — are
-established by construction in `safety_config` and are not covered by a test of
-their own. The editor guard is at least exercised indirectly: every conflict
-test above drives a rebase that halts, and a halted rebase without `GIT_EDITOR`
-set sits waiting on a commit message.
+The remaining rows of the table above are established by construction rather
+than by a test of their own, in two different places. `gpg.format`, `gc.auto`,
+and the `rebase.autoStash`/`autosquash` pair are entries in `safety_config`,
+which returns `-c key=value` arguments and nothing else; the editor and prompt
+environment — `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `GIT_TERMINAL_PROMPT` — is
+set on the command itself, in `Git::try_run`. The editor guard is at least
+exercised indirectly: every conflict test above drives a rebase that halts, and
+a halted rebase without `GIT_EDITOR` set sits waiting on a commit message.
 
 `gpg.format` looks like the signing test covers it and it does not, which is
 worth saying out loud so nobody re-derives the wrong answer. That test's fixture
