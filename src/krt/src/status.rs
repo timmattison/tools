@@ -374,6 +374,12 @@ mod tests {
     /// The number of destinations that the hunt of a log test finishes.
     const LOGGED_ROUNDS: usize = 3;
 
+    /// The width of a terminal that leaves no room for the two counts.
+    const WITHOUT_THE_COUNTS: u16 = 45;
+
+    /// The width of a terminal that leaves no room for the time either.
+    const WITHOUT_THE_TIME: u16 = 24;
+
     /// Reads an address that a test names.
     fn address(text: &str) -> Ipv4Addr {
         text.parse().expect("the test address must parse")
@@ -407,10 +413,25 @@ mod tests {
             .to_owned()
     }
 
-    /// An indicator that traced `round` destinations of which `reached`
-    /// answered, and that stands on one more.
-    fn hunting(clock: &Rc<FakeClock>, reached: usize, partial: usize) -> Indicator<Vec<u8>, Rc<FakeClock>> {
-        let mut indicator = indicator(Style::Line, clock);
+    /// An indicator that traced `reached` destinations that answered and
+    /// `partial` that did not, and that stands on one more.
+    fn hunting(
+        clock: &Rc<FakeClock>,
+        reached: usize,
+        partial: usize,
+    ) -> Indicator<Vec<u8>, Rc<FakeClock>> {
+        hunting_at(clock, COLUMNS, reached, partial)
+    }
+
+    /// The same hunt, on a terminal of the width that a test names.
+    fn hunting_at(
+        clock: &Rc<FakeClock>,
+        columns: u16,
+        reached: usize,
+        partial: usize,
+    ) -> Indicator<Vec<u8>, Rc<FakeClock>> {
+        let mut indicator =
+            Indicator::new(Style::Line, ROUNDS, columns, Vec::new(), Rc::clone(clock));
         for _ in 0..reached {
             indicator.show(Event::Target(address(TARGET)));
             indicator.show(Event::Scored { reached: true });
@@ -692,6 +713,50 @@ mod tests {
     fn a_terminal_takes_the_line_and_a_pipe_takes_the_log() {
         assert_eq!(super::style_of(true), Style::Line);
         assert_eq!(super::style_of(false), Style::Log);
+    }
+
+
+    #[test]
+    fn a_terminal_too_narrow_for_the_counts_drops_them_whole() {
+        let clock = FakeClock::new();
+        let line = painted(hunting_at(&clock, WITHOUT_THE_COUNTS, 0, 11));
+        assert!(
+            line.contains("12/64") && line.contains(TARGET),
+            "the round and the destination must stand: {line:?}"
+        );
+        assert!(
+            !line.contains(crate::REACHED) && !line.contains(crate::hunt::PARTIAL),
+            "the counts must go away whole and never in part: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_terminal_narrower_still_drops_the_time_and_keeps_the_destination() {
+        let clock = FakeClock::new();
+        let mut indicator = hunting_at(&clock, WITHOUT_THE_TIME, 0, 11);
+        indicator.show(Event::Tick);
+        let line = painted(indicator);
+        assert!(
+            line.contains("12/64") && line.contains(TARGET),
+            "the round and the destination must stand: {line:?}"
+        );
+        assert!(
+            !line.contains('s') && !line.contains('m'),
+            "the time must go away before the destination: {line:?}"
+        );
+    }
+
+    #[test]
+    fn the_time_stands_while_the_counts_are_gone() {
+        let clock = FakeClock::new();
+        let mut indicator = hunting_at(&clock, WITHOUT_THE_COUNTS, 0, 11);
+        clock.advance(Duration::from_secs(41));
+        indicator.show(Event::Tick);
+        let line = painted(indicator);
+        assert!(
+            line.contains("41s"),
+            "the counts go away in front of the time: {line:?}"
+        );
     }
 
     #[test]

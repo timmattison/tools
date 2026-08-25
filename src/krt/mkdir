@@ -728,3 +728,6 @@
 2026-08-25T12:47:50.477Z [DEBUG] Stopped sleep inhibitor, allowing sleep
 2026-08-25T12:48:20.501Z [DEBUG] Notification:idle_prompt [tsm cc-notify] completed with status 0
 2026-08-25T12:48:20.501Z [DEBUG] Hook output does not start with {, treating as plain text
+2026-08-25T13:00:16.001Z [DEBUG] Protecting locked version from cleanup: 2.1.243
+2026-08-25T13:00:16.007Z [DEBUG] Protecting locked version from cleanup: 2.1.241
+2026-08-25T13:00:16.012Z [DEBUG] Protecting locked version from cleanup: 2.1.240
