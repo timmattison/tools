@@ -2877,6 +2877,35 @@ mod tests {
         );
     }
 
+    /// A tracer that refuses lets the destinations in flight finish first.
+    ///
+    /// The refusal stops the hunt from drawing another destination. It takes
+    /// nothing away from the ones that already probe: those measured what they
+    /// measured, and the file already holds the record that opened each of
+    /// them.
+    #[test]
+    fn a_tracer_that_refuses_lets_the_destinations_in_flight_finish() {
+        let mut probes = FakeProbes::refuses_after(
+            &[REACHED_AT_FIVE, FAR_REACHED_AT_EIGHTEEN],
+            2,
+            NO_RAW_SOCKET,
+        );
+        let stopped = run_hunt(
+            &[NEAR, FAR, QUIET],
+            &mut probes,
+            wanting(3).at_once(3),
+            &never_stops(),
+            &[],
+            &mut Recorder::default(),
+        )
+        .expect_err("the tracer of the third destination stops the hunt");
+        let counts = counts(&stopped.summary);
+        assert!(
+            counts.starts_with("2/3 reached   2/64 targets   0 partial"),
+            "the two destinations that stood when the tracer refused still count: {counts}"
+        );
+    }
+
     /// A write that fails keeps the summary of the rounds in front of it.
     ///
     /// The disk that fills is the fault that this covers, and it is the one
