@@ -69,6 +69,17 @@ fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
 
     let repo = conflicting_repo();
     repo.git(&["config", "rebase.updateRefs", "true"]);
+    // Armed on purpose, and hostile on purpose. The control below exists to
+    // prove `rebase.updateRefs` is live, but `--update-refs` is a merge-backend
+    // feature and the apply backend ignores it outright - so a developer with
+    // `rebase.backend = apply` in their global config gets a control rebase
+    // that exits zero and leaves the control branch exactly where it was. The
+    // assertion that follows then names a config key that was set correctly and
+    // never mentions the backend that overrode it. Arming the hostile setting
+    // here, inside the fixture's own `TempDir` where no concurrent run can see
+    // it, turns a fragility that only some machines carry into a property this
+    // suite pins on every machine.
+    repo.git(&["config", "rebase.backend", "apply"]);
 
     let branch_refs = || -> Vec<(String, String)> {
         ["main", "left", "right"]
