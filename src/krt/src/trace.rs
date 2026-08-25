@@ -22,6 +22,12 @@
 //! probe. A TCP probe varies its source port already, and the tracer takes the
 //! next one when a port is in use.
 //!
+//! One process runs many tracers at the same time, because a hunt traces many
+//! destinations at once. Those tracers stand in one process and share its
+//! identifier, so the mark of the process alone would leave each of them
+//! reading the answers of the others. [`Lane`] is what tells them apart: it
+//! moves both marks, each by a stride of its own.
+//!
 //! The interface of the wall is one type and three functions. [`TraceConfig`]
 //! states one run in the words that `krt` owns, and [`spawn`] starts the
 //! tracer of that run and gives back a receiver of completed rounds.
@@ -425,10 +431,11 @@ fn next_seq(counter: &AtomicU64) -> u64 {
 /// `trippy` gives no way to stop a tracer, so the round limit of the run is
 /// what ends the thread, and this handle is what waits for that end.
 ///
-/// A caller that starts one tracer after another in one process holds the
-/// handle of each one and waits for it before it starts the next. Two tracers
-/// that probe at once are two tracers of one source port, and the second one
-/// dies on the port it cannot bind.
+/// Two tracers of one [`Lane`] carry one probe identifier and one source port,
+/// so they must not probe at the same time. A caller that starts one tracer
+/// after another in one lane holds the handle of each one and waits for it
+/// before it starts the next tracer of that lane. Two tracers of two lanes
+/// probe at the same time and read each other's answers for nothing.
 pub(crate) struct TracerThread(JoinHandle<Result<(), trippy_core::Error>>);
 
 impl TracerThread {

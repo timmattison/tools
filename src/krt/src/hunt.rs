@@ -44,9 +44,20 @@
 //! answer of each one, and the stop. The hunt itself draws nothing and knows
 //! nothing about which look the indicator wears.
 //!
-//! The hunt traces one destination at a time and never two at once. A
-//! measurement of 64 destinations at the normal interval is a small load, and
-//! it stays that way only while the hunt is serial.
+//! The hunt traces `Plan::concurrency` destinations at one moment. It starts
+//! that many at once, and it starts another one each time one of them stops, so
+//! the time that a destination which answers nothing costs is time the hunt
+//! spends on the other destinations of the pool. Most of the address space
+//! answers nothing, so that time is most of the time a hunt takes.
+//!
+//! Each destination of the pool probes in a lane of its own, which is what
+//! keeps two tracers of one process from reading each other's answers.
+//! `trace::Lane` holds that fact, and it holds the ceiling of the pool with it.
+//!
+//! The whole hunt still stands on one thread. Every tracer already runs on a
+//! thread of its own and hands its rounds over a channel, so the hunt sweeps
+//! the channels of the pool, one turn of each, and the file, the indicator, and
+//! the resolver stay where they were.
 
 use crate::live::Screen;
 use crate::names;
@@ -505,11 +516,16 @@ pub(crate) struct Facts {
 /// loop of the hunt and the indicator that shows it read the same pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Bounds {
-    /// The number of destinations that must answer before the hunt stops.
+    /// The number of destinations that must answer before the hunt stops
+    /// drawing.
     ///
     /// A destination that answered nothing costs no round. Most of the address
     /// space answers nothing, so a count of every draw would spend the hunt on
     /// addresses that measure no path at all.
+    ///
+    /// The destinations that stood when the last of these answered finish and
+    /// count, so a hunt can hold a few more rounds than this. Each of them is a
+    /// measurement the hunt already paid for.
     pub(crate) rounds: u64,
     /// The number of destinations that the hunt traces before it gives up.
     ///

@@ -9,8 +9,9 @@
 //! asked, print one status line each minute in the place of the table. The
 //! `replay` command reads a recorded file, folds one run of it, and prints the
 //! table of that path: a head that names the run, and one row for each TTL.
-//! The `hunt` command looks for the longest path it can find: it draws a
-//! random address, traces it, scores the path, and takes the next round.
+//! The `hunt` command looks for the longest path it can find: it draws random
+//! addresses, traces a pool of them at once, scores each path, and draws
+//! another address each time one of them stops.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -354,8 +355,8 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 /// `--headless` asked, print one status line each minute. The `replay` command
 /// reads a file that an earlier run wrote, so it takes no destination and no
 /// flag of a probe. The `hunt` command looks for the longest path it can find:
-/// it draws a random address, traces it, scores the path, and takes the next
-/// round.
+/// it draws random addresses, traces a pool of them at once, scores each path,
+/// and draws another address each time one of them stops.
 // The help names the `?` key and no other key of the live table, because
 // `live::KEYS` is the one list that says what a key does and a doc comment of
 // `clap` is a string literal that reads that list at no time. A help page that
@@ -505,8 +506,8 @@ enum Command {
         run: Option<String>,
     },
 
-    /// Hunt for the longest path. Draw an address, trace it, score it, and
-    /// take the next round.
+    /// Hunt for the longest path. Draw a pool of addresses, trace them at
+    /// once, score each one, and draw another as each one stops.
     Hunt {
         /// Stop after this many destinations answer. A destination that
         /// answers nothing costs no round.
