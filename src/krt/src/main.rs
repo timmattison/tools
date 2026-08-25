@@ -4341,8 +4341,10 @@ resolved configuration:
     /// A timeout that cannot hold the probe rounds of its own line contradicts
     /// that line.
     ///
-    /// The tracer sends one probe round each interval, so a destination of 20
-    /// probe rounds at a period of one second needs 20 seconds. A timeout of
+    /// The tracer sends one probe round each interval, and the first round goes
+    /// out one interval after the run starts, so a destination of 20 probe
+    /// rounds at a period of one second needs more than 20 seconds. The check
+    /// asks for 21 seconds, which is the time of one round more. A timeout of
     /// ten seconds cuts such a destination short after ten of its rounds, and
     /// the record of it says nothing about the eleven that never went out.
     #[test]
@@ -4354,7 +4356,43 @@ resolved configuration:
             "--probes-per-round",
             "20",
             "1s",
-            "20s",
+            "21s",
+        ] {
+            assert!(
+                reason.contains(expected),
+                "the reason names `{expected}`: {reason}"
+            );
+        }
+    }
+
+    /// A timeout that holds the probe rounds of its line and no more is
+    /// rejected.
+    ///
+    /// A run of two probe rounds at a period of one second lands its last round
+    /// past the second second, because the first round goes out one interval
+    /// after the run starts. A timeout of 2001 milliseconds thus holds the two
+    /// rounds by the arithmetic alone, and it still stops the destination after
+    /// the first one. The check therefore asks for the time of one round more,
+    /// which is three seconds here.
+    #[test]
+    fn a_target_timeout_that_holds_the_probe_rounds_and_no_more_is_rejected() {
+        let reason = contradiction(&[
+            "krt",
+            HUNT,
+            "--probes-per-round",
+            "2",
+            "--interval",
+            "1s",
+            "--target-timeout",
+            "2001ms",
+        ]);
+        for expected in [
+            "--target-timeout",
+            "2001ms",
+            "--probes-per-round",
+            "2",
+            "1s",
+            "3s",
         ] {
             assert!(
                 reason.contains(expected),
@@ -4402,9 +4440,10 @@ resolved configuration:
 
     /// The defaults of a hunt hold each other, so `krt hunt` alone resolves.
     ///
-    /// The timeout of a destination must hold the probe rounds that the same
-    /// line asks for. A pair of defaults that broke that rule would reject the
-    /// plainest line of the command.
+    /// The timeout of a destination must hold one round more than the probe
+    /// rounds that the same line asks for, because the last round lands past
+    /// the time of the rounds alone. A pair of defaults that broke that rule
+    /// would reject the plainest line of the command.
     #[test]
     fn the_default_timeout_of_a_hunt_holds_the_default_probe_rounds() {
         let config = resolve(&["krt", HUNT]);
@@ -4413,8 +4452,8 @@ resolved configuration:
             .expect("the command line must resolve to a hunt");
         let rounds = u32::try_from(plan.probes_per_round).expect("the default counts a few rounds");
         assert!(
-            plan.target_timeout > config.interval * rounds,
-            "a timeout of {:?} holds {} probe rounds at a period of {:?}",
+            plan.target_timeout > config.interval * (rounds + 1),
+            "a timeout of {:?} holds one round more than {} probe rounds at a period of {:?}",
             plan.target_timeout,
             plan.probes_per_round,
             config.interval
