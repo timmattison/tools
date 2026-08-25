@@ -3032,16 +3032,25 @@ mod tests {
         // where the column stands, and it needs the whole history of the row
         // that the image belongs to. One render answers both, so the lines and
         // the images can never stand for a different set of rows.
-        let rendered = golden_render(NOMINAL_WIDTH, RecentPicture::Bars);
-        let column_header = line(&rendered.lines, column_header_line(&rendered.lines)).to_owned();
+        //
+        // Two renders stand here, and each of them answers what the other
+        // cannot. The frame of images carries the Recent column, because that
+        // is the one picture whose caller draws it, so the invariant is proven
+        // where a run reads it. The frame of bars carries the golden lines and
+        // the marks of every row, because the frame of images blanks the body
+        // cells of the column, and those marks are what says that a history
+        // stands beside the row it belongs to.
+        let images = golden_render(NOMINAL_WIDTH, RecentPicture::Image);
+        let bars = golden_render(NOMINAL_WIDTH, RecentPicture::Bars);
+        let column_header = line(&images.lines, column_header_line(&images.lines)).to_owned();
 
         assert_eq!(
-            rendered.lines, GOLDEN_FRAME,
+            bars.lines, GOLDEN_FRAME,
             "the lines of a frame that draws the bars read as they always did"
         );
-        let recent = rendered
+        let recent = images
             .recent
-            .expect("a frame at the nominal width holds the Recent column");
+            .expect("a frame of images at the nominal width holds the Recent column");
         assert_eq!(
             Some(usize::from(recent.column)),
             field_start(&column_header, RECENT_HEADING),
@@ -3058,7 +3067,7 @@ mod tests {
             // so the marks of a line count the samples of the row that the line
             // draws. The history of a row therefore stands beside the marks of
             // that same row, and the two can never name different rows.
-            let row = line(&rendered.lines, HEAD_LINES + index);
+            let row = line(&bars.lines, HEAD_LINES + index);
             assert_eq!(
                 history.len(),
                 recent_of(row).chars().count(),
@@ -3091,6 +3100,23 @@ mod tests {
             rendered.recent.map(|recent| recent.rows.len()),
             Some(GOLDEN_ROWS),
             "and the history of every row still travels with the frame"
+        );
+    }
+
+    #[test]
+    fn a_frame_of_bars_carries_no_recent_column_for_a_caller_to_draw() {
+        // The Recent column travels with the lines for the caller that draws an
+        // image over it, and that caller is the one which asks for the images.
+        // A frame of bars already draws every history in its own lines, so a
+        // copy of those histories beside the lines is a copy that nobody reads:
+        // every replay, and every live run without the images, would pay it for
+        // each row of each frame.
+        let rendered = golden_render(NOMINAL_WIDTH, RecentPicture::Bars);
+
+        assert_eq!(
+            rendered.recent.map(|recent| recent.rows.len()),
+            None,
+            "a frame of bars hands back no Recent column"
         );
     }
 
