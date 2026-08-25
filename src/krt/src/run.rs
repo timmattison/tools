@@ -441,6 +441,26 @@ mod tests {
     /// of the test that reads it.
     const A_SHORT_GRACE: Duration = Duration::from_millis(200);
 
+    /// The grace of a run whose deadline cuts that grace short.
+    ///
+    /// The value stands far above the time that a run of no round takes, so a
+    /// drain that waited for the whole grace is plain in the elapsed time of
+    /// the run.
+    const A_LONG_GRACE: Duration = Duration::from_secs(1);
+
+    /// The longest that a run whose deadline already passed takes.
+    ///
+    /// Such a run writes two records and asks the namer one time, which takes
+    /// far less than this. The value stands well below [`A_LONG_GRACE`], so a
+    /// loaded machine moves no run of the deadline past it.
+    const A_QUICK_STOP: Duration = Duration::from_millis(500);
+
+    /// The number of asks that the run of a passed deadline gives the resolver.
+    ///
+    /// The test asks about the two hops of one round before the run starts, and
+    /// the drain of the run asks one more time about the hop that waits.
+    const ASKS_OF_A_CUT_DRAIN: usize = 3;
+
     /// The limits of a run that stops on nothing.
     const NO_LIMIT: Limits = Limits {
         rounds: None,
@@ -647,6 +667,12 @@ mod tests {
 
     /// The limits of a run whose moment already passed.
     fn a_past_deadline() -> Limits {
+        a_past_deadline_with_grace(NO_GRACE)
+    }
+
+    /// The limits of a run whose moment already passed and that names this
+    /// grace for its names.
+    fn a_past_deadline_with_grace(grace: Duration) -> Limits {
         Limits {
             rounds: None,
             deadline: Some(
@@ -654,7 +680,7 @@ mod tests {
                     .checked_sub(Duration::from_secs(1))
                     .expect("the clock must stand one second after the start of the process"),
             ),
-            name_grace: NO_GRACE,
+            name_grace: grace,
         }
     }
 
@@ -1529,6 +1555,44 @@ mod tests {
         );
         assert_eq!(outcome_of(&ran).reason, EndReason::Rounds);
         assert_eq!(outcome_of(&ran).rounds, 1);
+    }
+
+    /// The deadline bounds the whole run, and the drain of the names fits
+    /// inside it. A run that reached its moment gives its names no grace, so no
+    /// destination of a hunt holds that hunt past its timeout.
+    ///
+    /// The rounds of the run put the first hop into the namer before the run
+    /// starts, and the lookup of that hop never finishes. The run then reads a
+    /// moment that already passed. The drain asks one time, which writes the
+    /// names that already arrived, and the run closes there.
+    #[test]
+    fn a_deadline_that_passed_gives_the_names_no_grace() {
+        let resolver = FakeResolver::new(&[(FIRST_HOP, &[Lookup::Pending])]);
+        let mut namer = a_namer(&resolver);
+        assert!(
+            namer.names(&a_round(1).hops, Utc::now()).is_empty(),
+            "the lookup of the first hop has not finished"
+        );
+        assert!(namer.waits(), "the namer holds an address that waits");
+        let started = Instant::now();
+        let ran = ran_with(
+            "past-deadline-grace",
+            &a_stream(&rounds_of(&[1])),
+            &a_past_deadline_with_grace(A_LONG_GRACE),
+            &|| false,
+            &mut namer,
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(outcome_of(&ran).reason, EndReason::Duration);
+        assert_eq!(
+            resolver.asks(),
+            ASKS_OF_A_CUT_DRAIN,
+            "the drain of a run that reached its moment asks one time"
+        );
+        assert!(
+            elapsed < A_QUICK_STOP,
+            "the run took {elapsed:?}, which is longer than {A_QUICK_STOP:?}"
+        );
     }
 
     // What the run shows on its screen. The one line that a headless screen
