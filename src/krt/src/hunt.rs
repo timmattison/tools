@@ -499,14 +499,30 @@ pub(crate) struct Facts {
     pub(crate) host: String,
 }
 
-/// The numbers that bound one hunt.
-pub(crate) struct Plan {
+/// The two numbers that stop one hunt.
+///
+/// A hunt stops on whichever of them it meets first: the rounds it wants, or
+/// the destinations it traced looking for them. One value carries both, so the
+/// loop of the hunt and the indicator that shows it read the same pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Bounds {
     /// The number of destinations that must answer before the hunt stops.
     ///
     /// A destination that answered nothing costs no round. Most of the address
     /// space answers nothing, so a count of every draw would spend the hunt on
     /// addresses that measure no path at all.
     pub(crate) rounds: u64,
+    /// The number of destinations that the hunt traces before it gives up.
+    ///
+    /// The draw of a real hunt never runs out, so this is what stops a hunt
+    /// that finds fewer answers than it wants.
+    pub(crate) max_targets: u64,
+}
+
+/// The numbers that bound one hunt.
+pub(crate) struct Plan {
+    /// The two numbers that stop the hunt.
+    pub(crate) bounds: Bounds,
     /// The number of probe rounds that each destination takes.
     pub(crate) probes_per_round: u64,
     /// The longest that one destination takes, whether it answers or not.
@@ -580,7 +596,7 @@ pub(crate) fn record<W: Write>(
     let mut scores = Vec::new();
     let mut previous = None;
     let mut reached: u64 = 0;
-    while reached < plan.rounds {
+    while reached < plan.bounds.rounds {
         if stop() {
             break;
         }
@@ -1024,7 +1040,8 @@ fn pad(cell: &str, width: usize, right: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        random, record, reserved, Draw, Facts, HuntError, HuntStopped, PathKind, Plan, Probes,
+        random, record, reserved, Bounds, Draw, Facts, HuntError, HuntStopped, PathKind, Plan,
+        Probes,
         RunError, Score, Scorer, Sources, Summary, ATTEMPTS, FASTEST, LONGEST, NOTHING_TO_RANK,
         PARTIAL, SHORTEST, SLOWEST,
     };
@@ -1867,9 +1884,35 @@ mod tests {
         rounds: u64,
         stop: &dyn Fn() -> bool,
     ) -> Result<Hunted, HuntStopped> {
+        hunted_bounded(addresses, scripts, wanting(rounds), stop)
+    }
+
+    /// The number of destinations that a test hunt traces before it gives up.
+    ///
+    /// Every test above hands the draw fewer addresses than this, so the cap
+    /// stops no hunt but the one that names its own.
+    const A_GENEROUS_CAP: u64 = 64;
+
+    /// The bounds of a test hunt that wants this many rounds, and that traces
+    /// as many destinations as it must to find them.
+    const fn wanting(rounds: u64) -> Bounds {
+        Bounds {
+            rounds,
+            max_targets: A_GENEROUS_CAP,
+        }
+    }
+
+    /// Runs one hunt over a scripted draw, a scripted source of rounds, and the
+    /// bounds that the test names.
+    fn hunted_bounded(
+        addresses: &[&str],
+        scripts: &[Rounds],
+        bounds: Bounds,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Hunted, HuntStopped> {
         let mut probes = FakeProbes::of(scripts);
         let mut recorder = Recorder::default();
-        let outcome = run_hunt(addresses, &mut probes, rounds, stop, &[], &mut recorder);
+        let outcome = run_hunt(addresses, &mut probes, bounds, stop, &[], &mut recorder);
         outcome.map(|(summary, recording)| Hunted {
             summary,
             recording,
@@ -1882,7 +1925,7 @@ mod tests {
     fn run_hunt(
         addresses: &[&str],
         probes: &mut FakeProbes,
-        rounds: u64,
+        bounds: Bounds,
         stop: &dyn Fn() -> bool,
         names: &[(&str, &[crate::names::Lookup])],
         status: &mut dyn Status,
@@ -1890,7 +1933,7 @@ mod tests {
         let mut sink = Vec::new();
         let summary = {
             let mut writer = Writer::to_sink(&mut sink);
-            hunt_into(addresses, probes, rounds, stop, names, &mut writer, status)
+            hunt_into(addresses, probes, bounds, stop, names, &mut writer, status)
         }?;
         Ok((summary, read_back(&sink)))
     }
@@ -1902,7 +1945,7 @@ mod tests {
     fn hunt_into<W: std::io::Write>(
         addresses: &[&str],
         probes: &mut FakeProbes,
-        rounds: u64,
+        bounds: Bounds,
         stop: &dyn Fn() -> bool,
         names: &[(&str, &[crate::names::Lookup])],
         writer: &mut Writer<W>,
@@ -1928,7 +1971,7 @@ mod tests {
             host: HOST.to_owned(),
         };
         let plan = Plan {
-            rounds,
+            bounds,
             probes_per_round: 1,
             target_timeout: TARGET_TIMEOUT,
             name_grace: Duration::ZERO,
@@ -2117,7 +2160,7 @@ mod tests {
             hunt_into(
                 &[NEAR, FAR],
                 &mut probes,
-                2,
+                wanting(2),
                 &never_stops(),
                 &[],
                 &mut writer,
@@ -2168,6 +2211,30 @@ mod tests {
                 address(FAR),
             ],
             "the hunt traces destinations until two of them answer"
+        );
+    }
+
+    /// A hunt gives up after the destinations that its bounds let it trace.
+    ///
+    /// The draw of a real hunt never runs out, so the cap is the bound that
+    /// stops a hunt whose destinations answer nothing. Without it, such a hunt
+    /// draws forever.
+    #[test]
+    fn a_hunt_gives_up_after_the_targets_that_its_bounds_let_it_trace() {
+        let hunted = hunted_bounded(
+            &[QUIET, ANOTHER_QUIET, NEAR, FAR],
+            &[&[&[]], &[&[]], REACHED_AT_FIVE, FAR_REACHED_AT_EIGHTEEN],
+            Bounds {
+                rounds: 2,
+                max_targets: 2,
+            },
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            hunted.asked,
+            vec![address(QUIET), address(ANOTHER_QUIET)],
+            "the hunt gives up after two destinations, answered or not"
         );
     }
 
@@ -2254,7 +2321,7 @@ mod tests {
         let (_, recording) = run_hunt(
             &[NEAR],
             &mut probes,
-            1,
+            wanting(1),
             &never_stops(),
             &[],
             &mut Recorder::default(),
@@ -2331,7 +2398,7 @@ mod tests {
         let stopped = run_hunt(
             &[NEAR],
             &mut probes,
-            1,
+            wanting(1),
             &never_stops(),
             &[],
             &mut Recorder::default(),
@@ -2372,7 +2439,7 @@ mod tests {
         let stopped = run_hunt(
             &[NEAR, FAR, QUIET],
             &mut probes,
-            3,
+            wanting(3),
             &never_stops(),
             &[],
             &mut Recorder::default(),
@@ -2403,7 +2470,7 @@ mod tests {
         let stopped = hunt_into(
             &[NEAR, FAR],
             &mut probes,
-            2,
+            wanting(2),
             &never_stops(),
             &[],
             &mut writer,
@@ -2429,7 +2496,7 @@ mod tests {
         let (_, recording) = run_hunt(
             &[NEAR],
             &mut probes,
-            1,
+            wanting(1),
             &never_stops(),
             &[(NEAR, &[named(DESTINATION_NAME)])],
             &mut Recorder::default(),

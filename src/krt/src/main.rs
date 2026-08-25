@@ -114,6 +114,14 @@ const MAX_TTL_DEFAULT: u8 = 30;
 /// addresses that answer nothing.
 const HUNT_ROUNDS_DEFAULT: u64 = 8;
 
+/// The number of destinations that a hunt traces before it gives up, when the
+/// user names none.
+///
+/// The draw of a hunt never runs out, so a hunt that finds fewer answers than
+/// it wants would draw forever. The number stands well above the default rounds
+/// because most of the address space answers nothing.
+const MAX_TARGETS_DEFAULT: u64 = 128;
+
 /// The number of probe rounds that each destination of a hunt takes, when the
 /// user names none.
 ///
@@ -1889,7 +1897,10 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
         host: host_name(),
     };
     let hunt_plan = hunt::Plan {
-        rounds: plan.rounds,
+        bounds: hunt::Bounds {
+            rounds: plan.rounds,
+            max_targets: MAX_TARGETS_DEFAULT,
+        },
         probes_per_round: plan.probes_per_round,
         target_timeout: plan.target_timeout,
         name_grace: name_grace(),
@@ -4192,6 +4203,66 @@ resolved configuration:
             block.contains("500ms"),
             "the block of a hunt names the period that the line asked for: {block}"
         );
+    }
+
+    /// The default lets a hunt trace 128 destinations before it gives up.
+    #[test]
+    fn the_default_hunt_gives_up_after_a_hundred_and_twenty_eight_targets() {
+        let block = resolve(&["krt", HUNT]).to_string();
+        assert!(
+            block.contains("max targets:"),
+            "the block of a hunt names the cap of its targets: {block}"
+        );
+        assert!(
+            block.contains("128"),
+            "the cap of a hunt that named none is 128: {block}"
+        );
+    }
+
+    /// The block of a hunt names the cap that the command line asked for.
+    #[test]
+    fn the_resolved_block_of_a_hunt_names_the_cap_that_the_command_line_named() {
+        let block = resolve(&["krt", HUNT, "--max-targets", "20"]).to_string();
+        assert!(
+            block.contains("max targets:"),
+            "the block of a hunt names the cap of its targets: {block}"
+        );
+        assert!(
+            block.contains("20"),
+            "the block names the cap that the line asked for: {block}"
+        );
+    }
+
+    /// A hunt of no target traces nothing, so the parser rejects it.
+    #[test]
+    fn a_hunt_of_no_target_is_rejected() {
+        let error = rejection(&["krt", HUNT, "--max-targets", "0"]);
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    }
+
+    /// A cap below the rounds of its own line contradicts that line.
+    ///
+    /// A hunt that gives up after four destinations never holds eight that
+    /// answered. Such a line asks for two things at once, so the tool says so
+    /// in the place of a hunt that gives up every time.
+    #[test]
+    fn a_cap_below_the_rounds_of_its_own_line_is_rejected() {
+        let reason = contradiction(&["krt", HUNT, "--rounds", "8", "--max-targets", "4"]);
+        for expected in ["--max-targets", "4", "--rounds", "8"] {
+            assert!(
+                reason.contains(expected),
+                "the reason names `{expected}`: {reason}"
+            );
+        }
+    }
+
+    /// A cap that equals the rounds of its own line holds them.
+    ///
+    /// Such a hunt needs every destination it traces to answer, which is a hard
+    /// ask and not a contradiction.
+    #[test]
+    fn a_cap_that_equals_the_rounds_of_its_own_line_resolves() {
+        assert_eq!(hunt(&["krt", HUNT, "--rounds", "4", "--max-targets", "4"]).rounds, 4);
     }
 
     /// A hunt of no round records nothing, so the parser rejects it.
