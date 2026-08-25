@@ -507,7 +507,7 @@ fn a_replay_needs_no_destination() {
 const HUNT: &str = "hunt";
 
 #[test]
-fn the_help_of_the_hunt_names_the_two_flags_that_count_a_round() {
+fn the_help_of_the_hunt_names_the_flags_that_bound_it() {
     let result = run(&[HUNT, FLAG_HELP]);
     assert!(
         result.success,
@@ -516,6 +516,7 @@ fn the_help_of_the_hunt_names_the_two_flags_that_count_a_round() {
     );
     for flag in [
         "--rounds",
+        "--max-targets",
         "--probes-per-round",
         "--target-timeout",
         "--seed",

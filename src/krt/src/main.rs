@@ -143,6 +143,12 @@ const TARGET_TIMEOUT_DEFAULT: &str = "10s";
 /// The type is the type that `clap` takes for the bound of a range.
 const ROUNDS_LOWEST: u64 = 1;
 
+/// The lowest cap of the destinations of a hunt. A hunt that traces no
+/// destination measures nothing.
+///
+/// The type is the type that `clap` takes for the bound of a range.
+const TARGETS_LOWEST: u64 = 1;
+
 /// The number of spaces between the longest key of the resolved configuration
 /// block and its value.
 ///
@@ -489,6 +495,15 @@ enum Command {
         )]
         rounds: u64,
 
+        /// Give up after tracing this many destinations, answered or not.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = MAX_TARGETS_DEFAULT,
+            value_parser = clap::value_parser!(u64).range(TARGETS_LOWEST..),
+        )]
+        max_targets: u64,
+
         /// The number of probe rounds that each destination takes. One probe
         /// round is one sweep of the TTLs.
         #[arg(
@@ -527,6 +542,8 @@ enum Command {
 struct HuntConfig {
     /// The number of destinations that must answer before the hunt stops.
     rounds: u64,
+    /// The number of destinations that the hunt traces before it gives up.
+    max_targets: u64,
     /// The number of probe rounds that each destination takes.
     probes_per_round: u64,
     /// The longest that one destination takes, whether it answers or not.
@@ -626,7 +643,9 @@ impl Cli {
     /// changes nothing, and the record then names a mode that the run did not
     /// use. A target timeout that the probe rounds of the same hunt run past
     /// cuts every destination short of its last round, so such a line asks for
-    /// two things at once.
+    /// two things at once. A cap of the targets below the rounds of the same
+    /// hunt asks for two things at once as well: such a hunt gives up before it
+    /// can hold the rounds it wants.
     ///
     /// Returns the reason as text as well when the destination is the name of a
     /// command, which a flag in front of that command makes. That check runs
@@ -677,6 +696,17 @@ impl Cli {
         }
 
         if let Some(Command::Hunt {
+            rounds, max_targets, ..
+        }) = &self.command
+        {
+            if max_targets < rounds {
+                return Err(format!(
+                    "`--max-targets {max_targets}` is below `--rounds {rounds}`: a hunt that traces {max_targets} destinations never holds {rounds} that answered"
+                ));
+            }
+        }
+
+        if let Some(Command::Hunt {
             probes_per_round,
             target_timeout,
             ..
@@ -716,6 +746,7 @@ impl Cli {
         let (hunt, shared) = match self.command {
             Some(Command::Hunt {
                 rounds,
+                max_targets,
                 probes_per_round,
                 target_timeout,
                 seed,
@@ -724,6 +755,7 @@ impl Cli {
             }) => (
                 Some(HuntConfig {
                     rounds,
+                    max_targets,
                     probes_per_round,
                     target_timeout,
                     seed: seed.unwrap_or_else(seed_from_clock),
@@ -849,6 +881,7 @@ impl ResolvedConfig {
             ("reverse dns", reverse_dns()),
             ("source", source()),
             ("rounds", hunt.rounds.to_string()),
+            ("max targets", hunt.max_targets.to_string()),
             ("probes per round", hunt.probes_per_round.to_string()),
             ("target timeout", ui::render_duration(hunt.target_timeout)),
             ("seed", hunt.seed.to_string()),
@@ -1899,7 +1932,7 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
     let hunt_plan = hunt::Plan {
         bounds: hunt::Bounds {
             rounds: plan.rounds,
-            max_targets: MAX_TARGETS_DEFAULT,
+            max_targets: plan.max_targets,
         },
         probes_per_round: plan.probes_per_round,
         target_timeout: plan.target_timeout,

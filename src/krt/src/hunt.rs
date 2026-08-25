@@ -13,7 +13,9 @@
 //!
 //! A destination that answered nothing costs no round. Most of the address
 //! space answers nothing, so a hunt that counted every draw would spend itself
-//! on addresses that measure no path at all.
+//! on addresses that measure no path at all. The hunt gives up after
+//! `Bounds::max_targets` destinations, answered or not, because the draw of a
+//! real hunt never runs out.
 //!
 //! Both sources that a hunt draws on are seams, so no test of this module sends
 //! a packet:
@@ -550,9 +552,11 @@ pub(crate) struct Sources<'a> {
 
 /// Records one hunt: one run for each destination, and the summary of them all.
 ///
-/// The hunt stops when `Plan::rounds` destinations answered. A destination that
-/// answered nothing costs no round, so the hunt keeps drawing until it holds
-/// the paths that the user asked for.
+/// The hunt stops when `Bounds::rounds` destinations answered. A destination
+/// that answered nothing costs no round, so the hunt keeps drawing until it
+/// holds the paths that the user asked for. It gives up at
+/// `Bounds::max_targets` destinations, which is what stops a hunt that finds
+/// fewer answers than it wants: the draw never runs out on its own.
 ///
 /// The hunt traces one destination at a time and never two at once. A
 /// measurement of a few dozen destinations at the normal interval is a small
@@ -596,13 +600,15 @@ pub(crate) fn record<W: Write>(
     let mut scores = Vec::new();
     let mut previous = None;
     let mut reached: u64 = 0;
-    while reached < plan.bounds.rounds {
+    let mut targets: u64 = 0;
+    while reached < plan.bounds.rounds && targets < plan.bounds.max_targets {
         if stop() {
             break;
         }
         let Some(target) = sources.draw.address() else {
             break;
         };
+        targets += 1;
         status.show(Event::Target(target));
         let moment = next_moment(previous, Utc::now());
         previous = Some(moment);
