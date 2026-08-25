@@ -632,6 +632,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     ceiling of `--concurrency`, and `krt` refuses a larger pool and names that ceiling. A pool of
     32 sends about a thousand probes in the period of one round, which is a load that a link
     feels, so raise the number against a link that can take it.
+  - A pool costs the nearest hops some answers. Every destination of the pool probes the same
+    first hop at the same moment, so a home gateway that rate-limits its ICMP replies answers a
+    few of those probes and drops the rest. The row of that hop then shows loss, or shows `???`.
+    The paths and the round-trip times of the far hops stand: a measured hunt of a pool of 8 found
+    the same four destinations at the same path lengths as the same hunt of one destination at a
+    time, in a sixth of the wall time. Lower `--concurrency` to measure the first hops of a path,
+    and raise it to find paths sooner.
   - The hunt then prints one table of four rows: the shortest path, the longest path, the fastest
     path, and the slowest path. One destination can hold more than one row. Each row carries the
     address with its name, the length of the path, whether the destination answered, the mean
