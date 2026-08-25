@@ -702,33 +702,8 @@ impl Cli {
             ));
         }
 
-        if let Some(Command::Hunt {
-            rounds, max_targets, ..
-        }) = &self.command
-        {
-            if max_targets < rounds {
-                return Err(format!(
-                    "`--max-targets {max_targets}` is below `--rounds {rounds}`: a hunt that traces {max_targets} destinations never holds {rounds} that answered"
-                ));
-            }
-        }
-
-        if let Some(Command::Hunt {
-            probes_per_round,
-            target_timeout,
-            ..
-        }) = &self.command
-        {
-            let needed = probe_time(probe.interval, *probes_per_round);
-            if needed.is_none_or(|needed| *target_timeout <= needed) {
-                let needs =
-                    needed.map_or_else(|| TIME_BEYOND_A_DURATION.to_owned(), ui::render_duration);
-                return Err(format!(
-                    "`--target-timeout {}` cannot hold `--probes-per-round {probes_per_round}` at an interval of {}, which needs {needs}: raise the timeout or lower the probe rounds",
-                    ui::render_duration(*target_timeout),
-                    ui::render_duration(probe.interval)
-                ));
-            }
+        if let Some(reason) = hunt_contradiction(self.command.as_ref(), probe.interval) {
+            return Err(reason);
         }
 
         // The parser rejects the two flags of the address family together, so
@@ -1053,6 +1028,43 @@ fn probe_time(interval: Duration, probes_per_round: u64) -> Option<Duration> {
     u32::try_from(probes_per_round)
         .ok()
         .and_then(|rounds| interval.checked_mul(rounds))
+}
+
+/// The reason that the flags of one hunt contradict each other, when they do.
+///
+/// A cap of the targets below the rounds of the same line gives up before the
+/// hunt can hold the rounds it wants. A target timeout that the probe rounds of
+/// the same line run past cuts every destination short of its last round. Both
+/// lines ask for two things at once, so the tool names the pair in the place of
+/// a hunt that can never do what the line says.
+///
+/// A command line that names no hunt holds no such pair, and it gives none.
+fn hunt_contradiction(command: Option<&Command>, interval: Duration) -> Option<String> {
+    let Some(Command::Hunt {
+        rounds,
+        max_targets,
+        probes_per_round,
+        target_timeout,
+        ..
+    }) = command
+    else {
+        return None;
+    };
+    if max_targets < rounds {
+        return Some(format!(
+            "`--max-targets {max_targets}` is below `--rounds {rounds}`: a hunt that traces {max_targets} destinations never holds {rounds} that answered"
+        ));
+    }
+    let needed = probe_time(interval, *probes_per_round);
+    if needed.is_none_or(|needed| *target_timeout <= needed) {
+        let needs = needed.map_or_else(|| TIME_BEYOND_A_DURATION.to_owned(), ui::render_duration);
+        return Some(format!(
+            "`--target-timeout {}` cannot hold `--probes-per-round {probes_per_round}` at an interval of {}, which needs {needs}: raise the timeout or lower the probe rounds",
+            ui::render_duration(*target_timeout),
+            ui::render_duration(interval)
+        ));
+    }
+    None
 }
 
 /// The seed of a hunt that named none.
@@ -4305,7 +4317,10 @@ resolved configuration:
     /// ask and not a contradiction.
     #[test]
     fn a_cap_that_equals_the_rounds_of_its_own_line_resolves() {
-        assert_eq!(hunt(&["krt", HUNT, "--rounds", "4", "--max-targets", "4"]).rounds, 4);
+        assert_eq!(
+            hunt(&["krt", HUNT, "--rounds", "4", "--max-targets", "4"]).rounds,
+            4
+        );
     }
 
     /// A hunt of no round records nothing, so the parser rejects it.

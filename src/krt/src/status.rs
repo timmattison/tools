@@ -1,10 +1,10 @@
 //! The indicator that a hunt shows while it runs.
 //!
-//! A hunt of 64 destinations takes minutes, and it draws no live table. Without
-//! an indicator it prints one line at the start and nothing more until the
-//! summary, which reads as a tool that died. The indicator says which round the
-//! hunt stands in, which address it traces, how many destinations answered, and
-//! how long the hunt took so far.
+//! A hunt takes minutes, and it draws no live table. Without an indicator it
+//! prints one line at the start and nothing more until the summary, which reads
+//! as a tool that died. The indicator says how many rounds the hunt holds of
+//! the rounds it wants, how many destinations it drew of the ones it may draw,
+//! which address it traces, and how long the hunt took so far.
 //!
 //! Two styles serve two kinds of standard output, as the two screens of
 //! `live.rs` do for a run:
@@ -22,7 +22,7 @@
 use crate::hunt::{Bounds, PARTIAL};
 use crate::live::Clock;
 use crate::ui;
-use crate::{REACHED, ROUND, UNKNOWN};
+use crate::{REACHED, TARGETS, UNKNOWN};
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
@@ -109,10 +109,10 @@ const BAR_FLOOR: usize = 4;
 
 /// The place of the destination that the hunt traces among the fields of the
 /// line, as [`Indicator::fields`] builds them.
-const TARGET: usize = 1;
+const ADDRESS: usize = 1;
 
-/// The place of the counts of the hunt among those same fields.
-const COUNTS: usize = 2;
+/// The place of the targets of the hunt among those same fields.
+const BUDGET: usize = 2;
 
 /// The place of the time that the hunt took among those same fields.
 const TIME: usize = 3;
@@ -120,12 +120,11 @@ const TIME: usize = 3;
 /// The order that the fields of the line go away in, first dropped first.
 ///
 /// A terminal too narrow for every field keeps the fields that say the most to
-/// a reader who is watching a hunt: the round it stands in, and the address it
-/// traces. The counts go first, because they are the widest pair of the line
-/// and the summary at the end counts the same thing. The time goes next, for
-/// the second half of that reason. The round of the hunt is in no order at all,
-/// because it never goes away.
-const DROP_ORDER: [usize; 3] = [COUNTS, TIME, TARGET];
+/// a reader who is watching a hunt: the rounds it holds, and the address it
+/// traces. The targets go first, because the summary at the end counts the same
+/// thing. The time goes next, for the same reason. The rounds of the hunt are
+/// in no order at all, because they never go away.
+const DROP_ORDER: [usize; 3] = [BUDGET, TIME, ADDRESS];
 
 /// The fields that stand, as one line.
 fn join(fields: &[Option<String>]) -> String {
@@ -135,6 +134,21 @@ fn join(fields: &[Option<String>]) -> String {
         .map(String::as_str)
         .collect::<Vec<&str>>()
         .join(ui::FIELD_SEPARATOR)
+}
+
+/// The eighths of `cells` that `done` of `whole` fills.
+///
+/// A bound of zero is a bound that the hunt met before it started, and the
+/// share of it is the whole bar: a division by it has no answer. A count above
+/// its own bound fills the bar and no more, so no share can push the line past
+/// the columns it stands in.
+fn share(done: u64, whole: u64, cells: usize) -> usize {
+    if whole == 0 {
+        return cells;
+    }
+    let width = u128::try_from(cells).unwrap_or(u128::MAX);
+    let filled = u128::from(done) * width / u128::from(whole);
+    usize::try_from(filled).unwrap_or(usize::MAX).min(cells)
 }
 
 /// The control text that puts the cursor back at the left edge of the line.
@@ -160,13 +174,12 @@ pub(crate) struct Indicator<W: Write, C: Clock> {
     bounds: Bounds,
     /// The number of destinations that the hunt started, the one that stands
     /// included.
-    round: u64,
+    targets: u64,
     /// The destination that the hunt traces now.
     target: Option<Ipv4Addr>,
-    /// The number of destinations that answered.
-    reached: usize,
-    /// The number of destinations that answered nothing.
-    partial: usize,
+    /// The number of destinations that answered, which is the number of rounds
+    /// that the hunt holds.
+    reached: u64,
     /// The number of turns that the hunt took, which is the frame of the
     /// spinner.
     frame: usize,
@@ -189,10 +202,9 @@ impl<W: Write, C: Clock> Indicator<W, C> {
             started,
             columns,
             bounds,
-            round: 0,
+            targets: 0,
             target: None,
             reached: 0,
-            partial: 0,
             frame: 0,
             painted: 0,
         }
@@ -215,11 +227,11 @@ impl<W: Write, C: Clock> Indicator<W, C> {
         SPINNER[self.frame % SPINNER.len()]
     }
 
-    /// The bar of the rounds, in `width` columns.
+    /// The bar of the hunt, in `width` columns.
     ///
-    /// The bar fills in eighths of a cell, so a hunt of many rounds moves it on
-    /// most of its rounds. A bar of whole cells alone would stand still for
-    /// three rounds of a hunt of 64 in a bar of 24 cells.
+    /// The bar fills in eighths of a cell, so a hunt moves it on most of its
+    /// draws. A bar of whole cells alone would stand still for three draws of a
+    /// hunt of 64 targets in a bar of 24 cells.
     fn bar(&self, width: usize) -> String {
         let cells = width * EIGHTHS;
         let filled = self.filled(cells);
@@ -233,18 +245,17 @@ impl<W: Write, C: Clock> Indicator<W, C> {
         bar
     }
 
-    /// The number of eighths of the bar that the rounds filled, of `cells`.
+    /// The number of eighths of the bar that the hunt filled, of `cells`.
     ///
-    /// A hunt of no round at all fills the bar whole. Such a hunt asked for
-    /// nothing and it did all of it, and a division by its round count has no
-    /// answer.
+    /// The hunt stops on whichever bound it meets first, so the bar reads the
+    /// bound it stands closer to. A bar of the rounds alone would stand still
+    /// while a hunt that answers nothing spends every target it has, and a bar
+    /// of the targets alone would sit at one eighth as a hunt that answers well
+    /// finished.
     fn filled(&self, cells: usize) -> usize {
-        if self.bounds.rounds == 0 {
-            return cells;
-        }
-        let cells = u128::try_from(cells).unwrap_or(u128::MAX);
-        let filled = u128::from(self.round) * cells / u128::from(self.bounds.rounds);
-        usize::try_from(filled).unwrap_or(usize::MAX)
+        let by_rounds = share(self.reached, self.bounds.rounds, cells);
+        let by_targets = share(self.targets, self.bounds.max_targets, cells);
+        by_rounds.max(by_targets)
     }
 
     /// The line that a terminal shows.
@@ -285,17 +296,12 @@ impl<W: Write, C: Clock> Indicator<W, C> {
     /// A hunt that drew no address yet holds no destination, and that field is
     /// absent rather than empty between two separators.
     fn fields(&self, width: usize) -> String {
-        // The order of these four is the order that [`TARGET`], [`COUNTS`], and
-        // [`TIME`] name, and [`DROP_ORDER`] reads them by that name.
+        // The order of these four is the order that [`ADDRESS`], [`BUDGET`],
+        // and [`TIME`] name, and [`DROP_ORDER`] reads them by that name.
         let mut fields = [
-            Some(format!("{}/{}", self.round, self.bounds.rounds)),
+            Some(self.rounds_field()),
             self.target.map(|addr| addr.to_string()),
-            Some(format!(
-                "{} {REACHED}{}{} {PARTIAL}",
-                self.reached,
-                ui::FIELD_SEPARATOR,
-                self.partial
-            )),
+            Some(self.targets_field()),
             Some(ui::render_duration(self.elapsed())),
         ];
         for dropped in DROP_ORDER {
@@ -305,6 +311,22 @@ impl<W: Write, C: Clock> Indicator<W, C> {
             fields[dropped] = None;
         }
         join(&fields)
+    }
+
+    /// The rounds that the hunt holds, of the rounds it wants.
+    ///
+    /// The field never goes away. It is the one number that says whether the
+    /// hunt is measuring anything at all.
+    fn rounds_field(&self) -> String {
+        format!("{}/{} {REACHED}", self.reached, self.bounds.rounds)
+    }
+
+    /// The destinations that the hunt drew, of the ones it may draw.
+    ///
+    /// The count holds the destination that stands, so a reader who sees the
+    /// last target of the budget knows that this one ends the hunt.
+    fn targets_field(&self) -> String {
+        format!("{}/{} {TARGETS}", self.targets, self.bounds.max_targets)
     }
 
     /// Paints the line, and wipes the tail of a longer line in front of it.
@@ -323,14 +345,15 @@ impl<W: Write, C: Clock> Indicator<W, C> {
 
     /// Writes the whole line of a destination that the hunt finished.
     ///
-    /// The line carries the same numbers as the line of a terminal, and it
-    /// carries the destination and the answer of that one destination in the
-    /// place of the running counts. A reader of the file counts the answers
-    /// from the lines, and the summary at the end counts them again.
+    /// The line carries the same two ratios as the line of a terminal, and it
+    /// carries the destination and the answer of that one destination beside
+    /// them. A reader of the file counts the answers from the lines, and the
+    /// summary at the end counts them again.
     fn log(&mut self, reached: bool) {
         let answer = if reached { REACHED } else { PARTIAL };
         let fields = [
-            format!("{ROUND} {}/{}", self.round, self.bounds.rounds),
+            self.rounds_field(),
+            self.targets_field(),
             self.target
                 .map_or_else(|| UNKNOWN.to_owned(), |addr| addr.to_string()),
             answer.to_owned(),
@@ -359,15 +382,13 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
     fn show(&mut self, event: Event) {
         match event {
             Event::Target(target) => {
-                self.round += 1;
+                self.targets += 1;
                 self.target = Some(target);
             }
             Event::Tick => self.frame += 1,
             Event::Scored { reached } => {
                 if reached {
                     self.reached += 1;
-                } else {
-                    self.partial += 1;
                 }
             }
             Event::Stop => {}

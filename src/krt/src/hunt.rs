@@ -60,7 +60,7 @@ use crate::run::RunError;
 use crate::stats::{HopTable, TtlRow};
 use crate::status::{Event, Status};
 use crate::ui;
-use crate::{counted, REACHED, ROUND};
+use crate::{REACHED, TARGETS};
 use chrono::{DateTime, Utc};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -596,12 +596,7 @@ pub(crate) fn record<W: Write>(
     // Both ways out of the loop build the same summary over the scores that the
     // hunt holds at that point, so the fault and the finish read alike.
     let summarize = |scores: Vec<Score>| {
-        Summary::new(
-            scores,
-            started.elapsed(),
-            plan.bounds,
-            plan.include_partial,
-        )
+        Summary::new(scores, started.elapsed(), plan.bounds, plan.include_partial)
     };
     let mut scores = Vec::new();
     let mut previous = None;
@@ -963,6 +958,11 @@ impl Summary {
 
     /// The line that counts what the hunt did.
     ///
+    /// The two counts stand against the two bounds that stopped the hunt, as
+    /// the line of the indicator holds them. A reader thus tells a hunt that
+    /// held every round it wanted from one that gave up on its targets, which
+    /// the bare counts never said.
+    ///
     /// The line stands at the left edge, where the closing line of a trace
     /// stands, and the table above it stands one column in, where the table of
     /// a folded run stands. The two are different things: the table is a table,
@@ -974,8 +974,12 @@ impl Summary {
             .filter(|score| score.kind == PathKind::Reached)
             .count();
         [
-            counted(self.scores.len(), ROUND),
-            format!("{reached} {REACHED}"),
+            format!("{reached}/{} {REACHED}", self.bounds.rounds),
+            format!(
+                "{}/{} {TARGETS}",
+                self.scores.len(),
+                self.bounds.max_targets
+            ),
             format!("{} {PARTIAL}", self.scores.len() - reached),
             ui::render_duration(self.elapsed),
         ]
@@ -1064,9 +1068,8 @@ fn pad(cell: &str, width: usize, right: bool) -> String {
 mod tests {
     use super::{
         random, record, reserved, Bounds, Draw, Facts, HuntError, HuntStopped, PathKind, Plan,
-        Probes,
-        RunError, Score, Scorer, Sources, Summary, ATTEMPTS, FASTEST, LONGEST, NOTHING_TO_RANK,
-        PARTIAL, SHORTEST, SLOWEST,
+        Probes, RunError, Score, Scorer, Sources, Summary, ATTEMPTS, FASTEST, LONGEST,
+        NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
     };
     use crate::live::Screen;
     use crate::record::{
