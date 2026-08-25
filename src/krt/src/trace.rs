@@ -297,10 +297,23 @@ fn tracer_of(config: &TraceConfig) -> Result<trippy_core::Tracer, TraceError> {
                 trippy_core::PortDirection::FixedDest(trippy_core::Port(TCP_DESTINATION_PORT))
             }
         })
-        // `krt` owns the round limit and the time limit, and the run loop
-        // enforces both of them. A tracer that stopped itself would close the
-        // channel, and the run loop reads a closed channel as a dead tracer.
-        .max_rounds(None)
+        // The round limit of the run stands here too, because `trippy` gives
+        // no way to stop a tracer. A tracer that carries the limit ends its own
+        // thread when the run ends, so a hunt leaves behind no tracer of a
+        // destination it already traced.
+        //
+        // The run loop stops at the same number. It therefore reads the last
+        // round of the run and never the closed channel, and a closed channel
+        // still names a tracer that died.
+        //
+        // `trippy` counts rounds in a `usize` and `krt` counts them in a `u64`,
+        // so a number above the range of a `usize` takes the largest one. No
+        // run reaches that many rounds.
+        .max_rounds(
+            config
+                .rounds
+                .map(|rounds| usize::try_from(rounds).unwrap_or(usize::MAX)),
+        )
         .build()
         .map_err(|error| TraceError::Build {
             reason: error.to_string(),
