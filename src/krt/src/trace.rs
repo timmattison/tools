@@ -44,6 +44,7 @@ use chrono::{DateTime, Utc};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 use trippy_core::{CompletionReason, IcmpPacketType, ProbeStatus, Round};
 use trippy_dns::{DnsEntry, DnsResolver, Resolver as _};
@@ -328,29 +329,59 @@ fn next_seq(counter: &AtomicU64) -> u64 {
     counter.fetch_add(1, Ordering::Relaxed) + FIRST_ROUND
 }
 
+/// The thread of a tracer that runs.
+///
+/// `trippy` gives no way to stop a tracer, so the round limit of the run is
+/// what ends the thread, and this handle is what waits for that end.
+///
+/// A caller that starts one tracer after another in one process holds the
+/// handle of each one and waits for it before it starts the next. Two tracers
+/// that probe at once are two tracers of one source port, and the second one
+/// dies on the port it cannot bind.
+pub(crate) struct TracerThread(JoinHandle<Result<(), trippy_core::Error>>);
+
+impl TracerThread {
+    /// Waits for the thread of the tracer to stop.
+    ///
+    /// The thread stops when the tracer reaches the round limit of its run. A
+    /// run that names no round limit leaves the tracer without one, and this
+    /// wait then ends only when the process does.
+    ///
+    /// The answer of the thread goes nowhere. A tracer that died closes the
+    /// channel of its rounds, and the run loop already reports that.
+    pub(crate) fn wait(self) {
+        drop(self.0.join());
+    }
+}
+
 /// Starts the tracer on its own thread and gives back a receiver of completed
-/// rounds.
+/// rounds and the handle of that thread.
 ///
 /// The callback of the tracer holds a borrowed round. It converts that round
 /// into an owned record before it sends, so nothing borrowed crosses the
 /// channel and a later engine swap touches this file only.
 ///
 /// The channel is unbounded, so a slow reader never stalls the tracer thread.
-/// The tracer holds no way to stop, so its thread ends when the process ends.
+/// The round limit of the run is what stops the thread, and
+/// [`TracerThread::wait`] is what waits for it.
 ///
 /// # Errors
 ///
 /// Returns [`TraceError::Build`] when the tracer refuses the configuration, and
 /// [`TraceError::Spawn`] when the thread does not start.
-pub(crate) fn spawn(config: &TraceConfig) -> Result<Receiver<RoundRecord>, TraceError> {
+pub(crate) fn spawn(
+    config: &TraceConfig,
+) -> Result<(Receiver<RoundRecord>, TracerThread), TraceError> {
     let tracer = tracer_of(config)?;
     let (sender, receiver) = mpsc::channel();
     let run = config.run.clone();
     let first_ttl = config.first_ttl;
     let counter = AtomicU64::new(0);
     // `spawn_with` gives back the tracer and the handle of its thread. The run
-    // loop reads a closed channel as a dead tracer, so it needs neither.
-    let (_tracer, _thread) = tracer
+    // loop reads a closed channel as a dead tracer, so it needs the tracer for
+    // nothing. The handle of the thread travels to the caller, which waits on
+    // it before it starts another tracer.
+    let (_tracer, thread) = tracer
         .spawn_with(move |round| {
             let record = to_round_record(round, &run, next_seq(&counter), Utc::now(), first_ttl);
             // A failed send means the reader of the channel is gone, and the
@@ -360,7 +391,7 @@ pub(crate) fn spawn(config: &TraceConfig) -> Result<Receiver<RoundRecord>, Trace
         .map_err(|error| TraceError::Spawn {
             reason: error.to_string(),
         })?;
-    Ok(receiver)
+    Ok((receiver, TracerThread(thread)))
 }
 
 /// The number of milliseconds in one second.

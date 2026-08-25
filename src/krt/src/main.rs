@@ -1669,7 +1669,10 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
     println!("{RECORDING_TO} {}", path.display());
 
     let run = RunId::at(Utc::now());
-    let rounds = trace::spawn(&trace::TraceConfig {
+    // A trace starts one tracer, so nothing waits for its thread. The thread
+    // stops at the round limit of the run, and a run of no round limit stops
+    // when the process does.
+    let (rounds, _tracer) = trace::spawn(&trace::TraceConfig {
         target: target.addr,
         run: run.clone(),
         interval: config.interval,
@@ -1741,15 +1744,24 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
 
 /// The tracer of a hunt of the command line.
 ///
-/// Each destination takes one tracer of `trace.rs`, and the tracer of the
-/// destination before it has already stopped: the hunt traces one destination
-/// at a time.
+/// Each destination takes one tracer of `trace.rs`, and no two of those tracers
+/// ever probe at once. Two tracers of one process hold one source port, and the
+/// second one dies on the port it cannot bind.
+///
+/// The round limit of a destination is what stops its tracer, and `start` waits
+/// for that stop before it starts the tracer of the next destination. The wait
+/// is what the run loop cannot give: a destination that stops at its target
+/// timeout stops while its tracer still probes.
 struct SystemProbes<'a> {
     /// The command line that the hunt resolved, which holds the period, the
     /// range of the TTL, the protocol, and the multipath mode of every probe.
     config: &'a ResolvedConfig,
     /// The privilege mode that the platform gave.
     privilege: record::Privilege,
+    /// The thread of the tracer of the destination that the hunt traced last.
+    ///
+    /// The hunt traces its first destination with no such thread behind it.
+    running: Option<trace::TracerThread>,
 }
 
 impl SystemProbes<'_> {
@@ -1787,7 +1799,16 @@ impl hunt::Probes for SystemProbes<'_> {
         target: Ipv4Addr,
         run: &RunId,
     ) -> Result<std::sync::mpsc::Receiver<RoundRecord>, String> {
-        trace::spawn(&self.config_of(target, run)).map_err(|error| error.to_string())
+        // The tracer of the destination before this one stops first. The wait
+        // ends at the round limit of that destination, which the command line
+        // holds under the target timeout of every destination.
+        if let Some(running) = self.running.take() {
+            running.wait();
+        }
+        let (rounds, running) =
+            trace::spawn(&self.config_of(target, run)).map_err(|error| error.to_string())?;
+        self.running = Some(running);
+        Ok(rounds)
     }
 }
 
@@ -1848,7 +1869,11 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
             EXIT_FAILURE,
         )
     })?;
-    let mut probes = SystemProbes { config, privilege };
+    let mut probes = SystemProbes {
+        config,
+        privilege,
+        running: None,
+    };
     let facts = hunt::Facts {
         id: HuntId::at(Utc::now()),
         krt: version_string!().to_owned(),
@@ -3962,6 +3987,7 @@ resolved configuration:
         let probes = SystemProbes {
             config: &config,
             privilege: Privilege::Unprivileged,
+            running: None,
         };
         let traced = probes.config_of(A_HUNT_DESTINATION, &RunId::at(Utc::now()));
         assert_eq!(traced.rounds, Some(PROBES_OF_A_TEST_HUNT));

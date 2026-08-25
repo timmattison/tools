@@ -9,10 +9,16 @@
 //! because the name of an address that a round reports arrives after that
 //! round, and the last round of a run has no turn behind it.
 //!
-//! The tracer of `trace.rs` carries no limit of its own. It sends one round
-//! after another until the process ends, and this module owns the number of
-//! rounds and the moment that stop a run. A closed channel is therefore the one
+//! This module owns the number of rounds and the moment that stop a run. The
+//! tracer of `trace.rs` carries the same number of rounds, because `trippy`
+//! gives no way to stop a tracer and the round limit is what ends its thread.
+//! The loop stops at that number first, so it reads the last round of the run
+//! and never the closed channel. A closed channel is therefore still the one
 //! signal of a tracer thread that died, and the loop reads it as a fault.
+//!
+//! The time limit stays here alone. A run that stops at its time limit stops
+//! while its tracer still probes, and the caller that starts one tracer after
+//! another waits for that tracer before it starts the next.
 //!
 //! The design puts this loop in `main.rs`. It lives here because `main.rs`
 //! already carries the whole command line, and a loop that a test drives needs
