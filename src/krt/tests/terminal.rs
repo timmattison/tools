@@ -22,12 +22,14 @@
 //! therefore passes or fails for a reason that has nothing to do with the code
 //! it reads.
 //!
-//! Every pseudo terminal below also names itself, and the tests of the image
-//! path name a terminal that draws images and reports a pixel size. `krt` reads
-//! that terminal the way it reads the terminal of a reader: the name arrives in
-//! the environment of the run, and the pixel size arrives through the same
-//! ioctl as the columns. The environment of the machine that runs the suite
-//! reaches none of these runs, and [`TERMINAL_SIGNALS`] says why.
+//! Every pseudo terminal below also carries a `TERM`, and each test of the
+//! image path picks the one it covers: a terminal that names itself and draws
+//! images, that same terminal reporting no pixel size, and a terminal whose
+//! `TERM` names no terminal that `termgfx` knows. `krt` reads each of them the
+//! way it reads the terminal of a reader: the name arrives in the environment
+//! of the run, and the pixel size arrives through the same ioctl as the
+//! columns. The environment of the machine that runs the suite reaches none of
+//! these runs, and [`TERMINAL_SIGNALS`] says why.
 //!
 //! Every wait below carries a deadline. A read of a pseudo terminal whose child
 //! writes nothing waits for ever, and a test that waits for ever holds every
@@ -413,11 +415,12 @@ const CELL_HEIGHT: u16 = 20;
 ///
 /// Two answers of a terminal decide whether a run draws the Recent column as an
 /// image: the pixel size of the window, which measures one character cell, and
-/// the name in `TERM`, which says whether the terminal reads an image protocol
-/// at all. The two travel as one value, because a test that names one of them
-/// and leaves the other reads a terminal that nobody built. A Kitty window of no
-/// pixels draws no image, and a window of pixels that reads no protocol puts the
-/// escape sequence of an image on the screen as text.
+/// the name in `TERM`, which says whether `termgfx` can name this terminal and
+/// whether the terminal it names reads an image protocol at all. The two travel
+/// as one value, because a test that names one of them and leaves the other
+/// reads a terminal that nobody built. A Kitty window of no pixels draws no
+/// image, and a window of pixels whose name settles no protocol puts the escape
+/// sequence of an image on the screen as text.
 #[derive(Clone, Copy)]
 struct Report {
     /// The pixel width and the pixel height of the window.

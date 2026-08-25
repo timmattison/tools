@@ -366,8 +366,9 @@ pub(crate) struct Look {
     /// The image path of the Recent column, when the run draws one.
     ///
     /// `None` is every run that draws the block elements: a run that asked for
-    /// no image, a terminal that reads no image protocol, and a terminal that
-    /// reports no pixel size. `main::graphics_of` states the four questions.
+    /// no image, a terminal that reads no image protocol or names none, and a
+    /// terminal that reports no pixel size. `main::graphics_of` states the four
+    /// questions.
     pub(crate) graphics: Option<Graphics>,
 }
 
@@ -1812,8 +1813,8 @@ mod tests {
     /// A table whose terminal refuses every image of its frames.
     ///
     /// No run of the tool builds this look. `main::graphics_of` hands an image
-    /// path back only for a terminal that draws images, so a live run never
-    /// asks a terminal of this kind for an image. The refusal that a live run
+    /// path back only for a terminal that draws images under a name of its own,
+    /// so a live run never asks a terminal of this kind for an image. The refusal that a live run
     /// does reach comes out of the encoder of the Sixel protocol, which answers
     /// a fault for an image it will not encode, and a test that draws into a
     /// vector cannot make that encoder refuse. This table names the refusal

@@ -176,7 +176,7 @@ impl Capabilities {
     /// the same two audiences over the size of a character cell.
     #[must_use]
     pub fn draws_images_by_name(&self) -> bool {
-        self.draws_images
+        self.draws_images && !matches!(self.terminal_type, TerminalType::Unknown)
     }
 
     /// Whether this terminal takes the raw mode that a key press needs.

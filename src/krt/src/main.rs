@@ -364,7 +364,7 @@ struct Cli {
     headless: bool,
 
     /// Draw the Recent column as an image of the whole history. Needs a
-    /// terminal that draws images.
+    /// terminal that names itself and draws images.
     #[arg(long)]
     graphics: bool,
 
@@ -438,7 +438,8 @@ struct ResolvedConfig {
     /// answer is a switch and not a resolved value, because the run cannot read
     /// the terminal here: `graphics_of` asks the terminal at the moment the
     /// screen starts, and it answers the block elements for a terminal that
-    /// draws no image and for a terminal that measures no character cell.
+    /// draws no image, for a terminal that named itself to nobody, and for a
+    /// terminal that measures no character cell.
     graphics: bool,
     /// The time that stops the run. An absent time runs until the user stops it.
     duration: Option<Duration>,
@@ -1186,9 +1187,15 @@ fn display_of(headless: bool, is_terminal: bool) -> Display {
 /// path lives in [`crate::live`], and [`screen_of`] reaches
 /// [`crate::live::Table`] only when [`display_of`] answers [`Display::Table`].
 ///
-/// The terminal draws images. Three inline-image protocols are in service, no
-/// terminal reads all three, and a terminal that reads none of them puts the
-/// escape sequence of an image on the screen as text.
+/// The terminal draws images, and it named itself as well. Three inline-image
+/// protocols are in service, no terminal reads all three, and a terminal that
+/// reads none of them puts the escape sequence of an image on the screen as
+/// text. No terminal answers a question about the protocols it reads, so
+/// `termgfx` names the terminal from the environment variables that the
+/// terminal set and picks the protocol of that name. A terminal that set none
+/// of those variables carries no name, so the protocol it gets is a guess, and
+/// a guessed protocol is the same escape sequence on the screen as text.
+/// `Capabilities::draws_images_by_name` is the answer that refuses the guess.
 ///
 /// The terminal reports a pixel size. A terminal that answers the `TIOCGWINSZ`
 /// ioctl with zero pixels reports no pixel size, exactly as `termsize` argues
@@ -1199,8 +1206,12 @@ fn display_of(headless: bool, is_terminal: bool) -> Display {
 ///
 /// The reads of the world stand apart from this decision, so a test names the
 /// answers without a terminal to name them with.
-fn graphics_of(asked: bool, draws_images: bool, cell: Option<(u32, u32)>) -> Option<(u32, u32)> {
-    if !asked || !draws_images {
+fn graphics_of(
+    asked: bool,
+    draws_images_by_name: bool,
+    cell: Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
+    if !asked || !draws_images_by_name {
         return None;
     }
     cell
@@ -1402,7 +1413,7 @@ fn screen_of(
     let capabilities = termgfx::Capabilities::detect();
     let cell = graphics_of(
         config.graphics,
-        capabilities.draws_images(),
+        capabilities.draws_images_by_name(),
         termgfx::cell_pixels(),
     );
     let table = live::Table::new(
@@ -2438,11 +2449,13 @@ resolved configuration:
     fn a_terminal_that_draws_no_image_draws_the_block_elements() {
         // Every inline-image protocol carries its image in an escape sequence,
         // and a terminal that reads none of them puts that sequence on the
-        // screen as text.
+        // screen as text. A terminal that named itself to nobody stands here
+        // too: `termgfx` guesses the protocol of such a terminal, and a guessed
+        // protocol is the same sequence on the screen as text.
         assert_eq!(
             graphics_of(true, false, Some(CELL)),
             None,
-            "the flag draws no image on a terminal that reads no image protocol"
+            "the flag draws no image on a terminal that reads no image protocol, and none on a terminal that named none"
         );
     }
 

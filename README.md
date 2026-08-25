@@ -623,7 +623,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     | `--no-dns` | off | Skip every reverse lookup, and show the addresses alone. |
     | `--source <IP>` | discovered | Name the source of the derived filename, and skip the lookup of the public address. |
     | `--headless` | off | Draw no table and take no key. Print one status line each minute. |
-    | `--graphics` | off | Draw the `Recent` column of the live table as an image of the whole history. It needs a terminal that draws images. |
+    | `--graphics` | off | Draw the `Recent` column of the live table as an image of the whole history. It needs a terminal that names itself and draws images. |
     | `--duration <DUR>` | none | Stop the run after this much time. |
     | `--rounds <N>` | none | Stop the run after this many rounds. |
     | `-V`, `--version` | | Print the version, the git hash, and whether the build was clean. |
@@ -734,10 +734,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     probe that no hop answered draws a dotted red column, and the dots are what tell a loss from a
     slow answer. The background is transparent, so the terminal shows through the cell.
   - The flag is off by default, and it draws an image only when the run holds a terminal, that
-    terminal reads one of the three inline-image protocols (Kitty, iTerm2, or Sixel), and that
-    terminal reports a pixel size. A run that misses any one of the four draws the block elements,
-    because two pictures of one hop is what the table must never show and an image at a guessed size
-    stands over the wrong cells. A row that draws an image draws no block element, and the heading
+    terminal names itself as one that reads an inline-image protocol (Kitty, iTerm2, or Sixel), and
+    that terminal reports a pixel size. The name is what the terminal has to give, and not the
+    protocol alone: no terminal answers a question about the sequences it reads, so `krt` names the
+    terminal from the environment variables that the terminal set. A terminal that set none of them
+    carries no name, and the protocol such a terminal would get is a guess. xterm, GNOME Terminal
+    and Konsole all arrive that way. A run that misses any one of the four draws the block elements,
+    because two pictures of one hop is what the table must never show, an image at a guessed size
+    stands over the wrong cells, and an image in a protocol that the terminal does not read stands
+    on the screen as base64 text. A row that draws an image draws no block element, and the heading
     of the column stays. `krt replay`, a headless run, a pipe, and a file each draw the block
     elements, whatever the flag says.
   - The marks of the table each say one thing. A `★` behind a host marks the row that answered from
