@@ -22,7 +22,7 @@
 use crate::hunt::PARTIAL;
 use crate::live::Clock;
 use crate::ui;
-use crate::REACHED;
+use crate::{ROUND, REACHED, UNKNOWN};
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
@@ -277,6 +277,25 @@ impl<W: Write, C: Clock> Indicator<W, C> {
         drop(self.sink.flush());
     }
 
+    /// Writes the whole line of a destination that the hunt finished.
+    ///
+    /// The line carries the same numbers as the line of a terminal, and it
+    /// carries the destination and the answer of that one destination in the
+    /// place of the running counts. A reader of the file counts the answers
+    /// from the lines, and the summary at the end counts them again.
+    fn log(&mut self, reached: bool) {
+        let answer = if reached { REACHED } else { PARTIAL };
+        let fields = [
+            format!("{ROUND} {}/{}", self.round, self.rounds),
+            self.target
+                .map_or_else(|| UNKNOWN.to_owned(), |addr| addr.to_string()),
+            answer.to_owned(),
+            ui::render_duration(self.elapsed()),
+        ];
+        drop(writeln!(self.sink, "{}", fields.join(ui::FIELD_SEPARATOR)));
+        drop(self.sink.flush());
+    }
+
     /// Takes the line back, so the text that follows starts on a clean line.
     fn wipe(&mut self) {
         if self.painted == 0 {
@@ -309,12 +328,18 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
             }
             Event::Stop => {}
         }
-        match self.style {
-            Style::Line => match *event {
-                Event::Stop => self.wipe(),
-                _ => self.paint(),
-            },
-            Style::Log => {}
+        match (self.style, *event) {
+            // A terminal puts the cursor back where the carriage return sends
+            // it, so every event redraws the one line and the stop takes it
+            // back.
+            (Style::Line, Event::Stop) => self.wipe(),
+            (Style::Line, _) => self.paint(),
+            // A pipe and a file keep every byte they take. One line for each
+            // destination that finished is the pace of the hunt itself, and a
+            // frame of every turn would fill the file with the same line ten
+            // times a second.
+            (Style::Log, Event::Scored { reached }) => self.log(reached),
+            (Style::Log, _) => {}
         }
     }
 }
