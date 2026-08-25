@@ -382,6 +382,7 @@ impl Screen for Scorer<'_> {
     /// `Ctrl-C` reaches a hunt through the signal flag, which stops the trace
     /// of the destination that stands and the hunt that holds it.
     fn poll(&mut self) -> bool {
+        self.status.show(&Event::Tick);
         false
     }
 
@@ -393,6 +394,7 @@ impl Screen for Scorer<'_> {
     /// next, and a packet did reach the destination in the smaller number of
     /// hops.
     fn round(&mut self, round: &RoundRecord) {
+        self.status.show(&Event::Tick);
         self.table.observe(round);
         let answered = round
             .hops
@@ -561,20 +563,32 @@ pub(crate) fn record<W: Write>(
         let Some(target) = sources.draw.address() else {
             break;
         };
+        status.show(&Event::Target(target));
         let moment = next_moment(previous, Utc::now());
         previous = Some(moment);
         let run = RunId::at(moment);
         match trace_one(facts, plan, sources, stop, writer, target, run, status) {
-            Ok(Some(score)) => scores.push(score),
+            Ok(Some(score)) => {
+                status.show(&Event::Scored {
+                    reached: score.kind == PathKind::Reached,
+                });
+                scores.push(score);
+            }
+            // A destination that the user cut short takes no row and no count
+            // of the summary, so the indicator hears no answer for it either.
             Ok(None) => {}
             Err(fault) => {
+                // The line goes back before the caller prints the table of the
+                // rounds that finished and the reason that stopped the hunt.
+                status.show(&Event::Stop);
                 return Err(HuntStopped {
                     summary: summarize(scores),
                     fault,
-                })
+                });
             }
         }
     }
+    status.show(&Event::Stop);
     Ok(summarize(scores))
 }
 
