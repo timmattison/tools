@@ -24,7 +24,7 @@
 //! This module compiles under `cfg(test)` alone, so nothing it holds reaches
 //! the binary.
 
-use crate::live::{Command, Keys};
+use crate::live::{Clock, Command, Keys};
 use crate::names::{Lookup, Resolver};
 use crate::record::{Hop, Record, RecordFile, RoundRecord, RunId, TtlRange, Writer};
 use chrono::{DateTime, Utc};
@@ -34,6 +34,7 @@ use std::io::Write;
 use std::net::IpAddr;
 use std::path::Path;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// The identifier of the run that every test round belongs to.
 const RUN: &str = "2026-08-18T12:00:00.000Z";
@@ -253,5 +254,39 @@ impl<W: Write> Write for SecondRunBetweenWrites<W> {
     /// Returns the reason when the flush of the sink of the first run fails.
     fn flush(&mut self) -> std::io::Result<()> {
         self.first.flush()
+    }
+}
+
+/// A clock that a test moves by hand.
+///
+/// A screen that writes one line each minute, and an indicator that names the
+/// time a hunt took, both read a clock. A test that waited a minute for the
+/// second line would take a minute of the suite, so the clock comes from the
+/// caller and a test moves this one.
+///
+/// The moment sits behind a `Cell`, because [`Clock::now`] takes the clock by
+/// reference. The fake stays on one thread.
+pub(crate) struct FakeClock {
+    /// The moment that the clock reads now.
+    now: Cell<Instant>,
+}
+
+impl FakeClock {
+    /// A clock that stands at the moment of its making.
+    pub(crate) fn new() -> Rc<Self> {
+        Rc::new(Self {
+            now: Cell::new(Instant::now()),
+        })
+    }
+
+    /// Moves the clock forward.
+    pub(crate) fn advance(&self, by: Duration) {
+        self.now.set(self.now.get() + by);
+    }
+}
+
+impl Clock for Rc<FakeClock> {
+    fn now(&self) -> Instant {
+        self.now.get()
     }
 }

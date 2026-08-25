@@ -25,6 +25,7 @@ mod record;
 mod run;
 mod source;
 mod stats;
+mod status;
 #[cfg(test)]
 mod testing;
 mod trace;

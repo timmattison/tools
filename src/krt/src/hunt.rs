@@ -664,7 +664,7 @@ const FASTEST: &str = "fastest";
 const SLOWEST: &str = "slowest";
 
 /// The word that a row of a path the destination answered nothing for carries.
-const PARTIAL: &str = "partial";
+pub(crate) const PARTIAL: &str = "partial";
 
 /// The one column that a row of the summary stands in from the left edge.
 ///

@@ -1101,7 +1101,7 @@ mod tests {
         KEY_THAT_LISTS_THE_KEYS,
     };
     use crate::record::{NameRecord, RoundRecord, RunId};
-    use crate::testing::{address, round, FakeKeys};
+    use crate::testing::{address, round, FakeClock, FakeKeys};
     use crate::ui::Paint;
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -1660,37 +1660,6 @@ mod tests {
         record.seq = LOST_ROUND_SEQ;
         record.dur_ms = LOST_ROUND_MS;
         record
-    }
-
-    /// A clock that the test moves by hand.
-    ///
-    /// A headless screen writes one line each minute, and a test that waited a
-    /// minute for the second line would take a minute of the suite. The moment
-    /// sits behind a `Cell`, because [`Clock::now`] takes the clock by
-    /// reference. The fake stays on one thread.
-    struct FakeClock {
-        /// The moment that the clock reads now.
-        now: Cell<Instant>,
-    }
-
-    impl FakeClock {
-        /// A clock that stands at the moment of its making.
-        fn new() -> Rc<Self> {
-            Rc::new(Self {
-                now: Cell::new(Instant::now()),
-            })
-        }
-
-        /// Moves the clock forward.
-        fn advance(&self, by: Duration) {
-            self.now.set(self.now.get() + by);
-        }
-    }
-
-    impl Clock for Rc<FakeClock> {
-        fn now(&self) -> Instant {
-            self.now.get()
-        }
     }
 
     /// A headless screen that writes into bytes and reads the clock of the
