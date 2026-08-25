@@ -56,6 +56,20 @@ const KITTY_CHUNK_SIZE: usize = 4096;
 /// old one again, so it frees the pixels.
 const KITTY_DELETE_ALL: &str = "\x1b_Ga=d,d=A\x1b\\";
 
+/// The Kitty graphics key that stops the terminal from answering a command.
+///
+/// A Kitty terminal answers an image command that names an image id, and the
+/// answer is an APC sequence on the terminal itself. This crate reads no answer
+/// of any protocol, so every answer is waste at best. It is worse than waste
+/// for a caller that holds the terminal in raw mode: the answer arrives at that
+/// caller as key presses, and `krt` then reads the `p` of `i=1,p=1;OK` as the
+/// pause command of its own live table. `q=2` takes the success answer and the
+/// failure answer both away.
+///
+/// [`KITTY_DELETE_ALL`] carries no such key, because it names no image id and a
+/// Kitty terminal answers it never.
+const KITTY_QUIET: &str = "q=2";
+
 /// How much of the terminal one image can take, in character cells.
 ///
 /// An axis is `None` when the caller states no bound on it. The protocols each
@@ -227,6 +241,12 @@ fn cursor_contract(request: &Request, image_rows: impl FnOnce() -> u32) -> Curso
 /// the cursor itself through [`write_image_with_cursor_contract`]. A renderer
 /// that also moved the cursor would double the movement.
 ///
+/// The header carries [`KITTY_QUIET`], so the terminal answers no command of
+/// this writer. The key stands in the header and not beside the keys of one
+/// cursor mode, because every image of every mode wants the silence. A Kitty
+/// terminal reads the keys of a chunked image from the first chunk alone, and
+/// the first chunk is the header, so the key covers the chunked path as well.
+///
 /// Ghostty and WezTerm read this same protocol.
 ///
 /// # Arguments
@@ -283,7 +303,7 @@ fn write_kitty<W: Write>(
     let width_key = display_width.map_or_else(String::new, |columns| format!(",c={columns}"));
     let height_key = display_height.map_or_else(String::new, |rows| format!(",r={rows}"));
     let header = format!(
-        "\x1b_Ga=T,f=24,s={},v={}{cursor_keys}{width_key}{height_key}",
+        "\x1b_Ga=T,f=24,{KITTY_QUIET},s={},v={}{cursor_keys}{width_key}{height_key}",
         image.width(),
         image.height()
     );
