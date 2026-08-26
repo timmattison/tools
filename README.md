@@ -767,7 +767,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     address, and the file holds no record for it. A lookup holds up no round, and a run waits after
     its last round for the names that its lookups have not given yet. That wait ends the moment
     that every lookup settles, and its ceiling is the timeout of the system resolver, which is 5
-    seconds. `--no-dns` skips every lookup, so the file then holds no `name` record and the `run`
+    seconds. A destination of a `krt hunt` waits the same way. That wait holds up no other
+    destination of the pool, and each of them records its rounds while the wait stands. It does
+    hold its own lane, so the hunt starts the destination that follows it one wait later.
+    `--no-dns` skips every lookup, so the file then holds no `name` record and the `run`
     record says `"dns":false`.
   - A run draws the live table of the path when standard output is a terminal and `--headless` is
     off. Every other run prints one status line at its first round, and one more each minute: a run

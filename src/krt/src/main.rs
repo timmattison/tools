@@ -1670,6 +1670,12 @@ fn resolver_of(reverse_dns: bool) -> std::io::Result<Box<dyn names::Resolver>> {
 /// The time limit of a run caps this grace, and the deadline of a destination
 /// of a hunt caps it the same way. A run therefore takes the time that its
 /// limit names, and no more.
+///
+/// A run waits for its names one step at a time, one step to a turn. A
+/// destination of a hunt that waits here therefore holds up no other
+/// destination of the pool, whatever the length of this grace. It holds its
+/// own lane for the wait, so the hunt starts the destination that follows it
+/// one wait later than it otherwise would.
 fn name_grace() -> Duration {
     trace::resolver_timeout()
 }

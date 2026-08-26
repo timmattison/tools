@@ -5,9 +5,15 @@
 //! A reverse lookup takes a time that no round waits for, so the loop asks the
 //! namer of `names.rs` on every turn and writes whatever the namer hands back.
 //! A turn that saw no round asks too, so a name that arrives between two rounds
-//! still reaches the file. The run also asks one last time before it closes,
+//! still reaches the file. The run also asks again after its last round,
 //! because the name of an address that a round reports arrives after that
 //! round, and the last round of a run has no turn behind it.
+//!
+//! That last wait is a state of the run, and not a step inside one turn. A run
+//! that a limit stopped takes one ask of it on each turn, until the names
+//! arrive or the grace runs out. No turn of a run therefore holds its caller
+//! for longer than the round it reads, which is what lets one caller drive a
+//! pool of runs and lets no run of that pool hold up another.
 //!
 //! This module owns the number of rounds and the moment that stop a run. The
 //! tracer of `trace.rs` carries the same number of rounds, because `trippy`
@@ -64,6 +70,11 @@ pub(crate) struct Limits {
     /// The deadline caps this grace, and [`Limits::grace_now`] is where the two
     /// meet. The deadline bounds the whole run, so the wait for a name fits
     /// inside it and never stands after it.
+    ///
+    /// The run takes one step of this wait on each turn, and the caller sleeps
+    /// between two steps. No turn of the run holds its caller for the grace,
+    /// so a run of a pool that waits here holds up no run beside it. It holds
+    /// its own lane until the wait ends, because its tracer can still probe.
     pub(crate) name_grace: Duration,
 }
 
@@ -72,14 +83,18 @@ impl Limits {
     ///
     /// A run that names no deadline gets the whole grace. A run that still
     /// stands in front of its deadline gets whichever of the two is shorter. A
-    /// run that reached its deadline gets nothing, and the drain asks one time
+    /// run that reached its deadline gets nothing, and the wait takes one step
     /// whatever the grace, so the names that already arrived still reach the
     /// file.
     ///
     /// The deadline is the one bound that a caller states as the longest that
     /// the whole run takes. A grace that ran after it would put every run past
-    /// that time by as much as the grace, which is why the drain reads this and
+    /// that time by as much as the grace, which is why the wait reads this and
     /// not the field.
+    ///
+    /// The run reads this one time, on the turn that a limit stops it, and it
+    /// keeps the moment that the answer names. Every later turn reads that
+    /// moment.
     fn grace_now(&self) -> Duration {
         self.deadline.map_or(self.name_grace, |deadline| {
             self.name_grace
@@ -116,21 +131,40 @@ pub(crate) enum RunError {
 
 /// What one turn of a run did.
 ///
-/// The driver of one run reads nothing but [`Turn::Closed`], because it takes
-/// turns until the run closes and then answers. The driver of many runs reads
-/// the other two as well: a sweep that read no round anywhere sleeps, and a
-/// sweep that read one takes the next sweep at once.
+/// The driver of one run acts on [`Turn::Closed`] and on [`Turn::Draining`],
+/// because it takes turns until the run closes and sleeps between the steps of
+/// a drain. The driver of many runs reads all four: a sweep that read no round
+/// anywhere sleeps, and a sweep that read one takes the next sweep at once.
 #[derive(Debug)]
 pub(crate) enum Turn {
     /// The turn recorded one round, and the run goes on.
     Round,
     /// No round arrived inside the wait of the turn, and the run goes on.
     Quiet,
+    /// A limit stopped the run, and it waits for the names of its hops.
+    ///
+    /// The turn took one step of that wait and moved nothing else. The run
+    /// closes on a later turn, and it records no further round.
+    Draining,
     /// The run closed, and this is what it produced.
     Closed(
         /// What the run produced.
         Outcome,
     ),
+}
+
+/// The stop of a run that is under way: why the run stopped, and the moment
+/// that its wait for the names of its hops ends.
+///
+/// A run holds this from the turn that a limit stops it to the turn that
+/// writes the record which closes it. Every turn between the two takes one
+/// step of that wait and nothing else.
+#[derive(Debug, Clone, Copy)]
+struct Stopping {
+    /// Why the run stopped.
+    reason: EndReason,
+    /// The moment that the wait for the names ends.
+    until: Instant,
 }
 
 /// One run in flight: the channel of its rounds, the limits that stop it, the
@@ -142,6 +176,13 @@ pub(crate) enum Turn {
 /// Another sweeps many runs with a wait of nothing on each of them and sleeps
 /// once for the whole sweep, which is what a hunt does, so one slow destination
 /// holds up no other.
+///
+/// No turn waits for anything but the round it reads, and the wait for the
+/// names of the hops is a state of the run for that reason. A run that a limit
+/// stopped takes one step of that wait on each turn until the names arrive or
+/// the grace runs out. A turn of such a run holds the caller for no longer
+/// than a turn of any other run, so one destination that waits for a name
+/// holds up no other destination of a pool.
 ///
 /// A fault of one run of such a pool stops the whole pool, and the runs beside
 /// that one take no further turn. [`Run::abandon`] is the record that closes
@@ -158,6 +199,9 @@ pub(crate) struct Run {
     namer: Namer,
     /// The number of rounds that the run recorded.
     recorded: u64,
+    /// The stop that is under way, when a limit already stopped the run. A run
+    /// that still stands holds none.
+    stopping: Option<Stopping>,
 }
 
 impl Run {
@@ -185,25 +229,38 @@ impl Run {
             limits,
             namer,
             recorded: 0,
+            stopping: None,
         })
     }
 
-    /// The longest that the next turn of this run waits for a round.
+    /// The longest that the caller waits before the next turn of this run.
     ///
     /// The wait ends at the deadline of the run when that deadline stands
     /// nearer than [`POLL`], so a run stops at the moment of its time limit and
     /// not one poll after it.
+    ///
+    /// A run that waits for the names of its hops reads the end of that wait
+    /// in the place of the deadline, so the caller takes the last step of the
+    /// wait at the moment the grace runs out. The answer is nothing once that
+    /// moment stands behind the run, and the turn that follows closes the run,
+    /// so a wait of nothing costs one turn and never a loop.
     pub(crate) fn wait(&self) -> Duration {
-        wait(self.limits.deadline)
+        match self.stopping {
+            Some(stopping) => stopping
+                .until
+                .saturating_duration_since(Instant::now())
+                .min(POLL),
+            None => wait(self.limits.deadline),
+        }
     }
 
     /// Takes one turn of the run, waiting at most `wait` for a round.
     ///
     /// `stop` answers whether the user asked the run to stop, and the ask of
-    /// `screen` answers the same question. The turn asks both at its top,
-    /// before it reads a round, so a run that the user stops records no further
-    /// round. The ask of the screen also draws that screen, which is why one
-    /// turn asks one time.
+    /// `screen` answers the same question. A turn of a run that still stands
+    /// asks both at its top, before it reads a round, so a run that the user
+    /// stops records no further round. The ask of the screen also draws that
+    /// screen, which is why one turn asks one time.
     ///
     /// Each round that arrives becomes one `round` record. The turn also asks
     /// the namer for the names that arrived, and each name becomes one `name`
@@ -212,14 +269,16 @@ impl Run {
     /// between two rounds still reaches the file. The `name` records of a turn
     /// stand before the `round` record of that turn.
     ///
-    /// The turn that closes the run asks the namer again until no address waits
-    /// or the grace of [`Limits::grace_now`] runs out. The first ask of an
-    /// address starts the lookup of that address, so the name of an address
-    /// that the last round reported arrives after that round, and this last ask
-    /// is what puts it in the file. The deadline of the run caps that grace, so
-    /// a run that reached its deadline stops there and writes the names that
-    /// already arrived. The `end` record then names the number of rounds that
-    /// the run recorded and why it stopped.
+    /// The turn that a limit stops takes the first step of the wait for the
+    /// names, and every turn after it takes one more step, until no address
+    /// waits or the grace of [`Limits::grace_now`] runs out. Such a turn
+    /// answers [`Turn::Draining`], and the turn that ends the wait writes the
+    /// `end` record and answers [`Turn::Closed`]. That record names the number
+    /// of rounds that the run recorded and why it stopped.
+    ///
+    /// A run that waits for its names reads neither the screen nor the stop
+    /// flag. A limit already stopped it, and it records no further round, so
+    /// there is nothing left for either answer to change.
     ///
     /// Each round that the run records also reaches `screen`, and the recording
     /// comes first: a round reaches the file before it reaches the screen, so a
@@ -240,17 +299,26 @@ impl Run {
         writer: &mut Writer<W>,
         screen: &mut dyn Screen,
     ) -> Result<Turn, RunError> {
+        if let Some(stopping) = self.stopping {
+            return self.drain(stopping, writer);
+        }
         // The ask of the screen draws it, so one turn asks one time. The answer
         // then travels to the decision as a value.
         let asked = screen.poll();
         if let Some(reason) = stopped(self.recorded, &self.limits, stop, asked) {
-            let grace = self.limits.grace_now();
-            drain_names(writer, &mut self.namer, grace)?;
-            close(writer, &self.id, self.recorded, reason)?;
-            return Ok(Turn::Closed(Outcome {
-                rounds: self.recorded,
+            let stopping = Stopping {
                 reason,
-            }));
+                // A grace that no clock can add to leaves the run without a
+                // moment to wait for, and the first step of the wait then
+                // closes it. That is the wait of a run which reached its
+                // deadline, and it still writes the names that already
+                // arrived.
+                until: Instant::now()
+                    .checked_add(self.limits.grace_now())
+                    .unwrap_or_else(Instant::now),
+            };
+            self.stopping = Some(stopping);
+            return self.drain(stopping, writer);
         }
         match self.rounds.recv_timeout(wait) {
             Ok(round) => {
@@ -288,10 +356,10 @@ impl Run {
                 // dead tracer, because a file that takes no record names the
                 // fault that stops the tool from doing its job at all.
                 //
-                // The grace of this drain is zero. The names that already
-                // arrived still reach the file, and a run that is already
-                // failing waits for nothing.
-                drain_names(writer, &mut self.namer, Duration::ZERO)?;
+                // The ask is the last one. The names that already arrived
+                // still reach the file, and a run that is already failing
+                // waits for nothing.
+                write_names(writer, &self.namer.names(&[], Utc::now()))?;
                 close(writer, &self.id, self.recorded, EndReason::Error)?;
                 Err(RunError::Tracer {
                     rounds: self.recorded,
@@ -321,6 +389,44 @@ impl Run {
     pub(crate) fn abandon<W: Write>(&self, writer: &mut Writer<W>) -> Result<(), RunError> {
         close(writer, &self.id, self.recorded, EndReason::Error)
     }
+
+    /// Takes one step of the wait for the names of the hops, and closes the run
+    /// when that wait ends. Each name that arrives becomes one record.
+    ///
+    /// The first ask of an address starts the lookup of that address, so the
+    /// name of an address that a round reports arrives on a later turn. A run
+    /// whose last turn is its stopping turn therefore holds names that no turn
+    /// wrote, and these steps are the turns that write them.
+    ///
+    /// The wait takes one step whatever the grace, so a grace of nothing still
+    /// writes the names that already arrived. The step after that one comes on
+    /// the next turn of the run, and [`Run::wait`] is what holds the caller
+    /// between the two. The wait ends at the moment every lookup settles, and
+    /// at the end of the grace at the latest.
+    ///
+    /// The names of the wait reach no screen. The wait runs while the run
+    /// closes, and the display of a run that closes shows nothing more. Every
+    /// one of them reaches the file, so a replay of that file names the
+    /// address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunError::Write`] when a record does not reach the file.
+    fn drain<W: Write>(
+        &mut self,
+        stopping: Stopping,
+        writer: &mut Writer<W>,
+    ) -> Result<Turn, RunError> {
+        write_names(writer, &self.namer.names(&[], Utc::now()))?;
+        if self.namer.waits() && Instant::now() < stopping.until {
+            return Ok(Turn::Draining);
+        }
+        close(writer, &self.id, self.recorded, stopping.reason)?;
+        Ok(Turn::Closed(Outcome {
+            rounds: self.recorded,
+            reason: stopping.reason,
+        }))
+    }
 }
 
 /// Records one run: the record that opens it, one record for each round, and
@@ -329,6 +435,14 @@ impl Run {
 /// The run takes turns until it closes, and each turn waits [`POLL`] at the
 /// longest, so the run reads the stop flag and its deadline ten times each
 /// second. [`Run::turn`] holds what one turn does.
+///
+/// A turn that takes one step of the wait for the names reads no round, so it
+/// answers at once. This loop is the one that sleeps between two such steps,
+/// and it sleeps for the time that the run named.
+///
+/// The turn that a limit stops read its wait while the run still stood, so the
+/// sleep after that turn can be nothing. That costs one more turn and nothing
+/// else.
 ///
 /// # Errors
 ///
@@ -346,8 +460,10 @@ pub(crate) fn record<W: Write>(
     let mut run = Run::open(start, rounds, limits, namer, writer)?;
     loop {
         let wait = run.wait();
-        if let Turn::Closed(outcome) = run.turn(wait, stop, writer, screen)? {
-            return Ok(outcome);
+        match run.turn(wait, stop, writer, screen)? {
+            Turn::Closed(outcome) => return Ok(outcome),
+            Turn::Draining => std::thread::sleep(wait),
+            Turn::Round | Turn::Quiet => {}
         }
     }
 }
@@ -391,44 +507,6 @@ fn write_names<W: Write>(writer: &mut Writer<W>, names: &[NameRecord]) -> Result
             .map_err(RunError::Write)?;
     }
     Ok(())
-}
-
-/// Asks the namer one last time, and again until no address waits or the grace
-/// runs out. Each name that arrives becomes one record.
-///
-/// The first ask of an address starts the lookup of that address, so the name of
-/// an address that a round reports arrives on a later turn. A run whose last
-/// turn is its stopping turn therefore holds names that no turn wrote, and this
-/// drain is the turn that writes them.
-///
-/// The drain asks once whatever the grace, so a grace of zero still writes the
-/// names that already arrived. Between two asks it sleeps for [`POLL`] at the
-/// longest, and never past the end of the grace.
-///
-/// The names of the drain reach no screen. The drain runs while the run closes,
-/// and the display of a run that closes shows nothing more. Every one of them
-/// reaches the file, so a replay of that file names the address.
-///
-/// # Errors
-///
-/// Returns [`RunError::Write`] when a record does not reach the file.
-fn drain_names<W: Write>(
-    writer: &mut Writer<W>,
-    namer: &mut Namer,
-    grace: Duration,
-) -> Result<(), RunError> {
-    let end = Instant::now() + grace;
-    loop {
-        write_names(writer, &namer.names(&[], Utc::now()))?;
-        if !namer.waits() {
-            return Ok(());
-        }
-        let left = end.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Ok(());
-        }
-        std::thread::sleep(left.min(POLL));
-    }
 }
 
 /// Why the run stops at the top of this turn. A run that goes on stops for
@@ -585,23 +663,22 @@ mod tests {
 
     /// The grace of a run whose name arrives after its last round.
     ///
-    /// The drain sleeps for one hundred milliseconds at the longest between two
-    /// asks, so this value holds a few asks. The name arrives on the second ask
-    /// of the drain, and the run closes there, so the test pays one sleep and
-    /// not this whole time.
+    /// The loop sleeps for one hundred milliseconds at the longest between two
+    /// steps of the wait, so this value holds a few steps. The name arrives on
+    /// the second step, and the run closes there, so the test pays one sleep
+    /// and not this whole time.
     const A_GRACE: Duration = Duration::from_millis(300);
 
     /// The grace of a run whose lookup never finishes.
     ///
-    /// The drain asks until this time runs out, so this value is the whole cost
-    /// of the test that reads it.
+    /// The run takes one step of the wait on each turn until this time runs
+    /// out, so this value is the whole cost of the test that reads it.
     const A_SHORT_GRACE: Duration = Duration::from_millis(200);
 
     /// The grace of a run whose deadline cuts that grace short.
     ///
     /// The value stands far above the time that a run of no round takes, so a
-    /// drain that waited for the whole grace is plain in the elapsed time of
-    /// the run.
+    /// wait for the whole grace is plain in the elapsed time of the run.
     const A_LONG_GRACE: Duration = Duration::from_secs(1);
 
     /// The longest that a run whose deadline already passed takes.
@@ -614,8 +691,8 @@ mod tests {
     /// The number of asks that the run of a passed deadline gives the resolver.
     ///
     /// The test asks about the two hops of one round before the run starts, and
-    /// the drain of the run asks one more time about the hop that waits.
-    const ASKS_OF_A_CUT_DRAIN: usize = 3;
+    /// the one step of the wait asks one more time about the hop that waits.
+    const ASKS_OF_A_CUT_WAIT: usize = 3;
 
     /// The limits of a run that stops on nothing.
     const NO_LIMIT: Limits = Limits {
@@ -1637,15 +1714,15 @@ mod tests {
         assert_eq!(outcome_of(&ran).rounds, 1);
     }
 
-    /// One ask of the drain is not always enough. The drain asks again until
-    /// the name arrives, and the grace holds the run open for it.
+    /// One step of the wait is not always enough. The run asks again on the
+    /// turn that follows, and the grace holds the run open for it.
     ///
     /// The resolver answers `Pending` for the first two asks of the first hop.
-    /// The round takes the first ask and the drain takes the second, so the
-    /// name arrives on the third ask, which is the second ask of the drain. The
-    /// drain sleeps between those two asks.
+    /// The round takes the first ask and the first step of the wait takes the
+    /// second, so the name arrives on the third ask, which is the second step
+    /// of the wait. The loop sleeps between those two steps.
     #[test]
-    fn a_name_that_the_first_ask_of_the_drain_does_not_reach_arrives_on_the_second() {
+    fn a_name_that_the_first_step_of_the_wait_does_not_reach_arrives_on_the_second() {
         let resolver = FakeResolver::new(&[(
             FIRST_HOP,
             &[Lookup::Pending, Lookup::Pending, named(FIRST_HOP_NAME)],
@@ -1660,23 +1737,23 @@ mod tests {
         assert_eq!(
             kinds_of(&ran.recording),
             ["run", "round", "name", "end"],
-            "the name of the second ask of the drain stands before the end"
+            "the name of the second step of the wait stands before the end"
         );
         assert_eq!(
             names_of(&ran.recording)[0].host,
             FIRST_HOP_NAME,
-            "the record holds the name that the drain waited for"
+            "the record holds the name that the run waited for"
         );
         assert_eq!(
             resolver.asks(),
             4,
-            "the round asked about the two hops, and the drain asked twice more about the first one"
+            "the round asked about the two hops, and the wait asked twice more about the first one"
         );
         assert_eq!(outcome_of(&ran).reason, EndReason::Rounds);
         assert_eq!(outcome_of(&ran).rounds, 1);
     }
 
-    /// The grace bounds the drain. A lookup that never finishes holds the run
+    /// The grace bounds the wait. A lookup that never finishes holds the run
     /// open for the grace and no longer, and the run closes with no name.
     #[test]
     fn a_lookup_that_never_finishes_lets_the_grace_close_the_run() {
@@ -1701,13 +1778,13 @@ mod tests {
         assert_eq!(outcome_of(&ran).rounds, 1);
     }
 
-    /// The deadline bounds the whole run, and the drain of the names fits
+    /// The deadline bounds the whole run, and the wait for the names fits
     /// inside it. A run that reached its moment gives its names no grace, so no
-    /// destination of a hunt holds that hunt past its timeout.
+    /// destination of a hunt holds its lane past that timeout.
     ///
     /// The rounds of the run put the first hop into the namer before the run
     /// starts, and the lookup of that hop never finishes. The run then reads a
-    /// moment that already passed. The drain asks one time, which writes the
+    /// moment that already passed. The wait takes one step, which writes the
     /// names that already arrived, and the run closes there.
     #[test]
     fn a_deadline_that_passed_gives_the_names_no_grace() {
@@ -1730,8 +1807,8 @@ mod tests {
         assert_eq!(outcome_of(&ran).reason, EndReason::Duration);
         assert_eq!(
             resolver.asks(),
-            ASKS_OF_A_CUT_DRAIN,
-            "the drain of a run that reached its moment asks one time"
+            ASKS_OF_A_CUT_WAIT,
+            "the wait of a run that reached its moment asks one time"
         );
         assert!(
             elapsed < A_QUICK_STOP,

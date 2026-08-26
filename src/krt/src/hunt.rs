@@ -63,6 +63,14 @@
 //! thread of its own and hands its rounds over a channel, so the hunt sweeps
 //! the channels of the pool, one turn of each, and the file, the indicator, and
 //! the resolver stay where they were.
+//!
+//! No turn of that sweep waits for anything. A destination that closes still
+//! waits for the names of its hops, and it takes one step of that wait on each
+//! sweep. It keeps its lane until the wait ends, so the hunt starts the next
+//! destination one wait later than it otherwise would. It holds up no
+//! destination that already stands: every other flight of the pool records its
+//! rounds, reads its own deadline, and reaches the indicator while that one
+//! waits.
 
 use crate::live::Screen;
 use crate::names;
@@ -776,9 +784,15 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
     /// finished.
     ///
     /// Each turn waits for nothing, so one destination that answers slowly
-    /// holds up no other. The sweep answers whether the hunt moved: a turn that
-    /// recorded a round and a destination that closed both move it, and a sweep
-    /// that moved nothing is what the hunt sleeps after.
+    /// holds up no other. A destination that closed and still waits for the
+    /// names of its hops answers [`Turn::Draining`], which takes one step of
+    /// that wait and moves nothing. It holds its lane until the wait ends, so
+    /// the hunt draws no destination in its place, and it holds up no
+    /// destination that already stands.
+    ///
+    /// The sweep answers whether the hunt moved: a turn that recorded a round
+    /// and a destination that closed both move it, and a sweep that moved
+    /// nothing is what the hunt sleeps after.
     ///
     /// A fault of one destination stops the hunt, and [`Hunt::abandon`] closes
     /// the destinations that stood beside it before the fault reaches the
@@ -812,7 +826,7 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
                     moved = true;
                     place += 1;
                 }
-                Turn::Quiet => place += 1,
+                Turn::Quiet | Turn::Draining => place += 1,
                 Turn::Closed(outcome) => {
                     self.close(place, outcome.reason);
                     moved = true;
@@ -879,7 +893,9 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
     ///
     /// The sleep ends at the nearest deadline of the destinations in flight, so
     /// a destination stops at the moment of its target timeout and not one
-    /// sleep after it.
+    /// sleep after it. A destination that waits for the names of its hops names
+    /// the end of that wait in the place of its deadline, so the next step of
+    /// the wait comes at the moment it is due.
     fn nap(&self) -> Duration {
         self.flights
             .iter()
@@ -2375,8 +2391,8 @@ mod tests {
         /// this whatever it answers.
         const fn waiting_for_names(self, name_grace: Duration, target_timeout: Duration) -> Self {
             Self {
-                name_grace,
                 target_timeout,
+                name_grace,
                 ..self
             }
         }
@@ -3448,10 +3464,10 @@ mod tests {
             ONE_ASK_A_SWEEP,
             "the destination beside the wait must take a turn between two asks of it: {asked:?}"
         );
-        let named = names_in(&recording);
+        let hosts = names_in(&recording);
         assert!(
-            named.contains(&DESTINATION_NAME.to_owned()),
-            "the wait must still put the name of the destination in the file: {named:?}"
+            hosts.contains(&DESTINATION_NAME.to_owned()),
+            "the wait must still put the name of the destination in the file: {hosts:?}"
         );
     }
 
