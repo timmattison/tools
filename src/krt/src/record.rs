@@ -455,7 +455,8 @@ pub(crate) enum EndReason {
     Duration,
     /// The run reached the round limit.
     Rounds,
-    /// A fault stopped the run.
+    /// A fault stopped the run. The fault is a fault of this run, or a fault of
+    /// another run of the same hunt that stopped the whole hunt.
     Error,
 }
 

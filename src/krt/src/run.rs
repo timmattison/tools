@@ -142,6 +142,11 @@ pub(crate) enum Turn {
 /// Another sweeps many runs with a wait of nothing on each of them and sleeps
 /// once for the whole sweep, which is what a hunt does, so one slow destination
 /// holds up no other.
+///
+/// A fault of one run of such a pool stops the whole pool, and the runs beside
+/// that one take no further turn. [`Run::abandon`] is the record that closes
+/// each of them, so a reader of the file tells those runs from a file that
+/// stops in the middle.
 pub(crate) struct Run {
     /// The identifier that every record of this run carries.
     id: RunId,
@@ -293,6 +298,28 @@ impl Run {
                 })
             }
         }
+    }
+
+    /// Writes the record that closes a run which the fault of another run
+    /// ended.
+    ///
+    /// A hunt holds many runs at one moment, and a fault of one of them stops
+    /// the hunt where it stands. The runs beside that one then hold the record
+    /// that opened them, the rounds they recorded, and nothing that closes
+    /// them. A reader of the file reads such a run as a file that stops in the
+    /// middle, so the driver of the pool writes this record for each run that
+    /// still stood. The reason is [`EndReason::Error`], because a fault ended
+    /// the run.
+    ///
+    /// The record names the rounds that the run recorded, as the record of a
+    /// run that stopped on a limit does. The run takes no further turn, so this
+    /// asks the namer for nothing and writes no `name` record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunError::Write`] when the record does not reach the file.
+    pub(crate) fn abandon<W: Write>(&self, writer: &mut Writer<W>) -> Result<(), RunError> {
+        close(writer, &self.id, self.recorded, EndReason::Error)
     }
 }
 

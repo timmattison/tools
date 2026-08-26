@@ -38,6 +38,11 @@
 //! no live table. The fold therefore rides on the door that the run loop
 //! already knocks on, and the hunt reads no file back.
 //!
+//! A fault of one destination stops the hunt, and the hunt then writes the
+//! record that closes each destination that stood beside it. Every run of the
+//! file therefore holds the record that closes it, and a reader tells a hunt
+//! that a fault stopped from a file that stops in the middle.
+//!
 //! The [`Scorer`] also ticks the indicator of `status.rs` on every turn of that
 //! run loop, because the turns of one destination are the heartbeat of the
 //! whole hunt. The loop of the hunt names the destination of each round, the
@@ -770,6 +775,10 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
     /// recorded a round and a destination that closed both move it, and a sweep
     /// that moved nothing is what the hunt sleeps after.
     ///
+    /// A fault of one destination stops the hunt, and [`Hunt::abandon`] closes
+    /// the destinations that stood beside it before the fault reaches the
+    /// caller.
+    ///
     /// # Errors
     ///
     /// Returns [`RunError::Write`] when a record does not reach the file, and
@@ -780,11 +789,18 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
         let mut moved = false;
         let mut place = 0;
         while place < self.flights.len() {
-            let turn = {
+            let taken = {
                 let flight = &mut self.flights[place];
                 flight
                     .run
-                    .turn(Duration::ZERO, self.stop, self.writer, &mut flight.scorer)?
+                    .turn(Duration::ZERO, self.stop, self.writer, &mut flight.scorer)
+            };
+            let turn = match taken {
+                Ok(turn) => turn,
+                Err(fault) => {
+                    self.abandon(place);
+                    return Err(fault);
+                }
             };
             match turn {
                 Turn::Round => {
@@ -801,12 +817,39 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
         Ok(moved)
     }
 
+    /// Closes every destination that stood when a fault stopped the hunt.
+    ///
+    /// The destination at `place` is the one that met the fault, and
+    /// [`run::Run::turn`] already wrote the `end` record of that run. So this
+    /// takes that destination out and writes nothing for it. Every other
+    /// destination of the pool holds a `run` record, the rounds it recorded,
+    /// and nothing that closes it, and [`run::Run::abandon`] is the record that
+    /// closes it.
+    ///
+    /// The hunt drops the answer of each of those writes. A write that fails is
+    /// what stops most hunts here, and it fails these writes too. The fault
+    /// that stopped the hunt is the first one, and the caller reads that one.
+    ///
+    /// An abandoned destination takes no score, no count, and no line of the
+    /// indicator. It stood in the air and it did not finish, and the summary
+    /// counts the rounds that finished.
+    fn abandon(&mut self, place: usize) {
+        drop(self.flights.remove(place));
+        for flight in self.flights.drain(..) {
+            drop(flight.run.abandon(self.writer));
+        }
+    }
+
     /// Takes the destination at this place out of the pool and scores it.
     ///
     /// A destination that the user cut short takes no row and no count of the
     /// summary, and the indicator hears no answer for it: a round that stopped
     /// in the middle measured a path that the tool never finished measuring.
     /// The lane goes back to the pool either way.
+    ///
+    /// This is the path of a destination whose run closed. A destination that
+    /// a fault of another destination cut short takes [`Hunt::abandon`], and it
+    /// takes no score either.
     fn close(&mut self, place: usize, reason: EndReason) {
         let flight = self.flights.remove(place);
         self.free.push(flight.lane);
@@ -869,11 +912,17 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
 /// finished.
 ///
 /// A tracer that does not start stops the hunt, and the destinations that stood
-/// at that moment finish first. A fault of the file stops it where it stands,
-/// because a file that takes no record takes none of theirs either. Both keep
-/// the summary of the rounds that finished: the rounds in front of the fault
-/// measured what they measured, and the caller prints their table before it
-/// prints the reason.
+/// at that moment finish first. A tracer that dies stops the hunt where it
+/// stands, and so does a fault of the file. The destinations that stood at that
+/// moment take the `end` record of a fault, so every run of the file holds the
+/// record that closes it. A fault of the file fails those records too, because
+/// a file that takes no record takes none of theirs either.
+///
+/// All three keep the summary of the rounds that finished: the rounds in front
+/// of the fault measured what they measured, and the caller prints their table
+/// before it prints the reason. A destination that a fault cut short takes no
+/// row and no count of that summary, as a destination that the user cut short
+/// takes none.
 ///
 /// # Errors
 ///

@@ -649,8 +649,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the wall time, as in `8/8 reached   17/128 targets   9 partial   192s`. The two ratios tell a
     hunt that held every round it wanted from one that gave up on its targets. `Ctrl-C` stops the
     hunt and still prints the summary of the rounds that finished. A fault that stops the hunt — a
-    write that the file refuses, a tracer that does not start — prints that same summary, and it
-    then names the reason on standard error.
+    write that the file refuses, a tracer that does not start, a tracer that dies — prints that
+    same summary, and it then names the reason on standard error. A destination that the fault cut
+    short takes no row and no count of that summary, as a destination that `Ctrl-C` cut short takes
+    none.
   - A hunt shows what it is doing while it runs. A hunt whose standard output is a terminal draws
     one status line, which redraws in place: a spinner that turns on every sweep of the pool, a
     bar of the hunt, the rounds it holds of the rounds it wants, the address it started last with
@@ -678,7 +680,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     writes. The `run` record of each destination carries the identifier of the hunt, so a reader
     groups the runs of one hunt, and `replay` folds any one of them with no change. The hunt holds
     many destinations at once, so the records of two of them stand between each other in the file.
-    The records of one destination stay in order, which is what `replay` folds.
+    The records of one destination stay in order, which is what `replay` folds. A fault that stops
+    the hunt closes every destination that stood at that moment: each of those runs takes an `end`
+    record whose reason is an error. Every run of the file therefore holds the record that closes
+    it, and a reader tells a hunt that a fault stopped from a file that stops in the middle. A
+    write that the file refuses fails those records too, because a file that takes no record takes
+    none of theirs either.
   - `krt hunt` takes these flags, and the seven flags of a trace that still apply: `--output`,
     `--interval`, `--first-ttl`, `--max-ttl`, `--protocol`, `--no-dns`, and `--source`. Every flag
     stands behind the command, because a flag in front of it reads `hunt` as the destination.
