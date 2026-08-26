@@ -1345,6 +1345,7 @@ mod tests {
     use crate::trace::Lane;
     use crate::{Multipath, Protocol};
     use chrono::Utc;
+    use std::cell::Cell;
     use std::collections::HashSet;
     use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};
@@ -1378,6 +1379,27 @@ mod tests {
     fn draw_of(candidates: &[&str]) -> Draw {
         let list: Vec<Ipv4Addr> = candidates.iter().copied().map(address).collect();
         Draw::new(Box::new(list.into_iter()))
+    }
+
+    /// The draw over a scripted list that turns a flag over when it runs out.
+    ///
+    /// A hunt whose pool holds more destinations than the list asks the draw
+    /// one time more than the list answers. Every address of the list stands in
+    /// flight at that moment, so a stop closure that reads this flag stops a
+    /// hunt whose pool is full.
+    ///
+    /// The trigger is what the hunt does to the draw, and not a count of the
+    /// calls to the closure. A change to the order of the tests inside
+    /// [`Hunt::room`] therefore leaves it alone.
+    fn draw_that_signals(candidates: &[&str], ran_out: &Rc<Cell<bool>>) -> Draw {
+        let list: Vec<Ipv4Addr> = candidates.iter().copied().map(address).collect();
+        let flag = Rc::clone(ran_out);
+        Draw::new(Box::new(list.into_iter().chain(std::iter::from_fn(
+            move || {
+                flag.set(true);
+                None
+            },
+        ))))
     }
 
     /// The address that a draw gives, after it reads the rejected candidates
@@ -1863,6 +1885,20 @@ mod tests {
             .unwrap_or_else(|| panic!("the summary must hold the `{label}` row"))
     }
 
+    /// The three counts of the summary, without the wall time beside them.
+    ///
+    /// A hunt that runs takes whatever time the machine gives it, so a test of
+    /// a hunt that runs pins the three counts and leaves the fourth field out.
+    /// A test of a summary that a test built reads [`counts`] instead, because
+    /// such a summary holds a wall time that the test named.
+    fn measured(summary: &Summary) -> String {
+        let line = counts(summary);
+        let (measured, _) = line
+            .rsplit_once(crate::ui::FIELD_SEPARATOR)
+            .expect("the counts hold four fields");
+        measured.to_owned()
+    }
+
     /// The last line of the summary, which counts what the hunt did.
     fn counts(summary: &Summary) -> String {
         summary
@@ -2322,17 +2358,28 @@ mod tests {
         let mut sink = Vec::new();
         let summary = {
             let mut writer = Writer::to_sink(&mut sink);
-            hunt_into(addresses, probes, shape, stop, names, &mut writer, status)
+            hunt_into(
+                draw_of(addresses),
+                probes,
+                shape,
+                stop,
+                names,
+                &mut writer,
+                status,
+            )
         }?;
         Ok((summary, read_back(&sink)))
     }
 
-    /// Runs one hunt into the writer that a test names.
+    /// Runs one hunt over the draw that a test names, into the writer that it
+    /// names.
     ///
-    /// The sink of that writer is what a test of a write that fails hands in.
-    /// Every other test takes [`run_hunt`], which reads its bytes back.
+    /// The sink of that writer is what a test of a write that fails hands in,
+    /// and the draw is what a test of a hunt that runs out of addresses hands
+    /// in. Every other test takes [`run_hunt`], which builds a draw of a list
+    /// and reads its bytes back.
     fn hunt_into<W: std::io::Write>(
-        addresses: &[&str],
+        draw: Draw,
         probes: &mut FakeProbes,
         shape: Shape,
         stop: &dyn Fn() -> bool,
@@ -2340,7 +2387,6 @@ mod tests {
         writer: &mut Writer<W>,
         status: &mut dyn Status,
     ) -> Result<Summary, HuntStopped> {
-        let list: Vec<Ipv4Addr> = addresses.iter().copied().map(address).collect();
         let facts = Facts {
             id: HuntId::from(HUNT_ID),
             krt: KRT.to_owned(),
@@ -2374,7 +2420,7 @@ mod tests {
             crate::testing::FakeResolver::new(names)
         };
         let mut sources = Sources {
-            draw: Draw::new(Box::new(list.into_iter())),
+            draw,
             probes,
             resolver,
         };
@@ -2565,7 +2611,7 @@ mod tests {
         let mut recorder = Recorder::default();
         drop(
             hunt_into(
-                &[NEAR, FAR],
+                draw_of(&[NEAR, FAR]),
                 &mut probes,
                 wanting(2),
                 &never_stops(),
@@ -2902,6 +2948,41 @@ mod tests {
         );
     }
 
+    /// The targets count of the summary reads the destinations that the hunt
+    /// started.
+    ///
+    /// A destination that the user stopped takes no score, and the indicator
+    /// already named it. So a count of the scores stands below the count that
+    /// the last line of the indicator holds, and below the number of runs in
+    /// the file.
+    ///
+    /// The hunt of this test holds three destinations in a pool of four. The
+    /// draw runs out at that moment, and the stop closure answers true from
+    /// then on, so every one of the three closes on the stop and none of them
+    /// takes a score.
+    #[test]
+    fn the_summary_counts_the_destinations_that_the_hunt_started() {
+        let ran_out = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&ran_out);
+        let stop = move || flag.get();
+        let mut probes = FakeProbes::of(&[&[], &[], &[]]);
+        let mut sink = Vec::new();
+        let summary = {
+            let mut writer = Writer::to_sink(&mut sink);
+            hunt_into(
+                draw_that_signals(&[NEAR, FAR, ANOTHER_NEAR], &ran_out),
+                &mut probes,
+                wanting(8).at_once(4),
+                &stop,
+                &[],
+                &mut writer,
+                &mut Recorder::default(),
+            )
+        }
+        .expect("the hunt must finish");
+        assert_eq!(measured(&summary), "0/8 reached   3/64 targets   0 partial");
+    }
+
     /// The summary of a hunt reads the destinations that the hunt traced.
     #[test]
     fn the_summary_of_a_hunt_ranks_the_destinations_that_it_traced() {
@@ -3055,7 +3136,7 @@ mod tests {
         let stopped = {
             let mut writer = Writer::to_sink(&mut sink);
             hunt_into(
-                &[NEAR, FAR],
+                draw_of(&[NEAR, FAR]),
                 &mut probes,
                 wanting(2),
                 &never_stops(),
@@ -3105,7 +3186,7 @@ mod tests {
         let mut probes = FakeProbes::of(&[REACHED_AT_FIVE, REACHED_AT_FIVE]);
         let mut writer = Writer::to_sink(Sink::that_takes(RECORDS_OF_ONE_DESTINATION));
         let stopped = hunt_into(
-            &[NEAR, FAR],
+            draw_of(&[NEAR, FAR]),
             &mut probes,
             wanting(2).serial(),
             &never_stops(),
