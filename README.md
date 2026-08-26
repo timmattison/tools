@@ -645,14 +645,17 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     round-trip time and the loss of the last hop that answered, the number of TTLs inside the path
     that answered nothing, and the run that recorded the trace, so `krt replay <FILE> --run <ID>`
     prints the whole path. Under the table stand the rounds against the rounds the hunt wanted,
-    the destinations it traced against the ones it could trace, the number of partial paths, and
+    the destinations it started against the ones it could start, the number of partial paths, and
     the wall time, as in `8/8 reached   17/128 targets   9 partial   192s`. The two ratios tell a
-    hunt that held every round it wanted from one that gave up on its targets. `Ctrl-C` stops the
-    hunt and still prints the summary of the rounds that finished. A fault that stops the hunt — a
-    write that the file refuses, a tracer that does not start, a tracer that dies — prints that
-    same summary, and it then names the reason on standard error. A destination that the fault cut
-    short takes no row and no count of that summary, as a destination that `Ctrl-C` cut short takes
-    none.
+    hunt that held every round it wanted from one that gave up on its targets, and the targets
+    count is the one that the last line of the indicator held. `Ctrl-C` stops the hunt and still
+    prints the summary of the rounds that finished. A fault that stops the hunt — a write that the
+    file refuses, a tracer that does not start, a tracer that dies — prints that same summary, and
+    it then names the reason on standard error. A destination that the fault cut short takes no row
+    of that table and no round, as a destination that `Ctrl-C` cut short takes none, and both still
+    count against the targets, because the hunt started both. The three counts of such a hunt
+    therefore do not add up: `5/8 reached   13/128 targets   0 partial` is a hunt that held 8
+    destinations when `Ctrl-C` stopped it, and none of those 8 took a score.
   - A hunt shows what it is doing while it runs. A hunt whose standard output is a terminal draws
     one status line, which redraws in place: a spinner that turns on every sweep of the pool, a
     bar of the hunt, the rounds it holds of the rounds it wants, the address it started last with

@@ -536,6 +536,11 @@ pub(crate) struct Bounds {
     ///
     /// The draw of a real hunt never runs out, so this is what stops a hunt
     /// that finds fewer answers than it wants.
+    ///
+    /// A destination counts against this the moment its tracer starts, whether
+    /// it answers or not and whether it finishes or not. The indicator and the
+    /// summary count the same destinations, so both lines read one number
+    /// against this bound.
     pub(crate) max_targets: u64,
 }
 
@@ -830,9 +835,10 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
     /// what stops most hunts here, and it fails these writes too. The fault
     /// that stopped the hunt is the first one, and the caller reads that one.
     ///
-    /// An abandoned destination takes no score, no count, and no line of the
-    /// indicator. It stood in the air and it did not finish, and the summary
-    /// counts the rounds that finished.
+    /// An abandoned destination takes no score, no row of the table, and no
+    /// answer on the indicator. It stood in the air and it did not finish, and
+    /// the table holds the rounds that finished. It still counts among the
+    /// destinations the hunt started, because its tracer started.
     fn abandon(&mut self, place: usize) {
         drop(self.flights.remove(place));
         for flight in self.flights.drain(..) {
@@ -842,10 +848,11 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
 
     /// Takes the destination at this place out of the pool and scores it.
     ///
-    /// A destination that the user cut short takes no row and no count of the
-    /// summary, and the indicator hears no answer for it: a round that stopped
-    /// in the middle measured a path that the tool never finished measuring.
-    /// The lane goes back to the pool either way.
+    /// A destination that the user cut short takes no row of the table, no
+    /// round, and no answer on the indicator: a round that stopped in the
+    /// middle measured a path that the tool never finished measuring. It still
+    /// counts among the destinations the hunt started. The lane goes back to
+    /// the pool either way.
     ///
     /// This is the path of a destination whose run closed. A destination that
     /// a fault of another destination cut short takes [`Hunt::abandon`], and it
@@ -908,8 +915,9 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
 ///
 /// `stop` answers whether the user asked the hunt to stop, and it reaches both
 /// this loop and every run in flight. A destination that the user cut short
-/// takes no row and no count of the summary: the summary counts the rounds that
-/// finished.
+/// takes no row of the table and no round: the table holds the rounds that
+/// finished. It counts among the destinations the hunt started, because the
+/// hunt started it and the indicator named it.
 ///
 /// A tracer that does not start stops the hunt, and the destinations that stood
 /// at that moment finish first. A tracer that dies stops the hunt where it
@@ -921,8 +929,9 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
 /// All three keep the summary of the rounds that finished: the rounds in front
 /// of the fault measured what they measured, and the caller prints their table
 /// before it prints the reason. A destination that a fault cut short takes no
-/// row and no count of that summary, as a destination that the user cut short
-/// takes none.
+/// row of that table and no round, as a destination that the user cut short
+/// takes none, and it counts among the destinations the hunt started as that
+/// one does.
 ///
 /// # Errors
 ///
@@ -965,6 +974,7 @@ pub(crate) fn record<W: Write>(
     let summary = Summary::new(
         hunt.scores,
         started.elapsed(),
+        hunt.targets,
         plan.bounds,
         plan.include_partial,
     );
@@ -1142,12 +1152,21 @@ impl Score {
 /// a hunt that `Ctrl-C` stopped prints the same table over the rounds it did
 /// finish. A hunt that a fault stopped prints it too, and the fault follows the
 /// table.
+///
+/// The count of the destinations comes off the hunt and not off those scores. A
+/// destination that started and took no score still cost the hunt one of the
+/// destinations its bounds let it trace, and the indicator already named it.
 #[derive(Debug)]
 pub(crate) struct Summary {
     /// The score of each destination, in the order the hunt traced them.
     scores: Vec<Score>,
     /// The time that the whole hunt took.
     elapsed: Duration,
+    /// The number of destinations whose tracer started.
+    ///
+    /// The indicator counts the same destinations, so the last line of a hunt
+    /// and the summary under it hold one number.
+    targets: u64,
     /// The two numbers that stopped the hunt.
     ///
     /// The counts stand against them, so a reader tells a hunt that held every
@@ -1159,15 +1178,21 @@ pub(crate) struct Summary {
 
 impl Summary {
     /// Builds the summary of one hunt.
+    ///
+    /// `targets` is the number of destinations whose tracer started, and
+    /// `bounds` holds the number it could start. The two stand against each
+    /// other in the counts, as `scores` stands against `Bounds::rounds`.
     pub(crate) fn new(
         scores: Vec<Score>,
         elapsed: Duration,
+        targets: u64,
         bounds: Bounds,
         include_partial: bool,
     ) -> Self {
         Self {
             scores,
             elapsed,
+            targets,
             bounds,
             include_partial,
         }
@@ -1227,6 +1252,14 @@ impl Summary {
     /// held every round it wanted from one that gave up on its targets, which
     /// the bare counts never said.
     ///
+    /// The three counts of a hunt that stopped early do not add up. The reached
+    /// count and the partial count read the scores, and the targets count reads
+    /// the destinations that started, so a destination that started and took no
+    /// score stands in the third number alone. `Ctrl-C` leaves such
+    /// destinations, and so does a fault, because neither one lets the
+    /// destinations in flight finish. A hunt that ran to a bound of its own
+    /// leaves none, and its three counts do add up.
+    ///
     /// The line stands at the left edge, where the closing line of a trace
     /// stands, and the table above it stands one column in, where the table of
     /// a folded run stands. The two are different things: the table is a table,
@@ -1239,11 +1272,7 @@ impl Summary {
             .count();
         [
             format!("{reached}/{} {REACHED}", self.bounds.rounds),
-            format!(
-                "{}/{} {TARGETS}",
-                self.scores.len(),
-                self.bounds.max_targets
-            ),
+            format!("{}/{} {TARGETS}", self.targets, self.bounds.max_targets),
             format!("{} {PARTIAL}", self.scores.len() - reached),
             ui::render_duration(self.elapsed),
         ]
@@ -1845,6 +1874,9 @@ mod tests {
         max_targets: 128,
     };
 
+    /// The number of destinations that a summary test of one score names.
+    const ONE_TARGET: u64 = 1;
+
     /// The summary of a hunt of three destinations, as the tests read it.
     ///
     /// The near destination answered at TTL 5 and the far one at TTL 18, so the
@@ -1873,8 +1905,20 @@ mod tests {
                 &[],
             ),
         ];
-        Summary::new(scores, ELAPSED, SUMMARY_BOUNDS, include_partial)
+        Summary::new(
+            scores,
+            ELAPSED,
+            THREE_TARGETS,
+            SUMMARY_BOUNDS,
+            include_partial,
+        )
     }
+
+    /// The number of destinations that the hunt of [`a_hunt`] started.
+    ///
+    /// Every one of the three finished and took a score, so this hunt is one
+    /// whose three counts add up.
+    const THREE_TARGETS: u64 = 3;
 
     /// The row of the summary that carries one label.
     fn row(summary: &Summary, label: &str) -> String {
@@ -2004,7 +2048,7 @@ mod tests {
     #[test]
     fn a_summary_of_no_ranked_path_says_so_and_still_counts_the_hunt() {
         let scores = vec![traced(QUIET, QUIET_RUN, &[&[(1, FIRST_HOP, 1.0)]], &[])];
-        let summary = Summary::new(scores, ELAPSED, SUMMARY_BOUNDS, false);
+        let summary = Summary::new(scores, ELAPSED, ONE_TARGET, SUMMARY_BOUNDS, false);
         let lines = summary.lines();
         assert!(
             lines.iter().any(|line| line.contains(NOTHING_TO_RANK)),
