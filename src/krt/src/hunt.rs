@@ -613,7 +613,7 @@ struct Hunt<'a, 's, W: Write> {
     scores: Vec<Score>,
     /// The number of destinations that answered.
     reached: u64,
-    /// The number of destinations that the hunt started.
+    /// The number of destinations whose tracer started.
     targets: u64,
     /// The moment of the run of the destination that it started last.
     previous: Option<DateTime<Utc>>,
@@ -670,6 +670,10 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
     /// Draws destinations and starts them, until the pool is full or a bound
     /// stops the hunt from drawing another.
     ///
+    /// A destination counts, and reaches the indicator, when its tracer
+    /// starts. A tracer that refuses starts no destination, so the address it
+    /// refused counts nowhere: not against the cap, and not on the line.
+    ///
     /// # Errors
     ///
     /// Returns [`HuntError::Run`] when a record does not reach the file, and
@@ -684,10 +688,12 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
                 self.drawn_out = true;
                 return Ok(());
             };
-            self.targets += 1;
-            self.status.show(Event::Target(target));
             match self.start(target, lane) {
-                Ok(flight) => self.flights.push(flight),
+                Ok(flight) => {
+                    self.targets += 1;
+                    self.status.show(Event::Target(target));
+                    self.flights.push(flight);
+                }
                 Err(fault) => {
                     self.free.push(lane);
                     return Err(fault);

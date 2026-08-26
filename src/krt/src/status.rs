@@ -3,8 +3,8 @@
 //! A hunt takes minutes, and it draws no live table. Without an indicator it
 //! prints one line at the start and nothing more until the summary, which reads
 //! as a tool that died. The indicator says how many rounds the hunt holds of
-//! the rounds it wants, how many destinations it drew of the ones it may draw,
-//! which address it traces, and how long the hunt took so far.
+//! the rounds it wants, how many destinations it started of the ones it may
+//! start, which address it traces, and how long the hunt took so far.
 //!
 //! Two styles serve two kinds of standard output, as the two screens of
 //! `live.rs` do for a run:
@@ -39,7 +39,8 @@ pub(crate) trait Status {
 /// One thing that happened inside a hunt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Event {
-    /// The hunt started a round on this destination.
+    /// The tracer of this destination started. A destination whose tracer
+    /// refused shows no event, because the hunt never probed it.
     Target(Ipv4Addr),
     /// The trace of the destination that stands took one turn. A turn is one
     /// probe round that arrived, or one poll of the run loop that read none.
@@ -178,10 +179,10 @@ pub(crate) struct Indicator<W: Write, C: Clock> {
     columns: u16,
     /// The two numbers that stop the hunt.
     bounds: Bounds,
-    /// The number of destinations that the hunt started, the one that stands
+    /// The number of destinations whose tracer started, the one that stands
     /// included.
     targets: u64,
-    /// The destination that the hunt started last.
+    /// The destination that started last.
     target: Option<Ipv4Addr>,
     /// The number of destinations that the hunt holds at this moment.
     ///
@@ -305,7 +306,7 @@ impl<W: Write, C: Clock> Indicator<W, C> {
     /// time, while the line is too wide, and the round of the hunt never goes
     /// away.
     ///
-    /// A hunt that drew no address yet holds no destination, and that field is
+    /// A hunt that started no destination yet holds none, and that field is
     /// absent rather than empty between two separators.
     fn fields(&self, width: usize) -> String {
         // The order of these four is the order that [`ADDRESS`], [`BUDGET`],
@@ -325,10 +326,10 @@ impl<W: Write, C: Clock> Indicator<W, C> {
         join(&fields)
     }
 
-    /// The destination that the hunt started last, and the number of the
-    /// others that stand beside it.
+    /// The destination that started last, and the number of the others that
+    /// stand beside it.
     ///
-    /// A hunt that drew no address yet holds no destination, and the field is
+    /// A hunt that started no destination yet holds none, and the field is
     /// then absent rather than empty between two separators.
     ///
     /// The hunt holds many destinations at once, and the line has room for one
@@ -353,7 +354,7 @@ impl<W: Write, C: Clock> Indicator<W, C> {
         format!("{}/{} {REACHED}", self.reached, self.bounds.rounds)
     }
 
-    /// The destinations that the hunt drew, of the ones it may draw.
+    /// The destinations that started, of the ones the hunt may start.
     ///
     /// The count holds the destination that stands, so a reader who sees the
     /// last target of the budget knows that this one ends the hunt.
@@ -597,12 +598,12 @@ mod tests {
         );
     }
 
-    /// The two ratios count the destinations that answered and every draw.
+    /// The two ratios count the destinations that answered and every start.
     ///
     /// The count of the destinations that answered nothing is the difference of
     /// the two, and the summary at the end prints it.
     #[test]
-    fn the_line_counts_the_destinations_that_answered_and_every_one_it_drew() {
+    fn the_line_counts_the_destinations_that_answered_and_every_one_it_started() {
         let clock = FakeClock::new();
         let line = painted(hunting(&clock, 2, 3));
         assert!(
@@ -611,7 +612,7 @@ mod tests {
         );
         assert!(
             line.contains("6/64 targets"),
-            "the line must count every destination it drew: {line:?}"
+            "the line must count every destination it started: {line:?}"
         );
     }
 
@@ -622,7 +623,7 @@ mod tests {
     fn the_bar_fills_in_proportion_to_the_rounds() {
         let clock = FakeClock::new();
         // The hunt holds two rounds of eight, which is one quarter of the bar.
-        // It drew three targets of 64, which is a smaller share.
+        // It started three targets of 64, which is a smaller share.
         let line = painted(hunting(&clock, 2, 0));
         assert_eq!(
             line.matches(BAR_FULL).count(),
@@ -670,8 +671,8 @@ mod tests {
     #[test]
     fn the_bar_reads_the_targets_when_they_stand_closer_than_the_rounds() {
         let clock = FakeClock::new();
-        // The hunt holds no round of eight, and it drew 48 targets of 64, which
-        // is three quarters of the bar.
+        // The hunt holds no round of eight, and it started 48 targets of 64,
+        // which is three quarters of the bar.
         let line = painted(hunting(&clock, 0, 47));
         assert_eq!(
             line.matches(BAR_FULL).count(),

@@ -653,15 +653,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     then names the reason on standard error.
   - A hunt shows what it is doing while it runs. A hunt whose standard output is a terminal draws
     one status line, which redraws in place: a spinner that turns on every sweep of the pool, a
-    bar of the hunt, the rounds it holds of the rounds it wants, the address it drew last with the
-    number of the destinations that stand beside it, the destinations it drew of the ones it may
-    draw, and the time the hunt took. `203.0.113.7 +7` is a hunt that holds eight destinations. The bar reads
-    whichever of the two bounds the hunt stands closer to, because the hunt stops on the first one
-    it meets. The stop of the hunt takes the line back, so the summary prints on a clean line. A
-    terminal too narrow for every field drops the targets first, then the time, then the address,
-    and it never cuts a field in the middle. A hunt whose standard output is a pipe or a file
-    writes one whole line for each destination it finished, with no control text, because a file
-    keeps every byte it takes.
+    bar of the hunt, the rounds it holds of the rounds it wants, the address it started last with
+    the number of the destinations that stand beside it, the destinations it started of the ones it
+    may start, and the time the hunt took. `203.0.113.7 +7` is a hunt that holds eight
+    destinations. The bar reads whichever of the two bounds the hunt stands closer to, because the
+    hunt stops on the first one it meets. The stop of the hunt takes the line back, so the summary
+    prints on a clean line. A terminal too narrow for every field drops the targets first, then the
+    time, then the address, and it never cuts a field in the middle. A hunt whose standard output
+    is a pipe or a file writes one whole line for each destination it finished, with no control
+    text, because a file keeps every byte it takes.
   - The draw of a hunt is of ip version 4 alone, because the space of ip version 6 is far too
     sparse for a random address to reach a host. It rejects every address that no packet routes
     to — the private blocks, the loopback block, the documentation blocks, the multicast block,
