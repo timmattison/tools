@@ -1982,7 +1982,9 @@ mod tests {
     /// The fake stamps every scripted round with the run that the hunt made, so
     /// the file groups the rounds of one destination under that run, as a real
     /// tracer does. It keeps every sender alive, so no channel closes and no
-    /// run reads a closed channel as a tracer that died.
+    /// run reads a closed channel as a tracer that died. The source that
+    /// [`FakeProbes::that_drops_the_sender_of`] builds keeps every sender but
+    /// one.
     struct FakeProbes {
         /// The rounds of each destination, the next destination first.
         scripts: VecDeque<Vec<RoundRecord>>,
@@ -1997,6 +1999,9 @@ mod tests {
         /// The number of destinations that the source serves before it
         /// refuses. A source that refuses nothing never reads it.
         serves: usize,
+        /// The place of the destination whose sender the source drops. A
+        /// source that drops no sender holds no place.
+        drops: Option<usize>,
     }
 
     impl FakeProbes {
@@ -2017,7 +2022,20 @@ mod tests {
                 senders: Vec::new(),
                 refuses: None,
                 serves: 0,
+                drops: None,
             }
+        }
+
+        /// A source that drops the sender of one destination.
+        ///
+        /// The channel of the destination at `place` closes as soon as the run
+        /// reads the rounds of its script, and that run then reads a tracer
+        /// that died. Every other channel stays open, so the destinations
+        /// beside it stand in flight at that moment.
+        fn that_drops_the_sender_of(scripts: &[Rounds], place: usize) -> Self {
+            let mut probes = Self::of(scripts);
+            probes.drops = Some(place);
+            probes
         }
 
         /// A source whose tracer never starts.
@@ -2059,7 +2077,16 @@ mod tests {
                 record.run = run.clone();
                 sender.send(record).expect("the receiver stands");
             }
-            self.senders.push(sender);
+            // The push above counts this destination, so the length names the
+            // place of it.
+            if self.drops == Some(self.asked.len() - 1) {
+                // The sender goes out of scope here, and the channel of this
+                // destination closes as soon as the run reads the rounds above.
+                // A tracer thread that dies closes its channel the same way.
+                drop(sender);
+            } else {
+                self.senders.push(sender);
+            }
             Ok(receiver)
         }
     }
@@ -2962,6 +2989,55 @@ mod tests {
             recorder.targets(),
             vec![address(NEAR)],
             "the indicator names the destination that started, and no other"
+        );
+    }
+
+    /// A tracer that stops leaves the flights beside it closed.
+    ///
+    /// The run of the destination whose tracer died writes its own `end`
+    /// record. The other destinations of the pool hold a `run` record, the
+    /// rounds they recorded, and nothing that closes them. A reader of such a
+    /// file reads those runs as a file that stops in the middle, so the hunt
+    /// closes them itself.
+    #[test]
+    fn a_tracer_that_stops_leaves_the_flights_beside_it_closed() {
+        let mut probes = FakeProbes::that_drops_the_sender_of(&[&[], FAR_REACHED_AT_EIGHTEEN], 0);
+        let mut sink = Vec::new();
+        let stopped = {
+            let mut writer = Writer::to_sink(&mut sink);
+            hunt_into(
+                &[NEAR, FAR],
+                &mut probes,
+                wanting(2),
+                &never_stops(),
+                &[],
+                &mut writer,
+                &mut Recorder::default(),
+            )
+        }
+        .expect_err("the tracer of the first destination stops the hunt");
+        assert!(
+            matches!(stopped.fault, HuntError::Run(RunError::Tracer { .. })),
+            "the fault is the tracer that stopped: {}",
+            stopped.fault
+        );
+        let recording = read_back(&sink);
+        let ids = recording.run_ids();
+        assert_eq!(ids.len(), 2, "the file holds both runs: {ids:?}");
+        let open: Vec<&str> = ids
+            .iter()
+            .filter(|id| {
+                recording
+                    .run(id)
+                    .expect("the file holds every run it names")
+                    .end()
+                    .is_none()
+            })
+            .map(RunId::as_str)
+            .collect();
+        assert!(
+            open.is_empty(),
+            "every run of the file takes an end record, and these took none: {open:?}"
         );
     }
 
