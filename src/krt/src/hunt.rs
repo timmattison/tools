@@ -2932,6 +2932,33 @@ mod tests {
         );
     }
 
+    /// A tracer that refuses shows the indicator no destination.
+    ///
+    /// The indicator names the destination that started last, and it counts
+    /// every destination the hunt showed it. A tracer that refuses starts
+    /// nothing, so a line that named that address would name a destination the
+    /// hunt never probed, and the count of the destinations in flight would
+    /// stand one too high for the rest of the run.
+    #[test]
+    fn a_tracer_that_refuses_shows_the_indicator_no_destination() {
+        let mut probes = FakeProbes::refuses_after(&[REACHED_AT_FIVE], 1, NO_RAW_SOCKET);
+        let mut recorder = Recorder::default();
+        run_hunt(
+            &[NEAR, FAR],
+            &mut probes,
+            wanting(2).serial(),
+            &never_stops(),
+            &[],
+            &mut recorder,
+        )
+        .expect_err("the tracer of the second destination stops the hunt");
+        assert_eq!(
+            recorder.targets(),
+            vec![address(NEAR)],
+            "the indicator names the destination that started, and no other"
+        );
+    }
+
     /// A write that fails keeps the summary of the rounds in front of it.
     ///
     /// The disk that fills is the fault that this covers, and it is the one
