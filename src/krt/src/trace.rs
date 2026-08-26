@@ -163,12 +163,12 @@ impl Lane {
     /// line refuses such a count, so this clamp is the guard behind that
     /// refusal and never the thing a user meets.
     pub(crate) fn pool(count: usize) -> Vec<Self> {
-        let held = count.min(Self::COUNT as usize);
-        // The count stands at or below `COUNT`, which is far inside the range
-        // of a `u16`, so the conversion of each number takes nothing away.
-        (0..held)
-            .map(|number| Self(u16::try_from(number).unwrap_or(0)))
-            .collect()
+        // Only a count above the range of a `u16` fails the conversion, and
+        // every such count stands far above `COUNT`. The fallback is therefore
+        // `COUNT`, which the clamp beside it also gives the counts that the
+        // range holds.
+        let held = u16::try_from(count).unwrap_or(Self::COUNT).min(Self::COUNT);
+        (0..held).map(Self).collect()
     }
 
     /// The place of this lane among the lanes of its process.
@@ -1581,6 +1581,24 @@ this platform needs raw socket privileges to send probes.
         assert_eq!(
             Lane::pool(Lane::COUNT as usize + 10).len(),
             Lane::COUNT as usize
+        );
+    }
+
+    /// A count above the range of a lane number gives lanes that differ.
+    ///
+    /// The number of a lane is a `u16`, and such a count does not go into one.
+    /// The pool falls back to the ceiling, which the clamp beside it holds. A
+    /// fallback of the first lane would give that one lane many times and put
+    /// many destinations of one hunt on one probe identifier.
+    #[test]
+    fn a_count_above_the_range_of_a_lane_number_gives_lanes_that_differ() {
+        let pool = Lane::pool(usize::MAX);
+        assert_eq!(pool.len(), Lane::COUNT as usize);
+        let held: std::collections::HashSet<Lane> = pool.into_iter().collect();
+        assert_eq!(
+            held.len(),
+            Lane::COUNT as usize,
+            "the pool gave one lane many times"
         );
     }
 
