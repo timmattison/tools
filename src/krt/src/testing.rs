@@ -100,14 +100,19 @@ pub(crate) fn named(host: &str) -> Lookup {
 ///
 /// An address that the test named no answer for answers `Nameless`.
 ///
-/// The count and the answers sit behind a `Cell` and a `RefCell`, because
+/// The fake keeps the address of every ask, in order. A count of the asks
+/// says how much work a run gave the resolver, and the order says when it
+/// gave that work: two asks about one address that stand in a row took no
+/// turn of another run between them.
+///
+/// The log and the answers sit behind a `RefCell`, because
 /// [`Resolver::lookup`] takes the resolver by reference. The fake stays on
 /// one thread.
 pub(crate) struct FakeResolver {
     /// The answers that each address holds, the next answer first.
     answers: RefCell<HashMap<IpAddr, VecDeque<Lookup>>>,
-    /// The number of asks that the resolver took.
-    asks: Cell<usize>,
+    /// The address of every ask that the resolver took, in order.
+    asked: RefCell<Vec<IpAddr>>,
 }
 
 impl FakeResolver {
@@ -120,18 +125,23 @@ impl FakeResolver {
                     .map(|(addr, list)| (address(addr), list.iter().cloned().collect()))
                     .collect(),
             ),
-            asks: Cell::new(0),
+            asked: RefCell::new(Vec::new()),
         })
     }
 
     /// The number of asks that the resolver took.
     pub(crate) fn asks(&self) -> usize {
-        self.asks.get()
+        self.asked.borrow().len()
+    }
+
+    /// The address of every ask that the resolver took, in order.
+    pub(crate) fn asked(&self) -> Vec<IpAddr> {
+        self.asked.borrow().clone()
     }
 
     /// The answer of one ask, and one step along the list of that address.
     fn answer(&self, addr: IpAddr) -> Lookup {
-        self.asks.set(self.asks.get() + 1);
+        self.asked.borrow_mut().push(addr);
         let mut answers = self.answers.borrow_mut();
         let Some(queue) = answers.get_mut(&addr) else {
             return Lookup::Nameless;

@@ -1365,12 +1365,13 @@ mod tests {
         NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
     };
     use crate::live::Screen;
+    use crate::names::Lookup;
     use crate::record::{
         EndReason, Family, HuntId, NameRecord, Privilege, Record, Recording, RoundRecord,
         RunConfig, RunId, SourceKind, SourceLabel, Writer,
     };
     use crate::status::{Event, Status};
-    use crate::testing::{named, round};
+    use crate::testing::{named, round, FakeResolver};
     use crate::trace::Lane;
     use crate::{Multipath, Protocol};
     use chrono::Utc;
@@ -2322,28 +2323,62 @@ mod tests {
     /// names the number it needs.
     const TEST_CONCURRENCY: usize = 2;
 
-    /// The shape of one test hunt: the two bounds that stop it, and the number
-    /// of destinations it traces at one moment.
+    /// The number of probe rounds that each destination of a test hunt takes.
+    ///
+    /// One round is enough for every test that reads a score, because a score
+    /// of one round holds every column of the table. A test that needs one
+    /// destination to close while another stands names a greater number.
+    const TEST_PROBES_PER_ROUND: u64 = 1;
+
+    /// The shape of one test hunt: the two bounds that stop it, the number of
+    /// destinations it traces at one moment, and the three numbers of its plan
+    /// that a test of the pool names.
     #[derive(Debug, Clone, Copy)]
     struct Shape {
         /// The two numbers that stop the hunt.
         bounds: Bounds,
         /// The number of destinations that the hunt traces at one moment.
         concurrency: usize,
+        /// The number of probe rounds that each destination takes.
+        probes_per_round: u64,
+        /// The longest that one destination takes, whether it answers or not.
+        target_timeout: Duration,
+        /// The longest that a destination waits, after its last round, for the
+        /// names that its lookups have not given yet.
+        name_grace: Duration,
     }
 
     impl Shape {
         /// The same hunt, tracing this many destinations at one moment.
         const fn at_once(self, concurrency: usize) -> Self {
             Self {
-                bounds: self.bounds,
                 concurrency,
+                ..self
             }
         }
 
         /// The same hunt, tracing one destination at a time.
         const fn serial(self) -> Self {
             self.at_once(1)
+        }
+
+        /// The same hunt, where each destination takes this many probe rounds.
+        const fn probing(self, probes_per_round: u64) -> Self {
+            Self {
+                probes_per_round,
+                ..self
+            }
+        }
+
+        /// The same hunt, where a destination that closes waits this long for
+        /// the names of its hops, and where no destination takes longer than
+        /// this whatever it answers.
+        const fn waiting_for_names(self, name_grace: Duration, target_timeout: Duration) -> Self {
+            Self {
+                name_grace,
+                target_timeout,
+                ..self
+            }
         }
     }
 
@@ -2356,6 +2391,9 @@ mod tests {
                 max_targets: A_GENEROUS_CAP,
             },
             concurrency: TEST_CONCURRENCY,
+            probes_per_round: TEST_PROBES_PER_ROUND,
+            target_timeout: TARGET_TIMEOUT,
+            name_grace: Duration::ZERO,
         }
     }
 
@@ -2366,7 +2404,7 @@ mod tests {
                 rounds,
                 max_targets,
             },
-            concurrency: TEST_CONCURRENCY,
+            ..wanting(rounds)
         }
     }
 
@@ -2380,7 +2418,14 @@ mod tests {
     ) -> Result<Hunted, HuntStopped> {
         let mut probes = FakeProbes::of(scripts);
         let mut recorder = Recorder::default();
-        let outcome = run_hunt(addresses, &mut probes, shape, stop, &[], &mut recorder);
+        let outcome = run_hunt(
+            addresses,
+            &mut probes,
+            shape,
+            stop,
+            &Names::None,
+            &mut recorder,
+        );
         outcome.map(|(summary, recording)| Hunted {
             summary,
             recording,
@@ -2390,13 +2435,44 @@ mod tests {
         })
     }
 
+    /// What a test hunt looks the addresses of its hops up with.
+    ///
+    /// A test that reads the asks of the resolver builds the fake itself and
+    /// keeps a share of it, so it reads the log after the hunt ends.
+    enum Names {
+        /// The hunt looks nothing up, as `--no-dns` gives.
+        None,
+        /// The hunt asks this resolver.
+        Of(Rc<FakeResolver>),
+    }
+
+    impl Names {
+        /// A resolver of these answers, and the hunt that asks it.
+        fn of(answers: &[(&str, &[crate::names::Lookup])]) -> Self {
+            Self::Of(FakeResolver::new(answers))
+        }
+
+        /// The resolver that this hunt asks.
+        ///
+        /// # Panics
+        ///
+        /// Panics on a hunt that looks nothing up. Such a call is a mistake in
+        /// the test, not an answer the code under test can give.
+        fn resolver(&self) -> Rc<FakeResolver> {
+            match self {
+                Self::None => panic!("the hunt of this test must look its addresses up"),
+                Self::Of(fake) => Rc::clone(fake),
+            }
+        }
+    }
+
     /// Runs one hunt into a sink of bytes, and reads back the file it wrote.
     fn run_hunt(
         addresses: &[&str],
         probes: &mut FakeProbes,
         shape: Shape,
         stop: &dyn Fn() -> bool,
-        names: &[(&str, &[crate::names::Lookup])],
+        names: &Names,
         status: &mut dyn Status,
     ) -> Result<(Summary, Recording), HuntStopped> {
         let mut sink = Vec::new();
@@ -2427,7 +2503,7 @@ mod tests {
         probes: &mut FakeProbes,
         shape: Shape,
         stop: &dyn Fn() -> bool,
-        names: &[(&str, &[crate::names::Lookup])],
+        names: &Names,
         writer: &mut Writer<W>,
         status: &mut dyn Status,
     ) -> Result<Summary, HuntStopped> {
@@ -2445,7 +2521,7 @@ mod tests {
                 max_ttl: MAX_TTL,
                 multipath: Multipath::Classic,
                 privilege: Privilege::Unprivileged,
-                dns: !names.is_empty(),
+                dns: matches!(names, Names::Of(_)),
             },
             host: HOST.to_owned(),
         };
@@ -2453,15 +2529,14 @@ mod tests {
             bounds: shape.bounds,
             concurrency: NonZeroUsize::new(shape.concurrency)
                 .expect("a test hunt traces at least one destination at a time"),
-            probes_per_round: 1,
-            target_timeout: TARGET_TIMEOUT,
-            name_grace: Duration::ZERO,
+            probes_per_round: shape.probes_per_round,
+            target_timeout: shape.target_timeout,
+            name_grace: shape.name_grace,
             include_partial: false,
         };
-        let resolver: Rc<dyn crate::names::Resolver> = if names.is_empty() {
-            Rc::new(crate::names::NoLookups)
-        } else {
-            crate::testing::FakeResolver::new(names)
+        let resolver: Rc<dyn crate::names::Resolver> = match names {
+            Names::None => Rc::new(crate::names::NoLookups),
+            Names::Of(fake) => Rc::clone(fake) as Rc<dyn crate::names::Resolver>,
         };
         let mut sources = Sources {
             draw,
@@ -2659,7 +2734,7 @@ mod tests {
                 &mut probes,
                 wanting(2),
                 &never_stops(),
-                &[],
+                &Names::None,
                 &mut writer,
                 &mut recorder,
             )
@@ -2939,7 +3014,7 @@ mod tests {
             &mut probes,
             wanting(1),
             &never_stops(),
-            &[],
+            &Names::None,
             &mut Recorder::default(),
         )
         .expect("the hunt must finish");
@@ -3018,7 +3093,7 @@ mod tests {
                 &mut probes,
                 wanting(8).at_once(4),
                 &stop,
-                &[],
+                &Names::None,
                 &mut writer,
                 &mut Recorder::default(),
             )
@@ -3051,7 +3126,7 @@ mod tests {
             &mut probes,
             wanting(1),
             &never_stops(),
-            &[],
+            &Names::None,
             &mut Recorder::default(),
         )
         .expect_err("a tracer that will not start stops the hunt");
@@ -3092,7 +3167,7 @@ mod tests {
             &mut probes,
             wanting(3),
             &never_stops(),
-            &[],
+            &Names::None,
             &mut Recorder::default(),
         )
         .expect_err("the tracer of the third destination stops the hunt");
@@ -3128,7 +3203,7 @@ mod tests {
             &mut probes,
             wanting(3).at_once(3),
             &never_stops(),
-            &[],
+            &Names::None,
             &mut Recorder::default(),
         )
         .expect_err("the tracer of the third destination stops the hunt");
@@ -3155,7 +3230,7 @@ mod tests {
             &mut probes,
             wanting(2).serial(),
             &never_stops(),
-            &[],
+            &Names::None,
             &mut recorder,
         )
         .expect_err("the tracer of the second destination stops the hunt");
@@ -3184,7 +3259,7 @@ mod tests {
                 &mut probes,
                 wanting(2),
                 &never_stops(),
-                &[],
+                &Names::None,
                 &mut writer,
                 &mut Recorder::default(),
             )
@@ -3234,7 +3309,7 @@ mod tests {
             &mut probes,
             wanting(2).serial(),
             &never_stops(),
-            &[],
+            &Names::None,
             &mut writer,
             &mut Recorder::default(),
         )
@@ -3260,21 +3335,123 @@ mod tests {
             &mut probes,
             wanting(1),
             &never_stops(),
-            &[(NEAR, &[named(DESTINATION_NAME)])],
+            &Names::of(&[(NEAR, &[named(DESTINATION_NAME)])]),
             &mut Recorder::default(),
         )
         .expect("the hunt must finish");
-        let named: Vec<String> = recording
+        let named = names_in(&recording);
+        assert!(
+            named.contains(&DESTINATION_NAME.to_owned()),
+            "the file holds the name of the destination: {named:?}"
+        );
+    }
+
+    /// The name of every `name` record of a file, in order.
+    fn names_in(recording: &Recording) -> Vec<String> {
+        recording
             .records()
             .iter()
             .filter_map(|record| match record {
                 Record::Name(name) => Some(name.host.clone()),
                 _ => None,
             })
-            .collect();
+            .collect()
+    }
+
+    /// The number of probe rounds that each destination of the drain test
+    /// takes.
+    ///
+    /// The near destination takes both of them and closes on the round limit.
+    /// The far destination holds one round alone, so its channel runs dry and
+    /// it stands in flight while the near one waits for its name.
+    const TWO_PROBE_ROUNDS: u64 = 2;
+
+    /// The two rounds of the destination that closes first.
+    const NEAR_TWICE: &[&[(u8, &str, f64)]] = &[&[(5, NEAR, 20.0)], &[(5, NEAR, 21.0)]];
+
+    /// The one round of the destination that stands beside it.
+    const FAR_ONCE: &[&[(u8, &str, f64)]] = &[&[(18, FAR, 85.0)]];
+
+    /// The answers that the near destination takes: nothing for four asks, and
+    /// its name on the fifth.
+    ///
+    /// The two rounds of the run take the first two asks. The three that
+    /// follow stand in the wait for the name, so that wait takes three asks
+    /// whatever the speed of the machine.
+    fn name_on_the_fifth_ask() -> [Lookup; 5] {
+        [
+            Lookup::Pending,
+            Lookup::Pending,
+            Lookup::Pending,
+            Lookup::Pending,
+            named(DESTINATION_NAME),
+        ]
+    }
+
+    /// The longest that a destination of the drain test waits for its names,
+    /// and the longest that one of them takes.
+    ///
+    /// The wait of this test ends at the moment the name arrives, and not at
+    /// the moment the grace runs out. The value therefore stands well above
+    /// the time that three steps of a wait take, and the destination beside
+    /// the wait closes on it.
+    const A_NAME_GRACE: Duration = Duration::from_millis(400);
+
+    /// The number of asks about one address that one sweep gives.
+    const ONE_ASK_A_SWEEP: usize = 1;
+
+    /// The greatest number of asks about this address that stand in a row,
+    /// with no ask about another address between them.
+    fn asks_in_a_row(asked: &[IpAddr], addr: IpAddr) -> usize {
+        let mut most = 0;
+        let mut run = 0;
+        for ask in asked {
+            if *ask == addr {
+                run += 1;
+                most = most.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        most
+    }
+
+    /// A destination that waits for the names of its hops holds up no other.
+    ///
+    /// The near destination closes on the round limit and then waits for the
+    /// name of its hop. The far destination still stands, because its channel
+    /// holds one round of the two that the plan asks for.
+    ///
+    /// A sweep gives each destination of the pool one turn, so an ask of the
+    /// far destination stands between every two asks of the near one. A wait
+    /// that ran inside one turn would hold the sweep, and the three asks of
+    /// that wait would then stand in a row.
+    #[test]
+    fn a_destination_that_waits_for_its_names_holds_up_no_other() {
+        let names = Names::of(&[(NEAR, &name_on_the_fifth_ask()), (FAR, &[Lookup::Pending])]);
+        let resolver = names.resolver();
+        let mut probes = FakeProbes::of(&[NEAR_TWICE, FAR_ONCE]);
+        let (_, recording) = run_hunt(
+            &[NEAR, FAR],
+            &mut probes,
+            wanting(2)
+                .probing(TWO_PROBE_ROUNDS)
+                .waiting_for_names(A_NAME_GRACE, A_NAME_GRACE),
+            &never_stops(),
+            &names,
+            &mut Recorder::default(),
+        )
+        .expect("the hunt must finish");
+        let asked = resolver.asked();
+        assert_eq!(
+            asks_in_a_row(&asked, IpAddr::V4(address(NEAR))),
+            ONE_ASK_A_SWEEP,
+            "the destination beside the wait must take a turn between two asks of it: {asked:?}"
+        );
+        let named = names_in(&recording);
         assert!(
             named.contains(&DESTINATION_NAME.to_owned()),
-            "the file holds the name of the destination: {named:?}"
+            "the wait must still put the name of the destination in the file: {named:?}"
         );
     }
 
