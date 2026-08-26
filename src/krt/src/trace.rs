@@ -22,6 +22,12 @@
 //! probe. A TCP probe varies its source port already, and the tracer takes the
 //! next one when a port is in use.
 //!
+//! One process runs many tracers at the same time, because a hunt traces many
+//! destinations at once. Those tracers stand in one process and share its
+//! identifier, so the mark of the process alone would leave each of them
+//! reading the answers of the others. [`Lane`] is what tells them apart: it
+//! moves both marks, each by a stride of its own.
+//!
 //! The interface of the wall is one type and three functions. [`TraceConfig`]
 //! states one run in the words that `krt` owns, and [`spawn`] starts the
 //! tracer of that run and gives back a receiver of completed rounds.
@@ -44,6 +50,7 @@ use chrono::{DateTime, Utc};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 use trippy_core::{CompletionReason, IcmpPacketType, ProbeStatus, Round};
 use trippy_dns::{DnsEntry, DnsResolver, Resolver as _};
@@ -114,6 +121,75 @@ pub(crate) enum PrivilegeError {
     },
 }
 
+/// One of the lanes that a process probes in at the same time.
+///
+/// Two tracers of one process that probe at once must not read each other's
+/// answers, and two UDP tracers of one process must not bind one source port.
+/// The lane is what tells two such tracers apart. It moves the probe identifier
+/// of an ICMP trace and the source port of a UDP trace, each by a stride of its
+/// own, so no two lanes of one process land on one value.
+///
+/// A trace of one destination probes in [`Lane::FIRST`]. A hunt gives each
+/// destination that it holds at one moment a lane of its own, and it takes that
+/// lane back when the destination stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Lane(
+    /// The number of the lane, below [`Lane::COUNT`].
+    u16,
+);
+
+impl Lane {
+    /// The lane that a trace of one destination probes in.
+    pub(crate) const FIRST: Self = Self(0);
+
+    /// The number of lanes that one process holds.
+    ///
+    /// The ceiling stands here, and not on the command line, because the two
+    /// strides come off it: a count that the strides do not cover would put two
+    /// lanes of one process on one probe identifier. The command line refuses a
+    /// count above this one, and [`Lane::pool`] holds the same ceiling behind
+    /// that refusal.
+    ///
+    /// Thirty-two destinations at once send about a thousand probes in the
+    /// period of one round, which is a load that a link feels. The number is
+    /// therefore what the strides can carry and what a link can take, and not
+    /// the largest number that the fold allows.
+    pub(crate) const COUNT: u16 = 32;
+
+    /// The first `count` lanes, which is the pool that a hunt of that many
+    /// destinations at once draws from.
+    ///
+    /// A count above [`Lane::COUNT`] gives [`Lane::COUNT`] lanes. The command
+    /// line refuses such a count, so this clamp is the guard behind that
+    /// refusal and never the thing a user meets.
+    pub(crate) fn pool(count: usize) -> Vec<Self> {
+        // Only a count above the range of a `u16` fails the conversion, and
+        // every such count stands far above `COUNT`. The fallback is therefore
+        // `COUNT`, which the clamp beside it also gives the counts that the
+        // range holds.
+        let held = u16::try_from(count).unwrap_or(Self::COUNT).min(Self::COUNT);
+        (0..held).map(Self).collect()
+    }
+
+    /// The place of this lane among the lanes of its process.
+    ///
+    /// A caller that holds one thing for each lane reads this as the place of
+    /// that thing.
+    pub(crate) const fn place(self) -> usize {
+        self.0 as usize
+    }
+
+    /// The distance that this lane moves a value of a window of `window`.
+    ///
+    /// Each lane stands one stride from the lane beside it, and the stride is
+    /// the window divided by the number of lanes. Every lane of one process
+    /// therefore lands on a value of its own, and two processes whose
+    /// identifiers stand one apart land on no value in common.
+    const fn shift(self, window: u32) -> u32 {
+        (self.0 as u32) * (window / Self::COUNT as u32)
+    }
+}
+
 /// The first source port that a UDP trace of `krt` takes.
 ///
 /// A fixed source port to a varying destination port is the direction of a UDP
@@ -150,11 +226,18 @@ const UDP_SOURCE_PORTS: u32 = (UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) as 
 /// A port of the range that another program already holds stops the run, as the
 /// one fixed port of every run did before. The next run holds another process
 /// identifier and takes another port.
-const fn udp_source_port(process: u32) -> u16 {
-    // The remainder stands below `UDP_SOURCE_PORTS`, which is far inside the
-    // range of a `u16`, so the conversion of it takes nothing away.
-    let offset = (process % UDP_SOURCE_PORTS) as u16;
-    UDP_FIRST_SOURCE_PORT + offset
+///
+/// The lane is what tells two UDP tracers of one process apart, because those
+/// two probe at the same time and one port takes one of them. [`Lane`] states
+/// how the stride keeps every lane of one process on a port of its own.
+const fn udp_source_port(process: u32, lane: Lane) -> u16 {
+    // The fold of the process runs first, so the sum of it and the shift of the
+    // lane stands far below the range of a `u32` and overflows for no process
+    // identifier. The remainder of that sum then stands below
+    // `UDP_SOURCE_PORTS`, which is far inside the range of a `u16`, so the
+    // conversion of it takes nothing away.
+    let offset = ((process % UDP_SOURCE_PORTS) + lane.shift(UDP_SOURCE_PORTS)) % UDP_SOURCE_PORTS;
+    UDP_FIRST_SOURCE_PORT + offset as u16
 }
 
 /// The destination port that a TCP trace holds while the source port varies.
@@ -195,13 +278,22 @@ const PROBE_IDENTIFIERS: u32 = u16::MAX as u32;
 /// two process identifiers a few apart, so they never land on one value. Two
 /// runs whose process identifiers differ by exactly 65535 do land on one, and
 /// those two read each other as they did before this fold.
-const fn probe_identifier(process: u32) -> u16 {
-    // The remainder stands in 0 through 65534, which is inside the range of a
-    // `u16`, so the conversion of it takes nothing away, and clippy reads the
-    // remainder and raises no truncation of its own. The one that the sum adds
-    // then puts the answer in 1 through 65535.
-    let folded = (process % PROBE_IDENTIFIERS) as u16;
-    folded + 1
+///
+/// The lane is what tells two ICMP tracers of one process apart, because those
+/// two probe at the same time and each of them would otherwise read the answers
+/// of the other. [`Lane`] states how the stride keeps every lane of one process
+/// on an identifier of its own.
+const fn probe_identifier(process: u32, lane: Lane) -> u16 {
+    // The fold of the process runs first, so the sum of it and the shift of the
+    // lane stands far below the range of a `u32` and overflows for no process
+    // identifier. The remainder of that sum then stands in 0 through 65534,
+    // which is inside the range of a `u16`, so the conversion of it takes
+    // nothing away, and clippy reads the remainder and raises no truncation of
+    // its own. The one that the sum adds then puts the answer in 1 through
+    // 65535.
+    let folded =
+        ((process % PROBE_IDENTIFIERS) + lane.shift(PROBE_IDENTIFIERS)) % PROBE_IDENTIFIERS;
+    folded as u16 + 1
 }
 
 /// The configuration of one tracing run, in the words that `krt` owns.
@@ -227,6 +319,17 @@ pub(crate) struct TraceConfig {
     pub(crate) multipath: crate::Multipath,
     /// The privilege mode of the run.
     pub(crate) privilege: record::Privilege,
+    /// The lane that this tracer probes in.
+    ///
+    /// A trace of one destination probes in [`Lane::FIRST`]. A hunt gives each
+    /// destination that it holds at one moment a lane of its own, so no two
+    /// tracers of the hunt read each other's answers.
+    pub(crate) lane: Lane,
+    /// The number of probe rounds that the tracer sends before its thread
+    /// stops.
+    ///
+    /// A run that names no number takes rounds until the process ends.
+    pub(crate) rounds: Option<u64>,
 }
 
 /// Why the tracer of a run does not start.
@@ -259,7 +362,7 @@ fn tracer_of(config: &TraceConfig) -> Result<trippy_core::Tracer, TraceError> {
     trippy_core::Builder::new(config.target)
         // The identifier of the process, so the run reads the answers of its
         // own probes and no other run's. [`probe_identifier`] states why.
-        .trace_identifier(probe_identifier(std::process::id()))
+        .trace_identifier(probe_identifier(std::process::id(), config.lane))
         .min_round_duration(config.interval)
         .max_round_duration(config.interval)
         .first_ttl(config.first_ttl)
@@ -286,16 +389,29 @@ fn tracer_of(config: &TraceConfig) -> Result<trippy_core::Tracer, TraceError> {
         .port_direction(match config.protocol {
             crate::Protocol::Icmp => trippy_core::PortDirection::None,
             crate::Protocol::Udp => trippy_core::PortDirection::FixedSrc(trippy_core::Port(
-                udp_source_port(std::process::id()),
+                udp_source_port(std::process::id(), config.lane),
             )),
             crate::Protocol::Tcp => {
                 trippy_core::PortDirection::FixedDest(trippy_core::Port(TCP_DESTINATION_PORT))
             }
         })
-        // `krt` owns the round limit and the time limit, and the run loop
-        // enforces both of them. A tracer that stopped itself would close the
-        // channel, and the run loop reads a closed channel as a dead tracer.
-        .max_rounds(None)
+        // The round limit of the run stands here too, because `trippy` gives
+        // no way to stop a tracer. A tracer that carries the limit ends its own
+        // thread when the run ends, so a hunt leaves behind no tracer of a
+        // destination it already traced.
+        //
+        // The run loop stops at the same number. It therefore reads the last
+        // round of the run and never the closed channel, and a closed channel
+        // still names a tracer that died.
+        //
+        // `trippy` counts rounds in a `usize` and `krt` counts them in a `u64`,
+        // so a number above the range of a `usize` takes the largest one. No
+        // run reaches that many rounds.
+        .max_rounds(
+            config
+                .rounds
+                .map(|rounds| usize::try_from(rounds).unwrap_or(usize::MAX)),
+        )
         .build()
         .map_err(|error| TraceError::Build {
             reason: error.to_string(),
@@ -310,29 +426,60 @@ fn next_seq(counter: &AtomicU64) -> u64 {
     counter.fetch_add(1, Ordering::Relaxed) + FIRST_ROUND
 }
 
+/// The thread of a tracer that runs.
+///
+/// `trippy` gives no way to stop a tracer, so the round limit of the run is
+/// what ends the thread, and this handle is what waits for that end.
+///
+/// Two tracers of one [`Lane`] carry one probe identifier and one source port,
+/// so they must not probe at the same time. A caller that starts one tracer
+/// after another in one lane holds the handle of each one and waits for it
+/// before it starts the next tracer of that lane. Two tracers of two lanes
+/// probe at the same time and read each other's answers for nothing.
+pub(crate) struct TracerThread(JoinHandle<Result<(), trippy_core::Error>>);
+
+impl TracerThread {
+    /// Waits for the thread of the tracer to stop.
+    ///
+    /// The thread stops when the tracer reaches the round limit of its run. A
+    /// run that names no round limit leaves the tracer without one, and this
+    /// wait then ends only when the process does.
+    ///
+    /// The answer of the thread goes nowhere. A tracer that died closes the
+    /// channel of its rounds, and the run loop already reports that.
+    pub(crate) fn wait(self) {
+        drop(self.0.join());
+    }
+}
+
 /// Starts the tracer on its own thread and gives back a receiver of completed
-/// rounds.
+/// rounds and the handle of that thread.
 ///
 /// The callback of the tracer holds a borrowed round. It converts that round
 /// into an owned record before it sends, so nothing borrowed crosses the
 /// channel and a later engine swap touches this file only.
 ///
 /// The channel is unbounded, so a slow reader never stalls the tracer thread.
-/// The tracer holds no way to stop, so its thread ends when the process ends.
+/// The round limit of the run is what stops the thread, and
+/// [`TracerThread::wait`] is what waits for it.
 ///
 /// # Errors
 ///
 /// Returns [`TraceError::Build`] when the tracer refuses the configuration, and
 /// [`TraceError::Spawn`] when the thread does not start.
-pub(crate) fn spawn(config: &TraceConfig) -> Result<Receiver<RoundRecord>, TraceError> {
+pub(crate) fn spawn(
+    config: &TraceConfig,
+) -> Result<(Receiver<RoundRecord>, TracerThread), TraceError> {
     let tracer = tracer_of(config)?;
     let (sender, receiver) = mpsc::channel();
     let run = config.run.clone();
     let first_ttl = config.first_ttl;
     let counter = AtomicU64::new(0);
     // `spawn_with` gives back the tracer and the handle of its thread. The run
-    // loop reads a closed channel as a dead tracer, so it needs neither.
-    let (_tracer, _thread) = tracer
+    // loop reads a closed channel as a dead tracer, so it needs the tracer for
+    // nothing. The handle of the thread travels to the caller, which waits on
+    // it before it starts another tracer.
+    let (_tracer, thread) = tracer
         .spawn_with(move |round| {
             let record = to_round_record(round, &run, next_seq(&counter), Utc::now(), first_ttl);
             // A failed send means the reader of the channel is gone, and the
@@ -342,7 +489,7 @@ pub(crate) fn spawn(config: &TraceConfig) -> Result<Receiver<RoundRecord>, Trace
         .map_err(|error| TraceError::Spawn {
             reason: error.to_string(),
         })?;
-    Ok(receiver)
+    Ok((receiver, TracerThread(thread)))
 }
 
 /// The number of milliseconds in one second.
@@ -645,7 +792,8 @@ fn to_lookup(entry: &DnsEntry) -> Lookup {
 mod tests {
     use super::{
         choose_privilege, icmp_kind, next_seq, probe_identifier, to_lookup, to_round_record,
-        tracer_of, udp_source_port, IcmpKind, PrivilegeError, TraceConfig, TraceError,
+        tracer_of, udp_source_port, IcmpKind, Lane, PrivilegeError, TraceConfig, TraceError,
+        TracerThread,
     };
     use crate::names::Lookup;
     use crate::record::{Privilege, Record, RoundRecord, RunId};
@@ -653,7 +801,9 @@ mod tests {
     use crate::{Multipath, Protocol, PROGRAM};
     use chrono::{DateTime, Utc};
     use std::process;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::thread;
     use std::time::{Duration, SystemTime};
     use trippy_core::{
         CompletionReason, Flags, IcmpPacketType, Port, Probe, ProbeComplete, ProbeStatus, Round,
@@ -1188,6 +1338,12 @@ this platform needs raw socket privileges to send probes.
     /// varies. It is the port of HTTP.
     const TCP_DESTINATION_PORT: u16 = 80;
 
+    /// The number of probe rounds of a test run.
+    ///
+    /// A tracer holds no round limit by default, so a mapping that dropped the
+    /// field fails the test that reads this number back.
+    const A_ROUND_LIMIT: u64 = 3;
+
     /// A last TTL above the largest one that the tracer takes.
     ///
     /// The command line of `krt` accepts a TTL up to 255, and `trippy_core`
@@ -1207,6 +1363,8 @@ this platform needs raw socket privileges to send probes.
             protocol: Protocol::Icmp,
             multipath: Multipath::Classic,
             privilege: Privilege::Unprivileged,
+            lane: Lane::FIRST,
+            rounds: Some(A_ROUND_LIMIT),
         }
     }
 
@@ -1257,7 +1415,7 @@ this platform needs raw socket privileges to send probes.
     fn the_identifier_of_a_run_is_the_identifier_of_its_process() {
         assert_eq!(
             tracer_from(&a_config()).trace_identifier(),
-            TraceId(probe_identifier(process::id()))
+            TraceId(probe_identifier(process::id(), Lane::FIRST))
         );
     }
 
@@ -1278,7 +1436,11 @@ this platform needs raw socket privileges to send probes.
             (65_536, 2),
             (42_659, 42_660),
         ] {
-            assert_eq!(probe_identifier(process), expected, "process {process}");
+            assert_eq!(
+                probe_identifier(process, Lane::FIRST),
+                expected,
+                "process {process}"
+            );
         }
     }
 
@@ -1291,7 +1453,7 @@ this platform needs raw socket privileges to send probes.
     fn no_process_identifier_maps_onto_the_identifier_of_any_run() {
         for process in 0..=u32::from(u16::MAX) + 1 {
             assert_ne!(
-                TraceId(probe_identifier(process)),
+                TraceId(probe_identifier(process, Lane::FIRST)),
                 ANY_RUN,
                 "process {process}"
             );
@@ -1305,12 +1467,176 @@ this platform needs raw socket privileges to send probes.
     /// the two runs then read two different sets of answers.
     #[test]
     fn two_processes_of_one_window_hold_two_identifiers() {
-        let identifiers: std::collections::HashSet<u16> =
-            (0..u32::from(u16::MAX)).map(probe_identifier).collect();
+        let identifiers: std::collections::HashSet<u16> = (0..u32::from(u16::MAX))
+            .map(|process| probe_identifier(process, Lane::FIRST))
+            .collect();
         assert_eq!(
             identifiers.len(),
             u32::from(u16::MAX) as usize,
             "the fold maps two processes of one window onto one identifier"
+        );
+    }
+
+    /// A process identifier of the size that macOS hands out.
+    ///
+    /// Every test of the lanes reads this one, so each of them states what the
+    /// lanes do and never what one process identifier does.
+    const A_PROCESS: u32 = 42_659;
+
+    /// Every lane of one process.
+    fn every_lane() -> Vec<Lane> {
+        Lane::pool(Lane::COUNT as usize)
+    }
+
+    /// Two lanes of one process carry two probe identifiers.
+    ///
+    /// This is the property that lets a hunt trace many destinations at once.
+    /// Two tracers of one identifier read each other's answers, because
+    /// `trippy` takes an answer whose identifier is the one that the run holds
+    /// and looks no further. The hop of one destination would then land in the
+    /// path of another.
+    #[test]
+    fn two_lanes_of_one_process_carry_two_probe_identifiers() {
+        let identifiers: std::collections::HashSet<u16> = every_lane()
+            .into_iter()
+            .map(|lane| probe_identifier(A_PROCESS, lane))
+            .collect();
+        assert_eq!(
+            identifiers.len(),
+            Lane::COUNT as usize,
+            "two lanes of one process carry one identifier, and each reads the answers of the other"
+        );
+    }
+
+    /// Two lanes of one process take two source ports.
+    ///
+    /// This is the property that lets a hunt probe many destinations at once
+    /// with UDP. The unprivileged path of macOS binds the source port for each
+    /// probe it sends, so two tracers of one port cannot both send.
+    #[test]
+    fn two_lanes_of_one_process_take_two_source_ports() {
+        let ports: std::collections::HashSet<u16> = every_lane()
+            .into_iter()
+            .map(|lane| udp_source_port(A_PROCESS, lane))
+            .collect();
+        assert_eq!(
+            ports.len(),
+            Lane::COUNT as usize,
+            "two lanes of one process take one port, and the second tracer cannot bind it"
+        );
+    }
+
+    /// Two processes that stand one apart carry no identifier in common,
+    /// whatever lanes the two of them probe in.
+    ///
+    /// A user who starts one hunt after another holds two process identifiers a
+    /// few apart. The stride of a lane stands far above that distance, so the
+    /// lanes of the second hunt land between the lanes of the first one and
+    /// never on them.
+    #[test]
+    fn two_processes_that_stand_one_apart_carry_no_identifier_in_common() {
+        for mine in every_lane() {
+            for theirs in every_lane() {
+                assert_ne!(
+                    probe_identifier(A_PROCESS, mine),
+                    probe_identifier(A_PROCESS + 1, theirs),
+                    "lane {mine:?} of one process and lane {theirs:?} of the next carry one identifier"
+                );
+            }
+        }
+    }
+
+    /// Two processes that stand one apart take no source port in common,
+    /// whatever lanes the two of them probe in.
+    #[test]
+    fn two_processes_that_stand_one_apart_take_no_source_port_in_common() {
+        for mine in every_lane() {
+            for theirs in every_lane() {
+                assert_ne!(
+                    udp_source_port(A_PROCESS, mine),
+                    udp_source_port(A_PROCESS + 1, theirs),
+                    "lane {mine:?} of one process and lane {theirs:?} of the next take one port"
+                );
+            }
+        }
+    }
+
+    /// The pool of a hunt holds one lane for each destination it traces at
+    /// once.
+    #[test]
+    fn the_pool_holds_one_lane_for_each_destination_that_a_hunt_traces_at_once() {
+        let pool = Lane::pool(4);
+        assert_eq!(pool.len(), 4);
+        let held: std::collections::HashSet<Lane> = pool.into_iter().collect();
+        assert_eq!(held.len(), 4, "the pool gave one lane twice");
+    }
+
+    /// The pool never holds more lanes than the process has.
+    ///
+    /// The command line refuses a count above the ceiling, so this clamp is the
+    /// guard behind that refusal. A pool of more lanes than the strides cover
+    /// would put two destinations of one hunt on one probe identifier.
+    #[test]
+    fn the_pool_never_holds_more_lanes_than_the_process_has() {
+        assert_eq!(
+            Lane::pool(Lane::COUNT as usize + 10).len(),
+            Lane::COUNT as usize
+        );
+    }
+
+    /// A count above the range of a lane number gives lanes that differ.
+    ///
+    /// The number of a lane is a `u16`, and such a count does not go into one.
+    /// The pool falls back to the ceiling, which the clamp beside it holds. A
+    /// fallback of the first lane would give that one lane many times and put
+    /// many destinations of one hunt on one probe identifier.
+    #[test]
+    fn a_count_above_the_range_of_a_lane_number_gives_lanes_that_differ() {
+        let pool = Lane::pool(usize::MAX);
+        assert_eq!(pool.len(), Lane::COUNT as usize);
+        let held: std::collections::HashSet<Lane> = pool.into_iter().collect();
+        assert_eq!(
+            held.len(),
+            Lane::COUNT as usize,
+            "the pool gave one lane many times"
+        );
+    }
+
+    /// The first lane stands at the first place, and the lane beside it at the
+    /// next one.
+    ///
+    /// A caller that holds one tracer thread for each lane reads the place as
+    /// the place of that thread.
+    #[test]
+    fn the_place_of_a_lane_is_the_place_of_the_thing_a_caller_holds_for_it() {
+        let places: Vec<usize> = Lane::pool(3).into_iter().map(Lane::place).collect();
+        assert_eq!(places, vec![0, 1, 2]);
+        assert_eq!(Lane::FIRST.place(), 0);
+    }
+
+    /// The lane of a configuration reaches the identifier of its tracer.
+    #[test]
+    fn the_lane_of_a_configuration_reaches_the_identifier_of_its_tracer() {
+        let lane = *every_lane().last().expect("a process holds a lane");
+        let tracer = tracer_from(&TraceConfig { lane, ..a_config() });
+        assert_eq!(
+            tracer.trace_identifier(),
+            TraceId(probe_identifier(process::id(), lane))
+        );
+    }
+
+    /// The lane of a configuration reaches the source port of its UDP tracer.
+    #[test]
+    fn the_lane_of_a_configuration_reaches_the_source_port_of_its_udp_tracer() {
+        let lane = *every_lane().last().expect("a process holds a lane");
+        let tracer = tracer_from(&TraceConfig {
+            protocol: Protocol::Udp,
+            lane,
+            ..a_config()
+        });
+        assert_eq!(
+            tracer.port_direction(),
+            trippy_core::PortDirection::FixedSrc(Port(udp_source_port(process::id(), lane)))
         );
     }
 
@@ -1419,7 +1745,7 @@ this platform needs raw socket privileges to send probes.
     fn a_udp_trace_fixes_the_source_port_of_its_process() {
         assert_eq!(
             tracer_of_protocol(Protocol::Udp).port_direction(),
-            trippy_core::PortDirection::FixedSrc(Port(udp_source_port(process::id())))
+            trippy_core::PortDirection::FixedSrc(Port(udp_source_port(process::id(), Lane::FIRST)))
         );
     }
 
@@ -1438,7 +1764,11 @@ this platform needs raw socket privileges to send probes.
             (ports, UDP_FIRST_SOURCE_PORT),
             (42_659, 44_960),
         ] {
-            assert_eq!(udp_source_port(process), expected, "process {process}");
+            assert_eq!(
+                udp_source_port(process, Lane::FIRST),
+                expected,
+                "process {process}"
+            );
         }
     }
 
@@ -1456,7 +1786,7 @@ this platform needs raw socket privileges to send probes.
     fn no_process_identifier_maps_onto_a_port_that_a_traceroute_probes() {
         let ports = u32::from(UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) + 1;
         for process in 0..=ports {
-            let port = udp_source_port(process);
+            let port = udp_source_port(process, Lane::FIRST);
             assert!(
                 !(THE_CLASSIC_SOURCE_PORT..=THE_LAST_TRACEROUTE_PORT).contains(&port),
                 "process {process} takes port {port}, which a traceroute probes"
@@ -1470,7 +1800,9 @@ this platform needs raw socket privileges to send probes.
     #[test]
     fn two_processes_of_one_window_hold_two_source_ports() {
         let ports = u32::from(UDP_LAST_SOURCE_PORT - UDP_FIRST_SOURCE_PORT) + 1;
-        let taken: std::collections::HashSet<u16> = (0..ports).map(udp_source_port).collect();
+        let taken: std::collections::HashSet<u16> = (0..ports)
+            .map(|process| udp_source_port(process, Lane::FIRST))
+            .collect();
         assert_eq!(
             taken.len(),
             ports as usize,
@@ -1516,7 +1848,7 @@ this platform needs raw socket privileges to send probes.
 
         assert_eq!(
             tracer_of_protocol(Protocol::Udp).port_direction(),
-            trippy_core::PortDirection::FixedSrc(Port(udp_source_port(process::id()))),
+            trippy_core::PortDirection::FixedSrc(Port(udp_source_port(process::id(), Lane::FIRST))),
             "the free destination port of a UDP run carries the number of the round, and that is what makes `one flow for each round` true. A direction that held both ports would hold one flow for the whole run, and the help of `paris` and of `dublin` would then be false"
         );
 
@@ -1559,12 +1891,30 @@ this platform needs raw socket privileges to send probes.
         );
     }
 
-    /// `krt` owns the round limit and the time limit, and the run loop enforces
-    /// them. A tracer that stopped itself would close the channel, and the run
-    /// loop reads a closed channel as a dead tracer.
+    /// The tracer of a run stops at the round limit of that run.
+    ///
+    /// `trippy` gives no way to stop a tracer, so the round limit is the one
+    /// thing that ends the thread of one. A hunt starts one tracer for each
+    /// destination of one process, and a tracer that outlives its destination
+    /// probes beside the tracer of the destination after it. Two UDP tracers of
+    /// one process hold one source port, so the second one dies on the port it
+    /// cannot bind.
     #[test]
-    fn the_tracer_holds_no_round_limit() {
+    fn a_run_of_a_round_limit_stops_the_tracer_at_that_limit() {
         let limit = tracer_from(&a_config()).max_rounds();
+        let expected = usize::try_from(A_ROUND_LIMIT).expect("the round limit must fit a `usize`");
+        assert_eq!(limit.map(|rounds| rounds.0.get()), Some(expected));
+    }
+
+    /// A run that names no round limit leaves the tracer without one, and the
+    /// thread of that tracer then sends rounds until the process ends.
+    #[test]
+    fn a_run_of_no_round_limit_leaves_the_tracer_without_one() {
+        let config = TraceConfig {
+            rounds: None,
+            ..a_config()
+        };
+        let limit = tracer_from(&config).max_rounds();
         assert!(limit.is_none(), "the tracer holds a round limit: {limit:?}");
     }
 
@@ -1597,6 +1947,40 @@ this platform needs raw socket privileges to send probes.
         let counter = AtomicU64::new(0);
         assert_eq!(next_seq(&counter), 1);
         assert_eq!(next_seq(&counter), 2);
+    }
+
+    /// The time that the thread of the wait test sleeps before it sets its
+    /// flag.
+    ///
+    /// The sleep is short, because every run of the suite pays it. It is long
+    /// enough that a wait which drops the handle in the place of a join reads
+    /// the flag while the thread still sleeps.
+    const A_SHORT_SLEEP: Duration = Duration::from_millis(50);
+
+    /// The wait of a tracer thread holds the caller until that thread stops.
+    ///
+    /// The thread of this test sets a flag after a short sleep. A wait that
+    /// joins the thread reads the flag as set. A wait that drops the handle
+    /// reads the flag as clear, because the thread still sleeps.
+    ///
+    /// The flag lives in this process, so two runs of this test at the same
+    /// time share nothing.
+    #[test]
+    fn the_wait_of_a_tracer_thread_holds_the_caller_until_that_thread_stops() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let of_thread = Arc::clone(&flag);
+        let tracer = TracerThread(thread::spawn(move || {
+            thread::sleep(A_SHORT_SLEEP);
+            of_thread.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        tracer.wait();
+
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "the wait must hold the caller until the thread sets the flag"
+        );
     }
 
     // The reading of one reverse lookup. No test below touches the network, and

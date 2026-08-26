@@ -9,18 +9,24 @@
 //! asked, print one status line each minute in the place of the table. The
 //! `replay` command reads a recorded file, folds one run of it, and prints the
 //! table of that path: a head that names the run, and one row for each TTL.
+//! The `hunt` command looks for the longest path it can find: it draws random
+//! addresses, traces a pool of them at once, scores each path, and draws
+//! another address each time one of them stops.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
+#![warn(clippy::missing_docs_in_private_items)]
 
 mod graph;
+mod hunt;
 mod live;
 mod names;
 mod record;
 mod run;
 mod source;
 mod stats;
+mod status;
 #[cfg(test)]
 mod testing;
 mod trace;
@@ -30,14 +36,17 @@ use buildinfo::version_string;
 use chrono::Utc;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use record::{
-    EndReason, Family, Recording, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target,
+    EndReason, Family, HuntId, Recording, RoundRecord, RunConfig, RunId, RunRecord, SourceKind,
+    SourceLabel, Target,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::IsTerminal;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -99,16 +108,83 @@ const FIRST_TTL_DEFAULT: u8 = 1;
 /// The last TTL of a run, when the user names none.
 const MAX_TTL_DEFAULT: u8 = 30;
 
+/// The number of destinations that must answer a hunt, when the user names
+/// none.
+///
+/// Eight reached destinations make a hunt that measured something. The address
+/// space answers at a low rate, so a default far above eight spends minutes on
+/// addresses that answer nothing.
+const HUNT_ROUNDS_DEFAULT: u64 = 8;
+
+/// The number of destinations that a hunt traces before it gives up, when the
+/// user names none.
+///
+/// The draw of a hunt never runs out, so a hunt that finds fewer answers than
+/// it wants would draw forever. The number stands well above the default rounds
+/// because most of the address space answers nothing.
+const MAX_TARGETS_DEFAULT: u64 = 128;
+
+/// The number of destinations that a hunt traces at one moment, when the user
+/// names none.
+///
+/// The number matches [`HUNT_ROUNDS_DEFAULT`], so a hunt of the default rounds
+/// starts every destination it needs at once. Most of the address space answers
+/// nothing, and a destination that answers nothing costs the whole target
+/// timeout, so the pool is what keeps a hunt from spending that time on one
+/// address at a time.
+const HUNT_CONCURRENCY_DEFAULT: NonZeroUsize = match NonZeroUsize::new(8) {
+    Some(count) => count,
+    None => NonZeroUsize::MIN,
+};
+
+/// The number of probe rounds that each destination of a hunt takes, when the
+/// user names none.
+///
+/// A trace of one probe round gives one sample of each hop, and one sample is
+/// too few to read a round-trip time from.
+const PROBES_PER_ROUND_DEFAULT: u64 = 3;
+
+/// The longest that one destination of a hunt takes, when the user names none.
+///
+/// The time bounds every destination, and not the quiet ones alone. It stands
+/// above the time that one probe round more than the default probe rounds takes
+/// at the default interval, because the last round lands past the time of the
+/// rounds, and a timeout below that time cuts a destination short of its last
+/// round.
+const TARGET_TIMEOUT_DEFAULT: &str = "10s";
+
 /// The lowest number of rounds that stops a run. A run of zero rounds records
 /// nothing.
 ///
 /// The type is the type that `clap` takes for the bound of a range.
 const ROUNDS_LOWEST: u64 = 1;
 
-/// The width of the key field of the resolved configuration block.
+/// The lowest cap of the destinations of a hunt. A hunt that traces no
+/// destination measures nothing.
 ///
-/// The longest key is `address family:`, and one space follows it.
-const CONFIG_KEY_WIDTH: usize = 16;
+/// The type is the type that `clap` takes for the bound of a range.
+const TARGETS_LOWEST: u64 = 1;
+
+/// The number of spaces between the longest key of the resolved configuration
+/// block and its value.
+///
+/// The width of the key field comes off the keys of the block that prints, so a
+/// key that a later slice adds moves the whole column and never runs into its
+/// own value. A constant width would hold the column at the longest key of the
+/// day, and the first longer key would stand against its value with nothing to
+/// say so.
+const CONFIG_KEY_GAP: usize = 1;
+
+/// The label that the derived name of a recorded file carries in the place of
+/// a destination, for a hunt.
+///
+/// A hunt traces many destinations, so no one of them names the file. Two hunts
+/// of one machine therefore write into one file, and the identifier of the hunt
+/// in every `run` record is what tells their runs apart.
+const HUNT_FILE_LABEL: &str = "hunt";
+
+/// The reason of a hunt whose draw gave no address at all.
+const NO_ADDRESS_TO_HUNT: &str = "the draw gave no address to trace";
 
 /// The value of a flag that holds no limit and no file.
 const ABSENT: &str = "none";
@@ -144,7 +220,7 @@ const FLAG_VERSION_6: &str = "-6";
 
 /// The name of one round of a run, in a status line and in the header line of
 /// a frame.
-const ROUND: &str = "round";
+pub(crate) const ROUND: &str = "round";
 
 /// The name of one TTL that answered, in the status line of one round.
 const HOP: &str = "hop";
@@ -154,7 +230,14 @@ const HOP: &str = "hop";
 const ROW: &str = "row";
 
 /// The last field of the status line of one round that reached the target.
-const REACHED: &str = "reached";
+pub(crate) const REACHED: &str = "reached";
+
+/// The name of the destinations that a hunt traces, in the line of its
+/// indicator and in the counts of its summary.
+///
+/// The word stands beside a bound of many, as in `17/128 targets`, so it never
+/// takes the singular.
+pub(crate) const TARGETS: &str = "targets";
 
 /// The last field of the status line of one round that did not reach the
 /// target.
@@ -271,7 +354,9 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 /// table. A run whose standard output is a pipe or a file, and a run that
 /// `--headless` asked, print one status line each minute. The `replay` command
 /// reads a file that an earlier run wrote, so it takes no destination and no
-/// flag of a probe.
+/// flag of a probe. The `hunt` command looks for the longest path it can find:
+/// it draws random addresses, traces a pool of them at once, scores each path,
+/// and draws another address each time one of them stops.
 // The help names the `?` key and no other key of the live table, because
 // `live::KEYS` is the one list that says what a key does and a doc comment of
 // `clap` is a string literal that reads that list at no time. A help page that
@@ -301,6 +386,66 @@ struct Cli {
     #[arg(value_name = "DESTINATION", required = true)]
     destination: Option<String>,
 
+    /// The multipath mode. UDP only.
+    #[arg(long, value_name = "M", value_enum, default_value_t = Multipath::Classic)]
+    multipath: Multipath,
+
+    /// Force IP version 4.
+    #[arg(short = '4', conflicts_with = "ipv6")]
+    ipv4: bool,
+
+    /// Force IP version 6.
+    #[arg(short = '6')]
+    ipv6: bool,
+
+    /// No table and no keys. Print one status line per minute.
+    #[arg(long)]
+    headless: bool,
+
+    /// Draw the Recent column as an image of the whole history. Needs a
+    /// terminal that names itself and draws images.
+    #[arg(long)]
+    graphics: bool,
+
+    /// Stop after this much time.
+    #[arg(long, value_name = "DUR", value_parser = parse_duration)]
+    duration: Option<Duration>,
+
+    /// Stop after this many rounds. One round is one sweep of the TTLs.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(ROUNDS_LOWEST..),
+    )]
+    rounds: Option<u64>,
+
+    /// The flags that a trace and a hunt both take.
+    #[command(flatten)]
+    shared: SharedArgs,
+
+    /// The command that reads recorded work in the place of a trace.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// The flags that a trace and a hunt both take.
+///
+/// A hunt probes as a trace does, so the same seven flags set the file, the
+/// period of a round, the range of the TTL, the protocol, the lookups, and the
+/// source. One definition serves both, because two definitions of one flag
+/// drift: `--max-ttl` would take one default from a trace and another from a
+/// hunt, and nothing would say so.
+///
+/// The flags that a hunt does not take stay on [`Cli`] alone. A hunt draws its
+/// own destination, so it takes none. It draws addresses of ip version 4 alone,
+/// so the two flags of the address family say nothing about it. It prints one
+/// table at the end and no live table, so `--headless` says nothing either. Its
+/// own `--rounds` counts destinations, so the round limit and the time limit of
+/// a trace stay where they are. `--multipath` stays there as well, so a hunt
+/// names no mode and always probes the classic one. The block of a hunt prints
+/// that mode, so the reader sees which one the probes take.
+#[derive(clap::Args, Debug, PartialEq, Eq)]
+struct SharedArgs {
     /// The JSONL path. Overrides the derived name.
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
@@ -337,18 +482,6 @@ struct Cli {
     #[arg(long, value_name = "P", value_enum, default_value_t = Protocol::Icmp)]
     protocol: Protocol,
 
-    /// The multipath mode. UDP only.
-    #[arg(long, value_name = "M", value_enum, default_value_t = Multipath::Classic)]
-    multipath: Multipath,
-
-    /// Force IP version 4.
-    #[arg(short = '4', conflicts_with = "ipv6")]
-    ipv4: bool,
-
-    /// Force IP version 6.
-    #[arg(short = '6')]
-    ipv6: bool,
-
     /// Skip reverse DNS. Show addresses only.
     #[arg(long)]
     no_dns: bool,
@@ -357,31 +490,6 @@ struct Cli {
     /// the public address.
     #[arg(long, value_name = "IP")]
     source: Option<IpAddr>,
-
-    /// No table and no keys. Print one status line per minute.
-    #[arg(long)]
-    headless: bool,
-
-    /// Draw the Recent column as an image of the whole history. Needs a
-    /// terminal that names itself and draws images.
-    #[arg(long)]
-    graphics: bool,
-
-    /// Stop after this much time.
-    #[arg(long, value_name = "DUR", value_parser = parse_duration)]
-    duration: Option<Duration>,
-
-    /// Stop after this many rounds.
-    #[arg(
-        long,
-        value_name = "N",
-        value_parser = clap::value_parser!(u64).range(ROUNDS_LOWEST..),
-    )]
-    rounds: Option<u64>,
-
-    /// The command that reads recorded work in the place of a trace.
-    #[command(subcommand)]
-    command: Option<Command>,
 }
 
 /// A command that reads recorded work in the place of a new trace.
@@ -397,6 +505,94 @@ enum Command {
         #[arg(long, value_name = "ID")]
         run: Option<String>,
     },
+
+    /// Hunt for the longest path. Draw a pool of addresses, trace them at
+    /// once, score each one, and draw another as each one stops.
+    Hunt {
+        /// Stop after this many destinations answer. A destination that
+        /// answers nothing costs no round.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = HUNT_ROUNDS_DEFAULT,
+            value_parser = clap::value_parser!(u64).range(ROUNDS_LOWEST..),
+        )]
+        rounds: u64,
+
+        /// Give up after tracing this many destinations, answered or not.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = MAX_TARGETS_DEFAULT,
+            value_parser = clap::value_parser!(u64).range(TARGETS_LOWEST..),
+        )]
+        max_targets: u64,
+
+        /// Trace this many destinations at one moment. A larger pool finds the
+        /// paths sooner and sends more probes at once.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = HUNT_CONCURRENCY_DEFAULT,
+            value_parser = parse_concurrency,
+        )]
+        concurrency: NonZeroUsize,
+
+        /// The number of probe rounds that each destination takes. One probe
+        /// round is one sweep of the TTLs.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = PROBES_PER_ROUND_DEFAULT,
+            value_parser = clap::value_parser!(u64).range(ROUNDS_LOWEST..),
+        )]
+        probes_per_round: u64,
+
+        /// The longest that one destination takes, whether it answers or not.
+        #[arg(
+            long,
+            value_name = "DUR",
+            default_value = TARGET_TIMEOUT_DEFAULT,
+            value_parser = parse_duration,
+        )]
+        target_timeout: Duration,
+
+        /// The seed of the draw. A hunt of one seed visits the same addresses.
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
+
+        /// Let a partial path compete for a row of the summary.
+        #[arg(long)]
+        include_partial: bool,
+
+        /// The flags that a trace and a hunt both take.
+        #[command(flatten)]
+        shared: SharedArgs,
+    },
+}
+
+/// The configuration of one hunt, after the command line resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HuntConfig {
+    /// The number of destinations that must answer before the hunt stops.
+    rounds: u64,
+    /// The number of destinations that the hunt traces before it gives up.
+    max_targets: u64,
+    /// The number of destinations that the hunt traces at one moment.
+    concurrency: NonZeroUsize,
+    /// The number of probe rounds that each destination takes.
+    probes_per_round: u64,
+    /// The longest that one destination takes, whether it answers or not.
+    target_timeout: Duration,
+    /// The seed of the draw of the addresses.
+    ///
+    /// The value is resolved and never a flag: a command line that named no
+    /// seed takes one off the clock, and the block of the resolved
+    /// configuration prints it. A reader who wants that hunt back names the
+    /// number to `--seed`.
+    seed: u64,
+    /// True when a partial path competes for a row of the summary.
+    include_partial: bool,
 }
 
 /// The configuration of one run, after the command line resolves.
@@ -448,9 +644,24 @@ struct ResolvedConfig {
     replay: Option<PathBuf>,
     /// The run in the recorded file to fold.
     run: Option<String>,
+    /// The configuration of the hunt. A run that hunts nothing holds none.
+    hunt: Option<HuntConfig>,
 }
 
 impl Cli {
+    /// The seven shared flags of the side of the command line that probes.
+    ///
+    /// A `hunt` carries its own copy of them, because the parser rejects a flag
+    /// of a probe in front of a command. Every other line carries them at the
+    /// top. The two checks that read a flag before the run resolves therefore
+    /// read the same values that the run will use.
+    fn probe_args(&self) -> &SharedArgs {
+        match &self.command {
+            Some(Command::Hunt { shared, .. }) => shared,
+            _ => &self.shared,
+        }
+    }
+
     /// Resolves the command line into the configuration of one run.
     ///
     /// The two flags of the address family collapse into one value, and the
@@ -466,22 +677,64 @@ impl Cli {
     /// change a packet. ICMP carries no port to hold or to vary. A TCP probe
     /// puts the probe number in its source port under every mode, so the mode
     /// changes nothing, and the record then names a mode that the run did not
-    /// use.
+    /// use. A target timeout that the probe rounds of the same hunt run past
+    /// cuts every destination short of its last round, so such a line asks for
+    /// two things at once. The last round lands past the time of the rounds, so
+    /// the timeout must hold one probe round more than the line asks for. A cap
+    /// of the targets below the rounds of the same hunt asks for two things at
+    /// once as well: such a hunt gives up before it can hold the rounds it
+    /// wants.
+    ///
+    /// Returns the reason as text as well when the destination is the name of a
+    /// command, which a flag in front of that command makes. That check runs
+    /// ahead of the checks of the flags, because each of those reads a flag
+    /// that such a line must move.
     fn resolve(self) -> Result<ResolvedConfig, String> {
-        if self.first_ttl > self.max_ttl {
+        let probe = self.probe_args();
+
+        // This guard stands in front of every check of a flag. A line that
+        // reads a command as its destination holds the flags of a trace, and
+        // those flags then contradict each other as the flags of a trace do. A
+        // message about one of them names a fault that goes away as soon as the
+        // line writes the command first, and it sends the reader after the
+        // wrong flag.
+        if let Some(destination) = self.destination.as_deref() {
+            if let Some(command) = command_named(destination) {
+                let outside = flags_outside(&command);
+                let refused = if outside.is_empty() {
+                    String::new()
+                } else {
+                    let named: Vec<String> =
+                        outside.iter().map(|flag| format!("`{flag}`")).collect();
+                    format!(
+                        " `{command}` takes none of these flags: {}.",
+                        named.join(", ")
+                    )
+                };
+                return Err(format!(
+                    "`{destination}` is the name of a command, and this line reads it as a destination: write `{PROGRAM} {command}` first, because every flag of a probe stands behind the command.{refused}"
+                ));
+            }
+        }
+
+        if probe.first_ttl > probe.max_ttl {
             return Err(format!(
                 "`--first-ttl {}` is above `--max-ttl {}`: the first TTL starts the probe and the max TTL ends it",
-                self.first_ttl, self.max_ttl
+                probe.first_ttl, probe.max_ttl
             ));
         }
 
-        let carries_a_mode = matches!(self.protocol, Protocol::Udp);
+        let carries_a_mode = matches!(probe.protocol, Protocol::Udp);
         if self.multipath != Multipath::Classic && !carries_a_mode {
             return Err(format!(
                 "`--multipath {}` needs `--protocol udp`, but the protocol is `{}`",
                 value_name(&self.multipath),
-                value_name(&self.protocol)
+                value_name(&probe.protocol)
             ));
+        }
+
+        if let Some(reason) = hunt_contradiction(self.command.as_ref(), probe.interval) {
+            return Err(reason);
         }
 
         // The parser rejects the two flags of the address family together, so
@@ -494,28 +747,58 @@ impl Cli {
             AddressFamily::Auto
         };
 
-        let (replay, run) = match self.command {
-            Some(Command::Replay { file, run }) => (Some(file), run),
-            None => (None, None),
+        let (replay, run) = match &self.command {
+            Some(Command::Replay { file, run }) => (Some(file.clone()), run.clone()),
+            Some(Command::Hunt { .. }) | None => (None, None),
+        };
+
+        // A hunt carries its own copy of the seven shared flags, because the
+        // parser rejects a flag of a probe in front of a command. The hunt
+        // therefore wins over the flags of the line that stands in front of it,
+        // which hold their defaults for a line that names a command.
+        let (hunt, shared) = match self.command {
+            Some(Command::Hunt {
+                rounds,
+                max_targets,
+                concurrency,
+                probes_per_round,
+                target_timeout,
+                seed,
+                include_partial,
+                shared,
+            }) => (
+                Some(HuntConfig {
+                    rounds,
+                    max_targets,
+                    concurrency,
+                    probes_per_round,
+                    target_timeout,
+                    seed: seed.unwrap_or_else(seed_from_clock),
+                    include_partial,
+                }),
+                shared,
+            ),
+            _ => (None, self.shared),
         };
 
         Ok(ResolvedConfig {
             destination: self.destination,
-            output: self.output,
-            interval: self.interval,
-            first_ttl: self.first_ttl,
-            max_ttl: self.max_ttl,
-            protocol: self.protocol,
+            output: shared.output,
+            interval: shared.interval,
+            first_ttl: shared.first_ttl,
+            max_ttl: shared.max_ttl,
+            protocol: shared.protocol,
             multipath: self.multipath,
             address_family,
-            reverse_dns: !self.no_dns,
-            source: self.source,
+            reverse_dns: !shared.no_dns,
+            source: shared.source,
             headless: self.headless,
             graphics: self.graphics,
             duration: self.duration,
             rounds: self.rounds,
             replay,
             run,
+            hunt,
         })
     }
 }
@@ -528,57 +811,131 @@ impl Cli {
 /// prints the table of the run it folded in the place of the block.
 impl fmt::Display for ResolvedConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let path_or = |path: Option<&PathBuf>, absent: &str| {
-            path.map_or_else(|| absent.to_owned(), |path| path.display().to_string())
+        let rows = self.rows();
+        let width = rows
+            .iter()
+            .map(|(key, _)| key.len() + ":".len())
+            .max()
+            .unwrap_or_default()
+            + CONFIG_KEY_GAP;
+        writeln!(formatter, "resolved configuration:")?;
+        for (key, value) in rows {
+            let key = format!("{key}:");
+            writeln!(formatter, "  {key:<width$}{value}")?;
+        }
+        Ok(())
+    }
+}
+
+impl ResolvedConfig {
+    /// The rows of the block that a run prints before it probes.
+    ///
+    /// A hunt and a trace hold different rows, because a hunt draws its own
+    /// destination, draws addresses of ip version 4 alone, and draws no live
+    /// table. A block that named a destination, an address family, and a
+    /// display would state three things that the hunt does not do.
+    ///
+    /// The multipath mode stands in both blocks, because a hunt probes with a
+    /// mode as a trace does. A hunt names no mode of its own, so its block
+    /// always reads `classic`, and the row is what tells the reader so.
+    ///
+    /// The eight rows that both of them hold read one expression each, and the
+    /// two lists then name those rows in the order each block wants. A second
+    /// expression for one of those rows would print the source one way in a
+    /// trace and another way in a hunt.
+    fn rows(&self) -> Vec<(&'static str, String)> {
+        let output = || {
+            self.output.as_ref().map_or_else(
+                || OUTPUT_DERIVED.to_owned(),
+                |path| path.display().to_string(),
+            )
         };
-        let rows = [
-            (
-                "destination",
-                self.destination
-                    .clone()
-                    .unwrap_or_else(|| ABSENT.to_owned()),
-            ),
-            ("output", path_or(self.output.as_ref(), OUTPUT_DERIVED)),
-            ("interval", ui::render_duration(self.interval)),
+        let interval = || ui::render_duration(self.interval);
+        let reverse_dns = || if self.reverse_dns { "on" } else { "off" }.to_owned();
+        let source = || {
+            self.source.map_or_else(
+                || SOURCE_DISCOVERED.to_owned(),
+                |address| address.to_string(),
+            )
+        };
+        let Some(hunt) = &self.hunt else {
+            return vec![
+                (
+                    "destination",
+                    self.destination
+                        .clone()
+                        .unwrap_or_else(|| ABSENT.to_owned()),
+                ),
+                ("output", output()),
+                ("interval", interval()),
+                ("first ttl", self.first_ttl.to_string()),
+                ("max ttl", self.max_ttl.to_string()),
+                ("protocol", value_name(&self.protocol)),
+                ("multipath", value_name(&self.multipath)),
+                ("address family", self.address_family.to_string()),
+                ("reverse dns", reverse_dns()),
+                ("source", source()),
+                (
+                    "display",
+                    if self.headless { "headless" } else { "table" }.to_owned(),
+                ),
+                (
+                    "duration limit",
+                    self.duration
+                        .map_or_else(|| ABSENT.to_owned(), ui::render_duration),
+                ),
+                (
+                    "round limit",
+                    self.rounds
+                        .map_or_else(|| ABSENT.to_owned(), |rounds| rounds.to_string()),
+                ),
+            ];
+        };
+        vec![
+            ("output", output()),
+            ("interval", interval()),
             ("first ttl", self.first_ttl.to_string()),
             ("max ttl", self.max_ttl.to_string()),
             ("protocol", value_name(&self.protocol)),
             ("multipath", value_name(&self.multipath)),
-            ("address family", self.address_family.to_string()),
+            ("reverse dns", reverse_dns()),
+            ("source", source()),
+            ("rounds", hunt.rounds.to_string()),
+            ("max targets", hunt.max_targets.to_string()),
+            ("at once", hunt.concurrency.to_string()),
+            ("probes per round", hunt.probes_per_round.to_string()),
+            ("target timeout", ui::render_duration(hunt.target_timeout)),
+            ("seed", hunt.seed.to_string()),
             (
-                "reverse dns",
-                if self.reverse_dns { "on" } else { "off" }.to_owned(),
+                "include partial",
+                if hunt.include_partial { "on" } else { "off" }.to_owned(),
             ),
-            (
-                "source",
-                self.source.map_or_else(
-                    || SOURCE_DISCOVERED.to_owned(),
-                    |address| address.to_string(),
-                ),
-            ),
-            (
-                "display",
-                if self.headless { "headless" } else { "table" }.to_owned(),
-            ),
-            (
-                "duration limit",
-                self.duration
-                    .map_or_else(|| ABSENT.to_owned(), ui::render_duration),
-            ),
-            (
-                "round limit",
-                self.rounds
-                    .map_or_else(|| ABSENT.to_owned(), |rounds| rounds.to_string()),
-            ),
-        ];
-
-        writeln!(formatter, "resolved configuration:")?;
-        for (key, value) in rows {
-            let key = format!("{key}:");
-            writeln!(formatter, "  {key:<CONFIG_KEY_WIDTH$}{value}")?;
-        }
-        Ok(())
+        ]
     }
+}
+
+/// Reads the number of destinations that a hunt traces at one moment.
+///
+/// The number stands from one to the lanes that one process holds. A pool above
+/// that ceiling would put two destinations of one moment in one lane, and two
+/// tracers of one lane read each other's answers, so a hop of one destination
+/// would land in the path of another.
+///
+/// # Errors
+///
+/// Returns the reason as text when the number does not read, when it is zero,
+/// and when it stands above the ceiling.
+fn parse_concurrency(text: &str) -> Result<NonZeroUsize, String> {
+    let ceiling = usize::from(trace::Lane::COUNT);
+    let count: NonZeroUsize = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a number of destinations from 1 to {ceiling}"))?;
+    if count.get() > ceiling {
+        return Err(format!(
+            "`{text}` is above the {ceiling} destinations that one hunt traces at one moment: two destinations of one lane read each other's answers"
+        ));
+    }
+    Ok(count)
 }
 
 /// Reads a duration from the text of a command line flag.
@@ -655,6 +1012,180 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
         ));
     }
     Ok(duration)
+}
+
+/// The command that a destination names, when the destination is the name of
+/// one.
+///
+/// A line that names a flag in front of a command reads the command as the
+/// destination, because the parser takes the first free word as the
+/// destination and every flag of a probe conflicts with a command. Such a line
+/// would trace a host named `hunt`.
+///
+/// The list of the names comes from a built parser and never from a list of
+/// this file. A command that a later slice adds is a command that this guard
+/// covers, with nothing to remember.
+///
+/// The parser must be built, because clap writes the `help` command into it as
+/// it builds it. A parser straight from the derive macro therefore holds the
+/// commands of this file alone, and `krt --headless help` went to the network
+/// and looked for a host named `help`.
+fn command_named(destination: &str) -> Option<String> {
+    built_parser()
+        .get_subcommands()
+        .map(|command| command.get_name().to_owned())
+        .find(|name| name == destination)
+}
+
+/// The parser of the tool, as clap holds it once it is ready to read a command
+/// line.
+///
+/// Clap adds the `help` command and the `--help` and `--version` flags as it
+/// builds the parser, and the derive macro alone adds none of the three. A
+/// reader of the parser that skips this step therefore reads a list that the
+/// tool never gives a user.
+fn built_parser() -> clap::Command {
+    let mut parser = Cli::command();
+    parser.build();
+    parser
+}
+
+/// The flags that clap writes into the parser as it builds it.
+///
+/// A built parser carries `--help` on every command, and `--version` on the top
+/// level alone, because the version stands on [`Cli`]. Neither is a flag of a
+/// probe, so a message about the flags of a probe names neither. The names are
+/// the ids that clap gives the two arguments.
+const GENERATED_FLAGS: [&str; 2] = ["help", "version"];
+
+/// The flags of the top level that the command does not take, as a user writes
+/// them.
+///
+/// The guard of a command read as a destination tells the reader to write the
+/// command first. That repair works for a flag the command shares, and it fails
+/// for a flag that stands on the top level alone: the command then answers that
+/// the flag is unknown. The message therefore names the flags of the second
+/// kind.
+///
+/// The two sets come from a built parser and never from a list of this file. A
+/// flag that a later slice moves onto [`SharedArgs`] leaves this set on its
+/// own, and a flag that a later slice adds to the top level joins it.
+///
+/// The parser must be built, for the reason that [`command_named`] gives: the
+/// `help` command exists only in a built parser, and this function finds the
+/// command of a name that guard gave it. A built parser also carries the two
+/// flags that clap writes itself, so the top level drops
+/// [`GENERATED_FLAGS`] first. `--version` stands on the top level alone, and
+/// the message would otherwise name it as a flag that the command refuses.
+///
+/// A flag that carries a short name and no long name — the two flags of the
+/// address family — reads by its short name. A positional argument is no flag,
+/// so the set holds none. The order is the order of the text, so one command
+/// line always reads one message.
+fn flags_outside(command: &str) -> Vec<String> {
+    let top = built_parser();
+    let Some(inner) = top.find_subcommand(command) else {
+        return Vec::new();
+    };
+    let long_names: BTreeSet<&str> = inner
+        .get_arguments()
+        .filter_map(clap::Arg::get_long)
+        .collect();
+    let short_names: BTreeSet<char> = inner
+        .get_arguments()
+        .filter_map(clap::Arg::get_short)
+        .collect();
+    let mut outside: Vec<String> = top
+        .get_arguments()
+        .filter(|argument| !GENERATED_FLAGS.contains(&argument.get_id().as_str()))
+        .filter_map(
+            |argument| match (argument.get_long(), argument.get_short()) {
+                (Some(long), _) if !long_names.contains(long) => Some(format!("--{long}")),
+                (None, Some(short)) if !short_names.contains(&short) => Some(format!("-{short}")),
+                _ => None,
+            },
+        )
+        .collect();
+    outside.sort();
+    outside
+}
+
+/// What the refusal of a target timeout names in the place of a time that no
+/// duration holds.
+const TIME_BEYOND_A_DURATION: &str = "more time than a duration holds";
+
+/// The time that the probe rounds of one destination of a hunt take.
+///
+/// The tracer sends one probe round each interval, so the destination takes
+/// the interval once for each probe round. `--probes-per-round` counts up to
+/// the width of a `u64`, and a duration multiplies by a `u32`, so a large count
+/// gives a product that no duration holds. The answer is then none, and the
+/// caller reads that as a time that no timeout reaches.
+fn probe_time(interval: Duration, probes_per_round: u64) -> Option<Duration> {
+    u32::try_from(probes_per_round)
+        .ok()
+        .and_then(|rounds| interval.checked_mul(rounds))
+}
+
+/// The reason that the flags of one hunt contradict each other, when they do.
+///
+/// A cap of the targets below the rounds of the same line gives up before the
+/// hunt can hold the rounds it wants. A target timeout that the probe rounds of
+/// the same line run past cuts every destination short of its last round. Both
+/// lines ask for two things at once, so the tool names the pair in the place of
+/// a hunt that can never do what the line says.
+///
+/// The timeout must hold one probe round more than the line asks for. The first
+/// round of a destination goes out one interval after the run starts, and each
+/// round after it takes one interval more, so the last of N rounds lands past N
+/// intervals. A timeout of exactly N intervals therefore stops the destination
+/// one round short of the count on its own command line.
+///
+/// A command line that names no hunt holds no such pair, and it gives none.
+fn hunt_contradiction(command: Option<&Command>, interval: Duration) -> Option<String> {
+    let Some(Command::Hunt {
+        rounds,
+        max_targets,
+        probes_per_round,
+        target_timeout,
+        ..
+    }) = command
+    else {
+        return None;
+    };
+    if max_targets < rounds {
+        return Some(format!(
+            "`--max-targets {max_targets}` is below `--rounds {rounds}`: a hunt that traces {max_targets} destinations never holds {rounds} that answered"
+        ));
+    }
+    // The saturating add holds a count of the full width of a `u64`. The
+    // `u32::try_from` of `probe_time` then gives none, which reads as a time
+    // that no timeout reaches.
+    let needed = probe_time(interval, probes_per_round.saturating_add(1));
+    if needed.is_none_or(|needed| *target_timeout <= needed) {
+        let needs = needed.map_or_else(|| TIME_BEYOND_A_DURATION.to_owned(), ui::render_duration);
+        return Some(format!(
+            "`--target-timeout {}` cannot hold `--probes-per-round {probes_per_round}` at an interval of {}. The last round lands past the time of the rounds, so the timeout must hold one round more, which is {needs}: raise the timeout or lower the probe rounds",
+            ui::render_duration(*target_timeout),
+            ui::render_duration(interval)
+        ));
+    }
+    None
+}
+
+/// The seed of a hunt that named none.
+///
+/// The moment that the hunt starts makes the seed, so two hunts of one machine
+/// draw different addresses. The block of the resolved configuration prints the
+/// number, so a reader who wants that hunt back names it to `--seed`.
+///
+/// The nanoseconds of the moment run past the width of the seed, and the low
+/// bits are the ones that move, so the seed takes those.
+fn seed_from_clock() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    u64::try_from(nanos & u128::from(u64::MAX)).unwrap_or_default()
 }
 
 /// Picks the address of the version that the run asked for.
@@ -819,7 +1350,7 @@ fn user_stopped(flag: &AtomicBool) -> bool {
 ///
 /// One of a thing keeps the singular name, and every other count adds one `s`.
 /// The two names of this file, `round` and `run`, both take that plural.
-fn counted(count: usize, name: &str) -> String {
+pub(crate) fn counted(count: usize, name: &str) -> String {
     let plural = if count == 1 { "" } else { "s" };
     format!("{count} {name}{plural}")
 }
@@ -993,6 +1524,29 @@ impl TraceFailure {
     }
 }
 
+/// The fault that stopped a hunt, and what the hunt found before it.
+///
+/// A fault that stops the loop of the hunt carries the summary of the rounds
+/// that finished, and the caller prints that table before it prints the reason.
+/// A fault in front of the loop — the privilege gate, the resolver, the draw,
+/// the file, the signal — carries none, because no round ran.
+struct HuntFailure {
+    /// The summary of the rounds that finished, when the hunt reached the loop.
+    summary: Option<hunt::Summary>,
+    /// The fault, as the user reads it, and the code of its kind.
+    failure: TraceFailure,
+}
+
+impl From<TraceFailure> for HuntFailure {
+    /// A fault in front of the loop of the hunt, which found nothing to print.
+    fn from(failure: TraceFailure) -> Self {
+        Self {
+            summary: None,
+            failure,
+        }
+    }
+}
+
 /// The unspecified address of the family of an address.
 fn unspecified_of(target: IpAddr) -> IpAddr {
     match target {
@@ -1112,6 +1666,16 @@ fn resolver_of(reverse_dns: bool) -> std::io::Result<Box<dyn names::Resolver>> {
 /// answer, and a hop whose name server answers slowly still takes a `name`
 /// record. The wait ends at the moment that no address waits, so a run whose
 /// addresses settled pays none of it.
+///
+/// The time limit of a run caps this grace, and the deadline of a destination
+/// of a hunt caps it the same way. A run therefore takes the time that its
+/// limit names, and no more.
+///
+/// A run waits for its names one step at a time, one step to a turn. A
+/// destination of a hunt that waits here therefore holds up no other
+/// destination of the pool, whatever the length of this grace. It holds its
+/// own lane for the wait, so the hunt starts the destination that follows it
+/// one wait later than it otherwise would.
 fn name_grace() -> Duration {
     trace::resolver_timeout()
 }
@@ -1288,7 +1852,10 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
     println!("{RECORDING_TO} {}", path.display());
 
     let run = RunId::at(Utc::now());
-    let rounds = trace::spawn(&trace::TraceConfig {
+    // A trace starts one tracer, so nothing waits for its thread. The thread
+    // stops at the round limit of the run, and a run of no round limit stops
+    // when the process does.
+    let (rounds, _tracer) = trace::spawn(&trace::TraceConfig {
         target: target.addr,
         run: run.clone(),
         interval: config.interval,
@@ -1297,6 +1864,12 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         protocol: config.protocol,
         multipath: config.multipath,
         privilege,
+        // A trace of one destination probes in the first lane. The lanes
+        // beyond it are for a hunt, which traces many destinations at once.
+        lane: trace::Lane::FIRST,
+        // The run loop stops at this number too, so the tracer sends no probe
+        // behind the run that asked for it.
+        rounds: config.rounds,
     })
     .map_err(|error| TraceFailure::new(&error, EXIT_TRACER_FAILED))?;
 
@@ -1307,6 +1880,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         target,
         config: run_config(config, privilege),
         host: host_name(),
+        hunt: None,
     };
 
     let flag = stop_flag().map_err(|error| {
@@ -1320,7 +1894,7 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         deadline: deadline_of(config.duration),
         name_grace: name_grace(),
     };
-    let mut namer = names::Namer::new(resolver, start.run.clone());
+    let namer = names::Namer::new(resolver, start.run.clone());
 
     // The screen and the guard stand in a scope of their own, and the closing
     // line stands under it. The guard drops at the end of the scope, which
@@ -1335,10 +1909,10 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         let (mut screen, _guard) = screen_of(config, &start, &path)?;
         run::record(
             &start,
-            &rounds,
-            &limits,
+            rounds,
+            limits,
             &|| user_stopped(&flag),
-            &mut namer,
+            namer,
             &mut writer,
             screen.as_mut(),
         )
@@ -1352,6 +1926,218 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
     };
     println!("{}", closing_line(&outcome, &path));
     Ok(outcome)
+}
+
+/// The tracer of a hunt of the command line.
+///
+/// Each destination takes one tracer of `trace.rs`, and the hunt holds many of
+/// them at once. Every one of those tracers probes in a lane of its own, which
+/// is what keeps two of them from reading each other's answers and what keeps
+/// two UDP tracers from binding one source port.
+///
+/// Two tracers of one lane still cannot probe at once, so `start` waits for the
+/// tracer that ran last in the lane it is handed. The wait is what the run loop
+/// cannot give: a destination that stops at its target timeout stops while its
+/// tracer still probes. The wait ends at the round limit of that destination,
+/// which the command line holds under the target timeout of every destination.
+struct SystemProbes<'a> {
+    /// The command line that the hunt resolved, which holds the period, the
+    /// range of the TTL, the protocol, and the multipath mode of every probe.
+    config: &'a ResolvedConfig,
+    /// The privilege mode that the platform gave.
+    privilege: record::Privilege,
+    /// The thread of the tracer that ran last in each lane.
+    ///
+    /// A lane whose first destination the hunt has not started yet holds no
+    /// such thread.
+    running: Vec<Option<trace::TracerThread>>,
+}
+
+impl SystemProbes<'_> {
+    /// The configuration of the tracer of one destination.
+    ///
+    /// The round limit is the number of probe rounds that each destination of
+    /// the hunt takes, so the tracer of a destination stops when that
+    /// destination stops. `hunt::trace_one` gives the run loop the same number.
+    ///
+    /// A `SystemProbes` traces for a hunt alone, so the resolved command line
+    /// always holds a plan. A line that holds none leaves the tracer without a
+    /// round limit, which is what a trace of one destination takes.
+    ///
+    /// The build of the configuration stands apart from the start of the
+    /// tracer, because a tracer that starts sends packets and a test of this
+    /// wiring sends none.
+    fn config_of(&self, target: Ipv4Addr, run: &RunId, lane: trace::Lane) -> trace::TraceConfig {
+        trace::TraceConfig {
+            target: IpAddr::V4(target),
+            run: run.clone(),
+            interval: self.config.interval,
+            first_ttl: self.config.first_ttl,
+            max_ttl: self.config.max_ttl,
+            protocol: self.config.protocol,
+            multipath: self.config.multipath,
+            privilege: self.privilege,
+            lane,
+            rounds: self.config.hunt.map(|hunt| hunt.probes_per_round),
+        }
+    }
+}
+
+impl SystemProbes<'_> {
+    /// The thread of the tracer that ran last in this lane.
+    ///
+    /// A lane past the end of the list holds no thread, and the list grows to
+    /// reach it. The hunt builds the list at the size of its pool, so the growth
+    /// is the guard behind that size and never the normal case.
+    fn thread_of(&mut self, lane: trace::Lane) -> &mut Option<trace::TracerThread> {
+        let place = lane.place();
+        if self.running.len() <= place {
+            self.running.resize_with(place + 1, || None);
+        }
+        &mut self.running[place]
+    }
+}
+
+impl hunt::Probes for SystemProbes<'_> {
+    fn start(
+        &mut self,
+        target: Ipv4Addr,
+        run: &RunId,
+        lane: trace::Lane,
+    ) -> Result<std::sync::mpsc::Receiver<RoundRecord>, String> {
+        // The tracer that ran last in this lane stops first. Two tracers of one
+        // lane carry one probe identifier and one source port, so the second
+        // one would read the answers of the first.
+        if let Some(running) = self.thread_of(lane).take() {
+            running.wait();
+        }
+        let (rounds, running) =
+            trace::spawn(&self.config_of(target, run, lane)).map_err(|error| error.to_string())?;
+        *self.thread_of(lane) = Some(running);
+        Ok(rounds)
+    }
+}
+
+/// Records one hunt, from the draw of the addresses to the summary of them all.
+///
+/// The order of the steps is the order of a trace, and for the same reasons.
+/// The privilege gate comes first, so a platform that cannot probe says so
+/// before the hunt makes a file. The reverse resolver starts next, so a hunt
+/// that cannot start its resolver makes no file. The recorded file opens before
+/// the first tracer starts, so no probe leaves the machine for a hunt that
+/// cannot record it.
+///
+/// The search for the source address reads the route to one destination, and
+/// the first address of the draw is that destination. The draw keeps that
+/// address, so the hunt traces it as its first round and the search costs the
+/// hunt no round. A draw that gives no address at all leaves the hunt nothing
+/// to trace, and the run says so.
+///
+/// The hunt draws no live table. It prints the summary when it stops, and a
+/// hunt that `Ctrl-C` stopped prints the summary of the rounds that finished.
+///
+/// # Errors
+///
+/// Returns the reason and the exit code of the fault that stopped the hunt,
+/// with the summary of the rounds that finished beside them. A fault that
+/// stopped the loop of the hunt holds that summary, and a fault in front of the
+/// loop holds none.
+fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, HuntFailure> {
+    let privilege = trace::acquire_privilege()
+        .map_err(|error| TraceFailure::new(&error, EXIT_NO_PRIVILEGES))?;
+    let resolver = resolver_of(config.reverse_dns).map_err(|error| {
+        TraceFailure::new(
+            &format!("the reverse resolver did not start: {error}"),
+            EXIT_FAILURE,
+        )
+    })?;
+
+    let mut draw = hunt::Draw::seeded(plan.seed);
+    let first = draw
+        .peek()
+        .ok_or_else(|| TraceFailure::new(&NO_ADDRESS_TO_HUNT.to_owned(), EXIT_FAILURE))?;
+    let (source, warning) = source_from(
+        source::discover(config.source, IpAddr::V4(first)),
+        IpAddr::V4(first),
+    );
+    if let Some(warning) = warning {
+        eprintln!("{PROGRAM}: {warning}");
+    }
+    let path = source::output_path(config.output.as_deref(), source.addr, HUNT_FILE_LABEL);
+    let mut writer = record::Writer::append(&path).map_err(|error| {
+        TraceFailure::new(&format!("{}: {error}", path.display()), EXIT_WRITE_FAILED)
+    })?;
+    println!("{RECORDING_TO} {}", path.display());
+
+    let flag = stop_flag().map_err(|error| {
+        TraceFailure::new(
+            &format!("the stop signal did not register: {error}"),
+            EXIT_FAILURE,
+        )
+    })?;
+    let mut probes = SystemProbes {
+        config,
+        privilege,
+        running: (0..plan.concurrency.get()).map(|_| None).collect(),
+    };
+    let facts = hunt::Facts {
+        id: HuntId::at(Utc::now()),
+        krt: version_string!().to_owned(),
+        source,
+        config: run_config(config, privilege),
+        host: host_name(),
+    };
+    // One value carries both bounds, so the loop of the hunt and the indicator
+    // that shows it can hold no numbers that disagree.
+    let bounds = hunt::Bounds {
+        rounds: plan.rounds,
+        max_targets: plan.max_targets,
+    };
+    let hunt_plan = hunt::Plan {
+        bounds,
+        concurrency: plan.concurrency,
+        probes_per_round: plan.probes_per_round,
+        target_timeout: plan.target_timeout,
+        name_grace: name_grace(),
+        include_partial: plan.include_partial,
+    };
+    let mut sources = hunt::Sources {
+        draw,
+        probes: &mut probes,
+        resolver: Rc::from(resolver),
+    };
+    // The indicator shows what the hunt is doing while it runs. A hunt takes
+    // minutes and draws no live table, so a hunt without one prints nothing
+    // between the line above and the summary at the end.
+    let mut status = status::Indicator::new(
+        status::style_of(std::io::stdout().is_terminal()),
+        bounds,
+        ui::frame_columns(),
+        std::io::stdout(),
+        live::SystemClock,
+    );
+    let summary = hunt::record(
+        &facts,
+        &hunt_plan,
+        &mut sources,
+        &|| user_stopped(&flag),
+        &mut writer,
+        &mut status,
+    )
+    .map_err(|stopped| {
+        let code = match stopped.fault {
+            hunt::HuntError::Run(run::RunError::Write(_)) => EXIT_WRITE_FAILED,
+            hunt::HuntError::Run(run::RunError::Tracer { .. }) | hunt::HuntError::Tracer { .. } => {
+                EXIT_TRACER_FAILED
+            }
+        };
+        HuntFailure {
+            summary: Some(stopped.summary),
+            failure: TraceFailure::new(&stopped.fault, code),
+        }
+    })?;
+    println!("{RECORDED} {}", path.display());
+    Ok(summary)
 }
 
 /// The screen of one run, and the hold that screen takes on the terminal.
@@ -1439,6 +2225,27 @@ fn main() {
             .error(clap::error::ErrorKind::ValueValidation, message)
             .exit(),
     };
+    if let Some(plan) = config.hunt {
+        // The block names what the hunt will do, and then the hunt does it.
+        print!("{config}");
+        // The table of the rounds that finished prints either way, and the
+        // reason that stopped the hunt follows it. A fault at the fifth round
+        // of eight took nothing away from the four rounds in front of it.
+        let (summary, failure) = match hunt(&config, &plan) {
+            Ok(summary) => (Some(summary), None),
+            Err(stopped) => (stopped.summary, Some(stopped.failure)),
+        };
+        if let Some(summary) = summary {
+            for line in summary.lines() {
+                println!("{line}");
+            }
+        }
+        if let Some(failure) = failure {
+            eprintln!("{PROGRAM}: {}", failure.reason);
+            std::process::exit(failure.code);
+        }
+        return;
+    }
     let Some(path) = config.replay.as_deref() else {
         // The block names what the run will do, and then the run does it.
         print!("{config}");
@@ -1477,9 +2284,10 @@ mod tests {
     use super::{
         closing_line, display_of, graphics_of, host_name_or, name_grace, paint_of, parse_duration,
         pick_address, replay, resolve_target, run_config, source_from, stop_reason, user_stopped,
-        value_name, AddressFamily, Cli, Command, Display, EndReason, Family, Multipath, Protocol,
-        ResolveError, ResolvedConfig, SourceKind, SourceLabel, Target, RESOLVE_PORT,
-        SOURCE_FALLBACK, UNKNOWN,
+        value_name, AddressFamily, Cli, Command, Display, EndReason, Family, HuntConfig, Multipath,
+        Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, SystemProbes, Target,
+        HUNT_CONCURRENCY_DEFAULT, HUNT_ROUNDS_DEFAULT, PROBES_PER_ROUND_DEFAULT, RESOLVE_PORT,
+        SOURCE_FALLBACK, TARGET_TIMEOUT_DEFAULT, TIME_BEYOND_A_DURATION, UNKNOWN,
     };
     use crate::record::{
         Hop, Privilege, Record, RoundRecord, RunConfig, RunId, RunRecord, TtlRange, Writer,
@@ -1817,16 +2625,16 @@ resolved configuration:
     fn every_flag_has_its_documented_default() {
         let cli = parse(&["krt", "example.com"]);
         assert_eq!(cli.destination.as_deref(), Some("example.com"));
-        assert_eq!(cli.output, None);
-        assert_eq!(cli.interval, Duration::from_secs(1));
-        assert_eq!(cli.first_ttl, 1);
-        assert_eq!(cli.max_ttl, 30);
-        assert_eq!(cli.protocol, Protocol::Icmp);
+        assert_eq!(cli.shared.output, None);
+        assert_eq!(cli.shared.interval, Duration::from_secs(1));
+        assert_eq!(cli.shared.first_ttl, 1);
+        assert_eq!(cli.shared.max_ttl, 30);
+        assert_eq!(cli.shared.protocol, Protocol::Icmp);
         assert_eq!(cli.multipath, Multipath::Classic);
         assert!(!cli.ipv4, "the address family is automatic by default");
         assert!(!cli.ipv6, "the address family is automatic by default");
-        assert!(!cli.no_dns, "reverse DNS is on by default");
-        assert_eq!(cli.source, None);
+        assert!(!cli.shared.no_dns, "reverse DNS is on by default");
+        assert_eq!(cli.shared.source, None);
         assert!(!cli.headless, "the table is on by default");
         assert_eq!(cli.duration, None);
         assert_eq!(cli.rounds, None);
@@ -1841,7 +2649,7 @@ resolved configuration:
             ("tcp", Protocol::Tcp),
         ] {
             let cli = parse(&["krt", "example.com", "--protocol", text]);
-            assert_eq!(cli.protocol, expected, "`--protocol {text}`");
+            assert_eq!(cli.shared.protocol, expected, "`--protocol {text}`");
         }
     }
 
@@ -1911,13 +2719,13 @@ resolved configuration:
     #[test]
     fn parses_an_interval_in_milliseconds() {
         let cli = parse(&["krt", "example.com", "--interval", "500ms"]);
-        assert_eq!(cli.interval, Duration::from_millis(500));
+        assert_eq!(cli.shared.interval, Duration::from_millis(500));
     }
 
     #[test]
     fn parses_an_interval_in_minutes() {
         let cli = parse(&["krt", "example.com", "--interval", "2m"]);
-        assert_eq!(cli.interval, Duration::from_mins(2));
+        assert_eq!(cli.shared.interval, Duration::from_mins(2));
     }
 
     #[test]
@@ -2298,7 +3106,7 @@ resolved configuration:
     #[test]
     fn parses_the_largest_max_ttl() {
         let cli = parse(&["krt", "example.com", "--max-ttl", "255"]);
-        assert_eq!(cli.max_ttl, 255);
+        assert_eq!(cli.shared.max_ttl, 255);
     }
 
     #[test]
@@ -2320,23 +3128,26 @@ resolved configuration:
             "--interval",
             "500ms",
         ]);
-        assert_eq!(short.output, Some(PathBuf::from("path.jsonl")));
-        assert_eq!(short.interval, Duration::from_millis(500));
+        assert_eq!(short.shared.output, Some(PathBuf::from("path.jsonl")));
+        assert_eq!(short.shared.interval, Duration::from_millis(500));
         assert!(short.ipv4, "`-4` is the only form of the flag");
-        assert_eq!(short.output, long.output);
-        assert_eq!(short.interval, long.interval);
+        assert_eq!(short.shared.output, long.shared.output);
+        assert_eq!(short.shared.interval, long.shared.interval);
     }
 
     #[test]
     fn parses_a_source_of_ip_version_4() {
         let cli = parse(&["krt", "example.com", "--source", "1.2.3.4"]);
-        assert_eq!(cli.source, Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))));
+        assert_eq!(
+            cli.shared.source,
+            Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)))
+        );
     }
 
     #[test]
     fn parses_a_source_of_ip_version_6() {
         let cli = parse(&["krt", "example.com", "--source", "::1"]);
-        assert_eq!(cli.source, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert_eq!(cli.shared.source, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
     }
 
     #[test]
@@ -2366,7 +3177,7 @@ resolved configuration:
     #[test]
     fn parses_the_flags_that_hold_no_value() {
         let cli = parse(&["krt", "example.com", "--no-dns", "--headless", "--graphics"]);
-        assert!(cli.no_dns);
+        assert!(cli.shared.no_dns);
         assert!(cli.headless);
         assert!(cli.graphics);
     }
@@ -3265,6 +4076,7 @@ resolved configuration:
                 dns: false,
             },
             host: A_SHARED_MACHINE.to_owned(),
+            hunt: None,
         })
     }
 
@@ -3361,6 +4173,805 @@ resolved configuration:
                     "the frame of {run} names no hop of the other run: {hop}"
                 );
             }
+        }
+    }
+
+    /// The name of the command that hunts for the longest path.
+    const HUNT: &str = "hunt";
+
+    /// The flag that counts the destinations of a hunt.
+    const FLAG_ROUNDS: &str = "rounds";
+
+    /// The flag that counts the probe rounds of one destination.
+    const FLAG_PROBES: &str = "probes-per-round";
+
+    /// The number of probe rounds that a test hunt gives each destination.
+    ///
+    /// The number differs from the default, so a wiring that read the default
+    /// instead fails the test that reads this number back.
+    const PROBES_OF_A_TEST_HUNT: u64 = 7;
+
+    /// The destination that a test hands the tracer of a hunt. It is an address
+    /// of the block that documentation takes, and no probe reaches it: the test
+    /// builds the configuration of a tracer and starts none.
+    const A_HUNT_DESTINATION: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+
+    /// A hunt gives the tracer of a destination the probe rounds of its plan.
+    ///
+    /// The number reaches the tracer and the run loop by two paths. The tracer
+    /// reads the resolved command line, and `hunt::Plan` carries the number to
+    /// the limits of the run. A tracer of a smaller number closes its channel
+    /// under a run loop that still waits, and the run then reports a dead
+    /// tracer.
+    #[test]
+    fn a_hunt_gives_the_tracer_of_a_destination_the_probe_rounds_of_its_plan() {
+        let flag = format!("--{FLAG_PROBES}");
+        let count = PROBES_OF_A_TEST_HUNT.to_string();
+        let config = resolve(&["krt", HUNT, &flag, &count]);
+        let probes = SystemProbes {
+            config: &config,
+            privilege: Privilege::Unprivileged,
+            running: Vec::new(),
+        };
+        let traced = probes.config_of(
+            A_HUNT_DESTINATION,
+            &RunId::at(Utc::now()),
+            crate::trace::Lane::FIRST,
+        );
+        assert_eq!(traced.rounds, Some(PROBES_OF_A_TEST_HUNT));
+    }
+
+    /// The configuration of a hunt that a command line resolves to.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the command line resolves to no hunt. Such a line is a
+    /// mistake in the test.
+    fn hunt(arguments: &[&str]) -> HuntConfig {
+        resolve(arguments)
+            .hunt
+            .expect("the command line must resolve to a hunt")
+    }
+
+    /// The help of one flag of the `hunt` command.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the command holds no such flag, or when the flag carries no
+    /// help. Both are mistakes in the test.
+    fn hunt_help(flag: &str) -> String {
+        Cli::command()
+            .find_subcommand(HUNT)
+            .expect("the command line must hold the `hunt` command")
+            .get_arguments()
+            .find(|argument| argument.get_long() == Some(flag))
+            .unwrap_or_else(|| panic!("the `hunt` command must hold `--{flag}`"))
+            .get_help()
+            .unwrap_or_else(|| panic!("`--{flag}` must carry help"))
+            .to_string()
+    }
+
+    #[test]
+    fn a_hunt_needs_no_destination() {
+        assert_eq!(resolve(&["krt", HUNT]).destination, None);
+    }
+
+    #[test]
+    fn a_hunt_takes_the_default_number_of_destinations() {
+        assert_eq!(hunt(&["krt", HUNT]).rounds, HUNT_ROUNDS_DEFAULT);
+    }
+
+    /// The default asks for eight destinations that answered.
+    ///
+    /// Eight reached destinations make a hunt that measured something. The
+    /// address space answers at a low rate, so a default far above eight spends
+    /// minutes on addresses that answer nothing.
+    #[test]
+    fn the_default_hunt_asks_for_eight_destinations_that_answered() {
+        assert_eq!(hunt(&["krt", HUNT]).rounds, 8);
+    }
+
+    #[test]
+    fn a_hunt_takes_the_number_of_destinations_that_the_command_line_named() {
+        assert_eq!(hunt(&["krt", HUNT, "--rounds", "12"]).rounds, 12);
+    }
+
+    #[test]
+    fn a_hunt_takes_the_default_number_of_probe_rounds_for_each_destination() {
+        assert_eq!(
+            hunt(&["krt", HUNT]).probes_per_round,
+            PROBES_PER_ROUND_DEFAULT
+        );
+    }
+
+    #[test]
+    fn a_hunt_takes_the_number_of_probe_rounds_that_the_command_line_named() {
+        assert_eq!(
+            hunt(&["krt", HUNT, "--probes-per-round", "5"]).probes_per_round,
+            5
+        );
+    }
+
+    #[test]
+    fn a_hunt_takes_the_default_timeout_of_a_destination() {
+        assert_eq!(
+            render_duration(hunt(&["krt", HUNT]).target_timeout),
+            TARGET_TIMEOUT_DEFAULT
+        );
+    }
+
+    #[test]
+    fn a_hunt_takes_the_timeout_of_a_destination_that_the_command_line_named() {
+        assert_eq!(
+            hunt(&["krt", HUNT, "--target-timeout", "5s"]).target_timeout,
+            Duration::from_secs(5)
+        );
+    }
+
+    /// A hunt that named no pool traces eight destinations at once.
+    ///
+    /// The number matches the default rounds, so a plain `krt hunt` starts
+    /// every destination it needs at once.
+    #[test]
+    fn a_hunt_takes_the_default_number_of_destinations_at_once() {
+        assert_eq!(
+            hunt(&["krt", HUNT]).concurrency,
+            HUNT_CONCURRENCY_DEFAULT,
+            "a hunt of no flag traces the default number of destinations at once"
+        );
+        assert_eq!(HUNT_CONCURRENCY_DEFAULT.get(), 8);
+    }
+
+    #[test]
+    fn a_hunt_takes_the_number_of_destinations_at_once_that_the_command_line_named() {
+        assert_eq!(
+            hunt(&["krt", HUNT, &format!("--{FLAG_CONCURRENCY}"), "5"])
+                .concurrency
+                .get(),
+            5
+        );
+    }
+
+    /// A hunt of no destination at once measures nothing, so the parser refuses
+    /// it.
+    #[test]
+    fn a_hunt_of_no_destination_at_once_fails_at_the_parser() {
+        assert!(
+            Cli::try_parse_from(["krt", HUNT, &format!("--{FLAG_CONCURRENCY}"), "0"]).is_err(),
+            "a hunt that traces no destination at once measures nothing"
+        );
+    }
+
+    /// A hunt of more destinations at once than the process holds lanes for
+    /// fails at the parser.
+    ///
+    /// Two destinations of one lane read each other's answers, so a pool above
+    /// the lanes of the process is a hunt that measures the wrong path. The
+    /// refusal names the ceiling.
+    #[test]
+    fn a_hunt_of_more_destinations_at_once_than_lanes_fails_and_names_the_ceiling() {
+        let over = (crate::trace::Lane::COUNT + 1).to_string();
+        let refused = Cli::try_parse_from(["krt", HUNT, &format!("--{FLAG_CONCURRENCY}"), &over])
+            .expect_err("a pool above the lanes of the process measures the wrong path")
+            .to_string();
+        assert!(
+            refused.contains(&crate::trace::Lane::COUNT.to_string()),
+            "the refusal names the ceiling: {refused}"
+        );
+    }
+
+    /// The block of a hunt names the destinations it traces at once.
+    #[test]
+    fn the_resolved_block_of_a_hunt_names_the_destinations_it_traces_at_once() {
+        let block = resolve(&["krt", HUNT, &format!("--{FLAG_CONCURRENCY}"), "6"]).to_string();
+        assert!(
+            block.contains("at once:"),
+            "the block of a hunt names the destinations it traces at once: {block}"
+        );
+        assert!(
+            block.contains('6'),
+            "the block names the number that the line asked for: {block}"
+        );
+    }
+
+    /// The flag that counts the destinations a hunt traces at once.
+    const FLAG_CONCURRENCY: &str = "concurrency";
+
+    #[test]
+    fn a_hunt_takes_the_seed_that_the_command_line_named() {
+        assert_eq!(hunt(&["krt", HUNT, "--seed", "12345"]).seed, 12_345);
+    }
+
+    /// A hunt that named no seed still resolves to one.
+    ///
+    /// The block of the resolved configuration prints the number, so a reader
+    /// who wants that hunt back names it to `--seed`. A hunt of no seed at all
+    /// would leave that reader nothing to name.
+    #[test]
+    fn a_hunt_that_named_no_seed_takes_one_of_its_own() {
+        let first = hunt(&["krt", HUNT]).seed;
+        let second = hunt(&["krt", HUNT]).seed;
+        assert_ne!(
+            (first, second),
+            (0, 0),
+            "a hunt of no seed takes one off the clock"
+        );
+    }
+
+    #[test]
+    fn a_hunt_lets_no_partial_path_compete_by_default() {
+        assert!(!hunt(&["krt", HUNT]).include_partial);
+    }
+
+    #[test]
+    fn a_hunt_that_asked_lets_a_partial_path_compete() {
+        assert!(hunt(&["krt", HUNT, "--include-partial"]).include_partial);
+    }
+
+    #[test]
+    fn a_hunt_takes_the_protocol_of_a_probe() {
+        assert_eq!(
+            resolve(&["krt", HUNT, "--protocol", "udp"]).protocol,
+            Protocol::Udp
+        );
+    }
+
+    #[test]
+    fn a_hunt_takes_the_range_of_the_ttl() {
+        let config = resolve(&["krt", HUNT, "--first-ttl", "3", "--max-ttl", "9"]);
+        assert_eq!((config.first_ttl, config.max_ttl), (3, 9));
+    }
+
+    #[test]
+    fn a_hunt_takes_the_flag_that_reads_no_name() {
+        assert!(!resolve(&["krt", HUNT, "--no-dns"]).reverse_dns);
+    }
+
+    #[test]
+    fn a_hunt_takes_the_file_that_the_command_line_named() {
+        assert_eq!(
+            resolve(&["krt", HUNT, "--output", "hunt.jsonl"]).output,
+            Some(PathBuf::from("hunt.jsonl"))
+        );
+    }
+
+    #[test]
+    fn a_hunt_takes_the_source_that_the_command_line_named() {
+        assert_eq!(
+            resolve(&["krt", HUNT, "--source", "1.2.3.4"]).source,
+            Some(address("1.2.3.4"))
+        );
+    }
+
+    /// A hunt probes at the period that the command line named.
+    ///
+    /// The tracer of each destination takes the period of the resolved
+    /// configuration, so a hunt that reads the default alone probes once a
+    /// second whatever the line asked for.
+    #[test]
+    fn a_hunt_takes_the_interval_that_the_command_line_named() {
+        assert_eq!(
+            resolve(&["krt", HUNT, "--interval", "500ms"]).interval,
+            Duration::from_millis(500)
+        );
+    }
+
+    /// The block of a hunt names the period that every probe of it takes.
+    ///
+    /// The period sets how long each destination holds the hunt, so a block
+    /// that leaves it out keeps the number from every reader.
+    #[test]
+    fn the_resolved_block_of_a_hunt_names_the_interval() {
+        let block = resolve(&["krt", HUNT, "--interval", "500ms"]).to_string();
+        assert!(
+            block.contains("interval:"),
+            "the block of a hunt names the interval: {block}"
+        );
+        assert!(
+            block.contains("500ms"),
+            "the block of a hunt names the period that the line asked for: {block}"
+        );
+    }
+
+    /// The block of a hunt names the multipath mode that its probes take.
+    ///
+    /// `--multipath` stands on the top of the command line alone, and a flag in
+    /// front of `hunt` reads `hunt` as the destination. A hunt therefore always
+    /// probes the classic mode, and a block that leaves the mode out keeps that
+    /// fact from every reader.
+    #[test]
+    fn the_resolved_block_of_a_hunt_names_the_multipath_mode() {
+        let block = resolve(&["krt", HUNT]).to_string();
+        assert!(
+            block.contains("multipath:"),
+            "the block of a hunt names the multipath mode: {block}"
+        );
+        assert!(
+            block.contains("classic"),
+            "a hunt probes the classic multipath mode: {block}"
+        );
+    }
+
+    /// The default lets a hunt trace 128 destinations before it gives up.
+    #[test]
+    fn the_default_hunt_gives_up_after_a_hundred_and_twenty_eight_targets() {
+        let block = resolve(&["krt", HUNT]).to_string();
+        assert!(
+            block.contains("max targets:"),
+            "the block of a hunt names the cap of its targets: {block}"
+        );
+        assert!(
+            block.contains("128"),
+            "the cap of a hunt that named none is 128: {block}"
+        );
+    }
+
+    /// The block of a hunt names the cap that the command line asked for.
+    #[test]
+    fn the_resolved_block_of_a_hunt_names_the_cap_that_the_command_line_named() {
+        let block = resolve(&["krt", HUNT, "--max-targets", "20"]).to_string();
+        assert!(
+            block.contains("max targets:"),
+            "the block of a hunt names the cap of its targets: {block}"
+        );
+        assert!(
+            block.contains("20"),
+            "the block names the cap that the line asked for: {block}"
+        );
+    }
+
+    /// A hunt of no target traces nothing, so the parser rejects it.
+    #[test]
+    fn a_hunt_of_no_target_is_rejected() {
+        let error = rejection(&["krt", HUNT, "--max-targets", "0"]);
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    }
+
+    /// A cap below the rounds of its own line contradicts that line.
+    ///
+    /// A hunt that gives up after four destinations never holds eight that
+    /// answered. Such a line asks for two things at once, so the tool says so
+    /// in the place of a hunt that gives up every time.
+    #[test]
+    fn a_cap_below_the_rounds_of_its_own_line_is_rejected() {
+        let reason = contradiction(&["krt", HUNT, "--rounds", "8", "--max-targets", "4"]);
+        for expected in ["--max-targets", "4", "--rounds", "8"] {
+            assert!(
+                reason.contains(expected),
+                "the reason names `{expected}`: {reason}"
+            );
+        }
+    }
+
+    /// A cap that equals the rounds of its own line holds them.
+    ///
+    /// Such a hunt needs every destination it traces to answer, which is a hard
+    /// ask and not a contradiction.
+    #[test]
+    fn a_cap_that_equals_the_rounds_of_its_own_line_resolves() {
+        assert_eq!(
+            hunt(&["krt", HUNT, "--rounds", "4", "--max-targets", "4"]).rounds,
+            4
+        );
+    }
+
+    /// A hunt of no round records nothing, so the parser rejects it.
+    #[test]
+    fn a_hunt_of_no_round_is_rejected() {
+        let error = rejection(&["krt", HUNT, "--rounds", "0"]);
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    }
+
+    /// A destination of no probe round measures nothing, so the parser rejects
+    /// it.
+    #[test]
+    fn a_destination_of_no_probe_round_is_rejected() {
+        let error = rejection(&["krt", HUNT, "--probes-per-round", "0"]);
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    }
+
+    /// A timeout that cannot hold the probe rounds of its own line contradicts
+    /// that line.
+    ///
+    /// The tracer sends one probe round each interval, and the first round goes
+    /// out one interval after the run starts, so a destination of 20 probe
+    /// rounds at a period of one second needs more than 20 seconds. The check
+    /// asks for 21 seconds, which is the time of one round more. A timeout of
+    /// ten seconds cuts such a destination short after ten of its rounds, and
+    /// the record of it says nothing about the eleven that never went out.
+    #[test]
+    fn a_target_timeout_that_cannot_hold_the_probe_rounds_is_rejected() {
+        let reason = contradiction(&["krt", HUNT, "--probes-per-round", "20"]);
+        for expected in [
+            "--target-timeout",
+            "10s",
+            "--probes-per-round",
+            "20",
+            "1s",
+            "21s",
+        ] {
+            assert!(
+                reason.contains(expected),
+                "the reason names `{expected}`: {reason}"
+            );
+        }
+    }
+
+    /// A timeout that holds the probe rounds of its line and no more is
+    /// rejected.
+    ///
+    /// A run of two probe rounds at a period of one second lands its last round
+    /// past the second second, because the first round goes out one interval
+    /// after the run starts. A timeout of 2001 milliseconds thus holds the two
+    /// rounds by the arithmetic alone, and it still stops the destination after
+    /// the first one. The check therefore asks for the time of one round more,
+    /// which is three seconds here.
+    #[test]
+    fn a_target_timeout_that_holds_the_probe_rounds_and_no_more_is_rejected() {
+        let reason = contradiction(&[
+            "krt",
+            HUNT,
+            "--probes-per-round",
+            "2",
+            "--interval",
+            "1s",
+            "--target-timeout",
+            "2001ms",
+        ]);
+        for expected in [
+            "--target-timeout",
+            "2001ms",
+            "--probes-per-round",
+            "2",
+            "1s",
+            "3s",
+        ] {
+            assert!(
+                reason.contains(expected),
+                "the reason names `{expected}`: {reason}"
+            );
+        }
+    }
+
+    /// A count of probe rounds whose time no duration holds is rejected.
+    ///
+    /// `--probes-per-round` counts up to the width of a `u64`, and the time
+    /// that such a count takes runs past every duration. The check reads that
+    /// time as one that no timeout reaches, so it refuses the line in the place
+    /// of a panic or a product that wrapped.
+    #[test]
+    fn a_count_of_probe_rounds_that_no_duration_holds_is_rejected() {
+        let count = u64::MAX.to_string();
+        let reason = contradiction(&["krt", HUNT, "--probes-per-round", &count]);
+        assert!(
+            reason.contains(&count),
+            "the reason names the count: {reason}"
+        );
+        assert!(
+            reason.contains(TIME_BEYOND_A_DURATION),
+            "the reason says that no duration holds the time it needs: {reason}"
+        );
+    }
+
+    /// A timeout raised for the probe rounds of its line holds them.
+    #[test]
+    fn a_target_timeout_that_holds_the_probe_rounds_resolves() {
+        assert_eq!(
+            hunt(&[
+                "krt",
+                HUNT,
+                "--probes-per-round",
+                "20",
+                "--target-timeout",
+                "30s",
+            ])
+            .probes_per_round,
+            20
+        );
+    }
+
+    /// The defaults of a hunt hold each other, so `krt hunt` alone resolves.
+    ///
+    /// The timeout of a destination must hold one round more than the probe
+    /// rounds that the same line asks for, because the last round lands past
+    /// the time of the rounds alone. A pair of defaults that broke that rule
+    /// would reject the plainest line of the command.
+    #[test]
+    fn the_default_timeout_of_a_hunt_holds_the_default_probe_rounds() {
+        let config = resolve(&["krt", HUNT]);
+        let plan = config
+            .hunt
+            .expect("the command line must resolve to a hunt");
+        let rounds = u32::try_from(plan.probes_per_round).expect("the default counts a few rounds");
+        assert!(
+            plan.target_timeout > config.interval * (rounds + 1),
+            "a timeout of {:?} holds one round more than {} probe rounds at a period of {:?}",
+            plan.target_timeout,
+            plan.probes_per_round,
+            config.interval
+        );
+    }
+
+    /// A flag of a probe stands behind the command and never in front of it.
+    ///
+    /// A line that names a flag in front of the command reads the command as
+    /// the destination, so `krt --protocol udp hunt` would trace a host named
+    /// `hunt`. The run says so and names the line that hunts.
+    #[test]
+    fn a_flag_of_a_probe_in_front_of_the_hunt_is_rejected() {
+        let reason = parse(&["krt", "--protocol", "udp", HUNT])
+            .resolve()
+            .expect_err("a destination that names a command must be rejected");
+        assert!(
+            reason.contains(HUNT),
+            "the reason names the command: {reason}"
+        );
+    }
+
+    /// The guard of a command read as a destination runs in front of every
+    /// other check.
+    ///
+    /// `krt --multipath paris hunt` breaks two rules at once: the mode needs
+    /// UDP, and the line reads `hunt` as a destination. The second one is the
+    /// fault, because the mode reaches no probe of a hunt at all. A message
+    /// about the protocol sends the reader after a flag that the line must
+    /// drop.
+    #[test]
+    fn a_multipath_mode_in_front_of_a_command_names_the_command() {
+        let reason = contradiction(&["krt", "--multipath", "paris", HUNT]);
+        assert!(
+            reason.contains(HUNT),
+            "the reason names the command that the line read as a destination: {reason}"
+        );
+    }
+
+    /// The guard covers every command and not the one that prompted it.
+    #[test]
+    fn a_flag_of_a_probe_in_front_of_the_replay_is_rejected() {
+        let reason = parse(&["krt", "--no-dns", REPLAY])
+            .resolve()
+            .expect_err("a destination that names a command must be rejected");
+        assert!(
+            reason.contains(REPLAY),
+            "the reason names the command: {reason}"
+        );
+    }
+
+    /// The name of the command that prints the help of another command.
+    ///
+    /// Clap writes this command into the parser as it builds it, so the
+    /// derive macro alone names it nowhere.
+    const HELP: &str = "help";
+
+    /// The guard covers the command that clap itself adds.
+    ///
+    /// Clap puts the `help` command into the parser at build time, so a guard
+    /// that reads the commands of a parser it did not build sees `replay` and
+    /// `hunt` alone. `krt --headless help` then goes to the network and looks
+    /// for a host named `help`.
+    #[test]
+    fn a_flag_of_a_probe_in_front_of_the_help_is_rejected() {
+        let reason = contradiction(&["krt", "--headless", HELP]);
+        assert!(
+            reason.contains(HELP),
+            "the reason names the command: {reason}"
+        );
+    }
+
+    /// The reason names no flag that clap itself adds.
+    ///
+    /// Clap puts `--help` on every command and `--version` on the top level as
+    /// it builds the parser. A reason that read those two as flags of a probe
+    /// would name `--version` as a flag that the command refuses, and the
+    /// reader would look for a flag that no line of a trace holds.
+    #[test]
+    fn the_reason_of_a_command_read_as_a_destination_names_no_generated_flag() {
+        let reason = contradiction(&["krt", "--headless", HUNT]);
+        assert!(
+            !reason.contains("--version"),
+            "clap adds `--version`, and the reason names it nowhere: {reason}"
+        );
+        assert!(
+            !reason.contains("--help"),
+            "clap adds `--help`, and the reason names it nowhere: {reason}"
+        );
+    }
+
+    /// The reason names every flag of the top level that the command refuses.
+    ///
+    /// The repair that the reason offers — write the command first — works for
+    /// a flag that the command shares, and it fails for a flag that stands on
+    /// the top level alone: `krt hunt --headless` answers that the flag is
+    /// unknown. The reason therefore names the flags of the second kind, so the
+    /// reader takes one line and writes a command line that runs.
+    #[test]
+    fn the_reason_of_a_command_read_as_a_destination_names_the_flags_it_refuses() {
+        let reason = contradiction(&["krt", "--headless", HUNT]);
+        assert!(
+            reason.contains("--headless"),
+            "a hunt draws no live table, so the reason names `--headless`: {reason}"
+        );
+        let reason = contradiction(&["krt", "--no-dns", REPLAY]);
+        assert!(
+            reason.contains("--no-dns"),
+            "a replay reads the names of the file it folds, so the reason names `--no-dns`: {reason}"
+        );
+    }
+
+    /// The reason names no flag that the command takes.
+    ///
+    /// A hunt takes `--protocol`, so the repair works for that flag and the
+    /// reason says nothing about it. A reason that named every flag of the top
+    /// level would send the reader away from a flag that the command holds.
+    #[test]
+    fn the_reason_of_a_command_read_as_a_destination_names_no_flag_it_takes() {
+        let reason = contradiction(&["krt", "--protocol", "udp", HUNT]);
+        assert!(
+            !reason.contains("--protocol"),
+            "a hunt takes `--protocol`, so the reason names it nowhere: {reason}"
+        );
+    }
+
+    /// A host whose name merely starts with the name of a command still traces.
+    #[test]
+    fn a_destination_that_only_starts_with_the_name_of_a_command_still_traces() {
+        assert_eq!(
+            resolve(&["krt", "hunter.example.com"])
+                .destination
+                .as_deref(),
+            Some("hunter.example.com")
+        );
+    }
+
+    /// The two flags that carry the word `round` each say what they count.
+    ///
+    /// A run of `krt` calls one sweep of the TTLs a round, and a hunt calls one
+    /// destination a round. A reader of the help must not have to guess which
+    /// of the two a flag counts.
+    #[test]
+    fn the_help_of_the_rounds_of_a_hunt_says_that_it_counts_destinations() {
+        let help = hunt_help(FLAG_ROUNDS);
+        assert!(
+            help.contains("destination"),
+            "`--{FLAG_ROUNDS}` counts destinations, and its help must say so: {help}"
+        );
+    }
+
+    #[test]
+    fn the_help_of_the_probes_of_a_round_says_that_it_counts_probe_rounds() {
+        let help = hunt_help(FLAG_PROBES);
+        assert!(
+            help.contains("probe round"),
+            "`--{FLAG_PROBES}` counts probe rounds, and its help must say so: {help}"
+        );
+    }
+
+    #[test]
+    fn the_help_of_the_rounds_of_a_trace_says_that_it_counts_sweeps_of_the_ttls() {
+        let help = Cli::command()
+            .get_arguments()
+            .find(|argument| argument.get_long() == Some(FLAG_ROUNDS))
+            .expect("the command line must hold `--rounds`")
+            .get_help()
+            .expect("`--rounds` must carry help")
+            .to_string();
+        assert!(
+            help.contains("sweep"),
+            "the `--{FLAG_ROUNDS}` of a trace counts sweeps of the TTLs: {help}"
+        );
+    }
+
+    /// The block of a hunt names what the hunt will do.
+    #[test]
+    fn the_resolved_block_of_a_hunt_names_every_number_of_the_hunt() {
+        let block = resolve(&[
+            "krt",
+            HUNT,
+            "--rounds",
+            "8",
+            "--probes-per-round",
+            "5",
+            "--target-timeout",
+            "20s",
+            "--seed",
+            "12345",
+        ])
+        .to_string();
+        for expected in [
+            "rounds:",
+            "8",
+            "probes per round:",
+            "5",
+            "target timeout:",
+            "20s",
+            "seed:",
+            "12345",
+        ] {
+            assert!(
+                block.contains(expected),
+                "the block of a hunt names `{expected}`: {block}"
+            );
+        }
+    }
+
+    /// The glyph that ends the key of a row of the block.
+    const COLON: &str = ":";
+
+    /// The column that every value of a block stands in.
+    fn value_columns(block: &str) -> Vec<usize> {
+        block
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let (key, value) = split_key(line);
+                // The count is of characters and not of bytes, because a column
+                // of a terminal holds a character.
+                key.chars().count()
+                    + COLON.len()
+                    + (value.chars().count() - value.trim_start().chars().count())
+            })
+            .collect()
+    }
+
+    /// The key of one row of a block, and the text that follows its colon.
+    ///
+    /// The split is on the first colon, so a value that holds a colon of its
+    /// own — an address of ip version 6, and a path on some machines — takes no
+    /// part in the answer.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a row that holds no colon. Such a row is a defect of the
+    /// block, not an answer that a test names.
+    fn split_key(line: &str) -> (&str, &str) {
+        line.split_once(COLON)
+            .expect("every row of the block holds a key")
+    }
+
+    /// Asserts that every value of a block stands in one column, one space
+    /// clear of the longest key.
+    fn values_line_up(arguments: &[&str]) {
+        let block = resolve(arguments).to_string();
+        let columns = value_columns(&block);
+        let first = *columns.first().expect("the block holds a row");
+        assert!(
+            columns.iter().all(|column| *column == first),
+            "every value of the block stands in one column: {block}"
+        );
+        for line in block.lines().skip(1) {
+            assert!(
+                split_key(line).1.starts_with(' '),
+                "one space at the least stands between a key and its value: {line}"
+            );
+        }
+    }
+
+    /// The keys of a hunt are longer than the keys of a trace, so a width that
+    /// a constant fixed would run the longest of them into its value.
+    #[test]
+    fn every_value_of_the_block_of_a_hunt_stands_in_one_column() {
+        values_line_up(&["krt", HUNT]);
+    }
+
+    #[test]
+    fn every_value_of_the_block_of_a_trace_stands_in_one_column() {
+        values_line_up(&["krt", "example.com"]);
+    }
+
+    /// The block of a hunt names no field that says nothing about a hunt.
+    ///
+    /// A hunt draws its own destination, it draws addresses of ip version 4
+    /// alone, and it draws no live table. A block that named a destination, an
+    /// address family, or a display would state three things that the run does
+    /// not do.
+    #[test]
+    fn the_resolved_block_of_a_hunt_names_no_field_of_a_trace_alone() {
+        let block = resolve(&["krt", HUNT]).to_string();
+        for absent in ["destination:", "address family:", "display:"] {
+            assert!(
+                !block.contains(absent),
+                "the block of a hunt names no `{absent}`: {block}"
+            );
         }
     }
 }

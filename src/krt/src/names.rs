@@ -39,6 +39,17 @@ pub(crate) trait Resolver {
     fn lookup(&self, addr: IpAddr) -> Lookup;
 }
 
+/// A shared resolver is a resolver.
+///
+/// A hunt makes one namer for each destination it draws, and every one of them
+/// asks the same resolver. The share lets one resolver serve them all, so a
+/// hunt starts the system resolver once and not once for each address.
+impl<R: Resolver + ?Sized> Resolver for std::rc::Rc<R> {
+    fn lookup(&self, addr: IpAddr) -> Lookup {
+        (**self).lookup(addr)
+    }
+}
+
 /// A resolver that looks nothing up.
 ///
 /// `--no-dns` becomes this resolver, so no branch of the run loop reads the

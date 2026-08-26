@@ -17,6 +17,7 @@
 // Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
+#![warn(clippy::missing_docs_in_private_items)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -337,10 +338,11 @@ fn a_destination_that_names_no_address_of_the_family_prints_the_block_and_stops(
 }
 
 // macOS is the platform that sends probes without privileges, so it is the
-// platform where a trace reaches the two faults below. Linux and Windows stop
-// every trace at the privilege gate first, with a different code, so the same
-// test there would cover the gate and not the fault it names. The unit tests of
-// `src/krt/src/trace.rs` cover that gate on every platform.
+// platform where a run reaches the faults below. Linux and Windows stop every
+// run at the privilege gate first, with a different code, so the same test
+// there would cover the gate and not the fault it names. The unit tests of
+// `src/krt/src/trace.rs` cover that gate on every platform. The hunt at the
+// foot of the file carries that gate too, and it carries this comment with it.
 
 /// A path under the temporary directory of the machine.
 ///
@@ -491,5 +493,129 @@ fn a_replay_needs_no_destination() {
         result.success,
         "`krt {REPLAY} {FIXTURE}` must exit with success; stderr: {}",
         result.stderr
+    );
+}
+
+/// The name of the command that hunts for the longest path.
+///
+/// A hunt draws a random address and probes it, so a test that ran a whole hunt
+/// would send packets to a stranger. One test below starts a hunt and stops it
+/// at the recorded file: `fn hunt` in `src/krt/src/main.rs` opens that file
+/// before it registers the stop signal and before it builds its tracer, so a
+/// file that will not open ends the run in front of the first probe. Every
+/// other test below stops at the parser or at the help page.
+const HUNT: &str = "hunt";
+
+#[test]
+fn the_help_of_the_hunt_names_the_flags_that_bound_it() {
+    let result = run(&[HUNT, FLAG_HELP]);
+    assert!(
+        result.success,
+        "`krt {HUNT} {FLAG_HELP}` must exit with success; stderr: {}",
+        result.stderr
+    );
+    for flag in [
+        "--rounds",
+        "--max-targets",
+        "--concurrency",
+        "--probes-per-round",
+        "--target-timeout",
+        "--seed",
+    ] {
+        assert!(
+            result.stdout.contains(flag),
+            "the help of `{HUNT}` names `{flag}`: {}",
+            result.stdout
+        );
+    }
+}
+
+/// The help of the whole tool names the command.
+///
+/// The `Commands:` list of `clap` names it, and the paragraph above the usage
+/// line names it too. That paragraph is the first text a reader of the page
+/// meets, and it says what `krt` does, so it covers all three of the modes and
+/// not two of them.
+#[test]
+fn the_long_help_names_the_command_that_hunts() {
+    let result = run(&[FLAG_HELP]);
+    assert!(
+        result.stdout.contains(HUNT),
+        "the help page names the `{HUNT}` command: {}",
+        result.stdout
+    );
+    let (about, _) = result
+        .stdout
+        .split_once(USAGE_HEADING)
+        .unwrap_or_else(|| panic!("the help page holds a usage line: {}", result.stdout));
+    assert!(
+        about.contains(HUNT),
+        "the paragraph above the usage line names the `{HUNT}` command: {about}"
+    );
+}
+
+/// A hunt of no round records nothing, so the run stops at the parser.
+#[test]
+fn a_hunt_of_no_round_fails_and_names_the_flag() {
+    let message = failure(&[HUNT, "--rounds", "0"]);
+    assert!(
+        message.contains("--rounds"),
+        "the message names the flag: {message}"
+    );
+}
+
+/// A flag of a probe in front of the command reads the command as a
+/// destination, and the run says so.
+#[test]
+fn a_flag_of_a_probe_in_front_of_the_hunt_fails_and_names_the_command() {
+    let message = failure(&["--no-dns", HUNT]);
+    assert!(
+        message.contains(HUNT),
+        "the message names the command: {message}"
+    );
+}
+
+/// A recorded file that will not open stops the hunt in front of its first
+/// probe, and the hunt makes no directory of its own.
+///
+/// This is the one test of the file that goes past the parser of the hunt. It
+/// walks the wiring that `fn hunt` in `src/krt/src/main.rs` holds: the
+/// privilege gate, the start of the reverse resolver, the draw of the first
+/// address, the search for the source address, and the derived path. Then it
+/// stops at the open of the recorded file, which is the step that the wiring
+/// puts in front of the first tracer.
+///
+/// The run sends no packet, and each step of the line above keeps it that way.
+/// `FLAG_SOURCE` hands the search the address that it names, so the search
+/// opens no socket and asks no public address service. The draw makes its
+/// address out of a seeded sequence inside the machine. The parent directory of
+/// the output path does not exist, so the open fails, and the hunt returns
+/// there: it registers no stop signal, it starts no tracer, and it traces none
+/// of the addresses that it drew.
+///
+/// The privilege gate is why this test runs on macOS alone, as the comment
+/// above [`temp_path`] says.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_recorded_file_that_will_not_open_stops_the_hunt_before_the_first_probe() {
+    let missing = temp_path("krt-hunt-no-such-directory");
+    let path = missing.join(A_RECORDED_FILE);
+    let named = path.to_str().expect("the temporary path must be text");
+    let result = run(&[HUNT, FLAG_SOURCE, AN_IPV4_ADDRESS, "--output", named]);
+    assert_eq!(
+        result.code,
+        Some(EXIT_WRITE_FAILED),
+        "a recorded file that will not open stops the hunt; stderr: {}",
+        result.stderr
+    );
+    assert!(
+        result.stderr.contains(named),
+        "the message names the path that the hunt did not open: {}",
+        result.stderr
+    );
+    assert!(
+        !missing.exists(),
+        "the hunt makes no directory of its own: {}",
+        missing.display()
     );
 }

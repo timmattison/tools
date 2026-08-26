@@ -113,6 +113,40 @@ impl From<&str> for RunId {
     }
 }
 
+/// The identifier of one hunt: the RFC 3339 start time, to the millisecond, in
+/// UTC.
+///
+/// A hunt traces many destinations, and it writes one run for each of them into
+/// one file. The `run` record of each destination carries this identifier, so a
+/// reader groups the runs of one hunt and tells them from the runs of another.
+///
+/// The type stands apart from [`RunId`] because the two name different things.
+/// One identifier names one trace of one destination, and this one names the
+/// hunt that holds many such traces. A single type would let a reader compare
+/// the two and find them equal.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct HuntId(String);
+
+impl HuntId {
+    /// Builds the identifier of the hunt that starts at this moment.
+    pub(crate) fn at(start: DateTime<Utc>) -> Self {
+        Self(format_millis(start))
+    }
+}
+
+impl fmt::Display for HuntId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl From<&str> for HuntId {
+    fn from(text: &str) -> Self {
+        Self(text.to_owned())
+    }
+}
+
 /// One line of a recorded file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -187,6 +221,14 @@ pub(crate) struct RunRecord {
     pub(crate) config: RunConfig,
     /// The name of the machine that made the run.
     pub(crate) host: String,
+    /// The hunt that holds this run. A run that no hunt made holds none.
+    ///
+    /// The field stands last and it goes away when it is absent, so the `run`
+    /// line of a normal run reads and writes exactly as it did before the hunt
+    /// existed. A file that an earlier build recorded therefore folds with no
+    /// change, and it reads as a run that no hunt holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hunt: Option<HuntId>,
 }
 
 /// The source address of a run, and how `krt` found it.
@@ -413,7 +455,8 @@ pub(crate) enum EndReason {
     Duration,
     /// The run reached the round limit.
     Rounds,
-    /// A fault stopped the run.
+    /// A fault stopped the run. The fault is a fault of this run, or a fault of
+    /// another run of the same hunt that stopped the whole hunt.
     Error,
 }
 
@@ -1116,6 +1159,9 @@ mod tests {
     /// The identifier of a run that no test file holds.
     const ABSENT_RUN: &str = "2020-01-01T00:00:00.000Z";
 
+    /// The identifier of the hunt that a `run` line of a hunt names.
+    const HUNT: &str = "2026-08-18T11:59:00.000Z";
+
     /// The sequence number that `ROUND_LINE` carries.
     const ROUND_SEQ: u64 = 142;
 
@@ -1181,6 +1227,7 @@ mod tests {
                 dns: true,
             },
             host: "tims-mac".to_owned(),
+            hunt: None,
         })
     }
 
@@ -1288,6 +1335,32 @@ mod tests {
     fn a_round_trip_time_with_a_trailing_zero_reads_back_as_the_same_number() {
         let line = ROUND_LINE.replace("24.1,", "24.10,");
         assert_eq!(record_of(&line), a_round_record());
+    }
+
+    /// The `run` line of a destination of a hunt, as a reader groups it.
+    ///
+    /// The field stands last, so a file that an earlier build recorded holds
+    /// every other field in the place it already held.
+    fn a_hunt_run_line() -> String {
+        format!(r#"{},"hunt":"{HUNT}"}}"#, RUN_LINE.trim_end_matches('}'))
+    }
+
+    /// A run of a hunt keeps the hunt that holds it.
+    ///
+    /// The identifier groups the runs of one hunt, and a reader that folds one
+    /// destination of a hunt reads it from this field. A build that dropped the
+    /// field would leave a file whose runs no reader can group.
+    #[test]
+    fn a_run_line_that_names_a_hunt_keeps_that_hunt_when_it_writes_again() {
+        let line = a_hunt_run_line();
+        assert_eq!(line_of(&record_of(&line)), line);
+    }
+
+    /// A `run` line of a normal run names no hunt, and it reads as a run that
+    /// no hunt holds.
+    #[test]
+    fn a_run_line_that_names_no_hunt_keeps_naming_none_when_it_writes_again() {
+        assert_eq!(line_of(&record_of(RUN_LINE)), RUN_LINE);
     }
 
     #[test]
@@ -2573,6 +2646,7 @@ mod tests {
                 dns: false,
             },
             host: MACHINE.to_owned(),
+            hunt: None,
         })
     }
 

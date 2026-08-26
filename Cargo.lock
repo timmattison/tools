@@ -4564,6 +4564,7 @@ dependencies = [
  "image",
  "mockito",
  "portable-pty",
+ "rand 0.9.5",
  "ratatui",
  "reqwest",
  "serde",

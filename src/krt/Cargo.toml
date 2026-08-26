@@ -10,6 +10,7 @@ chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 image.workspace = true
+rand.workspace = true
 ratatui.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 serde.workspace = true
