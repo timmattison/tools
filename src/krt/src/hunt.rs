@@ -240,34 +240,198 @@ pub(crate) struct Pick {
     pub(crate) mine: Option<Ipv4Addr>,
 }
 
+/// The number of bits of an address that name the host inside its /24.
+const HOST_BITS: u8 = 8;
+
+/// The length of the block that a mine draws at.
+///
+/// Two addresses of one /24 take the same path to the border of the network
+/// that announced it, so a mine that walked address by address would spend its
+/// depth to learn nothing.
+const MINE_GRAIN: u8 = ADDRESS_BITS - HOST_BITS;
+
+/// The number of draws that one address of a mine takes before the mine ends.
+///
+/// The bound is for the mine whose block is nearly full: the last free host of
+/// a /24 that the hunt already visited 250 times takes about 253 draws to hit,
+/// and a bound that stood near that number would end such a mine early often.
+/// A mine that reads this many candidates and passes none has no address left
+/// to give, and it ends.
+const MINE_ATTEMPTS: usize = 10_000;
+
+/// The number that the seed of a hunt shifts by to seed its mines.
+///
+/// The mine draws on a sequence of its own, so a hunt of one seed reads the
+/// same independent addresses whether it mines or not. Two hunts of one seed
+/// still mine alike, because this shift is a constant.
+const MINE_SEED_SHIFT: u64 = 0x6b72_745f_6d69_6e65;
+
 /// The mine of the near space of the longest path that a hunt measured.
+///
+/// The value holds the record of the whole hunt and the one mine that stands.
+/// A result that beats the record replaces that mine, because the near space of
+/// a destination that no longer holds the record is worth less than the near
+/// space of the one that does, and one mine at a time is what keeps the caps of
+/// [`MinePlan`] meaningful.
 struct Mine {
     /// The numbers that bound each mine.
     plan: MinePlan,
+    /// The sequence that each mine draws its addresses from.
+    rng: StdRng,
     /// The clock that times the wait between two addresses of one mine.
     clock: Box<dyn Clock>,
     /// The length of the longest path that the hunt measured so far.
     record: Option<u8>,
+    /// The mine that stands now. A hunt whose last mine ran out holds none.
+    dig: Option<Dig>,
+}
+
+/// One mine while it runs: where it digs, how much of its depth is left, and
+/// how much of each /24 it already took.
+struct Dig {
+    /// The address of the first hit that started this mine.
+    origin: Ipv4Addr,
+    /// The block that this mine stays inside, as the bits of its network.
+    block: u32,
+    /// The /24 that this mine draws in now, as the bits of its network.
+    prefix: u32,
+    /// The number of addresses that this mine still gives.
+    left: usize,
+    /// The number of addresses that this mine gave of each /24.
+    probed: BTreeMap<u32, usize>,
+    /// The moment that this mine gives its next address at. The first address
+    /// of a mine waits for nothing.
+    ready: Option<Instant>,
+}
+
+/// The bits of the network of one block that holds an address.
+fn network_of(addr: Ipv4Addr, prefix: u8) -> u32 {
+    // Every caller names a prefix of 8 through 32, so the shift stays inside
+    // the width of the value.
+    let mask = u32::MAX << (ADDRESS_BITS - prefix);
+    addr.to_bits() & mask
+}
+
+impl Dig {
+    /// The mine of one first hit, which gives this many addresses.
+    fn at(origin: Ipv4Addr, plan: MinePlan) -> Self {
+        Self {
+            origin,
+            block: network_of(origin, plan.prefix),
+            prefix: network_of(origin, MINE_GRAIN),
+            left: plan.depth.get(),
+            probed: BTreeMap::new(),
+            ready: None,
+        }
+    }
+
+    /// The number of addresses that this mine already gave of one /24.
+    fn taken(&self, prefix: u32) -> usize {
+        self.probed.get(&prefix).copied().unwrap_or_default()
+    }
+
+    /// The next address of this mine, which no packet of the hunt already went
+    /// to.
+    ///
+    /// The mine fills the /24 of the first hit up to the cap of the plan, and
+    /// it then draws a sibling /24 inside its block and fills that one the same
+    /// way. A mine whose block holds no free address gives none, and it ends.
+    fn draw(
+        &mut self,
+        rng: &mut StdRng,
+        plan: MinePlan,
+        visited: &HashSet<Ipv4Addr>,
+    ) -> Option<Ipv4Addr> {
+        for _ in 0..MINE_ATTEMPTS {
+            if self.taken(self.prefix) >= plan.per_prefix.get() {
+                self.prefix = self.sibling(rng, plan)?;
+                continue;
+            }
+            let host = rng.random_range(FIRST_HOST..=LAST_HOST);
+            let addr = Ipv4Addr::from_bits(self.prefix | u32::from(host));
+            if reserved(addr).is_none() && !visited.contains(&addr) {
+                return Some(addr);
+            }
+        }
+        None
+    }
+
+    /// A /24 of this mine's block that still stands below the cap of the plan.
+    ///
+    /// The draw is at random and not in order, because a walk of the siblings
+    /// in order reads as a horizontal scan of the whole block. A block whose
+    /// /24s all hold the cap, and a block whose free /24s no packet routes to,
+    /// both give none.
+    fn sibling(&self, rng: &mut StdRng, plan: MinePlan) -> Option<u32> {
+        // The prefix of a plan is 24 at the most, so the block holds one /24 at
+        // the least and the shift stays inside the width of the value.
+        let span = 1_u32 << (MINE_GRAIN - plan.prefix);
+        for _ in 0..MINE_ATTEMPTS {
+            let sibling = self.block | (rng.random_range(0..span) << HOST_BITS);
+            if self.taken(sibling) < plan.per_prefix.get()
+                && reserved(Ipv4Addr::from_bits(sibling)).is_none()
+            {
+                return Some(sibling);
+            }
+        }
+        None
+    }
 }
 
 impl Mine {
+    /// Builds the mine of one hunt.
+    fn new(plan: MinePlan, seed: u64, clock: Box<dyn Clock>) -> Self {
+        Self {
+            plan,
+            rng: StdRng::seed_from_u64(seed ^ MINE_SEED_SHIFT),
+            clock,
+            record: None,
+            dig: None,
+        }
+    }
+
     /// Starts a mine at this destination when its path is the longest one the
     /// hunt measured.
-    fn scored(&mut self, _addr: Ipv4Addr, length: u8) {
-        if self.record.is_none_or(|held| length > held) {
-            self.record = Some(length);
+    ///
+    /// The first result of a hunt is the longest path it measured, so it starts
+    /// a mine. Every result after it must beat the record, and a result that
+    /// ties it starts none: the hunt already holds a path of that length, and
+    /// the near space of the destination that set it was already mined.
+    fn scored(&mut self, addr: Ipv4Addr, length: u8) {
+        if self.record.is_some_and(|held| length <= held) {
+            return;
         }
+        self.record = Some(length);
+        self.dig = Some(Dig::at(addr, self.plan));
     }
 
     /// The next address of the mine that stands, when one stands and it is
     /// due.
-    fn address(&mut self, _visited: &HashSet<Ipv4Addr>) -> Option<Pick> {
-        None
-    }
-
-    /// The time until the mine that stands gives its next address.
-    fn wait(&self) -> Option<Duration> {
-        None
+    ///
+    /// A mine that gave every address of its depth, and a mine whose block
+    /// holds no free address, both end here and stand no longer.
+    fn address(&mut self, visited: &HashSet<Ipv4Addr>) -> Option<Pick> {
+        let now = self.clock.now();
+        let plan = self.plan;
+        let dig = self.dig.as_mut()?;
+        if dig.ready.is_some_and(|ready| now < ready) {
+            return None;
+        }
+        let Some(addr) = dig.draw(&mut self.rng, plan, visited) else {
+            self.dig = None;
+            return None;
+        };
+        let origin = dig.origin;
+        dig.left -= 1;
+        *dig.probed.entry(network_of(addr, MINE_GRAIN)).or_default() += 1;
+        dig.ready = Some(now + plan.delay);
+        if dig.left == 0 {
+            self.dig = None;
+        }
+        Some(Pick {
+            addr,
+            mine: Some(origin),
+        })
     }
 }
 
@@ -308,11 +472,7 @@ impl Draw {
     /// therefore visits the same independent addresses whether it mines or
     /// not.
     pub(crate) fn mining(mut self, plan: MinePlan, seed: u64, clock: Box<dyn Clock>) -> Self {
-        self.mine = Some(Mine {
-            plan,
-            clock,
-            record: None,
-        });
+        self.mine = Some(Mine::new(plan, seed, clock));
         self
     }
 
@@ -360,12 +520,6 @@ impl Draw {
         if let Some(mine) = self.mine.as_mut() {
             mine.scored(addr, length);
         }
-    }
-
-    /// The time until a mine gives its next address. A draw whose mine holds
-    /// no address gives none.
-    pub(crate) fn mine_wait(&self) -> Option<Duration> {
-        self.mine.as_ref()?.wait()
     }
 
     /// The next candidate that routes and that this hunt has not visited.
