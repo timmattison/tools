@@ -405,11 +405,19 @@ impl Dig {
     /// The draw is at random and not in order, because a walk of the siblings
     /// in order reads as a horizontal scan of the whole block. A block whose
     /// /24s all hold the cap, and a block whose free /24s no packet routes to,
-    /// both give none.
+    /// both give none. A block that holds one /24 holds no sibling of it, and
+    /// it gives none at once, before it draws anything.
     fn sibling(&self, rng: &mut StdRng, plan: MinePlan) -> Option<u32> {
         // The prefix of a plan is 24 at the most, so the block holds one /24 at
         // the least and the shift stays inside the width of the value.
         let span = 1_u32 << (MINE_GRAIN - plan.prefix);
+        if span == 1 {
+            // The one /24 of such a block is the /24 that the mine digs in, and
+            // the caller reads a sibling only after that one holds the cap. The
+            // loop below would draw the same /24 on every turn and pass it on
+            // none.
+            return None;
+        }
         for _ in 0..MINE_ATTEMPTS {
             let sibling = self.block | (rng.random_range(0..span) << HOST_BITS);
             if self.taken(sibling) < plan.per_prefix.get()
