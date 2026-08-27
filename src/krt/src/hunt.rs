@@ -299,6 +299,11 @@ struct Dig {
     left: usize,
     /// The number of addresses that this mine gave of each /24.
     probed: BTreeMap<u32, usize>,
+    /// The moment that this mine gives its next address at.
+    ///
+    /// The first address of a mine follows no address of that mine, so it
+    /// waits for nothing and this moment is none.
+    ready: Option<Instant>,
 }
 
 /// The bits of the network of one block that holds an address.
@@ -318,6 +323,7 @@ impl Dig {
             prefix: network_of(origin, MINE_GRAIN),
             left: plan.depth.get(),
             probed: BTreeMap::new(),
+            ready: None,
         }
     }
 
@@ -402,8 +408,14 @@ impl Mine {
     }
 
     /// The time until the mine that stands gives its next address.
+    ///
+    /// A hunt whose mine holds no address reads none, and a mine that is due
+    /// reads no time at all.
     fn wait(&self) -> Option<Duration> {
-        self.dig.as_ref().map(|_| Duration::ZERO)
+        let dig = self.dig.as_ref()?;
+        Some(dig.ready.map_or(Duration::ZERO, |ready| {
+            ready.saturating_duration_since(self.clock.now())
+        }))
     }
 
     /// The next address of the mine that stands, when one stands and it is
@@ -412,8 +424,12 @@ impl Mine {
     /// A mine that gave every address of its depth, and a mine whose block
     /// holds no free address, both end here and stand no longer.
     fn address(&mut self, visited: &HashSet<Ipv4Addr>) -> Option<Pick> {
+        let now = self.clock.now();
         let plan = self.plan;
         let dig = self.dig.as_mut()?;
+        if dig.ready.is_some_and(|ready| now < ready) {
+            return None;
+        }
         let Some(addr) = dig.draw(&mut self.rng, plan, visited) else {
             self.dig = None;
             return None;
@@ -421,6 +437,7 @@ impl Mine {
         let origin = dig.origin;
         dig.left -= 1;
         *dig.probed.entry(network_of(addr, MINE_GRAIN)).or_default() += 1;
+        dig.ready = Some(now + plan.delay);
         if dig.left == 0 {
             self.dig = None;
         }
