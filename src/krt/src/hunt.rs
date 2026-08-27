@@ -299,9 +299,6 @@ struct Dig {
     left: usize,
     /// The number of addresses that this mine gave of each /24.
     probed: BTreeMap<u32, usize>,
-    /// The moment that this mine gives its next address at. The first address
-    /// of a mine waits for nothing.
-    ready: Option<Instant>,
 }
 
 /// The bits of the network of one block that holds an address.
@@ -321,7 +318,6 @@ impl Dig {
             prefix: network_of(origin, MINE_GRAIN),
             left: plan.depth.get(),
             probed: BTreeMap::new(),
-            ready: None,
         }
     }
 
@@ -405,18 +401,19 @@ impl Mine {
         self.dig = Some(Dig::at(addr, self.plan));
     }
 
+    /// The time until the mine that stands gives its next address.
+    fn wait(&self) -> Option<Duration> {
+        self.dig.as_ref().map(|_| Duration::ZERO)
+    }
+
     /// The next address of the mine that stands, when one stands and it is
     /// due.
     ///
     /// A mine that gave every address of its depth, and a mine whose block
     /// holds no free address, both end here and stand no longer.
     fn address(&mut self, visited: &HashSet<Ipv4Addr>) -> Option<Pick> {
-        let now = self.clock.now();
         let plan = self.plan;
         let dig = self.dig.as_mut()?;
-        if dig.ready.is_some_and(|ready| now < ready) {
-            return None;
-        }
         let Some(addr) = dig.draw(&mut self.rng, plan, visited) else {
             self.dig = None;
             return None;
@@ -424,7 +421,6 @@ impl Mine {
         let origin = dig.origin;
         dig.left -= 1;
         *dig.probed.entry(network_of(addr, MINE_GRAIN)).or_default() += 1;
-        dig.ready = Some(now + plan.delay);
         if dig.left == 0 {
             self.dig = None;
         }
@@ -510,6 +506,12 @@ impl Draw {
         let pick = mine.as_mut()?.address(visited)?;
         visited.insert(pick.addr);
         Some(pick)
+    }
+
+    /// The time until a mine gives its next address. A draw whose mine holds
+    /// no address gives none.
+    pub(crate) fn mine_wait(&self) -> Option<Duration> {
+        self.mine.as_ref()?.wait()
     }
 
     /// Tells the draw the length of the path that one destination gave, so a
@@ -3983,6 +3985,82 @@ mod tests {
             .map(|pick| pick.addr)
             .collect();
         assert_eq!(mined, vec![free]);
+    }
+
+    /// The wait between two addresses of one mine of a test.
+    const MINE_DELAY: Duration = Duration::from_secs(2);
+
+    /// A draw and the clock that its mine reads, so a test moves the clock.
+    fn timed_mining_draw(plan: MinePlan) -> (Draw, Rc<FakeClock>) {
+        let clock = FakeClock::new();
+        let draw = draw_of(&[]).mining(plan, SEED, Box::new(Rc::clone(&clock)));
+        (draw, clock)
+    }
+
+    /// A mine that waits between two addresses, and the clock of it.
+    fn a_waiting_mine() -> (Draw, Rc<FakeClock>) {
+        let (mut draw, clock) = timed_mining_draw(mine_plan(
+            MINE_DEPTH,
+            MINE_PREFIX,
+            MINE_PER_PREFIX,
+            MINE_DELAY,
+        ));
+        draw.scored(address(HIT), HIT_LENGTH);
+        (draw, clock)
+    }
+
+    /// The first address of a mine waits for nothing.
+    ///
+    /// The delay stands between two addresses of one mine, and the first
+    /// address of a mine follows no address of it.
+    #[test]
+    fn the_first_address_of_a_mine_waits_for_nothing() {
+        let (mut draw, _clock) = a_waiting_mine();
+        assert!(draw.mined().is_some());
+    }
+
+    #[test]
+    fn a_mine_gives_no_second_address_before_its_delay_passed() {
+        let (mut draw, clock) = a_waiting_mine();
+        assert!(draw.mined().is_some());
+        clock.advance(MINE_DELAY - Duration::from_millis(1));
+        assert_eq!(draw.mined(), None);
+    }
+
+    #[test]
+    fn a_mine_gives_its_second_address_once_its_delay_passed() {
+        let (mut draw, clock) = a_waiting_mine();
+        assert!(draw.mined().is_some());
+        clock.advance(MINE_DELAY);
+        assert!(draw.mined().is_some());
+    }
+
+    #[test]
+    fn the_wait_of_a_mine_that_is_not_due_is_the_time_that_is_left_of_its_delay() {
+        let (mut draw, clock) = a_waiting_mine();
+        assert!(draw.mined().is_some());
+        clock.advance(Duration::from_millis(500));
+        assert_eq!(draw.mine_wait(), Some(MINE_DELAY - Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn the_wait_of_a_mine_that_is_due_is_no_time_at_all() {
+        let (mut draw, _clock) = a_waiting_mine();
+        assert_eq!(draw.mine_wait(), Some(Duration::ZERO));
+        assert!(draw.mined().is_some());
+    }
+
+    #[test]
+    fn a_draw_whose_mine_ran_out_names_no_wait() {
+        let (mut draw, _clock) = timed_mining_draw(a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert_eq!(drained(&mut draw), MINE_DEPTH);
+        assert_eq!(draw.mine_wait(), None);
+    }
+
+    #[test]
+    fn a_draw_that_mines_nothing_names_no_wait() {
+        assert_eq!(draw_of(&[ROUTABLE]).mine_wait(), None);
     }
 
     #[test]
