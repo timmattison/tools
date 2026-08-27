@@ -72,7 +72,7 @@
 //! rounds, reads its own deadline, and reaches the indicator while that one
 //! waits.
 
-use crate::live::Screen;
+use crate::live::{Clock, Screen};
 use crate::names;
 use crate::names::Namer;
 use crate::record::{
@@ -206,8 +206,73 @@ fn random(seed: u64) -> impl Iterator<Item = Ipv4Addr> {
     std::iter::repeat_with(move || Ipv4Addr::from_bits(rng.random()))
 }
 
-/// The draw of one hunt: the source of the candidates, and the addresses that
-/// the hunt already visited.
+/// The lowest host number that a mine draws inside one /24.
+///
+/// `.0` names the network and `.255` is the broadcast address of it, so neither
+/// one names a host. `.1` is the gateway of most /24s, and a gateway stands at
+/// the border of the network, which is the shallowest point of it: a probe of
+/// the gateway measures the path that the mine already holds.
+const FIRST_HOST: u8 = 2;
+
+/// The highest host number that a mine draws inside one /24.
+const LAST_HOST: u8 = 254;
+
+/// The numbers that bound one mine of the near space of a long path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MinePlan {
+    /// The number of addresses that one mine probes.
+    pub(crate) depth: NonZeroUsize,
+    /// The length of the block that one mine stays inside.
+    pub(crate) prefix: u8,
+    /// The number of addresses that one mine probes of any one /24.
+    pub(crate) per_prefix: NonZeroUsize,
+    /// The wait between two addresses of one mine.
+    pub(crate) delay: Duration,
+}
+
+/// One address that a hunt traces, and where the draw found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Pick {
+    /// The address to trace.
+    pub(crate) addr: Ipv4Addr,
+    /// The address of the first hit whose mine drew this address. An
+    /// independent draw of the source holds none.
+    pub(crate) mine: Option<Ipv4Addr>,
+}
+
+/// The mine of the near space of the longest path that a hunt measured.
+struct Mine {
+    /// The numbers that bound each mine.
+    plan: MinePlan,
+    /// The clock that times the wait between two addresses of one mine.
+    clock: Box<dyn Clock>,
+    /// The length of the longest path that the hunt measured so far.
+    record: Option<u8>,
+}
+
+impl Mine {
+    /// Starts a mine at this destination when its path is the longest one the
+    /// hunt measured.
+    fn scored(&mut self, _addr: Ipv4Addr, length: u8) {
+        if self.record.is_none_or(|held| length > held) {
+            self.record = Some(length);
+        }
+    }
+
+    /// The next address of the mine that stands, when one stands and it is
+    /// due.
+    fn address(&mut self, _visited: &HashSet<Ipv4Addr>) -> Option<Pick> {
+        None
+    }
+
+    /// The time until the mine that stands gives its next address.
+    fn wait(&self) -> Option<Duration> {
+        None
+    }
+}
+
+/// The draw of one hunt: the source of the candidates, the addresses that the
+/// hunt already visited, and the mine of the near space.
 pub(crate) struct Draw {
     /// The candidates, in the order the draw reads them.
     candidates: Box<dyn Iterator<Item = Ipv4Addr>>,
@@ -216,6 +281,8 @@ pub(crate) struct Draw {
     /// The address that a peek took out of the source and that no ask has
     /// taken yet.
     peeked: Option<Ipv4Addr>,
+    /// The mine of the near space, when the hunt asked for one.
+    mine: Option<Mine>,
 }
 
 impl Draw {
@@ -225,12 +292,28 @@ impl Draw {
             candidates,
             visited: HashSet::new(),
             peeked: None,
+            mine: None,
         }
     }
 
     /// Builds the draw of a real hunt, over the seeded sequence of [`random`].
     pub(crate) fn seeded(seed: u64) -> Self {
         Self::new(Box::new(random(seed)))
+    }
+
+    /// The same draw, which mines the near space of every record it hears.
+    ///
+    /// The mine draws on a sequence of its own, so the addresses that a mine
+    /// probes shift no address of the independent draw. A hunt of one seed
+    /// therefore visits the same independent addresses whether it mines or
+    /// not.
+    pub(crate) fn mining(mut self, plan: MinePlan, seed: u64, clock: Box<dyn Clock>) -> Self {
+        self.mine = Some(Mine {
+            plan,
+            clock,
+            record: None,
+        });
+        self
     }
 
     /// The next address to trace, without taking it.
@@ -246,9 +329,43 @@ impl Draw {
         self.peeked
     }
 
-    /// The next address to trace.
-    pub(crate) fn address(&mut self) -> Option<Ipv4Addr> {
-        self.peeked.take().or_else(|| self.take())
+    /// The next address to trace, from a mine when one is due and from the
+    /// source of the candidates when none is.
+    pub(crate) fn address(&mut self) -> Option<Pick> {
+        if let Some(pick) = self.mined() {
+            return Some(pick);
+        }
+        let addr = self.peeked.take().or_else(|| self.take())?;
+        Some(Pick { addr, mine: None })
+    }
+
+    /// The next address of the mine that stands, and no address of the source
+    /// of the candidates.
+    ///
+    /// A hunt that already holds the rounds it wants takes this door. The
+    /// addresses of a mine cost no round, so such a hunt still finishes the
+    /// mine it started and draws no further independent address.
+    pub(crate) fn mined(&mut self) -> Option<Pick> {
+        let Self { mine, visited, .. } = self;
+        let pick = mine.as_mut()?.address(visited)?;
+        visited.insert(pick.addr);
+        Some(pick)
+    }
+
+    /// Tells the draw the length of the path that one destination gave, so a
+    /// mine starts when that path is the longest one the hunt measured.
+    ///
+    /// A draw that mines nothing keeps nothing.
+    pub(crate) fn scored(&mut self, addr: Ipv4Addr, length: u8) {
+        if let Some(mine) = self.mine.as_mut() {
+            mine.scored(addr, length);
+        }
+    }
+
+    /// The time until a mine gives its next address. A draw whose mine holds
+    /// no address gives none.
+    pub(crate) fn mine_wait(&self) -> Option<Duration> {
+        self.mine.as_ref()?.wait()
     }
 
     /// The next candidate that routes and that this hunt has not visited.
@@ -701,15 +818,15 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
             let Some(lane) = self.free.pop() else {
                 return Ok(());
             };
-            let Some(target) = self.sources.draw.address() else {
+            let Some(pick) = self.sources.draw.address() else {
                 self.free.push(lane);
                 self.drawn_out = true;
                 return Ok(());
             };
-            match self.start(target, lane) {
+            match self.start(pick.addr, lane) {
                 Ok(flight) => {
                     self.targets += 1;
-                    self.status.show(Event::Target(target));
+                    self.status.show(Event::Target(pick.addr));
                     self.flights.push(flight);
                 }
                 Err(fault) => {
@@ -1376,9 +1493,9 @@ fn pad(cell: &str, width: usize, right: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        random, record, reserved, Bounds, Draw, Facts, HuntError, HuntStopped, PathKind, Plan,
-        Probes, RunError, Score, Scorer, Sources, Summary, ATTEMPTS, FASTEST, LONGEST,
-        NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
+        random, record, reserved, Block, Bounds, Draw, Facts, HuntError, HuntStopped, MinePlan,
+        PathKind, Pick, Plan, Probes, RunError, Score, Scorer, Sources, Summary, ATTEMPTS, FASTEST,
+        FIRST_HOST, LAST_HOST, LONGEST, NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
     };
     use crate::live::Screen;
     use crate::names::Lookup;
@@ -1387,11 +1504,12 @@ mod tests {
         RunConfig, RunId, SourceKind, SourceLabel, Writer,
     };
     use crate::status::{Event, Status};
-    use crate::testing::{named, round, FakeResolver};
+    use crate::testing::{named, round, FakeClock, FakeResolver};
     use crate::trace::Lane;
     use crate::{Multipath, Protocol};
     use chrono::Utc;
     use std::cell::Cell;
+    use std::collections::BTreeMap;
     use std::collections::HashSet;
     use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};
@@ -1456,7 +1574,15 @@ mod tests {
     fn drawn_past(rejected: &[&str]) -> Option<Ipv4Addr> {
         let mut candidates = rejected.to_vec();
         candidates.push(ROUTABLE);
-        draw_of(&candidates).address()
+        drawn(&mut draw_of(&candidates))
+    }
+
+    /// The address of the next pick of a draw, without the mine beside it.
+    ///
+    /// Every test of the guard and of the visited set reads the address alone,
+    /// and the mine of each of those draws is absent.
+    fn drawn(draw: &mut Draw) -> Option<Ipv4Addr> {
+        draw.address().map(|pick| pick.addr)
     }
 
     /// Asserts that the draw reads past every address of one reserved block.
@@ -1473,20 +1599,20 @@ mod tests {
 
     #[test]
     fn the_draw_gives_a_routable_address() {
-        assert_eq!(draw_of(&[ROUTABLE]).address(), Some(address(ROUTABLE)));
+        assert_eq!(drawn(&mut draw_of(&[ROUTABLE])), Some(address(ROUTABLE)));
     }
 
     #[test]
     fn the_draw_of_a_source_that_ran_out_gives_no_address() {
-        assert_eq!(draw_of(&[]).address(), None);
+        assert_eq!(drawn(&mut draw_of(&[])), None);
     }
 
     #[test]
     fn the_draw_rejects_an_address_that_this_hunt_already_visited() {
         let mut draw = draw_of(&[ROUTABLE, ROUTABLE, OTHER_ROUTABLE]);
-        assert_eq!(draw.address(), Some(address(ROUTABLE)));
+        assert_eq!(drawn(&mut draw), Some(address(ROUTABLE)));
         assert_eq!(
-            draw.address(),
+            drawn(&mut draw),
             Some(address(OTHER_ROUTABLE)),
             "the second ask must read past the address that the first ask gave"
         );
@@ -1500,7 +1626,7 @@ mod tests {
     fn a_source_of_rejected_addresses_alone_stops_the_draw() {
         let loopback = address("127.0.0.1");
         let mut draw = Draw::new(Box::new(std::iter::repeat(loopback)));
-        assert_eq!(draw.address(), None);
+        assert_eq!(drawn(&mut draw), None);
     }
 
     #[test]
@@ -1511,7 +1637,7 @@ mod tests {
             assert!(read <= ATTEMPTS, "the draw read {read} candidates");
             address("10.0.0.1")
         });
-        assert_eq!(Draw::new(Box::new(counted)).address(), None);
+        assert_eq!(drawn(&mut Draw::new(Box::new(counted))), None);
     }
 
     #[test]
@@ -1649,7 +1775,7 @@ mod tests {
     fn seeded_addresses(seed: u64) -> Vec<Ipv4Addr> {
         let mut draw = Draw::seeded(seed);
         (0..SEEDED_DRAWS)
-            .map(|_| draw.address().expect("the seeded draw never runs out"))
+            .map(|_| drawn(&mut draw).expect("the seeded draw never runs out"))
             .collect()
     }
 
@@ -3502,13 +3628,314 @@ mod tests {
     fn a_peek_gives_the_address_that_the_next_ask_gives() {
         let mut draw = draw_of(&[ROUTABLE, OTHER_ROUTABLE]);
         assert_eq!(draw.peek(), Some(address(ROUTABLE)));
-        assert_eq!(draw.address(), Some(address(ROUTABLE)));
-        assert_eq!(draw.address(), Some(address(OTHER_ROUTABLE)));
+        assert_eq!(drawn(&mut draw), Some(address(ROUTABLE)));
+        assert_eq!(drawn(&mut draw), Some(address(OTHER_ROUTABLE)));
     }
 
     /// A peek of a draw that ran out gives no address.
     #[test]
     fn a_peek_of_a_draw_that_ran_out_gives_no_address() {
         assert_eq!(draw_of(&[]).peek(), None);
+    }
+
+    /// The address of the first hit that every mine of a test digs around.
+    ///
+    /// The block of `93.184.0.0/16` around it holds no reserved block, so a
+    /// mine of `--mine-prefix 16` there draws no address that the guard
+    /// rejects.
+    const HIT: &str = "93.184.216.34";
+
+    /// The /24 that holds the first hit of a mine test.
+    const HIT_PREFIX: &str = "93.184.216.0";
+
+    /// The block that bounds a mine of the first hit at a prefix of 16.
+    const HIT_BLOCK: &str = "93.184.0.0";
+
+    /// The address of a first hit whose /16 holds two reserved /24s.
+    ///
+    /// `192.0.0.0/24` and `192.0.2.0/24` both stand inside `192.0.0.0/16`, and
+    /// this address stands inside neither one.
+    const HIT_BESIDE_RESERVED: &str = "192.0.1.5";
+
+    /// The length of the path that the first hit of a mine test measured.
+    const HIT_LENGTH: u8 = 20;
+
+    /// The number of addresses that one mine of a test probes.
+    const MINE_DEPTH: usize = 8;
+
+    /// The length of the block that one mine of a test stays inside.
+    const MINE_PREFIX: u8 = 16;
+
+    /// The number of addresses that one mine of a test probes of any one /24.
+    const MINE_PER_PREFIX: usize = 2;
+
+    /// The number of addresses that the mine of the reserved test probes.
+    ///
+    /// The count is large, so the mine draws in many of the 256 /24s that its
+    /// block holds and meets the two reserved ones among them.
+    const A_DEEP_MINE: usize = 200;
+
+    /// The plan of one mine that a test names.
+    fn mine_plan(depth: usize, prefix: u8, per_prefix: usize, delay: Duration) -> MinePlan {
+        MinePlan {
+            depth: NonZeroUsize::new(depth).expect("a mine of a test probes one address at least"),
+            prefix,
+            per_prefix: NonZeroUsize::new(per_prefix)
+                .expect("a mine of a test probes one address of one prefix at least"),
+            delay,
+        }
+    }
+
+    /// The plan of a mine of the defaults of the design, which waits for
+    /// nothing between two addresses.
+    fn a_mine() -> MinePlan {
+        mine_plan(MINE_DEPTH, MINE_PREFIX, MINE_PER_PREFIX, Duration::ZERO)
+    }
+
+    /// A draw that mines the near space, over a scripted list of candidates.
+    fn mining_draw(candidates: &[&str], plan: MinePlan) -> Draw {
+        seeded_mining_draw(candidates, plan, SEED)
+    }
+
+    /// A draw that mines the near space, over the seed that a test names.
+    fn seeded_mining_draw(candidates: &[&str], plan: MinePlan, seed: u64) -> Draw {
+        draw_of(candidates).mining(plan, seed, Box::new(FakeClock::new()))
+    }
+
+    /// The addresses that one mine gives, after one first hit started it.
+    fn mined_addresses(hit: &str, plan: MinePlan) -> Vec<Ipv4Addr> {
+        seeded_mined_addresses(hit, plan, SEED)
+    }
+
+    /// The addresses that one mine of one seed gives.
+    fn seeded_mined_addresses(hit: &str, plan: MinePlan, seed: u64) -> Vec<Ipv4Addr> {
+        let mut draw = seeded_mining_draw(&[], plan, seed);
+        draw.scored(address(hit), HIT_LENGTH);
+        std::iter::from_fn(|| draw.mined())
+            .map(|pick| pick.addr)
+            .collect()
+    }
+
+    /// The number of addresses that the mine of a draw still holds.
+    fn drained(draw: &mut Draw) -> usize {
+        std::iter::from_fn(|| draw.mined()).count()
+    }
+
+    /// The /24 that holds one address.
+    fn prefix_of(addr: Ipv4Addr) -> Ipv4Addr {
+        Ipv4Addr::from_bits(addr.to_bits() & 0xffff_ff00)
+    }
+
+    #[test]
+    fn a_mine_gives_no_more_addresses_than_its_depth() {
+        assert_eq!(mined_addresses(HIT, a_mine()).len(), MINE_DEPTH);
+    }
+
+    #[test]
+    fn a_mine_stays_inside_the_block_that_its_prefix_names() {
+        let inside = Block::new(address(HIT_BLOCK), MINE_PREFIX);
+        let addresses = mined_addresses(HIT, a_mine());
+        assert!(!addresses.is_empty(), "the mine drew no address at all");
+        for addr in addresses {
+            assert!(inside.holds(addr), "the mine drew {addr}, outside {inside}");
+        }
+    }
+
+    #[test]
+    fn a_mine_probes_no_more_addresses_of_one_prefix_than_its_cap() {
+        let mut counted: BTreeMap<Ipv4Addr, usize> = BTreeMap::new();
+        for addr in mined_addresses(HIT, a_mine()) {
+            *counted.entry(prefix_of(addr)).or_default() += 1;
+        }
+        assert!(!counted.is_empty(), "the mine drew no address at all");
+        for (prefix, count) in counted {
+            assert!(
+                count <= MINE_PER_PREFIX,
+                "the mine probed {count} addresses of {prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mine_starts_in_the_prefix_of_the_first_hit() {
+        let addresses = mined_addresses(HIT, a_mine());
+        let first = *addresses.first().expect("the mine gives an address");
+        assert_eq!(prefix_of(first), address(HIT_PREFIX));
+    }
+
+    /// A mine draws a sibling /24 once the first one holds its cap.
+    ///
+    /// The depth of this mine is four times its cap, so the mine fills four
+    /// /24s: the one of the first hit, and three siblings of it.
+    #[test]
+    fn a_mine_draws_a_sibling_prefix_once_the_first_one_holds_its_cap() {
+        let addresses = mined_addresses(HIT, a_mine());
+        let prefixes: HashSet<Ipv4Addr> = addresses.iter().copied().map(prefix_of).collect();
+        assert_eq!(prefixes.len(), MINE_DEPTH / MINE_PER_PREFIX);
+    }
+
+    #[test]
+    fn a_mine_gives_no_address_twice() {
+        let addresses = mined_addresses(HIT, a_mine());
+        assert!(!addresses.is_empty(), "the mine drew no address at all");
+        let distinct: HashSet<Ipv4Addr> = addresses.iter().copied().collect();
+        assert_eq!(distinct.len(), addresses.len());
+    }
+
+    #[test]
+    fn a_mine_draws_no_network_no_broadcast_and_no_gateway() {
+        let addresses = mined_addresses(HIT, a_mine());
+        assert!(!addresses.is_empty(), "the mine drew no address at all");
+        for addr in addresses {
+            let host = addr.octets()[3];
+            assert!(
+                (FIRST_HOST..=LAST_HOST).contains(&host),
+                "the mine drew {addr}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mine_rejects_an_address_that_no_packet_routes_to() {
+        let plan = mine_plan(A_DEEP_MINE, MINE_PREFIX, MINE_PER_PREFIX, Duration::ZERO);
+        let addresses = mined_addresses(HIT_BESIDE_RESERVED, plan);
+        assert_eq!(addresses.len(), A_DEEP_MINE, "the mine drew too few addresses");
+        for addr in addresses {
+            assert_eq!(
+                reserved(addr),
+                None,
+                "the mine drew {addr}, which no packet routes to"
+            );
+        }
+    }
+
+    /// A mine gives no address that the hunt already visited.
+    ///
+    /// The mine below stands inside one /24, and the draw already gave every
+    /// host of that /24 but one. The mine therefore holds one address to give,
+    /// and it must be that one.
+    #[test]
+    fn a_mine_gives_no_address_that_the_hunt_already_visited() {
+        let free = address("93.184.216.7");
+        let taken: Vec<String> = (FIRST_HOST..=LAST_HOST)
+            .map(|host| format!("93.184.216.{host}"))
+            .filter(|text| *text != free.to_string())
+            .collect();
+        let names: Vec<&str> = taken.iter().map(String::as_str).collect();
+        let mut draw = mining_draw(&names, mine_plan(4, 24, 4, Duration::ZERO));
+        while drawn(&mut draw).is_some() {}
+        draw.scored(address(HIT), HIT_LENGTH);
+        let mined: Vec<Ipv4Addr> = std::iter::from_fn(|| draw.mined())
+            .map(|pick| pick.addr)
+            .collect();
+        assert_eq!(mined, vec![free]);
+    }
+
+    #[test]
+    fn a_mine_of_one_seed_gives_the_same_addresses() {
+        let addresses = mined_addresses(HIT, a_mine());
+        assert!(!addresses.is_empty(), "the mine drew no address at all");
+        assert_eq!(addresses, mined_addresses(HIT, a_mine()));
+    }
+
+    #[test]
+    fn a_mine_of_another_seed_gives_other_addresses() {
+        assert_ne!(
+            seeded_mined_addresses(HIT, a_mine(), SEED),
+            seeded_mined_addresses(HIT, a_mine(), OTHER_SEED)
+        );
+    }
+
+    #[test]
+    fn the_address_of_a_mine_names_the_first_hit_that_started_it() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        let pick = draw.mined().expect("the mine gives an address");
+        assert_eq!(pick.mine, Some(address(HIT)));
+    }
+
+    #[test]
+    fn an_independent_address_names_no_mine() {
+        assert_eq!(
+            draw_of(&[ROUTABLE]).address(),
+            Some(Pick {
+                addr: address(ROUTABLE),
+                mine: None,
+            })
+        );
+    }
+
+    /// A draw that the hunt did not ask to mine gives no mined address.
+    #[test]
+    fn a_draw_that_mines_nothing_gives_no_mined_address() {
+        let mut draw = draw_of(&[ROUTABLE]);
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert_eq!(draw.mined(), None);
+    }
+
+    #[test]
+    fn a_mine_that_gave_every_address_of_its_depth_stands_no_longer() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        for place in 0..MINE_DEPTH {
+            assert!(
+                draw.mined().is_some(),
+                "the mine must give address {place} of {MINE_DEPTH}"
+            );
+        }
+        assert_eq!(draw.mined(), None);
+    }
+
+    /// The first result of a hunt is the longest path it measured, so it starts
+    /// a mine.
+    #[test]
+    fn the_first_result_of_a_hunt_starts_a_mine() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert!(draw.mined().is_some());
+    }
+
+    #[test]
+    fn a_result_no_longer_than_the_record_starts_no_mine() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert_eq!(drained(&mut draw), MINE_DEPTH);
+        draw.scored(address(FAR), HIT_LENGTH);
+        assert_eq!(draw.mined(), None);
+    }
+
+    #[test]
+    fn a_result_shorter_than_the_record_starts_no_mine() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert_eq!(drained(&mut draw), MINE_DEPTH);
+        draw.scored(address(FAR), HIT_LENGTH - 1);
+        assert_eq!(draw.mined(), None);
+    }
+
+    #[test]
+    fn a_result_longer_than_the_record_starts_a_mine() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert_eq!(drained(&mut draw), MINE_DEPTH);
+        draw.scored(address(FAR), HIT_LENGTH + 1);
+        let pick = draw.mined().expect("the mine of the new record gives an address");
+        assert_eq!(pick.mine, Some(address(FAR)));
+    }
+
+    /// A new record replaces the mine that stands.
+    ///
+    /// The near space of a destination that no longer holds the record is
+    /// worth less than the near space of the one that does, and one mine at a
+    /// time is what keeps the caps of the design meaningful.
+    #[test]
+    fn a_new_record_replaces_the_mine_that_stands() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        draw.scored(address(FAR), HIT_LENGTH + 1);
+        let mines: HashSet<Option<Ipv4Addr>> = std::iter::from_fn(|| draw.mined())
+            .map(|pick| pick.mine)
+            .collect();
+        assert_eq!(mines, HashSet::from([Some(address(FAR))]));
     }
 }
