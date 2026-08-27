@@ -977,12 +977,25 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
     /// shrinks to the rounds that are left, because the tail of such a hunt
     /// runs one destination at a time and that tail is most of the time the
     /// hunt takes.
+    ///
+    /// A mine that stands keeps the hunt drawing past the rounds it wanted. The
+    /// addresses of a mine cost no round, so a hunt that stopped at its last
+    /// round would leave the mine that round started unprobed. The cap of the
+    /// targets stops such a hunt as it stops every other one.
     fn room(&self) -> bool {
-        !self.drawn_out
-            && !(self.stop)()
-            && self.reached < self.plan.bounds.rounds
+        !(self.stop)()
             && self.targets < self.plan.bounds.max_targets
             && self.flights.len() < self.plan.concurrency.get()
+            && (self.drawing() || self.sources.draw.mine_wait().is_some())
+    }
+
+    /// Whether the hunt still draws independent addresses.
+    ///
+    /// A hunt that holds the rounds it wanted draws no further address of its
+    /// source, and a hunt whose source ran out draws none either. Both still
+    /// trace the addresses of the mine that stands.
+    fn drawing(&self) -> bool {
+        !self.drawn_out && self.reached < self.plan.bounds.rounds
     }
 
     /// Draws destinations and starts them, until the pool is full or a bound
@@ -1001,9 +1014,19 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
             let Some(lane) = self.free.pop() else {
                 return Ok(());
             };
-            let Some(pick) = self.sources.draw.address() else {
+            let drawing = self.drawing();
+            let picked = if drawing {
+                self.sources.draw.address()
+            } else {
+                self.sources.draw.mined()
+            };
+            let Some(pick) = picked else {
                 self.free.push(lane);
-                self.drawn_out = true;
+                // A draw that gave nothing while the hunt still wanted an
+                // independent address ran its source out. A draw that gave
+                // nothing to a hunt that wanted none holds a mine that is not
+                // due, and the loop of the hunt sleeps that wait out.
+                self.drawn_out = drawing;
                 return Ok(());
             };
             match self.start(pick, lane) {
@@ -1180,7 +1203,11 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
         }
         let score = flight.scorer.score();
         let answered = score.kind == PathKind::Reached;
-        if answered {
+        // A mined destination costs no round. The rounds of a hunt count the
+        // independent draws, which are what set a record, and a mine that ate
+        // them would leave the hunt sampling one network in the place of the
+        // whole address space.
+        if answered && score.mine.is_none() {
             self.reached += 1;
         }
         self.status.show(Event::Scored {
@@ -1188,6 +1215,9 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
             reached: answered,
             mine: score.mine,
         });
+        // The draw hears every destination that finished, mined or not, so a
+        // mined destination that beats the record starts a mine of its own.
+        self.sources.draw.scored(score.addr, score.length);
         self.scores.push(score);
     }
 
@@ -1275,7 +1305,21 @@ pub(crate) fn record<W: Write>(
             }
         }
         if hunt.flights.is_empty() {
-            break;
+            // A mine that is not due leaves the pool empty for the length of
+            // its wait. The hunt sleeps that wait out and fills again, so the
+            // delay between two addresses of one mine costs the mine no
+            // address. A wait of no time started nothing, and the hunt stops
+            // rather than turning this loop without end.
+            let waiting = hunt
+                .room()
+                .then(|| hunt.sources.draw.mine_wait())
+                .flatten()
+                .filter(|wait| !wait.is_zero() && fault.is_none());
+            let Some(wait) = waiting else {
+                break;
+            };
+            std::thread::sleep(wait);
+            continue;
         }
         match hunt.sweep() {
             Ok(true) => {}

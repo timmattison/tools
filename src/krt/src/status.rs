@@ -94,6 +94,10 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 /// The glyph of a cell of the bar that the hunt filled whole.
 const BAR_FULL: char = '█';
 
+/// The word that a log line of a mined destination carries, in front of the
+/// address of the first hit that started that mine.
+pub(crate) const MINE: &str = "mine";
+
 /// The glyph of a cell of the bar that the hunt has not reached.
 const BAR_EMPTY: char = '░';
 
@@ -389,15 +393,22 @@ impl<W: Write, C: Clock> Indicator<W, C> {
     /// The destination comes off the event and never off the field of the
     /// indicator. A hunt holds many destinations at once, so the one that
     /// finishes is rarely the one that started last.
-    fn log(&mut self, target: Ipv4Addr, reached: bool, _mine: Option<Ipv4Addr>) {
+    fn log(&mut self, target: Ipv4Addr, reached: bool, mine: Option<Ipv4Addr>) {
         let answer = if reached { REACHED } else { PARTIAL };
-        let fields = [
-            self.rounds_field(),
-            self.targets_field(),
-            target.to_string(),
-            answer.to_owned(),
-            ui::render_duration(self.elapsed()),
-        ];
+        let fields: Vec<String> = [
+            Some(self.rounds_field()),
+            Some(self.targets_field()),
+            Some(target.to_string()),
+            Some(answer.to_owned()),
+            // A mined destination raises no ratio, so a reader who counted the
+            // answers of the lines would read more of them than the ratio
+            // beside them holds. This field is what says which lines those are.
+            mine.map(|first| format!("{MINE} {first}")),
+            Some(ui::render_duration(self.elapsed())),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         drop(writeln!(self.sink, "{}", fields.join(ui::FIELD_SEPARATOR)));
         drop(self.sink.flush());
     }
@@ -426,9 +437,13 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
                 self.flying += 1;
             }
             Event::Tick => self.frame += 1,
-            Event::Scored { reached, .. } => {
+            Event::Scored { reached, mine, .. } => {
                 self.flying = self.flying.saturating_sub(1);
-                if reached {
+                // A mined destination costs the hunt no round, so it raises no
+                // ratio here. The indicator and the summary count the same
+                // destinations, and a line that counted one would read a number
+                // that the summary under it denies.
+                if reached && mine.is_none() {
                     self.reached += 1;
                 }
             }
@@ -456,7 +471,7 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Event, Indicator, Status, Style, BAR_EMPTY, BAR_FULL, CARRIAGE_RETURN};
+    use super::{Event, Indicator, Status, Style, BAR_EMPTY, BAR_FULL, CARRIAGE_RETURN, MINE};
     use crate::hunt::{Bounds, PARTIAL};
     use crate::testing::FakeClock;
     use crate::ui::FIELD_SEPARATOR;
@@ -895,9 +910,6 @@ mod tests {
     /// The first hit whose mine drew the destination of a mined test event.
     const A_FIRST_HIT: &str = "93.184.216.34";
 
-    /// The word that a log line of a mined destination carries.
-    const MINED: &str = "mine";
-
     /// A mined destination costs the hunt no round, so it counts none here.
     ///
     /// The indicator and the summary count the same destinations. A mined
@@ -938,7 +950,7 @@ mod tests {
         });
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
         assert!(
-            text.contains(MINED) && text.contains(A_FIRST_HIT),
+            text.contains(MINE) && text.contains(A_FIRST_HIT),
             "the line must name the mine that drew the destination: {text:?}"
         );
     }
@@ -956,7 +968,7 @@ mod tests {
         });
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
         assert!(
-            !text.contains(MINED),
+            !text.contains(MINE),
             "an independent destination names no mine: {text:?}"
         );
     }
