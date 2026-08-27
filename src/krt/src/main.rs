@@ -4562,7 +4562,6 @@ resolved configuration:
         );
     }
 
-
     /// The flag that turns the mine of the near space on.
     const FLAG_MINE: &str = "--mine";
 

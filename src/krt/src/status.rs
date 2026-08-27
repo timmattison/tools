@@ -459,11 +459,14 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
             // destination that finished is the pace of the hunt itself, and a
             // frame of every turn would fill the file with the same line ten
             // times a second.
-            (Style::Log, Event::Scored {
-                target,
-                reached,
-                mine,
-            }) => self.log(target, reached, mine),
+            (
+                Style::Log,
+                Event::Scored {
+                    target,
+                    reached,
+                    mine,
+                },
+            ) => self.log(target, reached, mine),
             (Style::Log, _) => {}
         }
     }

@@ -3241,15 +3241,7 @@ mod tests {
                 Some(plan) => draw_of(addresses).mining(plan, SEED, Box::new(SystemClock)),
                 None => draw_of(addresses),
             };
-            hunt_into(
-                draw,
-                probes,
-                shape,
-                stop,
-                names,
-                &mut writer,
-                status,
-            )
+            hunt_into(draw, probes, shape, stop, names, &mut writer, status)
         }?;
         Ok((summary, read_back(&sink)))
     }
@@ -4570,7 +4562,11 @@ mod tests {
     fn a_mine_rejects_an_address_that_no_packet_routes_to() {
         let plan = mine_plan(A_DEEP_MINE, MINE_PREFIX, MINE_PER_PREFIX, Duration::ZERO);
         let addresses = mined_addresses(HIT_BESIDE_RESERVED, plan);
-        assert_eq!(addresses.len(), A_DEEP_MINE, "the mine drew too few addresses");
+        assert_eq!(
+            addresses.len(),
+            A_DEEP_MINE,
+            "the mine drew too few addresses"
+        );
         for addr in addresses {
             assert_eq!(
                 reserved(addr),
@@ -4769,7 +4765,9 @@ mod tests {
         draw.scored(address(HIT), HIT_LENGTH);
         assert_eq!(drained(&mut draw), MINE_DEPTH);
         draw.scored(address(FAR), HIT_LENGTH + 1);
-        let pick = draw.mined().expect("the mine of the new record gives an address");
+        let pick = draw
+            .mined()
+            .expect("the mine of the new record gives an address");
         assert_eq!(pick.mine, Some(address(FAR)));
     }
 
