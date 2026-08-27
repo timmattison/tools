@@ -257,6 +257,12 @@ pub(crate) struct MinePlan {
     /// The number of addresses that one mine probes.
     pub(crate) depth: NonZeroUsize,
     /// The length of the block that one mine stays inside.
+    ///
+    /// The length stands from 8 to 24. A shorter block holds so much of the
+    /// address space that a draw inside it is a draw of the whole internet, and
+    /// a longer one holds no whole /24, which is the grain that a mine draws
+    /// at. `parse_mine_prefix` of `main.rs` is what holds every command line to
+    /// that range.
     pub(crate) prefix: u8,
     /// The number of addresses that one mine probes of any one /24.
     pub(crate) per_prefix: NonZeroUsize,
@@ -1088,8 +1094,11 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
                 // A draw that gave nothing while the hunt still wanted an
                 // independent address ran its source out. A draw that gave
                 // nothing to a hunt that wanted none holds a mine that is not
-                // due, and the loop of the hunt sleeps that wait out.
-                self.drawn_out = drawing;
+                // due, and the loop of the hunt sleeps that wait out. The or
+                // never takes the mark back off: a source that ran out stays
+                // run out, and a later turn that reads the mine alone says
+                // nothing about the source.
+                self.drawn_out |= drawing;
                 return Ok(());
             };
             match self.start(pick, lane) {
