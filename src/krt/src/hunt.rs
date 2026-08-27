@@ -438,12 +438,16 @@ impl Mine {
             return None;
         };
         let origin = dig.origin;
+        if dig.left == plan.depth.get() {
+            self.counts.mines += 1;
+        }
         dig.left -= 1;
         *dig.probed.entry(network_of(addr, MINE_GRAIN)).or_default() += 1;
         dig.ready = Some(now + plan.delay);
         if dig.left == 0 {
             self.dig = None;
         }
+        self.counts.addresses += 1;
         Some(Pick {
             addr,
             mine: Some(origin),
@@ -1424,6 +1428,27 @@ const COLUMN_GAP: &str = "  ";
 /// What the summary says when no destination gave a path that the table ranks.
 const NOTHING_TO_RANK: &str = "no destination gave a path to rank";
 
+/// The word that the counts of a summary name one mine with.
+const MINE: &str = "mine";
+
+/// The word that the counts of a summary name more than one mine with.
+const MINES: &str = "mines";
+
+/// The word that the counts of a summary name the addresses of the mines with.
+const MINED: &str = "mined";
+
+/// The word that the counts of a summary name one added hop with.
+const HOP: &str = "hop";
+
+/// The word that the counts of a summary name more than one added hop with.
+const HOPS: &str = "hops";
+
+/// A count with the word that names it, in the singular for one and in the
+/// plural for every other number.
+fn counted(count: u64, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
 /// One row of the summary table: what the row ranks, and the destination that
 /// holds it.
 struct Row<'a> {
@@ -1445,40 +1470,67 @@ struct Column {
     heading: &'static str,
     /// True when the cell stands against the right edge of the column.
     right: bool,
+    /// True when a hunt that the user did not ask to mine leaves this column
+    /// out.
+    ///
+    /// The column marks the rows that a mine produced, and a hunt that mined
+    /// nothing holds no such row. A column of nothing but the empty mark would
+    /// take width from the columns beside it and say nothing.
+    mining: bool,
     /// The cell of one row.
     cell: fn(&Row) -> String,
 }
 
 /// The columns of the summary table, in the order they print.
-const COLUMNS: [Column; 8] = [
+///
+/// The `Mine` column stands beside `Path`, because the two answer the same kind
+/// of question about the row: what the path is, and where the destination of it
+/// came from.
+const COLUMNS: [Column; 9] = [
     Column {
         heading: "Row",
         right: false,
+        mining: false,
         cell: |row| row.label.to_owned(),
     },
     Column {
         heading: "Host",
         right: false,
+        mining: false,
         cell: |row| row.score.host_text(),
     },
     Column {
         heading: "Len",
         right: true,
+        mining: false,
         cell: |row| row.score.length.to_string(),
     },
     Column {
         heading: "Path",
         right: false,
+        mining: false,
         cell: |row| row.score.kind.to_string(),
+    },
+    Column {
+        heading: "Mine",
+        right: false,
+        mining: true,
+        cell: |row| {
+            row.score
+                .mine
+                .map_or_else(|| ui::NO_NUMBER.to_owned(), |first| first.to_string())
+        },
     },
     Column {
         heading: "Avg",
         right: true,
+        mining: false,
         cell: |row| ui::render_time(row.score.rtt_ms),
     },
     Column {
         heading: "Loss%",
         right: true,
+        mining: false,
         cell: |row| {
             row.score
                 .loss
@@ -1488,11 +1540,13 @@ const COLUMNS: [Column; 8] = [
     Column {
         heading: "Gaps",
         right: true,
+        mining: false,
         cell: |row| row.score.gaps.to_string(),
     },
     Column {
         heading: "Run",
         right: false,
+        mining: false,
         cell: |row| row.score.run.to_string(),
     },
 ];
@@ -1600,11 +1654,39 @@ impl Summary {
         let mut lines = if ranked.is_empty() {
             vec![format!("{ROW_START}{NOTHING_TO_RANK}")]
         } else {
-            table(&ranked)
+            table(&ranked, &self.columns())
         };
         lines.push(String::new());
         lines.push(self.counts());
         lines
+    }
+
+    /// The columns that this summary draws, in the order they print.
+    ///
+    /// A hunt that the user did not ask to mine leaves the mine column out.
+    fn columns(&self) -> Vec<&'static Column> {
+        COLUMNS
+            .iter()
+            .filter(|column| self.mined.is_some() || !column.mining)
+            .collect()
+    }
+
+    /// The hops that the mines of this hunt added.
+    ///
+    /// The number is the longest mined path over the longest independent one. A
+    /// reader of it asks one question — did the mine find a path that the hunt
+    /// would not otherwise hold — and that difference is the answer. A mine that
+    /// found a shorter path added no hop, which is the expected result.
+    fn added(&self) -> u8 {
+        let longest = |mined: bool| {
+            self.scores
+                .iter()
+                .filter(|score| score.mine.is_some() == mined)
+                .map(|score| score.length)
+                .max()
+                .unwrap_or_default()
+        };
+        longest(true).saturating_sub(longest(false))
     }
 
     /// The rows of the table, in the order they print.
@@ -1650,22 +1732,45 @@ impl Summary {
     /// destinations in flight finish. A hunt that ran to a bound of its own
     /// leaves none, and its three counts do add up.
     ///
+    /// The reached count and the partial count both read the independent
+    /// destinations alone. A mined destination costs no round, so it stands
+    /// against no bound and it stands in the mined count of its own. The counts
+    /// of a hunt that mined therefore add up the same way: the reached, the
+    /// partial, and the mined together are the destinations that the hunt
+    /// started.
+    ///
+    /// A hunt that the user asked to mine names its three mine fields whatever
+    /// they hold. A mine that added no hop is the expected result, and a field
+    /// that went away at zero would leave a reader unable to tell that result
+    /// from a hunt that never mined.
+    ///
     /// The line stands at the left edge, where the closing line of a trace
     /// stands, and the table above it stands one column in, where the table of
     /// a folded run stands. The two are different things: the table is a table,
     /// and this line closes the run.
     fn counts(&self) -> String {
-        let reached = self
-            .scores
-            .iter()
+        let independent = self.scores.iter().filter(|score| score.mine.is_none());
+        let reached = independent
+            .clone()
             .filter(|score| score.kind == PathKind::Reached)
             .count();
+        let partial = independent.count() - reached;
+        let mines = self.mined.map(|mined| {
+            [
+                counted(mined.mines, MINE, MINES),
+                format!("{} {MINED}", mined.addresses),
+                format!("+{}", counted(u64::from(self.added()), HOP, HOPS)),
+            ]
+        });
         [
             format!("{reached}/{} {REACHED}", self.bounds.rounds),
             format!("{}/{} {TARGETS}", self.targets, self.bounds.max_targets),
-            format!("{} {PARTIAL}", self.scores.len() - reached),
-            ui::render_duration(self.elapsed),
+            format!("{partial} {PARTIAL}"),
         ]
+        .into_iter()
+        .chain(mines.into_iter().flatten())
+        .chain(std::iter::once(ui::render_duration(self.elapsed)))
+        .collect::<Vec<String>>()
         .join(ui::FIELD_SEPARATOR)
     }
 }
@@ -1688,15 +1793,19 @@ fn pick<'a>(scores: &[&'a Score], better: impl Fn(&Score, &Score) -> bool) -> Op
 /// The lines of the table: the column header, and one line for each row.
 ///
 /// Each column takes the width of the widest cell it holds, and of its own
-/// heading. The widths come out of [`COLUMNS`], which holds the heading and the
-/// cell of each column together, so no cell can land under the heading of
-/// another column.
-fn table(rows: &[Row]) -> Vec<String> {
+/// heading. The widths come out of the columns themselves, which hold the
+/// heading and the cell of each one together, so no cell can land under the
+/// heading of another column.
+///
+/// `columns` is what the summary draws, which is every column of [`COLUMNS`]
+/// for a hunt that mined and every column but the mine one for a hunt that did
+/// not.
+fn table(rows: &[Row], columns: &[&Column]) -> Vec<String> {
     let cells: Vec<Vec<String>> = rows
         .iter()
-        .map(|row| COLUMNS.iter().map(|column| (column.cell)(row)).collect())
+        .map(|row| columns.iter().map(|column| (column.cell)(row)).collect())
         .collect();
-    let widths: Vec<usize> = COLUMNS
+    let widths: Vec<usize> = columns
         .iter()
         .enumerate()
         .map(|(index, column)| {
@@ -1708,13 +1817,13 @@ fn table(rows: &[Row]) -> Vec<String> {
                 .unwrap_or_default()
         })
         .collect();
-    let headings: Vec<String> = COLUMNS
+    let headings: Vec<String> = columns
         .iter()
         .map(|column| column.heading.to_owned())
         .collect();
     std::iter::once(&headings)
         .chain(cells.iter())
-        .map(|row| line_of(row, &widths))
+        .map(|row| line_of(row, &widths, columns))
         .collect()
 }
 
@@ -1723,11 +1832,11 @@ fn table(rows: &[Row]) -> Vec<String> {
 /// The line loses the spaces that follow its last cell. A trailing space says
 /// nothing, and it turns a copy of the table into text that a reader must
 /// clean.
-fn line_of(cells: &[String], widths: &[usize]) -> String {
+fn line_of(cells: &[String], widths: &[usize], columns: &[&Column]) -> String {
     let padded: Vec<String> = cells
         .iter()
         .zip(widths)
-        .zip(COLUMNS.iter())
+        .zip(columns.iter())
         .map(|((cell, width), column)| pad(cell, *width, column.right))
         .collect();
     format!("{ROW_START}{}", padded.join(COLUMN_GAP))
