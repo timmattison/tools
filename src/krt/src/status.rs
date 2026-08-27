@@ -52,6 +52,9 @@ pub(crate) enum Event {
         target: Ipv4Addr,
         /// True when that destination answered.
         reached: bool,
+        /// The address of the first hit whose mine drew that destination. A
+        /// destination of an independent draw holds none.
+        mine: Option<Ipv4Addr>,
     },
     /// The hunt stopped, and the indicator gives the line back.
     Stop,
@@ -386,7 +389,7 @@ impl<W: Write, C: Clock> Indicator<W, C> {
     /// The destination comes off the event and never off the field of the
     /// indicator. A hunt holds many destinations at once, so the one that
     /// finishes is rarely the one that started last.
-    fn log(&mut self, target: Ipv4Addr, reached: bool) {
+    fn log(&mut self, target: Ipv4Addr, reached: bool, _mine: Option<Ipv4Addr>) {
         let answer = if reached { REACHED } else { PARTIAL };
         let fields = [
             self.rounds_field(),
@@ -441,7 +444,11 @@ impl<W: Write, C: Clock> Status for Indicator<W, C> {
             // destination that finished is the pace of the hunt itself, and a
             // frame of every turn would fill the file with the same line ten
             // times a second.
-            (Style::Log, Event::Scored { target, reached }) => self.log(target, reached),
+            (Style::Log, Event::Scored {
+                target,
+                reached,
+                mine,
+            }) => self.log(target, reached, mine),
             (Style::Log, _) => {}
         }
     }
@@ -551,6 +558,7 @@ mod tests {
             indicator.show(Event::Scored {
                 target: address(TARGET),
                 reached: true,
+                mine: None,
             });
         }
         for _ in 0..partial {
@@ -558,6 +566,7 @@ mod tests {
             indicator.show(Event::Scored {
                 target: address(TARGET),
                 reached: false,
+                mine: None,
             });
         }
         indicator.show(Event::Target(address(TARGET)));
@@ -806,6 +815,7 @@ mod tests {
             indicator.show(Event::Scored {
                 target: address(TARGET),
                 reached: true,
+                mine: None,
             });
         }
         indicator.show(Event::Stop);
@@ -829,11 +839,13 @@ mod tests {
         indicator.show(Event::Scored {
             target: address(TARGET),
             reached: true,
+            mine: None,
         });
         indicator.show(Event::Target(address(ANOTHER_TARGET)));
         indicator.show(Event::Scored {
             target: address(ANOTHER_TARGET),
             reached: false,
+            mine: None,
         });
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
         let lines: Vec<&str> = text.lines().collect();
@@ -880,6 +892,75 @@ mod tests {
         );
     }
 
+    /// The first hit whose mine drew the destination of a mined test event.
+    const A_FIRST_HIT: &str = "93.184.216.34";
+
+    /// The word that a log line of a mined destination carries.
+    const MINED: &str = "mine";
+
+    /// A mined destination costs the hunt no round, so it counts none here.
+    ///
+    /// The indicator and the summary count the same destinations. A mined
+    /// destination that answered and that raised this ratio would leave the
+    /// line of the hunt reading a number that the summary under it denies.
+    #[test]
+    fn the_indicator_counts_no_round_for_a_mined_destination() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Line, &clock);
+        indicator.show(Event::Target(address(TARGET)));
+        indicator.show(Event::Scored {
+            target: address(TARGET),
+            reached: true,
+            mine: Some(address(A_FIRST_HIT)),
+        });
+        let line = painted(indicator);
+        assert!(
+            line.contains("0/8 reached"),
+            "a mined destination costs no round: {line:?}"
+        );
+    }
+
+    /// The line of a mined destination names the first hit that started the
+    /// mine.
+    ///
+    /// A reader of a file counts the answers from the lines, and a mined
+    /// destination that answered raises no ratio. The mark is what tells such a
+    /// reader why the count of the lines runs past the ratio beside them.
+    #[test]
+    fn a_log_line_of_a_mined_destination_names_the_first_hit_that_started_it() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Log, &clock);
+        indicator.show(Event::Target(address(TARGET)));
+        indicator.show(Event::Scored {
+            target: address(TARGET),
+            reached: true,
+            mine: Some(address(A_FIRST_HIT)),
+        });
+        let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
+        assert!(
+            text.contains(MINED) && text.contains(A_FIRST_HIT),
+            "the line must name the mine that drew the destination: {text:?}"
+        );
+    }
+
+    /// The line of an independent destination names no mine.
+    #[test]
+    fn a_log_line_of_an_independent_destination_names_no_mine() {
+        let clock = FakeClock::new();
+        let mut indicator = indicator(Style::Log, &clock);
+        indicator.show(Event::Target(address(TARGET)));
+        indicator.show(Event::Scored {
+            target: address(TARGET),
+            reached: true,
+            mine: None,
+        });
+        let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
+        assert!(
+            !text.contains(MINED),
+            "an independent destination names no mine: {text:?}"
+        );
+    }
+
     #[test]
     fn a_log_holds_no_control_text() {
         let clock = FakeClock::new();
@@ -889,6 +970,7 @@ mod tests {
         indicator.show(Event::Scored {
             target: address(TARGET),
             reached: true,
+            mine: None,
         });
         indicator.show(Event::Stop);
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
@@ -913,6 +995,7 @@ mod tests {
         indicator.show(Event::Scored {
             target: address(TARGET),
             reached: true,
+            mine: None,
         });
         let text = String::from_utf8(indicator.sink).expect("the indicator writes text");
         assert!(

@@ -598,6 +598,9 @@ pub(crate) struct Score {
     /// of the path is no hole: the path stops there, and a probe that went
     /// further measured nothing that belongs to this path.
     gaps: usize,
+    /// The address of the first hit whose mine drew this destination. A
+    /// destination of an independent draw holds none.
+    mine: Option<Ipv4Addr>,
 }
 
 /// The screen of one destination of a hunt.
@@ -623,11 +626,16 @@ pub(crate) struct Scorer {
     reached_at: Option<u8>,
     /// The name of each address that a reverse lookup gave.
     names: BTreeMap<IpAddr, String>,
+    /// The address of the first hit whose mine drew this destination.
+    mine: Option<Ipv4Addr>,
 }
 
 impl Scorer {
     /// Builds the screen of one destination.
-    pub(crate) fn new(addr: Ipv4Addr, run: RunId, first_ttl: u8) -> Self {
+    ///
+    /// `mine` names the first hit whose mine drew this destination, and it is
+    /// none for a destination of an independent draw.
+    pub(crate) fn new(addr: Ipv4Addr, run: RunId, first_ttl: u8, mine: Option<Ipv4Addr>) -> Self {
         Self {
             addr,
             run,
@@ -635,6 +643,7 @@ impl Scorer {
             table: HopTable::new(),
             reached_at: None,
             names: BTreeMap::new(),
+            mine,
         }
     }
 
@@ -663,6 +672,7 @@ impl Scorer {
             rtt_ms,
             loss,
             gaps,
+            mine: self.mine,
         }
     }
 
@@ -996,7 +1006,7 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
                 self.drawn_out = true;
                 return Ok(());
             };
-            match self.start(pick.addr, lane) {
+            match self.start(pick, lane) {
                 Ok(flight) => {
                     self.targets += 1;
                     self.status.show(Event::Target(pick.addr));
@@ -1027,7 +1037,8 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
     /// Returns [`HuntError::Run`] when a record does not reach the file, and
     /// [`HuntError::Tracer`] when the tracer of this destination does not
     /// start.
-    fn start(&mut self, target: Ipv4Addr, lane: Lane) -> Result<Flight, HuntError> {
+    fn start(&mut self, pick: Pick, lane: Lane) -> Result<Flight, HuntError> {
+        let target = pick.addr;
         let moment = next_moment(self.previous, Utc::now());
         self.previous = Some(moment);
         let id = RunId::at(moment);
@@ -1060,7 +1071,7 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
             name_grace: self.plan.name_grace,
         };
         let namer = Namer::new(Box::new(Rc::clone(&self.sources.resolver)), id.clone());
-        let scorer = Scorer::new(target, id, self.facts.config.first_ttl);
+        let scorer = Scorer::new(target, id, self.facts.config.first_ttl, pick.mine);
         let run = run::Run::open(&record, rounds, limits, namer, self.writer)?;
         Ok(Flight {
             target,
@@ -1175,6 +1186,7 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
         self.status.show(Event::Scored {
             target: flight.target,
             reached: answered,
+            mine: score.mine,
         });
         self.scores.push(score);
     }
@@ -1670,7 +1682,7 @@ mod tests {
         PathKind, Pick, Plan, Probes, RunError, Score, Scorer, Sources, Summary, ATTEMPTS, FASTEST,
         FIRST_HOST, LAST_HOST, LONGEST, NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
     };
-    use crate::live::Screen;
+    use crate::live::{Screen, SystemClock};
     use crate::names::Lookup;
     use crate::record::{
         EndReason, Family, HuntId, NameRecord, Privilege, Record, Recording, RoundRecord,
@@ -1994,7 +2006,18 @@ mod tests {
         rounds: &[&[(u8, &str, f64)]],
         names: &[(&str, &str)],
     ) -> Score {
-        let mut scorer = Scorer::new(address(destination), RunId::from(run), FIRST_TTL);
+        mined_trace(destination, run, rounds, names, None)
+    }
+
+    /// The score of one destination that the mine of one first hit drew.
+    fn mined_trace(
+        destination: &str,
+        run: &str,
+        rounds: &[&[(u8, &str, f64)]],
+        names: &[(&str, &str)],
+        mine: Option<Ipv4Addr>,
+    ) -> Score {
+        let mut scorer = Scorer::new(address(destination), RunId::from(run), FIRST_TTL, mine);
         for hops in rounds {
             scorer.round(&round(FIRST_TTL, MAX_TTL, hops));
         }
@@ -2156,7 +2179,7 @@ mod tests {
     /// A hunt takes no key of the terminal.
     #[test]
     fn the_screen_of_a_destination_asks_for_no_stop() {
-        let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL);
+        let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL, None);
         assert!(!scorer.poll());
     }
 
@@ -2661,6 +2684,8 @@ mod tests {
         /// The longest that a destination waits, after its last round, for the
         /// names that its lookups have not given yet.
         name_grace: Duration,
+        /// The mine of the near space, when the hunt asks for one.
+        mine: Option<MinePlan>,
     }
 
     impl Shape {
@@ -2675,6 +2700,14 @@ mod tests {
         /// The same hunt, tracing one destination at a time.
         const fn serial(self) -> Self {
             self.at_once(1)
+        }
+
+        /// The same hunt, which mines the near space of every record it hears.
+        const fn mining(self, mine: MinePlan) -> Self {
+            Self {
+                mine: Some(mine),
+                ..self
+            }
         }
 
         /// The same hunt, where each destination takes this many probe rounds.
@@ -2709,6 +2742,7 @@ mod tests {
             probes_per_round: TEST_PROBES_PER_ROUND,
             target_timeout: TARGET_TIMEOUT,
             name_grace: Duration::ZERO,
+            mine: None,
         }
     }
 
@@ -2793,8 +2827,12 @@ mod tests {
         let mut sink = Vec::new();
         let summary = {
             let mut writer = Writer::to_sink(&mut sink);
+            let draw = match shape.mine {
+                Some(plan) => draw_of(addresses).mining(plan, SEED, Box::new(SystemClock)),
+                None => draw_of(addresses),
+            };
             hunt_into(
-                draw_of(addresses),
+                draw,
                 probes,
                 shape,
                 stop,
@@ -2975,6 +3013,156 @@ mod tests {
 
     /// One round that answered to TTL 4 and no further.
     const PARTIAL_AT_FOUR: &[&[(u8, &str, f64)]] = &[&[(1, FIRST_HOP, 1.0), (4, LAST_ANSWER, 9.0)]];
+
+    /// One round that answered to TTL 18 and no further.
+    ///
+    /// A mine draws an address that no test can name, so a scripted round of a
+    /// mined destination names no destination and the path it measures is
+    /// partial. A partial path still carries a length, and the length is what
+    /// starts the next mine.
+    const PARTIAL_AT_EIGHTEEN: &[&[(u8, &str, f64)]] =
+        &[&[(1, FIRST_HOP, 1.0), (18, LAST_ANSWER, 85.0)]];
+
+    /// The wait between two addresses of the mine of a hunt that runs.
+    ///
+    /// A hunt of a test reads the clock of the machine, so the wait is short:
+    /// the hunt sleeps it out for each address of its mine.
+    const A_SHORT_DELAY: Duration = Duration::from_millis(5);
+
+    /// The shape of a hunt of one round, which traces one destination at a
+    /// time and mines this many addresses.
+    fn hunting_and_mining(depth: usize, delay: Duration) -> Shape {
+        wanting(1)
+            .serial()
+            .mining(mine_plan(depth, MINE_PREFIX, MINE_PER_PREFIX, delay))
+    }
+
+    /// The first hit of each score that a hunt took, in the order it took them.
+    fn mines(hunted: &Hunted) -> Vec<Option<Ipv4Addr>> {
+        hunted
+            .summary
+            .scores
+            .iter()
+            .map(|score| score.mine)
+            .collect()
+    }
+
+    /// A mined destination costs no round.
+    ///
+    /// The hunt below wants one round, and the destination it drew answers it.
+    /// The two addresses of the mine that the destination started still stand,
+    /// so the hunt traces three destinations for one round.
+    #[test]
+    fn a_mined_destination_costs_no_round() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR],
+            hunting_and_mining(2, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            hunted.asked.len(),
+            3,
+            "the hunt must trace the two addresses of its mine: {:?}",
+            hunted.asked
+        );
+    }
+
+    /// A mined destination counts against the targets.
+    ///
+    /// The cap of the hunt below is two destinations, and its mine holds eight
+    /// addresses. The cap stops the hunt at the first of them.
+    #[test]
+    fn a_mined_destination_counts_against_the_targets() {
+        let shape = Shape {
+            bounds: Bounds {
+                rounds: 1,
+                max_targets: 2,
+            },
+            ..hunting_and_mining(MINE_DEPTH, Duration::ZERO)
+        };
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR],
+            shape,
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 2, "asked: {:?}", hunted.asked);
+    }
+
+    #[test]
+    fn the_score_of_a_mined_destination_names_the_first_hit_that_started_it() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR],
+            hunting_and_mining(2, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            mines(&hunted),
+            vec![None, Some(address(NEAR)), Some(address(NEAR))]
+        );
+    }
+
+    /// A hunt that holds the rounds it wants draws no further independent
+    /// address, and it still finishes the mine it started.
+    #[test]
+    fn a_hunt_that_holds_its_rounds_draws_no_further_independent_address() {
+        let hunted = hunted_bounded(
+            &[NEAR, FAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR],
+            hunting_and_mining(1, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 2, "asked: {:?}", hunted.asked);
+        assert!(
+            !hunted.asked.contains(&address(FAR)),
+            "the hunt held its rounds, so it drew no second independent address: {:?}",
+            hunted.asked
+        );
+    }
+
+    /// A mined destination that beats the record starts a mine of its own.
+    ///
+    /// The mined destination below measures a path of 18 hops against the 5 of
+    /// the destination that started its mine, so the hunt mines the near space
+    /// of the mined address next.
+    #[test]
+    fn a_mined_destination_that_beats_the_record_starts_a_mine() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_EIGHTEEN, PARTIAL_AT_FOUR],
+            hunting_and_mining(1, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 3, "asked: {:?}", hunted.asked);
+        assert_eq!(
+            mines(&hunted),
+            vec![None, Some(address(NEAR)), Some(hunted.asked[1])]
+        );
+    }
+
+    /// A hunt whose pool stands empty sleeps the delay of its mine out.
+    ///
+    /// The hunt below holds the one round it wants, so the mine is the only
+    /// thing left to trace. The second address of that mine is not due when the
+    /// first one closes, and the hunt waits for it rather than stopping.
+    #[test]
+    fn a_hunt_waits_the_delay_of_its_mine_out() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR],
+            hunting_and_mining(2, A_SHORT_DELAY),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 3, "asked: {:?}", hunted.asked);
+    }
 
     #[test]
     fn a_hunt_shows_the_destination_of_each_round_to_its_indicator() {
