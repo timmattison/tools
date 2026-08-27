@@ -4272,7 +4272,7 @@ mod tests {
     fn a_mine_gives_no_second_address_before_its_delay_passed() {
         let (mut draw, clock) = a_waiting_mine();
         assert!(draw.mined().is_some());
-        clock.advance(MINE_DELAY - Duration::from_millis(1));
+        clock.advance(MINE_DELAY.saturating_sub(Duration::from_millis(1)));
         assert_eq!(draw.mined(), None);
     }
 
@@ -4289,7 +4289,10 @@ mod tests {
         let (mut draw, clock) = a_waiting_mine();
         assert!(draw.mined().is_some());
         clock.advance(Duration::from_millis(500));
-        assert_eq!(draw.mine_wait(), Some(MINE_DELAY - Duration::from_millis(500)));
+        assert_eq!(
+            draw.mine_wait(),
+            Some(MINE_DELAY.saturating_sub(Duration::from_millis(500)))
+        );
     }
 
     #[test]
