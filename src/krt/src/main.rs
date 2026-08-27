@@ -1532,7 +1532,10 @@ impl TraceFailure {
 /// the file, the signal — carries none, because no round ran.
 struct HuntFailure {
     /// The summary of the rounds that finished, when the hunt reached the loop.
-    summary: Option<hunt::Summary>,
+    ///
+    /// The summary stands behind a box, so the fault that a hunt carries in its
+    /// `Result` is the width of a pointer and not the width of a whole summary.
+    summary: Option<Box<hunt::Summary>>,
     /// The fault, as the user reads it, and the code of its kind.
     failure: TraceFailure,
 }
@@ -2232,7 +2235,7 @@ fn main() {
         // reason that stopped the hunt follows it. A fault at the fifth round
         // of eight took nothing away from the four rounds in front of it.
         let (summary, failure) = match hunt(&config, &plan) {
-            Ok(summary) => (Some(summary), None),
+            Ok(summary) => (Some(Box::new(summary)), None),
             Err(stopped) => (stopped.summary, Some(stopped.failure)),
         };
         if let Some(summary) = summary {

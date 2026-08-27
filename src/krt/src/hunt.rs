@@ -828,7 +828,11 @@ pub(crate) enum HuntError {
 #[derive(Debug)]
 pub(crate) struct HuntStopped {
     /// The summary of the rounds that finished.
-    pub(crate) summary: Summary,
+    ///
+    /// The summary stands behind a box, so the fault that every run of a hunt
+    /// carries in its `Result` is the width of a pointer and not the width of
+    /// a whole summary.
+    pub(crate) summary: Box<Summary>,
     /// The fault that stopped the hunt.
     pub(crate) fault: HuntError,
 }
@@ -1368,7 +1372,10 @@ pub(crate) fn record<W: Write>(
         mined,
     );
     match fault {
-        Some(fault) => Err(HuntStopped { summary, fault }),
+        Some(fault) => Err(HuntStopped {
+            summary: Box::new(summary),
+            fault,
+        }),
         None => Ok(summary),
     }
 }
