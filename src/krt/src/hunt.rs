@@ -2002,6 +2002,26 @@ mod tests {
         ))))
     }
 
+    /// An address of `10.0.0.0/8`, which the guard of the draw rejects.
+    const REJECTED: &str = "10.0.0.1";
+
+    /// The draw over a scripted list that an endless stream of rejected
+    /// candidates follows, and that counts every candidate it gives.
+    ///
+    /// The stream holds no address that a hunt traces, so the source runs the
+    /// draw out: one call of [`Draw::take`] reads [`ATTEMPTS`] candidates of it
+    /// and gives nothing. The count therefore names the number of times that
+    /// the hunt went back to a source which holds nothing for it.
+    fn draw_that_counts(candidates: &[&str], reads: &Rc<Cell<usize>>) -> Draw {
+        let list: Vec<Ipv4Addr> = candidates.iter().copied().map(address).collect();
+        let counter = Rc::clone(reads);
+        Draw::new(Box::new(
+            list.into_iter()
+                .chain(std::iter::repeat(address(REJECTED)))
+                .inspect(move |_| counter.set(counter.get() + 1)),
+        ))
+    }
+
     /// The address that a draw gives, after it reads the rejected candidates
     /// that stand in front of one routable address.
     ///
@@ -3767,6 +3787,83 @@ mod tests {
         )
         .expect("the hunt must finish");
         assert_eq!(hunted.asked.len(), 3, "asked: {:?}", hunted.asked);
+    }
+
+    /// The one address that the source of the run-out test gives.
+    ///
+    /// An endless stream of rejected candidates follows it, so the source holds
+    /// this address and nothing else that a hunt traces.
+    const ONE_ADDRESS_THAT_ROUTES: &[&str] = &[NEAR];
+
+    /// The number of rounds that the hunt of the run-out test wants.
+    ///
+    /// The source of that hunt gives one address, so the hunt holds one round
+    /// and it still wants another one at the moment the source runs out. A hunt
+    /// that wanted no further round marks nothing, and the test would then read
+    /// a hunt that never ran its source out.
+    const MORE_ROUNDS_THAN_THE_SOURCE_HOLDS: u64 = 2;
+
+    /// The wait between two addresses of the mine of the run-out test.
+    ///
+    /// The wait stands far above the time that a hunt takes to start one
+    /// destination, so the second address of the mine is not due at the moment
+    /// the hunt asks for it. That ask is the turn which reads the mine alone.
+    const A_DELAY_THAT_HOLDS_THE_MINE: Duration = Duration::from_millis(50);
+
+    /// A source that ran out stays run out.
+    ///
+    /// The hunt below draws the one address of its source, and that address
+    /// answers and starts a mine of two addresses. The source then gives
+    /// nothing but candidates that the draw rejects, and the hunt marks it run
+    /// out.
+    ///
+    /// The pool of the hunt holds two destinations. So the fill that starts the
+    /// first address of the mine asks for a second destination in the same
+    /// turn, and the delay of the mine holds the second address back. That ask
+    /// reads the mine alone, and it says nothing about the source: the mark
+    /// stands, and the hunt goes back to the source no further time.
+    ///
+    /// The count of the candidates proves it. One read of a source that ran out
+    /// costs [`ATTEMPTS`] candidates, so a hunt that took the mark back off
+    /// stands that many candidates above the count below.
+    #[test]
+    fn a_hunt_reads_a_source_that_ran_out_one_time() {
+        let reads = Rc::new(Cell::new(0));
+        let mut probes = FakeProbes::of(&[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR]);
+        let mut sink = Vec::new();
+        {
+            let mut writer = Writer::to_sink(&mut sink);
+            hunt_into(
+                draw_that_counts(ONE_ADDRESS_THAT_ROUTES, &reads).mining(
+                    mine_plan(
+                        A_MINE_OF_TWO_ADDRESSES,
+                        MINE_PREFIX,
+                        MINE_PER_PREFIX,
+                        A_DELAY_THAT_HOLDS_THE_MINE,
+                    ),
+                    SEED,
+                    Box::new(SystemClock),
+                ),
+                &mut probes,
+                wanting(MORE_ROUNDS_THAN_THE_SOURCE_HOLDS),
+                &never_stops(),
+                &Names::None,
+                &mut writer,
+                &mut Recorder::default(),
+            )
+            .expect("the hunt must finish");
+        }
+        assert_eq!(
+            probes.asked.len(),
+            ONE_ADDRESS_THAT_ROUTES.len() + A_MINE_OF_TWO_ADDRESSES,
+            "the hunt must trace the address of its source and the two addresses of its mine: {:?}",
+            probes.asked
+        );
+        assert_eq!(
+            reads.get(),
+            ONE_ADDRESS_THAT_ROUTES.len() + ATTEMPTS,
+            "the hunt must read a source that ran out one time"
+        );
     }
 
     #[test]
