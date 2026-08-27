@@ -284,6 +284,8 @@ struct Mine {
     record: Option<u8>,
     /// The mine that stands now. A hunt whose last mine ran out holds none.
     dig: Option<Dig>,
+    /// What every mine of this hunt started and gave.
+    counts: Mined,
 }
 
 /// One mine while it runs: where it digs, how much of its depth is left, and
@@ -389,6 +391,7 @@ impl Mine {
             clock,
             record: None,
             dig: None,
+            counts: Mined::default(),
         }
     }
 
@@ -446,6 +449,18 @@ impl Mine {
             mine: Some(origin),
         })
     }
+}
+
+/// What the mines of one hunt started and gave.
+///
+/// A mine that a new record replaced before it gave an address counts nowhere,
+/// because it probed nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Mined {
+    /// The number of mines that gave at least one address.
+    pub(crate) mines: u64,
+    /// The number of addresses that those mines gave.
+    pub(crate) addresses: u64,
 }
 
 /// The draw of one hunt: the source of the candidates, the addresses that the
@@ -523,6 +538,12 @@ impl Draw {
         let pick = mine.as_mut()?.address(visited)?;
         visited.insert(pick.addr);
         Some(pick)
+    }
+
+    /// What the mines of this hunt started and gave. A draw that the hunt did
+    /// not ask to mine gives none.
+    pub(crate) fn mine_counts(&self) -> Option<Mined> {
+        Some(self.mine.as_ref()?.counts)
     }
 
     /// The time until a mine gives its next address. A draw whose mine holds
@@ -1333,12 +1354,14 @@ pub(crate) fn record<W: Write>(
     // The line goes back before the caller prints the table of the rounds that
     // finished and, when a fault stopped the hunt, the reason.
     hunt.status.show(Event::Stop);
+    let mined = hunt.sources.draw.mine_counts();
     let summary = Summary::new(
         hunt.scores,
         started.elapsed(),
         hunt.targets,
         plan.bounds,
         plan.include_partial,
+        mined,
     );
     match fault {
         Some(fault) => Err(HuntStopped { summary, fault }),
@@ -1536,6 +1559,9 @@ pub(crate) struct Summary {
     bounds: Bounds,
     /// True when a partial path competes for a row of the table.
     include_partial: bool,
+    /// What the mines of the hunt started and gave. A hunt that the user did
+    /// not ask to mine holds none.
+    mined: Option<Mined>,
 }
 
 impl Summary {
@@ -1550,6 +1576,7 @@ impl Summary {
         targets: u64,
         bounds: Bounds,
         include_partial: bool,
+        mined: Option<Mined>,
     ) -> Self {
         Self {
             scores,
@@ -1557,6 +1584,7 @@ impl Summary {
             targets,
             bounds,
             include_partial,
+            mined,
         }
     }
 
@@ -1723,8 +1751,8 @@ fn pad(cell: &str, width: usize, right: bool) -> String {
 mod tests {
     use super::{
         random, record, reserved, Block, Bounds, Draw, Facts, HuntError, HuntStopped, MinePlan,
-        PathKind, Pick, Plan, Probes, RunError, Score, Scorer, Sources, Summary, ATTEMPTS, FASTEST,
-        FIRST_HOST, LAST_HOST, LONGEST, NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
+        Mined, PathKind, Pick, Plan, Probes, RunError, Score, Scorer, Sources, Summary, ATTEMPTS,
+        FASTEST, FIRST_HOST, LAST_HOST, LONGEST, NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
     };
     use crate::live::{Screen, SystemClock};
     use crate::names::Lookup;
@@ -2294,6 +2322,7 @@ mod tests {
             THREE_TARGETS,
             SUMMARY_BOUNDS,
             include_partial,
+            None,
         )
     }
 
@@ -2431,7 +2460,7 @@ mod tests {
     #[test]
     fn a_summary_of_no_ranked_path_says_so_and_still_counts_the_hunt() {
         let scores = vec![traced(QUIET, QUIET_RUN, &[&[(1, FIRST_HOP, 1.0)]], &[])];
-        let summary = Summary::new(scores, ELAPSED, ONE_TARGET, SUMMARY_BOUNDS, false);
+        let summary = Summary::new(scores, ELAPSED, ONE_TARGET, SUMMARY_BOUNDS, false, None);
         let lines = summary.lines();
         assert!(
             lines.iter().any(|line| line.contains(NOTHING_TO_RANK)),
@@ -2463,6 +2492,193 @@ mod tests {
         "",
         "2/8 reached   3/128 targets   1 partial   192s",
     ];
+
+    /// The address of the destination that the mine of the far one drew.
+    ///
+    /// It stands inside `72.14.0.0/16`, which is the block that a mine of
+    /// `--mine-prefix 16` around the far destination stays inside.
+    const DUG: &str = "72.14.201.9";
+
+    /// The run that recorded the trace of the mined destination.
+    const DUG_RUN: &str = "2026-08-18T12:03:00.000Z";
+
+    /// What the mines of the hunt of [`a_mining_hunt`] started and gave.
+    const ONE_MINE: Mined = Mined {
+        mines: 1,
+        addresses: 1,
+    };
+
+    /// The number of destinations that the hunt of [`a_mining_hunt`] started.
+    const FOUR_TARGETS: u64 = 4;
+
+    /// The summary of a hunt that mined, as the tests read it.
+    ///
+    /// The near destination answered at TTL 5 and the far one at TTL 18, and
+    /// the far one therefore held the record. Its mine drew one address, and
+    /// that address answered at TTL 20, so the mine added two hops.
+    fn a_mining_hunt() -> Summary {
+        let scores = vec![
+            traced(
+                NEAR,
+                NEAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (5, NEAR, 20.0)]],
+                &[(NEAR, DESTINATION_NAME)],
+            ),
+            traced(
+                FAR,
+                FAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (18, FAR, 85.0)]],
+                &[],
+            ),
+            mined_trace(
+                DUG,
+                DUG_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (20, DUG, 90.0)]],
+                &[],
+                Some(address(FAR)),
+            ),
+        ];
+        Summary::new(
+            scores,
+            ELAPSED,
+            FOUR_TARGETS,
+            SUMMARY_BOUNDS,
+            false,
+            Some(ONE_MINE),
+        )
+    }
+
+    #[test]
+    fn the_counts_of_a_hunt_that_mined_name_the_mines_the_addresses_and_the_hops() {
+        assert_eq!(
+            counts(&a_mining_hunt()),
+            "2/8 reached   4/128 targets   0 partial   1 mine   1 mined   +2 hops   192s"
+        );
+    }
+
+    /// A mined destination costs no round, so the reached count holds none.
+    ///
+    /// The mined destination of the hunt below answered, and the count still
+    /// reads the two independent destinations that did.
+    #[test]
+    fn the_reached_count_of_a_summary_counts_no_mined_destination() {
+        assert!(counts(&a_mining_hunt()).starts_with("2/8 reached"));
+    }
+
+    /// A mined destination is no partial path either.
+    ///
+    /// The three counts of a hunt that ran to a bound of its own add up: the
+    /// reached, the partial, and the mined together are the destinations that
+    /// the hunt started.
+    #[test]
+    fn the_partial_count_of_a_summary_counts_no_mined_destination() {
+        assert!(counts(&a_mining_hunt()).contains("0 partial"));
+    }
+
+    /// A mine that added no hop says so plainly.
+    ///
+    /// The expected result of a mine is that it finds the path it already had.
+    /// The summary states the zero rather than hiding the field.
+    #[test]
+    fn a_mine_that_added_no_hop_says_so_plainly() {
+        let scores = vec![
+            traced(
+                FAR,
+                FAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (18, FAR, 85.0)]],
+                &[],
+            ),
+            mined_trace(
+                DUG,
+                DUG_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (12, DUG, 90.0)]],
+                &[],
+                Some(address(FAR)),
+            ),
+        ];
+        let summary = Summary::new(
+            scores,
+            ELAPSED,
+            TWO_TARGETS,
+            SUMMARY_BOUNDS,
+            false,
+            Some(ONE_MINE),
+        );
+        assert!(
+            counts(&summary).contains("+0 hops"),
+            "the summary must state the zero: {}",
+            counts(&summary)
+        );
+    }
+
+    /// The number of destinations that the hunt of the shorter mine started.
+    const TWO_TARGETS: u64 = 2;
+
+    /// A hunt that mined nothing names no mine in its counts.
+    #[test]
+    fn the_counts_of_a_hunt_that_mined_nothing_name_no_mine() {
+        assert_eq!(
+            counts(&a_hunt(false)),
+            "2/8 reached   3/128 targets   1 partial   192s"
+        );
+    }
+
+    /// The heading of the column that names the mine of a row.
+    const MINE_HEADING: &str = "Mine";
+
+    #[test]
+    fn the_table_of_a_hunt_that_mined_holds_a_mine_column() {
+        let lines = a_mining_hunt().lines();
+        assert!(
+            lines[0].contains(MINE_HEADING),
+            "the header must hold the mine column: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_table_of_a_hunt_that_mined_nothing_holds_no_mine_column() {
+        let lines = a_hunt(false).lines();
+        assert!(
+            !lines[0].contains(MINE_HEADING),
+            "a hunt that mined nothing draws no mine column: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_row_of_a_mined_destination_names_the_first_hit_that_started_it() {
+        let line = row(&a_mining_hunt(), LONGEST);
+        assert!(
+            line.contains(DUG) && line.contains(FAR),
+            "the row must name the first hit that started the mine: {line}"
+        );
+    }
+
+    #[test]
+    fn the_row_of_an_independent_destination_names_no_mine() {
+        let line = row(&a_mining_hunt(), SHORTEST);
+        assert!(
+            line.contains(NEAR) && !line.contains(FAR),
+            "an independent row names no mine: {line}"
+        );
+    }
+
+    /// The summary of a hunt that mined reads as the table of the design.
+    #[test]
+    fn the_summary_of_a_hunt_that_mined_reads_as_the_table_of_the_design() {
+        assert_eq!(a_mining_hunt().lines(), GOLDEN_MINING_SUMMARY);
+    }
+
+    /// The summary of a hunt that mined one address, as the design writes it.
+    const GOLDEN_MINING_SUMMARY: [&str; 7] = [
+        " Row       Host                         Len  Path     Mine          Avg  Loss%  Gaps  Run",
+        " shortest  example.com (93.184.216.34)    5  reached  -            20.0   0.0%     3  2026-08-18T12:00:00.123Z",
+        " longest   72.14.201.9                   20  reached  72.14.200.1  90.0   0.0%    18  2026-08-18T12:03:00.000Z",
+        " fastest   example.com (93.184.216.34)    5  reached  -            20.0   0.0%     3  2026-08-18T12:00:00.123Z",
+        " slowest   72.14.201.9                   20  reached  72.14.200.1  90.0   0.0%    18  2026-08-18T12:03:00.000Z",
+        "",
+        "2/8 reached   4/128 targets   0 partial   1 mine   1 mined   +2 hops   192s",
+    ];
+
     /// The identifier of the hunt that every test of the loop makes.
     const HUNT_ID: &str = "2026-08-18T11:59:00.000Z";
 
