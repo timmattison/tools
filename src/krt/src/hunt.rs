@@ -2623,10 +2623,12 @@ mod tests {
         )
     }
 
-    /// The number of destinations that the hunt of [`a_hunt`] started.
+    /// The number of destinations that the hunt of [`a_hunt`] started, and the
+    /// number that the hunt of [`a_mining_hunt`] started.
     ///
-    /// Every one of the three finished and took a score, so this hunt is one
-    /// whose three counts add up.
+    /// Every destination of both finished and took a score, so each hunt is one
+    /// whose counts add up. The two independent destinations of the mining hunt
+    /// and the mined one make its three.
     const THREE_TARGETS: u64 = 3;
 
     /// The row of the summary that carries one label.
@@ -2805,9 +2807,6 @@ mod tests {
         addresses: 1,
     };
 
-    /// The number of destinations that the hunt of [`a_mining_hunt`] started.
-    const FOUR_TARGETS: u64 = 4;
-
     /// The summary of a hunt that mined, as the tests read it.
     ///
     /// The near destination answered at TTL 5 and the far one at TTL 18, and
@@ -2838,7 +2837,7 @@ mod tests {
         Summary::new(
             scores,
             ELAPSED,
-            FOUR_TARGETS,
+            THREE_TARGETS,
             SUMMARY_BOUNDS,
             false,
             Some(ONE_MINE),
@@ -2849,7 +2848,7 @@ mod tests {
     fn the_counts_of_a_hunt_that_mined_name_the_mines_the_addresses_and_the_hops() {
         assert_eq!(
             counts(&a_mining_hunt()),
-            "2/8 reached   4/128 targets   0 partial   1 mine   1 mined   +2 hops   192s"
+            "2/8 reached   3/128 targets   0 partial   1 mine   1 mined   +2 hops   192s"
         );
     }
 
@@ -3046,7 +3045,7 @@ mod tests {
         " fastest   example.com (93.184.216.34)    5  reached  -            20.0   0.0%     3  2026-08-18T12:00:00.123Z",
         " slowest   72.14.201.9                   20  reached  72.14.200.1  90.0   0.0%    18  2026-08-18T12:03:00.000Z",
         "",
-        "2/8 reached   4/128 targets   0 partial   1 mine   1 mined   +2 hops   192s",
+        "2/8 reached   3/128 targets   0 partial   1 mine   1 mined   +2 hops   192s",
     ];
 
     /// The identifier of the hunt that every test of the loop makes.
