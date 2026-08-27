@@ -159,6 +159,32 @@ const TARGET_TIMEOUT_DEFAULT: &str = "10s";
 /// The type is the type that `clap` takes for the bound of a range.
 const ROUNDS_LOWEST: u64 = 1;
 
+/// The number of addresses that one mine probes, when the user names none.
+const MINE_DEPTH_DEFAULT: &str = "8";
+
+/// The length of the block that one mine stays inside, when the user names
+/// none.
+const MINE_PREFIX_DEFAULT: u8 = 16;
+
+/// The shortest block that a mine stays inside.
+///
+/// A `/8` holds a 256th of the address space, and a draw inside a shorter block
+/// is a draw of the whole internet under another name.
+const MINE_PREFIX_FLOOR: u8 = 8;
+
+/// The longest block that a mine stays inside.
+///
+/// A mine draws at /24 granularity, so a block below a `/24` holds no /24 to
+/// draw in.
+const MINE_PREFIX_CEILING: u8 = 24;
+
+/// The number of addresses that one mine probes of any one /24, when the user
+/// names none.
+const MINE_PER_PREFIX_DEFAULT: &str = "2";
+
+/// The wait between two addresses of one mine, when the user names none.
+const MINE_DELAY_DEFAULT: &str = "2s";
+
 /// The lowest cap of the destinations of a hunt. A hunt that traces no
 /// destination measures nothing.
 ///
@@ -565,6 +591,48 @@ enum Command {
         #[arg(long)]
         include_partial: bool,
 
+        /// Mine the address space near the longest path found so far.
+        #[arg(long)]
+        mine: bool,
+
+        /// The number of addresses that one mine probes.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value = MINE_DEPTH_DEFAULT,
+            value_parser = clap::value_parser!(u64),
+        )]
+        mine_depth: u64,
+
+        /// The length of the block that one mine stays inside. A mine draws
+        /// every address inside the block of this length that holds the first
+        /// hit.
+        #[arg(
+            long,
+            value_name = "BITS",
+            default_value_t = MINE_PREFIX_DEFAULT,
+            value_parser = clap::value_parser!(u8),
+        )]
+        mine_prefix: u8,
+
+        /// The number of addresses that one mine probes of any one /24.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value = MINE_PER_PREFIX_DEFAULT,
+            value_parser = clap::value_parser!(u64),
+        )]
+        mine_per_prefix: u64,
+
+        /// The wait between two addresses of one mine.
+        #[arg(
+            long,
+            value_name = "DUR",
+            default_value = MINE_DELAY_DEFAULT,
+            value_parser = parse_duration,
+        )]
+        mine_delay: Duration,
+
         /// The flags that a trace and a hunt both take.
         #[command(flatten)]
         shared: SharedArgs,
@@ -593,6 +661,8 @@ struct HuntConfig {
     seed: u64,
     /// True when a partial path competes for a row of the summary.
     include_partial: bool,
+    /// The mine of the near space, when the user asked for one.
+    mine: Option<hunt::MinePlan>,
 }
 
 /// The configuration of one run, after the command line resolves.
@@ -766,6 +836,7 @@ impl Cli {
                 seed,
                 include_partial,
                 shared,
+                ..
             }) => (
                 Some(HuntConfig {
                     rounds,
@@ -775,6 +846,7 @@ impl Cli {
                     target_timeout,
                     seed: seed.unwrap_or_else(seed_from_clock),
                     include_partial,
+                    mine: None,
                 }),
                 shared,
             ),
@@ -2289,8 +2361,9 @@ mod tests {
         pick_address, replay, resolve_target, run_config, source_from, stop_reason, user_stopped,
         value_name, AddressFamily, Cli, Command, Display, EndReason, Family, HuntConfig, Multipath,
         Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, SystemProbes, Target,
-        HUNT_CONCURRENCY_DEFAULT, HUNT_ROUNDS_DEFAULT, PROBES_PER_ROUND_DEFAULT, RESOLVE_PORT,
-        SOURCE_FALLBACK, TARGET_TIMEOUT_DEFAULT, TIME_BEYOND_A_DURATION, UNKNOWN,
+        HUNT_CONCURRENCY_DEFAULT, HUNT_ROUNDS_DEFAULT, MINE_PREFIX_CEILING, MINE_PREFIX_FLOOR,
+        PROBES_PER_ROUND_DEFAULT, RESOLVE_PORT, SOURCE_FALLBACK, TARGET_TIMEOUT_DEFAULT,
+        TIME_BEYOND_A_DURATION, UNKNOWN,
     };
     use crate::record::{
         Hop, Privilege, Record, RoundRecord, RunConfig, RunId, RunRecord, TtlRange, Writer,
@@ -4398,6 +4471,187 @@ resolved configuration:
             (first, second),
             (0, 0),
             "a hunt of no seed takes one off the clock"
+        );
+    }
+
+
+    /// The flag that turns the mine of the near space on.
+    const FLAG_MINE: &str = "--mine";
+
+    /// The flag that counts the addresses of one mine.
+    const FLAG_MINE_DEPTH: &str = "--mine-depth";
+
+    /// The flag that names the block one mine stays inside.
+    const FLAG_MINE_PREFIX: &str = "--mine-prefix";
+
+    /// The flag that caps the addresses of one /24.
+    const FLAG_MINE_PER_PREFIX: &str = "--mine-per-prefix";
+
+    /// The flag that names the wait between two addresses of one mine.
+    const FLAG_MINE_DELAY: &str = "--mine-delay";
+
+    /// The mine of one hunt that a test resolved.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a hunt that mines nothing. Such a call is a mistake in the
+    /// test, not an answer the code under test can give.
+    fn mine(arguments: &[&str]) -> crate::hunt::MinePlan {
+        hunt(arguments)
+            .mine
+            .expect("the hunt of this test must mine the near space")
+    }
+
+    #[test]
+    fn a_hunt_mines_nothing_by_default() {
+        assert_eq!(hunt(&["krt", HUNT]).mine, None);
+    }
+
+    #[test]
+    fn a_hunt_that_asked_mines_the_near_space() {
+        assert!(hunt(&["krt", HUNT, FLAG_MINE]).mine.is_some());
+    }
+
+    #[test]
+    fn a_mine_takes_the_default_depth_the_prefix_the_cap_and_the_delay() {
+        let plan = mine(&["krt", HUNT, FLAG_MINE]);
+        assert_eq!(plan.depth.get(), 8);
+        assert_eq!(plan.prefix, 16);
+        assert_eq!(plan.per_prefix.get(), 2);
+        assert_eq!(plan.delay, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_mine_takes_the_depth_that_the_command_line_named() {
+        assert_eq!(
+            mine(&["krt", HUNT, FLAG_MINE, FLAG_MINE_DEPTH, "4"])
+                .depth
+                .get(),
+            4
+        );
+    }
+
+    #[test]
+    fn a_mine_takes_the_prefix_that_the_command_line_named() {
+        assert_eq!(
+            mine(&["krt", HUNT, FLAG_MINE, FLAG_MINE_PREFIX, "20"]).prefix,
+            20
+        );
+    }
+
+    #[test]
+    fn a_mine_takes_the_cap_of_one_prefix_that_the_command_line_named() {
+        assert_eq!(
+            mine(&["krt", HUNT, FLAG_MINE, FLAG_MINE_PER_PREFIX, "3"])
+                .per_prefix
+                .get(),
+            3
+        );
+    }
+
+    #[test]
+    fn a_mine_takes_the_delay_that_the_command_line_named() {
+        assert_eq!(
+            mine(&["krt", HUNT, FLAG_MINE, FLAG_MINE_DELAY, "500ms"]).delay,
+            Duration::from_millis(500)
+        );
+    }
+
+    /// A mine of no address probes nothing, so the parser refuses it.
+    #[test]
+    fn a_mine_of_no_address_fails_at_the_parser() {
+        assert!(Cli::try_parse_from(["krt", HUNT, FLAG_MINE, FLAG_MINE_DEPTH, "0"]).is_err());
+    }
+
+    /// A mine that probes no address of one /24 probes nothing.
+    #[test]
+    fn a_mine_of_no_address_of_one_prefix_fails_at_the_parser() {
+        assert!(Cli::try_parse_from(["krt", HUNT, FLAG_MINE, FLAG_MINE_PER_PREFIX, "0"]).is_err());
+    }
+
+    /// A prefix below the floor is a block that is no near space.
+    ///
+    /// A `/4` holds a sixteenth of the address space, and a draw inside it is a
+    /// draw of the whole internet under another name.
+    #[test]
+    fn a_mine_of_a_prefix_below_the_floor_fails_and_names_the_range() {
+        let refused = Cli::try_parse_from(["krt", HUNT, FLAG_MINE, FLAG_MINE_PREFIX, "4"])
+            .expect_err("a block that holds a sixteenth of the address space is no near space")
+            .to_string();
+        assert!(
+            refused.contains(&MINE_PREFIX_FLOOR.to_string())
+                && refused.contains(&MINE_PREFIX_CEILING.to_string()),
+            "the refusal names the range: {refused}"
+        );
+    }
+
+    /// A prefix above the ceiling is a block smaller than the /24 a mine draws
+    /// at.
+    #[test]
+    fn a_mine_of_a_prefix_above_the_ceiling_fails_and_names_the_range() {
+        let refused = Cli::try_parse_from(["krt", HUNT, FLAG_MINE, FLAG_MINE_PREFIX, "25"])
+            .expect_err("a block below the /24 that a mine draws at holds no address to draw")
+            .to_string();
+        assert!(
+            refused.contains(&MINE_PREFIX_CEILING.to_string()),
+            "the refusal names the ceiling: {refused}"
+        );
+    }
+
+    /// A flag of a mine without `--mine` asks for a mine that never runs.
+    ///
+    /// Every one of the four bounds is refused, so no line can name a number
+    /// that the hunt then ignores.
+    #[test]
+    fn a_flag_of_a_mine_without_the_mine_flag_fails_at_the_parser() {
+        for flag in [
+            [FLAG_MINE_DEPTH, "4"],
+            [FLAG_MINE_PREFIX, "20"],
+            [FLAG_MINE_PER_PREFIX, "3"],
+            [FLAG_MINE_DELAY, "500ms"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["krt", HUNT, flag[0], flag[1]]).is_err(),
+                "`{} {}` without `{FLAG_MINE}` names a bound that no mine reads",
+                flag[0],
+                flag[1]
+            );
+        }
+    }
+
+    /// The block of a hunt that mines nothing says so.
+    #[test]
+    fn the_resolved_block_of_a_hunt_that_mines_nothing_names_no_bound_of_a_mine() {
+        let block = resolve(&["krt", HUNT]).to_string();
+        assert!(
+            block.contains("mine:") && block.contains("off"),
+            "the block of a hunt names whether it mines: {block}"
+        );
+        assert!(
+            !block.contains("mine depth:"),
+            "a hunt that mines nothing names no bound of a mine: {block}"
+        );
+    }
+
+    /// The block of a hunt that mines names every bound of its mine.
+    #[test]
+    fn the_resolved_block_of_a_hunt_that_mines_names_every_bound() {
+        let block = resolve(&["krt", HUNT, FLAG_MINE]).to_string();
+        for row in [
+            "mine:",
+            "mine depth:",
+            "mine prefix:",
+            "mine per prefix:",
+            "mine delay:",
+        ] {
+            assert!(
+                block.contains(row),
+                "the block of a hunt that mines names `{row}`: {block}"
+            );
+        }
+        assert!(
+            block.contains("/16"),
+            "the block names the prefix as a block length: {block}"
         );
     }
 

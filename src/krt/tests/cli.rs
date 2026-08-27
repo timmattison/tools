@@ -521,6 +521,11 @@ fn the_help_of_the_hunt_names_the_flags_that_bound_it() {
         "--probes-per-round",
         "--target-timeout",
         "--seed",
+        "--mine",
+        "--mine-depth",
+        "--mine-prefix",
+        "--mine-per-prefix",
+        "--mine-delay",
     ] {
         assert!(
             result.stdout.contains(flag),
@@ -528,6 +533,24 @@ fn the_help_of_the_hunt_names_the_flags_that_bound_it() {
             result.stdout
         );
     }
+}
+
+/// The word that the help of `--mine` names the risk of a mine with.
+const A_SCAN: &str = "scan";
+
+/// The help of `--mine` says why the caps of a mine stay low.
+///
+/// Probes that concentrate on one network read as a horizontal scan. A reader
+/// who raises the caps without knowing that earns an abuse complaint, so the
+/// help page is where the reason stands.
+#[test]
+fn the_help_of_the_mine_says_why_its_caps_stay_low() {
+    let result = run(&[HUNT, FLAG_HELP]);
+    assert!(
+        result.stdout.contains(A_SCAN),
+        "the help of `--mine` must name the scan that a mine reads as: {}",
+        result.stdout
+    );
 }
 
 /// The help of the whole tool names the command.
