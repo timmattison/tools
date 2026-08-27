@@ -591,7 +591,11 @@ enum Command {
         #[arg(long)]
         include_partial: bool,
 
-        /// Mine the address space near the longest path found so far.
+        /// Mine the address space near the longest path found so far. The
+        /// caps below stay low on purpose: probes that concentrate on one
+        /// network read as a horizontal scan, which trips an intrusion
+        /// detection system and earns an abuse complaint to the ISP of the
+        /// user.
         #[arg(long)]
         mine: bool,
 
@@ -600,9 +604,10 @@ enum Command {
             long,
             value_name = "N",
             default_value = MINE_DEPTH_DEFAULT,
-            value_parser = clap::value_parser!(u64),
+            requires = "mine",
+            value_parser = parse_mine_count,
         )]
-        mine_depth: u64,
+        mine_depth: NonZeroUsize,
 
         /// The length of the block that one mine stays inside. A mine draws
         /// every address inside the block of this length that holds the first
@@ -611,24 +616,29 @@ enum Command {
             long,
             value_name = "BITS",
             default_value_t = MINE_PREFIX_DEFAULT,
-            value_parser = clap::value_parser!(u8),
+            requires = "mine",
+            value_parser = parse_mine_prefix,
         )]
         mine_prefix: u8,
 
-        /// The number of addresses that one mine probes of any one /24.
+        /// The number of addresses that one mine probes of any one /24. The cap
+        /// is what keeps a mine from reading as a horizontal scan of one
+        /// organization.
         #[arg(
             long,
             value_name = "N",
             default_value = MINE_PER_PREFIX_DEFAULT,
-            value_parser = clap::value_parser!(u64),
+            requires = "mine",
+            value_parser = parse_mine_count,
         )]
-        mine_per_prefix: u64,
+        mine_per_prefix: NonZeroUsize,
 
         /// The wait between two addresses of one mine.
         #[arg(
             long,
             value_name = "DUR",
             default_value = MINE_DELAY_DEFAULT,
+            requires = "mine",
             value_parser = parse_duration,
         )]
         mine_delay: Duration,
@@ -822,36 +832,7 @@ impl Cli {
             Some(Command::Hunt { .. }) | None => (None, None),
         };
 
-        // A hunt carries its own copy of the seven shared flags, because the
-        // parser rejects a flag of a probe in front of a command. The hunt
-        // therefore wins over the flags of the line that stands in front of it,
-        // which hold their defaults for a line that names a command.
-        let (hunt, shared) = match self.command {
-            Some(Command::Hunt {
-                rounds,
-                max_targets,
-                concurrency,
-                probes_per_round,
-                target_timeout,
-                seed,
-                include_partial,
-                shared,
-                ..
-            }) => (
-                Some(HuntConfig {
-                    rounds,
-                    max_targets,
-                    concurrency,
-                    probes_per_round,
-                    target_timeout,
-                    seed: seed.unwrap_or_else(seed_from_clock),
-                    include_partial,
-                    mine: None,
-                }),
-                shared,
-            ),
-            _ => (None, self.shared),
-        };
+        let (hunt, shared) = hunt_config(self.command, self.shared);
 
         Ok(ResolvedConfig {
             destination: self.destination,
@@ -963,7 +944,7 @@ impl ResolvedConfig {
                 ),
             ];
         };
-        vec![
+        let mut rows = vec![
             ("output", output()),
             ("interval", interval()),
             ("first ttl", self.first_ttl.to_string()),
@@ -982,8 +963,110 @@ impl ResolvedConfig {
                 "include partial",
                 if hunt.include_partial { "on" } else { "off" }.to_owned(),
             ),
-        ]
+            (
+                "mine",
+                if hunt.mine.is_some() { "on" } else { "off" }.to_owned(),
+            ),
+        ];
+        // A hunt that mines nothing names no bound of a mine. Four rows of
+        // numbers that nothing reads would leave a reader of the block unable
+        // to tell the hunt that mines from the hunt that does not.
+        if let Some(mine) = hunt.mine {
+            rows.extend([
+                ("mine depth", mine.depth.to_string()),
+                ("mine prefix", format!("/{}", mine.prefix)),
+                ("mine per prefix", mine.per_prefix.to_string()),
+                ("mine delay", ui::render_duration(mine.delay)),
+            ]);
+        }
+        rows
     }
+}
+
+/// The configuration of the hunt that a command line names, and the flags of a
+/// probe that the run then reads.
+///
+/// A hunt carries its own copy of the seven shared flags, because the parser
+/// rejects a flag of a probe in front of a command. The hunt therefore wins over
+/// the flags of the line that stands in front of it, which hold their defaults
+/// for a line that names a command. `outside` is that outer copy, and a line
+/// that names no hunt reads it.
+///
+/// A hunt that named no seed takes one off the clock, so every hunt resolves to
+/// a seed that the block of the configuration prints.
+fn hunt_config(command: Option<Command>, outside: SharedArgs) -> (Option<HuntConfig>, SharedArgs) {
+    let Some(Command::Hunt {
+        rounds,
+        max_targets,
+        concurrency,
+        probes_per_round,
+        target_timeout,
+        seed,
+        include_partial,
+        mine,
+        mine_depth,
+        mine_prefix,
+        mine_per_prefix,
+        mine_delay,
+        shared,
+    }) = command
+    else {
+        return (None, outside);
+    };
+    (
+        Some(HuntConfig {
+            rounds,
+            max_targets,
+            concurrency,
+            probes_per_round,
+            target_timeout,
+            seed: seed.unwrap_or_else(seed_from_clock),
+            include_partial,
+            mine: mine.then_some(hunt::MinePlan {
+                depth: mine_depth,
+                prefix: mine_prefix,
+                per_prefix: mine_per_prefix,
+                delay: mine_delay,
+            }),
+        }),
+        shared,
+    )
+}
+
+/// Reads a count of the addresses that one mine probes.
+///
+/// A mine of no address probes nothing, so the number stands above zero.
+///
+/// # Errors
+///
+/// Returns the reason as text when the number does not read, and when it is
+/// zero.
+fn parse_mine_count(text: &str) -> Result<NonZeroUsize, String> {
+    text.parse()
+        .map_err(|_| format!("`{text}` is no count of addresses above zero"))
+}
+
+/// Reads the length of the block that one mine stays inside.
+///
+/// The length stands from [`MINE_PREFIX_FLOOR`] to [`MINE_PREFIX_CEILING`]. A
+/// shorter block holds so much of the address space that a draw inside it is a
+/// draw of the whole internet, and a longer one holds no whole /24, which is
+/// the grain that a mine draws at.
+///
+/// # Errors
+///
+/// Returns the reason as text when the number does not read, and when it stands
+/// outside that range.
+fn parse_mine_prefix(text: &str) -> Result<u8, String> {
+    let prefix: u8 = text
+        .parse()
+        .map_err(|_| format!("`{text}` is no length of a block"))?;
+    if !(MINE_PREFIX_FLOOR..=MINE_PREFIX_CEILING).contains(&prefix) {
+        return Err(format!(
+            "`{text}` stands outside the block lengths that a mine draws in, which are {MINE_PREFIX_FLOOR} through {MINE_PREFIX_CEILING}: a shorter block is most of the address space, and a longer one holds no whole /24"
+        ));
+    }
+    Ok(prefix)
 }
 
 /// Reads the number of destinations that a hunt traces at one moment.
@@ -2128,6 +2211,9 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
     })?;
 
     let mut draw = hunt::Draw::seeded(plan.seed);
+    if let Some(mine) = plan.mine {
+        draw = draw.mining(mine, plan.seed, Box::new(live::SystemClock));
+    }
     let first = draw
         .peek()
         .ok_or_else(|| TraceFailure::new(&NO_ADDRESS_TO_HUNT.to_owned(), EXIT_FAILURE))?;
