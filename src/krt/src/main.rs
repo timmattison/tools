@@ -11,7 +11,9 @@
 //! table of that path: a head that names the run, and one row for each TTL.
 //! The `hunt` command looks for the longest path it can find: it draws random
 //! addresses, traces a pool of them at once, scores each path, and draws
-//! another address each time one of them stops.
+//! another address each time one of them stops. `--mine` adds one mode to that
+//! hunt: after a destination sets a record, the hunt probes a few addresses
+//! near it, to find whether a neighbor of that destination gives a longer path.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]

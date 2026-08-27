@@ -17,6 +17,40 @@
 //! `Bounds::max_targets` destinations, answered or not, because the draw of a
 //! real hunt never runs out.
 //!
+//! # The mine of the near space
+//!
+//! A hunt of `--mine` probes a few addresses near every destination that sets a
+//! record. The mode is block mining and not hill climbing, and the name matters
+//! because the wrong name leads to the wrong design.
+//!
+//! BGP carries prefixes and not addresses, so every address inside one
+//! announced /24 takes the same path to the border of that network. The length
+//! of a path is a property of the destination network and of the chain of
+//! transit that reaches it, and every one of those terms holds across the whole
+//! prefix and mostly across the whole allocation. The landscape is thus a
+//! plateau with cliffs and not a hill: a walk toward a longer neighbor finds
+//! the same number again and again, and then falls off an edge into an
+//! unrelated network.
+//!
+//! What the near space does give is worth taking, and it is two things. A
+//! partial path becomes a reached path, because a neighbor of an address that
+//! answered answers far more often. And different hosts of one network sit at
+//! different depths behind the same border router. The gain is the tail alone:
+//! count on 0 to 2 hops inside one /24, and 0 to 4 across one /16, against a
+//! global spread of roughly 8 to 30 hops.
+//!
+//! [`Mine`] holds the mode, and [`Draw`] is where it plugs in, because the mine
+//! is a source of addresses like the seeded sequence beside it. The bounds of
+//! [`MinePlan`] are small on purpose: probes that concentrate on one network
+//! read as a horizontal scan, which trips an intrusion detection system and
+//! earns an abuse complaint to the ISP of the user.
+//!
+//! The addresses of a mine cost no round. A round is what an independent draw
+//! measures, and an independent draw is what sets a record, so a mine that ate
+//! the rounds would leave the hunt sampling one network in the place of the
+//! whole address space. They still count against `Bounds::max_targets`, which
+//! is the cap on the destinations that a hunt traces at all.
+//!
 //! Both sources that a hunt draws on are seams, so no test of this module sends
 //! a packet:
 //!
