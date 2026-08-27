@@ -1929,9 +1929,10 @@ fn pad(cell: &str, width: usize, right: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        random, record, reserved, Block, Bounds, Draw, Facts, HuntError, HuntStopped, MinePlan,
-        Mined, PathKind, Pick, Plan, Probes, RunError, Score, Scorer, Sources, Summary, ATTEMPTS,
-        FASTEST, FIRST_HOST, LAST_HOST, LONGEST, NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
+        network_of, random, record, reserved, Block, Bounds, Dig, Draw, Facts, HuntError,
+        HuntStopped, MinePlan, Mined, PathKind, Pick, Plan, Probes, RunError, Score, Scorer,
+        Sources, Summary, ATTEMPTS, FASTEST, FIRST_HOST, LAST_HOST, LONGEST, MINE_GRAIN,
+        NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
     };
     use crate::live::{Screen, SystemClock};
     use crate::names::Lookup;
@@ -1944,6 +1945,8 @@ mod tests {
     use crate::trace::Lane;
     use crate::{Multipath, Protocol};
     use chrono::Utc;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::collections::HashSet;
@@ -4835,6 +4838,42 @@ mod tests {
         let addresses = mined_addresses(HIT, a_mine());
         let prefixes: HashSet<Ipv4Addr> = addresses.iter().copied().map(prefix_of).collect();
         assert_eq!(prefixes.len(), MINE_DEPTH / MINE_PER_PREFIX);
+    }
+
+    /// Draws one address of a mine and records it the way a hunt does.
+    ///
+    /// The count of each /24 stands in the mine, and the hunt raises it after
+    /// every address that the mine gives. A test that fills a /24 to the cap
+    /// of its plan raises it the same way.
+    fn dug(dig: &mut Dig, rng: &mut StdRng, plan: MinePlan) {
+        let addr = dig
+            .draw(rng, plan, &HashSet::new())
+            .expect("the mine gives an address");
+        *dig.probed.entry(network_of(addr, MINE_GRAIN)).or_default() += 1;
+    }
+
+    /// A mine whose block holds one /24 reads no random number to find no
+    /// sibling.
+    ///
+    /// The block of a mine of `--mine-prefix 24` is the /24 that the mine
+    /// digs in, so that block holds no sibling and the answer is none. The
+    /// mine reads that answer off the length of its block, and it therefore
+    /// draws nothing: the sequence stands where the addresses above left it.
+    #[test]
+    fn a_mine_of_one_prefix_reads_no_random_number_to_find_no_sibling() {
+        let plan = mine_plan(MINE_DEPTH, MINE_GRAIN, MINE_PER_PREFIX, Duration::ZERO);
+        let mut rng = StdRng::seed_from_u64(SEED);
+        let mut dig = Dig::at(address(HIT), plan);
+        for _ in 0..MINE_PER_PREFIX {
+            dug(&mut dig, &mut rng, plan);
+        }
+        let mut stood = rng.clone();
+        assert_eq!(dig.sibling(&mut rng, plan), None);
+        assert_eq!(
+            rng.random::<u32>(),
+            stood.random::<u32>(),
+            "the mine drew random numbers to find a sibling that its block holds none of"
+        );
     }
 
     #[test]
