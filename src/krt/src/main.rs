@@ -166,19 +166,10 @@ const MINE_DEPTH_DEFAULT: &str = "8";
 
 /// The length of the block that one mine stays inside, when the user names
 /// none.
-const MINE_PREFIX_DEFAULT: u8 = 16;
-
-/// The shortest block that a mine stays inside.
 ///
-/// A `/8` holds a 256th of the address space, and a draw inside a shorter block
-/// is a draw of the whole internet under another name.
-const MINE_PREFIX_FLOOR: u8 = 8;
-
-/// The longest block that a mine stays inside.
-///
-/// A mine draws at /24 granularity, so a block below a `/24` holds no /24 to
-/// draw in.
-const MINE_PREFIX_CEILING: u8 = 24;
+/// The default reads through [`parse_mine_prefix`], as every other length of a
+/// block does, so the one constructor of [`hunt::MinePrefix`] holds it too.
+const MINE_PREFIX_DEFAULT: &str = "16";
 
 /// The number of addresses that one mine probes of any one /24, when the user
 /// names none.
@@ -617,11 +608,11 @@ enum Command {
         #[arg(
             long,
             value_name = "BITS",
-            default_value_t = MINE_PREFIX_DEFAULT,
+            default_value = MINE_PREFIX_DEFAULT,
             requires = "mine",
             value_parser = parse_mine_prefix,
         )]
-        mine_prefix: u8,
+        mine_prefix: hunt::MinePrefix,
 
         /// The number of addresses that one mine probes of any one /24. The cap
         /// is what keeps a mine from reading as a horizontal scan of one
@@ -1050,25 +1041,19 @@ fn parse_mine_count(text: &str) -> Result<NonZeroUsize, String> {
 
 /// Reads the length of the block that one mine stays inside.
 ///
-/// The length stands from [`MINE_PREFIX_FLOOR`] to [`MINE_PREFIX_CEILING`]. A
-/// shorter block holds so much of the address space that a draw inside it is a
-/// draw of the whole internet, and a longer one holds no whole /24, which is
-/// the grain that a mine draws at.
+/// [`hunt::MinePrefix`] holds the range of that length, and this function reads
+/// a number and hands it to that one constructor. The refusal of the
+/// constructor is the text that the user reads.
 ///
 /// # Errors
 ///
-/// Returns the reason as text when the number does not read, and when it stands
-/// outside that range.
-fn parse_mine_prefix(text: &str) -> Result<u8, String> {
-    let prefix: u8 = text
+/// Returns the reason as text when the number does not read, and when
+/// [`hunt::MinePrefix`] refuses it.
+fn parse_mine_prefix(text: &str) -> Result<hunt::MinePrefix, String> {
+    let bits: u8 = text
         .parse()
         .map_err(|_| format!("`{text}` is no length of a block"))?;
-    if !(MINE_PREFIX_FLOOR..=MINE_PREFIX_CEILING).contains(&prefix) {
-        return Err(format!(
-            "`{text}` stands outside the block lengths that a mine draws in, which are {MINE_PREFIX_FLOOR} through {MINE_PREFIX_CEILING}: a shorter block is most of the address space, and a longer one holds no whole /24"
-        ));
-    }
-    Ok(prefix)
+    hunt::MinePrefix::new(bits).map_err(|outside| outside.to_string())
 }
 
 /// Reads the number of destinations that a hunt traces at one moment.
@@ -2449,10 +2434,10 @@ mod tests {
         pick_address, replay, resolve_target, run_config, source_from, stop_reason, user_stopped,
         value_name, AddressFamily, Cli, Command, Display, EndReason, Family, HuntConfig, Multipath,
         Protocol, ResolveError, ResolvedConfig, SourceKind, SourceLabel, SystemProbes, Target,
-        HUNT_CONCURRENCY_DEFAULT, HUNT_ROUNDS_DEFAULT, MINE_PREFIX_CEILING, MINE_PREFIX_FLOOR,
-        PROBES_PER_ROUND_DEFAULT, RESOLVE_PORT, SOURCE_FALLBACK, TARGET_TIMEOUT_DEFAULT,
-        TIME_BEYOND_A_DURATION, UNKNOWN,
+        HUNT_CONCURRENCY_DEFAULT, HUNT_ROUNDS_DEFAULT, PROBES_PER_ROUND_DEFAULT, RESOLVE_PORT,
+        SOURCE_FALLBACK, TARGET_TIMEOUT_DEFAULT, TIME_BEYOND_A_DURATION, UNKNOWN,
     };
+    use crate::hunt::MinePrefix;
     use crate::record::{
         Hop, Privilege, Record, RoundRecord, RunConfig, RunId, RunRecord, TtlRange, Writer,
     };
@@ -4589,6 +4574,16 @@ resolved configuration:
             .expect("the hunt of this test must mine the near space")
     }
 
+    /// The length of one block that a mine of a test stays inside.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a length that no mine draws inside. Such a call is a mistake
+    /// in the test, not an answer the code under test can give.
+    fn a_block_of(bits: u8) -> MinePrefix {
+        MinePrefix::new(bits).expect("the block of this test is one that a mine draws inside")
+    }
+
     #[test]
     fn a_hunt_mines_nothing_by_default() {
         assert_eq!(hunt(&["krt", HUNT]).mine, None);
@@ -4603,7 +4598,7 @@ resolved configuration:
     fn a_mine_takes_the_default_depth_the_prefix_the_cap_and_the_delay() {
         let plan = mine(&["krt", HUNT, FLAG_MINE]);
         assert_eq!(plan.depth.get(), 8);
-        assert_eq!(plan.prefix, 16);
+        assert_eq!(plan.prefix, a_block_of(16));
         assert_eq!(plan.per_prefix.get(), 2);
         assert_eq!(plan.delay, Duration::from_secs(2));
     }
@@ -4622,7 +4617,7 @@ resolved configuration:
     fn a_mine_takes_the_prefix_that_the_command_line_named() {
         assert_eq!(
             mine(&["krt", HUNT, FLAG_MINE, FLAG_MINE_PREFIX, "20"]).prefix,
-            20
+            a_block_of(20)
         );
     }
 
@@ -4666,8 +4661,8 @@ resolved configuration:
             .expect_err("a block that holds a sixteenth of the address space is no near space")
             .to_string();
         assert!(
-            refused.contains(&MINE_PREFIX_FLOOR.to_string())
-                && refused.contains(&MINE_PREFIX_CEILING.to_string()),
+            refused.contains(&MinePrefix::FLOOR.to_string())
+                && refused.contains(&MinePrefix::CEILING.to_string()),
             "the refusal names the range: {refused}"
         );
     }
@@ -4680,7 +4675,7 @@ resolved configuration:
             .expect_err("a block below the /24 that a mine draws at holds no address to draw")
             .to_string();
         assert!(
-            refused.contains(&MINE_PREFIX_CEILING.to_string()),
+            refused.contains(&MinePrefix::CEILING.to_string()),
             "the refusal names the ceiling: {refused}"
         );
     }

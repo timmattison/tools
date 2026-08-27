@@ -169,8 +169,8 @@ impl Block {
     /// is the one place that masks them off. A prefix of 32 shifts by no bit,
     /// and the mask is then every bit. A prefix of zero shifts by the whole
     /// width of the value and overflows, and no caller names one: the blocks of
-    /// the table carry a prefix of 4 through 32, and a mine names a prefix of 8
-    /// through 24.
+    /// the table carry a prefix of 4 through 32, and [`MinePrefix`] holds the
+    /// prefix of every mine above zero.
     const fn around(addr: Ipv4Addr, prefix: u8) -> Self {
         let mask = u32::MAX << (ADDRESS_BITS - prefix);
         Self::new(Ipv4Addr::from_bits(addr.to_bits() & mask), prefix)
@@ -260,6 +260,87 @@ const FIRST_HOST: u8 = 2;
 /// The highest host number that a mine draws inside one /24.
 const LAST_HOST: u8 = 254;
 
+/// The length of the block that one mine stays inside.
+///
+/// The length stands from [`MinePrefix::FLOOR`] to [`MinePrefix::CEILING`], and
+/// [`MinePrefix::new`] is the one way to build one. Every builder of a
+/// [`MinePlan`] therefore passes the same check. The arithmetic that the range
+/// protects stands inside this type too: [`MinePrefix::span`] counts the /24s
+/// of the block, and no caller subtracts anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MinePrefix {
+    /// The number of leading bits that every address of the block holds.
+    bits: u8,
+}
+
+impl MinePrefix {
+    /// The shortest block that a mine stays inside.
+    ///
+    /// A `/8` holds a 256th of the address space, and a draw inside a shorter
+    /// block is a draw of the whole internet under another name.
+    pub(crate) const FLOOR: u8 = 8;
+
+    /// The longest block that a mine stays inside.
+    ///
+    /// A mine draws at the grain of one /24, so a block below a `/24` holds no
+    /// /24 to draw in. The ceiling is [`MINE_GRAIN`] itself, and that is what
+    /// keeps the subtraction of [`MinePrefix::span`] above zero.
+    pub(crate) const CEILING: u8 = MINE_GRAIN;
+
+    /// The length of one block that a mine stays inside.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MinePrefixOutside`] when the length stands outside
+    /// [`MinePrefix::FLOOR`] through [`MinePrefix::CEILING`].
+    pub(crate) fn new(bits: u8) -> Result<Self, MinePrefixOutside> {
+        if (Self::FLOOR..=Self::CEILING).contains(&bits) {
+            Ok(Self { bits })
+        } else {
+            Err(MinePrefixOutside { bits })
+        }
+    }
+
+    /// The number of /24s that a block of this length holds.
+    ///
+    /// This is the arithmetic that the range of the length exists to protect.
+    /// The length stands at [`MinePrefix::CEILING`] at the most, which is the
+    /// grain that a mine draws at, so the subtraction stays above zero, the
+    /// shift stays inside the width of the value, and the block holds one /24
+    /// at the least.
+    pub(crate) fn span(self) -> u32 {
+        1_u32 << (Self::CEILING - self.bits)
+    }
+
+    /// The bits of the network of the block of this length that holds an
+    /// address.
+    ///
+    /// A mine holds its block as bits, because it draws a sibling with the bit
+    /// arithmetic of [`Dig::sibling`].
+    pub(crate) fn block_of(self, addr: Ipv4Addr) -> u32 {
+        network_of(addr, self.bits)
+    }
+}
+
+impl fmt::Display for MinePrefix {
+    /// Writes the length as the number of bits, which is how a user names it.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.bits)
+    }
+}
+
+/// The refusal of a block length that no mine stays inside.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error(
+    "`{bits}` stands outside the block lengths that a mine draws in, which are {} through {}: a shorter block is most of the address space, and a longer one holds no whole /24",
+    MinePrefix::FLOOR,
+    MinePrefix::CEILING
+)]
+pub(crate) struct MinePrefixOutside {
+    /// The length of the block that the caller named.
+    bits: u8,
+}
+
 /// The numbers that bound one mine of the near space of a long path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MinePlan {
@@ -267,12 +348,9 @@ pub(crate) struct MinePlan {
     pub(crate) depth: NonZeroUsize,
     /// The length of the block that one mine stays inside.
     ///
-    /// The length stands from 8 to 24. A shorter block holds so much of the
-    /// address space that a draw inside it is a draw of the whole internet, and
-    /// a longer one holds no whole /24, which is the grain that a mine draws
-    /// at. `parse_mine_prefix` of `main.rs` is what holds every command line to
-    /// that range.
-    pub(crate) prefix: u8,
+    /// [`MinePrefix`] holds the range of that length, and its constructor is
+    /// the one way to build one.
+    pub(crate) prefix: MinePrefix,
     /// The number of addresses that one mine probes of any one /24.
     pub(crate) per_prefix: NonZeroUsize,
     /// The wait between two addresses of one mine.
@@ -372,7 +450,7 @@ impl Dig {
     fn at(origin: Ipv4Addr, plan: MinePlan) -> Self {
         Self {
             origin,
-            block: network_of(origin, plan.prefix),
+            block: plan.prefix.block_of(origin),
             prefix: network_of(origin, MINE_GRAIN),
             left: plan.depth.get(),
             probed: BTreeMap::new(),
@@ -419,9 +497,7 @@ impl Dig {
     /// both give none. A block that holds one /24 holds no sibling of it, and
     /// it gives none at once, before it draws anything.
     fn sibling(&self, rng: &mut StdRng, plan: MinePlan) -> Option<u32> {
-        // The prefix of a plan is 24 at the most, so the block holds one /24 at
-        // the least and the shift stays inside the width of the value.
-        let span = 1_u32 << (MINE_GRAIN - plan.prefix);
+        let span = plan.prefix.span();
         if span == 1 {
             // The one /24 of such a block is the /24 that the mine digs in, and
             // the caller reads a sibling only after that one holds the cap. The
@@ -4867,7 +4943,8 @@ mod tests {
     fn mine_plan(depth: usize, prefix: u8, per_prefix: usize, delay: Duration) -> MinePlan {
         MinePlan {
             depth: NonZeroUsize::new(depth).expect("a mine of a test probes one address at least"),
-            prefix,
+            prefix: MinePrefix::new(prefix)
+                .expect("a mine of a test stays inside a block that a mine draws in"),
             per_prefix: NonZeroUsize::new(per_prefix)
                 .expect("a mine of a test probes one address of one prefix at least"),
             delay,
