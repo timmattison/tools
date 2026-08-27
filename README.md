@@ -644,11 +644,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     address with its name, the length of the path, whether the destination answered, the mean
     round-trip time and the loss of the last hop that answered, the number of TTLs inside the path
     that answered nothing, and the run that recorded the trace, so `krt replay <FILE> --run <ID>`
-    prints the whole path. The table gains a `Mine` column when the hunt mined, and that column
-    holds the address of the first hit that started the mine which drew the row. A row of an
-    independent draw holds `-` there, and a hunt that mined nothing draws no such column. Under the
-    table stand the rounds against the rounds the hunt wanted, the destinations it started against
-    the ones it could start, the number of partial paths, and the wall time, as in
+    prints the whole path. The table gains a `Mine` column when a row of it carries a mine, and
+    that column holds the address of the first hit that started the mine which drew the row. A
+    row of an independent draw holds `-` there, and a table of no mined row draws no such column.
+    Under the table stand the rounds against the rounds the hunt wanted, the destinations it
+    started against the ones it could start, the number of partial paths, and the wall time, as in
     `8/8 reached   17/128 targets   9 partial   192s`. The two ratios tell a hunt that held every
     round it wanted from one that gave up on its targets, and the targets
     count is the one that the last line of the indicator held. `Ctrl-C` stops the hunt and still
@@ -662,9 +662,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     hunt that mined gains three fields, between the partial count and the wall time: the mines the
     hunt started, the addresses those mines probed, and the hops they added, as in
     `2/8 reached   17/128 targets   1 partial   3 mines   11 mined   +2 hops   192s`. The hops
-    added is the longest mined path over the longest independent one. The reached count and the
-    partial count each read the independent destinations alone, so the reached, the partial, and
-    the mined together are the destinations the hunt started.
+    added is the longest mined path over the longest independent one, of the paths that the table
+    ranks. A mined path that the table drops adds no hop, so the length that the number names
+    stands in a row that the reader can find. The reached count and the partial count each read
+    the independent destinations alone, so the reached, the partial, and the mined together are
+    the destinations the hunt started.
   - A hunt shows what it is doing while it runs. A hunt whose standard output is a terminal draws
     one status line, which redraws in place: a spinner that turns on every sweep of the pool, a
     bar of the hunt, the rounds it holds of the rounds it wants, the address it started last with

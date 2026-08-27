@@ -1520,12 +1520,11 @@ struct Column {
     heading: &'static str,
     /// True when the cell stands against the right edge of the column.
     right: bool,
-    /// True when a hunt that the user did not ask to mine leaves this column
-    /// out.
+    /// True when a table whose rows carry no mine leaves this column out.
     ///
-    /// The column marks the rows that a mine produced, and a hunt that mined
-    /// nothing holds no such row. A column of nothing but the empty mark would
-    /// take width from the columns beside it and say nothing.
+    /// The column marks the rows that a mine produced. A table that holds no
+    /// such row draws a column of nothing but the empty mark, which takes width
+    /// from the columns beside it and says nothing.
     mining: bool,
     /// The cell of one row.
     cell: fn(&Row) -> String,
@@ -1704,32 +1703,44 @@ impl Summary {
         let mut lines = if ranked.is_empty() {
             vec![format!("{ROW_START}{NOTHING_TO_RANK}")]
         } else {
-            table(&ranked, &self.columns())
+            table(&ranked, &columns(&ranked))
         };
         lines.push(String::new());
         lines.push(self.counts());
         lines
     }
 
-    /// The columns that this summary draws, in the order they print.
+    /// The scores that this summary reports on.
     ///
-    /// A hunt that the user did not ask to mine leaves the mine column out.
-    fn columns(&self) -> Vec<&'static Column> {
-        COLUMNS
+    /// The table ranks these scores, and the count of the hops that a mine
+    /// added reads them. A hunt that asked for no partial path reports the
+    /// reached paths alone.
+    ///
+    /// One population answers every question that the summary states. A number
+    /// that reads a larger population names a path that the table drops, and
+    /// the reader of that number has no way to find the path.
+    fn reported(&self) -> Vec<&Score> {
+        self.scores
             .iter()
-            .filter(|column| self.mined.is_some() || !column.mining)
+            .filter(|score| self.include_partial || score.kind == PathKind::Reached)
             .collect()
     }
 
     /// The hops that the mines of this hunt added.
     ///
-    /// The number is the longest mined path over the longest independent one. A
-    /// reader of it asks one question — did the mine find a path that the hunt
-    /// would not otherwise hold — and that difference is the answer. A mine that
-    /// found a shorter path added no hop, which is the expected result.
+    /// The number is the longest mined path over the longest independent one,
+    /// of the paths that [`Summary::reported`] holds. A reader of it asks one
+    /// question — did the mine find a path that the hunt would not otherwise
+    /// hold — and that difference is the answer. A mine that found a shorter
+    /// path added no hop, which is the expected result.
+    ///
+    /// A mined path that the table drops adds no hop either. The table is where
+    /// the reader looks for the path that this number names, so a number that
+    /// reads a path outside the table names a length that no row holds.
     fn added(&self) -> u8 {
+        let reported = self.reported();
         let longest = |mined: bool| {
-            self.scores
+            reported
                 .iter()
                 .filter(|score| score.mine.is_some() == mined)
                 .map(|score| score.length)
@@ -1741,16 +1752,13 @@ impl Summary {
 
     /// The rows of the table, in the order they print.
     ///
-    /// A row that no destination holds is absent. Every reached path holds a
-    /// time, because the destination answered, so the fastest row and the
-    /// slowest row go away only when a hunt of `--include-partial` ranks
-    /// partial paths alone and no hop of any of them answered.
+    /// The rows come off the paths that [`Summary::reported`] holds. A row that
+    /// no destination holds is absent. Every reached path holds a time, because
+    /// the destination answered, so the fastest row and the slowest row go away
+    /// only when a hunt of `--include-partial` ranks partial paths alone and no
+    /// hop of any of them answered.
     fn ranked(&self) -> Vec<Row<'_>> {
-        let candidates: Vec<&Score> = self
-            .scores
-            .iter()
-            .filter(|score| self.include_partial || score.kind == PathKind::Reached)
-            .collect();
+        let candidates = self.reported();
         let timed: Vec<&Score> = candidates
             .iter()
             .copied()
@@ -1840,6 +1848,18 @@ fn pick<'a>(scores: &[&'a Score], better: impl Fn(&Score, &Score) -> bool) -> Op
     best
 }
 
+/// The columns that one table draws, in the order they print.
+///
+/// A table whose rows carry no mine leaves the mine column out. Every other
+/// column of [`COLUMNS`] stands in every table.
+fn columns(rows: &[Row]) -> Vec<&'static Column> {
+    let mined = rows.iter().any(|row| row.score.mine.is_some());
+    COLUMNS
+        .iter()
+        .filter(|column| mined || !column.mining)
+        .collect()
+}
+
 /// The lines of the table: the column header, and one line for each row.
 ///
 /// Each column takes the width of the widest cell it holds, and of its own
@@ -1847,9 +1867,9 @@ fn pick<'a>(scores: &[&'a Score], better: impl Fn(&Score, &Score) -> bool) -> Op
 /// heading and the cell of each one together, so no cell can land under the
 /// heading of another column.
 ///
-/// `columns` is what the summary draws, which is every column of [`COLUMNS`]
-/// for a hunt that mined and every column but the mine one for a hunt that did
-/// not.
+/// `columns` is what the table draws, which is every column of [`COLUMNS`] for
+/// a table that holds a mined row and every column but the mine one for a table
+/// that holds none.
 fn table(rows: &[Row], columns: &[&Column]) -> Vec<String> {
     let cells: Vec<Vec<String>> = rows
         .iter()
