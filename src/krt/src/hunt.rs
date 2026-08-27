@@ -3651,6 +3651,107 @@ mod tests {
         );
     }
 
+    /// The number of addresses that each mine of a count test gives.
+    ///
+    /// The number is two, so the count of the mines of a hunt and the count of
+    /// the addresses of those mines hold different numbers, and neither count
+    /// reads as the other one.
+    const A_MINE_OF_TWO_ADDRESSES: usize = 2;
+
+    /// What one mine of two addresses started and gave.
+    const ONE_MINE_OF_TWO_ADDRESSES: Mined = Mined {
+        mines: 1,
+        addresses: 2,
+    };
+
+    /// What two mines of two addresses each started and gave.
+    const TWO_MINES_OF_TWO_ADDRESSES: Mined = Mined {
+        mines: 2,
+        addresses: 4,
+    };
+
+    /// The counts of a hunt name the mine that it started and the addresses
+    /// that the mine gave.
+    ///
+    /// The destination below answers, so it starts one mine, and that mine
+    /// gives two addresses. The counts hold one mine of two addresses.
+    #[test]
+    fn the_counts_of_a_hunt_name_its_one_mine_and_the_addresses_of_that_mine() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR],
+            hunting_and_mining(A_MINE_OF_TWO_ADDRESSES, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            hunted.summary.mined,
+            Some(ONE_MINE_OF_TWO_ADDRESSES),
+            "the hunt started one mine, and that mine gave two addresses: {:?}",
+            hunted.asked
+        );
+    }
+
+    /// The counts of a hunt name every mine that gave an address.
+    ///
+    /// The second address of the first mine below measures a path of 18 hops
+    /// against the 5 of the destination that started that mine, so it starts a
+    /// mine of its own. Each of the two mines gives two addresses, and the hunt
+    /// traces five destinations: the one it drew, and the four of its mines.
+    #[test]
+    fn the_counts_of_a_hunt_name_every_mine_that_gave_an_address() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[
+                REACHED_AT_FIVE,
+                PARTIAL_AT_FOUR,
+                PARTIAL_AT_EIGHTEEN,
+                PARTIAL_AT_FOUR,
+                PARTIAL_AT_FOUR,
+            ],
+            hunting_and_mining(A_MINE_OF_TWO_ADDRESSES, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 5, "asked: {:?}", hunted.asked);
+        assert_eq!(
+            hunted.summary.mined,
+            Some(TWO_MINES_OF_TWO_ADDRESSES),
+            "the hunt started two mines, and each of them gave two addresses: {:?}",
+            hunted.asked
+        );
+    }
+
+    /// A mine that a new record replaced before it gave an address counts
+    /// nowhere.
+    ///
+    /// The hunt below traces two destinations at one moment, and both of them
+    /// close in one sweep. The near one answers at TTL 5 and starts a mine, and
+    /// the far one answers at TTL 18 and replaces that mine before it gave an
+    /// address. The counts therefore name one mine, and the two addresses are
+    /// the addresses of the mine of the far destination.
+    #[test]
+    fn a_mine_that_a_new_record_replaced_before_it_gave_an_address_counts_nowhere() {
+        let hunted = hunted_bounded(
+            &[NEAR, FAR],
+            &[
+                REACHED_AT_FIVE,
+                FAR_REACHED_AT_EIGHTEEN,
+                PARTIAL_AT_FOUR,
+                PARTIAL_AT_FOUR,
+            ],
+            hunting_and_mining(A_MINE_OF_TWO_ADDRESSES, Duration::ZERO).at_once(TEST_CONCURRENCY),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            hunted.summary.mined,
+            Some(ONE_MINE_OF_TWO_ADDRESSES),
+            "the mine of the near destination gave no address, so it counts nowhere: {:?}",
+            hunted.asked
+        );
+    }
+
     /// A hunt whose pool stands empty sleeps the delay of its mine out.
     ///
     /// The hunt below holds the one round it wants, so the mine is the only
