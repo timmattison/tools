@@ -1949,8 +1949,8 @@ fn pad(cell: &str, width: usize, right: bool) -> String {
 mod tests {
     use super::{
         network_of, random, record, reserved, Block, Bounds, Dig, Draw, Facts, HuntError,
-        HuntStopped, MinePlan, Mined, PathKind, Pick, Plan, Probes, RunError, Score, Scorer,
-        Sources, Summary, ATTEMPTS, FASTEST, FIRST_HOST, LAST_HOST, LONGEST, MINE_GRAIN,
+        HuntStopped, MinePlan, MinePrefix, Mined, PathKind, Pick, Plan, Probes, RunError, Score,
+        Scorer, Sources, Summary, ATTEMPTS, FASTEST, FIRST_HOST, LAST_HOST, LONGEST, MINE_GRAIN,
         NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
     };
     use crate::live::{Screen, SystemClock};
@@ -4759,6 +4759,109 @@ mod tests {
     /// The count is large, so the mine draws in many of the 256 /24s that its
     /// block holds and meets the two reserved ones among them.
     const A_DEEP_MINE: usize = 200;
+
+    /// The shortest block that a mine draws inside.
+    ///
+    /// A shorter block holds so much of the address space that a draw inside it
+    /// is a draw of the whole internet.
+    const SHORTEST_MINE_BLOCK: u8 = 8;
+
+    /// The longest block that a mine draws inside.
+    ///
+    /// A longer block holds no whole /24, which is the grain that a mine draws
+    /// at.
+    const LONGEST_MINE_BLOCK: u8 = 24;
+
+    /// A block one bit shorter than the shortest one that a mine draws inside.
+    const A_BLOCK_BELOW_THE_SHORTEST: u8 = 7;
+
+    /// A block one bit longer than the longest one that a mine draws inside.
+    const A_BLOCK_ABOVE_THE_LONGEST: u8 = 25;
+
+    /// The number of /24s that the shortest block of a mine holds.
+    ///
+    /// A /8 stands 16 bits above the grain of a mine, so it holds 65536 /24s.
+    const PREFIXES_OF_THE_SHORTEST_MINE_BLOCK: u32 = 65_536;
+
+    /// The number of /24s that the longest block of a mine holds.
+    ///
+    /// The block of a /24 is the /24 itself.
+    const PREFIXES_OF_THE_LONGEST_MINE_BLOCK: u32 = 1;
+
+    /// A block shorter than the shortest one is the length of no mine.
+    #[test]
+    fn a_block_shorter_than_the_shortest_one_is_the_length_of_no_mine() {
+        assert!(
+            MinePrefix::new(A_BLOCK_BELOW_THE_SHORTEST).is_err(),
+            "a block of {A_BLOCK_BELOW_THE_SHORTEST} bits is most of the address space"
+        );
+    }
+
+    /// A block longer than the longest one is the length of no mine.
+    #[test]
+    fn a_block_longer_than_the_longest_one_is_the_length_of_no_mine() {
+        assert!(
+            MinePrefix::new(A_BLOCK_ABOVE_THE_LONGEST).is_err(),
+            "a block of {A_BLOCK_ABOVE_THE_LONGEST} bits holds no whole /24"
+        );
+    }
+
+    /// Both ends of the range are lengths that a mine draws inside.
+    #[test]
+    fn the_shortest_and_the_longest_block_are_both_lengths_of_a_mine() {
+        assert!(
+            MinePrefix::new(SHORTEST_MINE_BLOCK).is_ok(),
+            "a block of {SHORTEST_MINE_BLOCK} bits is the shortest one that a mine draws inside"
+        );
+        assert!(
+            MinePrefix::new(LONGEST_MINE_BLOCK).is_ok(),
+            "a block of {LONGEST_MINE_BLOCK} bits is the longest one that a mine draws inside"
+        );
+    }
+
+    /// The span of the shortest block counts every /24 that it holds.
+    #[test]
+    fn the_span_of_the_shortest_block_counts_every_prefix_that_it_holds() {
+        assert_eq!(
+            MinePrefix::new(SHORTEST_MINE_BLOCK)
+                .expect("the shortest block is a length that a mine draws inside")
+                .span(),
+            PREFIXES_OF_THE_SHORTEST_MINE_BLOCK
+        );
+    }
+
+    /// The span of the longest block is the one /24 that it holds.
+    #[test]
+    fn the_span_of_the_longest_block_is_the_one_prefix_that_it_holds() {
+        assert_eq!(
+            MinePrefix::new(LONGEST_MINE_BLOCK)
+                .expect("the longest block is a length that a mine draws inside")
+                .span(),
+            PREFIXES_OF_THE_LONGEST_MINE_BLOCK
+        );
+    }
+
+    /// Every length that a mine takes counts its /24s, and none of them panics.
+    ///
+    /// The span of a block subtracts its length from the grain of a mine, and a
+    /// block longer than the grain takes that subtraction below zero. The range
+    /// of the length is what holds the subtraction above zero, so every length
+    /// that the constructor gives reads a span, and each block holds half of
+    /// the /24s that the block one bit shorter holds.
+    #[test]
+    fn every_length_that_a_mine_takes_counts_the_prefixes_of_its_block() {
+        let mut held = PREFIXES_OF_THE_SHORTEST_MINE_BLOCK;
+        for bits in SHORTEST_MINE_BLOCK..=LONGEST_MINE_BLOCK {
+            let prefix = MinePrefix::new(bits)
+                .expect("every length of the range is a length that a mine draws inside");
+            assert_eq!(
+                prefix.span(),
+                held,
+                "a block of {bits} bits holds {held} prefixes"
+            );
+            held /= 2;
+        }
+    }
 
     /// The plan of one mine that a test names.
     fn mine_plan(depth: usize, prefix: u8, per_prefix: usize, delay: Duration) -> MinePlan {
