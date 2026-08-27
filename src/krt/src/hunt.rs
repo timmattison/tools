@@ -2803,6 +2803,79 @@ mod tests {
         );
     }
 
+    /// The TTL that the independent destination of
+    /// [`a_hunt_whose_mine_is_partial`] answered at.
+    const REACHED_LENGTH: u8 = 10;
+
+    /// The TTL of the last hop that answered on the mined path of
+    /// [`a_hunt_whose_mine_is_partial`].
+    const PARTIAL_MINE_LENGTH: u8 = 17;
+
+    /// The address of the hop where that mined path ends.
+    const DEEP_HOP: &str = "72.14.201.1";
+
+    /// The summary of a hunt whose one mined path is partial.
+    ///
+    /// The independent destination answered at TTL 10. The mine of it drew one
+    /// address that answered nothing past TTL 17, so the mined path is partial
+    /// and it is seven hops longer. The hunt asked for no partial path, so the
+    /// table ranks the reached path alone and no row of it carries a mine.
+    fn a_hunt_whose_mine_is_partial() -> Summary {
+        let scores = vec![
+            traced(
+                FAR,
+                FAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (REACHED_LENGTH, FAR, 85.0)]],
+                &[],
+            ),
+            mined_trace(
+                DUG,
+                DUG_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (PARTIAL_MINE_LENGTH, DEEP_HOP, 90.0)]],
+                &[],
+                Some(address(FAR)),
+            ),
+        ];
+        Summary::new(
+            scores,
+            ELAPSED,
+            TWO_TARGETS,
+            SUMMARY_BOUNDS,
+            false,
+            Some(ONE_MINE),
+        )
+    }
+
+    /// A path that the table drops adds no hop to the counts.
+    ///
+    /// The mined path of the hunt below is seven hops longer than the reached
+    /// one, and it is partial, so the table ranks it nowhere. A count of `+7
+    /// hops` names a length that no row of the table holds, and the reader of
+    /// it has no way to find the path it names.
+    ///
+    /// The three mine fields stand whatever they hold, so the line still names
+    /// the mine and the address it probed beside the zero.
+    #[test]
+    fn a_mined_path_that_the_table_dropped_adds_no_hop() {
+        assert_eq!(
+            counts(&a_hunt_whose_mine_is_partial()),
+            "1/8 reached   2/128 targets   0 partial   1 mine   1 mined   +0 hops   192s"
+        );
+    }
+
+    /// A table of no mined row draws no mine column.
+    ///
+    /// Every mined path of the hunt below is partial, so the table drops all of
+    /// them. A mine column there holds nothing but the empty mark.
+    #[test]
+    fn the_table_of_a_hunt_whose_mined_paths_the_table_dropped_holds_no_mine_column() {
+        let lines = a_hunt_whose_mine_is_partial().lines();
+        assert!(
+            !lines[0].contains(MINE_HEADING),
+            "a table of no mined row draws no mine column: {lines:?}"
+        );
+    }
+
     #[test]
     fn the_row_of_a_mined_destination_names_the_first_hit_that_started_it() {
         let line = row(&a_mining_hunt(), LONGEST);
