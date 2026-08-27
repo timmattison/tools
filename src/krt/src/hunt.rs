@@ -163,13 +163,22 @@ impl Block {
         Self { network, prefix }
     }
 
+    /// Builds the block of one prefix that holds an address.
+    ///
+    /// The network is the address without the bits below the prefix, and this
+    /// is the one place that masks them off. A prefix of 32 shifts by no bit,
+    /// and the mask is then every bit. A prefix of zero shifts by the whole
+    /// width of the value and overflows, and no caller names one: the blocks of
+    /// the table carry a prefix of 4 through 32, and a mine names a prefix of 8
+    /// through 24.
+    const fn around(addr: Ipv4Addr, prefix: u8) -> Self {
+        let mask = u32::MAX << (ADDRESS_BITS - prefix);
+        Self::new(Ipv4Addr::from_bits(addr.to_bits() & mask), prefix)
+    }
+
     /// Answers whether this block holds the address.
     fn holds(self, addr: Ipv4Addr) -> bool {
-        // A prefix of 32 shifts by no bit, and the mask is then every bit. No
-        // block of the table carries a prefix of zero, which would shift by the
-        // whole width and overflow.
-        let mask = u32::MAX << (ADDRESS_BITS - self.prefix);
-        addr.to_bits() & mask == self.network.to_bits()
+        Self::around(addr, self.prefix) == self
     }
 }
 
@@ -349,11 +358,13 @@ struct Dig {
 }
 
 /// The bits of the network of one block that holds an address.
+///
+/// A mine holds its block and its /24 as bits, because it draws a sibling and
+/// a host with the bit arithmetic of [`Dig::sibling`] and [`Dig::draw`].
+/// [`Block::around`] masks the address, and this function reads the bits of the
+/// network off the block that it gives.
 fn network_of(addr: Ipv4Addr, prefix: u8) -> u32 {
-    // Every caller names a prefix of 8 through 32, so the shift stays inside
-    // the width of the value.
-    let mask = u32::MAX << (ADDRESS_BITS - prefix);
-    addr.to_bits() & mask
+    Block::around(addr, prefix).network.to_bits()
 }
 
 impl Dig {
