@@ -3729,6 +3729,41 @@ mod tests {
         );
     }
 
+    /// The mine that each `run` record of a file names, in the order the file
+    /// holds them.
+    fn recorded_mines(recording: &Recording) -> Vec<Option<IpAddr>> {
+        recording
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::Run(run) => Some(run.mine),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The run of a mined destination names the mine that drew it.
+    ///
+    /// The score holds the same address, and the score lives as long as the
+    /// hunt does. A reader of the file thus tells a mined destination from an
+    /// independent one long after the hunt printed its summary, and counts the
+    /// hops that the mines added without it.
+    #[test]
+    fn the_run_of_a_mined_destination_names_the_mine_that_drew_it() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR],
+            hunting_and_mining(2, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        let near = IpAddr::V4(address(NEAR));
+        assert_eq!(
+            recorded_mines(&hunted.recording),
+            vec![None, Some(near), Some(near)]
+        );
+    }
+
     /// A hunt that holds the rounds it wants draws no further independent
     /// address, and it still finishes the mine it started.
     #[test]
