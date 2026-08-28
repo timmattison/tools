@@ -17,9 +17,9 @@
 //! are independent, so the invariant holds by construction rather than by care.
 
 use crate::lang::Language;
-use crate::lines::Counts;
-use crate::pathrule::PathRules;
-use anyhow::Result;
+use crate::lines::{self, Counts, LineIndex};
+use crate::pathrule::{PathRules, PathVerdict};
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Which rule marked a span, so `--explain` can name it in a later slice.
@@ -88,7 +88,7 @@ impl FileCount {
     /// This is the invariant of the tool: the two buckets always sum to it.
     #[must_use]
     pub fn total(&self) -> Counts {
-        Counts::default()
+        self.production + self.test
     }
 
     /// Whether this file counts as a test file.
@@ -99,7 +99,7 @@ impl FileCount {
     /// nothing in it.
     #[must_use]
     pub fn is_test_file(&self) -> bool {
-        false
+        self.test.total() > 0
     }
 }
 
@@ -126,8 +126,37 @@ impl Counter {
     /// Returns `None` for a file of no language the tool counts.
     #[must_use]
     pub fn count_source(&self, path: &Path, relative: &Path, source: &str) -> Option<FileCount> {
-        let _ = (&self.rules, path, relative, source);
-        None
+        let language = Language::from_path(path)?;
+        let counts = lines::count(source, language);
+        let rows = LineIndex::new(source).row_count();
+
+        let (production, test, spans) = match self.rules.verdict(relative) {
+            PathVerdict::Test(glob) => {
+                // A file of no rows carries no span; see [`Span`].
+                let spans = if rows == 0 {
+                    Vec::new()
+                } else {
+                    vec![Span {
+                        first_row: 1,
+                        last_row: rows,
+                        rule: Rule::PathGlob(glob),
+                    }]
+                };
+                (Counts::default(), counts, spans)
+            }
+            PathVerdict::Production(_) | PathVerdict::Unmarked => {
+                (counts, Counts::default(), Vec::new())
+            }
+        };
+
+        Some(FileCount {
+            path: path.to_path_buf(),
+            language,
+            production,
+            test,
+            spans,
+            parse_status: ParseStatus::NotParsed,
+        })
     }
 
     /// Read `path` and count it.
@@ -146,7 +175,17 @@ impl Counter {
     ///
     /// Returns an error when the file cannot be read.
     pub fn count_path(&self, path: &Path, relative: &Path) -> Result<Option<FileCount>> {
-        let _ = (path, relative);
-        Ok(None)
+        if Language::from_path(path).is_none() {
+            return Ok(None);
+        }
+
+        let bytes =
+            std::fs::read(path).with_context(|| format!("cannot read `{}`", path.display()))?;
+
+        let Ok(source) = String::from_utf8(bytes) else {
+            return Ok(None);
+        };
+
+        Ok(self.count_source(path, relative, &source))
     }
 }

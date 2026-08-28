@@ -21,7 +21,8 @@
 //! what the tree says to count, and the tree says it in `.gitignore` whether or
 //! not `.git` is beside it.
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
+use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
 
 /// What the walk includes beyond the default.
@@ -49,8 +50,39 @@ pub struct WalkOptions {
 /// Returns an error when a root does not exist, and when a directory under one
 /// cannot be read.
 pub fn walk(roots: &[PathBuf], options: WalkOptions) -> Result<Vec<(PathBuf, PathBuf)>> {
-    let _ = (roots, options, relative_to as fn(&Path, &Path) -> PathBuf);
-    Ok(Vec::new())
+    let mut found = Vec::new();
+
+    for root in roots {
+        let exists = root
+            .try_exists()
+            .with_context(|| format!("cannot read `{}`", root.display()))?;
+        if !exists {
+            bail!("`{}` does not exist", root.display());
+        }
+
+        let mut builder = WalkBuilder::new(root);
+        builder
+            .ignore(!options.no_ignore)
+            .git_ignore(!options.no_ignore)
+            .git_global(!options.no_ignore)
+            .git_exclude(!options.no_ignore)
+            .require_git(false)
+            .hidden(!options.hidden);
+
+        for entry in builder.build() {
+            let entry = entry
+                .with_context(|| format!("cannot read the tree under `{}`", root.display()))?;
+            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let path = entry.into_path();
+            let relative = relative_to(root, &path);
+            found.push((path, relative));
+        }
+    }
+
+    found.sort();
+    Ok(found)
 }
 
 /// The path of a file as the rules see it: relative to the root that found it.
@@ -61,7 +93,7 @@ pub fn walk(roots: &[PathBuf], options: WalkOptions) -> Result<Vec<(PathBuf, Pat
 fn relative_to(root: &Path, path: &Path) -> PathBuf {
     match path.strip_prefix(root) {
         Ok(rest) if rest.as_os_str().is_empty() => {
-            PathBuf::from(path.file_name().unwrap_or_else(|| path.as_os_str()))
+            PathBuf::from(path.file_name().unwrap_or(path.as_os_str()))
         }
         Ok(rest) => rest.to_path_buf(),
         Err(_) => path.to_path_buf(),

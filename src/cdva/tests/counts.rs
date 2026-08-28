@@ -390,7 +390,12 @@ fn rows_are_ordered_by_code_descending_then_by_label() {
     let summary = Summary::new(vec![
         counted("a.rs", Language::Rust, counts(0, 0, 10), Counts::default()),
         counted("b.go", Language::Go, counts(0, 0, 30), Counts::default()),
-        counted("c.py", Language::Python, counts(0, 0, 10), Counts::default()),
+        counted(
+            "c.py",
+            Language::Python,
+            counts(0, 0, 10),
+            Counts::default(),
+        ),
     ]);
 
     let labels: Vec<&str> = summary.rows.iter().map(|row| row.label.as_str()).collect();
@@ -417,14 +422,16 @@ fn the_total_is_the_field_wise_sum_of_the_rows() {
     assert_eq!(summary.total.comment(), 11);
     assert_eq!(summary.total.code(), 17);
 
-    let summed = summary
-        .rows
-        .iter()
-        .fold(Counts::default(), |sum, row| sum + row.production + row.test);
+    let summed = summary.rows.iter().fold(Counts::default(), |sum, row| {
+        sum + row.production + row.test
+    });
     assert_eq!(summed, summary.total.production + summary.total.test);
 
     assert_eq!(summary.files.len(), 3, "the summary keeps the files");
-    assert!(summary.failed_parses.is_empty(), "nothing was parsed at all");
+    assert!(
+        summary.failed_parses.is_empty(),
+        "nothing was parsed at all"
+    );
 }
 
 #[test]
@@ -445,7 +452,12 @@ fn test_files_counts_only_the_files_holding_a_test_row() {
 fn test_percent_is_the_test_share_of_the_code() {
     let summary = Summary::new(vec![
         counted("a.rs", Language::Rust, counts(0, 0, 30), counts(0, 0, 10)),
-        counted("b.md", Language::Markdown, counts(3, 0, 0), Counts::default()),
+        counted(
+            "b.md",
+            Language::Markdown,
+            counts(3, 0, 0),
+            Counts::default(),
+        ),
     ]);
 
     let rust = summary

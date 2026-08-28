@@ -42,8 +42,8 @@ fn an_ignored_file_is_skipped_by_default_and_no_ignore_takes_it_back() {
     write(root.path(), IGNORED_NAME, "fn ignored() {}\n");
     write(root.path(), ".gitignore", &format!("{IGNORED_NAME}\n"));
 
-    let default = walk(&[root.path().to_path_buf()], WalkOptions::default())
-        .expect("the fixture tree walks");
+    let default =
+        walk(&[root.path().to_path_buf()], WalkOptions::default()).expect("the fixture tree walks");
     assert_eq!(
         relatives(&default),
         vec!["keep.rs".to_string()],
@@ -75,8 +75,8 @@ fn a_hidden_file_is_skipped_by_default_and_hidden_takes_it_back() {
     write(root.path(), "shown.rs", "fn main() {}\n");
     write(root.path(), ".hidden.rs", "fn hidden() {}\n");
 
-    let default = walk(&[root.path().to_path_buf()], WalkOptions::default())
-        .expect("the fixture tree walks");
+    let default =
+        walk(&[root.path().to_path_buf()], WalkOptions::default()).expect("the fixture tree walks");
     assert_eq!(relatives(&default), vec!["shown.rs".to_string()]);
 
     let with_hidden = walk(
@@ -102,8 +102,8 @@ fn the_walk_yields_files_only_and_sorts_them() {
     std::fs::create_dir_all(root.path().join("empty-directory"))
         .expect("the empty directory is made");
 
-    let found = walk(&[root.path().to_path_buf()], WalkOptions::default())
-        .expect("the fixture tree walks");
+    let found =
+        walk(&[root.path().to_path_buf()], WalkOptions::default()).expect("the fixture tree walks");
 
     assert_eq!(
         relatives(&found),
@@ -158,7 +158,8 @@ fn a_root_that_is_a_file_yields_that_file() {
     write(root.path(), "src/other.rs", "fn other() {}\n");
     let only = root.path().join("src/only.rs");
 
-    let found = walk(&[only.clone()], WalkOptions::default()).expect("the single file walks");
+    let found =
+        walk(std::slice::from_ref(&only), WalkOptions::default()).expect("the single file walks");
 
     assert_eq!(found.len(), 1, "exactly the file that was named");
     assert_eq!(found[0].0, only);
@@ -174,7 +175,7 @@ fn a_root_that_does_not_exist_is_an_error_that_names_it() {
     let root = tempfile::tempdir().expect("a temporary directory is made");
     let missing = root.path().join("no-such-directory");
 
-    let error = walk(&[missing.clone()], WalkOptions::default())
+    let error = walk(std::slice::from_ref(&missing), WalkOptions::default())
         .expect_err("a root that is not there cannot be walked");
 
     assert!(

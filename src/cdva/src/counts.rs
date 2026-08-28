@@ -14,6 +14,7 @@
 use crate::file::{FileCount, ParseStatus};
 use crate::lang::Language;
 use crate::lines::Counts;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// The label of the row that sums every other row.
@@ -49,25 +50,29 @@ impl Row {
     /// Every blank row of both buckets.
     #[must_use]
     pub fn blank(&self) -> u64 {
-        0
+        self.production.blank.saturating_add(self.test.blank)
     }
 
     /// Every comment row of both buckets.
     #[must_use]
     pub fn comment(&self) -> u64 {
-        0
+        self.production.comment.saturating_add(self.test.comment)
     }
 
     /// Every code row of both buckets, of which the test code is a part.
     #[must_use]
     pub fn code(&self) -> u64 {
-        0
+        self.production.code.saturating_add(self.test.code)
     }
 
     /// The test share of the code, as a percentage. Zero when there is no code.
     #[must_use]
     pub fn test_percent(&self) -> f64 {
-        0.0
+        let code = self.code();
+        if code == 0 {
+            return 0.0;
+        }
+        percent(self.test.code, code)
     }
 
     /// Adds another row's counts into this one, leaving the label alone.
@@ -98,12 +103,44 @@ impl Summary {
     /// Rolls up the files by language.
     #[must_use]
     pub fn new(files: Vec<FileCount>) -> Self {
-        let _ = (&files, ParseStatus::Failed, Language::Rust, percent(0, 1));
+        let mut by_language: BTreeMap<Language, Row> = BTreeMap::new();
+
+        for file in &files {
+            let row = by_language
+                .entry(file.language)
+                .or_insert_with(|| Row::empty(file.language.name().to_string()));
+            row.files = row.files.saturating_add(1);
+            if file.is_test_file() {
+                row.test_files = row.test_files.saturating_add(1);
+            }
+            row.production += file.production;
+            row.test += file.test;
+        }
+
+        let mut rows: Vec<Row> = by_language.into_values().collect();
+        rows.sort_by(|left, right| {
+            right
+                .code()
+                .cmp(&left.code())
+                .then_with(|| left.label.cmp(&right.label))
+        });
+
+        let mut total = Row::empty(TOTAL_LABEL.to_string());
+        for row in &rows {
+            total.absorb(row);
+        }
+
+        let failed_parses = files
+            .iter()
+            .filter(|file| file.parse_status == ParseStatus::Failed)
+            .map(|file| file.path.clone())
+            .collect();
+
         Self {
-            rows: Vec::new(),
-            total: Row::empty(String::new()),
-            files: Vec::new(),
-            failed_parses: Vec::new(),
+            rows,
+            total,
+            files,
+            failed_parses,
         }
     }
 }
