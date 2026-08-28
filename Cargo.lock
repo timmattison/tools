@@ -1126,7 +1126,10 @@ dependencies = [
  "clap",
  "globset",
  "ignore",
+ "num-format",
+ "rayon",
  "tempfile",
+ "unicode-width",
 ]
 
 [[package]]

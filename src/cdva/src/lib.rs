@@ -12,15 +12,17 @@
 //!
 //! [`walk`] finds the files, [`Counter`] reads one of them into a [`FileCount`]
 //! of two buckets, and [`Summary`] rolls those up by language. Together they
-//! are the whole run: walk, count, add up. The invariant that a reader of the
-//! report leans on lives in [`FileCount::total`] — the two buckets always sum
-//! to the count the tool would report with the split turned off.
+//! are the whole run: walk, count, add up. [`render_table`] prints that summary
+//! as the default report. The invariant that a reader of the report leans on
+//! lives in [`FileCount::total`] — the two buckets always sum to the count the
+//! tool would report with the split turned off.
 
 pub mod counts;
 pub mod file;
 pub mod lang;
 pub mod lines;
 pub mod pathrule;
+pub mod report;
 pub mod walk;
 
 pub use counts::{Row, Summary};
@@ -28,4 +30,5 @@ pub use file::{Counter, FileCount, ParseStatus, Rule, Span};
 pub use lang::{BlockSpec, CommentSyntax, Language, StringSpec};
 pub use lines::{classify, count, Counts, LineIndex, LineKind};
 pub use pathrule::{PathRules, PathVerdict};
+pub use report::render_table;
 pub use walk::{walk, WalkOptions};
