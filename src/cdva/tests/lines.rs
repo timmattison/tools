@@ -297,11 +297,13 @@ fn a_character_literal_of_a_quote_opens_no_string_in_zig_or_kotlin() {
     assert!(!ends_unterminated("const q: u8 = '\"';", Language::Zig));
     assert!(!ends_unterminated("val q: Char = '\"'", Language::Kotlin));
 
-    // In Kotlin the phantom string also swallows the block comment behind it,
-    // and reports both of its rows as code.
+    // In Kotlin the phantom string also swallows the block comment that opens
+    // behind it, so the second row here — which is nothing but the rest of that
+    // comment — reads as code. The first row holds a character literal and is
+    // code either way.
     assert_eq!(
         tally("val q = '\"' /* a\nb */\nval x = 1\n", Language::Kotlin),
-        counts(0, 2, 1)
+        counts(0, 1, 2)
     );
 
     // The other forms of both languages, which a string form on the quote

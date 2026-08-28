@@ -12,6 +12,12 @@
 //! delimiter and no delimiter can match across the middle of one. Nothing here
 //! ever indexes the source as a string, which is what `clippy::string_slice`
 //! asks for and what keeps a file of Japanese from panicking the tool.
+//!
+//! One reading does count characters rather than bytes, and it says so:
+//! [`Scanner::char_literal_length`] looks ahead over exactly one character to
+//! tell the character literal `'"'` of Rust from the lifetime of `&'static
+//! str`. `'日'` is one character of three bytes, so that lookahead counts
+//! continuation bytes instead of stepping one.
 
 use crate::lang::{BlockSpec, CommentSyntax, Language, StringSpec};
 use std::ops::{Add, AddAssign};
@@ -302,6 +308,20 @@ impl<'a> Scanner<'a> {
             }
         }
 
+        // A character literal is read here, by a lookahead, and never by a
+        // string form of the table. See `char_literal_length`: the language
+        // that needs this spells an unpaired quote as well, so a string form on
+        // the quote would open a string at every lifetime. The whole literal is
+        // stepped over at once, which is what keeps the `"` of `'"'` from being
+        // read as anything.
+        if syntax.char_literal_lookahead {
+            if let Some(length) = self.char_literal_length(byte) {
+                self.mark_code();
+                self.pos += length;
+                return;
+            }
+        }
+
         for spec in syntax.strings {
             if self.matches(spec.open) {
                 let doc = spec.doc_when_line_leading && self.row_is_untouched();
@@ -446,6 +466,91 @@ impl<'a> Scanner<'a> {
         Some((hashes, offset - self.pos + 1))
     }
 
+    /// The length in bytes of the character literal standing at the cursor,
+    /// where one stands.
+    ///
+    /// Rust spells a character literal `'x'` and a lifetime `'a`, and both open
+    /// with the same byte. A [`StringSpec`] on the quote is therefore not an
+    /// option, however much it looks like one: it would read `&'static str` as
+    /// the opening of a string, and a Rust string spans rows, so the phantom
+    /// string would run to the next quote anywhere in the file. That is the bug
+    /// this function ends, and turning it back into a `StringSpec` would bring
+    /// it back in a far commoner spelling — a lifetime is on many more rows
+    /// than a character literal is.
+    ///
+    /// The quote is read by a bounded lookahead instead:
+    ///
+    /// - a quote, one character, and a quote is a literal: `'a'`, `'"'`, `'日'`,
+    ///   `' '`;
+    /// - a quote, a backslash, an escape body, and a quote is a literal:
+    ///   `'\\'`, `'\''`, `'\n'`, `'\x41'`, `'\u{1F600}'`. A lifetime never
+    ///   opens with a backslash, so the body reaches to the next quote of the
+    ///   row and no table of escape shapes is needed;
+    /// - anything else is a lifetime, which is ordinary code. The caller steps
+    ///   over the one quote and reads on.
+    ///
+    /// The lookahead never crosses a row break, because no character literal
+    /// does. A quote with nothing behind it therefore ends with its row rather
+    /// than swallowing the file, and a quote at the very end of the source
+    /// reads no further than the last byte.
+    ///
+    /// [`StringSpec`]: crate::lang::StringSpec
+    fn char_literal_length(&self, byte: u8) -> Option<usize> {
+        if byte != b'\'' {
+            return None;
+        }
+        let body = self.pos.checked_add(1)?;
+        let close = match self.bytes.get(body).copied()? {
+            // No character literal spans a row.
+            b'\n' => return None,
+            b'\\' => self.escaped_body_end(body.checked_add(1)?)?,
+            _ => self.char_end(body),
+        };
+        if self.bytes.get(close).copied()? != b'\'' {
+            return None;
+        }
+        close.checked_add(1)?.checked_sub(self.pos)
+    }
+
+    /// The offset of the quote that closes an escape body starting at `offset`.
+    ///
+    /// The backslash quotes exactly one character, whatever that character is,
+    /// so the quote of `'\''` is not the end of the literal. Everything after
+    /// that one character — the braces of `'\u{1F600}'`, the digits of
+    /// `'\x41'` — reaches to the next quote of the row.
+    ///
+    /// Returns `None` for a body that meets the end of its row, or the end of
+    /// the source, before it meets a quote.
+    fn escaped_body_end(&self, offset: usize) -> Option<usize> {
+        let mut end = self.char_end(offset);
+        loop {
+            match self.bytes.get(end).copied()? {
+                b'\'' => return Some(end),
+                b'\n' => return None,
+                _ => end = self.char_end(end),
+            }
+        }
+    }
+
+    /// The offset just past the character that starts at `offset`.
+    ///
+    /// The length is read from the continuation bytes that follow the first
+    /// one, because a character of the source may take as many as four. A
+    /// lookahead that stepped one *byte* would read the second byte of `日` as
+    /// the whole character and the third as the closing quote, and would then
+    /// hand the real closing quote back to the scanner to read again.
+    fn char_end(&self, offset: usize) -> usize {
+        let mut end = offset.saturating_add(1);
+        while self
+            .bytes
+            .get(end)
+            .is_some_and(|&byte| is_continuation(byte))
+        {
+            end = end.saturating_add(1);
+        }
+        end
+    }
+
     /// Whether the bytes at the cursor open with this delimiter.
     ///
     /// An empty delimiter matches nothing. A table row that held one would
@@ -516,6 +621,16 @@ impl<'a> Scanner<'a> {
 fn escape_byte(spec: &StringSpec) -> Option<u8> {
     spec.escape
         .and_then(|escape| u8::try_from(u32::from(escape)).ok())
+}
+
+/// Whether a byte continues the character before it rather than starting one.
+///
+/// Every byte of a character after its first carries the two high bits `10`,
+/// and no first byte of any character carries them. Counting those bytes is how
+/// the lookahead of [`Scanner::char_end`] steps one character at a time over
+/// bytes.
+const fn is_continuation(byte: u8) -> bool {
+    byte & 0b1100_0000 == 0b1000_0000
 }
 
 /// Whether a byte is white space that no bucket counts.

@@ -46,6 +46,23 @@ pub struct CommentSyntax {
     /// `r#"..."#`, `r##"..."##` — where the count of the hash marks varies and
     /// no fixed pair of delimiters describes it.
     pub raw_hash_strings: bool,
+    /// Whether the single quote of this language opens a character literal
+    /// that the classifier must tell from an *unpaired* single quote by
+    /// looking ahead.
+    ///
+    /// Rust is the one language here that needs this, and it needs it because
+    /// it spells both: `'"'` is a character literal, and `&'static str` is a
+    /// lifetime. Neither reading of the quote can be the standing one. A
+    /// [`StringSpec`] on the quote would open a string at every lifetime, and a
+    /// Rust string spans rows, so that phantom string would run to the next
+    /// quote anywhere in the file — the very bug this flag exists to end, in a
+    /// far more common spelling.
+    ///
+    /// A language whose quote is unambiguous wants no flag and a plain
+    /// [`StringSpec`] instead: Zig, Kotlin, Go, C, Java, and the rest of the
+    /// table carry one. A language that spells a character literal *and* an
+    /// unpaired quote carries neither today, and the rows below say why.
+    pub char_literal_lookahead: bool,
 }
 
 /// One block comment form.
@@ -241,7 +258,7 @@ const PERL_BLOCK: BlockSpec = anchored("=pod", "=cut");
 /// Each row reads
 /// `Variant => "Display name", [extensions], [file names], line: [tokens],
 /// block: [specs], nested: bool, strings: [specs], raw_hash: bool,
-/// tree: rule;`.
+/// char_lit: bool, tree: rule;`.
 ///
 /// Extensions are written in lower case, because [`Language::from_path`]
 /// compares them without regard to case. File names are written exactly as they
@@ -256,6 +273,7 @@ macro_rules! language_table {
             nested: $nested:literal,
             strings: [$($string:ident),* $(,)?],
             raw_hash: $raw_hash:literal,
+            char_lit: $char_lit:literal,
             tree: $tree:ident;
     )*) => {
         /// A language that `cdva` counts.
@@ -289,6 +307,7 @@ macro_rules! language_table {
                             nested_block: $nested,
                             strings: &[$($string,)*],
                             raw_hash_strings: $raw_hash,
+                            char_literal_lookahead: $char_lit,
                         };
                         &SYNTAX
                     })*
@@ -327,85 +346,108 @@ macro_rules! language_table {
 
 language_table! {
     Rust => "Rust", ["rs"], [],
-        line: ["//"], block: [C_BLOCK], nested: true, strings: [DQ_ESC_ML], raw_hash: true, tree: RUST_TREE;
+        line: ["//"], block: [C_BLOCK], nested: true, strings: [DQ_ESC_ML], raw_hash: true, char_lit: true, tree: RUST_TREE;
     Go => "Go", ["go"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, BACKTICK, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, BACKTICK, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Python => "Python", ["py", "pyi"], [],
-        line: ["#"], block: [], nested: false, strings: [TDQ_DOC, TSQ_DOC, DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [], nested: false, strings: [TDQ_DOC, TSQ_DOC, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     JavaScript => "JavaScript", ["js", "jsx", "mjs", "cjs"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     TypeScript => "TypeScript", ["ts", "mts", "cts"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Tsx => "TSX", ["tsx"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Java => "Java", ["java"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+    // Kotlin spells a character literal `'a'` and carries no unpaired quote, so
+    // the plain string form on the quote is right and no lookahead is wanted.
     Kotlin => "Kotlin", ["kt", "kts"], [],
-        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     CSharp => "C#", ["cs"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Ruby => "Ruby", ["rb", "rake", "gemspec"], ["Gemfile", "Rakefile"],
-        line: ["#"], block: [RUBY_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [RUBY_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+    // Swift has no character literal at all. A character there is a `"` string
+    // of one character, which the form below already reads.
     Swift => "Swift", ["swift"], [],
-        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+    // Elixir gets neither rule, because its two spellings want opposite ones: a
+    // charlist is `'abc'`, and a character is `?'`. A string form on the quote
+    // would read the `?'` of `if c == ?' do` as the opening of a charlist. Its
+    // quote therefore stays ordinary code until somebody measures the pair.
     Elixir => "Elixir", ["ex", "exs"], [],
-        line: ["#"], block: [], nested: false, strings: [TDQ, DQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [], nested: false, strings: [TDQ, DQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+    // Zig spells a character literal `'a'` and carries no unpaired quote, and a
+    // test in Zig is a language construct rather than a name, so nothing there
+    // wants a bare quote either.
     Zig => "Zig", ["zig"], [],
-        line: ["//"], block: [], nested: false, strings: [DQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     C => "C", ["c"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     CHeader => "C/C++ Header", ["h"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Cpp => "C++", ["cc", "cpp", "cxx"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     CppHeader => "C++ Header", ["hh", "hpp", "hxx"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Php => "PHP", ["php"], [],
-        line: ["//", "#"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//", "#"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Shell => "Shell", ["sh", "bash", "zsh", "bats"], [],
-        line: ["#"], block: [], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     PowerShell => "PowerShell", ["ps1", "psm1", "psd1"], [],
-        line: ["#"], block: [POWERSHELL_BLOCK], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [POWERSHELL_BLOCK], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     Batch => "Batch", ["bat", "cmd"], [],
-        line: ["::", "REM ", "rem "], block: [], nested: false, strings: [DQ_PLAIN], raw_hash: false, tree: NO_TREE;
+        line: ["::", "REM ", "rem "], block: [], nested: false, strings: [DQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     Html => "HTML", ["html", "htm"], [],
-        line: [], block: [MARKUP_BLOCK], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
+        line: [], block: [MARKUP_BLOCK], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     Xml => "XML", ["xml", "xsd", "xsl"], [],
-        line: [], block: [MARKUP_BLOCK], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
+        line: [], block: [MARKUP_BLOCK], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     Css => "CSS", ["css"], [],
-        line: [], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: [], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Scss => "SCSS", ["scss", "sass"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Json => "JSON", ["json"], [],
-        line: [], block: [], nested: false, strings: [DQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: [], block: [], nested: false, strings: [DQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Yaml => "YAML", ["yaml", "yml"], [],
-        line: ["#"], block: [], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     Toml => "TOML", ["toml"], [],
-        line: ["#"], block: [], nested: false, strings: [TDQ, TSQ, DQ_ESC, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [], nested: false, strings: [TDQ, TSQ, DQ_ESC, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     Ini => "INI", ["ini", "cfg"], [],
-        line: ["#", ";"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
+        line: ["#", ";"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     Markdown => "Markdown", ["md", "markdown"], [],
-        line: [], block: [], nested: false, strings: [], raw_hash: false, tree: NO_TREE;
+        line: [], block: [], nested: false, strings: [], raw_hash: false, char_lit: false, tree: NO_TREE;
     Sql => "SQL", ["sql"], [],
-        line: ["--"], block: [C_BLOCK], nested: false, strings: [SQ_ESC, DQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["--"], block: [C_BLOCK], nested: false, strings: [SQ_ESC, DQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Makefile => "Makefile", ["mk", "mak"], ["Makefile", "makefile", "GNUmakefile"],
-        line: ["#"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     Dockerfile => "Dockerfile", ["dockerfile"], ["Dockerfile", "Containerfile", "dockerfile", "containerfile"],
-        line: ["#"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     Lua => "Lua", ["lua"], [],
-        line: ["--"], block: [LUA_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, LUA_LONG], raw_hash: false, tree: NO_TREE;
+        line: ["--"], block: [LUA_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, LUA_LONG], raw_hash: false, char_lit: false, tree: NO_TREE;
+    // Scala and Haskell are the two rows that get neither rule, and they get
+    // neither on purpose. Both spell a character literal `'a'` AND an unpaired
+    // quote — Scala the symbol `'foo`, Haskell the primed identifier `x'` — so
+    // a string form on the quote would open a string at every symbol and at
+    // every primed name, which is the bug of Rust in a commoner spelling. DO
+    // NOT ADD ONE. The lookahead of Rust does not fit Haskell either: a prime
+    // ends a name, and `f x' 'a'` puts a quote, a space, and a quote in a row,
+    // which no lookahead can tell from the literal `' '`. Their quote stays
+    // ordinary code, which is right for every unpaired form and reads the
+    // quotes of a character literal as code as well — the same answer for the
+    // row. The one loss is `'"'`, whose quote opens a string that ends with its
+    // row, and a row holding a character literal is code either way.
     Scala => "Scala", ["scala", "sc"], [],
-        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Haskell => "Haskell", ["hs"], [],
-        line: ["--"], block: [HASKELL_BLOCK], nested: true, strings: [DQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["--"], block: [HASKELL_BLOCK], nested: true, strings: [DQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Nix => "Nix", ["nix"], [],
-        line: ["#"], block: [C_BLOCK], nested: false, strings: [NIX_INDENTED, DQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [C_BLOCK], nested: false, strings: [NIX_INDENTED, DQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Protobuf => "Protocol Buffers", ["proto"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     GraphQL => "GraphQL", ["graphql", "gql"], [],
-        line: ["#"], block: [], nested: false, strings: [TDQ_DOC, DQ_ESC], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [], nested: false, strings: [TDQ_DOC, DQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Perl => "Perl", ["pl", "pm"], [],
-        line: ["#"], block: [PERL_BLOCK], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
+        line: ["#"], block: [PERL_BLOCK], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
 }
 
 impl Language {
