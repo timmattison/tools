@@ -13,6 +13,10 @@ anyhow.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 globset.workspace = true
+ignore.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
