@@ -1252,7 +1252,10 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
             config: self.facts.config,
             host: self.facts.host.clone(),
             hunt: Some(self.facts.id.clone()),
-            mine: None,
+            // The score of the destination holds the same address, and the
+            // score goes away when the hunt ends. The file is what a reader
+            // reads afterward, so the address stands in both.
+            mine: pick.mine.map(IpAddr::V4),
         };
         let limits = run::Limits {
             rounds: Some(self.plan.probes_per_round),
