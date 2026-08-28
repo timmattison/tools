@@ -1,0 +1,17 @@
+[package]
+name = "cdva"
+version = "0.1.0"
+edition.workspace = true
+description = "Count da various attributes: a code counter that reports test code apart from production code"
+
+[[bin]]
+name = "cdva"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true
