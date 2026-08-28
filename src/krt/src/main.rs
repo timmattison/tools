@@ -2026,6 +2026,8 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         config: run_config(config, privilege),
         host: host_name(),
         hunt: None,
+        // A trace of one destination is no hunt, so no mine drew it.
+        mine: None,
     };
 
     let flag = stop_flag().map_err(|error| {
@@ -4226,6 +4228,7 @@ resolved configuration:
             },
             host: A_SHARED_MACHINE.to_owned(),
             hunt: None,
+            mine: None,
         })
     }
 

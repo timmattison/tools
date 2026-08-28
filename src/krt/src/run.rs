@@ -806,6 +806,7 @@ mod tests {
             },
             host: HOST.to_owned(),
             hunt: None,
+            mine: None,
         }
     }
 

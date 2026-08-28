@@ -1252,6 +1252,7 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
             config: self.facts.config,
             host: self.facts.host.clone(),
             hunt: Some(self.facts.id.clone()),
+            mine: None,
         };
         let limits = run::Limits {
             rounds: Some(self.plan.probes_per_round),

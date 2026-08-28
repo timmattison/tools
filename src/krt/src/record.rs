@@ -229,6 +229,20 @@ pub(crate) struct RunRecord {
     /// change, and it reads as a run that no hunt holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) hunt: Option<HuntId>,
+    /// The address of the first hit whose mine drew this destination. A run
+    /// that an independent draw started holds none, and so does a run that no
+    /// hunt made.
+    ///
+    /// The field is what tells a mined destination of a hunt from an
+    /// independent one, and it names which mine found the destination. A reader
+    /// of the file counts the hops that the mines of a hunt added from it, and
+    /// finds the path that a mine measured, without the summary that the hunt
+    /// printed.
+    ///
+    /// The field stands last, after the hunt, and it goes away when it is
+    /// absent, for the reason that the `hunt` field above gives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mine: Option<IpAddr>,
 }
 
 /// The source address of a run, and how `krt` found it.
@@ -1232,6 +1246,7 @@ mod tests {
             },
             host: "tims-mac".to_owned(),
             hunt: None,
+            mine: None,
         })
     }
 
@@ -2677,6 +2692,7 @@ mod tests {
             },
             host: MACHINE.to_owned(),
             hunt: None,
+            mine: None,
         })
     }
 
