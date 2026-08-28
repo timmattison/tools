@@ -166,33 +166,53 @@ impl Counter {
         let language = Language::from_path(path)?;
         let kinds = lines::classify(source, language);
 
-        let (production, test, spans, parse_status) = match self.rules.verdict(relative) {
-            PathVerdict::Test(glob) => {
-                let (production, test) = split(&kinds, |_| true);
-                let spans = whole_file(&kinds, Rule::PathGlob(glob));
-                (production, test, spans, ParseStatus::NotParsed)
-            }
-            PathVerdict::Production(_) => {
-                let (production, test) = split(&kinds, |_| false);
-                (production, test, Vec::new(), ParseStatus::NotParsed)
-            }
-            PathVerdict::Unmarked => {
-                match self
-                    .tree
-                    .as_ref()
-                    .and_then(|tree| tree.outcome(source, language))
-                {
-                    Some(outcome) => {
-                        let (production, test) = split(&kinds, |row| outcome.rows.contains(&row));
-                        (production, test, outcome.spans, outcome.status)
-                    }
-                    None => {
-                        let (production, test) = split(&kinds, |_| false);
-                        (production, test, Vec::new(), ParseStatus::NotParsed)
+        let (production, test, spans, parse_status, test_mod_declarations) =
+            match self.rules.verdict(relative) {
+                PathVerdict::Test(glob) => {
+                    let (production, test) = split(&kinds, |_| true);
+                    let spans = whole_file(&kinds, Rule::PathGlob(glob));
+                    (production, test, spans, ParseStatus::NotParsed, Vec::new())
+                }
+                PathVerdict::Production(_) => {
+                    let (production, test) = split(&kinds, |_| false);
+                    (
+                        production,
+                        test,
+                        Vec::new(),
+                        ParseStatus::NotParsed,
+                        Vec::new(),
+                    )
+                }
+                PathVerdict::Unmarked => {
+                    match self
+                        .tree
+                        .as_ref()
+                        .and_then(|tree| tree.outcome(source, language))
+                    {
+                        Some(outcome) => {
+                            let (production, test) =
+                                split(&kinds, |row| outcome.rows.contains(&row));
+                            (
+                                production,
+                                test,
+                                outcome.spans,
+                                outcome.status,
+                                outcome.test_mod_declarations,
+                            )
+                        }
+                        None => {
+                            let (production, test) = split(&kinds, |_| false);
+                            (
+                                production,
+                                test,
+                                Vec::new(),
+                                ParseStatus::NotParsed,
+                                Vec::new(),
+                            )
+                        }
                     }
                 }
-            }
-        };
+            };
 
         Some(FileCount {
             path: path.to_path_buf(),
@@ -201,7 +221,7 @@ impl Counter {
             test,
             spans,
             parse_status,
-            test_mod_declarations: Vec::new(),
+            test_mod_declarations,
         })
     }
 

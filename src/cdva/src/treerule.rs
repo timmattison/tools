@@ -42,6 +42,16 @@
 //! marking of such a file is not to be trusted, and a guessed test count is
 //! worse than none: it reads exactly like a measured one.
 //!
+//! # The test code that is somewhere else
+//!
+//! A Rust file that declares `#[cfg(test)] mod tests;` holds none of the test
+//! code it is talking about: the whole of the file it names is test code, and
+//! the declaration is the only evidence of that anywhere. This rule reads one
+//! file at a time and so cannot act on it, but it is the only thing that ever
+//! reads the declaring file, so it collects the name into
+//! [`TreeOutcome::test_mod_declarations`] and [`crate::modpass`] resolves it
+//! once every file has been counted.
+//!
 //! [`Unmarked`]: crate::pathrule::PathVerdict::Unmarked
 
 use crate::file::{ParseStatus, Rule, Span};
@@ -61,6 +71,16 @@ const CAPTURE_CANDIDATE: &str = "candidate";
 
 /// The capture naming a node whose outermost enclosing scope is test code.
 const CAPTURE_TEST_SCOPE: &str = "test_scope";
+
+/// The node kind of a Rust `mod` item, which is the one item that can move its
+/// test code into another file.
+const MOD_ITEM: &str = "mod_item";
+
+/// The field of a `mod` item that holds the braces and everything in them.
+const FIELD_BODY: &str = "body";
+
+/// The field of a `mod` item that holds the name of the module.
+const FIELD_NAME: &str = "name";
 
 /// The rows of a file that hold test code, and how the parse went.
 pub struct TreeOutcome {
@@ -153,6 +173,7 @@ impl TreeRules {
         let index = LineIndex::new(source);
         let mut rows = BTreeSet::new();
         let mut spans = Vec::new();
+        let mut test_mod_declarations = Vec::new();
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&compiled.query, tree.root_node(), source.as_bytes());
         while let Some(matched) = matches.next() {
@@ -163,6 +184,9 @@ impl TreeRules {
                 let Some(span) = compiled.span_of(marking, capture.node, source, &index) else {
                     continue;
                 };
+                if let Some(module) = declared_test_module(capture.node, source) {
+                    test_mod_declarations.push(module);
+                }
                 rows.extend(span.first_row..=span.last_row);
                 spans.push(span);
             }
@@ -172,7 +196,7 @@ impl TreeRules {
             rows,
             spans,
             status: ParseStatus::Clean,
-            test_mod_declarations: Vec::new(),
+            test_mod_declarations,
         })
     }
 
@@ -337,6 +361,33 @@ impl Compiled {
             None
         }
     }
+}
+
+/// The module a `#[cfg(test)] mod <name>;` moves its test code into, where
+/// `node` is such a declaration.
+///
+/// A node reaches here only once the rule has decided it is test code, so the
+/// `#[cfg(test)]` has already been read off the chain of attributes before it.
+/// What is left to tell apart is `mod tests;` from `mod tests { … }`, and the
+/// two differ by a child rather than by a character: the braces and everything
+/// in them are the `body` field of the node, so its *absence* is the question
+/// asked here. Looking for a `;` in the text would answer the same for a module
+/// whose body holds one, which is every module that holds a statement.
+///
+/// The name comes back through `utf8_text`, which reads a byte range as a
+/// string, so a module named in Japanese is read exactly as one named in ASCII
+/// is. Nothing here indexes the source.
+///
+/// Returns `None` for every node that is not such a declaration, which is every
+/// node of every other language: `mod_item` is a kind of the Rust grammar
+/// alone, and Rust is the one language of the table whose test code can live in
+/// a file that says nothing about itself.
+fn declared_test_module(node: Node<'_>, source: &str) -> Option<String> {
+    if node.kind() != MOD_ITEM || node.child_by_field_name(FIELD_BODY).is_some() {
+        return None;
+    }
+    let name = node.child_by_field_name(FIELD_NAME)?;
+    name.utf8_text(source.as_bytes()).ok().map(str::to_string)
 }
 
 /// What a capture of this name marks, or `None` where it marks nothing.

@@ -20,7 +20,7 @@ use cdva::{
     lines, resolve_test_modules, Counter, Counts, FileCount, Language, PathRules, Rule, Span,
     TreeRules,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A file the pass names: production code to look at, and no test node in it,
 /// so only a declaration in another file can move it into the test bucket.
@@ -63,7 +63,7 @@ fn count_under(rules: PathRules, path: &str, source: &str) -> FileCount {
 fn find<'files>(files: &'files [FileCount], path: &str) -> &'files FileCount {
     files
         .iter()
-        .find(|file| file.path == PathBuf::from(path))
+        .find(|file| file.path.as_path() == Path::new(path))
         .unwrap_or_else(|| panic!("`{path}` is one of the counted files"))
 }
 
