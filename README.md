@@ -724,8 +724,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     hunt that mines prints a `mine depth` row, a `mine prefix` row (as a block length, `/16`), a
     `mine per prefix` row, and a `mine delay` row under it.
   - Each destination of a hunt writes one run into one file, with the records that a normal run
-    writes. The `run` record of each destination carries the identifier of the hunt, so a reader
-    groups the runs of one hunt, and `replay` folds any one of them with no change. The hunt holds
+    writes. Every destination writes one, the mined ones as well as the independent ones, so the
+    file holds every path the hunt measured and not the four that the table ranks. The `run`
+    record of each destination carries the identifier of the hunt, so a reader groups the runs of
+    one hunt, and `replay` folds any one of them with no change. The `run` record of a mined
+    destination also carries a `mine` field, which holds the address of the first hit whose mine
+    drew it. A run of an independent draw carries no such field, and neither does a run that no
+    hunt made. A reader thus tells the two apart, finds the path that each mine measured, and
+    counts the hops that the mines added, long after the hunt printed its summary. The hunt holds
     many destinations at once, so the records of two of them stand between each other in the file.
     The records of one destination stay in order, which is what `replay` folds. A fault that stops
     the hunt closes every destination that stood at that moment: each of those runs takes an `end`
