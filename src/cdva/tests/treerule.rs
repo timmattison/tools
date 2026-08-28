@@ -381,6 +381,46 @@ fn a_missing_token_fails_the_parse_although_the_tree_holds_no_error_node() {
 }
 
 #[test]
+fn the_tree_rule_of_every_language_in_the_table_compiles() {
+    let rules = TreeRules::new();
+    for &language in Language::all() {
+        let named = language.name();
+        // The four accessors read one column, so a row cannot hold half a rule
+        // — a query with no grammar, or an attribute chain belonging to a
+        // language whose query never captures a candidate.
+        assert_eq!(
+            language.grammar().is_some(),
+            language.tree_query().is_some(),
+            "{named}: a grammar and a query arrive together or not at all"
+        );
+        if language.tree_query().is_none() {
+            assert!(language.attribute_chain().is_none(), "{named}");
+            assert!(language.scope_kinds().is_empty(), "{named}");
+        }
+
+        // Compiling the rule is what refuses a query that does not parse, a
+        // capture name that marks nothing, and a pattern that is not a regular
+        // expression. Asking for the outcome of an empty source is what makes
+        // it compile, so this call is the assertion.
+        let outcome = rules.outcome("", language);
+        assert_eq!(
+            outcome.is_some(),
+            language.tree_query().is_some(),
+            "{named}: a language answers the tree rule exactly when it has one"
+        );
+    }
+
+    assert!(
+        Language::Rust.tree_query().is_some(),
+        "Rust is the language this slice reads"
+    );
+    assert!(
+        Language::Markdown.tree_query().is_none(),
+        "a language with no code to parse carries no rule"
+    );
+}
+
+#[test]
 fn a_language_with_no_tree_rule_is_not_parsed() {
     let source = "package main\n\nfunc TestThing(t *testing.T) {\n\tt.Fatal(\"x\")\n}\n";
     let path = Path::new("src/thing.go");

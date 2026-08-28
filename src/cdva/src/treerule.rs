@@ -5,41 +5,176 @@
 //! a file that the path rule left [`Unmarked`], by parsing it and asking a
 //! tree-sitter query which of its nodes are tests. [`TreeRules::outcome`] is
 //! the whole interface: hand it a source and its language, and it hands back
-//! the rows.
+//! the rows. Everything below — the grammar, the query, the capture names, the
+//! chain of attributes, the recovery of the parser — stays behind that call,
+//! and adding a language is a row of the table in [`crate::lang`] plus a
+//! fixture.
+//!
+//! # The three capture names
+//!
+//! A capture whose name starts with `_` is a helper for a `#match?` predicate
+//! and marks nothing. The three that mark are:
+//!
+//! - `@test` — the span of the captured node is test code.
+//! - `@candidate` — the node is test code *only when* the chain of attributes
+//!   before it matches, and the span then reaches back to the first attribute
+//!   of that chain. Rust needs this, because there an attribute is a sibling of
+//!   the item it decorates rather than a child of it.
+//! - `@test_scope` — the outermost enclosing node of a kind the language lists
+//!   is test code.
+//!
+//! Any other capture name is a mistake in the table, and it is refused loudly:
+//! a capture the rule quietly ignored would mark nothing, and a language that
+//! marks nothing reads exactly like a language with no test code in it.
+//!
+//! # A parse that did not hold
+//!
+//! Tree-sitter recovers from a syntax error and still returns a tree, so a
+//! parse that threw nothing proves nothing. Two shapes of defect come back:
+//! an `ERROR` node, for input the parser could not fit, and a `MISSING` node,
+//! for a token the parser inserted to carry on. Both were measured against
+//! `tree-sitter-rust` 0.24, and `Node::has_error` on the root reports both —
+//! a `let x = 1` with no semicolon yields a tree whose only defect is a
+//! `MISSING ";"` and whose root still answers `true`. So the one call is
+//! enough, and no walk of the tree is needed.
+//!
+//! A file whose parse did not hold counts entirely as production code. The
+//! marking of such a file is not to be trusted, and a guessed test count is
+//! worse than none: it reads exactly like a measured one.
 //!
 //! [`Unmarked`]: crate::pathrule::PathVerdict::Unmarked
 
-use crate::file::{ParseStatus, Span};
-use crate::lang::Language;
+use crate::file::{ParseStatus, Rule, Span};
+use crate::lang::{AttributeChain, Language};
+use crate::lines::LineIndex;
+use regex::Regex;
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
+use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
+
+/// The capture naming a node whose own span is test code.
+const CAPTURE_TEST: &str = "test";
+
+/// The capture naming a node that is test code when its attribute chain says
+/// so.
+const CAPTURE_CANDIDATE: &str = "candidate";
+
+/// The capture naming a node whose outermost enclosing scope is test code.
+const CAPTURE_TEST_SCOPE: &str = "test_scope";
 
 /// The rows of a file that hold test code, and how the parse went.
 pub struct TreeOutcome {
     /// The 1-based rows that hold test code.
     pub rows: BTreeSet<u32>,
-    /// The regions the query matched, in the order it found them.
+    /// The regions the query matched, in the order it found them. Two of them
+    /// may cover the same row — a `#[test] fn` inside a `#[cfg(test)] mod` is
+    /// two nodes over one region — which is why the rows are a set and not a
+    /// sum of lengths.
     pub spans: Vec<Span>,
     /// Whether the parse held.
     pub status: ParseStatus,
 }
 
+impl TreeOutcome {
+    /// The outcome of a parse that did not hold.
+    ///
+    /// No row is a test row, so the file counts entirely as production code.
+    fn failed() -> Self {
+        Self {
+            rows: BTreeSet::new(),
+            spans: Vec::new(),
+            status: ParseStatus::Failed,
+        }
+    }
+}
+
 /// Parses a file and asks it which of its rows belong to a test.
-pub struct TreeRules {}
+pub struct TreeRules {
+    /// One slot per language of [`Language::all`], in that order, filled the
+    /// first time a file of that language arrives.
+    ///
+    /// A `Query` and a `Regex` are both costly to build and both `Sync`, so
+    /// each is built once and then read from every thread that counts a file.
+    /// The slot is lazy rather than eager because a run over a tree of one
+    /// language would otherwise pay to compile the queries of a dozen
+    /// languages it never reads.
+    compiled: Vec<OnceLock<Option<Compiled>>>,
+}
 
 impl TreeRules {
     /// A tree rule that reads the query of every language that has one.
     #[must_use]
     pub fn new() -> Self {
-        Self {}
+        Self {
+            compiled: std::iter::repeat_with(OnceLock::new)
+                .take(Language::all().len())
+                .collect(),
+        }
     }
 
     /// The test rows of `source`.
     ///
     /// Returns `None` when the language has no tree rule, which is the answer
-    /// that leaves the whole file to the production bucket.
+    /// that leaves the whole file to the production bucket without opening a
+    /// parser at all.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the query of the language table does not compile against
+    /// the grammar of that table, when it captures a name that marks nothing,
+    /// or when its attribute pattern is not a regular expression. Each of
+    /// those is a fact of the table rather than of the file being counted, a
+    /// test asserts all three for every language, and an answer of "no test
+    /// rows" instead would silently miscount every file of that language.
     #[must_use]
-    pub fn outcome(&self, _source: &str, _language: Language) -> Option<TreeOutcome> {
-        None
+    pub fn outcome(&self, source: &str, language: Language) -> Option<TreeOutcome> {
+        let compiled = self.compiled(language)?;
+
+        // A fresh parser for every call. `tree_sitter::Parser` is `Send` but
+        // not `Sync`, so one cannot be shared between the rayon threads that
+        // read the files, and a single parser behind a lock would serialise the
+        // one part of the run worth doing in parallel. Building one is cheap
+        // beside parsing a file.
+        let mut parser = Parser::new();
+        if parser.set_language(&compiled.grammar).is_err() {
+            return Some(TreeOutcome::failed());
+        }
+        let Some(tree) = parser.parse(source, None) else {
+            return Some(TreeOutcome::failed());
+        };
+        if tree.root_node().has_error() {
+            return Some(TreeOutcome::failed());
+        }
+
+        let index = LineIndex::new(source);
+        let mut rows = BTreeSet::new();
+        let mut spans = Vec::new();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&compiled.query, tree.root_node(), source.as_bytes());
+        while let Some(matched) = matches.next() {
+            for capture in matched.captures {
+                let Some(marking) = compiled.marking(capture.index) else {
+                    continue;
+                };
+                let Some(span) = compiled.span_of(marking, capture.node, source, &index) else {
+                    continue;
+                };
+                rows.extend(span.first_row..=span.last_row);
+                spans.push(span);
+            }
+        }
+
+        Some(TreeOutcome {
+            rows,
+            spans,
+            status: ParseStatus::Clean,
+        })
+    }
+
+    /// The compiled rule of a language, built on first use.
+    fn compiled(&self, language: Language) -> Option<&Compiled> {
+        let slot = self.compiled.get(index_of(language)?)?;
+        slot.get_or_init(|| Compiled::new(language)).as_ref()
     }
 }
 
@@ -47,4 +182,208 @@ impl Default for TreeRules {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The slot a language's compiled rule lives in, which is its position in
+/// [`Language::all`].
+fn index_of(language: Language) -> Option<usize> {
+    Language::all().iter().position(|&known| known == language)
+}
+
+/// What a capture marks.
+#[derive(Clone, Copy)]
+enum Marking {
+    /// `@test`: the span of the captured node.
+    Whole,
+    /// `@candidate`: the node together with the chain of attributes before it,
+    /// and only when one of those attributes says so.
+    Candidate,
+    /// `@test_scope`: the outermost enclosing node of a listed kind.
+    Scope,
+}
+
+/// One language's tree rule, compiled.
+struct Compiled {
+    /// The grammar the parser is set to.
+    grammar: tree_sitter::Language,
+    /// The query, compiled against that grammar.
+    query: Query,
+    /// What each capture of the query marks, by capture index.
+    markings: Vec<Option<Marking>>,
+    /// The attribute chain and the compiled form of its pattern.
+    chain: Option<(AttributeChain, Regex)>,
+    /// The node kinds a `@test_scope` capture may climb to.
+    scope_kinds: &'static [&'static str],
+}
+
+impl Compiled {
+    /// Compiles the tree rule of a language, or `None` where it has none.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the table's query does not compile, captures a name that
+    /// marks nothing, or carries a pattern that is not a regular expression.
+    /// See [`TreeRules::outcome`].
+    fn new(language: Language) -> Option<Self> {
+        let source = language.tree_query()?;
+        let grammar = language.grammar()?;
+        let query = Query::new(&grammar, source).unwrap_or_else(|error| {
+            panic!(
+                "the tree query of {} does not compile: {error}",
+                language.name()
+            )
+        });
+        let markings = query
+            .capture_names()
+            .iter()
+            .map(|name| marking_of(name, language))
+            .collect();
+        let chain = language.attribute_chain().map(|chain| {
+            let pattern = Regex::new(chain.pattern).unwrap_or_else(|error| {
+                panic!(
+                    "the attribute pattern of {} is not a regular expression: {error}",
+                    language.name()
+                )
+            });
+            (chain, pattern)
+        });
+
+        Some(Self {
+            grammar,
+            query,
+            markings,
+            chain,
+            scope_kinds: language.scope_kinds(),
+        })
+    }
+
+    /// What the capture of this index marks, where it marks anything.
+    fn marking(&self, index: u32) -> Option<Marking> {
+        *self.markings.get(usize::try_from(index).ok()?)?
+    }
+
+    /// The span a capture marks, or `None` where this capture marks nothing
+    /// after all.
+    ///
+    /// A `@candidate` whose attribute chain says nothing is the only capture
+    /// that can decline here, and declining is the whole point of the name: a
+    /// plain `fn` and a `#[test] fn` are the same node kind, and only the
+    /// siblings before them tell the two apart.
+    fn span_of(
+        &self,
+        marking: Marking,
+        node: Node<'_>,
+        source: &str,
+        index: &LineIndex,
+    ) -> Option<Span> {
+        let (first_byte, end_byte, kind) = match marking {
+            Marking::Whole => (node.start_byte(), node.end_byte(), node.kind()),
+            Marking::Candidate => (
+                self.chain_start(node, source)?,
+                node.end_byte(),
+                node.kind(),
+            ),
+            Marking::Scope => {
+                let scope = outermost_scope(node, self.scope_kinds);
+                (scope.start_byte(), scope.end_byte(), scope.kind())
+            }
+        };
+        let (first_row, last_row) = rows_of(index, first_byte, end_byte);
+
+        Some(Span {
+            first_row,
+            last_row,
+            rule: Rule::TreeNode(kind.to_string()),
+        })
+    }
+
+    /// The byte at which the chain of attributes before `node` starts, where
+    /// one of those attributes says the node is test code.
+    ///
+    /// The whole contiguous chain is walked, and not the one adjacent sibling.
+    /// A stack such as `#[rstest]` over `#[case(1)]` puts the attribute that
+    /// decides two siblings back, so a walk of one sibling reads `#[case(1)]`,
+    /// finds nothing, and drops that test — while still passing every fixture
+    /// whose deciding attribute happens to sit next to the item.
+    ///
+    /// The text of an attribute is taken through `utf8_text`, which reads a
+    /// byte range as a string. Nothing here indexes the source, so a file of
+    /// Japanese or of emoji is read exactly as one of ASCII is.
+    fn chain_start(&self, node: Node<'_>, source: &str) -> Option<usize> {
+        let (chain, pattern) = self.chain.as_ref()?;
+        let mut start = None;
+        let mut decided = false;
+
+        let mut sibling = node.prev_sibling();
+        while let Some(attribute) = sibling {
+            if attribute.kind() != chain.kind {
+                break;
+            }
+            if let Ok(text) = attribute.utf8_text(source.as_bytes()) {
+                decided |= pattern.is_match(text);
+            }
+            start = Some(attribute.start_byte());
+            sibling = attribute.prev_sibling();
+        }
+
+        if decided {
+            start
+        } else {
+            None
+        }
+    }
+}
+
+/// What a capture of this name marks, or `None` where it marks nothing.
+///
+/// A name that starts with `_` is a helper a `#match?` predicate reads, and it
+/// marks nothing on purpose. Any other name must be one of the three that
+/// carry meaning; a fourth is refused rather than ignored, because a capture
+/// the rule skipped would make the query mark less than its author wrote and
+/// nothing in the output would say so.
+fn marking_of(name: &str, language: Language) -> Option<Marking> {
+    match name {
+        CAPTURE_TEST => Some(Marking::Whole),
+        CAPTURE_CANDIDATE => Some(Marking::Candidate),
+        CAPTURE_TEST_SCOPE => Some(Marking::Scope),
+        _ if name.starts_with('_') => None,
+        _ => panic!(
+            "the tree query of {} captures `@{name}`, which marks nothing",
+            language.name()
+        ),
+    }
+}
+
+/// The outermost node of a listed kind at or above `node`.
+///
+/// Elixir is what needs this: `use ExUnit.Case` is a `call`, and so is the
+/// `defmodule` that holds it, so climbing the `call` ancestors of the `use`
+/// reaches the module it belongs to and leaves a neighbouring production
+/// module alone. A node that sits under no ancestor of a listed kind marks its
+/// own span, so a query naming a kind the tree never holds marks too little
+/// rather than disappearing.
+fn outermost_scope<'tree>(node: Node<'tree>, kinds: &[&str]) -> Node<'tree> {
+    let mut outermost = node;
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        if kinds.contains(&parent.kind()) {
+            outermost = parent;
+        }
+        current = parent;
+    }
+    outermost
+}
+
+/// The 1-based inclusive rows that a byte range covers.
+///
+/// Tree-sitter counts rows from zero and everything else in this tool counts
+/// them from one, so the conversion happens here and in no other place. The
+/// end of the range is read one byte back, because a node that ends at the
+/// first byte of the next row must not claim that row.
+fn rows_of(index: &LineIndex, start_byte: usize, end_byte: usize) -> (u32, u32) {
+    let first = index.row_of(start_byte);
+    let last = index
+        .row_of(end_byte.saturating_sub(1).max(start_byte))
+        .max(first);
+    (first.saturating_add(1), last.saturating_add(1))
 }

@@ -98,6 +98,62 @@ pub struct AttributeChain {
     pub pattern: &'static str,
 }
 
+/// The tree rule of one language: the grammar, the query, and the two facts
+/// about the shape of that language's tree that a query cannot state.
+///
+/// The grammar arrives behind a function because a `tree_sitter::Language` is
+/// built at run time and a row of this table is built at compile time.
+struct TreeRule {
+    /// The tree-sitter grammar of the language.
+    grammar: fn() -> tree_sitter::Language,
+    /// The query naming the nodes whose rows are test rows.
+    query: &'static str,
+    /// The attribute chain, where the language spells an attribute as a sibling.
+    attribute_chain: Option<AttributeChain>,
+    /// The node kinds a `@test_scope` capture may climb to.
+    scope_kinds: &'static [&'static str],
+}
+
+/// The nodes of a Rust file whose rows may be test rows.
+///
+/// Both are candidates rather than tests, because in Rust nothing inside
+/// either node says it is one: the `#[cfg(test)]` or `#[test]` that decides is
+/// a *sibling* of the item, so the chain of attributes before the node has to
+/// be read as well.
+const RUST_QUERY: &str = "(mod_item) @candidate\n(function_item) @candidate\n";
+
+/// The attributes that make a Rust item test code.
+///
+/// This one expression covers `#[cfg(test)] mod tests`, `#[cfg(test)] mod
+/// other;`, `#[test] fn`, `#[tokio::test] async fn`, `#[cfg(all(test, feature =
+/// "x"))] mod`, `#[bench]`, and the stack `#[rstest]` over `#[case(1)]`. It
+/// leaves a `///` doc comment that holds a fenced example alone, which is what
+/// keeps a doc test a comment and the total of this tool in agreement with
+/// `cloc`.
+const RUST_ATTRIBUTE: &str = r"^#\[\s*(cfg\s*\(.*\btest\b|cfg_attr\s*\(.*\btest\b|.*\btest\s*\]|.*::test\s*\]|rstest|bench|test_case|proptest)";
+
+/// The grammar of Rust.
+fn rust_grammar() -> tree_sitter::Language {
+    tree_sitter_rust::LANGUAGE.into()
+}
+
+/// The tree rule of Rust.
+const RUST_TREE: Option<TreeRule> = Some(TreeRule {
+    grammar: rust_grammar,
+    query: RUST_QUERY,
+    attribute_chain: Some(AttributeChain {
+        kind: "attribute_item",
+        pattern: RUST_ATTRIBUTE,
+    }),
+    scope_kinds: &[],
+});
+
+/// A language whose test code the path rule finds on its own, for now.
+///
+/// A later slice turns one of these into a rule of its own, and the whole of
+/// that change is this word and a fixture.
+const NO_TREE: Option<TreeRule> = None;
+
 /// A block comment that is read anywhere in a row.
 const fn block(open: &'static str, close: &'static str) -> BlockSpec {
     BlockSpec {
@@ -184,7 +240,8 @@ const PERL_BLOCK: BlockSpec = anchored("=pod", "=cut");
 ///
 /// Each row reads
 /// `Variant => "Display name", [extensions], [file names], line: [tokens],
-/// block: [specs], nested: bool, strings: [specs], raw_hash: bool;`.
+/// block: [specs], nested: bool, strings: [specs], raw_hash: bool,
+/// tree: rule;`.
 ///
 /// Extensions are written in lower case, because [`Language::from_path`]
 /// compares them without regard to case. File names are written exactly as they
@@ -198,7 +255,8 @@ macro_rules! language_table {
             block: [$($block:ident),* $(,)?],
             nested: $nested:literal,
             strings: [$($string:ident),* $(,)?],
-            raw_hash: $raw_hash:literal;
+            raw_hash: $raw_hash:literal,
+            tree: $tree:ident;
     )*) => {
         /// A language that `cdva` counts.
         ///
@@ -236,6 +294,21 @@ macro_rules! language_table {
                     })*
                 }
             }
+
+            /// The tree rule of the language, where it has one.
+            ///
+            /// This is the one entrance to the column, and the four public
+            /// methods below read it. A caller therefore cannot hold half a
+            /// rule — a query with no grammar, or an attribute chain belonging
+            /// to a language whose query never captures a candidate.
+            fn tree_rule(self) -> Option<&'static TreeRule> {
+                match self {
+                    $(Language::$variant => {
+                        static RULE: Option<TreeRule> = $tree;
+                        RULE.as_ref()
+                    })*
+                }
+            }
         }
 
         /// Every language, in the order of the table.
@@ -254,85 +327,85 @@ macro_rules! language_table {
 
 language_table! {
     Rust => "Rust", ["rs"], [],
-        line: ["//"], block: [C_BLOCK], nested: true, strings: [DQ_ESC_ML], raw_hash: true;
+        line: ["//"], block: [C_BLOCK], nested: true, strings: [DQ_ESC_ML], raw_hash: true, tree: RUST_TREE;
     Go => "Go", ["go"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, BACKTICK, SQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, BACKTICK, SQ_ESC], raw_hash: false, tree: NO_TREE;
     Python => "Python", ["py", "pyi"], [],
-        line: ["#"], block: [], nested: false, strings: [TDQ_DOC, TSQ_DOC, DQ_ESC, SQ_ESC], raw_hash: false;
+        line: ["#"], block: [], nested: false, strings: [TDQ_DOC, TSQ_DOC, DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     JavaScript => "JavaScript", ["js", "jsx", "mjs", "cjs"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, tree: NO_TREE;
     TypeScript => "TypeScript", ["ts", "mts", "cts"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, tree: NO_TREE;
     Tsx => "TSX", ["tsx"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, tree: NO_TREE;
     Java => "Java", ["java"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     Kotlin => "Kotlin", ["kt", "kts"], [],
-        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false, tree: NO_TREE;
     CSharp => "C#", ["cs"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     Ruby => "Ruby", ["rb", "rake", "gemspec"], ["Gemfile", "Rakefile"],
-        line: ["#"], block: [RUBY_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false;
+        line: ["#"], block: [RUBY_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     Swift => "Swift", ["swift"], [],
-        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false, tree: NO_TREE;
     Elixir => "Elixir", ["ex", "exs"], [],
-        line: ["#"], block: [], nested: false, strings: [TDQ, DQ_ESC], raw_hash: false;
+        line: ["#"], block: [], nested: false, strings: [TDQ, DQ_ESC], raw_hash: false, tree: NO_TREE;
     Zig => "Zig", ["zig"], [],
-        line: ["//"], block: [], nested: false, strings: [DQ_ESC], raw_hash: false;
+        line: ["//"], block: [], nested: false, strings: [DQ_ESC], raw_hash: false, tree: NO_TREE;
     C => "C", ["c"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     CHeader => "C/C++ Header", ["h"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     Cpp => "C++", ["cc", "cpp", "cxx"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     CppHeader => "C++ Header", ["hh", "hpp", "hxx"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     Php => "PHP", ["php"], [],
-        line: ["//", "#"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false;
+        line: ["//", "#"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     Shell => "Shell", ["sh", "bash", "zsh", "bats"], [],
-        line: ["#"], block: [], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false;
+        line: ["#"], block: [], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
     PowerShell => "PowerShell", ["ps1", "psm1", "psd1"], [],
-        line: ["#"], block: [POWERSHELL_BLOCK], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false;
+        line: ["#"], block: [POWERSHELL_BLOCK], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
     Batch => "Batch", ["bat", "cmd"], [],
-        line: ["::", "REM ", "rem "], block: [], nested: false, strings: [DQ_PLAIN], raw_hash: false;
+        line: ["::", "REM ", "rem "], block: [], nested: false, strings: [DQ_PLAIN], raw_hash: false, tree: NO_TREE;
     Html => "HTML", ["html", "htm"], [],
-        line: [], block: [MARKUP_BLOCK], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false;
+        line: [], block: [MARKUP_BLOCK], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
     Xml => "XML", ["xml", "xsd", "xsl"], [],
-        line: [], block: [MARKUP_BLOCK], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false;
+        line: [], block: [MARKUP_BLOCK], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
     Css => "CSS", ["css"], [],
-        line: [], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false;
+        line: [], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     Scss => "SCSS", ["scss", "sass"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     Json => "JSON", ["json"], [],
-        line: [], block: [], nested: false, strings: [DQ_ESC], raw_hash: false;
+        line: [], block: [], nested: false, strings: [DQ_ESC], raw_hash: false, tree: NO_TREE;
     Yaml => "YAML", ["yaml", "yml"], [],
-        line: ["#"], block: [], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false;
+        line: ["#"], block: [], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
     Toml => "TOML", ["toml"], [],
-        line: ["#"], block: [], nested: false, strings: [TDQ, TSQ, DQ_ESC, SQ_PLAIN], raw_hash: false;
+        line: ["#"], block: [], nested: false, strings: [TDQ, TSQ, DQ_ESC, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
     Ini => "INI", ["ini", "cfg"], [],
-        line: ["#", ";"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false;
+        line: ["#", ";"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
     Markdown => "Markdown", ["md", "markdown"], [],
-        line: [], block: [], nested: false, strings: [], raw_hash: false;
+        line: [], block: [], nested: false, strings: [], raw_hash: false, tree: NO_TREE;
     Sql => "SQL", ["sql"], [],
-        line: ["--"], block: [C_BLOCK], nested: false, strings: [SQ_ESC, DQ_ESC], raw_hash: false;
+        line: ["--"], block: [C_BLOCK], nested: false, strings: [SQ_ESC, DQ_ESC], raw_hash: false, tree: NO_TREE;
     Makefile => "Makefile", ["mk", "mak"], ["Makefile", "makefile", "GNUmakefile"],
-        line: ["#"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false;
+        line: ["#"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
     Dockerfile => "Dockerfile", ["dockerfile"], ["Dockerfile", "Containerfile", "dockerfile", "containerfile"],
-        line: ["#"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false;
+        line: ["#"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
     Lua => "Lua", ["lua"], [],
-        line: ["--"], block: [LUA_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, LUA_LONG], raw_hash: false;
+        line: ["--"], block: [LUA_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, LUA_LONG], raw_hash: false, tree: NO_TREE;
     Scala => "Scala", ["scala", "sc"], [],
-        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false, tree: NO_TREE;
     Haskell => "Haskell", ["hs"], [],
-        line: ["--"], block: [HASKELL_BLOCK], nested: true, strings: [DQ_ESC], raw_hash: false;
+        line: ["--"], block: [HASKELL_BLOCK], nested: true, strings: [DQ_ESC], raw_hash: false, tree: NO_TREE;
     Nix => "Nix", ["nix"], [],
-        line: ["#"], block: [C_BLOCK], nested: false, strings: [NIX_INDENTED, DQ_ESC], raw_hash: false;
+        line: ["#"], block: [C_BLOCK], nested: false, strings: [NIX_INDENTED, DQ_ESC], raw_hash: false, tree: NO_TREE;
     Protobuf => "Protocol Buffers", ["proto"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, tree: NO_TREE;
     GraphQL => "GraphQL", ["graphql", "gql"], [],
-        line: ["#"], block: [], nested: false, strings: [TDQ_DOC, DQ_ESC], raw_hash: false;
+        line: ["#"], block: [], nested: false, strings: [TDQ_DOC, DQ_ESC], raw_hash: false, tree: NO_TREE;
     Perl => "Perl", ["pl", "pm"], [],
-        line: ["#"], block: [PERL_BLOCK], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false;
+        line: ["#"], block: [PERL_BLOCK], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, tree: NO_TREE;
 }
 
 impl Language {
@@ -380,7 +453,7 @@ impl Language {
     /// language whose test code is found by its path alone.
     #[must_use]
     pub fn grammar(self) -> Option<tree_sitter::Language> {
-        None
+        self.tree_rule().map(|rule| (rule.grammar)())
     }
 
     /// The query naming the nodes whose rows are test rows.
@@ -388,7 +461,7 @@ impl Language {
     /// Returns `None` for a language with no tree rule.
     #[must_use]
     pub fn tree_query(self) -> Option<&'static str> {
-        None
+        self.tree_rule().map(|rule| rule.query)
     }
 
     /// The attribute chain, for a language whose attribute is a sibling.
@@ -397,7 +470,7 @@ impl Language {
     /// decorates, where the query alone gives the whole span.
     #[must_use]
     pub fn attribute_chain(self) -> Option<AttributeChain> {
-        None
+        self.tree_rule().and_then(|rule| rule.attribute_chain)
     }
 
     /// The node kinds that a `@test_scope` capture may climb to.
@@ -405,6 +478,6 @@ impl Language {
     /// Empty for a language whose query never captures `@test_scope`.
     #[must_use]
     pub fn scope_kinds(self) -> &'static [&'static str] {
-        &[]
+        self.tree_rule().map_or(&[], |rule| rule.scope_kinds)
     }
 }
