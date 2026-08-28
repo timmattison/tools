@@ -2,7 +2,7 @@
 # contributor resolves the exact same lint set instead of whatever stable
 # happens to be installed. Formatting is already insulated independently by
 # `style_edition` in rustfmt.toml, which holds rustfmt's output stable across
-# compiler versions (verified byte-identical from 1.88 through 1.97.1), so the
+# compiler versions (verified byte-identical from 1.88 through 1.98.0), so the
 # pin is carrying the clippy contract, not the formatting one. See issue #273.
 #
 # Bump deliberately, and only once `cargo clippy --all-targets --workspace --
@@ -10,5 +10,5 @@
 # renamed lint into a repo-wide commit blocker. Editing this file re-triggers
 # the full Rust gate in .husky/pre-commit, which re-proves that on commit.
 [toolchain]
-channel = "1.97.1"
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]
