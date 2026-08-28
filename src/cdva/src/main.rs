@@ -4,11 +4,28 @@
 //! code apart from the production code.
 //!
 //! This slice carries the command line, the walk, and the default table. The
-//! tree rule and the other reports arrive in later slices.
+//! numbers it prints are the path rule alone: a file whose path says it is test
+//! material is test material from its first row to its last. The tree rule, and
+//! every report but the table, arrive in later slices.
+//!
+//! # Two things this command states rather than assumes
+//!
+//! **A file the walk found twice is counted once.** Two roots that overlap —
+//! `cdva . src` — hand the same file to the counter twice, and a total that
+//! counted it twice reads exactly like a correct one. The key is the canonical
+//! path, because the two roots reach the same file by two different names.
+//!
+//! **A file that cannot be read does not stop the run.** A tree of thousands
+//! holds a file whose mode says no, and a counter that died on it would be a
+//! counter nobody could use. The path and the reason go to standard error, the
+//! file is left out of the table, and the run carries on.
 
 use anyhow::Result;
 use buildinfo::version_string;
+use cdva::{render_table, walk, Counter, FileCount, PathRules, Summary, WalkOptions};
 use clap::Parser;
+use rayon::prelude::*;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// The path the tool counts when the command line names none.
@@ -41,7 +58,59 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+
+    let counter = Counter::new(PathRules::new(&cli.test_glob, &cli.production_glob)?);
+    let found = walk(
+        &cli.paths,
+        WalkOptions {
+            hidden: cli.hidden,
+            no_ignore: cli.no_ignore,
+        },
+    )?;
+
+    let counted = count_all(&counter, &once_each(found));
+    print!("{}", render_table(&Summary::new(counted)));
 
     Ok(())
+}
+
+/// Every file of the walk, with a file two roots both found kept once.
+///
+/// The canonical path is the key, because two overlapping roots reach one file
+/// by two names and neither name tells the difference on its own. A path that
+/// cannot be canonicalised — a broken symbolic link, a race with whoever is
+/// writing the tree — answers for itself, so the file is still counted.
+///
+/// The first of the two entries is the one kept, so the order of the walk is the
+/// order of the result and two runs over one tree read the same.
+fn once_each(found: Vec<(PathBuf, PathBuf)>) -> Vec<(PathBuf, PathBuf)> {
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    found
+        .into_iter()
+        .filter(|(path, _)| {
+            seen.insert(std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+        })
+        .collect()
+}
+
+/// Counts every file, in parallel, and reports the ones that could not be read.
+///
+/// Reading a file and classifying it depend on nothing but that file, so the
+/// files are independent and `rayon` splits them across the cores. The parallel
+/// `filter_map` keeps the order of its input, so the table of a second run over
+/// one tree is the table of the first.
+fn count_all(counter: &Counter, files: &[(PathBuf, PathBuf)]) -> Vec<FileCount> {
+    files
+        .par_iter()
+        .filter_map(
+            |(path, relative)| match counter.count_path(path, relative) {
+                Ok(counted) => counted,
+                Err(error) => {
+                    eprintln!("cdva: {error:#}. The file is not counted.");
+                    None
+                }
+            },
+        )
+        .collect()
 }
