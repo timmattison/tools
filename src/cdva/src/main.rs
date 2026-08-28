@@ -23,7 +23,10 @@
 
 use anyhow::Result;
 use buildinfo::version_string;
-use cdva::{render_table, walk, Counter, FileCount, PathRules, Summary, TreeRules, WalkOptions};
+use cdva::{
+    render_table, resolve_test_modules, walk, Counter, FileCount, PathRules, Summary, TreeRules,
+    WalkOptions,
+};
 use clap::Parser;
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -71,7 +74,8 @@ fn main() -> Result<()> {
         },
     )?;
 
-    let counted = count_all(&counter, &once_each(found));
+    let mut counted = count_all(&counter, &once_each(found));
+    resolve_test_modules(&mut counted);
     print!("{}", render_table(&Summary::new(counted)));
 
     Ok(())

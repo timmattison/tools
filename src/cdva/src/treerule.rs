@@ -73,6 +73,9 @@ pub struct TreeOutcome {
     pub spans: Vec<Span>,
     /// Whether the parse held.
     pub status: ParseStatus,
+    /// The names of `#[cfg(test)] mod <name>;` declarations, each of which
+    /// moves the test code of this module into another file.
+    pub test_mod_declarations: Vec<String>,
 }
 
 impl TreeOutcome {
@@ -84,6 +87,7 @@ impl TreeOutcome {
             rows: BTreeSet::new(),
             spans: Vec::new(),
             status: ParseStatus::Failed,
+            test_mod_declarations: Vec::new(),
         }
     }
 }
@@ -168,6 +172,7 @@ impl TreeRules {
             rows,
             spans,
             status: ParseStatus::Clean,
+            test_mod_declarations: Vec::new(),
         })
     }
 

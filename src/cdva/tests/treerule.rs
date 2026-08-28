@@ -39,8 +39,10 @@ const FIXTURES: &[&str] = &[
     "doc_test",
     "missing_node",
     "multibyte_mod",
+    "multibyte_mod_declaration",
     "nested_overlap",
     "no_tests",
+    "plain_mod_declaration",
     "rstest_stack",
     "syntax_error",
     "test_fn",
@@ -145,6 +147,13 @@ fn listed_names() -> BTreeSet<String> {
     FIXTURES.iter().map(|name| (*name).to_string()).collect()
 }
 
+/// The modules a fixture declares its test code lives in, in the order the rule
+/// read them.
+fn declarations(name: &str) -> Vec<String> {
+    let source = source(name);
+    counted(name, &source).test_mod_declarations
+}
+
 #[test]
 fn cfg_test_mod_marks_the_module_and_the_attribute_above_it() {
     assert_marking("cfg_test_mod");
@@ -217,6 +226,70 @@ fn missing_node_marks_nothing() {
 #[test]
 fn multibyte_mod_marks_the_module_that_holds_characters_of_many_bytes() {
     assert_marking("multibyte_mod");
+}
+
+#[test]
+fn plain_mod_declaration_marks_nothing() {
+    assert_marking("plain_mod_declaration");
+}
+
+#[test]
+fn multibyte_mod_declaration_marks_the_two_rows_of_a_declaration_of_many_bytes() {
+    assert_marking("multibyte_mod_declaration");
+}
+
+#[test]
+fn a_declaration_with_no_body_names_the_module_that_holds_its_test_code() {
+    assert_eq!(
+        declarations("cfg_test_mod_declaration"),
+        vec!["tests".to_string()],
+        "`mod tests;` moves the test code of this file into another one"
+    );
+}
+
+#[test]
+fn a_test_module_with_a_body_names_no_other_file() {
+    for name in [
+        "cfg_test_mod",
+        "cfg_all_test",
+        "multibyte_mod",
+        "nested_overlap",
+    ] {
+        assert!(
+            declarations(name).is_empty(),
+            "`{name}` holds its test code itself, so it names no other file"
+        );
+    }
+}
+
+#[test]
+fn a_declaration_with_no_cfg_test_names_nothing() {
+    assert!(
+        declarations("plain_mod_declaration").is_empty(),
+        "a plain `mod helpers;` is a module of production code"
+    );
+}
+
+#[test]
+fn a_declaration_of_a_module_whose_name_is_not_ascii_reads_the_whole_name() {
+    assert_eq!(
+        declarations("multibyte_mod_declaration"),
+        vec!["テスト".to_string()],
+        "the name is read as text and never sliced by byte"
+    );
+}
+
+#[test]
+fn a_fixture_that_declares_nothing_carries_no_declaration() {
+    for name in FIXTURES {
+        if ["cfg_test_mod_declaration", "multibyte_mod_declaration"].contains(name) {
+            continue;
+        }
+        assert!(
+            declarations(name).is_empty(),
+            "`{name}` holds no `#[cfg(test)] mod <name>;`"
+        );
+    }
 }
 
 #[test]

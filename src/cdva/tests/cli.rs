@@ -49,6 +49,14 @@ const HELPER: &str = "fn helper() -> u64 {\n    7\n}\n";
 /// A test file of four rows of code, which the built-in `tests/**` marks.
 const INTEGRATION_TEST: &str = "#[test]\nfn works() {\n    assert_eq!(1, 1);\n}\n";
 
+/// A library of five rows of code that moves its test code into another file.
+const DECLARES_A_TEST_MODULE: &str =
+    "pub fn add(a: u64, b: u64) -> u64 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests;\n";
+
+/// The file that declaration names: four rows of code, and nothing in it that
+/// any other rule of the tool would call a test.
+const DECLARED_TEST_MODULE: &str = "use super::add;\n\nfn checked() -> u64 {\n    add(1, 2)\n}\n";
+
 /// The binary, with every `GIT_*` variable of the caller removed.
 fn cdva() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cdva"));
@@ -203,6 +211,37 @@ fn a_user_glob_moves_a_file_into_the_test_bucket_and_another_takes_one_back_out(
         fields(&released_table, RUST_ROW)[TEST_CODE],
         "0",
         "a production glob of the user beats the built-in table:\n{released_table}"
+    );
+}
+
+#[test]
+fn a_test_module_declaration_moves_the_file_it_names_into_the_test_bucket() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", DECLARES_A_TEST_MODULE);
+    write(root.path(), "src/tests.rs", DECLARED_TEST_MODULE);
+
+    let output = cdva()
+        .arg(NO_IGNORE)
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        output.status.success(),
+        "a tree of two files counts: {}",
+        stderr(&output)
+    );
+    let table = stdout(&output);
+    let row = fields(&table, RUST_ROW);
+    assert_eq!(row[FILES], "2", "both files land in the Rust row:\n{table}");
+    assert_eq!(row[CODE], "9", "every row of code is counted:\n{table}");
+    assert_eq!(
+        row[TEST_CODE], "6",
+        "the four rows of src/tests.rs are test code, beside the two rows of the declaration:\n{table}"
+    );
+    assert_eq!(
+        row[TEST_FILES], "2",
+        "the file the declaration names is a test file, and so is the one that declares it:\n{table}"
     );
 }
 

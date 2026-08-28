@@ -40,6 +40,10 @@ pub enum Rule {
     PathGlob(String),
     /// The tree rule matched a node of this kind.
     TreeNode(String),
+    /// Another file declares this whole file as its test module, with a
+    /// `#[cfg(test)] mod <name>;` that names it. The name is the module's, as
+    /// the declaration spelled it, and not the file's.
+    ModDeclaration(String),
 }
 
 /// One marked region of one file, in 1-based inclusive rows.
@@ -92,6 +96,14 @@ pub struct FileCount {
     pub spans: Vec<Span>,
     /// Whether a parser ran over this file, and how it went.
     pub parse_status: ParseStatus,
+    /// The names of the `#[cfg(test)] mod <name>;` declarations this file
+    /// holds, each of which moves the test code of a module into another file.
+    ///
+    /// The names travel with the count so that [`resolve_test_modules`] can
+    /// read them without parsing anything a second time.
+    ///
+    /// [`resolve_test_modules`]: crate::modpass::resolve_test_modules
+    pub test_mod_declarations: Vec<String>,
 }
 
 impl FileCount {
@@ -189,6 +201,7 @@ impl Counter {
             test,
             spans,
             parse_status,
+            test_mod_declarations: Vec::new(),
         })
     }
 
