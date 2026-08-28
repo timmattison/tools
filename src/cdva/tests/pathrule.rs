@@ -290,7 +290,7 @@ fn the_verdict_names_the_glob_as_the_user_wrote_it() {
 fn an_invalid_glob_names_itself_in_the_error() {
     let broken = "src/[unclosed".to_string();
 
-    let error = PathRules::new(&[broken.clone()], &[])
+    let error = PathRules::new(std::slice::from_ref(&broken), &[])
         .expect_err("an unclosed character class is not a glob");
     let message = format!("{error:#}");
     assert!(
@@ -298,7 +298,7 @@ fn an_invalid_glob_names_itself_in_the_error() {
         "the error must name the glob that failed to compile, and said: {message}"
     );
 
-    let error = PathRules::new(&[], &[broken.clone()])
+    let error = PathRules::new(&[], std::slice::from_ref(&broken))
         .expect_err("a production glob is compiled the same way");
     let message = format!("{error:#}");
     assert!(

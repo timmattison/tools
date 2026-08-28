@@ -1124,6 +1124,7 @@ dependencies = [
  "anyhow",
  "buildinfo",
  "clap",
+ "globset",
 ]
 
 [[package]]

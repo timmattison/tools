@@ -12,6 +12,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
+globset.workspace = true
 
 [lints]
 workspace = true
