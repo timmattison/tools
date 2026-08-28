@@ -135,7 +135,9 @@ impl DvfsTable {
 /// whose frequency is zero is padding rather than a real step.
 #[must_use]
 pub fn decode_voltage_states(raw: &[u8]) -> Vec<Mhz> {
-    raw.chunks_exact(ENTRY_BYTES)
+    let (entries, _trailing_partial_entry) = raw.as_chunks::<ENTRY_BYTES>();
+    entries
+        .iter()
         .filter_map(|entry| {
             let (frequency, _voltage) = entry.split_at(ENTRY_BYTES / 2);
             let kilohertz = u32::from_le_bytes(frequency.try_into().ok()?);
