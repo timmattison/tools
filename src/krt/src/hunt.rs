@@ -1815,9 +1815,14 @@ impl Summary {
     /// added reads them. A hunt that asked for no partial path reports the
     /// reached paths alone.
     ///
-    /// One population answers every question that the summary states. A number
-    /// that reads a larger population names a path that the table drops, and
-    /// the reader of that number has no way to find the path.
+    /// One population answers both of those questions. A number of the table
+    /// that read a larger population would name a path that the table drops,
+    /// and the reader of that number would have no way to find the path.
+    ///
+    /// The reached count and the partial count of [`Summary::counts`] stand
+    /// outside this rule, and the doc there gives the reason. They count the
+    /// destinations that the hunt started against the bounds it ran to, so
+    /// they read every score whether the table ranks it or not.
     fn reported(&self) -> Vec<&Score> {
         self.scores
             .iter()
