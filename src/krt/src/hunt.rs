@@ -1836,6 +1836,13 @@ impl Summary {
     /// A mined path that the table drops adds no hop either. The table is where
     /// the reader looks for the path that this number names, so a number that
     /// reads a path outside the table names a length that no row holds.
+    ///
+    /// The number is a difference, so it needs both of its terms. A hunt that
+    /// reports no independent path holds nothing for the mined one to stand
+    /// against, and a hunt that reports no mined path holds nothing that a
+    /// mine added. Either one adds no hop. The zero of a missing term would
+    /// otherwise turn the difference into the whole length of the mined path,
+    /// which is a number that no mine added.
     fn added(&self) -> u8 {
         let reported = self.reported();
         let longest = |mined: bool| {
@@ -1844,9 +1851,11 @@ impl Summary {
                 .filter(|score| score.mine.is_some() == mined)
                 .map(|score| score.length)
                 .max()
-                .unwrap_or_default()
         };
-        longest(true).saturating_sub(longest(false))
+        match (longest(true), longest(false)) {
+            (Some(mined), Some(independent)) => mined.saturating_sub(independent),
+            _ => 0,
+        }
     }
 
     /// The rows of the table, in the order they print.

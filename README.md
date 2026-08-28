@@ -664,10 +664,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `2/8 reached   14/128 targets   1 partial   3 mines   11 mined   +2 hops   192s`. The hops
     added is the longest mined path over the longest independent one, of the paths that the table
     ranks. A mined path that the table drops adds no hop, so the length that the number names
-    stands in a row that the reader can find. The reached count and the partial count each read
-    the independent destinations alone. The counts of a hunt that no `Ctrl-C` and no fault cut
-    short therefore add up: the reached, the partial, and the mined together are the destinations
-    the hunt started.
+    stands in a row that the reader can find. The number is a difference, so it needs both of its
+    terms: a table that ranks no independent path adds no hop, and neither does one that ranks no
+    mined path. The reached count and the partial count each read the independent destinations
+    alone. The counts of a hunt that no `Ctrl-C` and no fault cut short therefore add up: the
+    reached, the partial, and the mined together are the destinations the hunt started.
   - A hunt shows what it is doing while it runs. A hunt whose standard output is a terminal draws
     one status line, which redraws in place: a spinner that turns on every sweep of the pool, a
     bar of the hunt, the rounds it holds of the rounds it wants, the address it started last with
