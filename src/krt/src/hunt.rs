@@ -3017,6 +3017,61 @@ mod tests {
         );
     }
 
+    /// The TTL of the last hop that answered on the independent path of
+    /// [`a_hunt_whose_one_reached_path_is_mined`].
+    const PARTIAL_REACH_LENGTH: u8 = 12;
+
+    /// The TTL that the mined destination of
+    /// [`a_hunt_whose_one_reached_path_is_mined`] answered at.
+    const MINED_REACHED_LENGTH: u8 = 15;
+
+    /// The summary of a hunt whose one reached path is the mined one.
+    ///
+    /// The independent destination answered nothing past TTL 12, so its path
+    /// is partial. The mine of it drew one address, and that address answered
+    /// at TTL 15. The hunt asked for no partial path, so the table ranks the
+    /// mined path alone and no independent path stands beside it.
+    fn a_hunt_whose_one_reached_path_is_mined() -> Summary {
+        let scores = vec![
+            traced(
+                FAR,
+                FAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (PARTIAL_REACH_LENGTH, DEEP_HOP, 50.0)]],
+                &[],
+            ),
+            mined_trace(
+                DUG,
+                DUG_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (MINED_REACHED_LENGTH, DUG, 90.0)]],
+                &[],
+                Some(address(FAR)),
+            ),
+        ];
+        Summary::new(
+            scores,
+            ELAPSED,
+            TWO_TARGETS,
+            SUMMARY_BOUNDS,
+            false,
+            Some(ONE_MINE),
+        )
+    }
+
+    /// A hunt that reports no independent path adds no hop.
+    ///
+    /// The count of the added hops is a difference, and the table holds no
+    /// independent row to take that difference against. A count of `+15 hops`
+    /// there names the whole length of the mined path, which the mine did not
+    /// add: the hunt measured an independent path of 12 hops, and the mine
+    /// found 3 hops more.
+    #[test]
+    fn a_hunt_that_reports_no_independent_path_adds_no_hop() {
+        assert_eq!(
+            counts(&a_hunt_whose_one_reached_path_is_mined()),
+            "0/8 reached   2/128 targets   1 partial   1 mine   1 mined   +0 hops   192s"
+        );
+    }
+
     #[test]
     fn the_row_of_a_mined_destination_names_the_first_hit_that_started_it() {
         let line = row(&a_mining_hunt(), LONGEST);
