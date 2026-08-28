@@ -1,0 +1,11 @@
+. pub fn feature_flagged() -> bool {
+.     cfg!(feature = "x")
+. }
+. 
+T #[cfg(all(test, feature = "x"))]
+T mod gated {
+T     #[test]
+T     fn flagged() {
+T         assert!(super::feature_flagged());
+T     }
+T }

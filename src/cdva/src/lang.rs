@@ -79,6 +79,25 @@ pub struct StringSpec {
     pub doc_when_line_leading: bool,
 }
 
+/// The chain of attributes that precedes an item, where the language spells an
+/// attribute as a preceding *sibling* of the item it decorates rather than as a
+/// child of it.
+///
+/// Rust is such a language: an `attribute_item` is a sibling of the
+/// `mod_item` it applies to, so a query that captures the `mod_item` alone
+/// loses the `#[cfg(test)]` row. The tree rule walks the whole contiguous chain
+/// of siblings of this kind, and a match of `pattern` against the source text
+/// of any one of them makes the item test code. Walking the whole chain rather
+/// than the one adjacent sibling is what makes the stack `#[rstest]` over
+/// `#[case(1)]` work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttributeChain {
+    /// The node kind that spells an attribute preceding an item.
+    pub kind: &'static str,
+    /// A match on the source text of the attribute makes the item a test.
+    pub pattern: &'static str,
+}
+
 /// A block comment that is read anywhere in a row.
 const fn block(open: &'static str, close: &'static str) -> BlockSpec {
     BlockSpec {
@@ -353,5 +372,39 @@ impl Language {
                     .any(|known| known.eq_ignore_ascii_case(extension))
             })
             .map(|entry| entry.language)
+    }
+
+    /// The tree-sitter grammar, for a language the tree rule reads.
+    ///
+    /// Returns `None` for a language with no tree rule, which is every
+    /// language whose test code is found by its path alone.
+    #[must_use]
+    pub fn grammar(self) -> Option<tree_sitter::Language> {
+        None
+    }
+
+    /// The query naming the nodes whose rows are test rows.
+    ///
+    /// Returns `None` for a language with no tree rule.
+    #[must_use]
+    pub fn tree_query(self) -> Option<&'static str> {
+        None
+    }
+
+    /// The attribute chain, for a language whose attribute is a sibling.
+    ///
+    /// Returns `None` for a language whose annotation is a child of the item it
+    /// decorates, where the query alone gives the whole span.
+    #[must_use]
+    pub fn attribute_chain(self) -> Option<AttributeChain> {
+        None
+    }
+
+    /// The node kinds that a `@test_scope` capture may climb to.
+    ///
+    /// Empty for a language whose query never captures `@test_scope`.
+    #[must_use]
+    pub fn scope_kinds(self) -> &'static [&'static str] {
+        &[]
     }
 }

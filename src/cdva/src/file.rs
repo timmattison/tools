@@ -2,11 +2,20 @@
 //!
 //! [`Counter`] is the entrance. It reads one file, labels every row through the
 //! line classifier, and splits those rows between the production bucket and the
-//! test bucket. In this slice only the path rule marks anything, so a marked
-//! file is test material from its first row to its last and an unmarked file is
-//! production code. That is exactly what `--no-tree` will mean, and the tree
-//! rule of a later slice narrows the marking without changing the shape of the
-//! answer.
+//! test bucket. The path rule marks a whole file from its name, and the tree
+//! rule marks a region of one the path rule left unmarked. A counter built with
+//! [`Counter::new`] alone reads the path rule and nothing else, which is
+//! exactly what `--no-tree` will mean; [`Counter::with_tree_rules`] adds the
+//! parse.
+//!
+//! # The order of the two rules
+//!
+//! The path rule runs first, and a file it settles is never parsed. A glob of
+//! the user that holds a file out of the test bucket holds *all* of it out, so
+//! a parse could only disagree with the user. A glob that marks a file marks it
+//! whole, so a parse could only find rows that are already marked. Either way
+//! the parse buys nothing, and skipping it is what makes a run over a tree of
+//! test files cheap.
 //!
 //! # The invariant
 //!
@@ -17,8 +26,9 @@
 //! are independent, so the invariant holds by construction rather than by care.
 
 use crate::lang::Language;
-use crate::lines::{self, Counts, LineIndex};
+use crate::lines::{self, Counts, LineKind};
 use crate::pathrule::{PathRules, PathVerdict};
+use crate::treerule::TreeRules;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -28,6 +38,8 @@ pub enum Rule {
     /// The glob of the path rule that marked the whole file, written as the
     /// user wrote it rather than as the rule compiled it.
     PathGlob(String),
+    /// The tree rule matched a node of this kind.
+    TreeNode(String),
 }
 
 /// One marked region of one file, in 1-based inclusive rows.
@@ -48,8 +60,8 @@ pub struct Span {
 /// Whether the file was parsed, and whether the parse held.
 ///
 /// Tree-sitter recovers from a syntax error and still returns a tree, so a run
-/// that throws no error proves nothing. A later slice looks for an ERROR node
-/// and reports [`Failed`] when it finds one.
+/// that throws no error proves nothing. The tree rule asks the root node
+/// whether the tree holds a defect, and reports [`Failed`] when it does.
 ///
 /// [`Failed`]: ParseStatus::Failed
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -107,13 +119,26 @@ impl FileCount {
 pub struct Counter {
     /// The globs that mark a whole file from its path alone.
     rules: PathRules,
+    /// The parser that marks a region of a file the globs left unmarked, where
+    /// the run asked for one.
+    tree: Option<TreeRules>,
 }
 
 impl Counter {
-    /// A counter that reads these rules.
+    /// A counter that reads the path rule alone.
+    ///
+    /// No file is ever parsed, so a file the globs do not mark is production
+    /// code from its first row to its last. This is what `--no-tree` selects.
     #[must_use]
     pub const fn new(rules: PathRules) -> Self {
-        Self { rules }
+        Self { rules, tree: None }
+    }
+
+    /// Read the file with the tree rule as well as the path rule.
+    #[must_use]
+    pub fn with_tree_rules(mut self, tree: TreeRules) -> Self {
+        self.tree = Some(tree);
+        self
     }
 
     /// Count `source`, which was read from `path`.
@@ -127,25 +152,33 @@ impl Counter {
     #[must_use]
     pub fn count_source(&self, path: &Path, relative: &Path, source: &str) -> Option<FileCount> {
         let language = Language::from_path(path)?;
-        let counts = lines::count(source, language);
-        let rows = LineIndex::new(source).row_count();
+        let kinds = lines::classify(source, language);
 
-        let (production, test, spans) = match self.rules.verdict(relative) {
+        let (production, test, spans, parse_status) = match self.rules.verdict(relative) {
             PathVerdict::Test(glob) => {
-                // A file of no rows carries no span; see [`Span`].
-                let spans = if rows == 0 {
-                    Vec::new()
-                } else {
-                    vec![Span {
-                        first_row: 1,
-                        last_row: rows,
-                        rule: Rule::PathGlob(glob),
-                    }]
-                };
-                (Counts::default(), counts, spans)
+                let (production, test) = split(&kinds, |_| true);
+                let spans = whole_file(&kinds, Rule::PathGlob(glob));
+                (production, test, spans, ParseStatus::NotParsed)
             }
-            PathVerdict::Production(_) | PathVerdict::Unmarked => {
-                (counts, Counts::default(), Vec::new())
+            PathVerdict::Production(_) => {
+                let (production, test) = split(&kinds, |_| false);
+                (production, test, Vec::new(), ParseStatus::NotParsed)
+            }
+            PathVerdict::Unmarked => {
+                match self
+                    .tree
+                    .as_ref()
+                    .and_then(|tree| tree.outcome(source, language))
+                {
+                    Some(outcome) => {
+                        let (production, test) = split(&kinds, |row| outcome.rows.contains(&row));
+                        (production, test, outcome.spans, outcome.status)
+                    }
+                    None => {
+                        let (production, test) = split(&kinds, |_| false);
+                        (production, test, Vec::new(), ParseStatus::NotParsed)
+                    }
+                }
             }
         };
 
@@ -155,7 +188,7 @@ impl Counter {
             production,
             test,
             spans,
-            parse_status: ParseStatus::NotParsed,
+            parse_status,
         })
     }
 
@@ -187,5 +220,41 @@ impl Counter {
         };
 
         Ok(self.count_source(path, relative, &source))
+    }
+}
+
+/// Splits the rows of a file between the two buckets.
+///
+/// `is_test` reads a 1-based row and says which bucket it belongs to. This is
+/// the one place the split happens, and it is why the invariant of the tool
+/// holds by construction rather than by care: the classifier already decided
+/// the *kind* of every row, this decides only the *bucket*, and every row is
+/// added to exactly one bucket under the kind it already has. Nothing here can
+/// invent a row, drop one, or count one twice.
+fn split(kinds: &[LineKind], is_test: impl Fn(u32) -> bool) -> (Counts, Counts) {
+    let mut production = Counts::default();
+    let mut test = Counts::default();
+    for (offset, kind) in kinds.iter().enumerate() {
+        let row = u32::try_from(offset.saturating_add(1)).unwrap_or(u32::MAX);
+        if is_test(row) {
+            test.add_kind(*kind);
+        } else {
+            production.add_kind(*kind);
+        }
+    }
+    (production, test)
+}
+
+/// The one span that covers every row of a file, under this rule.
+///
+/// A file of no rows carries no span; see [`Span`].
+fn whole_file(kinds: &[LineKind], rule: Rule) -> Vec<Span> {
+    match u32::try_from(kinds.len()).unwrap_or(u32::MAX) {
+        0 => Vec::new(),
+        rows => vec![Span {
+            first_row: 1,
+            last_row: rows,
+            rule,
+        }],
     }
 }

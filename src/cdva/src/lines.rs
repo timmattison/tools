@@ -46,6 +46,22 @@ impl Counts {
             .saturating_add(self.comment)
             .saturating_add(self.code)
     }
+
+    /// Adds one row of this kind.
+    ///
+    /// This is the one place a [`LineKind`] turns into a number, so the two
+    /// buckets of a file and the count of the whole file are added up by the
+    /// same code. A second copy of this match is how a bucket comes to count a
+    /// comment row as code while the total counts it as a comment, and the two
+    /// numbers then disagree with no line of either saying why.
+    pub fn add_kind(&mut self, kind: LineKind) {
+        let field = match kind {
+            LineKind::Blank => &mut self.blank,
+            LineKind::Comment => &mut self.comment,
+            LineKind::Code => &mut self.code,
+        };
+        *field = field.saturating_add(1);
+    }
 }
 
 impl Add for Counts {
@@ -144,11 +160,7 @@ pub fn classify(source: &str, language: Language) -> Vec<LineKind> {
 pub fn count(source: &str, language: Language) -> Counts {
     let mut counts = Counts::default();
     for kind in classify(source, language) {
-        match kind {
-            LineKind::Blank => counts.blank = counts.blank.saturating_add(1),
-            LineKind::Comment => counts.comment = counts.comment.saturating_add(1),
-            LineKind::Code => counts.code = counts.code.saturating_add(1),
-        }
+        counts.add_kind(kind);
     }
     counts
 }

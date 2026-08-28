@@ -16,6 +16,9 @@ globset.workspace = true
 ignore.workspace = true
 num-format.workspace = true
 rayon.workspace = true
+regex.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]

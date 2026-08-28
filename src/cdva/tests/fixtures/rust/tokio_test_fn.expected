@@ -1,0 +1,8 @@
+. pub async fn fetch() -> u32 {
+.     7
+. }
+. 
+T #[tokio::test]
+T async fn fetch_returns_seven() {
+T     assert_eq!(fetch().await, 7);
+T }

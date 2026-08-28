@@ -4,9 +4,10 @@
 //! code apart from the production code.
 //!
 //! This slice carries the command line, the walk, and the default table. The
-//! numbers it prints are the path rule alone: a file whose path says it is test
-//! material is test material from its first row to its last. The tree rule, and
-//! every report but the table, arrive in later slices.
+//! numbers it prints are both rules: a file whose path says it is test material
+//! is test material from its first row to its last, and every other file of a
+//! language with a tree rule is parsed so that the test nodes inside it are
+//! found. Every report but the table arrives in a later slice.
 //!
 //! # Two things this command states rather than assumes
 //!
@@ -22,7 +23,7 @@
 
 use anyhow::Result;
 use buildinfo::version_string;
-use cdva::{render_table, walk, Counter, FileCount, PathRules, Summary, WalkOptions};
+use cdva::{render_table, walk, Counter, FileCount, PathRules, Summary, TreeRules, WalkOptions};
 use clap::Parser;
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -60,7 +61,8 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let counter = Counter::new(PathRules::new(&cli.test_glob, &cli.production_glob)?);
+    let counter = Counter::new(PathRules::new(&cli.test_glob, &cli.production_glob)?)
+        .with_tree_rules(TreeRules::new());
     let found = walk(
         &cli.paths,
         WalkOptions {

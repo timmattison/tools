@@ -7,8 +7,8 @@
 //! file out of its path, and carries the comment and string syntax of that
 //! language. [`classify`] reads a source under that syntax and labels every row
 //! blank, comment, or code. [`PathRules`] marks a whole file as test material
-//! from its path alone, which is the cheap half of the split. A later slice
-//! hangs the tree rule off the same table.
+//! from its path alone, which is the cheap half of the split, and [`TreeRules`]
+//! parses what the path rule leaves and marks the rows of a test node.
 //!
 //! [`walk`] finds the files, [`Counter`] reads one of them into a [`FileCount`]
 //! of two buckets, and [`Summary`] rolls those up by language. Together they
@@ -23,12 +23,14 @@ pub mod lang;
 pub mod lines;
 pub mod pathrule;
 pub mod report;
+pub mod treerule;
 pub mod walk;
 
 pub use counts::{Row, Summary};
 pub use file::{Counter, FileCount, ParseStatus, Rule, Span};
-pub use lang::{BlockSpec, CommentSyntax, Language, StringSpec};
+pub use lang::{AttributeChain, BlockSpec, CommentSyntax, Language, StringSpec};
 pub use lines::{classify, count, Counts, LineIndex, LineKind};
 pub use pathrule::{PathRules, PathVerdict};
 pub use report::render_table;
+pub use treerule::{TreeOutcome, TreeRules};
 pub use walk::{walk, WalkOptions};

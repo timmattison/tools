@@ -1,0 +1,13 @@
+. /// Returns the two party emoji, each of which takes four bytes.
+. pub fn party() -> &'static str {
+.     "🎉🎊"
+. }
+. 
+T #[cfg(test)]
+T mod tests {
+T     #[test]
+T     fn party_is_festive() {
+T         // 日本語のコメント — three bytes a character, and an em dash besides.
+T         assert_eq!(super::party(), "🎉🎊");
+T     }
+T }

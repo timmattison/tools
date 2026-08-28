@@ -1,0 +1,11 @@
+. pub fn ok() -> bool {
+.     true
+. }
+. 
+T #[cfg(test)]
+T mod tests {
+T     #[test]
+T     fn ok_is_true() {
+T         assert!(super::ok());
+T     }
+T }
