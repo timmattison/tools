@@ -11,7 +11,9 @@
 //! table of that path: a head that names the run, and one row for each TTL.
 //! The `hunt` command looks for the longest path it can find: it draws random
 //! addresses, traces a pool of them at once, scores each path, and draws
-//! another address each time one of them stops.
+//! another address each time one of them stops. `--mine` adds one mode to that
+//! hunt: after a destination sets a record, the hunt probes a few addresses
+//! near it, to find whether a neighbor of that destination gives a longer path.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -158,6 +160,23 @@ const TARGET_TIMEOUT_DEFAULT: &str = "10s";
 ///
 /// The type is the type that `clap` takes for the bound of a range.
 const ROUNDS_LOWEST: u64 = 1;
+
+/// The number of addresses that one mine probes, when the user names none.
+const MINE_DEPTH_DEFAULT: &str = "8";
+
+/// The length of the block that one mine stays inside, when the user names
+/// none.
+///
+/// The default reads through [`parse_mine_prefix`], as every other length of a
+/// block does, so the one constructor of [`hunt::MinePrefix`] holds it too.
+const MINE_PREFIX_DEFAULT: &str = "16";
+
+/// The number of addresses that one mine probes of any one /24, when the user
+/// names none.
+const MINE_PER_PREFIX_DEFAULT: &str = "2";
+
+/// The wait between two addresses of one mine, when the user names none.
+const MINE_DELAY_DEFAULT: &str = "2s";
 
 /// The lowest cap of the destinations of a hunt. A hunt that traces no
 /// destination measures nothing.
@@ -565,6 +584,58 @@ enum Command {
         #[arg(long)]
         include_partial: bool,
 
+        /// Mine the address space near the longest path found so far. The
+        /// caps below stay low on purpose: probes that concentrate on one
+        /// network read as a horizontal scan, which trips an intrusion
+        /// detection system and earns an abuse complaint to the ISP of the
+        /// user.
+        #[arg(long)]
+        mine: bool,
+
+        /// The number of addresses that one mine probes.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value = MINE_DEPTH_DEFAULT,
+            requires = "mine",
+            value_parser = parse_mine_count,
+        )]
+        mine_depth: NonZeroUsize,
+
+        /// The length of the block that one mine stays inside. A mine draws
+        /// every address inside the block of this length that holds the first
+        /// hit.
+        #[arg(
+            long,
+            value_name = "BITS",
+            default_value = MINE_PREFIX_DEFAULT,
+            requires = "mine",
+            value_parser = parse_mine_prefix,
+        )]
+        mine_prefix: hunt::MinePrefix,
+
+        /// The number of addresses that one mine probes of any one /24. The cap
+        /// is what keeps a mine from reading as a horizontal scan of one
+        /// organization.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value = MINE_PER_PREFIX_DEFAULT,
+            requires = "mine",
+            value_parser = parse_mine_count,
+        )]
+        mine_per_prefix: NonZeroUsize,
+
+        /// The wait between two addresses of one mine.
+        #[arg(
+            long,
+            value_name = "DUR",
+            default_value = MINE_DELAY_DEFAULT,
+            requires = "mine",
+            value_parser = parse_duration,
+        )]
+        mine_delay: Duration,
+
         /// The flags that a trace and a hunt both take.
         #[command(flatten)]
         shared: SharedArgs,
@@ -593,6 +664,8 @@ struct HuntConfig {
     seed: u64,
     /// True when a partial path competes for a row of the summary.
     include_partial: bool,
+    /// The mine of the near space, when the user asked for one.
+    mine: Option<hunt::MinePlan>,
 }
 
 /// The configuration of one run, after the command line resolves.
@@ -752,34 +825,7 @@ impl Cli {
             Some(Command::Hunt { .. }) | None => (None, None),
         };
 
-        // A hunt carries its own copy of the seven shared flags, because the
-        // parser rejects a flag of a probe in front of a command. The hunt
-        // therefore wins over the flags of the line that stands in front of it,
-        // which hold their defaults for a line that names a command.
-        let (hunt, shared) = match self.command {
-            Some(Command::Hunt {
-                rounds,
-                max_targets,
-                concurrency,
-                probes_per_round,
-                target_timeout,
-                seed,
-                include_partial,
-                shared,
-            }) => (
-                Some(HuntConfig {
-                    rounds,
-                    max_targets,
-                    concurrency,
-                    probes_per_round,
-                    target_timeout,
-                    seed: seed.unwrap_or_else(seed_from_clock),
-                    include_partial,
-                }),
-                shared,
-            ),
-            _ => (None, self.shared),
-        };
+        let (hunt, shared) = hunt_config(self.command, self.shared);
 
         Ok(ResolvedConfig {
             destination: self.destination,
@@ -891,7 +937,7 @@ impl ResolvedConfig {
                 ),
             ];
         };
-        vec![
+        let mut rows = vec![
             ("output", output()),
             ("interval", interval()),
             ("first ttl", self.first_ttl.to_string()),
@@ -910,8 +956,104 @@ impl ResolvedConfig {
                 "include partial",
                 if hunt.include_partial { "on" } else { "off" }.to_owned(),
             ),
-        ]
+            (
+                "mine",
+                if hunt.mine.is_some() { "on" } else { "off" }.to_owned(),
+            ),
+        ];
+        // A hunt that mines nothing names no bound of a mine. Four rows of
+        // numbers that nothing reads would leave a reader of the block unable
+        // to tell the hunt that mines from the hunt that does not.
+        if let Some(mine) = hunt.mine {
+            rows.extend([
+                ("mine depth", mine.depth.to_string()),
+                ("mine prefix", format!("/{}", mine.prefix)),
+                ("mine per prefix", mine.per_prefix.to_string()),
+                ("mine delay", ui::render_duration(mine.delay)),
+            ]);
+        }
+        rows
     }
+}
+
+/// The configuration of the hunt that a command line names, and the flags of a
+/// probe that the run then reads.
+///
+/// A hunt carries its own copy of the seven shared flags, because the parser
+/// rejects a flag of a probe in front of a command. The hunt therefore wins over
+/// the flags of the line that stands in front of it, which hold their defaults
+/// for a line that names a command. `outside` is that outer copy, and a line
+/// that names no hunt reads it.
+///
+/// A hunt that named no seed takes one off the clock, so every hunt resolves to
+/// a seed that the block of the configuration prints.
+fn hunt_config(command: Option<Command>, outside: SharedArgs) -> (Option<HuntConfig>, SharedArgs) {
+    let Some(Command::Hunt {
+        rounds,
+        max_targets,
+        concurrency,
+        probes_per_round,
+        target_timeout,
+        seed,
+        include_partial,
+        mine,
+        mine_depth,
+        mine_prefix,
+        mine_per_prefix,
+        mine_delay,
+        shared,
+    }) = command
+    else {
+        return (None, outside);
+    };
+    (
+        Some(HuntConfig {
+            rounds,
+            max_targets,
+            concurrency,
+            probes_per_round,
+            target_timeout,
+            seed: seed.unwrap_or_else(seed_from_clock),
+            include_partial,
+            mine: mine.then_some(hunt::MinePlan {
+                depth: mine_depth,
+                prefix: mine_prefix,
+                per_prefix: mine_per_prefix,
+                delay: mine_delay,
+            }),
+        }),
+        shared,
+    )
+}
+
+/// Reads a count of the addresses that one mine probes.
+///
+/// A mine of no address probes nothing, so the number stands above zero.
+///
+/// # Errors
+///
+/// Returns the reason as text when the number does not read, and when it is
+/// zero.
+fn parse_mine_count(text: &str) -> Result<NonZeroUsize, String> {
+    text.parse()
+        .map_err(|_| format!("`{text}` is no count of addresses above zero"))
+}
+
+/// Reads the length of the block that one mine stays inside.
+///
+/// [`hunt::MinePrefix`] holds the range of that length, and this function reads
+/// a number and hands it to that one constructor. The refusal of the
+/// constructor is the text that the user reads.
+///
+/// # Errors
+///
+/// Returns the reason as text when the number does not read, and when
+/// [`hunt::MinePrefix`] refuses it.
+fn parse_mine_prefix(text: &str) -> Result<hunt::MinePrefix, String> {
+    let bits: u8 = text
+        .parse()
+        .map_err(|_| format!("`{text}` is no length of a block"))?;
+    hunt::MinePrefix::new(bits).map_err(|outside| outside.to_string())
 }
 
 /// Reads the number of destinations that a hunt traces at one moment.
@@ -1532,7 +1674,10 @@ impl TraceFailure {
 /// the file, the signal — carries none, because no round ran.
 struct HuntFailure {
     /// The summary of the rounds that finished, when the hunt reached the loop.
-    summary: Option<hunt::Summary>,
+    ///
+    /// The summary stands behind a box, so the fault that a hunt carries in its
+    /// `Result` is the width of a pointer and not the width of a whole summary.
+    summary: Option<Box<hunt::Summary>>,
     /// The fault, as the user reads it, and the code of its kind.
     failure: TraceFailure,
 }
@@ -1881,6 +2026,8 @@ fn trace(config: &ResolvedConfig) -> Result<run::Outcome, TraceFailure> {
         config: run_config(config, privilege),
         host: host_name(),
         hunt: None,
+        // A trace of one destination is no hunt, so no mine drew it.
+        mine: None,
     };
 
     let flag = stop_flag().map_err(|error| {
@@ -2053,6 +2200,9 @@ fn hunt(config: &ResolvedConfig, plan: &HuntConfig) -> Result<hunt::Summary, Hun
     })?;
 
     let mut draw = hunt::Draw::seeded(plan.seed);
+    if let Some(mine) = plan.mine {
+        draw = draw.mining(mine, plan.seed, Box::new(live::SystemClock));
+    }
     let first = draw
         .peek()
         .ok_or_else(|| TraceFailure::new(&NO_ADDRESS_TO_HUNT.to_owned(), EXIT_FAILURE))?;
@@ -2232,7 +2382,7 @@ fn main() {
         // reason that stopped the hunt follows it. A fault at the fifth round
         // of eight took nothing away from the four rounds in front of it.
         let (summary, failure) = match hunt(&config, &plan) {
-            Ok(summary) => (Some(summary), None),
+            Ok(summary) => (Some(Box::new(summary)), None),
             Err(stopped) => (stopped.summary, Some(stopped.failure)),
         };
         if let Some(summary) = summary {
@@ -2289,6 +2439,7 @@ mod tests {
         HUNT_CONCURRENCY_DEFAULT, HUNT_ROUNDS_DEFAULT, PROBES_PER_ROUND_DEFAULT, RESOLVE_PORT,
         SOURCE_FALLBACK, TARGET_TIMEOUT_DEFAULT, TIME_BEYOND_A_DURATION, UNKNOWN,
     };
+    use crate::hunt::MinePrefix;
     use crate::record::{
         Hop, Privilege, Record, RoundRecord, RunConfig, RunId, RunRecord, TtlRange, Writer,
     };
@@ -4077,6 +4228,7 @@ resolved configuration:
             },
             host: A_SHARED_MACHINE.to_owned(),
             hunt: None,
+            mine: None,
         })
     }
 
@@ -4395,6 +4547,196 @@ resolved configuration:
             (first, second),
             (0, 0),
             "a hunt of no seed takes one off the clock"
+        );
+    }
+
+    /// The flag that turns the mine of the near space on.
+    const FLAG_MINE: &str = "--mine";
+
+    /// The flag that counts the addresses of one mine.
+    const FLAG_MINE_DEPTH: &str = "--mine-depth";
+
+    /// The flag that names the block one mine stays inside.
+    const FLAG_MINE_PREFIX: &str = "--mine-prefix";
+
+    /// The flag that caps the addresses of one /24.
+    const FLAG_MINE_PER_PREFIX: &str = "--mine-per-prefix";
+
+    /// The flag that names the wait between two addresses of one mine.
+    const FLAG_MINE_DELAY: &str = "--mine-delay";
+
+    /// The mine of one hunt that a test resolved.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a hunt that mines nothing. Such a call is a mistake in the
+    /// test, not an answer the code under test can give.
+    fn mine(arguments: &[&str]) -> crate::hunt::MinePlan {
+        hunt(arguments)
+            .mine
+            .expect("the hunt of this test must mine the near space")
+    }
+
+    /// The length of one block that a mine of a test stays inside.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a length that no mine draws inside. Such a call is a mistake
+    /// in the test, not an answer the code under test can give.
+    fn a_block_of(bits: u8) -> MinePrefix {
+        MinePrefix::new(bits).expect("the block of this test is one that a mine draws inside")
+    }
+
+    #[test]
+    fn a_hunt_mines_nothing_by_default() {
+        assert_eq!(hunt(&["krt", HUNT]).mine, None);
+    }
+
+    #[test]
+    fn a_hunt_that_asked_mines_the_near_space() {
+        assert!(hunt(&["krt", HUNT, FLAG_MINE]).mine.is_some());
+    }
+
+    #[test]
+    fn a_mine_takes_the_default_depth_the_prefix_the_cap_and_the_delay() {
+        let plan = mine(&["krt", HUNT, FLAG_MINE]);
+        assert_eq!(plan.depth.get(), 8);
+        assert_eq!(plan.prefix, a_block_of(16));
+        assert_eq!(plan.per_prefix.get(), 2);
+        assert_eq!(plan.delay, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_mine_takes_the_depth_that_the_command_line_named() {
+        assert_eq!(
+            mine(&["krt", HUNT, FLAG_MINE, FLAG_MINE_DEPTH, "4"])
+                .depth
+                .get(),
+            4
+        );
+    }
+
+    #[test]
+    fn a_mine_takes_the_prefix_that_the_command_line_named() {
+        assert_eq!(
+            mine(&["krt", HUNT, FLAG_MINE, FLAG_MINE_PREFIX, "20"]).prefix,
+            a_block_of(20)
+        );
+    }
+
+    #[test]
+    fn a_mine_takes_the_cap_of_one_prefix_that_the_command_line_named() {
+        assert_eq!(
+            mine(&["krt", HUNT, FLAG_MINE, FLAG_MINE_PER_PREFIX, "3"])
+                .per_prefix
+                .get(),
+            3
+        );
+    }
+
+    #[test]
+    fn a_mine_takes_the_delay_that_the_command_line_named() {
+        assert_eq!(
+            mine(&["krt", HUNT, FLAG_MINE, FLAG_MINE_DELAY, "500ms"]).delay,
+            Duration::from_millis(500)
+        );
+    }
+
+    /// A mine of no address probes nothing, so the parser refuses it.
+    #[test]
+    fn a_mine_of_no_address_fails_at_the_parser() {
+        assert!(Cli::try_parse_from(["krt", HUNT, FLAG_MINE, FLAG_MINE_DEPTH, "0"]).is_err());
+    }
+
+    /// A mine that probes no address of one /24 probes nothing.
+    #[test]
+    fn a_mine_of_no_address_of_one_prefix_fails_at_the_parser() {
+        assert!(Cli::try_parse_from(["krt", HUNT, FLAG_MINE, FLAG_MINE_PER_PREFIX, "0"]).is_err());
+    }
+
+    /// A prefix below the floor is a block that is no near space.
+    ///
+    /// A `/4` holds a sixteenth of the address space, and a draw inside it is a
+    /// draw of the whole internet under another name.
+    #[test]
+    fn a_mine_of_a_prefix_below_the_floor_fails_and_names_the_range() {
+        let refused = Cli::try_parse_from(["krt", HUNT, FLAG_MINE, FLAG_MINE_PREFIX, "4"])
+            .expect_err("a block that holds a sixteenth of the address space is no near space")
+            .to_string();
+        assert!(
+            refused.contains(&MinePrefix::FLOOR.to_string())
+                && refused.contains(&MinePrefix::CEILING.to_string()),
+            "the refusal names the range: {refused}"
+        );
+    }
+
+    /// A prefix above the ceiling is a block smaller than the /24 a mine draws
+    /// at.
+    #[test]
+    fn a_mine_of_a_prefix_above_the_ceiling_fails_and_names_the_range() {
+        let refused = Cli::try_parse_from(["krt", HUNT, FLAG_MINE, FLAG_MINE_PREFIX, "25"])
+            .expect_err("a block below the /24 that a mine draws at holds no address to draw")
+            .to_string();
+        assert!(
+            refused.contains(&MinePrefix::CEILING.to_string()),
+            "the refusal names the ceiling: {refused}"
+        );
+    }
+
+    /// A flag of a mine without `--mine` asks for a mine that never runs.
+    ///
+    /// Every one of the four bounds is refused, so no line can name a number
+    /// that the hunt then ignores.
+    #[test]
+    fn a_flag_of_a_mine_without_the_mine_flag_fails_at_the_parser() {
+        for flag in [
+            [FLAG_MINE_DEPTH, "4"],
+            [FLAG_MINE_PREFIX, "20"],
+            [FLAG_MINE_PER_PREFIX, "3"],
+            [FLAG_MINE_DELAY, "500ms"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["krt", HUNT, flag[0], flag[1]]).is_err(),
+                "`{} {}` without `{FLAG_MINE}` names a bound that no mine reads",
+                flag[0],
+                flag[1]
+            );
+        }
+    }
+
+    /// The block of a hunt that mines nothing says so.
+    #[test]
+    fn the_resolved_block_of_a_hunt_that_mines_nothing_names_no_bound_of_a_mine() {
+        let block = resolve(&["krt", HUNT]).to_string();
+        assert!(
+            block.contains("mine:") && block.contains("off"),
+            "the block of a hunt names whether it mines: {block}"
+        );
+        assert!(
+            !block.contains("mine depth:"),
+            "a hunt that mines nothing names no bound of a mine: {block}"
+        );
+    }
+
+    /// The block of a hunt that mines names every bound of its mine.
+    #[test]
+    fn the_resolved_block_of_a_hunt_that_mines_names_every_bound() {
+        let block = resolve(&["krt", HUNT, FLAG_MINE]).to_string();
+        for row in [
+            "mine:",
+            "mine depth:",
+            "mine prefix:",
+            "mine per prefix:",
+            "mine delay:",
+        ] {
+            assert!(
+                block.contains(row),
+                "the block of a hunt that mines names `{row}`: {block}"
+            );
+        }
+        assert!(
+            block.contains("/16"),
+            "the block names the prefix as a block length: {block}"
         );
     }
 

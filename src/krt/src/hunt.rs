@@ -17,6 +17,40 @@
 //! `Bounds::max_targets` destinations, answered or not, because the draw of a
 //! real hunt never runs out.
 //!
+//! # The mine of the near space
+//!
+//! A hunt of `--mine` probes a few addresses near every destination that sets a
+//! record. The mode is block mining and not hill climbing, and the name matters
+//! because the wrong name leads to the wrong design.
+//!
+//! BGP carries prefixes and not addresses, so every address inside one
+//! announced /24 takes the same path to the border of that network. The length
+//! of a path is a property of the destination network and of the chain of
+//! transit that reaches it, and every one of those terms holds across the whole
+//! prefix and mostly across the whole allocation. The landscape is thus a
+//! plateau with cliffs and not a hill: a walk toward a longer neighbor finds
+//! the same number again and again, and then falls off an edge into an
+//! unrelated network.
+//!
+//! What the near space does give is worth taking, and it is two things. A
+//! partial path becomes a reached path, because a neighbor of an address that
+//! answered answers far more often. And different hosts of one network sit at
+//! different depths behind the same border router. The gain is the tail alone:
+//! count on 0 to 2 hops inside one /24, and 0 to 4 across one /16, against a
+//! global spread of roughly 8 to 30 hops.
+//!
+//! [`Mine`] holds the mode, and [`Draw`] is where it plugs in, because the mine
+//! is a source of addresses like the seeded sequence beside it. The bounds of
+//! [`MinePlan`] are small on purpose: probes that concentrate on one network
+//! read as a horizontal scan, which trips an intrusion detection system and
+//! earns an abuse complaint to the ISP of the user.
+//!
+//! The addresses of a mine cost no round. A round is what an independent draw
+//! measures, and an independent draw is what sets a record, so a mine that ate
+//! the rounds would leave the hunt sampling one network in the place of the
+//! whole address space. They still count against `Bounds::max_targets`, which
+//! is the cap on the destinations that a hunt traces at all.
+//!
 //! Both sources that a hunt draws on are seams, so no test of this module sends
 //! a packet:
 //!
@@ -72,7 +106,7 @@
 //! rounds, reads its own deadline, and reaches the indicator while that one
 //! waits.
 
-use crate::live::Screen;
+use crate::live::{Clock, Screen};
 use crate::names;
 use crate::names::Namer;
 use crate::record::{
@@ -129,13 +163,22 @@ impl Block {
         Self { network, prefix }
     }
 
+    /// Builds the block of one prefix that holds an address.
+    ///
+    /// The network is the address without the bits below the prefix, and this
+    /// is the one place that masks them off. A prefix of 32 shifts by no bit,
+    /// and the mask is then every bit. A prefix of zero shifts by the whole
+    /// width of the value and overflows, and no caller names one: the blocks of
+    /// the table carry a prefix of 4 through 32, and [`MinePrefix`] holds the
+    /// prefix of every mine above zero.
+    const fn around(addr: Ipv4Addr, prefix: u8) -> Self {
+        let mask = u32::MAX << (ADDRESS_BITS - prefix);
+        Self::new(Ipv4Addr::from_bits(addr.to_bits() & mask), prefix)
+    }
+
     /// Answers whether this block holds the address.
     fn holds(self, addr: Ipv4Addr) -> bool {
-        // A prefix of 32 shifts by no bit, and the mask is then every bit. No
-        // block of the table carries a prefix of zero, which would shift by the
-        // whole width and overflow.
-        let mask = u32::MAX << (ADDRESS_BITS - self.prefix);
-        addr.to_bits() & mask == self.network.to_bits()
+        Self::around(addr, self.prefix) == self
     }
 }
 
@@ -206,8 +249,361 @@ fn random(seed: u64) -> impl Iterator<Item = Ipv4Addr> {
     std::iter::repeat_with(move || Ipv4Addr::from_bits(rng.random()))
 }
 
-/// The draw of one hunt: the source of the candidates, and the addresses that
-/// the hunt already visited.
+/// The lowest host number that a mine draws inside one /24.
+///
+/// `.0` names the network and `.255` is the broadcast address of it, so neither
+/// one names a host. `.1` is the gateway of most /24s, and a gateway stands at
+/// the border of the network, which is the shallowest point of it: a probe of
+/// the gateway measures the path that the mine already holds.
+const FIRST_HOST: u8 = 2;
+
+/// The highest host number that a mine draws inside one /24.
+const LAST_HOST: u8 = 254;
+
+/// The length of the block that one mine stays inside.
+///
+/// The length stands from [`MinePrefix::FLOOR`] to [`MinePrefix::CEILING`], and
+/// [`MinePrefix::new`] is the one way to build one. Every builder of a
+/// [`MinePlan`] therefore passes the same check. The arithmetic that the range
+/// protects stands inside this type too: [`MinePrefix::span`] counts the /24s
+/// of the block, and no caller subtracts anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MinePrefix {
+    /// The number of leading bits that every address of the block holds.
+    bits: u8,
+}
+
+impl MinePrefix {
+    /// The shortest block that a mine stays inside.
+    ///
+    /// A `/8` holds a 256th of the address space, and a draw inside a shorter
+    /// block is a draw of the whole internet under another name.
+    pub(crate) const FLOOR: u8 = 8;
+
+    /// The longest block that a mine stays inside.
+    ///
+    /// A mine draws at the grain of one /24, so a block below a `/24` holds no
+    /// /24 to draw in. The ceiling is [`MINE_GRAIN`] itself, and that is what
+    /// keeps the subtraction of [`MinePrefix::span`] above zero.
+    pub(crate) const CEILING: u8 = MINE_GRAIN;
+
+    /// The length of one block that a mine stays inside.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MinePrefixOutside`] when the length stands outside
+    /// [`MinePrefix::FLOOR`] through [`MinePrefix::CEILING`].
+    pub(crate) fn new(bits: u8) -> Result<Self, MinePrefixOutside> {
+        if (Self::FLOOR..=Self::CEILING).contains(&bits) {
+            Ok(Self { bits })
+        } else {
+            Err(MinePrefixOutside { bits })
+        }
+    }
+
+    /// The number of /24s that a block of this length holds.
+    ///
+    /// This is the arithmetic that the range of the length exists to protect.
+    /// The length stands at [`MinePrefix::CEILING`] at the most, which is the
+    /// grain that a mine draws at, so the subtraction stays above zero, the
+    /// shift stays inside the width of the value, and the block holds one /24
+    /// at the least.
+    pub(crate) fn span(self) -> u32 {
+        1_u32 << (Self::CEILING - self.bits)
+    }
+
+    /// The bits of the network of the block of this length that holds an
+    /// address.
+    ///
+    /// A mine holds its block as bits, because it draws a sibling with the bit
+    /// arithmetic of [`Dig::sibling`].
+    pub(crate) fn block_of(self, addr: Ipv4Addr) -> u32 {
+        network_of(addr, self.bits)
+    }
+}
+
+impl fmt::Display for MinePrefix {
+    /// Writes the length as the number of bits, which is how a user names it.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.bits)
+    }
+}
+
+/// The refusal of a block length that no mine stays inside.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error(
+    "`{bits}` stands outside the block lengths that a mine draws in, which are {} through {}: a shorter block is most of the address space, and a longer one holds no whole /24",
+    MinePrefix::FLOOR,
+    MinePrefix::CEILING
+)]
+pub(crate) struct MinePrefixOutside {
+    /// The length of the block that the caller named.
+    bits: u8,
+}
+
+/// The numbers that bound one mine of the near space of a long path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MinePlan {
+    /// The number of addresses that one mine probes.
+    pub(crate) depth: NonZeroUsize,
+    /// The length of the block that one mine stays inside.
+    ///
+    /// [`MinePrefix`] holds the range of that length, and its constructor is
+    /// the one way to build one.
+    pub(crate) prefix: MinePrefix,
+    /// The number of addresses that one mine probes of any one /24.
+    pub(crate) per_prefix: NonZeroUsize,
+    /// The wait between two addresses of one mine.
+    pub(crate) delay: Duration,
+}
+
+/// One address that a hunt traces, and where the draw found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Pick {
+    /// The address to trace.
+    pub(crate) addr: Ipv4Addr,
+    /// The address of the first hit whose mine drew this address. An
+    /// independent draw of the source holds none.
+    pub(crate) mine: Option<Ipv4Addr>,
+}
+
+/// The number of bits of an address that name the host inside its /24.
+const HOST_BITS: u8 = 8;
+
+/// The length of the block that a mine draws at.
+///
+/// Two addresses of one /24 take the same path to the border of the network
+/// that announced it, so a mine that walked address by address would spend its
+/// depth to learn nothing.
+const MINE_GRAIN: u8 = ADDRESS_BITS - HOST_BITS;
+
+/// The number of draws that one address of a mine takes before the mine ends.
+///
+/// The bound is for the mine whose block is nearly full: the last free host of
+/// a /24 that the hunt already visited 250 times takes about 253 draws to hit,
+/// and a bound that stood near that number would end such a mine early often.
+/// A mine that reads this many candidates and passes none has no address left
+/// to give, and it ends.
+const MINE_ATTEMPTS: usize = 10_000;
+
+/// The number that the seed of a hunt shifts by to seed its mines.
+///
+/// The mine draws on a sequence of its own, so a hunt of one seed reads the
+/// same independent addresses whether it mines or not. Two hunts of one seed
+/// still mine alike, because this shift is a constant.
+const MINE_SEED_SHIFT: u64 = 0x6b72_745f_6d69_6e65;
+
+/// The mine of the near space of the longest path that a hunt measured.
+///
+/// The value holds the record of the whole hunt and the one mine that stands.
+/// A result that beats the record replaces that mine, because the near space of
+/// a destination that no longer holds the record is worth less than the near
+/// space of the one that does, and one mine at a time is what keeps the caps of
+/// [`MinePlan`] meaningful.
+struct Mine {
+    /// The numbers that bound each mine.
+    plan: MinePlan,
+    /// The sequence that each mine draws its addresses from.
+    rng: StdRng,
+    /// The clock that times the wait between two addresses of one mine.
+    clock: Box<dyn Clock>,
+    /// The length of the longest path that the hunt measured so far.
+    record: Option<u8>,
+    /// The mine that stands now. A hunt whose last mine ran out holds none.
+    dig: Option<Dig>,
+    /// What every mine of this hunt started and gave.
+    counts: Mined,
+}
+
+/// One mine while it runs: where it digs, how much of its depth is left, and
+/// how much of each /24 it already took.
+struct Dig {
+    /// The address of the first hit that started this mine.
+    origin: Ipv4Addr,
+    /// The block that this mine stays inside, as the bits of its network.
+    block: u32,
+    /// The /24 that this mine draws in now, as the bits of its network.
+    prefix: u32,
+    /// The number of addresses that this mine still gives.
+    left: usize,
+    /// The number of addresses that this mine gave of each /24.
+    probed: BTreeMap<u32, usize>,
+    /// The moment that this mine gives its next address at.
+    ///
+    /// The first address of a mine follows no address of that mine, so it
+    /// waits for nothing and this moment is none.
+    ready: Option<Instant>,
+}
+
+/// The bits of the network of one block that holds an address.
+///
+/// A mine holds its block and its /24 as bits, because it draws a sibling and
+/// a host with the bit arithmetic of [`Dig::sibling`] and [`Dig::draw`].
+/// [`Block::around`] masks the address, and this function reads the bits of the
+/// network off the block that it gives.
+fn network_of(addr: Ipv4Addr, prefix: u8) -> u32 {
+    Block::around(addr, prefix).network.to_bits()
+}
+
+impl Dig {
+    /// The mine of one first hit, which gives this many addresses.
+    fn at(origin: Ipv4Addr, plan: MinePlan) -> Self {
+        Self {
+            origin,
+            block: plan.prefix.block_of(origin),
+            prefix: network_of(origin, MINE_GRAIN),
+            left: plan.depth.get(),
+            probed: BTreeMap::new(),
+            ready: None,
+        }
+    }
+
+    /// The number of addresses that this mine already gave of one /24.
+    fn taken(&self, prefix: u32) -> usize {
+        self.probed.get(&prefix).copied().unwrap_or_default()
+    }
+
+    /// The next address of this mine, which no packet of the hunt already went
+    /// to.
+    ///
+    /// The mine fills the /24 of the first hit up to the cap of the plan, and
+    /// it then draws a sibling /24 inside its block and fills that one the same
+    /// way. A mine whose block holds no free address gives none, and it ends.
+    fn draw(
+        &mut self,
+        rng: &mut StdRng,
+        plan: MinePlan,
+        visited: &HashSet<Ipv4Addr>,
+    ) -> Option<Ipv4Addr> {
+        for _ in 0..MINE_ATTEMPTS {
+            if self.taken(self.prefix) >= plan.per_prefix.get() {
+                self.prefix = self.sibling(rng, plan)?;
+                continue;
+            }
+            let host = rng.random_range(FIRST_HOST..=LAST_HOST);
+            let addr = Ipv4Addr::from_bits(self.prefix | u32::from(host));
+            if reserved(addr).is_none() && !visited.contains(&addr) {
+                return Some(addr);
+            }
+        }
+        None
+    }
+
+    /// A /24 of this mine's block that still stands below the cap of the plan.
+    ///
+    /// The draw is at random and not in order, because a walk of the siblings
+    /// in order reads as a horizontal scan of the whole block. A block whose
+    /// /24s all hold the cap, and a block whose free /24s no packet routes to,
+    /// both give none. A block that holds one /24 holds no sibling of it, and
+    /// it gives none at once, before it draws anything.
+    fn sibling(&self, rng: &mut StdRng, plan: MinePlan) -> Option<u32> {
+        let span = plan.prefix.span();
+        if span == 1 {
+            // The one /24 of such a block is the /24 that the mine digs in, and
+            // the caller reads a sibling only after that one holds the cap. The
+            // loop below would draw the same /24 on every turn and pass it on
+            // none.
+            return None;
+        }
+        for _ in 0..MINE_ATTEMPTS {
+            let sibling = self.block | (rng.random_range(0..span) << HOST_BITS);
+            if self.taken(sibling) < plan.per_prefix.get()
+                && reserved(Ipv4Addr::from_bits(sibling)).is_none()
+            {
+                return Some(sibling);
+            }
+        }
+        None
+    }
+}
+
+impl Mine {
+    /// Builds the mine of one hunt.
+    fn new(plan: MinePlan, seed: u64, clock: Box<dyn Clock>) -> Self {
+        Self {
+            plan,
+            rng: StdRng::seed_from_u64(seed ^ MINE_SEED_SHIFT),
+            clock,
+            record: None,
+            dig: None,
+            counts: Mined::default(),
+        }
+    }
+
+    /// Starts a mine at this destination when its path is the longest one the
+    /// hunt measured.
+    ///
+    /// The first result of a hunt is the longest path it measured, so it starts
+    /// a mine. Every result after it must beat the record, and a result that
+    /// ties it starts none: the hunt already holds a path of that length, and
+    /// the near space of the destination that set it was already mined.
+    fn scored(&mut self, addr: Ipv4Addr, length: u8) {
+        if self.record.is_some_and(|held| length <= held) {
+            return;
+        }
+        self.record = Some(length);
+        self.dig = Some(Dig::at(addr, self.plan));
+    }
+
+    /// The time until the mine that stands gives its next address.
+    ///
+    /// A hunt whose mine holds no address reads none, and a mine that is due
+    /// reads no time at all.
+    fn wait(&self) -> Option<Duration> {
+        let dig = self.dig.as_ref()?;
+        Some(dig.ready.map_or(Duration::ZERO, |ready| {
+            ready.saturating_duration_since(self.clock.now())
+        }))
+    }
+
+    /// The next address of the mine that stands, when one stands and it is
+    /// due.
+    ///
+    /// A mine that gave every address of its depth, and a mine whose block
+    /// holds no free address, both end here and stand no longer.
+    fn address(&mut self, visited: &HashSet<Ipv4Addr>) -> Option<Pick> {
+        let now = self.clock.now();
+        let plan = self.plan;
+        let dig = self.dig.as_mut()?;
+        if dig.ready.is_some_and(|ready| now < ready) {
+            return None;
+        }
+        let Some(addr) = dig.draw(&mut self.rng, plan, visited) else {
+            self.dig = None;
+            return None;
+        };
+        let origin = dig.origin;
+        if dig.left == plan.depth.get() {
+            self.counts.mines += 1;
+        }
+        dig.left -= 1;
+        *dig.probed.entry(network_of(addr, MINE_GRAIN)).or_default() += 1;
+        dig.ready = Some(now + plan.delay);
+        if dig.left == 0 {
+            self.dig = None;
+        }
+        self.counts.addresses += 1;
+        Some(Pick {
+            addr,
+            mine: Some(origin),
+        })
+    }
+}
+
+/// What the mines of one hunt started and gave.
+///
+/// A mine that a new record replaced before it gave an address counts nowhere,
+/// because it probed nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Mined {
+    /// The number of mines that gave at least one address.
+    pub(crate) mines: u64,
+    /// The number of addresses that those mines gave.
+    pub(crate) addresses: u64,
+}
+
+/// The draw of one hunt: the source of the candidates, the addresses that the
+/// hunt already visited, and the mine of the near space.
 pub(crate) struct Draw {
     /// The candidates, in the order the draw reads them.
     candidates: Box<dyn Iterator<Item = Ipv4Addr>>,
@@ -216,6 +612,8 @@ pub(crate) struct Draw {
     /// The address that a peek took out of the source and that no ask has
     /// taken yet.
     peeked: Option<Ipv4Addr>,
+    /// The mine of the near space, when the hunt asked for one.
+    mine: Option<Mine>,
 }
 
 impl Draw {
@@ -225,12 +623,24 @@ impl Draw {
             candidates,
             visited: HashSet::new(),
             peeked: None,
+            mine: None,
         }
     }
 
     /// Builds the draw of a real hunt, over the seeded sequence of [`random`].
     pub(crate) fn seeded(seed: u64) -> Self {
         Self::new(Box::new(random(seed)))
+    }
+
+    /// The same draw, which mines the near space of every record it hears.
+    ///
+    /// The mine draws on a sequence of its own, so the addresses that a mine
+    /// probes shift no address of the independent draw. A hunt of one seed
+    /// therefore visits the same independent addresses whether it mines or
+    /// not.
+    pub(crate) fn mining(mut self, plan: MinePlan, seed: u64, clock: Box<dyn Clock>) -> Self {
+        self.mine = Some(Mine::new(plan, seed, clock));
+        self
     }
 
     /// The next address to trace, without taking it.
@@ -246,9 +656,49 @@ impl Draw {
         self.peeked
     }
 
-    /// The next address to trace.
-    pub(crate) fn address(&mut self) -> Option<Ipv4Addr> {
-        self.peeked.take().or_else(|| self.take())
+    /// The next address to trace, from a mine when one is due and from the
+    /// source of the candidates when none is.
+    pub(crate) fn address(&mut self) -> Option<Pick> {
+        if let Some(pick) = self.mined() {
+            return Some(pick);
+        }
+        let addr = self.peeked.take().or_else(|| self.take())?;
+        Some(Pick { addr, mine: None })
+    }
+
+    /// The next address of the mine that stands, and no address of the source
+    /// of the candidates.
+    ///
+    /// A hunt that already holds the rounds it wants takes this door. The
+    /// addresses of a mine cost no round, so such a hunt still finishes the
+    /// mine it started and draws no further independent address.
+    pub(crate) fn mined(&mut self) -> Option<Pick> {
+        let Self { mine, visited, .. } = self;
+        let pick = mine.as_mut()?.address(visited)?;
+        visited.insert(pick.addr);
+        Some(pick)
+    }
+
+    /// What the mines of this hunt started and gave. A draw that the hunt did
+    /// not ask to mine gives none.
+    pub(crate) fn mine_counts(&self) -> Option<Mined> {
+        Some(self.mine.as_ref()?.counts)
+    }
+
+    /// The time until a mine gives its next address. A draw whose mine holds
+    /// no address gives none.
+    pub(crate) fn mine_wait(&self) -> Option<Duration> {
+        self.mine.as_ref()?.wait()
+    }
+
+    /// Tells the draw the length of the path that one destination gave, so a
+    /// mine starts when that path is the longest one the hunt measured.
+    ///
+    /// A draw that mines nothing keeps nothing.
+    pub(crate) fn scored(&mut self, addr: Ipv4Addr, length: u8) {
+        if let Some(mine) = self.mine.as_mut() {
+            mine.scored(addr, length);
+        }
     }
 
     /// The next candidate that routes and that this hunt has not visited.
@@ -308,6 +758,9 @@ pub(crate) struct Score {
     /// of the path is no hole: the path stops there, and a probe that went
     /// further measured nothing that belongs to this path.
     gaps: usize,
+    /// The address of the first hit whose mine drew this destination. A
+    /// destination of an independent draw holds none.
+    mine: Option<Ipv4Addr>,
 }
 
 /// The screen of one destination of a hunt.
@@ -333,11 +786,16 @@ pub(crate) struct Scorer {
     reached_at: Option<u8>,
     /// The name of each address that a reverse lookup gave.
     names: BTreeMap<IpAddr, String>,
+    /// The address of the first hit whose mine drew this destination.
+    mine: Option<Ipv4Addr>,
 }
 
 impl Scorer {
     /// Builds the screen of one destination.
-    pub(crate) fn new(addr: Ipv4Addr, run: RunId, first_ttl: u8) -> Self {
+    ///
+    /// `mine` names the first hit whose mine drew this destination, and it is
+    /// none for a destination of an independent draw.
+    pub(crate) fn new(addr: Ipv4Addr, run: RunId, first_ttl: u8, mine: Option<Ipv4Addr>) -> Self {
         Self {
             addr,
             run,
@@ -345,6 +803,7 @@ impl Scorer {
             table: HopTable::new(),
             reached_at: None,
             names: BTreeMap::new(),
+            mine,
         }
     }
 
@@ -373,6 +832,7 @@ impl Scorer {
             rtt_ms,
             loss,
             gaps,
+            mine: self.mine,
         }
     }
 
@@ -503,7 +963,11 @@ pub(crate) enum HuntError {
 #[derive(Debug)]
 pub(crate) struct HuntStopped {
     /// The summary of the rounds that finished.
-    pub(crate) summary: Summary,
+    ///
+    /// The summary stands behind a box, so the fault that every run of a hunt
+    /// carries in its `Result` is the width of a pointer and not the width of
+    /// a whole summary.
+    pub(crate) summary: Box<Summary>,
     /// The fault that stopped the hunt.
     pub(crate) fault: HuntError,
 }
@@ -677,12 +1141,25 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
     /// shrinks to the rounds that are left, because the tail of such a hunt
     /// runs one destination at a time and that tail is most of the time the
     /// hunt takes.
+    ///
+    /// A mine that stands keeps the hunt drawing past the rounds it wanted. The
+    /// addresses of a mine cost no round, so a hunt that stopped at its last
+    /// round would leave the mine that round started unprobed. The cap of the
+    /// targets stops such a hunt as it stops every other one.
     fn room(&self) -> bool {
-        !self.drawn_out
-            && !(self.stop)()
-            && self.reached < self.plan.bounds.rounds
+        !(self.stop)()
             && self.targets < self.plan.bounds.max_targets
             && self.flights.len() < self.plan.concurrency.get()
+            && (self.drawing() || self.sources.draw.mine_wait().is_some())
+    }
+
+    /// Whether the hunt still draws independent addresses.
+    ///
+    /// A hunt that holds the rounds it wanted draws no further address of its
+    /// source, and a hunt whose source ran out draws none either. Both still
+    /// trace the addresses of the mine that stands.
+    fn drawing(&self) -> bool {
+        !self.drawn_out && self.reached < self.plan.bounds.rounds
     }
 
     /// Draws destinations and starts them, until the pool is full or a bound
@@ -701,15 +1178,28 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
             let Some(lane) = self.free.pop() else {
                 return Ok(());
             };
-            let Some(target) = self.sources.draw.address() else {
+            let drawing = self.drawing();
+            let picked = if drawing {
+                self.sources.draw.address()
+            } else {
+                self.sources.draw.mined()
+            };
+            let Some(pick) = picked else {
                 self.free.push(lane);
-                self.drawn_out = true;
+                // A draw that gave nothing while the hunt still wanted an
+                // independent address ran its source out. A draw that gave
+                // nothing to a hunt that wanted none holds a mine that is not
+                // due, and the loop of the hunt sleeps that wait out. The or
+                // never takes the mark back off: a source that ran out stays
+                // run out, and a later turn that reads the mine alone says
+                // nothing about the source.
+                self.drawn_out |= drawing;
                 return Ok(());
             };
-            match self.start(target, lane) {
+            match self.start(pick, lane) {
                 Ok(flight) => {
                     self.targets += 1;
-                    self.status.show(Event::Target(target));
+                    self.status.show(Event::Target(pick.addr));
                     self.flights.push(flight);
                 }
                 Err(fault) => {
@@ -737,7 +1227,8 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
     /// Returns [`HuntError::Run`] when a record does not reach the file, and
     /// [`HuntError::Tracer`] when the tracer of this destination does not
     /// start.
-    fn start(&mut self, target: Ipv4Addr, lane: Lane) -> Result<Flight, HuntError> {
+    fn start(&mut self, pick: Pick, lane: Lane) -> Result<Flight, HuntError> {
+        let target = pick.addr;
         let moment = next_moment(self.previous, Utc::now());
         self.previous = Some(moment);
         let id = RunId::at(moment);
@@ -761,6 +1252,10 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
             config: self.facts.config,
             host: self.facts.host.clone(),
             hunt: Some(self.facts.id.clone()),
+            // The score of the destination holds the same address, and the
+            // score goes away when the hunt ends. The file is what a reader
+            // reads afterward, so the address stands in both.
+            mine: pick.mine.map(IpAddr::V4),
         };
         let limits = run::Limits {
             rounds: Some(self.plan.probes_per_round),
@@ -770,7 +1265,7 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
             name_grace: self.plan.name_grace,
         };
         let namer = Namer::new(Box::new(Rc::clone(&self.sources.resolver)), id.clone());
-        let scorer = Scorer::new(target, id, self.facts.config.first_ttl);
+        let scorer = Scorer::new(target, id, self.facts.config.first_ttl, pick.mine);
         let run = run::Run::open(&record, rounds, limits, namer, self.writer)?;
         Ok(Flight {
             target,
@@ -879,13 +1374,21 @@ impl<'a, 's, W: Write> Hunt<'a, 's, W> {
         }
         let score = flight.scorer.score();
         let answered = score.kind == PathKind::Reached;
-        if answered {
+        // A mined destination costs no round. The rounds of a hunt count the
+        // independent draws, which are what set a record, and a mine that ate
+        // them would leave the hunt sampling one network in the place of the
+        // whole address space.
+        if answered && score.mine.is_none() {
             self.reached += 1;
         }
         self.status.show(Event::Scored {
             target: flight.target,
             reached: answered,
+            mine: score.mine,
         });
+        // The draw hears every destination that finished, mined or not, so a
+        // mined destination that beats the record starts a mine of its own.
+        self.sources.draw.scored(score.addr, score.length);
         self.scores.push(score);
     }
 
@@ -973,7 +1476,21 @@ pub(crate) fn record<W: Write>(
             }
         }
         if hunt.flights.is_empty() {
-            break;
+            // A mine that is not due leaves the pool empty for the length of
+            // its wait. The hunt sleeps that wait out and fills again, so the
+            // delay between two addresses of one mine costs the mine no
+            // address. A wait of no time started nothing, and the hunt stops
+            // rather than turning this loop without end.
+            let waiting = hunt
+                .room()
+                .then(|| hunt.sources.draw.mine_wait())
+                .flatten()
+                .filter(|wait| !wait.is_zero() && fault.is_none());
+            let Some(wait) = waiting else {
+                break;
+            };
+            std::thread::sleep(wait);
+            continue;
         }
         match hunt.sweep() {
             Ok(true) => {}
@@ -987,15 +1504,20 @@ pub(crate) fn record<W: Write>(
     // The line goes back before the caller prints the table of the rounds that
     // finished and, when a fault stopped the hunt, the reason.
     hunt.status.show(Event::Stop);
+    let mined = hunt.sources.draw.mine_counts();
     let summary = Summary::new(
         hunt.scores,
         started.elapsed(),
         hunt.targets,
         plan.bounds,
         plan.include_partial,
+        mined,
     );
     match fault {
-        Some(fault) => Err(HuntStopped { summary, fault }),
+        Some(fault) => Err(HuntStopped {
+            summary: Box::new(summary),
+            fault,
+        }),
         None => Ok(summary),
     }
 }
@@ -1055,6 +1577,27 @@ const COLUMN_GAP: &str = "  ";
 /// What the summary says when no destination gave a path that the table ranks.
 const NOTHING_TO_RANK: &str = "no destination gave a path to rank";
 
+/// The word that the counts of a summary name one mine with.
+const MINE: &str = "mine";
+
+/// The word that the counts of a summary name more than one mine with.
+const MINES: &str = "mines";
+
+/// The word that the counts of a summary name the addresses of the mines with.
+const MINED: &str = "mined";
+
+/// The word that the counts of a summary name one added hop with.
+const HOP: &str = "hop";
+
+/// The word that the counts of a summary name more than one added hop with.
+const HOPS: &str = "hops";
+
+/// A count with the word that names it, in the singular for one and in the
+/// plural for every other number.
+fn counted(count: u64, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
 /// One row of the summary table: what the row ranks, and the destination that
 /// holds it.
 struct Row<'a> {
@@ -1076,40 +1619,66 @@ struct Column {
     heading: &'static str,
     /// True when the cell stands against the right edge of the column.
     right: bool,
+    /// True when a table whose rows carry no mine leaves this column out.
+    ///
+    /// The column marks the rows that a mine produced. A table that holds no
+    /// such row draws a column of nothing but the empty mark, which takes width
+    /// from the columns beside it and says nothing.
+    mining: bool,
     /// The cell of one row.
     cell: fn(&Row) -> String,
 }
 
 /// The columns of the summary table, in the order they print.
-const COLUMNS: [Column; 8] = [
+///
+/// The `Mine` column stands beside `Path`, because the two answer the same kind
+/// of question about the row: what the path is, and where the destination of it
+/// came from.
+const COLUMNS: [Column; 9] = [
     Column {
         heading: "Row",
         right: false,
+        mining: false,
         cell: |row| row.label.to_owned(),
     },
     Column {
         heading: "Host",
         right: false,
+        mining: false,
         cell: |row| row.score.host_text(),
     },
     Column {
         heading: "Len",
         right: true,
+        mining: false,
         cell: |row| row.score.length.to_string(),
     },
     Column {
         heading: "Path",
         right: false,
+        mining: false,
         cell: |row| row.score.kind.to_string(),
+    },
+    Column {
+        heading: "Mine",
+        right: false,
+        mining: true,
+        cell: |row| {
+            row.score
+                .mine
+                .map_or_else(|| ui::NO_NUMBER.to_owned(), |first| first.to_string())
+        },
     },
     Column {
         heading: "Avg",
         right: true,
+        mining: false,
         cell: |row| ui::render_time(row.score.rtt_ms),
     },
     Column {
         heading: "Loss%",
         right: true,
+        mining: false,
         cell: |row| {
             row.score
                 .loss
@@ -1119,11 +1688,13 @@ const COLUMNS: [Column; 8] = [
     Column {
         heading: "Gaps",
         right: true,
+        mining: false,
         cell: |row| row.score.gaps.to_string(),
     },
     Column {
         heading: "Run",
         right: false,
+        mining: false,
         cell: |row| row.score.run.to_string(),
     },
 ];
@@ -1190,6 +1761,9 @@ pub(crate) struct Summary {
     bounds: Bounds,
     /// True when a partial path competes for a row of the table.
     include_partial: bool,
+    /// What the mines of the hunt started and gave. A hunt that the user did
+    /// not ask to mine holds none.
+    mined: Option<Mined>,
 }
 
 impl Summary {
@@ -1204,6 +1778,7 @@ impl Summary {
         targets: u64,
         bounds: Bounds,
         include_partial: bool,
+        mined: Option<Mined>,
     ) -> Self {
         Self {
             scores,
@@ -1211,6 +1786,7 @@ impl Summary {
             targets,
             bounds,
             include_partial,
+            mined,
         }
     }
 
@@ -1226,25 +1802,76 @@ impl Summary {
         let mut lines = if ranked.is_empty() {
             vec![format!("{ROW_START}{NOTHING_TO_RANK}")]
         } else {
-            table(&ranked)
+            table(&ranked, &columns(&ranked))
         };
         lines.push(String::new());
         lines.push(self.counts());
         lines
     }
 
-    /// The rows of the table, in the order they print.
+    /// The scores that this summary reports on.
     ///
-    /// A row that no destination holds is absent. Every reached path holds a
-    /// time, because the destination answered, so the fastest row and the
-    /// slowest row go away only when a hunt of `--include-partial` ranks
-    /// partial paths alone and no hop of any of them answered.
-    fn ranked(&self) -> Vec<Row<'_>> {
-        let candidates: Vec<&Score> = self
-            .scores
+    /// The table ranks these scores, and the count of the hops that a mine
+    /// added reads them. A hunt that asked for no partial path reports the
+    /// reached paths alone.
+    ///
+    /// One population answers both of those questions. A number of the table
+    /// that read a larger population would name a path that the table drops,
+    /// and the reader of that number would have no way to find the path.
+    ///
+    /// The reached count and the partial count of [`Summary::counts`] stand
+    /// outside this rule, and the doc there gives the reason. They count the
+    /// destinations that the hunt started against the bounds it ran to, so
+    /// they read every score whether the table ranks it or not.
+    fn reported(&self) -> Vec<&Score> {
+        self.scores
             .iter()
             .filter(|score| self.include_partial || score.kind == PathKind::Reached)
-            .collect();
+            .collect()
+    }
+
+    /// The hops that the mines of this hunt added.
+    ///
+    /// The number is the longest mined path over the longest independent one,
+    /// of the paths that [`Summary::reported`] holds. A reader of it asks one
+    /// question — did the mine find a path that the hunt would not otherwise
+    /// hold — and that difference is the answer. A mine that found a shorter
+    /// path added no hop, which is the expected result.
+    ///
+    /// A mined path that the table drops adds no hop either. The table is where
+    /// the reader looks for the path that this number names, so a number that
+    /// reads a path outside the table names a length that no row holds.
+    ///
+    /// The number is a difference, so it needs both of its terms. A hunt that
+    /// reports no independent path holds nothing for the mined one to stand
+    /// against, and a hunt that reports no mined path holds nothing that a
+    /// mine added. Either one adds no hop. The zero of a missing term would
+    /// otherwise turn the difference into the whole length of the mined path,
+    /// which is a number that no mine added.
+    fn added(&self) -> u8 {
+        let reported = self.reported();
+        let longest = |mined: bool| {
+            reported
+                .iter()
+                .filter(|score| score.mine.is_some() == mined)
+                .map(|score| score.length)
+                .max()
+        };
+        match (longest(true), longest(false)) {
+            (Some(mined), Some(independent)) => mined.saturating_sub(independent),
+            _ => 0,
+        }
+    }
+
+    /// The rows of the table, in the order they print.
+    ///
+    /// The rows come off the paths that [`Summary::reported`] holds. A row that
+    /// no destination holds is absent. Every reached path holds a time, because
+    /// the destination answered, so the fastest row and the slowest row go away
+    /// only when a hunt of `--include-partial` ranks partial paths alone and no
+    /// hop of any of them answered.
+    fn ranked(&self) -> Vec<Row<'_>> {
+        let candidates = self.reported();
         let timed: Vec<&Score> = candidates
             .iter()
             .copied()
@@ -1276,22 +1903,45 @@ impl Summary {
     /// destinations in flight finish. A hunt that ran to a bound of its own
     /// leaves none, and its three counts do add up.
     ///
+    /// The reached count and the partial count both read the independent
+    /// destinations alone. A mined destination costs no round, so it stands
+    /// against no bound and it stands in the mined count of its own. The counts
+    /// of a hunt that mined therefore add up the same way: the reached, the
+    /// partial, and the mined together are the destinations that the hunt
+    /// started.
+    ///
+    /// A hunt that the user asked to mine names its three mine fields whatever
+    /// they hold. A mine that added no hop is the expected result, and a field
+    /// that went away at zero would leave a reader unable to tell that result
+    /// from a hunt that never mined.
+    ///
     /// The line stands at the left edge, where the closing line of a trace
     /// stands, and the table above it stands one column in, where the table of
     /// a folded run stands. The two are different things: the table is a table,
     /// and this line closes the run.
     fn counts(&self) -> String {
-        let reached = self
-            .scores
-            .iter()
+        let independent = self.scores.iter().filter(|score| score.mine.is_none());
+        let reached = independent
+            .clone()
             .filter(|score| score.kind == PathKind::Reached)
             .count();
+        let partial = independent.count() - reached;
+        let mines = self.mined.map(|mined| {
+            [
+                counted(mined.mines, MINE, MINES),
+                format!("{} {MINED}", mined.addresses),
+                format!("+{}", counted(u64::from(self.added()), HOP, HOPS)),
+            ]
+        });
         [
             format!("{reached}/{} {REACHED}", self.bounds.rounds),
             format!("{}/{} {TARGETS}", self.targets, self.bounds.max_targets),
-            format!("{} {PARTIAL}", self.scores.len() - reached),
-            ui::render_duration(self.elapsed),
+            format!("{partial} {PARTIAL}"),
         ]
+        .into_iter()
+        .chain(mines.into_iter().flatten())
+        .chain(std::iter::once(ui::render_duration(self.elapsed)))
+        .collect::<Vec<String>>()
         .join(ui::FIELD_SEPARATOR)
     }
 }
@@ -1311,18 +1961,34 @@ fn pick<'a>(scores: &[&'a Score], better: impl Fn(&Score, &Score) -> bool) -> Op
     best
 }
 
+/// The columns that one table draws, in the order they print.
+///
+/// A table whose rows carry no mine leaves the mine column out. Every other
+/// column of [`COLUMNS`] stands in every table.
+fn columns(rows: &[Row]) -> Vec<&'static Column> {
+    let mined = rows.iter().any(|row| row.score.mine.is_some());
+    COLUMNS
+        .iter()
+        .filter(|column| mined || !column.mining)
+        .collect()
+}
+
 /// The lines of the table: the column header, and one line for each row.
 ///
 /// Each column takes the width of the widest cell it holds, and of its own
-/// heading. The widths come out of [`COLUMNS`], which holds the heading and the
-/// cell of each column together, so no cell can land under the heading of
-/// another column.
-fn table(rows: &[Row]) -> Vec<String> {
+/// heading. The widths come out of the columns themselves, which hold the
+/// heading and the cell of each one together, so no cell can land under the
+/// heading of another column.
+///
+/// `columns` is what the table draws, which is every column of [`COLUMNS`] for
+/// a table that holds a mined row and every column but the mine one for a table
+/// that holds none.
+fn table(rows: &[Row], columns: &[&Column]) -> Vec<String> {
     let cells: Vec<Vec<String>> = rows
         .iter()
-        .map(|row| COLUMNS.iter().map(|column| (column.cell)(row)).collect())
+        .map(|row| columns.iter().map(|column| (column.cell)(row)).collect())
         .collect();
-    let widths: Vec<usize> = COLUMNS
+    let widths: Vec<usize> = columns
         .iter()
         .enumerate()
         .map(|(index, column)| {
@@ -1334,13 +2000,13 @@ fn table(rows: &[Row]) -> Vec<String> {
                 .unwrap_or_default()
         })
         .collect();
-    let headings: Vec<String> = COLUMNS
+    let headings: Vec<String> = columns
         .iter()
         .map(|column| column.heading.to_owned())
         .collect();
     std::iter::once(&headings)
         .chain(cells.iter())
-        .map(|row| line_of(row, &widths))
+        .map(|row| line_of(row, &widths, columns))
         .collect()
 }
 
@@ -1349,11 +2015,11 @@ fn table(rows: &[Row]) -> Vec<String> {
 /// The line loses the spaces that follow its last cell. A trailing space says
 /// nothing, and it turns a copy of the table into text that a reader must
 /// clean.
-fn line_of(cells: &[String], widths: &[usize]) -> String {
+fn line_of(cells: &[String], widths: &[usize], columns: &[&Column]) -> String {
     let padded: Vec<String> = cells
         .iter()
         .zip(widths)
-        .zip(COLUMNS.iter())
+        .zip(columns.iter())
         .map(|((cell, width), column)| pad(cell, *width, column.right))
         .collect();
     format!("{ROW_START}{}", padded.join(COLUMN_GAP))
@@ -1376,22 +2042,26 @@ fn pad(cell: &str, width: usize, right: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        random, record, reserved, Bounds, Draw, Facts, HuntError, HuntStopped, PathKind, Plan,
-        Probes, RunError, Score, Scorer, Sources, Summary, ATTEMPTS, FASTEST, LONGEST,
+        network_of, random, record, reserved, Block, Bounds, Dig, Draw, Facts, HuntError,
+        HuntStopped, MinePlan, MinePrefix, Mined, PathKind, Pick, Plan, Probes, RunError, Score,
+        Scorer, Sources, Summary, ATTEMPTS, FASTEST, FIRST_HOST, LAST_HOST, LONGEST, MINE_GRAIN,
         NOTHING_TO_RANK, PARTIAL, SHORTEST, SLOWEST,
     };
-    use crate::live::Screen;
+    use crate::live::{Screen, SystemClock};
     use crate::names::Lookup;
     use crate::record::{
         EndReason, Family, HuntId, NameRecord, Privilege, Record, Recording, RoundRecord,
         RunConfig, RunId, SourceKind, SourceLabel, Writer,
     };
     use crate::status::{Event, Status};
-    use crate::testing::{named, round, FakeResolver};
+    use crate::testing::{named, round, FakeClock, FakeResolver};
     use crate::trace::Lane;
     use crate::{Multipath, Protocol};
     use chrono::Utc;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use std::cell::Cell;
+    use std::collections::BTreeMap;
     use std::collections::HashSet;
     use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};
@@ -1448,6 +2118,26 @@ mod tests {
         ))))
     }
 
+    /// An address of `10.0.0.0/8`, which the guard of the draw rejects.
+    const REJECTED: &str = "10.0.0.1";
+
+    /// The draw over a scripted list that an endless stream of rejected
+    /// candidates follows, and that counts every candidate it gives.
+    ///
+    /// The stream holds no address that a hunt traces, so the source runs the
+    /// draw out: one call of [`Draw::take`] reads [`ATTEMPTS`] candidates of it
+    /// and gives nothing. The count therefore names the number of times that
+    /// the hunt went back to a source which holds nothing for it.
+    fn draw_that_counts(candidates: &[&str], reads: &Rc<Cell<usize>>) -> Draw {
+        let list: Vec<Ipv4Addr> = candidates.iter().copied().map(address).collect();
+        let counter = Rc::clone(reads);
+        Draw::new(Box::new(
+            list.into_iter()
+                .chain(std::iter::repeat(address(REJECTED)))
+                .inspect(move |_| counter.set(counter.get() + 1)),
+        ))
+    }
+
     /// The address that a draw gives, after it reads the rejected candidates
     /// that stand in front of one routable address.
     ///
@@ -1456,7 +2146,15 @@ mod tests {
     fn drawn_past(rejected: &[&str]) -> Option<Ipv4Addr> {
         let mut candidates = rejected.to_vec();
         candidates.push(ROUTABLE);
-        draw_of(&candidates).address()
+        drawn(&mut draw_of(&candidates))
+    }
+
+    /// The address of the next pick of a draw, without the mine beside it.
+    ///
+    /// Every test of the guard and of the visited set reads the address alone,
+    /// and the mine of each of those draws is absent.
+    fn drawn(draw: &mut Draw) -> Option<Ipv4Addr> {
+        draw.address().map(|pick| pick.addr)
     }
 
     /// Asserts that the draw reads past every address of one reserved block.
@@ -1473,20 +2171,20 @@ mod tests {
 
     #[test]
     fn the_draw_gives_a_routable_address() {
-        assert_eq!(draw_of(&[ROUTABLE]).address(), Some(address(ROUTABLE)));
+        assert_eq!(drawn(&mut draw_of(&[ROUTABLE])), Some(address(ROUTABLE)));
     }
 
     #[test]
     fn the_draw_of_a_source_that_ran_out_gives_no_address() {
-        assert_eq!(draw_of(&[]).address(), None);
+        assert_eq!(drawn(&mut draw_of(&[])), None);
     }
 
     #[test]
     fn the_draw_rejects_an_address_that_this_hunt_already_visited() {
         let mut draw = draw_of(&[ROUTABLE, ROUTABLE, OTHER_ROUTABLE]);
-        assert_eq!(draw.address(), Some(address(ROUTABLE)));
+        assert_eq!(drawn(&mut draw), Some(address(ROUTABLE)));
         assert_eq!(
-            draw.address(),
+            drawn(&mut draw),
             Some(address(OTHER_ROUTABLE)),
             "the second ask must read past the address that the first ask gave"
         );
@@ -1500,7 +2198,7 @@ mod tests {
     fn a_source_of_rejected_addresses_alone_stops_the_draw() {
         let loopback = address("127.0.0.1");
         let mut draw = Draw::new(Box::new(std::iter::repeat(loopback)));
-        assert_eq!(draw.address(), None);
+        assert_eq!(drawn(&mut draw), None);
     }
 
     #[test]
@@ -1511,7 +2209,7 @@ mod tests {
             assert!(read <= ATTEMPTS, "the draw read {read} candidates");
             address("10.0.0.1")
         });
-        assert_eq!(Draw::new(Box::new(counted)).address(), None);
+        assert_eq!(drawn(&mut Draw::new(Box::new(counted))), None);
     }
 
     #[test]
@@ -1649,7 +2347,7 @@ mod tests {
     fn seeded_addresses(seed: u64) -> Vec<Ipv4Addr> {
         let mut draw = Draw::seeded(seed);
         (0..SEEDED_DRAWS)
-            .map(|_| draw.address().expect("the seeded draw never runs out"))
+            .map(|_| drawn(&mut draw).expect("the seeded draw never runs out"))
             .collect()
     }
 
@@ -1695,7 +2393,18 @@ mod tests {
         rounds: &[&[(u8, &str, f64)]],
         names: &[(&str, &str)],
     ) -> Score {
-        let mut scorer = Scorer::new(address(destination), RunId::from(run), FIRST_TTL);
+        mined_trace(destination, run, rounds, names, None)
+    }
+
+    /// The score of one destination that the mine of one first hit drew.
+    fn mined_trace(
+        destination: &str,
+        run: &str,
+        rounds: &[&[(u8, &str, f64)]],
+        names: &[(&str, &str)],
+        mine: Option<Ipv4Addr>,
+    ) -> Score {
+        let mut scorer = Scorer::new(address(destination), RunId::from(run), FIRST_TTL, mine);
         for hops in rounds {
             scorer.round(&round(FIRST_TTL, MAX_TTL, hops));
         }
@@ -1857,7 +2566,7 @@ mod tests {
     /// A hunt takes no key of the terminal.
     #[test]
     fn the_screen_of_a_destination_asks_for_no_stop() {
-        let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL);
+        let mut scorer = Scorer::new(address(DESTINATION), RunId::from(RUN), FIRST_TTL, None);
         assert!(!scorer.poll());
     }
 
@@ -1928,13 +2637,16 @@ mod tests {
             THREE_TARGETS,
             SUMMARY_BOUNDS,
             include_partial,
+            None,
         )
     }
 
-    /// The number of destinations that the hunt of [`a_hunt`] started.
+    /// The number of destinations that the hunt of [`a_hunt`] started, and the
+    /// number that the hunt of [`a_mining_hunt`] started.
     ///
-    /// Every one of the three finished and took a score, so this hunt is one
-    /// whose three counts add up.
+    /// Every destination of both finished and took a score, so each hunt is one
+    /// whose counts add up. The two independent destinations of the mining hunt
+    /// and the mined one make its three.
     const THREE_TARGETS: u64 = 3;
 
     /// The row of the summary that carries one label.
@@ -2065,7 +2777,7 @@ mod tests {
     #[test]
     fn a_summary_of_no_ranked_path_says_so_and_still_counts_the_hunt() {
         let scores = vec![traced(QUIET, QUIET_RUN, &[&[(1, FIRST_HOP, 1.0)]], &[])];
-        let summary = Summary::new(scores, ELAPSED, ONE_TARGET, SUMMARY_BOUNDS, false);
+        let summary = Summary::new(scores, ELAPSED, ONE_TARGET, SUMMARY_BOUNDS, false, None);
         let lines = summary.lines();
         assert!(
             lines.iter().any(|line| line.contains(NOTHING_TO_RANK)),
@@ -2097,6 +2809,318 @@ mod tests {
         "",
         "2/8 reached   3/128 targets   1 partial   192s",
     ];
+
+    /// The address of the destination that the mine of the far one drew.
+    ///
+    /// It stands inside `72.14.0.0/16`, which is the block that a mine of
+    /// `--mine-prefix 16` around the far destination stays inside.
+    const DUG: &str = "72.14.201.9";
+
+    /// The run that recorded the trace of the mined destination.
+    const DUG_RUN: &str = "2026-08-18T12:03:00.000Z";
+
+    /// What the mines of the hunt of [`a_mining_hunt`] started and gave.
+    const ONE_MINE: Mined = Mined {
+        mines: 1,
+        addresses: 1,
+    };
+
+    /// The summary of a hunt that mined, as the tests read it.
+    ///
+    /// The near destination answered at TTL 5 and the far one at TTL 18, and
+    /// the far one therefore held the record. Its mine drew one address, and
+    /// that address answered at TTL 20, so the mine added two hops.
+    fn a_mining_hunt() -> Summary {
+        let scores = vec![
+            traced(
+                NEAR,
+                NEAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (5, NEAR, 20.0)]],
+                &[(NEAR, DESTINATION_NAME)],
+            ),
+            traced(
+                FAR,
+                FAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (18, FAR, 85.0)]],
+                &[],
+            ),
+            mined_trace(
+                DUG,
+                DUG_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (20, DUG, 90.0)]],
+                &[],
+                Some(address(FAR)),
+            ),
+        ];
+        Summary::new(
+            scores,
+            ELAPSED,
+            THREE_TARGETS,
+            SUMMARY_BOUNDS,
+            false,
+            Some(ONE_MINE),
+        )
+    }
+
+    #[test]
+    fn the_counts_of_a_hunt_that_mined_name_the_mines_the_addresses_and_the_hops() {
+        assert_eq!(
+            counts(&a_mining_hunt()),
+            "2/8 reached   3/128 targets   0 partial   1 mine   1 mined   +2 hops   192s"
+        );
+    }
+
+    /// A mined destination costs no round, so the reached count holds none.
+    ///
+    /// The mined destination of the hunt below answered, and the count still
+    /// reads the two independent destinations that did.
+    #[test]
+    fn the_reached_count_of_a_summary_counts_no_mined_destination() {
+        assert!(counts(&a_mining_hunt()).starts_with("2/8 reached"));
+    }
+
+    /// A mined destination is no partial path either.
+    ///
+    /// The three counts of a hunt that ran to a bound of its own add up: the
+    /// reached, the partial, and the mined together are the destinations that
+    /// the hunt started.
+    #[test]
+    fn the_partial_count_of_a_summary_counts_no_mined_destination() {
+        assert!(counts(&a_mining_hunt()).contains("0 partial"));
+    }
+
+    /// A mine that added no hop says so plainly.
+    ///
+    /// The expected result of a mine is that it finds the path it already had.
+    /// The summary states the zero rather than hiding the field.
+    #[test]
+    fn a_mine_that_added_no_hop_says_so_plainly() {
+        let scores = vec![
+            traced(
+                FAR,
+                FAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (18, FAR, 85.0)]],
+                &[],
+            ),
+            mined_trace(
+                DUG,
+                DUG_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (12, DUG, 90.0)]],
+                &[],
+                Some(address(FAR)),
+            ),
+        ];
+        let summary = Summary::new(
+            scores,
+            ELAPSED,
+            TWO_TARGETS,
+            SUMMARY_BOUNDS,
+            false,
+            Some(ONE_MINE),
+        );
+        assert!(
+            counts(&summary).contains("+0 hops"),
+            "the summary must state the zero: {}",
+            counts(&summary)
+        );
+    }
+
+    /// The number of destinations that the hunt of the shorter mine started.
+    const TWO_TARGETS: u64 = 2;
+
+    /// A hunt that mined nothing names no mine in its counts.
+    #[test]
+    fn the_counts_of_a_hunt_that_mined_nothing_name_no_mine() {
+        assert_eq!(
+            counts(&a_hunt(false)),
+            "2/8 reached   3/128 targets   1 partial   192s"
+        );
+    }
+
+    /// The heading of the column that names the mine of a row.
+    const MINE_HEADING: &str = "Mine";
+
+    #[test]
+    fn the_table_of_a_hunt_that_mined_holds_a_mine_column() {
+        let lines = a_mining_hunt().lines();
+        assert!(
+            lines[0].contains(MINE_HEADING),
+            "the header must hold the mine column: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_table_of_a_hunt_that_mined_nothing_holds_no_mine_column() {
+        let lines = a_hunt(false).lines();
+        assert!(
+            !lines[0].contains(MINE_HEADING),
+            "a hunt that mined nothing draws no mine column: {lines:?}"
+        );
+    }
+
+    /// The TTL that the independent destination of
+    /// [`a_hunt_whose_mine_is_partial`] answered at.
+    const REACHED_LENGTH: u8 = 10;
+
+    /// The TTL of the last hop that answered on the mined path of
+    /// [`a_hunt_whose_mine_is_partial`].
+    const PARTIAL_MINE_LENGTH: u8 = 17;
+
+    /// The address of the hop where that mined path ends.
+    const DEEP_HOP: &str = "72.14.201.1";
+
+    /// The summary of a hunt whose one mined path is partial.
+    ///
+    /// The independent destination answered at TTL 10. The mine of it drew one
+    /// address that answered nothing past TTL 17, so the mined path is partial
+    /// and it is seven hops longer. The hunt asked for no partial path, so the
+    /// table ranks the reached path alone and no row of it carries a mine.
+    fn a_hunt_whose_mine_is_partial() -> Summary {
+        let scores = vec![
+            traced(
+                FAR,
+                FAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (REACHED_LENGTH, FAR, 85.0)]],
+                &[],
+            ),
+            mined_trace(
+                DUG,
+                DUG_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (PARTIAL_MINE_LENGTH, DEEP_HOP, 90.0)]],
+                &[],
+                Some(address(FAR)),
+            ),
+        ];
+        Summary::new(
+            scores,
+            ELAPSED,
+            TWO_TARGETS,
+            SUMMARY_BOUNDS,
+            false,
+            Some(ONE_MINE),
+        )
+    }
+
+    /// A path that the table drops adds no hop to the counts.
+    ///
+    /// The mined path of the hunt below is seven hops longer than the reached
+    /// one, and it is partial, so the table ranks it nowhere. A count of `+7
+    /// hops` names a length that no row of the table holds, and the reader of
+    /// it has no way to find the path it names.
+    ///
+    /// The three mine fields stand whatever they hold, so the line still names
+    /// the mine and the address it probed beside the zero.
+    #[test]
+    fn a_mined_path_that_the_table_dropped_adds_no_hop() {
+        assert_eq!(
+            counts(&a_hunt_whose_mine_is_partial()),
+            "1/8 reached   2/128 targets   0 partial   1 mine   1 mined   +0 hops   192s"
+        );
+    }
+
+    /// A table of no mined row draws no mine column.
+    ///
+    /// Every mined path of the hunt below is partial, so the table drops all of
+    /// them. A mine column there holds nothing but the empty mark.
+    #[test]
+    fn the_table_of_a_hunt_whose_mined_paths_the_table_dropped_holds_no_mine_column() {
+        let lines = a_hunt_whose_mine_is_partial().lines();
+        assert!(
+            !lines[0].contains(MINE_HEADING),
+            "a table of no mined row draws no mine column: {lines:?}"
+        );
+    }
+
+    /// The TTL of the last hop that answered on the independent path of
+    /// [`a_hunt_whose_one_reached_path_is_mined`].
+    const PARTIAL_REACH_LENGTH: u8 = 12;
+
+    /// The TTL that the mined destination of
+    /// [`a_hunt_whose_one_reached_path_is_mined`] answered at.
+    const MINED_REACHED_LENGTH: u8 = 15;
+
+    /// The summary of a hunt whose one reached path is the mined one.
+    ///
+    /// The independent destination answered nothing past TTL 12, so its path
+    /// is partial. The mine of it drew one address, and that address answered
+    /// at TTL 15. The hunt asked for no partial path, so the table ranks the
+    /// mined path alone and no independent path stands beside it.
+    fn a_hunt_whose_one_reached_path_is_mined() -> Summary {
+        let scores = vec![
+            traced(
+                FAR,
+                FAR_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (PARTIAL_REACH_LENGTH, DEEP_HOP, 50.0)]],
+                &[],
+            ),
+            mined_trace(
+                DUG,
+                DUG_RUN,
+                &[&[(1, FIRST_HOP, 1.0), (MINED_REACHED_LENGTH, DUG, 90.0)]],
+                &[],
+                Some(address(FAR)),
+            ),
+        ];
+        Summary::new(
+            scores,
+            ELAPSED,
+            TWO_TARGETS,
+            SUMMARY_BOUNDS,
+            false,
+            Some(ONE_MINE),
+        )
+    }
+
+    /// A hunt that reports no independent path adds no hop.
+    ///
+    /// The count of the added hops is a difference, and the table holds no
+    /// independent row to take that difference against. A count of `+15 hops`
+    /// there names the whole length of the mined path, which the mine did not
+    /// add: the hunt measured an independent path of 12 hops, and the mine
+    /// found 3 hops more.
+    #[test]
+    fn a_hunt_that_reports_no_independent_path_adds_no_hop() {
+        assert_eq!(
+            counts(&a_hunt_whose_one_reached_path_is_mined()),
+            "0/8 reached   2/128 targets   1 partial   1 mine   1 mined   +0 hops   192s"
+        );
+    }
+
+    #[test]
+    fn the_row_of_a_mined_destination_names_the_first_hit_that_started_it() {
+        let line = row(&a_mining_hunt(), LONGEST);
+        assert!(
+            line.contains(DUG) && line.contains(FAR),
+            "the row must name the first hit that started the mine: {line}"
+        );
+    }
+
+    #[test]
+    fn the_row_of_an_independent_destination_names_no_mine() {
+        let line = row(&a_mining_hunt(), SHORTEST);
+        assert!(
+            line.contains(NEAR) && !line.contains(FAR),
+            "an independent row names no mine: {line}"
+        );
+    }
+
+    /// The summary of a hunt that mined reads as the table of the design.
+    #[test]
+    fn the_summary_of_a_hunt_that_mined_reads_as_the_table_of_the_design() {
+        assert_eq!(a_mining_hunt().lines(), GOLDEN_MINING_SUMMARY);
+    }
+
+    /// The summary of a hunt that mined one address, as the design writes it.
+    const GOLDEN_MINING_SUMMARY: [&str; 7] = [
+        " Row       Host                         Len  Path     Mine          Avg  Loss%  Gaps  Run",
+        " shortest  example.com (93.184.216.34)    5  reached  -            20.0   0.0%     3  2026-08-18T12:00:00.123Z",
+        " longest   72.14.201.9                   20  reached  72.14.200.1  90.0   0.0%    18  2026-08-18T12:03:00.000Z",
+        " fastest   example.com (93.184.216.34)    5  reached  -            20.0   0.0%     3  2026-08-18T12:00:00.123Z",
+        " slowest   72.14.201.9                   20  reached  72.14.200.1  90.0   0.0%    18  2026-08-18T12:03:00.000Z",
+        "",
+        "2/8 reached   3/128 targets   0 partial   1 mine   1 mined   +2 hops   192s",
+    ];
+
     /// The identifier of the hunt that every test of the loop makes.
     const HUNT_ID: &str = "2026-08-18T11:59:00.000Z";
 
@@ -2362,6 +3386,8 @@ mod tests {
         /// The longest that a destination waits, after its last round, for the
         /// names that its lookups have not given yet.
         name_grace: Duration,
+        /// The mine of the near space, when the hunt asks for one.
+        mine: Option<MinePlan>,
     }
 
     impl Shape {
@@ -2376,6 +3402,14 @@ mod tests {
         /// The same hunt, tracing one destination at a time.
         const fn serial(self) -> Self {
             self.at_once(1)
+        }
+
+        /// The same hunt, which mines the near space of every record it hears.
+        const fn mining(self, mine: MinePlan) -> Self {
+            Self {
+                mine: Some(mine),
+                ..self
+            }
         }
 
         /// The same hunt, where each destination takes this many probe rounds.
@@ -2410,6 +3444,7 @@ mod tests {
             probes_per_round: TEST_PROBES_PER_ROUND,
             target_timeout: TARGET_TIMEOUT,
             name_grace: Duration::ZERO,
+            mine: None,
         }
     }
 
@@ -2494,15 +3529,11 @@ mod tests {
         let mut sink = Vec::new();
         let summary = {
             let mut writer = Writer::to_sink(&mut sink);
-            hunt_into(
-                draw_of(addresses),
-                probes,
-                shape,
-                stop,
-                names,
-                &mut writer,
-                status,
-            )
+            let draw = match shape.mine {
+                Some(plan) => draw_of(addresses).mining(plan, SEED, Box::new(SystemClock)),
+                None => draw_of(addresses),
+            };
+            hunt_into(draw, probes, shape, stop, names, &mut writer, status)
         }?;
         Ok((summary, read_back(&sink)))
     }
@@ -2676,6 +3707,369 @@ mod tests {
 
     /// One round that answered to TTL 4 and no further.
     const PARTIAL_AT_FOUR: &[&[(u8, &str, f64)]] = &[&[(1, FIRST_HOP, 1.0), (4, LAST_ANSWER, 9.0)]];
+
+    /// One round that answered to TTL 18 and no further.
+    ///
+    /// A mine draws an address that no test can name, so a scripted round of a
+    /// mined destination names no destination and the path it measures is
+    /// partial. A partial path still carries a length, and the length is what
+    /// starts the next mine.
+    const PARTIAL_AT_EIGHTEEN: &[&[(u8, &str, f64)]] =
+        &[&[(1, FIRST_HOP, 1.0), (18, LAST_ANSWER, 85.0)]];
+
+    /// The wait between two addresses of the mine of a hunt that runs.
+    ///
+    /// A hunt of a test reads the clock of the machine, so the wait is short:
+    /// the hunt sleeps it out for each address of its mine.
+    const A_SHORT_DELAY: Duration = Duration::from_millis(5);
+
+    /// The shape of a hunt of one round, which traces one destination at a
+    /// time and mines this many addresses.
+    fn hunting_and_mining(depth: usize, delay: Duration) -> Shape {
+        wanting(1)
+            .serial()
+            .mining(mine_plan(depth, MINE_PREFIX, MINE_PER_PREFIX, delay))
+    }
+
+    /// The first hit of each score that a hunt took, in the order it took them.
+    fn mines(hunted: &Hunted) -> Vec<Option<Ipv4Addr>> {
+        hunted
+            .summary
+            .scores
+            .iter()
+            .map(|score| score.mine)
+            .collect()
+    }
+
+    /// A mined destination costs no round.
+    ///
+    /// The hunt below wants one round, and the destination it drew answers it.
+    /// The two addresses of the mine that the destination started still stand,
+    /// so the hunt traces three destinations for one round.
+    #[test]
+    fn a_mined_destination_costs_no_round() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR],
+            hunting_and_mining(2, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            hunted.asked.len(),
+            3,
+            "the hunt must trace the two addresses of its mine: {:?}",
+            hunted.asked
+        );
+    }
+
+    /// A mined destination counts against the targets.
+    ///
+    /// The cap of the hunt below is two destinations, and its mine holds eight
+    /// addresses. The cap stops the hunt at the first of them.
+    #[test]
+    fn a_mined_destination_counts_against_the_targets() {
+        let shape = Shape {
+            bounds: Bounds {
+                rounds: 1,
+                max_targets: 2,
+            },
+            ..hunting_and_mining(MINE_DEPTH, Duration::ZERO)
+        };
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR],
+            shape,
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 2, "asked: {:?}", hunted.asked);
+    }
+
+    #[test]
+    fn the_score_of_a_mined_destination_names_the_first_hit_that_started_it() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR],
+            hunting_and_mining(2, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            mines(&hunted),
+            vec![None, Some(address(NEAR)), Some(address(NEAR))]
+        );
+    }
+
+    /// The mine that each `run` record of a file names, in the order the file
+    /// holds them.
+    fn recorded_mines(recording: &Recording) -> Vec<Option<IpAddr>> {
+        recording
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::Run(run) => Some(run.mine),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The run of a mined destination names the mine that drew it.
+    ///
+    /// The score holds the same address, and the score lives as long as the
+    /// hunt does. A reader of the file thus tells a mined destination from an
+    /// independent one long after the hunt printed its summary, and counts the
+    /// hops that the mines added without it.
+    #[test]
+    fn the_run_of_a_mined_destination_names_the_mine_that_drew_it() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR],
+            hunting_and_mining(2, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        let near = IpAddr::V4(address(NEAR));
+        assert_eq!(
+            recorded_mines(&hunted.recording),
+            vec![None, Some(near), Some(near)]
+        );
+    }
+
+    /// A hunt that holds the rounds it wants draws no further independent
+    /// address, and it still finishes the mine it started.
+    #[test]
+    fn a_hunt_that_holds_its_rounds_draws_no_further_independent_address() {
+        let hunted = hunted_bounded(
+            &[NEAR, FAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR],
+            hunting_and_mining(1, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 2, "asked: {:?}", hunted.asked);
+        assert!(
+            !hunted.asked.contains(&address(FAR)),
+            "the hunt held its rounds, so it drew no second independent address: {:?}",
+            hunted.asked
+        );
+    }
+
+    /// A mined destination that beats the record starts a mine of its own.
+    ///
+    /// The mined destination below measures a path of 18 hops against the 5 of
+    /// the destination that started its mine, so the hunt mines the near space
+    /// of the mined address next.
+    #[test]
+    fn a_mined_destination_that_beats_the_record_starts_a_mine() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_EIGHTEEN, PARTIAL_AT_FOUR],
+            hunting_and_mining(1, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 3, "asked: {:?}", hunted.asked);
+        assert_eq!(
+            mines(&hunted),
+            vec![None, Some(address(NEAR)), Some(hunted.asked[1])]
+        );
+    }
+
+    /// The number of addresses that each mine of a count test gives.
+    ///
+    /// The number is two, so the count of the mines of a hunt and the count of
+    /// the addresses of those mines hold different numbers, and neither count
+    /// reads as the other one.
+    const A_MINE_OF_TWO_ADDRESSES: usize = 2;
+
+    /// What one mine of two addresses started and gave.
+    const ONE_MINE_OF_TWO_ADDRESSES: Mined = Mined {
+        mines: 1,
+        addresses: 2,
+    };
+
+    /// What two mines of two addresses each started and gave.
+    const TWO_MINES_OF_TWO_ADDRESSES: Mined = Mined {
+        mines: 2,
+        addresses: 4,
+    };
+
+    /// The counts of a hunt name the mine that it started and the addresses
+    /// that the mine gave.
+    ///
+    /// The destination below answers, so it starts one mine, and that mine
+    /// gives two addresses. The counts hold one mine of two addresses.
+    #[test]
+    fn the_counts_of_a_hunt_name_its_one_mine_and_the_addresses_of_that_mine() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR],
+            hunting_and_mining(A_MINE_OF_TWO_ADDRESSES, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            hunted.summary.mined,
+            Some(ONE_MINE_OF_TWO_ADDRESSES),
+            "the hunt started one mine, and that mine gave two addresses: {:?}",
+            hunted.asked
+        );
+    }
+
+    /// The counts of a hunt name every mine that gave an address.
+    ///
+    /// The second address of the first mine below measures a path of 18 hops
+    /// against the 5 of the destination that started that mine, so it starts a
+    /// mine of its own. Each of the two mines gives two addresses, and the hunt
+    /// traces five destinations: the one it drew, and the four of its mines.
+    #[test]
+    fn the_counts_of_a_hunt_name_every_mine_that_gave_an_address() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[
+                REACHED_AT_FIVE,
+                PARTIAL_AT_FOUR,
+                PARTIAL_AT_EIGHTEEN,
+                PARTIAL_AT_FOUR,
+                PARTIAL_AT_FOUR,
+            ],
+            hunting_and_mining(A_MINE_OF_TWO_ADDRESSES, Duration::ZERO),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 5, "asked: {:?}", hunted.asked);
+        assert_eq!(
+            hunted.summary.mined,
+            Some(TWO_MINES_OF_TWO_ADDRESSES),
+            "the hunt started two mines, and each of them gave two addresses: {:?}",
+            hunted.asked
+        );
+    }
+
+    /// A mine that a new record replaced before it gave an address counts
+    /// nowhere.
+    ///
+    /// The hunt below traces two destinations at one moment, and both of them
+    /// close in one sweep. The near one answers at TTL 5 and starts a mine, and
+    /// the far one answers at TTL 18 and replaces that mine before it gave an
+    /// address. The counts therefore name one mine, and the two addresses are
+    /// the addresses of the mine of the far destination.
+    #[test]
+    fn a_mine_that_a_new_record_replaced_before_it_gave_an_address_counts_nowhere() {
+        let hunted = hunted_bounded(
+            &[NEAR, FAR],
+            &[
+                REACHED_AT_FIVE,
+                FAR_REACHED_AT_EIGHTEEN,
+                PARTIAL_AT_FOUR,
+                PARTIAL_AT_FOUR,
+            ],
+            hunting_and_mining(A_MINE_OF_TWO_ADDRESSES, Duration::ZERO).at_once(TEST_CONCURRENCY),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(
+            hunted.summary.mined,
+            Some(ONE_MINE_OF_TWO_ADDRESSES),
+            "the mine of the near destination gave no address, so it counts nowhere: {:?}",
+            hunted.asked
+        );
+    }
+
+    /// A hunt whose pool stands empty sleeps the delay of its mine out.
+    ///
+    /// The hunt below holds the one round it wants, so the mine is the only
+    /// thing left to trace. The second address of that mine is not due when the
+    /// first one closes, and the hunt waits for it rather than stopping.
+    #[test]
+    fn a_hunt_waits_the_delay_of_its_mine_out() {
+        let hunted = hunted_bounded(
+            &[NEAR],
+            &[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR],
+            hunting_and_mining(2, A_SHORT_DELAY),
+            &never_stops(),
+        )
+        .expect("the hunt must finish");
+        assert_eq!(hunted.asked.len(), 3, "asked: {:?}", hunted.asked);
+    }
+
+    /// The one address that the source of the run-out test gives.
+    ///
+    /// An endless stream of rejected candidates follows it, so the source holds
+    /// this address and nothing else that a hunt traces.
+    const ONE_ADDRESS_THAT_ROUTES: &[&str] = &[NEAR];
+
+    /// The number of rounds that the hunt of the run-out test wants.
+    ///
+    /// The source of that hunt gives one address, so the hunt holds one round
+    /// and it still wants another one at the moment the source runs out. A hunt
+    /// that wanted no further round marks nothing, and the test would then read
+    /// a hunt that never ran its source out.
+    const MORE_ROUNDS_THAN_THE_SOURCE_HOLDS: u64 = 2;
+
+    /// The wait between two addresses of the mine of the run-out test.
+    ///
+    /// The wait stands far above the time that a hunt takes to start one
+    /// destination, so the second address of the mine is not due at the moment
+    /// the hunt asks for it. That ask is the turn which reads the mine alone.
+    const A_DELAY_THAT_HOLDS_THE_MINE: Duration = Duration::from_millis(50);
+
+    /// A source that ran out stays run out.
+    ///
+    /// The hunt below draws the one address of its source, and that address
+    /// answers and starts a mine of two addresses. The source then gives
+    /// nothing but candidates that the draw rejects, and the hunt marks it run
+    /// out.
+    ///
+    /// The pool of the hunt holds two destinations. So the fill that starts the
+    /// first address of the mine asks for a second destination in the same
+    /// turn, and the delay of the mine holds the second address back. That ask
+    /// reads the mine alone, and it says nothing about the source: the mark
+    /// stands, and the hunt goes back to the source no further time.
+    ///
+    /// The count of the candidates proves it. One read of a source that ran out
+    /// costs [`ATTEMPTS`] candidates, so a hunt that took the mark back off
+    /// stands that many candidates above the count below.
+    #[test]
+    fn a_hunt_reads_a_source_that_ran_out_one_time() {
+        let reads = Rc::new(Cell::new(0));
+        let mut probes = FakeProbes::of(&[REACHED_AT_FIVE, PARTIAL_AT_FOUR, PARTIAL_AT_FOUR]);
+        let mut sink = Vec::new();
+        {
+            let mut writer = Writer::to_sink(&mut sink);
+            hunt_into(
+                draw_that_counts(ONE_ADDRESS_THAT_ROUTES, &reads).mining(
+                    mine_plan(
+                        A_MINE_OF_TWO_ADDRESSES,
+                        MINE_PREFIX,
+                        MINE_PER_PREFIX,
+                        A_DELAY_THAT_HOLDS_THE_MINE,
+                    ),
+                    SEED,
+                    Box::new(SystemClock),
+                ),
+                &mut probes,
+                wanting(MORE_ROUNDS_THAN_THE_SOURCE_HOLDS),
+                &never_stops(),
+                &Names::None,
+                &mut writer,
+                &mut Recorder::default(),
+            )
+            .expect("the hunt must finish");
+        }
+        assert_eq!(
+            probes.asked.len(),
+            ONE_ADDRESS_THAT_ROUTES.len() + A_MINE_OF_TWO_ADDRESSES,
+            "the hunt must trace the address of its source and the two addresses of its mine: {:?}",
+            probes.asked
+        );
+        assert_eq!(
+            reads.get(),
+            ONE_ADDRESS_THAT_ROUTES.len() + ATTEMPTS,
+            "the hunt must read a source that ran out one time"
+        );
+    }
 
     #[test]
     fn a_hunt_shows_the_destination_of_each_round_to_its_indicator() {
@@ -3502,13 +4896,539 @@ mod tests {
     fn a_peek_gives_the_address_that_the_next_ask_gives() {
         let mut draw = draw_of(&[ROUTABLE, OTHER_ROUTABLE]);
         assert_eq!(draw.peek(), Some(address(ROUTABLE)));
-        assert_eq!(draw.address(), Some(address(ROUTABLE)));
-        assert_eq!(draw.address(), Some(address(OTHER_ROUTABLE)));
+        assert_eq!(drawn(&mut draw), Some(address(ROUTABLE)));
+        assert_eq!(drawn(&mut draw), Some(address(OTHER_ROUTABLE)));
     }
 
     /// A peek of a draw that ran out gives no address.
     #[test]
     fn a_peek_of_a_draw_that_ran_out_gives_no_address() {
         assert_eq!(draw_of(&[]).peek(), None);
+    }
+
+    /// The address of the first hit that every mine of a test digs around.
+    ///
+    /// The block of `93.184.0.0/16` around it holds no reserved block, so a
+    /// mine of `--mine-prefix 16` there draws no address that the guard
+    /// rejects.
+    const HIT: &str = "93.184.216.34";
+
+    /// The /24 that holds the first hit of a mine test.
+    const HIT_PREFIX: &str = "93.184.216.0";
+
+    /// The block that bounds a mine of the first hit at a prefix of 16.
+    const HIT_BLOCK: &str = "93.184.0.0";
+
+    /// The address of a first hit whose /16 holds two reserved /24s.
+    ///
+    /// `192.0.0.0/24` and `192.0.2.0/24` both stand inside `192.0.0.0/16`, and
+    /// this address stands inside neither one.
+    const HIT_BESIDE_RESERVED: &str = "192.0.1.5";
+
+    /// The length of the path that the first hit of a mine test measured.
+    const HIT_LENGTH: u8 = 20;
+
+    /// The number of addresses that one mine of a test probes.
+    const MINE_DEPTH: usize = 8;
+
+    /// The length of the block that one mine of a test stays inside.
+    const MINE_PREFIX: u8 = 16;
+
+    /// The number of addresses that one mine of a test probes of any one /24.
+    const MINE_PER_PREFIX: usize = 2;
+
+    /// The number of addresses that the mine of the reserved test probes.
+    ///
+    /// The count is large, so the mine draws in many of the 256 /24s that its
+    /// block holds and meets the two reserved ones among them.
+    const A_DEEP_MINE: usize = 200;
+
+    /// The shortest block that a mine draws inside.
+    ///
+    /// A shorter block holds so much of the address space that a draw inside it
+    /// is a draw of the whole internet.
+    const SHORTEST_MINE_BLOCK: u8 = 8;
+
+    /// The longest block that a mine draws inside.
+    ///
+    /// A longer block holds no whole /24, which is the grain that a mine draws
+    /// at.
+    const LONGEST_MINE_BLOCK: u8 = 24;
+
+    /// A block one bit shorter than the shortest one that a mine draws inside.
+    const A_BLOCK_BELOW_THE_SHORTEST: u8 = 7;
+
+    /// A block one bit longer than the longest one that a mine draws inside.
+    const A_BLOCK_ABOVE_THE_LONGEST: u8 = 25;
+
+    /// The number of /24s that the shortest block of a mine holds.
+    ///
+    /// A /8 stands 16 bits above the grain of a mine, so it holds 65536 /24s.
+    const PREFIXES_OF_THE_SHORTEST_MINE_BLOCK: u32 = 65_536;
+
+    /// The number of /24s that the longest block of a mine holds.
+    ///
+    /// The block of a /24 is the /24 itself.
+    const PREFIXES_OF_THE_LONGEST_MINE_BLOCK: u32 = 1;
+
+    /// A block shorter than the shortest one is the length of no mine.
+    #[test]
+    fn a_block_shorter_than_the_shortest_one_is_the_length_of_no_mine() {
+        assert!(
+            MinePrefix::new(A_BLOCK_BELOW_THE_SHORTEST).is_err(),
+            "a block of {A_BLOCK_BELOW_THE_SHORTEST} bits is most of the address space"
+        );
+    }
+
+    /// A block longer than the longest one is the length of no mine.
+    #[test]
+    fn a_block_longer_than_the_longest_one_is_the_length_of_no_mine() {
+        assert!(
+            MinePrefix::new(A_BLOCK_ABOVE_THE_LONGEST).is_err(),
+            "a block of {A_BLOCK_ABOVE_THE_LONGEST} bits holds no whole /24"
+        );
+    }
+
+    /// Both ends of the range are lengths that a mine draws inside.
+    #[test]
+    fn the_shortest_and_the_longest_block_are_both_lengths_of_a_mine() {
+        assert!(
+            MinePrefix::new(SHORTEST_MINE_BLOCK).is_ok(),
+            "a block of {SHORTEST_MINE_BLOCK} bits is the shortest one that a mine draws inside"
+        );
+        assert!(
+            MinePrefix::new(LONGEST_MINE_BLOCK).is_ok(),
+            "a block of {LONGEST_MINE_BLOCK} bits is the longest one that a mine draws inside"
+        );
+    }
+
+    /// The span of the shortest block counts every /24 that it holds.
+    #[test]
+    fn the_span_of_the_shortest_block_counts_every_prefix_that_it_holds() {
+        assert_eq!(
+            MinePrefix::new(SHORTEST_MINE_BLOCK)
+                .expect("the shortest block is a length that a mine draws inside")
+                .span(),
+            PREFIXES_OF_THE_SHORTEST_MINE_BLOCK
+        );
+    }
+
+    /// The span of the longest block is the one /24 that it holds.
+    #[test]
+    fn the_span_of_the_longest_block_is_the_one_prefix_that_it_holds() {
+        assert_eq!(
+            MinePrefix::new(LONGEST_MINE_BLOCK)
+                .expect("the longest block is a length that a mine draws inside")
+                .span(),
+            PREFIXES_OF_THE_LONGEST_MINE_BLOCK
+        );
+    }
+
+    /// Every length that a mine takes counts its /24s, and none of them panics.
+    ///
+    /// The span of a block subtracts its length from the grain of a mine, and a
+    /// block longer than the grain takes that subtraction below zero. The range
+    /// of the length is what holds the subtraction above zero, so every length
+    /// that the constructor gives reads a span, and each block holds half of
+    /// the /24s that the block one bit shorter holds.
+    #[test]
+    fn every_length_that_a_mine_takes_counts_the_prefixes_of_its_block() {
+        let mut held = PREFIXES_OF_THE_SHORTEST_MINE_BLOCK;
+        for bits in SHORTEST_MINE_BLOCK..=LONGEST_MINE_BLOCK {
+            let prefix = MinePrefix::new(bits)
+                .expect("every length of the range is a length that a mine draws inside");
+            assert_eq!(
+                prefix.span(),
+                held,
+                "a block of {bits} bits holds {held} prefixes"
+            );
+            held /= 2;
+        }
+    }
+
+    /// The plan of one mine that a test names.
+    fn mine_plan(depth: usize, prefix: u8, per_prefix: usize, delay: Duration) -> MinePlan {
+        MinePlan {
+            depth: NonZeroUsize::new(depth).expect("a mine of a test probes one address at least"),
+            prefix: MinePrefix::new(prefix)
+                .expect("a mine of a test stays inside a block that a mine draws in"),
+            per_prefix: NonZeroUsize::new(per_prefix)
+                .expect("a mine of a test probes one address of one prefix at least"),
+            delay,
+        }
+    }
+
+    /// The plan of a mine of the defaults of the design, which waits for
+    /// nothing between two addresses.
+    fn a_mine() -> MinePlan {
+        mine_plan(MINE_DEPTH, MINE_PREFIX, MINE_PER_PREFIX, Duration::ZERO)
+    }
+
+    /// A draw that mines the near space, over a scripted list of candidates.
+    fn mining_draw(candidates: &[&str], plan: MinePlan) -> Draw {
+        seeded_mining_draw(candidates, plan, SEED)
+    }
+
+    /// A draw that mines the near space, over the seed that a test names.
+    fn seeded_mining_draw(candidates: &[&str], plan: MinePlan, seed: u64) -> Draw {
+        draw_of(candidates).mining(plan, seed, Box::new(FakeClock::new()))
+    }
+
+    /// The addresses that one mine gives, after one first hit started it.
+    fn mined_addresses(hit: &str, plan: MinePlan) -> Vec<Ipv4Addr> {
+        seeded_mined_addresses(hit, plan, SEED)
+    }
+
+    /// The addresses that one mine of one seed gives.
+    fn seeded_mined_addresses(hit: &str, plan: MinePlan, seed: u64) -> Vec<Ipv4Addr> {
+        let mut draw = seeded_mining_draw(&[], plan, seed);
+        draw.scored(address(hit), HIT_LENGTH);
+        std::iter::from_fn(|| draw.mined())
+            .map(|pick| pick.addr)
+            .collect()
+    }
+
+    /// The number of addresses that the mine of a draw still holds.
+    fn drained(draw: &mut Draw) -> usize {
+        std::iter::from_fn(|| draw.mined()).count()
+    }
+
+    /// The /24 that holds one address.
+    fn prefix_of(addr: Ipv4Addr) -> Ipv4Addr {
+        Ipv4Addr::from_bits(addr.to_bits() & 0xffff_ff00)
+    }
+
+    #[test]
+    fn a_mine_gives_no_more_addresses_than_its_depth() {
+        assert_eq!(mined_addresses(HIT, a_mine()).len(), MINE_DEPTH);
+    }
+
+    #[test]
+    fn a_mine_stays_inside_the_block_that_its_prefix_names() {
+        let inside = Block::new(address(HIT_BLOCK), MINE_PREFIX);
+        let addresses = mined_addresses(HIT, a_mine());
+        assert!(!addresses.is_empty(), "the mine drew no address at all");
+        for addr in addresses {
+            assert!(inside.holds(addr), "the mine drew {addr}, outside {inside}");
+        }
+    }
+
+    #[test]
+    fn a_mine_probes_no_more_addresses_of_one_prefix_than_its_cap() {
+        let mut counted: BTreeMap<Ipv4Addr, usize> = BTreeMap::new();
+        for addr in mined_addresses(HIT, a_mine()) {
+            *counted.entry(prefix_of(addr)).or_default() += 1;
+        }
+        assert!(!counted.is_empty(), "the mine drew no address at all");
+        for (prefix, count) in counted {
+            assert!(
+                count <= MINE_PER_PREFIX,
+                "the mine probed {count} addresses of {prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mine_starts_in_the_prefix_of_the_first_hit() {
+        let addresses = mined_addresses(HIT, a_mine());
+        let first = *addresses.first().expect("the mine gives an address");
+        assert_eq!(prefix_of(first), address(HIT_PREFIX));
+    }
+
+    /// A mine draws a sibling /24 once the first one holds its cap.
+    ///
+    /// The depth of this mine is four times its cap, so the mine fills four
+    /// /24s: the one of the first hit, and three siblings of it.
+    #[test]
+    fn a_mine_draws_a_sibling_prefix_once_the_first_one_holds_its_cap() {
+        let addresses = mined_addresses(HIT, a_mine());
+        let prefixes: HashSet<Ipv4Addr> = addresses.iter().copied().map(prefix_of).collect();
+        assert_eq!(prefixes.len(), MINE_DEPTH / MINE_PER_PREFIX);
+    }
+
+    /// Draws one address of a mine and records it the way a hunt does.
+    ///
+    /// The count of each /24 stands in the mine, and the hunt raises it after
+    /// every address that the mine gives. A test that fills a /24 to the cap
+    /// of its plan raises it the same way.
+    fn dug(dig: &mut Dig, rng: &mut StdRng, plan: MinePlan) {
+        let addr = dig
+            .draw(rng, plan, &HashSet::new())
+            .expect("the mine gives an address");
+        *dig.probed.entry(network_of(addr, MINE_GRAIN)).or_default() += 1;
+    }
+
+    /// A mine whose block holds one /24 reads no random number to find no
+    /// sibling.
+    ///
+    /// The block of a mine of `--mine-prefix 24` is the /24 that the mine
+    /// digs in, so that block holds no sibling and the answer is none. The
+    /// mine reads that answer off the length of its block, and it therefore
+    /// draws nothing: the sequence stands where the addresses above left it.
+    #[test]
+    fn a_mine_of_one_prefix_reads_no_random_number_to_find_no_sibling() {
+        let plan = mine_plan(MINE_DEPTH, MINE_GRAIN, MINE_PER_PREFIX, Duration::ZERO);
+        let mut rng = StdRng::seed_from_u64(SEED);
+        let mut dig = Dig::at(address(HIT), plan);
+        for _ in 0..MINE_PER_PREFIX {
+            dug(&mut dig, &mut rng, plan);
+        }
+        let mut stood = rng.clone();
+        assert_eq!(dig.sibling(&mut rng, plan), None);
+        assert_eq!(
+            rng.random::<u32>(),
+            stood.random::<u32>(),
+            "the mine drew random numbers to find a sibling that its block holds none of"
+        );
+    }
+
+    #[test]
+    fn a_mine_gives_no_address_twice() {
+        let addresses = mined_addresses(HIT, a_mine());
+        assert!(!addresses.is_empty(), "the mine drew no address at all");
+        let distinct: HashSet<Ipv4Addr> = addresses.iter().copied().collect();
+        assert_eq!(distinct.len(), addresses.len());
+    }
+
+    #[test]
+    fn a_mine_draws_no_network_no_broadcast_and_no_gateway() {
+        let addresses = mined_addresses(HIT, a_mine());
+        assert!(!addresses.is_empty(), "the mine drew no address at all");
+        for addr in addresses {
+            let host = addr.octets()[3];
+            assert!(
+                (FIRST_HOST..=LAST_HOST).contains(&host),
+                "the mine drew {addr}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mine_rejects_an_address_that_no_packet_routes_to() {
+        let plan = mine_plan(A_DEEP_MINE, MINE_PREFIX, MINE_PER_PREFIX, Duration::ZERO);
+        let addresses = mined_addresses(HIT_BESIDE_RESERVED, plan);
+        assert_eq!(
+            addresses.len(),
+            A_DEEP_MINE,
+            "the mine drew too few addresses"
+        );
+        for addr in addresses {
+            assert_eq!(
+                reserved(addr),
+                None,
+                "the mine drew {addr}, which no packet routes to"
+            );
+        }
+    }
+
+    /// A mine gives no address that the hunt already visited.
+    ///
+    /// The mine below stands inside one /24, and the draw already gave every
+    /// host of that /24 but one. The mine therefore holds one address to give,
+    /// and it must be that one.
+    #[test]
+    fn a_mine_gives_no_address_that_the_hunt_already_visited() {
+        let free = address("93.184.216.7");
+        let taken: Vec<String> = (FIRST_HOST..=LAST_HOST)
+            .map(|host| format!("93.184.216.{host}"))
+            .filter(|text| *text != free.to_string())
+            .collect();
+        let names: Vec<&str> = taken.iter().map(String::as_str).collect();
+        let mut draw = mining_draw(&names, mine_plan(4, 24, 4, Duration::ZERO));
+        while drawn(&mut draw).is_some() {}
+        draw.scored(address(HIT), HIT_LENGTH);
+        let mined: Vec<Ipv4Addr> = std::iter::from_fn(|| draw.mined())
+            .map(|pick| pick.addr)
+            .collect();
+        assert_eq!(mined, vec![free]);
+    }
+
+    /// The wait between two addresses of one mine of a test.
+    const MINE_DELAY: Duration = Duration::from_secs(2);
+
+    /// A draw and the clock that its mine reads, so a test moves the clock.
+    fn timed_mining_draw(plan: MinePlan) -> (Draw, Rc<FakeClock>) {
+        let clock = FakeClock::new();
+        let draw = draw_of(&[]).mining(plan, SEED, Box::new(Rc::clone(&clock)));
+        (draw, clock)
+    }
+
+    /// A mine that waits between two addresses, and the clock of it.
+    fn a_waiting_mine() -> (Draw, Rc<FakeClock>) {
+        let (mut draw, clock) = timed_mining_draw(mine_plan(
+            MINE_DEPTH,
+            MINE_PREFIX,
+            MINE_PER_PREFIX,
+            MINE_DELAY,
+        ));
+        draw.scored(address(HIT), HIT_LENGTH);
+        (draw, clock)
+    }
+
+    /// The first address of a mine waits for nothing.
+    ///
+    /// The delay stands between two addresses of one mine, and the first
+    /// address of a mine follows no address of it.
+    #[test]
+    fn the_first_address_of_a_mine_waits_for_nothing() {
+        let (mut draw, _clock) = a_waiting_mine();
+        assert!(draw.mined().is_some());
+    }
+
+    #[test]
+    fn a_mine_gives_no_second_address_before_its_delay_passed() {
+        let (mut draw, clock) = a_waiting_mine();
+        assert!(draw.mined().is_some());
+        clock.advance(MINE_DELAY.saturating_sub(Duration::from_millis(1)));
+        assert_eq!(draw.mined(), None);
+    }
+
+    #[test]
+    fn a_mine_gives_its_second_address_once_its_delay_passed() {
+        let (mut draw, clock) = a_waiting_mine();
+        assert!(draw.mined().is_some());
+        clock.advance(MINE_DELAY);
+        assert!(draw.mined().is_some());
+    }
+
+    #[test]
+    fn the_wait_of_a_mine_that_is_not_due_is_the_time_that_is_left_of_its_delay() {
+        let (mut draw, clock) = a_waiting_mine();
+        assert!(draw.mined().is_some());
+        clock.advance(Duration::from_millis(500));
+        assert_eq!(
+            draw.mine_wait(),
+            Some(MINE_DELAY.saturating_sub(Duration::from_millis(500)))
+        );
+    }
+
+    #[test]
+    fn the_wait_of_a_mine_that_is_due_is_no_time_at_all() {
+        let (mut draw, _clock) = a_waiting_mine();
+        assert_eq!(draw.mine_wait(), Some(Duration::ZERO));
+        assert!(draw.mined().is_some());
+    }
+
+    #[test]
+    fn a_draw_whose_mine_ran_out_names_no_wait() {
+        let (mut draw, _clock) = timed_mining_draw(a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert_eq!(drained(&mut draw), MINE_DEPTH);
+        assert_eq!(draw.mine_wait(), None);
+    }
+
+    #[test]
+    fn a_draw_that_mines_nothing_names_no_wait() {
+        assert_eq!(draw_of(&[ROUTABLE]).mine_wait(), None);
+    }
+
+    #[test]
+    fn a_mine_of_one_seed_gives_the_same_addresses() {
+        let addresses = mined_addresses(HIT, a_mine());
+        assert!(!addresses.is_empty(), "the mine drew no address at all");
+        assert_eq!(addresses, mined_addresses(HIT, a_mine()));
+    }
+
+    #[test]
+    fn a_mine_of_another_seed_gives_other_addresses() {
+        assert_ne!(
+            seeded_mined_addresses(HIT, a_mine(), SEED),
+            seeded_mined_addresses(HIT, a_mine(), OTHER_SEED)
+        );
+    }
+
+    #[test]
+    fn the_address_of_a_mine_names_the_first_hit_that_started_it() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        let pick = draw.mined().expect("the mine gives an address");
+        assert_eq!(pick.mine, Some(address(HIT)));
+    }
+
+    #[test]
+    fn an_independent_address_names_no_mine() {
+        assert_eq!(
+            draw_of(&[ROUTABLE]).address(),
+            Some(Pick {
+                addr: address(ROUTABLE),
+                mine: None,
+            })
+        );
+    }
+
+    /// A draw that the hunt did not ask to mine gives no mined address.
+    #[test]
+    fn a_draw_that_mines_nothing_gives_no_mined_address() {
+        let mut draw = draw_of(&[ROUTABLE]);
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert_eq!(draw.mined(), None);
+    }
+
+    #[test]
+    fn a_mine_that_gave_every_address_of_its_depth_stands_no_longer() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        for place in 0..MINE_DEPTH {
+            assert!(
+                draw.mined().is_some(),
+                "the mine must give address {place} of {MINE_DEPTH}"
+            );
+        }
+        assert_eq!(draw.mined(), None);
+    }
+
+    /// The first result of a hunt is the longest path it measured, so it starts
+    /// a mine.
+    #[test]
+    fn the_first_result_of_a_hunt_starts_a_mine() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert!(draw.mined().is_some());
+    }
+
+    #[test]
+    fn a_result_no_longer_than_the_record_starts_no_mine() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert_eq!(drained(&mut draw), MINE_DEPTH);
+        draw.scored(address(FAR), HIT_LENGTH);
+        assert_eq!(draw.mined(), None);
+    }
+
+    #[test]
+    fn a_result_shorter_than_the_record_starts_no_mine() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert_eq!(drained(&mut draw), MINE_DEPTH);
+        draw.scored(address(FAR), HIT_LENGTH - 1);
+        assert_eq!(draw.mined(), None);
+    }
+
+    #[test]
+    fn a_result_longer_than_the_record_starts_a_mine() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        assert_eq!(drained(&mut draw), MINE_DEPTH);
+        draw.scored(address(FAR), HIT_LENGTH + 1);
+        let pick = draw
+            .mined()
+            .expect("the mine of the new record gives an address");
+        assert_eq!(pick.mine, Some(address(FAR)));
+    }
+
+    /// A new record replaces the mine that stands.
+    ///
+    /// The near space of a destination that no longer holds the record is
+    /// worth less than the near space of the one that does, and one mine at a
+    /// time is what keeps the caps of the design meaningful.
+    #[test]
+    fn a_new_record_replaces_the_mine_that_stands() {
+        let mut draw = mining_draw(&[], a_mine());
+        draw.scored(address(HIT), HIT_LENGTH);
+        draw.scored(address(FAR), HIT_LENGTH + 1);
+        let mines: HashSet<Option<Ipv4Addr>> = std::iter::from_fn(|| draw.mined())
+            .map(|pick| pick.mine)
+            .collect();
+        assert_eq!(mines, HashSet::from([Some(address(FAR))]));
     }
 }

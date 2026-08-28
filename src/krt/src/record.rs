@@ -229,6 +229,20 @@ pub(crate) struct RunRecord {
     /// change, and it reads as a run that no hunt holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) hunt: Option<HuntId>,
+    /// The address of the first hit whose mine drew this destination. A run
+    /// that an independent draw started holds none, and so does a run that no
+    /// hunt made.
+    ///
+    /// The field is what tells a mined destination of a hunt from an
+    /// independent one, and it names which mine found the destination. A reader
+    /// of the file counts the hops that the mines of a hunt added from it, and
+    /// finds the path that a mine measured, without the summary that the hunt
+    /// printed.
+    ///
+    /// The field stands last, after the hunt, and it goes away when it is
+    /// absent, for the reason that the `hunt` field above gives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mine: Option<IpAddr>,
 }
 
 /// The source address of a run, and how `krt` found it.
@@ -1162,6 +1176,10 @@ mod tests {
     /// The identifier of the hunt that a `run` line of a hunt names.
     const HUNT: &str = "2026-08-18T11:59:00.000Z";
 
+    /// The address of the first hit whose mine drew the destination that a
+    /// `run` line of a mined destination names.
+    const MINE_ORIGIN: &str = "203.0.113.7";
+
     /// The sequence number that `ROUND_LINE` carries.
     const ROUND_SEQ: u64 = 142;
 
@@ -1228,6 +1246,7 @@ mod tests {
             },
             host: "tims-mac".to_owned(),
             hunt: None,
+            mine: None,
         })
     }
 
@@ -1361,6 +1380,32 @@ mod tests {
     #[test]
     fn a_run_line_that_names_no_hunt_keeps_naming_none_when_it_writes_again() {
         assert_eq!(line_of(&record_of(RUN_LINE)), RUN_LINE);
+    }
+
+    /// The `run` line of a destination that a mine of a hunt drew.
+    ///
+    /// The field stands last, after the hunt that holds the run, so a file that
+    /// an earlier build recorded holds every other field in the place it
+    /// already held.
+    fn a_mined_run_line() -> String {
+        format!(
+            r#"{},"mine":"{MINE_ORIGIN}"}}"#,
+            a_hunt_run_line().trim_end_matches('}')
+        )
+    }
+
+    /// A run that a mine drew keeps the address of the mine that drew it.
+    ///
+    /// The address is what tells a mined destination of a hunt from an
+    /// independent one, and it names which mine found the destination. A reader
+    /// of the file counts the hops that the mines of a hunt added from it. A
+    /// build that dropped the field would leave a file whose mined runs no
+    /// reader can tell apart, and the count of the added hops would then live
+    /// in the summary that the hunt printed and nowhere else.
+    #[test]
+    fn a_run_line_that_names_a_mine_keeps_that_mine_when_it_writes_again() {
+        let line = a_mined_run_line();
+        assert_eq!(line_of(&record_of(&line)), line);
     }
 
     #[test]
@@ -2647,6 +2692,7 @@ mod tests {
             },
             host: MACHINE.to_owned(),
             hunt: None,
+            mine: None,
         })
     }
 

@@ -644,10 +644,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     address with its name, the length of the path, whether the destination answered, the mean
     round-trip time and the loss of the last hop that answered, the number of TTLs inside the path
     that answered nothing, and the run that recorded the trace, so `krt replay <FILE> --run <ID>`
-    prints the whole path. Under the table stand the rounds against the rounds the hunt wanted,
-    the destinations it started against the ones it could start, the number of partial paths, and
-    the wall time, as in `8/8 reached   17/128 targets   9 partial   192s`. The two ratios tell a
-    hunt that held every round it wanted from one that gave up on its targets, and the targets
+    prints the whole path. The table gains a `Mine` column when a row of it carries a mine, and
+    that column holds the address of the first hit that started the mine which drew the row. A
+    row of an independent draw holds `-` there, and a table of no mined row draws no such column.
+    Under the table stand the rounds against the rounds the hunt wanted, the destinations it
+    started against the ones it could start, the number of partial paths, and the wall time, as in
+    `8/8 reached   17/128 targets   9 partial   192s`. The two ratios tell a hunt that held every
+    round it wanted from one that gave up on its targets, and the targets
     count is the one that the last line of the indicator held. `Ctrl-C` stops the hunt and still
     prints the summary of the rounds that finished. A fault that stops the hunt — a write that the
     file refuses, a tracer that does not start, a tracer that dies — prints that same summary, and
@@ -655,7 +658,17 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     of that table and no round, as a destination that `Ctrl-C` cut short takes none, and both still
     count against the targets, because the hunt started both. The three counts of such a hunt
     therefore do not add up: `5/8 reached   13/128 targets   0 partial` is a hunt that held 8
-    destinations when `Ctrl-C` stopped it, and none of those 8 took a score.
+    destinations when `Ctrl-C` stopped it, and none of those 8 took a score. The counts line of a
+    hunt that mined gains three fields, between the partial count and the wall time: the mines the
+    hunt started, the addresses those mines probed, and the hops they added, as in
+    `2/8 reached   14/128 targets   1 partial   3 mines   11 mined   +2 hops   192s`. The hops
+    added is the longest mined path over the longest independent one, of the paths that the table
+    ranks. A mined path that the table drops adds no hop, so the length that the number names
+    stands in a row that the reader can find. The number is a difference, so it needs both of its
+    terms: a table that ranks no independent path adds no hop, and neither does one that ranks no
+    mined path. The reached count and the partial count each read the independent destinations
+    alone. The counts of a hunt that no `Ctrl-C` and no fault cut short therefore add up: the
+    reached, the partial, and the mined together are the destinations the hunt started.
   - A hunt shows what it is doing while it runs. A hunt whose standard output is a terminal draws
     one status line, which redraws in place: a spinner that turns on every sweep of the pool, a
     bar of the hunt, the rounds it holds of the rounds it wants, the address it started last with
@@ -666,7 +679,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     prints on a clean line. A terminal too narrow for every field drops the targets first, then the
     time, then the address, and it never cuts a field in the middle. A hunt whose standard output
     is a pipe or a file writes one whole line for each destination it finished, with no control
-    text, because a file keeps every byte it takes.
+    text, because a file keeps every byte it takes. The line of a mined destination carries
+    `mine <address>` between the answer and the wall time, so a reader who counts the answers of
+    the lines sees why the count runs past the ratio beside them.
   - The draw of a hunt is of ip version 4 alone, because the space of ip version 6 is far too
     sparse for a random address to reach a host. It rejects every address that no packet routes
     to — the private blocks, the loopback block, the documentation blocks, the multicast block,
@@ -679,9 +694,45 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     every row of the table, and the row of such a path says `partial`. It changes what the table
     ranks and never what a round costs: a round is a destination that answered, under that flag as
     under every other one.
+  - `--mine` mines the address space near the longest path the hunt measured. After the hunt
+    measures a path that is the longest one it measured so far, it probes a few addresses near
+    that destination, to find whether a neighbor gives a longer path. The first result of a hunt
+    is the longest path it measured, so it starts a mine too. A result that ties the record starts
+    none, and a new record replaces the mine that stands, so one mine runs at a time. Without the
+    flag a hunt draws independent addresses alone.
+  - The mode is block mining and not hill climbing. BGP carries prefixes and not addresses, so
+    every address inside one announced /24 takes the same path to the border of that network. The
+    landscape is a plateau with cliffs and not a hill, so a walk toward a longer neighbor finds
+    the same number again and again, and it then falls off an edge into an unrelated network. The
+    near space gives two other things. A partial path becomes a reached path, because a neighbor
+    of an address that answered answers far more often. Different hosts of one network also sit at
+    different depths behind the same border router. Count on 0 to 2 hops inside one /24, and 0 to
+    4 across one /16, against a global spread of roughly 8 to 30 hops. A mine that added no hop is
+    the expected result.
+  - A mine draws at /24 granularity, and it never walks address by address. It probes up to
+    `--mine-per-prefix` addresses of the /24 that holds the first hit. It then draws a sibling /24
+    at random inside the block that `--mine-prefix` names, and it probes that one the same way.
+    Inside a /24 it avoids `.0`, `.255`, and `.1`, because a gateway at `.1` stands at the border
+    of the network, which is the shallowest point of it. It rejects every address the hunt already
+    visited, and every address that no packet routes to, as the draw of the hunt does. The
+    addresses of a mine count against `--mine-depth` and not against `--rounds`: a hunt of
+    `--rounds 64 --mine-depth 8` traces 64 independent destinations, and at most 8 more for each
+    mine it starts. Mined addresses do count against `--max-targets`. The defaults are small on
+    purpose, because probes that concentrate on one network read as a horizontal scan, which trips
+    an intrusion detection system and earns an abuse complaint to the ISP of the user. `krt`
+    refuses any of the four bound flags without `--mine`, because such a line names a number that
+    no mine reads. The resolved configuration prints a `mine` row that reads `on` or `off`, and a
+    hunt that mines prints a `mine depth` row, a `mine prefix` row (as a block length, `/16`), a
+    `mine per prefix` row, and a `mine delay` row under it.
   - Each destination of a hunt writes one run into one file, with the records that a normal run
-    writes. The `run` record of each destination carries the identifier of the hunt, so a reader
-    groups the runs of one hunt, and `replay` folds any one of them with no change. The hunt holds
+    writes. Every destination writes one, the mined ones as well as the independent ones, so the
+    file holds every path the hunt measured and not the four that the table ranks. The `run`
+    record of each destination carries the identifier of the hunt, so a reader groups the runs of
+    one hunt, and `replay` folds any one of them with no change. The `run` record of a mined
+    destination also carries a `mine` field, which holds the address of the first hit whose mine
+    drew it. A run of an independent draw carries no such field, and neither does a run that no
+    hunt made. A reader thus tells the two apart, finds the path that each mine measured, and
+    counts the hops that the mines added, long after the hunt printed its summary. The hunt holds
     many destinations at once, so the records of two of them stand between each other in the file.
     The records of one destination stay in order, which is what `replay` folds. A fault that stops
     the hunt closes every destination that stood at that moment: each of those runs takes an `end`
@@ -701,6 +752,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     | `--target-timeout <DUR>` | `10s` | The longest that one destination takes, whether it answers or not. `krt` refuses a hunt whose probe rounds run past this time, because such a hunt cuts every destination short of its last round. The last round lands past the time of the rounds, so this time must hold one probe round more than `--probes-per-round` asks for: 3 rounds at an interval of `1s` need more than `4s`. |
     | `--seed <N>` | the clock | The seed of the draw. A hunt of one seed visits the same addresses in the same order, for one build of `krt`. The resolved configuration prints the seed of every hunt. |
     | `--include-partial` | off | Let a partial path compete for a row of the table. |
+    | `--mine` | off | Mine the address space near the longest path found so far. |
+    | `--mine-depth <N>` | `8` | The number of addresses that one mine probes. |
+    | `--mine-prefix <BITS>` | `16` | The length of the block that one mine stays inside. `krt` refuses a value outside 8 through 24: a shorter block is most of the address space, and a longer one holds no whole /24. |
+    | `--mine-per-prefix <N>` | `2` | The number of addresses that one mine probes of any one /24. |
+    | `--mine-delay <DUR>` | `2s` | The wait between two addresses of one mine. |
   - Every flag of a trace takes a default. `krt replay <FILE>` takes `--run <ID>` alone, which
     picks the run of the file to fold, and the last run of the file is the default there. The
     flags of a trace are:
