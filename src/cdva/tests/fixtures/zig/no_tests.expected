@@ -1,0 +1,11 @@
+. const std = @import("std");
+. 
+. /// Doubles a number.
+. pub fn double(x: i32) i32 {
+.     return x * 2;
+. }
+. 
+. /// Halves a number, rounding towards zero.
+. pub fn half(x: i32) i32 {
+.     return @divTrunc(x, 2);
+. }

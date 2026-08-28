@@ -1,0 +1,14 @@
+. package cache
+. 
+. import "testing"
+. 
+. // Warm fills the cache before a run.
+. func Warm() int {
+. 	return 1
+. }
+. 
+T func BenchmarkWarm(b *testing.B) {
+T 	for i := 0; i < b.N; i++ {
+T 		Warm()
+T 	}
+T }

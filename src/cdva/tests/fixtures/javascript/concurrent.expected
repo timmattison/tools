@@ -1,0 +1,7 @@
+. export async function fetchName() {
+.   return "name";
+. }
+. 
+T test.concurrent("reads the name", async () => {
+T   expect(await fetchName()).toBe("name");
+T });

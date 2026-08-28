@@ -1,0 +1,10 @@
+. import unittest
+. 
+. 
+. def parse(text):
+.     return text.strip()
+. 
+. 
+T @unittest.skip("not ready")
+T def test_parse():
+T     assert parse(" x ") == "x"

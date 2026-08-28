@@ -1,0 +1,14 @@
+. package parse
+. 
+. import "testing"
+. 
+. // Parse reads a word out of a string.
+. func Parse(s string) string {
+. 	return s
+. }
+. 
+T func FuzzParse(f *testing.F) {
+T 	f.Fuzz(func(t *testing.T, s string) {
+T 		Parse(s)
+T 	})
+T }
