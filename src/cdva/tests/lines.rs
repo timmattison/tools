@@ -4,7 +4,8 @@
 //! them were measured against `cloc` 2.x rather than reasoned about, and each
 //! says so where it stands.
 
-use cdva::{classify, count, Counts, Language, LineIndex, LineKind};
+use cdva::{classify, count, ends_unterminated, Counts, Language, LineIndex, LineKind};
+use std::path::{Path, PathBuf};
 
 /// The three numbers of a bucket, which reads better in an assertion than the
 /// four lines of a struct literal.
@@ -156,6 +157,315 @@ fn a_plain_r_is_not_a_raw_string() {
     assert_eq!(
         tally("let a = br\"x // y\";\n// a comment\n", Language::Rust),
         counts(0, 1, 1)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Character literals, and the quotes that only look like one.
+// ---------------------------------------------------------------------------
+
+/// The row of `src/krt/src/source.rs` that this whole section exists for.
+///
+/// `cdva` once read the `"` inside the character literal `'"'` as the opening
+/// of a string. A Rust string spans rows, so that phantom string ran to the
+/// next quote anywhere in the file: `cdva` reported comment=484 code=619 for
+/// that file where `cloc` reported comment=540 code=563, and those 56 rows were
+/// the only disagreement between the two tools over the whole of `src/krt`,
+/// `src/cwt`, and `src/gsw`.
+const RUST_FORBIDDEN_CHARS: &str = r#"const FORBIDDEN: [char; 9] = [':', '/', '\\', '?', '*', '<', '>', '"', '|'];
+// this comment must stay a comment
+fn f() {}
+"#;
+
+#[test]
+fn a_rust_character_literal_of_a_quote_does_not_open_a_string() {
+    assert_eq!(tally(RUST_FORBIDDEN_CHARS, Language::Rust), counts(0, 1, 2));
+    assert!(!ends_unterminated(RUST_FORBIDDEN_CHARS, Language::Rust));
+}
+
+/// Every form a Rust character literal comes in.
+///
+/// The escapes are written through a raw string, so each one reaches the
+/// classifier as the two characters a Rust source holds rather than as the one
+/// character the compiler of *this* file would make of it.
+const RUST_CHAR_LITERALS: &[&str] = &[
+    "'a'",
+    "'\"'",
+    "' '",
+    r"'\\'",
+    r"'\''",
+    r"'\n'",
+    r"'\t'",
+    r"'\0'",
+    r"'\x41'",
+    r"'\u{1F600}'",
+    "'日'",
+    "'é'",
+    "'🎉'",
+];
+
+#[test]
+fn every_rust_character_literal_is_code_and_opens_nothing() {
+    for literal in RUST_CHAR_LITERALS {
+        // A literal that opened a string would swallow the comment below it,
+        // because a Rust string spans rows.
+        let source = format!("let c = {literal};\n// a comment\nfn f() {{}}\n");
+        assert_eq!(tally(&source, Language::Rust), counts(0, 1, 2), "{literal}");
+        assert!(!ends_unterminated(&source, Language::Rust), "{literal}");
+
+        // The same row with nothing after it. A phantom string has no row end
+        // to close it here, so this is what the state of the scan reports.
+        let alone = format!("let c = {literal};");
+        assert!(!ends_unterminated(&alone, Language::Rust), "{literal}");
+    }
+}
+
+#[test]
+fn a_character_literal_of_many_bytes_is_read_whole() {
+    // A lookahead that stepped one *byte* rather than one character would not
+    // know 日 for a character, and would leave the closing quote of `'日'` for
+    // the scanner to read again. That quote then pairs with the comma to make
+    // `','`, and the `"` behind it opens the phantom string all over again.
+    for literal in ["'日'", "'é'", "'🎉'", r"'\u{1F600}'"] {
+        let source = format!(
+            "let m = [{literal},'\"'];\n// this comment must stay a comment\nfn f() {{}}\n"
+        );
+        assert_eq!(tally(&source, Language::Rust), counts(0, 1, 2), "{literal}");
+        assert!(!ends_unterminated(&source, Language::Rust), "{literal}");
+    }
+}
+
+/// Rust rows that hold an unpaired quote, which is a lifetime and not the
+/// opening of anything.
+///
+/// This is why the quote of Rust is read by a lookahead rather than by a string
+/// form of the table: a form on the quote would open a string at every row
+/// here, which is a worse spelling of the same bug.
+const RUST_LIFETIMES: &[&str] = &[
+    "let s: &'static str = \"text\";",
+    "fn f<'a>(x: &'a str) -> &'a str { x }",
+    "struct S<'a, 'b>(&'a str, &'b str);",
+    "impl<'a> Trait for S<'a> {}",
+    "fn g<'a>(x: &'a str) { println!(\"{x}\"); }",
+    "fn h<T: 'static>(x: T) -> Box<dyn Any + 'static> { Box::new(x) }",
+];
+
+#[test]
+fn a_rust_lifetime_is_code_and_opens_nothing() {
+    for row in RUST_LIFETIMES {
+        let source = format!("{row}\n// a comment\nfn f() {{}}\n");
+        assert_eq!(tally(&source, Language::Rust), counts(0, 1, 2), "{row}");
+        assert!(!ends_unterminated(&source, Language::Rust), "{row}");
+    }
+}
+
+#[test]
+fn a_quote_at_the_end_of_a_rust_source_reads_no_further() {
+    // A lookahead that read past the end of the source would panic here rather
+    // than count. Each of these is a quote with too little behind it to make a
+    // character literal of.
+    assert_eq!(tally("let c = '", Language::Rust), counts(0, 0, 1));
+    assert_eq!(tally("let c = 'a", Language::Rust), counts(0, 0, 1));
+    assert_eq!(tally("let c = '\\", Language::Rust), counts(0, 0, 1));
+    assert_eq!(tally("let c = '\\n", Language::Rust), counts(0, 0, 1));
+    assert_eq!(tally("let c = '日", Language::Rust), counts(0, 0, 1));
+    assert_eq!(tally("'", Language::Rust), counts(0, 0, 1));
+    assert_eq!(tally("''", Language::Rust), counts(0, 0, 1));
+
+    // A quote that ends its row is a lifetime bound. No character literal
+    // spans a row, so the lookahead stops at the row break and the comment
+    // below stays a comment.
+    assert_eq!(
+        tally(
+            "fn f<T>() where T: 'a\n// a comment\nfn g() {}\n",
+            Language::Rust
+        ),
+        counts(0, 1, 2)
+    );
+    assert_eq!(
+        tally("let c = '\n// a comment\nfn g() {}\n", Language::Rust),
+        counts(0, 1, 2)
+    );
+}
+
+#[test]
+fn a_character_literal_of_a_quote_opens_no_string_in_zig_or_kotlin() {
+    // Zig and Kotlin spell a character literal with a quote and carry no
+    // unpaired quote, so each takes a plain string form on the quote rather
+    // than the lookahead Rust needs. Without one, the `"` of `'"'` opens a
+    // string that is still open when the source ends.
+    assert!(!ends_unterminated("const q: u8 = '\"';", Language::Zig));
+    assert!(!ends_unterminated("val q: Char = '\"'", Language::Kotlin));
+
+    // In Kotlin the phantom string also swallows the block comment behind it,
+    // and reports both of its rows as code.
+    assert_eq!(
+        tally("val q = '\"' /* a\nb */\nval x = 1\n", Language::Kotlin),
+        counts(0, 2, 1)
+    );
+
+    // The other forms of both languages, which a string form on the quote
+    // reads without any lookahead.
+    for source in [
+        "const a: u8 = 'a';\nconst b: u8 = '\\'';\nconst c: u8 = '\\\\';\n",
+        "const d: u8 = '\\n';\n// a comment\nconst e = 1;\n",
+    ] {
+        assert!(!ends_unterminated(source, Language::Zig), "{source}");
+    }
+    assert_eq!(
+        tally(
+            "val a = 'a'\nval b = '\\''\n// a comment\n",
+            Language::Kotlin
+        ),
+        counts(0, 1, 2)
+    );
+}
+
+#[test]
+fn a_haskell_prime_and_a_scala_symbol_stay_code_and_open_nothing() {
+    // Haskell spells a character literal `'a'` *and* an identifier `x'`, and
+    // Scala a character literal *and* the symbol `'foo`. Neither carries a
+    // string form on the quote, and neither may gain one: it would open a
+    // string at every primed name and at every symbol.
+    assert_eq!(
+        tally("let x' = 1\n-- a comment\ny = x'\n", Language::Haskell),
+        counts(0, 1, 2)
+    );
+    assert!(!ends_unterminated("let x' = 1", Language::Haskell));
+    assert_eq!(
+        tally("val s = 'foo\n// a comment\nval t = 1\n", Language::Scala),
+        counts(0, 1, 2)
+    );
+    assert!(!ends_unterminated("val s = 'foo", Language::Scala));
+}
+
+// ---------------------------------------------------------------------------
+// The state the scan ended in.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ends_unterminated_reads_the_state_the_scan_ended_in() {
+    // Well-formed source ends outside every string and every comment.
+    for source in [
+        "fn f() {}\n",
+        "let s = \"text\";\n",
+        "let r = r#\"text\"#;\n",
+        "/* a comment */\nfn f() {}\n",
+        "// a comment\n",
+        "",
+        "   \n\n",
+    ] {
+        assert!(!ends_unterminated(source, Language::Rust), "{source:?}");
+    }
+
+    // A string, a raw string, and a block comment that never close.
+    for source in [
+        "let s = \"text;\n",
+        "let r = r#\"text;\n",
+        "/* a comment\nand more\n",
+        "let s = \"text\\\n",
+    ] {
+        assert!(ends_unterminated(source, Language::Rust), "{source:?}");
+    }
+
+    // A string of one row closes at the end of its row, so a language whose
+    // string holds no row break never ends unterminated for that reason. The
+    // back-quoted string of Go does hold one.
+    assert!(!ends_unterminated("s := \"text;\n", Language::Go));
+    assert!(ends_unterminated("s := `text;\n", Language::Go));
+
+    // And a docstring that never closes is still a string.
+    assert!(ends_unterminated(
+        "def f():\n    \"\"\"docs\n",
+        Language::Python
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Every Rust source of this repository.
+// ---------------------------------------------------------------------------
+
+/// The root of this repository, found from the manifest directory of this
+/// crate.
+///
+/// `CARGO_MANIFEST_DIR` is `<repository>/src/cdva`, so the root is two levels
+/// above it. An absolute path written here would name one checkout, and this
+/// repository is worked in worktrees.
+fn repository_root() -> PathBuf {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .ancestors()
+        .nth(2)
+        .expect("the manifest of this crate lies two levels below the repository root")
+        .to_path_buf()
+}
+
+/// Every `*.rs` file under a directory, read from the working tree.
+///
+/// The walk reads and never writes, so any number of copies of this test may
+/// run at once. It follows no symbolic link, because the type of a directory
+/// entry is the type of the link itself.
+fn collect_rust_sources(directory: &Path, skip: &Path, found: &mut Vec<PathBuf>) {
+    if directory == skip {
+        return;
+    }
+    let entries = std::fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("{} reads: {error}", directory.display()));
+    for entry in entries {
+        let entry = entry.expect("a directory entry reads");
+        let path = entry.path();
+        let kind = entry.file_type().expect("a directory entry has a type");
+        if kind.is_dir() {
+            // A build directory holds generated sources, which nobody here
+            // committed and which say nothing about the language table.
+            if path.file_name().is_some_and(|name| name == "target") {
+                continue;
+            }
+            collect_rust_sources(&path, skip, found);
+        } else if kind.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
+            found.push(path);
+        }
+    }
+}
+
+#[test]
+fn no_rust_source_of_this_repository_ends_unterminated() {
+    // This is the guard the character literal of Rust needed. A file that ends
+    // inside a string or a block comment is almost never a file somebody wrote
+    // that way; it is the language table reading a construct wrong, and every
+    // row of that file behind the construct is in the wrong bucket. The
+    // classifier reports such a file with numbers that look like any other, so
+    // nothing but this question tells the difference.
+    let root = repository_root();
+    // The one deliberately malformed source of the corpus. It is a fixture of
+    // the tree rule, which needs a file that does not parse.
+    let skip = root.join("src").join("cdva").join("tests").join("fixtures");
+
+    let mut sources = Vec::new();
+    collect_rust_sources(&root.join("src"), &skip, &mut sources);
+    assert!(
+        sources.len() > 100,
+        "the walk found only {} Rust sources under {}, so it is reading the wrong tree and a clean \
+         report here would mean nothing",
+        sources.len(),
+        root.display()
+    );
+
+    let mut unterminated = Vec::new();
+    for path in &sources {
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("{} reads: {error}", path.display()));
+        if ends_unterminated(&source, Language::Rust) {
+            unterminated.push(path.display().to_string());
+        }
+    }
+    unterminated.sort();
+
+    assert!(
+        unterminated.is_empty(),
+        "these sources end inside a string or a block comment, which means the Rust row of the \
+         language table reads one of their constructs wrong:\n{}",
+        unterminated.join("\n")
     );
 }
 

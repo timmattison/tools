@@ -135,24 +135,30 @@ impl LineIndex {
 /// The returned vector has exactly [`LineIndex::row_count`] entries.
 #[must_use]
 pub fn classify(source: &str, language: Language) -> Vec<LineKind> {
-    let index = LineIndex::new(source);
-    let rows = index.starts.len();
-    if rows == 0 {
-        return Vec::new();
-    }
-
-    let mut scanner = Scanner {
-        bytes: source.as_bytes(),
-        syntax: language.comment_syntax(),
-        code: vec![false; rows],
-        comment: vec![false; rows],
-        pos: 0,
-        row: 0,
-        row_start: 0,
-        state: Scan::Normal,
-    };
+    let mut scanner = Scanner::new(source, language);
     scanner.run();
     scanner.finish()
+}
+
+/// Whether the scan of `source` ended inside a string or a block comment.
+///
+/// Valid source of a language almost never ends that way, so a `true` here is
+/// a smell that the syntax table of the language is wrong rather than a fact
+/// about the file. The classifier itself cannot say so: it labels every row
+/// either way and prints a total that no reader can tell from a right one.
+///
+/// This is the question that would have caught the character literal of Rust.
+/// `cdva` read the `"` of `'"'` as the opening of a string, and because a Rust
+/// string spans rows that phantom string ran to the next quote anywhere in the
+/// file — 56 comment rows of `src/krt/src/source.rs` counted as code, with
+/// nothing in the report saying so. A test asks this of every Rust source of
+/// this repository, which catches the next table bug of the same shape without
+/// anyone having to think of the construct in advance.
+#[must_use]
+pub fn ends_unterminated(source: &str, language: Language) -> bool {
+    let mut scanner = Scanner::new(source, language);
+    scanner.run();
+    !matches!(scanner.state, Scan::Normal)
 }
 
 /// Sum the labels of [`classify`].
@@ -207,7 +213,23 @@ struct Scanner<'a> {
     state: Scan,
 }
 
-impl Scanner<'_> {
+impl<'a> Scanner<'a> {
+    /// A scanner standing at the first byte of `source`, with a flag for each
+    /// of its rows.
+    fn new(source: &'a str, language: Language) -> Self {
+        let rows = LineIndex::new(source).starts.len();
+        Scanner {
+            bytes: source.as_bytes(),
+            syntax: language.comment_syntax(),
+            code: vec![false; rows],
+            comment: vec![false; rows],
+            pos: 0,
+            row: 0,
+            row_start: 0,
+            state: Scan::Normal,
+        }
+    }
+
     /// Reads every byte of the source.
     fn run(&mut self) {
         while let Some(byte) = self.bytes.get(self.pos).copied() {

@@ -6,9 +6,12 @@
 //! [`Language`] names every language the tool counts, reads the language of a
 //! file out of its path, and carries the comment and string syntax of that
 //! language. [`classify`] reads a source under that syntax and labels every row
-//! blank, comment, or code. [`PathRules`] marks a whole file as test material
-//! from its path alone, which is the cheap half of the split, and [`TreeRules`]
-//! parses what the path rule leaves and marks the rows of a test node.
+//! blank, comment, or code, and [`ends_unterminated`] asks that same scan
+//! whether it ended inside a string or a block comment, which is how a wrong
+//! row of the language table announces itself. [`PathRules`] marks a whole file
+//! as test material from its path alone, which is the cheap half of the split,
+//! and [`TreeRules`] parses what the path rule leaves and marks the rows of a
+//! test node.
 //!
 //! [`walk`] finds the files, [`Counter`] reads one of them into a [`FileCount`]
 //! of two buckets, and [`Summary`] rolls those up by language. Together they
@@ -29,7 +32,7 @@ pub mod walk;
 pub use counts::{Row, Summary};
 pub use file::{Counter, FileCount, ParseStatus, Rule, Span};
 pub use lang::{AttributeChain, BlockSpec, CommentSyntax, Language, StringSpec};
-pub use lines::{classify, count, Counts, LineIndex, LineKind};
+pub use lines::{classify, count, ends_unterminated, Counts, LineIndex, LineKind};
 pub use pathrule::{PathRules, PathVerdict};
 pub use report::render_table;
 pub use treerule::{TreeOutcome, TreeRules};

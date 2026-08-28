@@ -29,6 +29,15 @@ const FIXTURES: &[(&str, &str)] = &[
         "//! A library.\n\n/// Adds two numbers.\npub fn add(a: u64, b: u64) -> u64 {\n    a + b /* the sum */\n}\n",
     ),
     (
+        // A quote is the delimiter of a character literal and the first
+        // character of a lifetime, and the classifier tells the two apart by
+        // looking ahead. A row it read wrong would move every row behind it to
+        // another bucket, and the split would still sum to the same wrong
+        // total, so the invariant below is asserted over such a file too.
+        "src/chars.rs",
+        "// The characters a name must not hold.\nconst FORBIDDEN: [char; 3] = ['/', '\\\\', '\"'];\n\n/// Reads the first character of a name.\npub fn first<'a>(name: &'a str) -> Option<char> {\n    name.chars().next() /* the first one */\n}\n",
+    ),
+    (
         "tests/add.rs",
         "// The test of the sum.\n\n#[test]\nfn adds() {\n    assert_eq!(2 + 2, 4);\n}\n",
     ),
