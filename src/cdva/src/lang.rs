@@ -165,6 +165,119 @@ const RUST_TREE: Option<TreeRule> = Some(TreeRule {
     scope_kinds: &[],
 });
 
+/// A tree rule that says everything it has to say in its query.
+///
+/// Most languages are this shape: the thing that makes a node a test — the
+/// annotation, or the name — is a *child* of the node, so the query alone
+/// reaches it and the two fields below have nothing to add. Only a language
+/// that spells its annotation as a sibling wants an attribute chain, and only
+/// one that marks an enclosing node wants a scope kind.
+const fn plain(grammar: fn() -> tree_sitter::Language, query: &'static str) -> Option<TreeRule> {
+    Some(TreeRule {
+        grammar,
+        query,
+        attribute_chain: None,
+        scope_kinds: &[],
+    })
+}
+
+/// The functions of a Go file whose rows are test rows.
+///
+/// The trailing `([A-Z_]|$)` is the whole of the rule that `go test` uses, and
+/// it is what keeps `func Testify()` and `func TestingHelper()` out of the test
+/// bucket: a test there is `Test` followed by the end of the name or by a
+/// character that opens a new word.
+const GO_QUERY: &str = r#"((function_declaration name: (identifier) @_n) @test
+ (#match? @_n "^(Test|Benchmark|Fuzz|Example)([A-Z_]|$)"))
+"#;
+
+/// The tests of a Zig file.
+///
+/// Zig is the clean case of the whole table. A test there is a language
+/// construct beside `fn` and `struct`, so the grammar names it outright and no
+/// heuristic over a name enters.
+const ZIG_QUERY: &str = "(test_declaration) @test\n";
+
+/// The definitions of a Python file whose rows are test rows.
+///
+/// The second pattern is not a duplicate of the first. A decorated function is
+/// a `decorated_definition` that *holds* a `function_definition`, so the first
+/// pattern alone starts the span at the `def` and leaves the `@pytest.mark…`
+/// rows above it in the production bucket. The second pattern captures the
+/// outer node, and the union of the two spans is the whole thing.
+const PYTHON_QUERY: &str = r#"((function_definition name: (identifier) @_n) @test (#match? @_n "^test_"))
+((decorated_definition definition: (function_definition name: (identifier) @_n)) @test (#match? @_n "^test_"))
+((decorated_definition (decorator) @_d) @test (#match? @_d "pytest"))
+((class_definition name: (identifier) @_n) @test (#match? @_n "^Test"))
+((class_definition superclasses: (argument_list) @_s) @test (#match? @_s "TestCase"))
+"#;
+
+/// The calls of a JavaScript, TypeScript, or TSX file whose rows are test rows.
+///
+/// The three languages share one rule because they share one way of spelling a
+/// test: a call to a function that a runner defined. Matching the *whole*
+/// function expression rather than an identifier is what covers `it.each`,
+/// `it.only`, `test.concurrent`, and `describe.skip` without a pattern each,
+/// and the word boundary at the end is what keeps `testHelper()` out.
+///
+/// The doubled backslash is not a Rust escape — this is a raw string, and the
+/// query language has an unescaping pass of its own. Tree-sitter reads `\\` as
+/// one backslash and hands the regular expression the `\b` it wants.
+const SCRIPT_QUERY: &str = r#"((call_expression function: (_) @_f) @test
+ (#match? @_f "^(describe|it|test|suite|bench|context)\\b"))
+"#;
+
+/// The grammar of Go.
+fn go_grammar() -> tree_sitter::Language {
+    tree_sitter_go::LANGUAGE.into()
+}
+
+/// The grammar of Zig.
+fn zig_grammar() -> tree_sitter::Language {
+    tree_sitter_zig::LANGUAGE.into()
+}
+
+/// The grammar of Python.
+fn python_grammar() -> tree_sitter::Language {
+    tree_sitter_python::LANGUAGE.into()
+}
+
+/// The grammar of JavaScript.
+fn javascript_grammar() -> tree_sitter::Language {
+    tree_sitter_javascript::LANGUAGE.into()
+}
+
+/// The grammar of TypeScript.
+fn typescript_grammar() -> tree_sitter::Language {
+    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+}
+
+/// The grammar of TSX, which is a grammar of its own and not a mode of the one
+/// above. `<span>` is an element in TSX and a type assertion in TypeScript, so
+/// a TSX file read under the TypeScript grammar fails to parse and counts
+/// wholly as production code.
+fn tsx_grammar() -> tree_sitter::Language {
+    tree_sitter_typescript::LANGUAGE_TSX.into()
+}
+
+/// The tree rule of Go.
+const GO_TREE: Option<TreeRule> = plain(go_grammar, GO_QUERY);
+
+/// The tree rule of Zig.
+const ZIG_TREE: Option<TreeRule> = plain(zig_grammar, ZIG_QUERY);
+
+/// The tree rule of Python.
+const PYTHON_TREE: Option<TreeRule> = plain(python_grammar, PYTHON_QUERY);
+
+/// The tree rule of JavaScript.
+const JAVASCRIPT_TREE: Option<TreeRule> = plain(javascript_grammar, SCRIPT_QUERY);
+
+/// The tree rule of TypeScript.
+const TYPESCRIPT_TREE: Option<TreeRule> = plain(typescript_grammar, SCRIPT_QUERY);
+
+/// The tree rule of TSX.
+const TSX_TREE: Option<TreeRule> = plain(tsx_grammar, SCRIPT_QUERY);
+
 /// A language whose test code the path rule finds on its own, for now.
 ///
 /// A later slice turns one of these into a rule of its own, and the whole of
@@ -348,15 +461,15 @@ language_table! {
     Rust => "Rust", ["rs"], [],
         line: ["//"], block: [C_BLOCK], nested: true, strings: [DQ_ESC_ML], raw_hash: true, char_lit: true, tree: RUST_TREE;
     Go => "Go", ["go"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, BACKTICK, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, BACKTICK, SQ_ESC], raw_hash: false, char_lit: false, tree: GO_TREE;
     Python => "Python", ["py", "pyi"], [],
-        line: ["#"], block: [], nested: false, strings: [TDQ_DOC, TSQ_DOC, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["#"], block: [], nested: false, strings: [TDQ_DOC, TSQ_DOC, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: PYTHON_TREE;
     JavaScript => "JavaScript", ["js", "jsx", "mjs", "cjs"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, char_lit: false, tree: JAVASCRIPT_TREE;
     TypeScript => "TypeScript", ["ts", "mts", "cts"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, char_lit: false, tree: TYPESCRIPT_TREE;
     Tsx => "TSX", ["tsx"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, char_lit: false, tree: TSX_TREE;
     Java => "Java", ["java"], [],
         line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     // Kotlin spells a character literal `'a'` and carries no unpaired quote, so
@@ -381,7 +494,7 @@ language_table! {
     // test in Zig is a language construct rather than a name, so nothing there
     // wants a bare quote either.
     Zig => "Zig", ["zig"], [],
-        line: ["//"], block: [], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["//"], block: [], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: ZIG_TREE;
     C => "C", ["c"], [],
         line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     CHeader => "C/C++ Header", ["h"], [],
