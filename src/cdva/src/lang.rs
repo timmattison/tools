@@ -298,7 +298,7 @@ language_table! {
         line: ["--"], block: [C_BLOCK], nested: false, strings: [SQ_ESC, DQ_ESC], raw_hash: false;
     Makefile => "Makefile", ["mk", "mak"], ["Makefile", "makefile", "GNUmakefile"],
         line: ["#"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false;
-    Dockerfile => "Dockerfile", ["dockerfile"], ["Dockerfile", "Containerfile"],
+    Dockerfile => "Dockerfile", ["dockerfile"], ["Dockerfile", "Containerfile", "dockerfile", "containerfile"],
         line: ["#"], block: [], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false;
     Lua => "Lua", ["lua"], [],
         line: ["--"], block: [LUA_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, LUA_LONG], raw_hash: false;
