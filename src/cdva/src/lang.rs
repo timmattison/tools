@@ -124,7 +124,26 @@ impl Language {
     ///
     /// Returns `None` for a file the tool does not count.
     #[must_use]
-    pub fn from_path(_path: &Path) -> Option<Language> {
-        None
+    pub fn from_path(path: &Path) -> Option<Language> {
+        let file_name = path.file_name()?.to_str()?;
+
+        if let Some(entry) = TABLE
+            .iter()
+            .find(|entry| entry.file_names.contains(&file_name))
+        {
+            return Some(entry.language);
+        }
+
+        let extension = path.extension()?.to_str()?;
+
+        TABLE
+            .iter()
+            .find(|entry| {
+                entry
+                    .extensions
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(extension))
+            })
+            .map(|entry| entry.language)
     }
 }
