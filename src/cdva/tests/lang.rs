@@ -101,6 +101,11 @@ const FILE_NAMES: &[(&str, Language)] = &[
     ("GNUmakefile", Language::Makefile),
     ("Dockerfile", Language::Dockerfile),
     ("Containerfile", Language::Dockerfile),
+    // A container build file is as often written in lower case as it is in
+    // title case, and neither spelling carries an extension for the second rule
+    // to read.
+    ("dockerfile", Language::Dockerfile),
+    ("containerfile", Language::Dockerfile),
 ];
 
 /// The display name of every language, in the order [`Language::all`] reports.
@@ -210,7 +215,8 @@ fn a_whole_file_name_is_matched_exactly() {
     assert_eq!(detect("MAKEFILE"), None);
     assert_eq!(detect("gemfile"), None);
     assert_eq!(detect("RAKEFILE"), None);
-    assert_eq!(detect("containerfile"), None);
+    assert_eq!(detect("DOCKERFILE"), None);
+    assert_eq!(detect("CONTAINERFILE"), None);
 }
 
 #[test]

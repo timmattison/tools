@@ -3,11 +3,14 @@
 //! The library behind the `cdva` binary: a code counter that reports the test
 //! code of a tree apart from its production code.
 //!
-//! This slice carries the language table. [`Language`] names every language the
-//! tool counts and reads the language of a file out of its path. Later slices
-//! hang the line classifier, the path rule, and the tree rule off the same
-//! table.
+//! [`Language`] names every language the tool counts, reads the language of a
+//! file out of its path, and carries the comment and string syntax of that
+//! language. [`classify`] reads a source under that syntax and labels every row
+//! blank, comment, or code. Later slices hang the path rule and the tree rule
+//! off the same table.
 
 pub mod lang;
+pub mod lines;
 
-pub use lang::Language;
+pub use lang::{BlockSpec, CommentSyntax, Language, StringSpec};
+pub use lines::{classify, count, Counts, LineIndex, LineKind};
