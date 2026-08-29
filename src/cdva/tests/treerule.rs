@@ -134,13 +134,16 @@ const JAVASCRIPT_FIXTURES: &[&str] = &[
     "negative",
 ];
 
-/// Every TypeScript fixture. Both carry type annotations inside the test
-/// region, which is what a JavaScript grammar would fail to parse.
-const TYPESCRIPT_FIXTURES: &[&str] = &["annotated_describe", "multibyte", "only"];
+/// Every TypeScript fixture. The three that hold a test carry type annotations
+/// inside the test region, which is what a JavaScript grammar would fail to
+/// parse, and `negative` is the module of typed production code that holds no
+/// test at all.
+const TYPESCRIPT_FIXTURES: &[&str] = &["annotated_describe", "multibyte", "negative", "only"];
 
-/// Every TSX fixture. Both hold an element, which is what a TypeScript grammar
-/// would fail to parse.
-const TSX_FIXTURES: &[&str] = &["component", "multibyte"];
+/// Every TSX fixture. The two that hold a test hold an element as well, which
+/// is what a TypeScript grammar would fail to parse, and `negative` is the
+/// component that stands on its own.
+const TSX_FIXTURES: &[&str] = &["component", "multibyte", "negative"];
 
 /// Every Java fixture. `annotated` and `runwith` are the two nodes the query
 /// names, `parameterized` holds both spellings of an annotation, and `negative`
@@ -754,6 +757,11 @@ fn typescript_marks_a_test_that_holds_characters_of_many_bytes() {
 }
 
 #[test]
+fn typescript_leaves_a_module_of_production_code_alone() {
+    assert_marks_nothing(Corpus::of(Language::TypeScript), "negative");
+}
+
+#[test]
 fn tsx_marks_the_block_beside_the_component_it_reads() {
     Corpus::of(Language::Tsx).assert_marking("component");
 }
@@ -761,6 +769,11 @@ fn tsx_marks_the_block_beside_the_component_it_reads() {
 #[test]
 fn tsx_marks_a_test_that_holds_characters_of_many_bytes() {
     Corpus::of(Language::Tsx).assert_marking("multibyte");
+}
+
+#[test]
+fn tsx_leaves_a_component_of_production_code_alone() {
+    assert_marks_nothing(Corpus::of(Language::Tsx), "negative");
 }
 
 #[test]

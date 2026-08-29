@@ -1,0 +1,14 @@
+export interface AvatarProps {
+  name: string;
+  imageUrl: string;
+}
+
+export function Avatar({ name, imageUrl }: AvatarProps) {
+  const initial = name.slice(0, 1).toUpperCase();
+  return (
+    <figure className="avatar">
+      <img alt={name} src={imageUrl} />
+      <figcaption>{initial}</figcaption>
+    </figure>
+  );
+}
