@@ -24,6 +24,7 @@ const EXTENSIONS: &[(&str, Language)] = &[
     ("go", Language::Go),
     ("py", Language::Python),
     ("pyi", Language::Python),
+    ("pyw", Language::Python),
     ("js", Language::JavaScript),
     ("jsx", Language::JavaScript),
     ("mjs", Language::JavaScript),
@@ -56,6 +57,8 @@ const EXTENSIONS: &[(&str, Language)] = &[
     ("bash", Language::Shell),
     ("zsh", Language::Shell),
     ("bats", Language::Shell),
+    ("fish", Language::Shell),
+    ("ksh", Language::Shell),
     ("ps1", Language::PowerShell),
     ("psm1", Language::PowerShell),
     ("psd1", Language::PowerShell),
@@ -63,13 +66,21 @@ const EXTENSIONS: &[(&str, Language)] = &[
     ("cmd", Language::Batch),
     ("html", Language::Html),
     ("htm", Language::Html),
+    ("xhtml", Language::Html),
     ("xml", Language::Xml),
     ("xsd", Language::Xml),
     ("xsl", Language::Xml),
+    ("svg", Language::Xml),
     ("css", Language::Css),
     ("scss", Language::Scss),
     ("sass", Language::Scss),
     ("json", Language::Json),
+    // One JSON value per row. `cloc` counts such a file, and this tool skipped
+    // it until a cross-check against `cloc` over this repository named
+    // `src/krt/fixtures/two-runs.jsonl` as a file one counter saw and the other
+    // did not.
+    ("jsonl", Language::Json),
+    ("ndjson", Language::Json),
     ("yaml", Language::Yaml),
     ("yml", Language::Yaml),
     ("toml", Language::Toml),
@@ -225,6 +236,28 @@ fn a_directory_in_the_path_does_not_name_the_language() {
     assert_eq!(detect("a/b/c/main.rs"), Some(Language::Rust));
     assert_eq!(detect("/absolute/path/to/lib.go"), Some(Language::Go));
     assert_eq!(detect("./relative/App.tsx"), Some(Language::Tsx));
+}
+
+#[test]
+fn a_json_lines_file_of_this_repository_is_counted() {
+    // The file that found the gap. A cross-check against `cloc` over this
+    // repository reported one file that `cloc` counted and this tool did not,
+    // and this is it.
+    assert_eq!(
+        detect("src/krt/fixtures/two-runs.jsonl"),
+        Some(Language::Json)
+    );
+}
+
+#[test]
+fn a_json_dialect_that_admits_comments_is_not_counted() {
+    // `jsonc` and `json5` are left out on purpose, and the purpose is the
+    // comment syntax rather than an oversight: both admit `//` and `/* … */`,
+    // which plain JSON does not, so counting them as JSON would report every
+    // comment row of such a file as code. They want a row of their own, with a
+    // comment syntax of their own, and they do not have one yet.
+    assert_eq!(detect("tsconfig.jsonc"), None);
+    assert_eq!(detect("config.json5"), None);
 }
 
 #[test]
