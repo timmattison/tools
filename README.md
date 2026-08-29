@@ -963,27 +963,27 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     ```
     Language    Files   Blank  Comment     Code |  Test files  Test code  Test %
     ----------------------------------------------------------------------------
-    Rust          306  15,698   40,133  105,187 |         217     62,257   59.2%
-    Markdown       50   2,949        0   10,657 |           0          0    0.0%
+    Rust          309  15,792   40,625  105,826 |         220     62,745   59.3%
+    Markdown       50   2,976        0   10,847 |           0          0    0.0%
     Go             19     403      232    1,574 |           7        152    9.7%
-    TOML           85     259      124    1,464 |           0          0    0.0%
-    TypeScript      5      81       95      462 |           4        191   41.3%
+    TOML           85     259      124    1,463 |           0          0    0.0%
+    TypeScript      7      86       95      496 |           6        225   45.4%
     Shell           6      70       64      321 |           0          0    0.0%
     C#              5      11        1       96 |           5         96  100.0%
     JSON            3       0        0       78 |           2         66   84.6%
     Java            5      19        3       71 |           5         71  100.0%
-    Ruby            5       7        6       52 |           5         52  100.0%
+    Ruby            6       9        8       70 |           6         70  100.0%
+    JavaScript      6       9        0       63 |           6         63  100.0%
+    TSX             4       6        0       61 |           4         61  100.0%
     Elixir          4       8        0       48 |           4         48  100.0%
     Python          9      25        1       47 |           9         47  100.0%
     Kotlin          4      13        1       42 |           4         42  100.0%
     Swift           4       8        1       41 |           4         41  100.0%
-    JavaScript      5       6        0       39 |           5         39  100.0%
     Zig             3       6        4       21 |           3         21  100.0%
     YAML            1       7        0       17 |           0          0    0.0%
     Perl            1      11       15       16 |           0          0    0.0%
-    TSX             2       2        0       16 |           2         16  100.0%
     ----------------------------------------------------------------------------
-    Total         522  19,583   40,680  120,249 |         276     63,139   52.5%
+    Total         531  19,718   41,174  121,198 |         285     63,748   52.6%
     ```
 
   - Two rules mark the test code. The path rule reads a name — `*_test.go`, `tests/**`,
@@ -1001,7 +1001,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     | `--json` | The whole report as JSON: every row, both buckets, the files whose parse failed, and the files whose scan ended inside a string. |
     | `--csv` | The same report as CSV, one row to a line. |
     | `--explain <PATH>` | Answer for one file instead of printing a table: the rows a rule marked, and which rule marked them. |
-    | `--no-tree` | Read no syntax tree. The path rule alone decides, which is about three times faster and finds no test code inside a production file. |
+    | `--no-tree` | Read no syntax tree. The path rule alone decides, which runs in about half the wall time and finds no test code inside a production file. |
     | `--strict` | Fail the run when the parse of any file failed. |
     | `--test-glob <GLOB>` | Mark a path as test material. `--production-glob` holds one out of the test bucket, and wins over `--test-glob`. |
 

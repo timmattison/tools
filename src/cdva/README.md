@@ -242,13 +242,13 @@ rather than modelling the form.
 
 ### Where `cdva` and `cloc` disagree
 
-The totals of the two tools agree over almost every file. Run over the 306 Rust
-files of this repository, `cloc` 2.10 and `cdva` differ on eight of them, and
-`cdva` is right in all eight. Two classes are known:
+The totals of the two tools agree over almost every file. Run over the 309 Rust
+files of this repository, `cloc` 2.10 and `cdva` differ on nine of them, and
+`cdva` is right in all nine. Two classes are known:
 
 **A comment token inside a string literal is not a comment.** `cloc` reads one
 as a comment; `cdva` knows it is inside a string, and a string is code. This
-class accounts for all eight files. It shows on a row of a multi-row string
+class accounts for all nine files. It shows on a row of a multi-row string
 that holds nothing else — a `// Initialize xterm.js` inside a block of
 JavaScript embedded in a Rust source (`src/beta/src/export/web.rs`), or a
 `https://claude.ai/code` on its own row of a multi-row error message
@@ -280,17 +280,17 @@ The default mode does the least work that is still correct:
    parser.
 3. `rayon` parses the survivors across the cores.
 
-Over this repository — 522 files, about 180,000 rows, on 14 cores — the three
+Over this repository — 531 files, about 182,000 rows, on 14 cores — the three
 modes measure like this, as the median of three runs:
 
 | Mode | Wall | CPU |
 | --- | --- | --- |
-| default | 0.068 s | 0.50 s |
-| `--no-tree` | 0.024 s | 0.06 s |
-| `--tree` | 0.070 s | 0.54 s |
+| default | 0.153 s | 0.53 s |
+| `--no-tree` | 0.080 s | 0.10 s |
+| `--tree` | 0.154 s | 0.59 s |
 
-`--no-tree` is the path rule alone. It runs in about a third of the wall time
-and an eighth of the CPU, and it reports no test code inside a production file.
+`--no-tree` is the path rule alone. It runs in about half the wall time and a
+fifth of the CPU, and it reports no test code inside a production file.
 
 `--tree` parses every file of a language that has a rule and skips the literal
 pre-filter. It costs about what the default costs here, because most files of
