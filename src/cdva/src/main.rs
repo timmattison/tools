@@ -33,6 +33,12 @@
 //! explanation of the number the table would have printed and not of a file
 //! read on its own.
 //!
+//! A file whose parse failed counts entirely as production code, which is the
+//! safe reading of a tree nobody could read. It is also a silent one, so the
+//! table carries a footer naming those files, and `--strict` fails the run over
+//! them. The report is printed either way: a machine that asked for `--json
+//! --strict` wants the document as well as the status.
+//!
 //! # Two things this command states rather than assumes
 //!
 //! **A file the walk found twice is counted once.** Two roots that overlap —
@@ -48,9 +54,9 @@
 use anyhow::{anyhow, Error, Result};
 use buildinfo::version_string;
 use cdva::{
-    render_csv, render_explanation, render_json, render_table, resolve_test_modules, walk, Bucket,
-    Counter, FileCount, Language, PathRules, ReportOptions, SortColumn, Summary, TreeMode,
-    TreeRules, WalkOptions,
+    render_csv, render_explanation, render_failed_parses, render_json, render_table,
+    resolve_test_modules, walk, Bucket, Counter, FileCount, Language, PathRules, ReportOptions,
+    SortColumn, Summary, TreeMode, TreeRules, WalkOptions,
 };
 use clap::Parser;
 use rayon::prelude::*;
@@ -113,6 +119,17 @@ struct Cli {
     #[arg(long)]
     tree: bool,
     /// Fail the run when any file's parse failed.
+    ///
+    /// A file whose parse failed counts entirely as production code, which is
+    /// the safe reading of a tree nobody could read and a silent one. The
+    /// report names such a file whatever this flag says; this flag puts the
+    /// same news in the exit status, for a build that would rather stop.
+    ///
+    /// Careful with --no-tree: it parses nothing at all, so no parse can fail
+    /// and this flag then always passes. That is the honest answer to the
+    /// question it asks, and it is not the answer a build wants, so a check
+    /// that means to catch a broken grammar must not also ask for the fast
+    /// mode.
     #[arg(long)]
     strict: bool,
     /// Explain how one file was marked, span by span, rather than printing a
@@ -171,6 +188,19 @@ impl Cli {
         }
     }
 
+    /// The footer under the report, or nothing at all.
+    ///
+    /// Only the table carries one. The two machine formats already carry the
+    /// same list as data, and a line of prose on standard output is a line
+    /// every consumer of them has to strip; an explanation answers for one
+    /// file, and what the other files of the run did is not its answer.
+    fn footer(&self, summary: &Summary) -> Option<String> {
+        if self.json || self.csv || self.explain.is_some() {
+            return None;
+        }
+        render_failed_parses(summary)
+    }
+
     /// When the tree rule runs, as the two flags say.
     ///
     /// The flags conflict, so clap has already refused the pair by the time
@@ -199,15 +229,41 @@ fn main() -> Result<()> {
 
     let mut counted = count_all(&counter, &once_each(found));
     resolve_test_modules(&mut counted);
+    let summary = Summary::new(counted);
 
+    // The report is printed whatever `--strict` is about to make of it. A
+    // machine that asked for `--json --strict` asked for both the document and
+    // the failing status, and a run that answered with the status alone would
+    // make the flag cost the answer it was reading.
     if let Some(target) = cli.explain.as_deref() {
-        print!("{}", explain(target, &counted)?);
-        return Ok(());
+        print!("{}", explain(target, &summary.files)?);
+    } else {
+        print!("{}", cli.render(&summary));
+        if let Some(footer) = cli.footer(&summary) {
+            print!("{footer}");
+        }
     }
 
-    print!("{}", cli.render(&Summary::new(counted)));
+    if cli.strict && !summary.failed_parses.is_empty() {
+        return Err(refused(summary.failed_parses.len()));
+    }
 
     Ok(())
+}
+
+/// Why `--strict` failed the run.
+///
+/// `main` returns this rather than exiting, so the report above it is flushed
+/// before anything is said about it. The message names the count, because a
+/// run under `--json` prints no footer and this line is then the only place
+/// the news is written in words.
+fn refused(count: usize) -> Error {
+    let files = if count == 1 { "file" } else { "files" };
+    anyhow!(
+        "--strict: the parse of {count} {files} failed, and every row of {} counts as production \
+         code. Run without --strict to count anyway.",
+        if count == 1 { "it" } else { "them" }
+    )
 }
 
 /// The explanation of one file of the run, or the reason there is none.

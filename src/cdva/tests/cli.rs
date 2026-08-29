@@ -1168,7 +1168,11 @@ fn the_strict_complaint_goes_to_standard_error_and_not_into_the_report() {
         .output()
         .expect("the binary runs");
 
-    assert!(!output.status.success(), "the run failed:\n{}", stdout(&output));
+    assert!(
+        !output.status.success(),
+        "the run failed:\n{}",
+        stdout(&output)
+    );
     let complaint = stderr(&output);
     assert!(
         complaint.contains(STRICT) && complaint.contains('1'),

@@ -40,6 +40,16 @@
 //! copies of it is how a document and a table of one run come to name a
 //! different file as the largest.
 //!
+//! # The failures the table would otherwise swallow
+//!
+//! [`render_failed_parses`] is the footer under the table, and it exists
+//! because the safe reading of a file nobody could parse is also the silent
+//! one: every row of it counts as production code, and the table that results
+//! looks exactly like a correct table of a repository with less test code than
+//! it has. Only the table carries the footer. The two machine formats already
+//! carry the same list as data, and a line of prose in a document is a line
+//! every consumer has to strip.
+//!
 //! # One file, and the reason for its number
 //!
 //! [`render_explanation`] answers a different question from the three reports
@@ -113,6 +123,18 @@ const PRODUCTION_LABEL: &str = "production";
 /// The numbers one bucket line prints: the rows of the bucket, and the three
 /// kinds those rows are.
 const BUCKET_CELLS: usize = 4;
+
+/// How many paths the footer names before it starts counting the rest.
+///
+/// Ten is enough to fix a handful of broken files by hand and short enough that
+/// a tree where a grammar fails wholesale still leaves its table on the screen.
+const NAMED_FAILURES: usize = 10;
+
+/// What the line that counts the unnamed failures starts with.
+const OVERFLOW_MARK: char = '…';
+
+/// What that line ends with: where the reader finds the paths it left out.
+const SEE_THEM_ALL: &str = "Run with --json to see them all.";
 
 /// Which bucket the main columns report.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -678,9 +700,58 @@ fn rounded_percent(row: &Row) -> f64 {
 }
 
 /// The footer naming the files whose parse failed, or `None` when none did.
+///
+/// A file whose parse failed counts entirely as production code, which is the
+/// safe reading of a tree nobody could read — and a silent one. A repository
+/// where a grammar chokes on half the files otherwise reports a confident,
+/// wrong, low test share with nothing on screen to say so, and this footer is
+/// what turns that silent undercount into a visible one.
+///
+/// It names at most [`NAMED_FAILURES`] paths and then counts the rest, because
+/// a tree where a grammar fails wholesale would otherwise push the table it
+/// belongs to off the screen with thousands of lines. The machine formats
+/// carry every one of them, and the last line says so.
+///
+/// The paths come out in the order the summary holds them, which is the order
+/// the walk sorted them into. Sorting them again here would be a second
+/// opinion about an order that is already settled.
 #[must_use]
-pub fn render_failed_parses(_summary: &Summary) -> Option<String> {
-    None
+pub fn render_failed_parses(summary: &Summary) -> Option<String> {
+    let count = summary.failed_parses.len();
+    if count == 0 {
+        return None;
+    }
+
+    // The blank line is a part of the footer rather than of its caller, so the
+    // one function that decides this layout decides all of it: a golden string
+    // of the footer is then the bytes a reader sees under the table.
+    let mut footer = String::from("\n");
+    push_line(&mut footer, &failure_sentence(count));
+    for path in summary.failed_parses.iter().take(NAMED_FAILURES) {
+        push_line(&mut footer, &format!("{INDENT}{}", path.display()));
+    }
+    let unnamed = count.saturating_sub(NAMED_FAILURES);
+    if unnamed > 0 {
+        push_line(
+            &mut footer,
+            &format!("{INDENT}{OVERFLOW_MARK} and {unnamed} more. {SEE_THEM_ALL}"),
+        );
+    }
+    Some(footer)
+}
+
+/// The sentence the footer opens with: how many files failed, and where their
+/// rows went.
+///
+/// The verb agrees with the count. One file *counts* as production code and
+/// two files *count* as production code, and a tool that prints `1 files ...
+/// count` reads as one nobody finished.
+fn failure_sentence(count: usize) -> String {
+    if count == 1 {
+        format!("{count} file failed to parse and counts as production code:")
+    } else {
+        format!("{count} files failed to parse and count as production code:")
+    }
 }
 
 /// Explain how one file was marked, span by span.
