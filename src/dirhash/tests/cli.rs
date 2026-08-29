@@ -150,6 +150,30 @@ fn the_note_separates_the_hidden_count_from_the_ignored_count() {
 }
 
 #[test]
+fn a_file_that_is_both_hidden_and_ignored_is_counted_once() {
+    let fixture = Fixture::new();
+    fixture
+        .write(".gitignore", ".secret\n.cache/\n")
+        .write("visible.txt", "a")
+        .write(".secret", "b")
+        .write(".cache/one", "c")
+        .write(".cache/two", "d");
+
+    // Every excluded file here is hidden, and all but `.gitignore` are named by
+    // an ignore file too, so the two groups can only add up if the subtraction
+    // runs in the right order. The unfiltered tree holds 5 files. The default
+    // walk hashes visible.txt alone. Turning off the hidden filter alone adds
+    // back `.gitignore` and nothing else, because `.gitignore` names `.secret`
+    // and `.cache/`; that difference of 1 is the hidden count. The remaining 3 —
+    // `.secret`, `.cache/one`, `.cache/two` — are the ignored count. Measuring
+    // the ignored group against the hashed walk instead would charge those 3 to
+    // both groups and report 5 excluded out of the 5 files on disk.
+    fixture.run(&[]).assert_note(
+        "Note: 4 file(s) excluded: 1 hidden, 3 ignored. Use --hidden and --no-ignore to include them.",
+    );
+}
+
+#[test]
 fn no_ignore_includes_files_ignored_by_gitignore() {
     let fixture = Fixture::new();
     fixture
