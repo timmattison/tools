@@ -712,6 +712,53 @@ fn perl_pod_is_read_only_at_the_start_of_a_row() {
     assert_eq!(tally("  =pod\nprint 1;\n", Language::Perl), counts(0, 0, 2));
 }
 
+#[test]
+fn perl_pod_opens_on_any_directive() {
+    // Measured: `cloc` 2.10 reports exactly these numbers for each source
+    // below. Perl opens POD on `=` and an identifier, so `=pod` is one
+    // directive of many and `=head1` is the commonest one of all.
+    assert_eq!(
+        tally("=head1 NAME\ndocs\n=cut\nprint 1;\n", Language::Perl),
+        counts(0, 3, 1)
+    );
+
+    // The directives of a list open POD as well, and the blank rows inside the
+    // block stay blank.
+    assert_eq!(
+        tally(
+            "=over 4\n\n=item one\n\n=back\n\n=cut\nprint 1;\n",
+            Language::Perl
+        ),
+        counts(3, 4, 1)
+    );
+
+    // `=pod` is still one of them.
+    assert_eq!(
+        tally("=pod\ndocs\n=cut\nprint 1;\n", Language::Perl),
+        counts(0, 3, 1)
+    );
+
+    // An indented directive is not POD. Perl reads the token at column zero and
+    // nowhere else, so both rows below are code.
+    assert_eq!(
+        tally("  =head1 NAME\nprint 1;\n", Language::Perl),
+        counts(0, 0, 2)
+    );
+
+    // An identifier is what opens POD, so a row of code that opens with `=` and
+    // a space stays code, and the whole expression below is code.
+    assert_eq!(
+        tally("my $x\n= 1;\nprint $x;\n", Language::Perl),
+        counts(0, 0, 3)
+    );
+
+    // A digit opens no identifier either.
+    assert_eq!(
+        tally("my $n\n=42;\nprint $n;\n", Language::Perl),
+        counts(0, 0, 3)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // A wider sweep of the table.
 // ---------------------------------------------------------------------------
