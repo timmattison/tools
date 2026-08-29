@@ -359,3 +359,17 @@ fn push_line(table: &mut String, line: &str) {
     table.push_str(line);
     table.push('\n');
 }
+
+/// Render the report as one JSON document, pretty-printed and ended by a
+/// break.
+#[must_use]
+pub fn render_json(_summary: &Summary, _options: ReportOptions) -> String {
+    String::new()
+}
+
+/// Render the report as CSV: a header, one record for each row, and the total
+/// last.
+#[must_use]
+pub fn render_csv(_summary: &Summary, _options: ReportOptions) -> String {
+    String::new()
+}

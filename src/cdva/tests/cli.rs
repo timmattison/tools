@@ -40,6 +40,25 @@ const TEST_FILES: usize = 5;
 /// The column of the test code of a row.
 const TEST_CODE: usize = 6;
 
+/// The header of the CSV report, which is a contract with whatever reads it.
+const CSV_HEADER: [&str; 15] = [
+    "label",
+    "language",
+    "files",
+    "production_files",
+    "test_files",
+    "blank",
+    "comment",
+    "code",
+    "production_blank",
+    "production_comment",
+    "production_code",
+    "test_blank",
+    "test_comment",
+    "test_code",
+    "test_percent",
+];
+
 /// A library file of three rows of code, which no glob marks.
 const LIBRARY: &str = "pub fn add(a: u64, b: u64) -> u64 {\n    a + b\n}\n";
 
@@ -161,6 +180,8 @@ fn the_help_names_every_flag_of_the_command() {
         "--production-glob",
         "--no-tree",
         "--tree",
+        "--json",
+        "--csv",
     ] {
         assert!(help.contains(flag), "the help names `{flag}`:\n{help}");
     }
@@ -562,4 +583,165 @@ fn the_by_file_flag_names_the_files_and_the_top_flag_keeps_one_of_them() {
         "2",
         "the total still covers the file that was trimmed away:\n{trimmed}"
     );
+}
+
+#[test]
+fn the_json_flag_writes_one_document_and_nothing_else() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+    write(root.path(), "tests/it.rs", INTEGRATION_TEST);
+
+    let output = cdva()
+        .arg(NO_IGNORE)
+        .arg("--json")
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        output.status.success(),
+        "a readable tree counts: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        output.stdout.first(),
+        Some(&b'{'),
+        "the first byte of the report is the document, and not a table or a heading:\n{}",
+        stdout(&output)
+    );
+
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the report parses as JSON");
+    for key in ["rows", "total", "failed_parses"] {
+        assert!(
+            document.get(key).is_some(),
+            "the document holds `{key}`: {document}"
+        );
+    }
+    assert_eq!(
+        document["rows"][0]["language"], RUST_ROW,
+        "the one language of the tree is named: {document}"
+    );
+    assert_eq!(
+        document["total"]["code"], 7,
+        "every row of code is counted: {document}"
+    );
+    assert_eq!(
+        document["total"]["test"]["code"], 4,
+        "the code of the file under tests/ is test code: {document}"
+    );
+    assert_eq!(
+        document["total"]["production"]["code"], 3,
+        "the production bucket is carried rather than left to be subtracted: {document}"
+    );
+
+    let table = stdout(&output);
+    assert!(
+        !table.contains("Language") && !table.contains("Test %"),
+        "a machine format prints no table:\n{table}"
+    );
+}
+
+#[test]
+fn the_csv_flag_writes_the_documented_header_and_nothing_else() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+    write(root.path(), "tests/it.rs", INTEGRATION_TEST);
+
+    let output = cdva()
+        .arg(NO_IGNORE)
+        .arg("--csv")
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        output.status.success(),
+        "a readable tree counts: {}",
+        stderr(&output)
+    );
+
+    let report = stdout(&output);
+    let records: Vec<Vec<String>> = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(report.as_bytes())
+        .records()
+        .map(|record| {
+            let record = record.expect("the report parses as CSV");
+            record.iter().map(str::to_string).collect()
+        })
+        .collect();
+
+    assert_eq!(records.len(), 3, "one language, then the total:\n{report}");
+    assert_eq!(
+        records[0], CSV_HEADER,
+        "the first record is the documented header:\n{report}"
+    );
+    assert_eq!(
+        records[2][0], "Total",
+        "the total is the last record:\n{report}"
+    );
+    assert!(
+        !report.contains("Test %"),
+        "a machine format prints no table:\n{report}"
+    );
+}
+
+#[test]
+fn the_two_format_flags_refuse_to_run_together() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+
+    let output = cdva()
+        .arg(NO_IGNORE)
+        .arg("--json")
+        .arg("--csv")
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !output.status.success(),
+        "asking for two reports at once is a mistake, not a silent choice of one:\n{}",
+        stdout(&output)
+    );
+    let complaint = stderr(&output);
+    assert!(
+        complaint.contains("--json") && complaint.contains("--csv"),
+        "the failure names the two flags that conflict: {complaint}"
+    );
+}
+
+#[test]
+fn a_machine_format_keeps_a_warning_on_standard_error_and_out_of_the_report() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+    write(root.path(), "tests/it.rs", INTEGRATION_TEST);
+
+    for flag in ["--json", "--csv"] {
+        let output = cdva()
+            .arg(NO_IGNORE)
+            .arg(flag)
+            .arg("--by-file")
+            .arg("--top")
+            .arg("1")
+            .arg(root.path())
+            .output()
+            .expect("the binary runs");
+
+        assert!(
+            output.status.success(),
+            "{flag} counts a readable tree: {}",
+            stderr(&output)
+        );
+        let report = stdout(&output);
+        assert!(
+            report.lines().count() > 1,
+            "{flag} writes a report:\n{report}"
+        );
+        assert!(
+            !report.contains("cdva:"),
+            "{flag} keeps every warning off standard output:\n{report}"
+        );
+    }
 }

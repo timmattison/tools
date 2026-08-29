@@ -12,7 +12,13 @@
 //! than one for each language, `--sort` and `--top` order the rows and trim
 //! them, and `--tests-only` and `--production-only` narrow every column to one
 //! bucket. None of the five touches the total, which always covers every file
-//! the walk counted. Every report but the table arrives in a later slice.
+//! the walk counted.
+//!
+//! `--json` and `--csv` write the same report for a program to read rather
+//! than a person. The five flags above still choose the rows, and none of them
+//! narrows a machine format to fewer columns: a consumer that had to subtract
+//! one bucket from the whole to reach the other is a consumer that will get it
+//! wrong.
 //!
 //! A parse costs far more than a scan of the rows, so by default only a file
 //! whose bytes hold a literal of its language ever reaches a parser.
@@ -36,8 +42,8 @@
 use anyhow::Result;
 use buildinfo::version_string;
 use cdva::{
-    render_table, resolve_test_modules, walk, Bucket, Counter, FileCount, PathRules, ReportOptions,
-    SortColumn, Summary, TreeMode, TreeRules, WalkOptions,
+    render_csv, render_json, render_table, resolve_test_modules, walk, Bucket, Counter, FileCount,
+    PathRules, ReportOptions, SortColumn, Summary, TreeMode, TreeRules, WalkOptions,
 };
 use clap::Parser;
 use rayon::prelude::*;
@@ -86,6 +92,12 @@ struct Cli {
     /// Hold a path out of the test bucket. Repeat for more than one glob.
     #[arg(long, value_name = "GLOB")]
     production_glob: Vec<String>,
+    /// Write the report as JSON.
+    #[arg(long, conflicts_with = "csv")]
+    json: bool,
+    /// Write the report as CSV.
+    #[arg(long)]
+    csv: bool,
     /// Do not read any syntax tree. The path rule alone decides, which is fast.
     #[arg(long, conflicts_with = "tree")]
     no_tree: bool,
@@ -118,6 +130,25 @@ impl Cli {
         }
     }
 
+    /// The report itself, as the two format flags choose it.
+    ///
+    /// A machine format carries every number the tool knows, whatever
+    /// `--bucket` asked the table to print, and no footer or other prose: a
+    /// stray line on standard output is a line every consumer has to strip.
+    /// The row flags still choose which rows the report holds, because they
+    /// choose rows and not columns.
+    ///
+    /// The two flags conflict, so clap has already refused the pair by the time
+    /// this reads them and no third answer is reachable here.
+    fn render(&self, summary: &Summary) -> String {
+        let options = self.report_options();
+        match (self.json, self.csv) {
+            (true, _) => render_json(summary, options),
+            (_, true) => render_csv(summary, options),
+            _ => render_table(summary, options),
+        }
+    }
+
     /// When the tree rule runs, as the two flags say.
     ///
     /// The flags conflict, so clap has already refused the pair by the time
@@ -146,10 +177,7 @@ fn main() -> Result<()> {
 
     let mut counted = count_all(&counter, &once_each(found));
     resolve_test_modules(&mut counted);
-    print!(
-        "{}",
-        render_table(&Summary::new(counted), cli.report_options())
-    );
+    print!("{}", cli.render(&Summary::new(counted)));
 
     Ok(())
 }
