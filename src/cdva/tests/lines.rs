@@ -964,9 +964,9 @@ fn classify_labels_each_row_in_order() {
 fn every_language_carries_a_comment_syntax_with_no_empty_delimiter() {
     for &language in Language::all() {
         let syntax = language.comment_syntax();
-        for token in syntax.line {
+        for spec in syntax.line {
             assert!(
-                !token.is_empty(),
+                !spec.token.is_empty(),
                 "{} lists an empty line comment token",
                 language.name()
             );
@@ -1022,7 +1022,8 @@ fn assert_no_delimiter_shadows_a_later_one(
 fn no_delimiter_is_a_prefix_of_one_listed_after_it() {
     for &language in Language::all() {
         let syntax = language.comment_syntax();
-        assert_no_delimiter_shadows_a_later_one(language, "line comment token", syntax.line);
+        let tokens: Vec<&'static str> = syntax.line.iter().map(|spec| spec.token).collect();
+        assert_no_delimiter_shadows_a_later_one(language, "line comment token", &tokens);
 
         let openers: Vec<&'static str> = syntax.block.iter().map(|spec| spec.open).collect();
         assert_no_delimiter_shadows_a_later_one(language, "block comment opener", &openers);

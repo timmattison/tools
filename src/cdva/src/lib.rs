@@ -43,7 +43,7 @@ pub mod walk;
 
 pub use counts::{Row, Summary};
 pub use file::{Counter, FileCount, ParseStatus, Rule, Span};
-pub use lang::{AttributeChain, BlockSpec, CommentSyntax, Language, StringSpec};
+pub use lang::{AttributeChain, BlockSpec, CommentSyntax, Language, LineSpec, StringSpec};
 pub use lines::{classify, count, ends_unterminated, Counts, LineIndex, LineKind};
 pub use modpass::resolve_test_modules;
 pub use pathrule::{PathRules, PathVerdict};

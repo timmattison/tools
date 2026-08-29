@@ -19,7 +19,7 @@
 //! str`. `'日'` is one character of three bytes, so that lookahead counts
 //! continuation bytes instead of stepping one.
 
-use crate::lang::{BlockSpec, CommentSyntax, Language, StringSpec};
+use crate::lang::{BlockSpec, CommentSyntax, Language, LineSpec, StringSpec};
 use std::ops::{Add, AddAssign};
 
 /// The kind of one line. A line holding both code and a comment is code.
@@ -294,8 +294,11 @@ impl<'a> Scanner<'a> {
             }
         }
 
-        for token in syntax.line {
-            if self.matches(token) {
+        for spec in syntax.line {
+            if spec.line_anchored && !self.row_is_untouched() {
+                continue;
+            }
+            if self.matches_line_token(spec) {
                 self.mark_comment();
                 self.skip_to_end_of_row();
                 return;
@@ -552,6 +555,49 @@ impl<'a> Scanner<'a> {
             end = end.saturating_add(1);
         }
         end
+    }
+
+    /// Whether the line comment token of `spec` stands at the cursor.
+    ///
+    /// An ordinary token is read exactly, as every other delimiter of the table
+    /// is. A [command word] is read as the language reads a command: without
+    /// regard to the case of its letters, and only where the word ends there.
+    /// Both readings are what `REM` needs and neither is what `::` needs, which
+    /// is why the flag is a flag and not the rule for every token.
+    ///
+    /// The comparison is between byte slices and never between substrings of
+    /// the source. `eq_ignore_ascii_case` folds the case of ASCII bytes alone,
+    /// and every byte of a character of more than one byte is 0x80 or above, so
+    /// no such byte can be folded into a letter of a token. A file of Japanese
+    /// therefore reads exactly as one of ASCII does, and nothing here indexes a
+    /// string.
+    ///
+    /// [command word]: crate::lang::LineSpec::command_word
+    fn matches_line_token(&self, spec: &LineSpec) -> bool {
+        if !spec.command_word {
+            return self.matches(spec.token);
+        }
+
+        let token = spec.token.as_bytes();
+        if token.is_empty() {
+            return false;
+        }
+        let Some(tail) = self.bytes.get(self.pos..) else {
+            return false;
+        };
+        let Some(head) = tail.get(..token.len()) else {
+            return false;
+        };
+        if !head.eq_ignore_ascii_case(token) {
+            return false;
+        }
+
+        // The word has to end here. Without this, `remove /f target` would
+        // comment out its own row, because it opens with the letters of `rem`.
+        match tail.get(token.len()) {
+            None => true,
+            Some(&byte) => byte == b'\n' || is_space(byte),
+        }
     }
 
     /// Whether the bytes at the cursor open with this delimiter.
