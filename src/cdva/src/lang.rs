@@ -694,7 +694,7 @@ language_table! {
         line: ["//"], block: [C_BLOCK], nested: true, strings: [DQ_ESC_ML], raw_hash: true, char_lit: true, tree: RUST_TREE;
     Go => "Go", ["go"], [],
         line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, BACKTICK, SQ_ESC], raw_hash: false, char_lit: false, tree: GO_TREE;
-    Python => "Python", ["py", "pyi"], [],
+    Python => "Python", ["py", "pyi", "pyw"], [],
         line: ["#"], block: [], nested: false, strings: [TDQ_DOC, TSQ_DOC, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: PYTHON_TREE;
     JavaScript => "JavaScript", ["js", "jsx", "mjs", "cjs"], [],
         line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, char_lit: false, tree: JAVASCRIPT_TREE;
@@ -737,21 +737,29 @@ language_table! {
         line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Php => "PHP", ["php"], [],
         line: ["//", "#"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
-    Shell => "Shell", ["sh", "bash", "zsh", "bats"], [],
+    Shell => "Shell", ["sh", "bash", "zsh", "bats", "fish", "ksh"], [],
         line: ["#"], block: [], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     PowerShell => "PowerShell", ["ps1", "psm1", "psd1"], [],
         line: ["#"], block: [POWERSHELL_BLOCK], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     Batch => "Batch", ["bat", "cmd"], [],
         line: ["::", "REM ", "rem "], block: [], nested: false, strings: [DQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
-    Html => "HTML", ["html", "htm"], [],
+    Html => "HTML", ["html", "htm", "xhtml"], [],
         line: [], block: [MARKUP_BLOCK], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
-    Xml => "XML", ["xml", "xsd", "xsl"], [],
+    // An SVG is XML, and it is listed here rather than beside HTML because its
+    // comment and string syntax is the XML one.
+    Xml => "XML", ["xml", "xsd", "xsl", "svg"], [],
         line: [], block: [MARKUP_BLOCK], nested: false, strings: [DQ_PLAIN, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
     Css => "CSS", ["css"], [],
         line: [], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Scss => "SCSS", ["scss", "sass"], [],
         line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
-    Json => "JSON", ["json"], [],
+    // `jsonl` and `ndjson` are one JSON value per row, which reads exactly as
+    // JSON does. `jsonc` and `json5` are NOT here, and the omission is a
+    // decision rather than the same oversight repeated: both admit `//` and
+    // `/* … */`, which plain JSON does not, so a file of either counted under
+    // this row would have every comment row of it reported as code. They want a
+    // row of their own with a comment syntax of their own.
+    Json => "JSON", ["json", "jsonl", "ndjson"], [],
         line: [], block: [], nested: false, strings: [DQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
     Yaml => "YAML", ["yaml", "yml"], [],
         line: ["#"], block: [], nested: false, strings: [DQ_ESC, SQ_PLAIN], raw_hash: false, char_lit: false, tree: NO_TREE;
