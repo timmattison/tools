@@ -1327,6 +1327,66 @@ fn a_missing_token_fails_the_parse_although_the_tree_holds_no_error_node() {
 }
 
 #[test]
+fn a_nul_byte_in_a_literal_does_not_stop_the_parse_of_a_script_file() {
+    // A NUL byte is legal inside a template literal, and the lexer of the
+    // parser reads one as the end of the input. A file that holds one as data
+    // would otherwise fail to parse whole, over a byte no syntax objects to.
+    let source =
+        "const key = `${a}\u{0}${b}`\n\ndescribe('thing', () => {\n  it('works', () => {})\n})\n";
+    let path = Path::new("src/thing.ts");
+    let counted = counter()
+        .count_source(path, path, source)
+        .expect("TypeScript is a language the tool counts");
+
+    assert_eq!(
+        counted.parse_status,
+        ParseStatus::Clean,
+        "a NUL byte inside a literal is data, not a defect"
+    );
+    assert_eq!(
+        marked_rows(&counted.spans),
+        BTreeSet::from([3, 4, 5]),
+        "the rows are the rows of the same file with a space in place of the NUL byte"
+    );
+}
+
+#[test]
+fn a_nul_byte_in_a_literal_does_not_stop_the_parse_of_a_rust_file() {
+    // The Rust grammar reads a NUL byte in a literal today, and the script
+    // grammars do not. The tool hands every language the same substituted
+    // source, so this pins that the substitution leaves the marking of a
+    // grammar which needed nothing exactly where it was.
+    let source = "const SEP: &str = \"\u{0}\";\n\n#[test]\nfn works() {}\n";
+    let path = Path::new("src/thing.rs");
+    let counted = counter()
+        .count_source(path, path, source)
+        .expect("Rust is a language the tool counts");
+
+    assert_eq!(counted.parse_status, ParseStatus::Clean);
+    assert_eq!(
+        marked_rows(&counted.spans),
+        BTreeSet::from([3, 4]),
+        "the attribute and the function it decorates, as in a file of no NUL bytes"
+    );
+}
+
+#[test]
+fn a_nul_byte_does_not_hide_a_defect_that_is_next_to_it() {
+    // The byte is taken out of the parser's way and nothing else is. A file
+    // that holds a NUL byte and a real defect fails its parse, as it must:
+    // the whole point of naming a failed parse is that the marking of such a
+    // file is not to be trusted.
+    let source = "const key = `${a}\u{0}${b}`\n\ndescribe('thing', () => {\n";
+    let path = Path::new("src/thing.ts");
+    let counted = counter()
+        .count_source(path, path, source)
+        .expect("TypeScript is a language the tool counts");
+
+    assert_eq!(counted.parse_status, ParseStatus::Failed);
+    assert_eq!(counted.test.total(), 0);
+}
+
+#[test]
 fn the_tree_rule_of_every_language_in_the_table_compiles() {
     let rules = TreeRules::new();
     for &language in Language::all() {
