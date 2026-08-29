@@ -125,25 +125,36 @@ const PYTHON_FIXTURES: &[&str] = &[
 
 /// Every JavaScript fixture. `each` and `concurrent` are the two spellings that
 /// make the query match the whole function expression rather than an
-/// identifier, and `negative` holds the two names its word boundary refuses.
+/// identifier, `negative` holds the two names its word boundary refuses, and
+/// `member_access` holds a member access on a variable named after a runner
+/// beside a runner mode the query must still read.
 const JAVASCRIPT_FIXTURES: &[&str] = &[
     "concurrent",
     "describe_nesting",
     "each",
+    "member_access",
     "multibyte",
     "negative",
 ];
 
 /// Every TypeScript fixture. The three that hold a test carry type annotations
 /// inside the test region, which is what a JavaScript grammar would fail to
-/// parse, and `negative` is the module of typed production code that holds no
-/// test at all.
-const TYPESCRIPT_FIXTURES: &[&str] = &["annotated_describe", "multibyte", "negative", "only"];
+/// parse, `negative` is the module of typed production code that holds no test
+/// at all, and `member_access` is the typed spelling of the member access the
+/// query must leave alone.
+const TYPESCRIPT_FIXTURES: &[&str] = &[
+    "annotated_describe",
+    "member_access",
+    "multibyte",
+    "negative",
+    "only",
+];
 
 /// Every TSX fixture. The two that hold a test hold an element as well, which
-/// is what a TypeScript grammar would fail to parse, and `negative` is the
-/// component that stands on its own.
-const TSX_FIXTURES: &[&str] = &["component", "multibyte", "negative"];
+/// is what a TypeScript grammar would fail to parse, `negative` is the
+/// component that stands on its own, and `member_access` is the component whose
+/// member accesses name a runner.
+const TSX_FIXTURES: &[&str] = &["component", "member_access", "multibyte", "negative"];
 
 /// Every Java fixture. `annotated` and `runwith` are the two nodes the query
 /// names, `parameterized` holds both spellings of an annotation, and `negative`
@@ -737,6 +748,17 @@ fn javascript_leaves_a_name_that_merely_opens_with_test_in_the_production_bucket
 }
 
 #[test]
+fn javascript_reads_a_runner_mode_and_leaves_every_other_member_access_alone() {
+    // `context`, `it`, and `test` are ordinary variable names of this language,
+    // and a call on a member of one of them is production code: a canvas, an
+    // iterator, and a regular expression here. The same fixture holds
+    // `describe.skip`, so a query narrowed until it refuses `context.fillRect`
+    // and goes on to refuse a runner mode as well fails here rather than
+    // reading clean.
+    Corpus::of(Language::JavaScript).assert_marking("member_access");
+}
+
+#[test]
 fn javascript_marks_a_test_that_holds_characters_of_many_bytes() {
     Corpus::of(Language::JavaScript).assert_marking("multibyte");
 }
@@ -752,6 +774,14 @@ fn typescript_marks_a_focused_test() {
 }
 
 #[test]
+fn typescript_reads_a_runner_mode_and_leaves_every_other_member_access_alone() {
+    // The three script languages share one query, so the member access they
+    // must all leave alone is pinned in all three corpora. This one carries the
+    // type annotations of the language around it.
+    Corpus::of(Language::TypeScript).assert_marking("member_access");
+}
+
+#[test]
 fn typescript_marks_a_test_that_holds_characters_of_many_bytes() {
     Corpus::of(Language::TypeScript).assert_marking("multibyte");
 }
@@ -764,6 +794,14 @@ fn typescript_leaves_a_module_of_production_code_alone() {
 #[test]
 fn tsx_marks_the_block_beside_the_component_it_reads() {
     Corpus::of(Language::Tsx).assert_marking("component");
+}
+
+#[test]
+fn tsx_reads_a_runner_mode_and_leaves_every_other_member_access_alone() {
+    // A component draws on a canvas and reads an iterator exactly as a module
+    // of the two languages above does, and the element beside them is what
+    // holds the third grammar to the same answer.
+    Corpus::of(Language::Tsx).assert_marking("member_access");
 }
 
 #[test]
