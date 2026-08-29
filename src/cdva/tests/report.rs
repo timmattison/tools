@@ -14,6 +14,13 @@
 //! copies of "which rows, in what order" is how a JSON report and a table of
 //! one run come to disagree about which file is the largest.
 //!
+//! The explanation of one file is read the same way, from a [`FileCount`]
+//! built by hand: a golden string pins its shape, and the tests under it pin
+//! the rules a golden string of one file cannot show — every rule spelled in
+//! words, the order of the spans, the sentence a file of no spans prints, the
+//! wording of each parse status, and a path of characters of more than one
+//! byte.
+//!
 //! Every summary here is built by hand rather than counted from a tree. The
 //! renderer is what these tests cover, so a fixture tree would put the walk and
 //! the classifier between the assertion and the thing it asserts, and a failure
@@ -22,8 +29,8 @@
 //! nothing at all.
 
 use cdva::{
-    render_csv, render_json, render_table, Bucket, Counts, FileCount, Language, ParseStatus,
-    ReportOptions, Row, SortColumn, Summary,
+    render_csv, render_explanation, render_json, render_table, Bucket, Counts, FileCount, Language,
+    ParseStatus, ReportOptions, Row, Rule, SortColumn, Span, Summary,
 };
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
@@ -1194,5 +1201,291 @@ fn a_label_of_multi_byte_characters_survives_both_formats() {
         records(&summary, shaped)[1][0],
         path,
         "the CSV carries the path as it is"
+    );
+}
+
+/// The explanation of the file of two overlapping tree spans below, byte for
+/// byte.
+///
+/// The alignment a reader sees here is the alignment the tool prints: the row
+/// ranges are one column, and the two bucket lines share the width of every
+/// number they hold, so a reader compares two counts by looking straight down.
+const GOLDEN_EXPLANATION: &str = "src/krt/src/main.rs — Rust — parsed clean
+
+  rows 612..=699    the tree rule matched a mod_item
+  rows 640..=648    the tree rule matched a function_item
+
+  test         88 rows:  12 blank,   4 comment, 72 code
+  production  648 rows:  81 blank, 536 comment, 31 code
+";
+
+/// The sentence a file no rule marked prints where the spans would be.
+const NO_SPANS_SENTENCE: &str = "No rule marked any row, so every row counts as production code.";
+
+/// The names of the three rule variants, which the explanation must never
+/// print: a reader of an explanation is not reading Rust.
+const VARIANT_NAMES: [&str; 3] = ["PathGlob", "TreeNode", "ModDeclaration"];
+
+/// One marked region of a file, under the rule that marked it.
+fn span(first_row: u32, last_row: u32, rule: Rule) -> Span {
+    Span {
+        first_row,
+        last_row,
+        rule,
+    }
+}
+
+/// One counted file that carries spans and a parse status, which is what an
+/// explanation reads and the table never looks at.
+fn explained(
+    path: &str,
+    parse_status: ParseStatus,
+    spans: Vec<Span>,
+    production: Counts,
+    test: Counts,
+) -> FileCount {
+    FileCount {
+        path: PathBuf::from(path),
+        language: Language::Rust,
+        production,
+        test,
+        spans,
+        parse_status,
+        test_mod_declarations: Vec::new(),
+    }
+}
+
+/// The lines of an explanation that name a span, trimmed of their indent.
+fn span_lines(explanation: &str) -> Vec<String> {
+    explanation
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("rows "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The first line of an explanation, which is its header.
+fn header(explanation: &str) -> String {
+    explanation
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// Everything under the header, which is the part no path can reach.
+fn under_the_header(explanation: &str) -> String {
+    explanation
+        .lines()
+        .skip(1)
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+#[test]
+fn the_explanation_of_a_file_of_two_overlapping_spans_reads_as_the_golden_text() {
+    let file = explained(
+        "src/krt/src/main.rs",
+        ParseStatus::Clean,
+        vec![
+            span(612, 699, Rule::TreeNode("mod_item".to_string())),
+            span(640, 648, Rule::TreeNode("function_item".to_string())),
+        ],
+        counts(81, 536, 31),
+        counts(12, 4, 72),
+    );
+
+    assert_eq!(
+        render_explanation(&file),
+        GOLDEN_EXPLANATION,
+        "the explanation is the header, one line for each span, and the two buckets"
+    );
+}
+
+#[test]
+fn each_rule_reads_as_words_and_names_the_glob_the_node_or_the_module() {
+    let file = explained(
+        "src/lib.rs",
+        ParseStatus::Clean,
+        vec![
+            span(1, 4, Rule::PathGlob("tests/**".to_string())),
+            span(5, 9, Rule::TreeNode("function_item".to_string())),
+            span(10, 12, Rule::ModDeclaration("inner".to_string())),
+        ],
+        counts(0, 0, 0),
+        counts(0, 0, 12),
+    );
+
+    let explanation = render_explanation(&file);
+    let lines = span_lines(&explanation);
+    assert_eq!(lines.len(), 3, "one line for each span:\n{explanation}");
+    assert!(
+        lines[0].contains("glob") && lines[0].contains("tests/**"),
+        "a path rule names its glob: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("tree") && lines[1].contains("function_item"),
+        "a tree rule names the kind of node it matched: {}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("mod inner;"),
+        "a module declaration names the module another file declared: {}",
+        lines[2]
+    );
+    for name in VARIANT_NAMES {
+        assert!(
+            !explanation.contains(name),
+            "a reader of an explanation is not reading Rust, so `{name}` never \
+             appears:\n{explanation}"
+        );
+    }
+}
+
+#[test]
+fn the_spans_are_ordered_by_the_first_row_then_the_last_row_then_the_rule() {
+    // No single key produces this order, so a renderer that printed the spans
+    // as it found them cannot pass: the first row is out of order, the last row
+    // is out of order, and the two rules of the tied span are the wrong way
+    // round.
+    let file = explained(
+        "src/lib.rs",
+        ParseStatus::Clean,
+        vec![
+            span(10, 20, Rule::TreeNode("zeta".to_string())),
+            span(5, 99, Rule::PathGlob("g/**".to_string())),
+            span(10, 20, Rule::TreeNode("alpha".to_string())),
+            span(10, 15, Rule::ModDeclaration("inner".to_string())),
+        ],
+        counts(0, 0, 0),
+        counts(0, 0, 99),
+    );
+
+    let explanation = render_explanation(&file);
+    let ranges: Vec<String> = span_lines(&explanation)
+        .iter()
+        .map(|line| {
+            line.split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        ranges,
+        vec!["5..=99", "10..=15", "10..=20", "10..=20"],
+        "the first row orders the spans, then the last row:\n{explanation}"
+    );
+    let tied: Vec<String> = span_lines(&explanation).into_iter().skip(2).collect();
+    assert!(
+        tied[0].contains("alpha") && tied[1].contains("zeta"),
+        "two spans over the same rows are ordered by the words of their rules:\n{explanation}"
+    );
+}
+
+#[test]
+fn a_file_no_rule_marked_says_so_in_a_sentence_rather_than_printing_no_list() {
+    let file = explained(
+        "src/lib.rs",
+        ParseStatus::NotParsed,
+        Vec::new(),
+        counts(1, 2, 3),
+        counts(0, 0, 0),
+    );
+
+    let explanation = render_explanation(&file);
+    assert!(
+        explanation.contains(NO_SPANS_SENTENCE),
+        "a file of no spans says where its rows went:\n{explanation}"
+    );
+    assert!(
+        span_lines(&explanation).is_empty(),
+        "a sentence stands in place of the list, and not beside it:\n{explanation}"
+    );
+}
+
+#[test]
+fn each_parse_status_reads_as_its_own_words_and_a_failed_parse_says_where_the_rows_went() {
+    let of = |status| {
+        header(&render_explanation(&explained(
+            "src/lib.rs",
+            status,
+            Vec::new(),
+            counts(1, 2, 3),
+            counts(0, 0, 0),
+        )))
+    };
+
+    let not_parsed = of(ParseStatus::NotParsed);
+    let clean = of(ParseStatus::Clean);
+    let failed = of(ParseStatus::Failed);
+
+    assert!(
+        not_parsed.contains("not parsed"),
+        "a file no parser read says so: {not_parsed}"
+    );
+    assert!(
+        clean.contains("parsed clean"),
+        "a file that parsed says so: {clean}"
+    );
+    assert!(
+        failed.contains("the parse failed") && failed.contains("production"),
+        "a failed parse says that every row counts as production: {failed}"
+    );
+    assert_eq!(
+        [&not_parsed, &clean, &failed]
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "each status reads as its own words"
+    );
+    for line in [&not_parsed, &clean, &failed] {
+        assert!(
+            line.starts_with("src/lib.rs") && line.contains("Rust"),
+            "the header names the path and the language: {line}"
+        );
+    }
+}
+
+#[test]
+fn a_path_of_characters_of_more_than_one_byte_does_not_break_the_layout() {
+    let spans = || {
+        vec![
+            span(1, 4, Rule::PathGlob("テスト/**".to_string())),
+            span(2, 3, Rule::TreeNode("function_item".to_string())),
+        ]
+    };
+    let multi_byte = render_explanation(&explained(
+        "src/日本語/テスト.rs",
+        ParseStatus::Clean,
+        spans(),
+        counts(0, 0, 0),
+        counts(1, 0, 3),
+    ));
+    let ascii = render_explanation(&explained(
+        "src/lib.rs",
+        ParseStatus::Clean,
+        spans(),
+        counts(0, 0, 0),
+        counts(1, 0, 3),
+    ));
+
+    assert!(
+        header(&multi_byte).starts_with("src/日本語/テスト.rs"),
+        "the header names the path whole, and cuts no character in half: {}",
+        header(&multi_byte)
+    );
+    assert_eq!(
+        under_the_header(&multi_byte),
+        under_the_header(&ascii),
+        "a path of Japanese changes the header alone, and no column under it:\n{multi_byte}"
+    );
+    assert!(
+        span_lines(&multi_byte)[0].contains("テスト/**"),
+        "a glob of Japanese is named whole:\n{multi_byte}"
     );
 }

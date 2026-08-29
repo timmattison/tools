@@ -10,6 +10,12 @@
 //! otherwise decide that answer — a failure that reads as a bug in the tool and
 //! belongs to the configuration of one machine.
 //!
+//! Every run that explains one file works from the tree itself, because a
+//! relative path on the command line and a path the walk produced name one file
+//! only when both are read from one place. That working directory is the
+//! `tempfile::tempdir()` of the test, so such a run still reaches nothing
+//! outside its own fixture.
+//!
 //! The binary reads no environment of its own, but the pre-commit hook exports
 //! `GIT_DIR` and `GIT_INDEX_FILE` into `cargo test`, and a child that inherited
 //! one of those would work in a repository nobody named. Every spawn below
@@ -24,6 +30,13 @@ const GIT_PREFIX: &str = "GIT_";
 
 /// The flag that turns every ignore file off.
 const NO_IGNORE: &str = "--no-ignore";
+
+/// The flag that explains one file rather than printing a table.
+const EXPLAIN: &str = "--explain";
+
+/// The start of the sentence an explanation prints in place of a list of spans,
+/// for a file no rule marked.
+const NO_RULE: &str = "No rule marked any row";
 
 /// The name of the row the fixtures below land in.
 const RUST_ROW: &str = "Rust";
@@ -80,6 +93,9 @@ const DECLARES_A_TEST_MODULE: &str =
 /// The file that declaration names: four rows of code, and nothing in it that
 /// any other rule of the tool would call a test.
 const DECLARED_TEST_MODULE: &str = "use super::add;\n\nfn checked() -> u64 {\n    add(1, 2)\n}\n";
+
+/// A file of no language the tool counts.
+const NOTES: &str = "This is a note, and no language the tool counts.\n";
 
 /// The binary, with every `GIT_*` variable of the caller removed.
 fn cdva() -> Command {
@@ -182,6 +198,7 @@ fn the_help_names_every_flag_of_the_command() {
         "--tree",
         "--json",
         "--csv",
+        EXPLAIN,
     ] {
         assert!(help.contains(flag), "the help names `{flag}`:\n{help}");
     }
@@ -742,6 +759,247 @@ fn a_machine_format_keeps_a_warning_on_standard_error_and_out_of_the_report() {
         assert!(
             !report.contains("cdva:"),
             "{flag} keeps every warning off standard output:\n{report}"
+        );
+    }
+}
+
+#[test]
+fn explaining_a_file_another_file_declared_as_its_test_module_names_the_declaration() {
+    // The walk is what makes this answerable. The declaration lives in
+    // src/lib.rs and the rows it marks live in src/tests.rs, so a run that
+    // counted the named file alone would report no span at all — while the
+    // table went on calling the whole file test code.
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", DECLARES_A_TEST_MODULE);
+    write(root.path(), "src/tests.rs", DECLARED_TEST_MODULE);
+
+    let output = cdva()
+        .current_dir(root.path())
+        .arg(NO_IGNORE)
+        .arg(EXPLAIN)
+        .arg("src/tests.rs")
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        output.status.success(),
+        "a file the walk counted is explained: {}",
+        stderr(&output)
+    );
+    let explanation = stdout(&output);
+    assert!(
+        explanation.contains("src/tests.rs"),
+        "the header names the file that was asked about:\n{explanation}"
+    );
+    assert!(
+        explanation.contains("rows 1..=5"),
+        "the declaration in the other file marks the whole of this one:\n{explanation}"
+    );
+    assert!(
+        explanation.contains("mod tests;"),
+        "the span names the declaration that marked it:\n{explanation}"
+    );
+    assert!(
+        !explanation.contains(NO_RULE),
+        "a file the table calls test code has a reason, and this is it:\n{explanation}"
+    );
+}
+
+#[test]
+fn explaining_a_file_a_glob_marked_names_the_glob() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "tests/it.rs", INTEGRATION_TEST);
+
+    let output = cdva()
+        .current_dir(root.path())
+        .arg(NO_IGNORE)
+        .arg(EXPLAIN)
+        .arg("tests/it.rs")
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        output.status.success(),
+        "a file the walk counted is explained: {}",
+        stderr(&output)
+    );
+    let explanation = stdout(&output);
+    assert!(
+        explanation.contains("tests/**"),
+        "the glob of the built-in table is named:\n{explanation}"
+    );
+    assert!(
+        explanation.contains("rows 1..=4"),
+        "the glob marks the whole file:\n{explanation}"
+    );
+}
+
+#[test]
+fn explaining_a_file_that_does_not_exist_fails_and_says_so() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+
+    let output = cdva()
+        .current_dir(root.path())
+        .arg(NO_IGNORE)
+        .arg(EXPLAIN)
+        .arg("src/no-such-file.rs")
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !output.status.success(),
+        "a file that is not there is a mistake, not an empty explanation:\n{}",
+        stdout(&output)
+    );
+    let complaint = stderr(&output);
+    assert!(
+        complaint.contains("src/no-such-file.rs") && complaint.contains("does not exist"),
+        "the failure names the path and the reason: {complaint}"
+    );
+}
+
+#[test]
+fn explaining_a_file_of_an_extension_the_tool_does_not_count_names_the_extension() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+    write(root.path(), "notes.txt", NOTES);
+
+    let output = cdva()
+        .current_dir(root.path())
+        .arg(NO_IGNORE)
+        .arg(EXPLAIN)
+        .arg("notes.txt")
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !output.status.success(),
+        "a file of no language the tool counts is a mistake:\n{}",
+        stdout(&output)
+    );
+    let complaint = stderr(&output);
+    assert!(
+        complaint.contains("notes.txt") && complaint.contains("txt"),
+        "the failure names the file and its extension: {complaint}"
+    );
+    assert!(
+        complaint.contains("language"),
+        "the failure says the extension names no language it counts: {complaint}"
+    );
+}
+
+#[test]
+fn explaining_a_file_an_ignore_file_excluded_says_so_and_suggests_the_flag_that_reaches_it() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), ".gitignore", "secret.rs\n");
+    write(root.path(), "src/lib.rs", LIBRARY);
+    write(root.path(), "secret.rs", HELPER);
+
+    let ignored = cdva()
+        .current_dir(root.path())
+        .arg(EXPLAIN)
+        .arg("secret.rs")
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !ignored.status.success(),
+        "a file the walk never reached cannot be explained:\n{}",
+        stdout(&ignored)
+    );
+    let complaint = stderr(&ignored);
+    assert!(
+        complaint.contains("secret.rs") && complaint.contains(NO_IGNORE),
+        "the failure names the file and the flag that would reach it: {complaint}"
+    );
+
+    let reached = cdva()
+        .current_dir(root.path())
+        .arg(NO_IGNORE)
+        .arg(EXPLAIN)
+        .arg("secret.rs")
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        reached.status.success(),
+        "the same command reaches the file under {NO_IGNORE}: {}",
+        stderr(&reached)
+    );
+    assert!(
+        stdout(&reached).contains("secret.rs"),
+        "the file the flag reached is the file explained:\n{}",
+        stdout(&reached)
+    );
+}
+
+#[test]
+fn an_explanation_reads_the_same_flags_the_table_reads() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY_WITH_A_TEST_MODULE);
+
+    let run = |flags: &[&str]| {
+        let mut command = cdva();
+        command.current_dir(root.path());
+        command.arg(NO_IGNORE);
+        for flag in flags {
+            command.arg(flag);
+        }
+        let output = command
+            .arg(EXPLAIN)
+            .arg("src/lib.rs")
+            .output()
+            .expect("the binary runs");
+        assert!(
+            output.status.success(),
+            "a file the walk counted is explained under {flags:?}: {}",
+            stderr(&output)
+        );
+        stdout(&output)
+    };
+
+    let default = run(&[]);
+    assert!(
+        default.contains("mod_item"),
+        "the tree rule of the default run found the test module:\n{default}"
+    );
+
+    let fast = run(&["--no-tree"]);
+    assert!(
+        !fast.contains(".."),
+        "--no-tree reads no tree, so no span of one is explained:\n{fast}"
+    );
+    assert!(
+        fast.contains(NO_RULE),
+        "a file no rule marked says where its rows went:\n{fast}"
+    );
+}
+
+#[test]
+fn the_explanation_and_the_machine_formats_refuse_to_run_together() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+
+    for flag in ["--json", "--csv"] {
+        let output = cdva()
+            .current_dir(root.path())
+            .arg(NO_IGNORE)
+            .arg(flag)
+            .arg(EXPLAIN)
+            .arg("src/lib.rs")
+            .output()
+            .expect("the binary runs");
+
+        assert!(
+            !output.status.success(),
+            "{flag} promises a machine format, and an explanation is not one:\n{}",
+            stdout(&output)
+        );
+        let complaint = stderr(&output);
+        assert!(
+            complaint.contains(EXPLAIN) && complaint.contains(flag),
+            "the failure names the two flags that conflict: {complaint}"
         );
     }
 }

@@ -105,6 +105,18 @@ struct Cli {
     /// pre-filter.
     #[arg(long)]
     tree: bool,
+    /// Explain how one file was marked, span by span, rather than printing a
+    /// table.
+    ///
+    /// The whole walk still runs, because one rule of the tool reads across
+    /// files: the explanation of a file is the explanation of the number the
+    /// table printed, and a file read on its own would answer a different
+    /// question. Every flag that changes that answer therefore still applies.
+    /// The flags that choose the rows of a table — --by-file, --sort, --top,
+    /// --tests-only, and --production-only — do not, because this prints no
+    /// table.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["json", "csv"])]
+    explain: Option<PathBuf>,
 }
 
 impl Cli {

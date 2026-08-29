@@ -41,6 +41,7 @@
 //! different file as the largest.
 
 use crate::counts::{Row, Summary};
+use crate::file::FileCount;
 use crate::lines::Counts;
 use num_format::{Locale, ToFormattedString};
 use serde::Serialize;
@@ -637,4 +638,10 @@ fn record(row: &ReportRow) -> Record {
 fn rounded_percent(row: &Row) -> f64 {
     let percent = row.test_percent();
     format!("{percent:.1}").parse().unwrap_or(percent)
+}
+
+/// Explain how one file was marked, span by span.
+#[must_use]
+pub fn render_explanation(_file: &FileCount) -> String {
+    String::new()
 }
