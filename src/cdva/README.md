@@ -67,7 +67,7 @@ dialects share a query, so the table holds eleven rows:
 | Java | A method annotated `@Test`, `@ParameterizedTest`, `@RepeatedTest`, `@Before…`, or `@After…`; a class annotated `@RunWith`, `@ExtendWith`, or `@SpringBootTest`. |
 | Kotlin | A function annotated `@Test`, `@ParameterizedTest`, `@RepeatedTest`, `@Before…`, or `@After…`. |
 | C# | A method attributed `[Test]`, `[Fact]`, `[Theory]`, `[TestMethod]`, `[TestCase]`, `[SetUp]`, or `[TearDown]`; a class attributed `[TestFixture]` or `[TestClass]`. |
-| Ruby | A `describe`, `context`, `feature`, `it`, `specify`, or `scenario` block, `RSpec.describe` included; a class inheriting `Minitest::Test`, `Test::Unit::TestCase`, or `ActiveSupport::TestCase`. |
+| Ruby | A `describe`, `context`, `feature`, `it`, `specify`, or `scenario` block that names no receiver, or one whose receiver is `RSpec`. Any other receiver is a method of that object, so `logger.context(name) do … end` is production code. Also a class inheriting `Minitest::Test`, `Test::Unit::TestCase`, or `ActiveSupport::TestCase`. |
 | Swift | A class inheriting `XCTestCase` or `QuickSpec`; a function attributed `@Test` or `@Suite`. |
 | Elixir | A `test`, `describe`, or `property` block; `use ExUnit.…`, which marks the whole module that holds it and leaves a neighbouring production module alone. |
 

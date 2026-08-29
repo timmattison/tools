@@ -568,23 +568,37 @@ const CSHARP_NEEDLES: &[&str] = &["Test", "Fact", "Theory", "SetUp", "TearDown"]
 
 /// The blocks and classes of a Ruby file whose rows are test rows.
 ///
-/// The receiver does not enter the first pattern, so it reads `RSpec.describe
-/// "x" do` and a bare `describe "x" do` alike. The `do_block` is what keeps the
-/// pattern off a call of a method that merely shares a name with a block of
-/// RSpec: `ledger.describe("totals")` carries no block and marks nothing.
+/// A block of RSpec stands on its own or behind the runner, and the two
+/// patterns are that pair. `!receiver` is the negated field of the query
+/// language, and it holds the first pattern to a call that names no receiver at
+/// all, which is a bare `describe "x" do`. The second names the one receiver
+/// that is the runner, so `RSpec.describe "x" do` reads as a test as well.
 ///
-/// The second pattern is Minitest, whose tests are methods of a class that
+/// The receiver is what tells a block of RSpec from a method of production code
+/// that shares one of the six names. `logger.context(name) do |scope|` is a
+/// method of the logger and marks nothing, because the name of the receiver is
+/// neither absent nor `RSpec`. The `do_block` holds both patterns off a call
+/// that takes no block at all, such as `ledger.describe("totals")`.
+///
+/// The third pattern is Minitest, whose tests are methods of a class that
 /// inherits a case rather than blocks.
-const RUBY_QUERY: &str = r#"((call method: (identifier) @_m block: (do_block)) @test
+const RUBY_QUERY: &str = r#"((call !receiver method: (identifier) @_m block: (do_block)) @test
+ (#match? @_m "^(describe|context|feature|it|specify|scenario)$"))
+((call receiver: (constant) @_r method: (identifier) @_m block: (do_block)) @test
+ (#eq? @_r "RSpec")
  (#match? @_m "^(describe|context|feature|it|specify|scenario)$"))
 ((class superclass: (superclass) @_s) @test
  (#match? @_s "Minitest::Test|Test::Unit::TestCase|ActiveSupport::TestCase"))
 "#;
 
 /// The literals a Ruby file must hold before it is parsed: the six block names
-/// of the first pattern, and the two that cover the three superclasses of the
-/// second — `Test::Unit::TestCase` and `ActiveSupport::TestCase` both hold
+/// of the first two patterns, and the two that cover the three superclasses of
+/// the third — `Test::Unit::TestCase` and `ActiveSupport::TestCase` both hold
 /// `TestCase`, and `Minitest::Test` holds `Minitest`.
+///
+/// `RSpec` is not a needle of its own. The second pattern names it, but that
+/// pattern also names one of the six, so a file it matches holds a needle
+/// already.
 const RUBY_NEEDLES: &[&str] = &[
     "describe", "context", "feature", "it", "specify", "scenario", "Minitest", "TestCase",
 ];

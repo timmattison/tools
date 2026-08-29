@@ -205,7 +205,8 @@ root manifest. Do not assume them; they differ between grammars.
   `(call target: (identifier) (arguments (string ...)) (do_block ...))`, and
   `use ExUnit.Case` is `(call target: (identifier) (arguments (alias)))`.
 - **Ruby spells `RSpec.describe` as** `(call receiver: (constant) method:
-  (identifier) block: (do_block ...))`, and a Minitest class as
+  (identifier) block: (do_block ...))`, a bare `describe` as the same node with
+  no `receiver` field at all, and a Minitest class as
   `(class superclass: (superclass (scope_resolution ...)))`.
 
 ### The traps
@@ -406,14 +407,19 @@ A bare `@Test` is a `marker_annotation`, and `@ValueSource(ints = {1, 2})` is an
 ### Ruby
 
 ```
-((call method: (identifier) @_m block: (do_block)) @test
+((call !receiver method: (identifier) @_m block: (do_block)) @test
+ (#match? @_m "^(describe|context|feature|it|specify|scenario)$"))
+((call receiver: (constant) @_r method: (identifier) @_m block: (do_block)) @test
+ (#eq? @_r "RSpec")
  (#match? @_m "^(describe|context|feature|it|specify|scenario)$"))
 ((class superclass: (superclass) @_s) @test
  (#match? @_s "Minitest::Test|Test::Unit::TestCase|ActiveSupport::TestCase"))
 ```
 
-The first rule takes `RSpec.describe "x" do` as well as a bare `describe`,
-because the receiver does not enter the pattern.
+The first rule takes a bare `describe "x" do`, which the negated field
+`!receiver` holds it to, and the second takes `RSpec.describe "x" do`. A call
+on any other receiver is a method of that object, so
+`logger.context(name) do |scope|` stays production code.
 
 ### Swift
 

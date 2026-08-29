@@ -980,10 +980,9 @@ fn ruby_marks_a_block_whose_receiver_is_the_runner() {
     let corpus = Corpus::of(Language::Ruby);
     corpus.assert_marking("rspec");
 
-    // The receiver does not enter the pattern, which is what makes one rule
-    // read `RSpec.describe … do` and a bare `describe … do` alike. A pattern
-    // anchored on a bare identifier would mark the `it` inside and lose the
-    // block that holds it.
+    // The second pattern names `RSpec` as the receiver, which is what reaches
+    // the whole block. The pattern that reads a bare `describe … do` would mark
+    // only the `it` inside and lose the block that holds it.
     let marked = marked_lines(corpus, "rspec");
     assert_eq!(
         marked.first().map(String::as_str),
