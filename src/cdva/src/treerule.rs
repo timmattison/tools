@@ -67,6 +67,26 @@
 //! marking of such a file is not to be trusted, and a guessed test count is
 //! worse than none: it reads exactly like a measured one.
 //!
+//! # A NUL byte in the source
+//!
+//! The lexer of a generated parser reads the value 0 as the end of the input,
+//! because 0 is the value it gives a real end of input. A NUL byte inside a
+//! literal is data that no language here objects to, and a grammar that met
+//! one stopped there and marked the rest of the file an error. That is a
+//! defect of the parser rather than of the file, and two files of a real
+//! repository hit it.
+//!
+//! So the parser reads a copy in which every NUL byte is a space. A space is
+//! one byte, as a NUL byte is, so every row and column of the tree still names
+//! the row and column of the file, and no offset the query reports moves.
+//!
+//! The substitution reaches the parser and nothing else. The row
+//! classification and the needle filter both read the file as it is, and a
+//! file whose parse fails for any other reason fails as it did. A NUL byte
+//! that sits between two tokens rather than inside a literal is a defect this
+//! hides, and no compiler of these languages reads such a file either. This
+//! tool counts rows, and it does not rule on whether a file builds.
+//!
 //! # The test code that is somewhere else
 //!
 //! A Rust file that declares `#[cfg(test)] mod tests;` holds none of the test
@@ -84,6 +104,7 @@ use crate::lang::{AttributeChain, Language};
 use crate::lines::LineIndex;
 use memchr::memmem::Finder;
 use regex::Regex;
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
@@ -205,6 +226,11 @@ impl TreeRules {
         if mode == TreeMode::Auto && !compiled.may_hold_a_test(source.as_bytes()) {
             return None;
         }
+        // After the filter, so a file that is never parsed never pays for the
+        // copy. The needle holds no NUL byte, so the filter reads the same
+        // answer out of either text.
+        let text = without_nul(source);
+        let text: &str = text.as_ref();
 
         // A fresh parser for every call. `tree_sitter::Parser` is `Send` but
         // not `Sync`, so one cannot be shared between the rayon threads that
@@ -215,28 +241,28 @@ impl TreeRules {
         if parser.set_language(&compiled.grammar).is_err() {
             return Some(TreeOutcome::failed());
         }
-        let Some(tree) = parser.parse(source, None) else {
+        let Some(tree) = parser.parse(text, None) else {
             return Some(TreeOutcome::failed());
         };
         if tree.root_node().has_error() {
             return Some(TreeOutcome::failed());
         }
 
-        let index = LineIndex::new(source);
+        let index = LineIndex::new(text);
         let mut rows = BTreeSet::new();
         let mut spans = Vec::new();
         let mut test_mod_declarations = Vec::new();
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&compiled.query, tree.root_node(), source.as_bytes());
+        let mut matches = cursor.matches(&compiled.query, tree.root_node(), text.as_bytes());
         while let Some(matched) = matches.next() {
             for capture in matched.captures {
                 let Some(marking) = compiled.marking(capture.index) else {
                     continue;
                 };
-                let Some(span) = compiled.span_of(marking, capture.node, source, &index) else {
+                let Some(span) = compiled.span_of(marking, capture.node, text, &index) else {
                     continue;
                 };
-                if let Some(module) = declared_test_module(capture.node, source) {
+                if let Some(module) = declared_test_module(capture.node, text) {
                     test_mod_declarations.push(module);
                 }
                 rows.extend(span.first_row..=span.last_row);
@@ -263,6 +289,24 @@ impl Default for TreeRules {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The source a parser reads: the file, with every NUL byte replaced by a
+/// space.
+///
+/// A NUL byte is one byte and a space is one byte, so the copy holds every
+/// other byte of the file at the offset it had. Thus a row, a column, and a
+/// byte range of the tree all name the same place in the file the reader has
+/// open.
+///
+/// The copy is made only for a file that holds such a byte, which is very few
+/// of them. See the module documentation for why the substitution is made at
+/// all.
+fn without_nul(source: &str) -> Cow<'_, str> {
+    if memchr::memchr(0, source.as_bytes()).is_none() {
+        return Cow::Borrowed(source);
+    }
+    Cow::Owned(source.replace('\0', " "))
 }
 
 /// The slot a language's compiled rule lives in, which is its position in

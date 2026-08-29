@@ -157,6 +157,22 @@ always passes.** That is the honest answer to the question the flag asks, and it
 is not the answer a build wants. A check that means to catch a broken grammar
 must not also ask for the fast mode.
 
+### A NUL byte reaches the parser as a space
+
+The lexer of a generated parser reads the value 0 as the end of the input,
+because 0 is the value it gives a real end of input. A NUL byte inside a
+literal is data that no language here objects to, and a grammar that met one
+stopped there and called the rest of the file an error.
+
+So the parser reads a copy in which every NUL byte is a space. A space is one
+byte, as a NUL byte is, so every row the parser names is still the row of the
+file. Nothing else reads the copy: the row classification counts the file as it
+is, and a file whose parse fails for any other reason fails as it did.
+
+A NUL byte between two tokens, rather than inside a literal, is a defect this
+hides. No compiler of these languages reads such a file either. `cdva` counts
+rows, and it does not rule on whether a file builds.
+
 ### `#[path = "…"] mod x;` is not resolved
 
 The cross-file pass knows the two conventional spellings of a module file and
