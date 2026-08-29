@@ -125,9 +125,9 @@ const PYTHON_FIXTURES: &[&str] = &[
 
 /// Every JavaScript fixture. `each` and `concurrent` are the two spellings that
 /// make the query match the whole function expression rather than an
-/// identifier, `negative` holds the two names its word boundary refuses, and
-/// `member_access` holds a member access on a variable named after a runner
-/// beside a runner mode the query must still read.
+/// identifier, `negative` holds the two names the anchor at the front of the
+/// pattern refuses, and `member_access` holds a member access on a variable
+/// named after a runner beside a runner mode the query must still read.
 const JAVASCRIPT_FIXTURES: &[&str] = &[
     "concurrent",
     "describe_nesting",

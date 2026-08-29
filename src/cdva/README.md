@@ -63,7 +63,7 @@ dialects share a query, so the table holds eleven rows:
 | Go | A `func` named `Test…`, `Benchmark…`, `Fuzz…`, or `Example…`. The name must break there, so `Testify` is production code. |
 | Zig | A `test` declaration, which is a construct of the language and needs no heuristic. |
 | Python | A `def test_…`, a `class Test…`, a class inheriting `TestCase`, and any definition a `pytest` decorator marks. |
-| JavaScript, TypeScript, TSX | A call to `describe`, `it`, `test`, `suite`, `bench`, or `context`, including the `.each`, `.only`, `.skip`, and `.concurrent` forms. `testHelper()` is production code. |
+| JavaScript, TypeScript, TSX | A call to `describe`, `it`, `test`, `suite`, `bench`, or `context`, alone or under a chain of runner modes: `.only`, `.skip`, `.each`, `.concurrent`, and the rest of what Jest, Vitest, Mocha, `node:test`, and Bun spell. Nothing else after the name counts, so `testHelper()`, `context.fillRect()`, and `it.next()` are production code. |
 | Java | A method annotated `@Test`, `@ParameterizedTest`, `@RepeatedTest`, `@Before…`, or `@After…`; a class annotated `@RunWith`, `@ExtendWith`, or `@SpringBootTest`. |
 | Kotlin | A function annotated `@Test`, `@ParameterizedTest`, `@RepeatedTest`, `@Before…`, or `@After…`. |
 | C# | A method attributed `[Test]`, `[Fact]`, `[Theory]`, `[TestMethod]`, `[TestCase]`, `[SetUp]`, or `[TearDown]`; a class attributed `[TestFixture]` or `[TestClass]`. |

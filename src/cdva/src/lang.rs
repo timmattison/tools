@@ -286,20 +286,40 @@ const PYTHON_NEEDLES: &[&str] = &["test", "Test"];
 /// The calls of a JavaScript, TypeScript, or TSX file whose rows are test rows.
 ///
 /// The three languages share one rule because they share one way of spelling a
-/// test: a call to a function that a runner defined. Matching the *whole*
-/// function expression rather than an identifier is what covers `it.each`,
-/// `it.only`, `test.concurrent`, and `describe.skip` without a pattern each,
-/// and the word boundary at the end is what keeps `testHelper()` out.
+/// test: a call to a function that a runner defined. The pattern reads the
+/// *whole* function expression, because a runner is named in two shapes and an
+/// identifier is only the first of them.
+///
+/// The first shape is the name alone: `describe`, `it`, `test`, `suite`,
+/// `bench`, or `context`. The second is the name and a chain of modes of the
+/// runner — `it.only`, `describe.skip`, `test.concurrent`,
+/// `describe.only.each`. The modes are the ones the runners in service spell:
+/// Jest, Vitest, Mocha, `node:test`, and Bun.
+///
+/// A mode that takes an argument gives the runner back, so such a test names
+/// the runner once and calls it twice: `it.each([[1, 2]])("doubles %i", fn)`,
+/// and the tagged form `` it.each`…`(…) ``. The function expression of the
+/// outer call is the whole inner call, text and all, so the pattern accepts an
+/// argument list or a template after a mode.
+///
+/// The name and the chain of modes are the whole of what the pattern accepts,
+/// and that is what keeps production code out. These languages need it:
+/// `context` and `it` are among the commonest variable names they have, and
+/// `context.fillRect(0, 0, w, h)`, `it.next()`, and `test.test(line)` are
+/// production code. A word boundary in place of this structure read every one
+/// of them as a test.
 ///
 /// The doubled backslash is not a Rust escape — this is a raw string, and the
 /// query language has an unescaping pass of its own. Tree-sitter reads `\\` as
-/// one backslash and hands the regular expression the `\b` it wants.
+/// one backslash and hands the regular expression the `\.` it wants.
 const SCRIPT_QUERY: &str = r#"((call_expression function: (_) @_f) @test
- (#match? @_f "^(describe|it|test|suite|bench|context)\\b"))
+ (#match? @_f "^(describe|it|test|suite|bench|context)($|(\\.(only|skip|skipIf|runIf|todo|todoIf|each|for|concurrent|sequential|shuffle|failing|fails|extend|if))+($|[(`]))"))
 "#;
 
 /// The literals a JavaScript, TypeScript, or TSX file must hold before it is
-/// parsed. They are the alternation of [`SCRIPT_QUERY`], word for word.
+/// parsed. They are the six names of [`SCRIPT_QUERY`], word for word. Every
+/// match of that pattern opens with one of them, whatever mode follows it, so
+/// this set stays a superset of the pattern.
 ///
 /// `it` appears in nearly every file of these languages — in `with`, `omit`,
 /// `split`, and a hundred other words — so the filter buys little here. That is

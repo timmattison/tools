@@ -321,12 +321,20 @@ The trailing `([A-Z_]|$)` is what keeps `func Testify()` out.
 
 ```
 ((call_expression function: (_) @_f) @test
- (#match? @_f "^(describe|it|test|suite|bench|context)\\b"))
+ (#match? @_f "^(describe|it|test|suite|bench|context)($|(\\.(only|skip|skipIf|runIf|todo|todoIf|each|for|concurrent|sequential|shuffle|failing|fails|extend|if))+($|[(`]))"))
 ```
 
 The match on the whole function expression covers `it.each`, `it.only`,
-`test.concurrent`, and `describe.skip` in one rule. The word boundary keeps
-`testHelper()` out.
+`test.concurrent`, and `describe.skip` in one rule. A mode that takes an
+argument gives the runner back, so `it.each([[1, 2]])("doubles %i", fn)` calls
+the runner twice and the outer call carries the inner one as its function
+expression. The tail of the pattern reads that argument list, and a tagged
+template beside it.
+
+The name and the chain of modes are the whole of what the pattern accepts, and
+that is what keeps production code out. `context` and `it` are common variable
+names in these languages, so `testHelper()`, `context.fillRect(0, 0, w, h)`,
+and `it.next()` are production code.
 
 ### Java
 
