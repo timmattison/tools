@@ -194,8 +194,18 @@ fn broken_tree() -> tempfile::TempDir {
 
 /// The lines of the long help that document one flag, from its name to the
 /// next flag after it.
+///
+/// The escape codes come out of the help first. `clap` paints a flag name bold
+/// whenever it decides the run wants color, and it reads `CLICOLOR_FORCE` for
+/// that decision, not only the terminal. The pre-commit hook of this
+/// repository sets that variable, so the name of a flag arrives as
+/// `\x1b[1m--strict\x1b[0m` under a commit and as `--strict` under a plain
+/// `cargo test`. A reader of this section wants the glyphs either way. See
+/// "Colored Output in Tests" in CLAUDE.md.
 fn help_section(help: &str, flag: &str) -> String {
-    help.lines()
+    let glyphs = testcolor::strip_ansi(help);
+    glyphs
+        .lines()
         .skip_while(|line| line.trim() != flag)
         .skip(1)
         .take_while(|line| !line.starts_with(HELP_FLAG_INDENT))

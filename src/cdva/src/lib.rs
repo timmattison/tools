@@ -14,7 +14,7 @@
 //! test node — or rather parses the few of those files whose raw bytes hold a
 //! literal of the language, which is what [`TreeMode`] decides.
 //!
-//! [`walk`] finds the files, [`Counter`] reads one of them into a [`FileCount`]
+//! [`fn@walk`] finds the files, [`Counter`] reads one into a [`FileCount`]
 //! of two buckets, [`resolve_test_modules`] marks the files that a
 //! `#[cfg(test)] mod <name>;` declaration moved the test code into — the one
 //! rule that reads across files, so it runs once every file is counted — and

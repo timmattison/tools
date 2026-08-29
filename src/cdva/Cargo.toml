@@ -38,6 +38,7 @@ unicode-width.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+testcolor.workspace = true
 unicode-width.workspace = true
 
 [lints]
