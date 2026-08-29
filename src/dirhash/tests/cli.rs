@@ -104,9 +104,9 @@ fn hidden_files_are_counted_as_excluded() {
     let fixture = Fixture::new();
     fixture.write("visible.txt", "a").write(".hidden.txt", "b");
 
-    fixture.run(&[]).assert_note(
-        "Note: 1 hidden file(s) excluded. Use --hidden to include them.",
-    );
+    fixture
+        .run(&[])
+        .assert_note("Note: 1 hidden file(s) excluded. Use --hidden to include them.");
 }
 
 #[test]
@@ -117,9 +117,9 @@ fn files_inside_hidden_directories_are_counted_as_excluded() {
         .write(".cache/one.txt", "b")
         .write(".cache/two.txt", "c");
 
-    fixture.run(&[]).assert_note(
-        "Note: 2 hidden file(s) excluded. Use --hidden to include them.",
-    );
+    fixture
+        .run(&[])
+        .assert_note("Note: 2 hidden file(s) excluded. Use --hidden to include them.");
 }
 
 #[test]
@@ -196,9 +196,9 @@ fn no_ignore_vcs_keeps_dot_ignore_but_no_ignore_drops_it() {
         .write("visible.txt", "a")
         .write("skipped.txt", "b");
 
-    fixture.run(&["--hidden", "--no-ignore-vcs"]).assert_note(
-        "Note: 1 ignored file(s) excluded. Use --no-ignore to include them.",
-    );
+    fixture
+        .run(&["--hidden", "--no-ignore-vcs"])
+        .assert_note("Note: 1 ignored file(s) excluded. Use --no-ignore to include them.");
     fixture.run(&["--hidden", "--no-ignore"]).assert_no_note();
 }
 
@@ -250,6 +250,9 @@ fn the_walk_reaches_a_directory_given_by_a_relative_path() {
         .expect("spawn the dirhash binary");
     let relative = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    assert_eq!(absolute, relative, "the path spelling must not move the hash");
+    assert_eq!(
+        absolute, relative,
+        "the path spelling must not move the hash"
+    );
     assert!(Path::new(&fixture.root()).is_dir());
 }
