@@ -48,7 +48,8 @@ pub use lines::{classify, count, ends_unterminated, Counts, LineIndex, LineKind}
 pub use modpass::resolve_test_modules;
 pub use pathrule::{PathRules, PathVerdict};
 pub use report::{
-    render_csv, render_explanation, render_json, render_table, Bucket, ReportOptions, SortColumn,
+    render_csv, render_explanation, render_failed_parses, render_json, render_table, Bucket,
+    ReportOptions, SortColumn,
 };
 pub use treerule::{TreeMode, TreeOutcome, TreeRules};
 pub use walk::{walk, WalkOptions};

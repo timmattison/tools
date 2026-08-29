@@ -112,6 +112,9 @@ struct Cli {
     /// pre-filter.
     #[arg(long)]
     tree: bool,
+    /// Fail the run when any file's parse failed.
+    #[arg(long)]
+    strict: bool,
     /// Explain how one file was marked, span by span, rather than printing a
     /// table.
     ///

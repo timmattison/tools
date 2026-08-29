@@ -97,6 +97,32 @@ const DECLARED_TEST_MODULE: &str = "use super::add;\n\nfn checked() -> u64 {\n  
 /// A file of no language the tool counts.
 const NOTES: &str = "This is a note, and no language the tool counts.\n";
 
+/// A library whose braces do not balance, with a test module under the break.
+///
+/// Tree-sitter recovers from the stray brace and hands back a tree all the
+/// same, so nothing about the count *looks* wrong: the test module is never
+/// found, and all twelve rows of code count as production code. That silence
+/// is what the footer and `--strict` are for.
+const BROKEN_LIBRARY: &str = "pub fn broken() -> i32 {\n    let x = 1;\n    x\n}\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn always() {\n        assert!(1 + 1 == 2);\n    }\n}\n";
+
+/// The flag that fails the run when any parse failed.
+const STRICT: &str = "--strict";
+
+/// The flag that reads no syntax tree at all.
+const NO_TREE: &str = "--no-tree";
+
+/// The words of the footer that names the parses that failed, and which no
+/// other line of any report holds.
+const FAILED_TO_PARSE: &str = "failed to parse";
+
+/// The footer a run whose one parse failed prints under its table.
+const ONE_FAILURE_FOOTER: &str = "1 file failed to parse and counts as production code:";
+
+/// What the long help indents a flag by, which is less than it indents the
+/// prose under one. A section of the help therefore ends at the next line that
+/// starts a flag, and not at a line of prose that happens to name one.
+const HELP_FLAG_INDENT: &str = "      --";
+
 /// The binary, with every `GIT_*` variable of the caller removed.
 fn cdva() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cdva"));
@@ -153,6 +179,30 @@ fn fields(table: &str, label: &str) -> Vec<String> {
         .collect()
 }
 
+/// A tree of one library that parses and one that does not.
+///
+/// The clean file is there so that every assertion below reads a run that
+/// counted something as well as a run that failed to: a footer over a tree of
+/// nothing but broken files would not show that the rest of the report carried
+/// on.
+fn broken_tree() -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+    write(root.path(), "src/broken.rs", BROKEN_LIBRARY);
+    root
+}
+
+/// The lines of the long help that document one flag, from its name to the
+/// next flag after it.
+fn help_section(help: &str, flag: &str) -> String {
+    help.lines()
+        .skip_while(|line| line.trim() != flag)
+        .skip(1)
+        .take_while(|line| !line.starts_with(HELP_FLAG_INDENT))
+        .collect::<Vec<&str>>()
+        .join("\n")
+}
+
 #[test]
 fn the_version_flag_names_the_tool_and_the_build() {
     let output = cdva().arg("--version").output().expect("the binary runs");
@@ -194,10 +244,11 @@ fn the_help_names_every_flag_of_the_command() {
         NO_IGNORE,
         "--test-glob",
         "--production-glob",
-        "--no-tree",
+        NO_TREE,
         "--tree",
         "--json",
         "--csv",
+        STRICT,
         EXPLAIN,
     ] {
         assert!(help.contains(flag), "the help names `{flag}`:\n{help}");
@@ -1002,4 +1053,285 @@ fn the_explanation_and_the_machine_formats_refuse_to_run_together() {
             "the failure names the two flags that conflict: {complaint}"
         );
     }
+}
+
+#[test]
+fn the_help_names_the_strict_flag_and_its_no_tree_caveat() {
+    let output = cdva().arg("--help").output().expect("the binary runs");
+
+    assert!(
+        output.status.success(),
+        "the help flag succeeds: {}",
+        stderr(&output)
+    );
+    let section = help_section(&stdout(&output), STRICT);
+    assert!(
+        !section.is_empty(),
+        "the long help documents {STRICT}:\n{}",
+        stdout(&output)
+    );
+    assert!(
+        section.contains(NO_TREE),
+        "the help of {STRICT} names the flag that quietly satisfies it:\n{section}"
+    );
+    assert!(
+        section.contains("passes"),
+        "the help of {STRICT} says what {NO_TREE} does to it:\n{section}"
+    );
+}
+
+#[test]
+fn a_file_whose_parse_failed_is_named_in_a_footer_and_a_clean_tree_prints_none() {
+    let root = broken_tree();
+
+    let output = cdva()
+        .arg(NO_IGNORE)
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        output.status.success(),
+        "a failed parse alone does not fail the run: {}",
+        stderr(&output)
+    );
+    let report = stdout(&output);
+    assert!(
+        report.contains(ONE_FAILURE_FOOTER),
+        "the footer says how many files failed, and where their rows went:\n{report}"
+    );
+    assert!(
+        report.contains("broken.rs"),
+        "the footer names the file, so a reader can go and look at it:\n{report}"
+    );
+    assert!(
+        !report.contains("src/lib.rs"),
+        "the file that parsed is not a failure:\n{report}"
+    );
+
+    let clean = tempfile::tempdir().expect("a temporary directory is made");
+    write(clean.path(), "src/lib.rs", LIBRARY);
+    let quiet = cdva()
+        .arg(NO_IGNORE)
+        .arg(clean.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !stdout(&quiet).contains(FAILED_TO_PARSE),
+        "a tree that parsed clean has no footer at all:\n{}",
+        stdout(&quiet)
+    );
+}
+
+#[test]
+fn strict_fails_the_run_over_a_failed_parse_and_prints_the_same_report() {
+    let root = broken_tree();
+
+    let lenient = cdva()
+        .arg(NO_IGNORE)
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+    let strict = cdva()
+        .arg(NO_IGNORE)
+        .arg(STRICT)
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        lenient.status.success(),
+        "without {STRICT} a failed parse never changes the exit status: {}",
+        stderr(&lenient)
+    );
+    assert!(
+        !strict.status.success(),
+        "{STRICT} is what turns a silent undercount into a failing run:\n{}",
+        stdout(&strict)
+    );
+    assert_eq!(
+        stdout(&strict),
+        stdout(&lenient),
+        "the report is the report, whatever the exit status says about it"
+    );
+}
+
+#[test]
+fn the_strict_complaint_goes_to_standard_error_and_not_into_the_report() {
+    let root = broken_tree();
+
+    let output = cdva()
+        .arg(NO_IGNORE)
+        .arg(STRICT)
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(!output.status.success(), "the run failed:\n{}", stdout(&output));
+    let complaint = stderr(&output);
+    assert!(
+        complaint.contains(STRICT) && complaint.contains('1'),
+        "the complaint names the flag that refused, and how many files it refused over: {complaint}"
+    );
+    assert!(
+        !stdout(&output).contains(STRICT),
+        "standard output carries the report and nothing else:\n{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn strict_under_no_tree_passes_because_nothing_was_parsed() {
+    let root = broken_tree();
+
+    let fast = cdva()
+        .arg(NO_IGNORE)
+        .arg(NO_TREE)
+        .arg(STRICT)
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        fast.status.success(),
+        "{NO_TREE} parses nothing, so no parse can fail: {}",
+        stderr(&fast)
+    );
+    assert!(
+        !stdout(&fast).contains(FAILED_TO_PARSE),
+        "a run that parsed nothing names no failure:\n{}",
+        stdout(&fast)
+    );
+
+    let parsed = cdva()
+        .arg(NO_IGNORE)
+        .arg(STRICT)
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !parsed.status.success(),
+        "the same tree, and the same flag, over a run that did parse:\n{}",
+        stdout(&parsed)
+    );
+}
+
+#[test]
+fn a_machine_format_prints_no_footer_and_the_json_names_the_failure() {
+    let root = broken_tree();
+
+    for flag in ["--json", "--csv"] {
+        let output = cdva()
+            .arg(NO_IGNORE)
+            .arg(flag)
+            .arg(root.path())
+            .output()
+            .expect("the binary runs");
+
+        assert!(
+            output.status.success(),
+            "{flag} counts a tree holding a broken file: {}",
+            stderr(&output)
+        );
+        assert!(
+            !stdout(&output).contains(FAILED_TO_PARSE),
+            "{flag} carries the failures as data, so a line of prose in it is a line to strip:\n{}",
+            stdout(&output)
+        );
+    }
+
+    let document = cdva()
+        .arg(NO_IGNORE)
+        .arg("--json")
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&document.stdout).expect("the report parses as JSON");
+    let failures = parsed["failed_parses"]
+        .as_array()
+        .expect("the document carries a list of failures");
+    assert_eq!(failures.len(), 1, "one file failed: {parsed}");
+    assert!(
+        failures[0]
+            .as_str()
+            .is_some_and(|path| path.ends_with("broken.rs")),
+        "the document names the file, as the footer would have: {parsed}"
+    );
+}
+
+#[test]
+fn json_under_strict_writes_a_whole_document_and_still_fails() {
+    let root = broken_tree();
+
+    let output = cdva()
+        .arg(NO_IGNORE)
+        .arg("--json")
+        .arg(STRICT)
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !output.status.success(),
+        "a machine that asked for {STRICT} asked for the failing status:\n{}",
+        stdout(&output)
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("a failing run still writes a document that parses");
+    assert_eq!(
+        parsed["failed_parses"].as_array().map(Vec::len),
+        Some(1),
+        "the document is whole: the exit status corrupts nothing: {parsed}"
+    );
+}
+
+#[test]
+fn an_explanation_prints_no_footer_and_still_answers_to_strict() {
+    let root = broken_tree();
+
+    let output = cdva()
+        .current_dir(root.path())
+        .arg(NO_IGNORE)
+        .arg(EXPLAIN)
+        .arg("src/broken.rs")
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        output.status.success(),
+        "a file the walk counted is explained: {}",
+        stderr(&output)
+    );
+    let explanation = stdout(&output);
+    assert!(
+        explanation.contains("the parse failed"),
+        "the header of the one file asked about says what happened to it:\n{explanation}"
+    );
+    assert!(
+        !explanation.contains(FAILED_TO_PARSE),
+        "an explanation is about one file, and the footer is about the run:\n{explanation}"
+    );
+
+    let strict = cdva()
+        .current_dir(root.path())
+        .arg(NO_IGNORE)
+        .arg(STRICT)
+        .arg(EXPLAIN)
+        .arg("src/broken.rs")
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !strict.status.success(),
+        "{STRICT} asks about the run, and this run held a failed parse:\n{}",
+        stdout(&strict)
+    );
+    assert_eq!(
+        stdout(&strict),
+        explanation,
+        "the explanation is the explanation, whatever the exit status says about it"
+    );
 }

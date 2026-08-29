@@ -677,6 +677,12 @@ fn rounded_percent(row: &Row) -> f64 {
     format!("{percent:.1}").parse().unwrap_or(percent)
 }
 
+/// The footer naming the files whose parse failed, or `None` when none did.
+#[must_use]
+pub fn render_failed_parses(_summary: &Summary) -> Option<String> {
+    None
+}
+
 /// Explain how one file was marked, span by span.
 ///
 /// The header names the file, its language, and what a parser made of it. Under

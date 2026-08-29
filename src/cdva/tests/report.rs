@@ -21,6 +21,13 @@
 //! wording of each parse status, and a path of characters of more than one
 //! byte.
 //!
+//! The footer that names the parses that failed is read the same way, from a
+//! list of paths built by hand. Two golden strings pin its two wordings — one
+//! file counts, two files count — and the tests under them pin the rules a
+//! golden string cannot show: the ten paths it names before it starts counting
+//! the rest, the boundary where the eleventh arrives, the order it names them
+//! in, and a path of characters of more than one byte.
+//!
 //! Every summary here is built by hand rather than counted from a tree. The
 //! renderer is what these tests cover, so a fixture tree would put the walk and
 //! the classifier between the assertion and the thing it asserts, and a failure
@@ -29,8 +36,8 @@
 //! nothing at all.
 
 use cdva::{
-    render_csv, render_explanation, render_json, render_table, Bucket, Counts, FileCount, Language,
-    ParseStatus, ReportOptions, Row, Rule, SortColumn, Span, Summary,
+    render_csv, render_explanation, render_failed_parses, render_json, render_table, Bucket,
+    Counts, FileCount, Language, ParseStatus, ReportOptions, Row, Rule, SortColumn, Span, Summary,
 };
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
@@ -85,6 +92,33 @@ TypeScript     70    900      600   6,321
 -----------------------------------------
 Total         470  6,900    4,600  42,746
 ";
+
+/// The footer of a run whose one parse failed, byte for byte.
+///
+/// The blank line is a part of it: the footer follows a table, and a sentence
+/// of prose butted straight against the total reads as another row of it. One
+/// file *counts* as production code, and the singular is the whole point of
+/// this golden string — a footer that says `1 files ... count` is a footer
+/// nobody wrote on purpose.
+const GOLDEN_ONE_FAILURE: &str = "
+1 file failed to parse and counts as production code:
+  src/broken.rs
+";
+
+/// The footer of a run whose two parses failed, byte for byte. The mirror of
+/// the string above, in the plural.
+const GOLDEN_TWO_FAILURES: &str = "
+2 files failed to parse and count as production code:
+  src/a.rs
+  src/b.rs
+";
+
+/// How many paths the footer names before it starts counting the rest.
+const NAMED_FAILURES: usize = 10;
+
+/// What the footer starts the line that counts the paths it did not name with,
+/// and which no path of these tests holds.
+const OVERFLOW_MARK: &str = "…";
 
 /// The lines a table of two language rows prints: a header, a rule, the two
 /// rows, a rule, and the total.
@@ -158,6 +192,35 @@ fn failed(path: &str, language: Language) -> FileCount {
         parse_status: ParseStatus::Failed,
         test_mod_declarations: Vec::new(),
     }
+}
+
+/// A summary whose parse failed for exactly these paths, in this order.
+///
+/// The rows and the files are left empty, because the footer reads the list of
+/// failures and nothing else. Building the list here rather than rolling it up
+/// out of files is also what lets a test hand the renderer an order no rollup
+/// produces, which is how "the renderer sorts nothing" gets asserted rather
+/// than assumed.
+fn failures(paths: &[&str]) -> Summary {
+    Summary {
+        rows: Vec::new(),
+        total: row("Total", [0, 0, 0], Counts::default(), Counts::default()),
+        files: Vec::new(),
+        failed_parses: paths.iter().map(PathBuf::from).collect(),
+    }
+}
+
+/// The paths a footer names, in the order it names them.
+///
+/// The line that counts the paths the footer left out is indented exactly as a
+/// path is, so it is dropped by the mark it starts with rather than by its
+/// indent.
+fn named_paths(footer: &str) -> Vec<&str> {
+    footer
+        .lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(OVERFLOW_MARK))
+        .collect()
 }
 
 /// The options of the default report, with `mutate` applied to them.
@@ -1487,5 +1550,112 @@ fn a_path_of_characters_of_more_than_one_byte_does_not_break_the_layout() {
     assert!(
         span_lines(&multi_byte)[0].contains("テスト/**"),
         "a glob of Japanese is named whole:\n{multi_byte}"
+    );
+}
+
+#[test]
+fn a_run_whose_every_parse_held_prints_no_footer() {
+    assert!(
+        render_failed_parses(&two_languages()).is_none(),
+        "a summary of rows alone knows of no failure, so there is nothing to say"
+    );
+    assert!(
+        render_failed_parses(&two_files()).is_none(),
+        "two files neither of which failed print no footer"
+    );
+    assert!(
+        render_failed_parses(&failures(&[])).is_none(),
+        "an empty list of failures is no failure at all"
+    );
+}
+
+#[test]
+fn one_failed_parse_is_named_in_the_singular() {
+    let summary = Summary::new(vec![
+        counted(
+            "src/lib.rs",
+            Language::Rust,
+            counts(0, 0, 10),
+            Counts::default(),
+        ),
+        failed("src/broken.rs", Language::Rust),
+    ]);
+
+    assert_eq!(
+        render_failed_parses(&summary).as_deref(),
+        Some(GOLDEN_ONE_FAILURE),
+        "the footer names the one file that failed, and the file beside it that did not"
+    );
+}
+
+#[test]
+fn two_failed_parses_are_named_in_the_plural() {
+    assert_eq!(
+        render_failed_parses(&failures(&["src/a.rs", "src/b.rs"])).as_deref(),
+        Some(GOLDEN_TWO_FAILURES),
+        "two files count as production code, and the verb agrees with them"
+    );
+}
+
+#[test]
+fn eleven_failures_name_ten_and_count_the_rest_while_ten_name_them_all() {
+    let paths: Vec<String> = (0..=NAMED_FAILURES)
+        .map(|index| format!("src/f{index}.rs"))
+        .collect();
+    let all: Vec<&str> = paths.iter().map(String::as_str).collect();
+
+    let eleven =
+        render_failed_parses(&failures(&all)).expect("eleven failures are a failure to report");
+    assert_eq!(
+        named_paths(&eleven),
+        all[..NAMED_FAILURES],
+        "the footer names the first ten and stops:\n{eleven}"
+    );
+    assert!(
+        eleven.contains("… and 1 more. Run with --json to see them all."),
+        "the footer counts the paths it left out, and says where they all are:\n{eleven}"
+    );
+
+    let ten = render_failed_parses(&failures(&all[..NAMED_FAILURES]))
+        .expect("ten failures are a failure to report");
+    assert_eq!(
+        named_paths(&ten),
+        all[..NAMED_FAILURES],
+        "ten paths are ten paths:\n{ten}"
+    );
+    assert!(
+        !ten.contains(OVERFLOW_MARK),
+        "nothing was left out, so nothing is counted:\n{ten}"
+    );
+}
+
+#[test]
+fn the_footer_names_the_files_in_the_order_the_summary_holds_them() {
+    let held = ["src/z.rs", "src/a.rs", "src/m.rs"];
+    let footer =
+        render_failed_parses(&failures(&held)).expect("three failures are a failure to report");
+
+    assert_eq!(
+        named_paths(&footer),
+        held,
+        "the walk sorted these once, and the footer sorts them again over nobody's dead body:\n{footer}"
+    );
+}
+
+#[test]
+fn a_failed_path_of_characters_of_more_than_one_byte_is_named_whole() {
+    let path = "src/日本語/テスト.rs";
+    let footer =
+        render_failed_parses(&failures(&[path])).expect("one failure is a failure to report");
+
+    assert_eq!(
+        named_paths(&footer),
+        [path],
+        "the path is named whole, and no character of it is cut in half:\n{footer}"
+    );
+    assert_eq!(
+        footer,
+        GOLDEN_ONE_FAILURE.replace("src/broken.rs", path),
+        "a path of Japanese changes the path and no other byte of the footer:\n{footer}"
     );
 }
