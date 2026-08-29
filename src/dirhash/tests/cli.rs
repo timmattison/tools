@@ -8,7 +8,7 @@
 //! is what marks one. The test makes the directory itself rather than call
 //! `git init`, so no test can reach a real repository.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 /// A temporary tree to hash, plus an empty `HOME` for the child process.
@@ -42,13 +42,21 @@ impl Fixture {
         self
     }
 
-    /// Run the freshly built binary on the fixture root.
-    ///
-    /// The child gets a scrubbed environment. A stray `GIT_*` variable or the
-    /// real global gitignore changes which files the walker sees, and a test
-    /// that reads the machine it runs on is a test that passes for a reason
-    /// nobody wrote down.
+    /// Run the freshly built binary on the fixture root, named by its absolute
+    /// path.
     fn run(&self, args: &[&str]) -> Run {
+        self.run_from(self.root(), self.root(), args)
+    }
+
+    /// Run the freshly built binary from `working_dir`, on the directory named
+    /// by `directory`, and require that it exits well.
+    ///
+    /// This is the one spawn in the file, so no test can reach the binary
+    /// without the scrub below. The child gets a scrubbed environment: a stray
+    /// `GIT_*` variable or the real global gitignore changes which files the
+    /// walker sees, and a test that reads the machine it runs on is a test that
+    /// passes for a reason nobody wrote down.
+    fn run_from(&self, working_dir: PathBuf, directory: PathBuf, args: &[&str]) -> Run {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dirhash"));
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("GIT_") {
@@ -58,11 +66,11 @@ impl Fixture {
         command
             .env("HOME", self.home())
             .env("XDG_CONFIG_HOME", self.home())
-            .env_remove("RIPGREP_CONFIG_PATH");
+            .current_dir(working_dir);
 
         let output = command
             .args(args)
-            .arg(self.root())
+            .arg(&directory)
             .output()
             .expect("spawn the dirhash binary");
 
@@ -70,7 +78,8 @@ impl Fixture {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         assert!(
             output.status.success(),
-            "dirhash {args:?} must succeed; stderr: {stderr}"
+            "dirhash {args:?} {} must succeed; stderr: {stderr}",
+            directory.display()
         );
         Run {
             hash: stdout.trim().to_string(),
@@ -234,25 +243,12 @@ fn the_walk_reaches_a_directory_given_by_a_relative_path() {
     fixture.write("visible.txt", "a").write(".hidden.txt", "b");
 
     let absolute = fixture.run(&[]).hash;
-
-    let mut command = Command::new(env!("CARGO_BIN_EXE_dirhash"));
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("GIT_") {
-            command.env_remove(&key);
-        }
-    }
-    let output = command
-        .env("HOME", fixture.home())
-        .env("XDG_CONFIG_HOME", fixture.home())
-        .current_dir(fixture.root())
-        .arg(".")
-        .output()
-        .expect("spawn the dirhash binary");
-    let relative = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let relative = fixture
+        .run_from(fixture.root(), PathBuf::from("."), &[])
+        .hash;
 
     assert_eq!(
         absolute, relative,
         "the path spelling must not move the hash"
     );
-    assert!(Path::new(&fixture.root()).is_dir());
 }
