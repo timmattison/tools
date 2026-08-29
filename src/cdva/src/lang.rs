@@ -227,6 +227,95 @@ const SCRIPT_QUERY: &str = r#"((call_expression function: (_) @_f) @test
  (#match? @_f "^(describe|it|test|suite|bench|context)\\b"))
 "#;
 
+/// The methods and classes of a Java file whose rows are test rows.
+///
+/// The alternation is what reads both spellings of an annotation. A bare
+/// `@Test` is a `marker_annotation`, and `@ValueSource(ints = {1, 2})` is an
+/// `annotation`, so a query naming one of the two kinds would drop every test
+/// whose deciding annotation is written the other way.
+///
+/// The annotation is a child of the item it decorates here, which is what makes
+/// Java simpler than Rust: the span of the `method_declaration` already reaches
+/// back over the whole stack of annotations, and no attribute chain is wanted.
+///
+/// The second pattern marks a whole class, because `@RunWith`, `@ExtendWith`,
+/// and `@SpringBootTest` decorate the class rather than any one method of it.
+const JAVA_QUERY: &str = r#"((method_declaration (modifiers [(marker_annotation name: (identifier) @_a) (annotation name: (identifier) @_a)])) @test
+ (#match? @_a "^(Test|ParameterizedTest|RepeatedTest|BeforeEach|AfterEach|BeforeAll|AfterAll|Before|After)$"))
+((class_declaration (modifiers [(marker_annotation name: (identifier) @_a) (annotation name: (identifier) @_a)])) @test
+ (#match? @_a "^(RunWith|ExtendWith|SpringBootTest)$"))
+"#;
+
+/// The functions of a Kotlin file whose rows are test rows.
+///
+/// Kotlin spells one annotation kind rather than two: an annotation there is an
+/// `annotation` holding a `user_type`, whether or not it carries arguments.
+const KOTLIN_QUERY: &str = r#"((function_declaration (modifiers (annotation (user_type (identifier) @_a)))) @test
+ (#match? @_a "^(Test|ParameterizedTest|RepeatedTest|Before|After|BeforeEach|AfterEach)$"))
+"#;
+
+/// The methods and classes of a C# file whose rows are test rows.
+///
+/// One name each is enough for the four runners in service: `Test` and
+/// `TestCase` are NUnit, `Fact` and `Theory` are xUnit, `TestMethod` is MSTest,
+/// and `SetUp`/`TearDown` are the fixtures around them. The second pattern
+/// marks a whole class for the two runners that decorate one.
+const CSHARP_QUERY: &str = r#"((method_declaration (attribute_list (attribute name: (identifier) @_a))) @test
+ (#match? @_a "^(Test|Fact|Theory|TestMethod|TestCase|SetUp|TearDown)$"))
+((class_declaration (attribute_list (attribute name: (identifier) @_a))) @test
+ (#match? @_a "^(TestFixture|TestClass)$"))
+"#;
+
+/// The blocks and classes of a Ruby file whose rows are test rows.
+///
+/// The receiver does not enter the first pattern, so it reads `RSpec.describe
+/// "x" do` and a bare `describe "x" do` alike. The `do_block` is what keeps the
+/// pattern off a call of a method that merely shares a name with a block of
+/// RSpec: `ledger.describe("totals")` carries no block and marks nothing.
+///
+/// The second pattern is Minitest, whose tests are methods of a class that
+/// inherits a case rather than blocks.
+const RUBY_QUERY: &str = r#"((call method: (identifier) @_m block: (do_block)) @test
+ (#match? @_m "^(describe|context|feature|it|specify|scenario)$"))
+((class superclass: (superclass) @_s) @test
+ (#match? @_s "Minitest::Test|Test::Unit::TestCase|ActiveSupport::TestCase"))
+"#;
+
+/// The classes and functions of a Swift file whose rows are test rows.
+///
+/// XCTest and Quick both spell a test suite as a class that inherits one, which
+/// the first pattern reads. The second reads the Swift Testing library, whose
+/// test is a free function carrying a `@Test` or `@Suite` attribute.
+const SWIFT_QUERY: &str = r#"((class_declaration (inheritance_specifier inherits_from: (user_type (type_identifier) @_s))) @test
+ (#match? @_s "^(XCTestCase|QuickSpec)$"))
+((function_declaration (modifiers (attribute (user_type (type_identifier) @_a)))) @test
+ (#match? @_a "^(Test|Suite)$"))
+"#;
+
+/// The calls of an Elixir file whose rows are test rows.
+///
+/// The first pattern is the block a test is written in, and the string in the
+/// arguments is what tells `test "adds" do` from a `def test do` of production
+/// code.
+///
+/// The second is the one use of `@test_scope` in the whole tool. `use
+/// ExUnit.Case` says nothing about the rows around it and everything about the
+/// module that holds it, so the capture climbs to the outermost enclosing
+/// `call` — which is the `defmodule` — and marks all of it. A neighbouring
+/// production module is a `call` of its own and is left alone.
+const ELIXIR_QUERY: &str = r#"((call target: (identifier) @_t (arguments (string)) (do_block)) @test
+ (#match? @_t "^(test|describe|property)$"))
+((call target: (identifier) @_t (arguments (alias) @_a)) @test_scope
+ (#eq? @_t "use") (#match? @_a "ExUnit"))
+"#;
+
+/// The node kind an Elixir `@test_scope` capture climbs to.
+///
+/// `defmodule Foo do … end` is a `call`, exactly as the `use ExUnit.Case`
+/// inside it is, so the outermost `call` above the `use` is the module it
+/// belongs to.
+const ELIXIR_SCOPE_KINDS: &[&str] = &["call"];
+
 /// The grammar of Go.
 fn go_grammar() -> tree_sitter::Language {
     tree_sitter_go::LANGUAGE.into()
@@ -260,6 +349,38 @@ fn tsx_grammar() -> tree_sitter::Language {
     tree_sitter_typescript::LANGUAGE_TSX.into()
 }
 
+/// The grammar of Java.
+fn java_grammar() -> tree_sitter::Language {
+    tree_sitter_java::LANGUAGE.into()
+}
+
+/// The grammar of Kotlin, which arrives from `tree-sitter-kotlin-ng` rather
+/// than from `tree-sitter-kotlin`. The two are separate crates over separate
+/// grammars, and the node kinds the query above names are the ones of this one.
+fn kotlin_grammar() -> tree_sitter::Language {
+    tree_sitter_kotlin_ng::LANGUAGE.into()
+}
+
+/// The grammar of C#.
+fn csharp_grammar() -> tree_sitter::Language {
+    tree_sitter_c_sharp::LANGUAGE.into()
+}
+
+/// The grammar of Ruby.
+fn ruby_grammar() -> tree_sitter::Language {
+    tree_sitter_ruby::LANGUAGE.into()
+}
+
+/// The grammar of Swift.
+fn swift_grammar() -> tree_sitter::Language {
+    tree_sitter_swift::LANGUAGE.into()
+}
+
+/// The grammar of Elixir.
+fn elixir_grammar() -> tree_sitter::Language {
+    tree_sitter_elixir::LANGUAGE.into()
+}
+
 /// The tree rule of Go.
 const GO_TREE: Option<TreeRule> = plain(go_grammar, GO_QUERY);
 
@@ -277,6 +398,30 @@ const TYPESCRIPT_TREE: Option<TreeRule> = plain(typescript_grammar, SCRIPT_QUERY
 
 /// The tree rule of TSX.
 const TSX_TREE: Option<TreeRule> = plain(tsx_grammar, SCRIPT_QUERY);
+
+/// The tree rule of Java.
+const JAVA_TREE: Option<TreeRule> = plain(java_grammar, JAVA_QUERY);
+
+/// The tree rule of Kotlin.
+const KOTLIN_TREE: Option<TreeRule> = plain(kotlin_grammar, KOTLIN_QUERY);
+
+/// The tree rule of C#.
+const CSHARP_TREE: Option<TreeRule> = plain(csharp_grammar, CSHARP_QUERY);
+
+/// The tree rule of Ruby.
+const RUBY_TREE: Option<TreeRule> = plain(ruby_grammar, RUBY_QUERY);
+
+/// The tree rule of Swift.
+const SWIFT_TREE: Option<TreeRule> = plain(swift_grammar, SWIFT_QUERY);
+
+/// The tree rule of Elixir, the one rule of the table that marks a node it
+/// climbs to rather than one the query captured.
+const ELIXIR_TREE: Option<TreeRule> = Some(TreeRule {
+    grammar: elixir_grammar,
+    query: ELIXIR_QUERY,
+    attribute_chain: None,
+    scope_kinds: ELIXIR_SCOPE_KINDS,
+});
 
 /// A language whose test code the path rule finds on its own, for now.
 ///
@@ -471,25 +616,25 @@ language_table! {
     Tsx => "TSX", ["tsx"], [],
         line: ["//"], block: [C_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC, BACKTICK_ESC], raw_hash: false, char_lit: false, tree: TSX_TREE;
     Java => "Java", ["java"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: JAVA_TREE;
     // Kotlin spells a character literal `'a'` and carries no unpaired quote, so
     // the plain string form on the quote is right and no lookahead is wanted.
     Kotlin => "Kotlin", ["kt", "kts"], [],
-        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: KOTLIN_TREE;
     CSharp => "C#", ["cs"], [],
-        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: false, strings: [TDQ, DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: CSHARP_TREE;
     Ruby => "Ruby", ["rb", "rake", "gemspec"], ["Gemfile", "Rakefile"],
-        line: ["#"], block: [RUBY_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["#"], block: [RUBY_BLOCK], nested: false, strings: [DQ_ESC, SQ_ESC], raw_hash: false, char_lit: false, tree: RUBY_TREE;
     // Swift has no character literal at all. A character there is a `"` string
     // of one character, which the form below already reads.
     Swift => "Swift", ["swift"], [],
-        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["//"], block: [C_BLOCK], nested: true, strings: [TDQ, DQ_ESC], raw_hash: false, char_lit: false, tree: SWIFT_TREE;
     // Elixir gets neither rule, because its two spellings want opposite ones: a
     // charlist is `'abc'`, and a character is `?'`. A string form on the quote
     // would read the `?'` of `if c == ?' do` as the opening of a charlist. Its
     // quote therefore stays ordinary code until somebody measures the pair.
     Elixir => "Elixir", ["ex", "exs"], [],
-        line: ["#"], block: [], nested: false, strings: [TDQ, DQ_ESC], raw_hash: false, char_lit: false, tree: NO_TREE;
+        line: ["#"], block: [], nested: false, strings: [TDQ, DQ_ESC], raw_hash: false, char_lit: false, tree: ELIXIR_TREE;
     // Zig spells a character literal `'a'` and carries no unpaired quote, and a
     // test in Zig is a language construct rather than a name, so nothing there
     // wants a bare quote either.
