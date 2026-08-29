@@ -59,7 +59,7 @@ dialects share a query, so the table holds eleven rows:
 
 | Language | What the rule marks |
 | --- | --- |
-| Rust | A `mod` or `fn` whose attributes hold `#[cfg(test)]`, `#[test]`, `#[tokio::test]`, `#[rstest]`, `#[bench]`, `#[test_case]`, or `#[proptest]`. The span reaches back over the whole attribute stack. |
+| Rust | A `mod` or `fn` whose attributes hold a name that ends in `test`, `rstest`, `bench`, `test_case`, or `proptest` — `#[test]`, `#[tokio::test]`, `#[rstest]` — or a `#[cfg(…)]` condition that names the option `test` where no `not` inverts it. So `#[cfg(test)]`, `#[cfg(all(test, feature = "x"))]`, and `#[cfg(all(not(windows), test))]` are test code, while `#[cfg(not(test))]`, `#[cfg(feature = "test-support")]`, and `#[cfg_attr(test, allow(dead_code))]` are production code. The span reaches back over the whole attribute stack. |
 | Go | A `func` named `Test…`, `Benchmark…`, `Fuzz…`, or `Example…`. The name must break there, so `Testify` is production code. |
 | Zig | A `test` declaration, which is a construct of the language and needs no heuristic. |
 | Python | A `def test_…`, a `class Test…`, a class inheriting `TestCase`, and any definition a `pytest` decorator marks. |

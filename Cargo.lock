@@ -1130,7 +1130,6 @@ dependencies = [
  "memchr",
  "num-format",
  "rayon",
- "regex",
  "serde",
  "serde_json",
  "tempfile",

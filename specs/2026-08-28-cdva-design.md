@@ -183,6 +183,14 @@ root manifest. Do not assume them; they differ between grammars.
   alone loses the `#[cfg(test)]` row. The tree rule walks `prev_sibling()` while
   the kind is `attribute_item`, so a stack such as `#[rstest]` over `#[case(1)]`
   extends the span to the first attribute.
+- **In `tree-sitter-rust` the arguments of an attribute are tokens and not an
+  expression.** An `attribute_item` holds one `attribute`, which holds a path —
+  an `identifier` or a `scoped_identifier` whose `name` field is the last name —
+  and an optional `arguments` field of kind `token_tree`. That group is flat:
+  `cfg(all(not(windows), test))` gives `(token_tree (identifier "all")
+  (token_tree (identifier "not") (token_tree (identifier "windows"))
+  (identifier "test")))`. So a call is a name that a `token_tree` follows, and
+  `feature = "x"` is a name, an anonymous `=`, and a `string_literal`.
 - **In Java, Kotlin, C#, Python, and Swift the annotation is a child.** The
   query alone gives the whole span, and no walk is needed. The node paths are:
   - Java: `(method_declaration (modifiers (marker_annotation name: (identifier))))`
@@ -267,9 +275,9 @@ starts with `_` is a helper for a predicate and marks nothing.
 Three capture names carry meaning:
 
 - `@test` — the span of the captured node is test code.
-- `@candidate` — the node is test code only when the chain of attributes that
-  precedes it matches. The span then reaches back to the first attribute of the
-  chain. Rust alone needs this, because an attribute there is a sibling.
+- `@candidate` — the node is test code only when one attribute of the chain
+  that precedes it says so. The span then reaches back to the first attribute of
+  the chain. Rust alone needs this, because an attribute there is a sibling.
 - `@test_scope` — the outermost enclosing node of a listed kind is test code.
   Elixir alone needs this, for `use ExUnit.Case`.
 
@@ -280,17 +288,48 @@ Three capture names carry meaning:
 (function_item) @candidate
 ```
 
-The attribute chain is `attribute_item`, and the regular expression over the
-text of the attribute is:
+The attribute chain is `attribute_item`, and the rule reads the tree of the
+attribute rather than the text of it. An attribute says one of two things, and
+the two are read two ways.
 
-```
-^#\[\s*(cfg\s*\(.*\btest\b|cfg_attr\s*\(.*\btest\b|.*\btest\s*\]|.*::test\s*\]|rstest|bench|test_case|proptest)
-```
+A **name** makes the item test code on its own. The name of an attribute is a
+path, so the rule reads the last name of that path and looks for it among
+`test`, `rstest`, `bench`, `test_case`, and `proptest`. The arguments say
+nothing here, so `#[tokio::test(flavor = "multi_thread")]` reads exactly as
+`#[tokio::test]` does.
 
-This marks `#[cfg(test)] mod tests`, `#[cfg(test)] mod other;`, `#[test] fn`,
-`#[tokio::test] async fn`, `#[cfg(all(test, feature = "x"))] mod`, `#[bench]`,
-and the stack `#[rstest]` over `#[case(1)]`. It leaves a `///` doc comment that
-holds a fenced example as a comment, which decision 3 requires.
+A **condition** — the argument of `#[cfg(…)]` — makes the item test code when
+it names the option `test` where no `not` inverts it. The grammar gives that
+argument as a flat list of tokens, so the rule walks it: a name that a group
+follows is `not(…)`, `all(…)`, or `any(…)`; a name that an equals sign follows
+is an option with a value, such as `feature = "x"`; a name that neither follows
+is a bare option. `not` inverts the condition below it and `all` and `any`
+invert nothing, so:
+
+| Attribute | Verdict |
+| --- | --- |
+| `#[cfg(test)]` | test |
+| `#[cfg(all(test, feature = "x"))]` | test |
+| `#[cfg(all(not(windows), test))]` | test |
+| `#[cfg(any(test, feature = "x"))]` | test |
+| `#[cfg(not(test))]` | production |
+| `#[cfg(not(not(test)))]` | test |
+| `#[cfg(feature = "test-support")]` | production |
+| `#[cfg_attr(test, allow(dead_code))]` | production |
+
+A regular expression over the text cannot answer this. A `cfg` condition is a
+nested boolean expression, so the question names a syntactic category, and a
+word search reads `not(test)` — the code that is compiled when the tests are
+OFF — as test code.
+
+`cfg_attr` is left out for the same reason it is production code: it says which
+*attributes* apply and never whether the item exists.
+
+Together this marks `#[cfg(test)] mod tests`, `#[cfg(test)] mod other;`,
+`#[test] fn`, `#[tokio::test] async fn`, `#[cfg(all(test, feature = "x"))]
+mod`, `#[bench]`, and the stack `#[rstest]` over `#[case(1)]`. It leaves a `///`
+doc comment that holds a fenced example as a comment, which decision 3
+requires.
 
 ### Go
 

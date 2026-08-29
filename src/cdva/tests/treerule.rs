@@ -1530,10 +1530,10 @@ fn the_tree_rule_of_every_language_in_the_table_compiles() {
             assert!(language.scope_kinds().is_empty(), "{named}");
         }
 
-        // Compiling the rule is what refuses a query that does not parse, a
-        // capture name that marks nothing, and a pattern that is not a regular
-        // expression. Asking for the outcome of an empty source is what makes
-        // it compile, so this call is the assertion.
+        // Compiling the rule is what refuses a query that does not parse and
+        // a capture name that marks nothing. Asking for the outcome of an
+        // empty source is what makes it compile, so this call is the
+        // assertion.
         let outcome = rules.outcome("", language, TreeMode::Always);
         assert_eq!(
             outcome.is_some(),

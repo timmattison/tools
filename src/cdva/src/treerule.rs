@@ -16,10 +16,10 @@
 //! and marks nothing. The three that mark are:
 //!
 //! - `@test` — the span of the captured node is test code.
-//! - `@candidate` — the node is test code *only when* the chain of attributes
-//!   before it matches, and the span then reaches back to the first attribute
-//!   of that chain. Rust needs this, because there an attribute is a sibling of
-//!   the item it decorates rather than a child of it.
+//! - `@candidate` — the node is test code *only when* one attribute of the
+//!   chain before it says so, and the span then reaches back to the first
+//!   attribute of that chain. Rust needs this, because there an attribute is a
+//!   sibling of the item it decorates rather than a child of it.
 //! - `@test_scope` — the outermost enclosing node of a kind the language lists
 //!   is test code.
 //!
@@ -103,7 +103,6 @@ use crate::file::{ParseStatus, Rule, Span};
 use crate::lang::{AttributeChain, Language};
 use crate::lines::LineIndex;
 use memchr::memmem::Finder;
-use regex::Regex;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -178,11 +177,10 @@ pub struct TreeRules {
     /// One slot per language of [`Language::all`], in that order, filled the
     /// first time a file of that language arrives.
     ///
-    /// A `Query` and a `Regex` are both costly to build and both `Sync`, so
-    /// each is built once and then read from every thread that counts a file.
-    /// The slot is lazy rather than eager because a run over a tree of one
-    /// language would otherwise pay to compile the queries of a dozen
-    /// languages it never reads.
+    /// A `Query` is costly to build and `Sync`, so it is built once and then
+    /// read from every thread that counts a file. The slot is lazy rather than
+    /// eager because a run over a tree of one language would otherwise pay to
+    /// compile the queries of a dozen languages it never reads.
     compiled: Vec<OnceLock<Option<Compiled>>>,
 }
 
@@ -212,11 +210,11 @@ impl TreeRules {
     /// # Panics
     ///
     /// Panics when the query of the language table does not compile against
-    /// the grammar of that table, when it captures a name that marks nothing,
-    /// or when its attribute pattern is not a regular expression. Each of
-    /// those is a fact of the table rather than of the file being counted, a
-    /// test asserts all three for every language, and an answer of "no test
-    /// rows" instead would silently miscount every file of that language.
+    /// the grammar of that table, or when it captures a name that marks
+    /// nothing. Both are facts of the table rather than of the file being
+    /// counted, a test asserts the two of them for every language, and an
+    /// answer of "no test rows" instead would silently miscount every file of
+    /// that language.
     #[must_use]
     pub fn outcome(&self, source: &str, language: Language, mode: TreeMode) -> Option<TreeOutcome> {
         if mode == TreeMode::Never {
@@ -340,8 +338,9 @@ struct Compiled {
     finders: Vec<Finder<'static>>,
     /// What each capture of the query marks, by capture index.
     markings: Vec<Option<Marking>>,
-    /// The attribute chain and the compiled form of its pattern.
-    chain: Option<(AttributeChain, Regex)>,
+    /// The attribute chain, where the language spells an attribute as a
+    /// sibling of the item it decorates.
+    chain: Option<AttributeChain>,
     /// The node kinds a `@test_scope` capture may climb to.
     scope_kinds: &'static [&'static str],
 }
@@ -351,9 +350,8 @@ impl Compiled {
     ///
     /// # Panics
     ///
-    /// Panics when the table's query does not compile, captures a name that
-    /// marks nothing, or carries a pattern that is not a regular expression.
-    /// See [`TreeRules::outcome`].
+    /// Panics when the table's query does not compile, or captures a name
+    /// that marks nothing. See [`TreeRules::outcome`].
     fn new(language: Language) -> Option<Self> {
         let source = language.tree_query()?;
         let grammar = language.grammar()?;
@@ -368,16 +366,6 @@ impl Compiled {
             .iter()
             .map(|name| marking_of(name, language))
             .collect();
-        let chain = language.attribute_chain().map(|chain| {
-            let pattern = Regex::new(chain.pattern).unwrap_or_else(|error| {
-                panic!(
-                    "the attribute pattern of {} is not a regular expression: {error}",
-                    language.name()
-                )
-            });
-            (chain, pattern)
-        });
-
         Some(Self {
             grammar,
             query,
@@ -387,7 +375,7 @@ impl Compiled {
                 .map(|needle| Finder::new(needle.as_bytes()).into_owned())
                 .collect(),
             markings,
-            chain,
+            chain: language.attribute_chain(),
             scope_kinds: language.scope_kinds(),
         })
     }
@@ -466,11 +454,11 @@ impl Compiled {
     /// finds nothing, and drops that test — while still passing every fixture
     /// whose deciding attribute happens to sit next to the item.
     ///
-    /// The text of an attribute is taken through `utf8_text`, which reads a
-    /// byte range as a string. Nothing here indexes the source, so a file of
-    /// Japanese or of emoji is read exactly as one of ASCII is.
+    /// What one attribute *says* is a fact of the language rather than of this
+    /// walk, so the reader of the language table answers it. See
+    /// [`AttributeChain`].
     fn chain_start(&self, node: Node<'_>, source: &str) -> Option<usize> {
-        let (chain, pattern) = self.chain.as_ref()?;
+        let chain = self.chain.as_ref()?;
         let mut start = None;
         let mut decided = false;
 
@@ -479,9 +467,7 @@ impl Compiled {
             if attribute.kind() != chain.kind {
                 break;
             }
-            if let Ok(text) = attribute.utf8_text(source.as_bytes()) {
-                decided |= pattern.is_match(text);
-            }
+            decided |= (chain.reads_as_test)(attribute, source);
             start = Some(attribute.start_byte());
             sibling = attribute.prev_sibling();
         }

@@ -15,6 +15,7 @@
 //! line.
 
 use std::path::Path;
+use tree_sitter::Node;
 
 /// One row of the language table: a language, the extensions that name it, and
 /// the whole file names that name it.
@@ -136,16 +137,26 @@ pub struct StringSpec {
 /// Rust is such a language: an `attribute_item` is a sibling of the
 /// `mod_item` it applies to, so a query that captures the `mod_item` alone
 /// loses the `#[cfg(test)]` row. The tree rule walks the whole contiguous chain
-/// of siblings of this kind, and a match of `pattern` against the source text
-/// of any one of them makes the item test code. Walking the whole chain rather
-/// than the one adjacent sibling is what makes the stack `#[rstest]` over
-/// `#[case(1)]` work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// of siblings of this kind, and a `true` from `reads_as_test` on any one of
+/// them makes the item test code. Walking the whole chain rather than the one
+/// adjacent sibling is what makes the stack `#[rstest]` over `#[case(1)]` work.
+///
+/// The reader takes the node and the source rather than the text of the
+/// attribute, because the two things an attribute says are two shapes of the
+/// tree rather than two words. See [`rust_attribute_marks_a_test`].
+///
+/// The type carries no `PartialEq`, because the one field a comparison would
+/// read is a function pointer and the address of a function is not a stable
+/// name for it: two functions may share an address, and one function may have
+/// two. A caller that wants to know whether a language has a chain asks
+/// [`Language::attribute_chain`] for one.
+#[derive(Debug, Clone, Copy)]
 pub struct AttributeChain {
     /// The node kind that spells an attribute preceding an item.
     pub kind: &'static str,
-    /// A match on the source text of the attribute makes the item a test.
-    pub pattern: &'static str,
+    /// Reads one attribute of that kind, with the source it was parsed from,
+    /// and answers whether it makes the item after it test code.
+    pub reads_as_test: fn(Node<'_>, &str) -> bool,
 }
 
 /// The tree rule of one language: the grammar, the query, and the two facts
@@ -175,23 +186,191 @@ struct TreeRule {
 /// be read as well.
 const RUST_QUERY: &str = "(mod_item) @candidate\n(function_item) @candidate\n";
 
-/// The attributes that make a Rust item test code.
+/// The node inside an `attribute_item` that holds the name of the attribute
+/// and its arguments.
+const RUST_ATTRIBUTE_NODE: &str = "attribute";
+
+/// The field of an attribute that holds its arguments.
+const RUST_ARGUMENTS_FIELD: &str = "arguments";
+
+/// The field of a path of several names that holds the last of them.
+const RUST_NAME_FIELD: &str = "name";
+
+/// The node kind of a path of several names, such as `tokio::test`.
+const RUST_SCOPED_IDENTIFIER: &str = "scoped_identifier";
+
+/// The node kind of one name.
+const RUST_IDENTIFIER: &str = "identifier";
+
+/// The node kind of a group in brackets.
 ///
-/// This one expression covers `#[cfg(test)] mod tests`, `#[cfg(test)] mod
-/// other;`, `#[test] fn`, `#[tokio::test] async fn`, `#[cfg(all(test, feature =
-/// "x"))] mod`, `#[bench]`, and the stack `#[rstest]` over `#[case(1)]`. It
-/// leaves a `///` doc comment that holds a fenced example alone, which is what
-/// keeps a doc test a comment and the total of this tool in agreement with
-/// `cloc`.
-const RUST_ATTRIBUTE: &str = r"^#\[\s*(cfg\s*\(.*\btest\b|cfg_attr\s*\(.*\btest\b|.*\btest\s*\]|.*::test\s*\]|rstest|bench|test_case|proptest)";
+/// The grammar reads the arguments of an attribute as tokens rather than as an
+/// expression, because an attribute of a macro may hold anything at all. So
+/// `all(test, feature = "x")` arrives as the name `all` and a group, and that
+/// group holds the name `test`, a comma, the name `feature`, an equals sign,
+/// and a string.
+const RUST_TOKEN_TREE: &str = "token_tree";
+
+/// The sign that gives a name a value, as `feature = "x"` does.
+const RUST_EQUALS: &str = "=";
+
+/// The attribute that carries a condition on the build.
+const RUST_CONDITION: &str = "cfg";
+
+/// The option that names a build of the tests.
+const RUST_TEST_OPTION: &str = "test";
+
+/// The condition that inverts the one below it.
+const RUST_NOT: &str = "not";
+
+/// The conditions that hold a list of conditions and invert none of them.
+const RUST_LISTS: &[&str] = &["all", "any"];
+
+/// The attribute names that make the item after them test code on their own.
+///
+/// Each one names a path rather than a condition, so the rule compares the
+/// last name of that path with this list. `#[test]`, `#[tokio::test]`, and
+/// `#[serial_test::test]` all end in `test`, and `#[rstest::rstest]` ends in
+/// `rstest`.
+const RUST_TEST_ATTRIBUTES: &[&str] = &["test", "rstest", "bench", "test_case", "proptest"];
+
+/// Whether one Rust attribute makes the item after it test code.
+///
+/// Rust spells this two ways, and the rule reads each of the two on its own.
+///
+/// The first is a **name**: `#[test]`, `#[tokio::test]`, `#[rstest]`,
+/// `#[bench]`, `#[test_case(1)]`, and `#[proptest]`. The name of an attribute
+/// is a path, so the rule reads the last name of the path and looks for it in
+/// [`RUST_TEST_ATTRIBUTES`]. The arguments say nothing here, which is why
+/// `#[tokio::test(flavor = "multi_thread")]` reads exactly as `#[tokio::test]`
+/// does.
+///
+/// The second is a **condition**: the argument of `#[cfg(...)]`, which is a
+/// nested expression over `not`, `all`, `any`, a bare option such as `test`,
+/// and an option with a value such as `feature = "x"`. A search for the word
+/// `test` cannot read such an expression, because `not(test)` names the code
+/// that is compiled when the tests are OFF. So the rule walks it, and
+/// [`names_the_test_option`] is that walk.
+///
+/// `cfg_attr` is neither, and it is left out on purpose. `#[cfg_attr(test,
+/// allow(dead_code))]` says which *attributes* apply to the item and never
+/// whether the item exists, so the item below it is production code.
+///
+/// Returns `false` for every attribute this rule cannot read. A `///` doc
+/// comment is one of them, which is what keeps a doc test a comment and the
+/// total of this tool in agreement with `cloc`.
+fn rust_attribute_marks_a_test(attribute_item: Node<'_>, source: &str) -> bool {
+    let Some(attribute) = attribute_item.named_child(0) else {
+        return false;
+    };
+    if attribute.kind() != RUST_ATTRIBUTE_NODE {
+        return false;
+    }
+    let Some(path) = attribute.named_child(0) else {
+        return false;
+    };
+    let Some(name) = last_name_of(path, source) else {
+        return false;
+    };
+
+    if path.kind() == RUST_IDENTIFIER && name == RUST_CONDITION {
+        return attribute
+            .child_by_field_name(RUST_ARGUMENTS_FIELD)
+            .is_some_and(|condition| names_the_test_option(condition, source, false));
+    }
+    RUST_TEST_ATTRIBUTES.contains(&name)
+}
+
+/// The last name of a path, which is `test` in both `test` and `tokio::test`.
+///
+/// The text comes back through `utf8_text`, which reads a byte range as a
+/// string, so a path of many bytes per character is read exactly as one of
+/// ASCII is. Nothing here indexes the source.
+fn last_name_of<'source>(path: Node<'_>, source: &'source str) -> Option<&'source str> {
+    let last = if path.kind() == RUST_SCOPED_IDENTIFIER {
+        path.child_by_field_name(RUST_NAME_FIELD)?
+    } else {
+        path
+    };
+    last.utf8_text(source.as_bytes()).ok()
+}
+
+/// Whether a condition names the option `test` where nothing inverts it.
+///
+/// `condition` is the group in brackets after `cfg`, `not`, `all`, or `any`,
+/// and `inverted` says how many `not` conditions stand above that group:
+/// `false` for an even count, and `true` for an odd one.
+///
+/// The walk reads the three shapes a condition is written in out of the flat
+/// list of tokens the grammar gives it. A name that a group follows is a
+/// condition of a name — `not(...)`, `all(...)`, `any(...)`. A name that an
+/// equals sign follows is an option with a value, such as `feature =
+/// "test-support"`, and the value is a string rather than an option, so the
+/// word in it names nothing. A name that neither follows is a bare option, and
+/// `test` is the one bare option that decides.
+///
+/// `not` inverts the condition below it, and `all` and `any` invert nothing.
+/// That is the whole of what `inverted` carries, and it is what makes
+/// `not(test)` production code, `not(not(test))` test code again, and
+/// `all(not(windows), test)` test code — the `not` there stands over `windows`
+/// and not over `test`. Neither `all` nor `any` can turn a positive `test`
+/// into a negative one, so `all(test, feature = "x")` and `any(test, feature =
+/// "x")` are both test code.
+///
+/// A condition of a name this rule does not know is not walked into. The rule
+/// cannot say what such a condition means, and the two mistakes are not equal:
+/// an unread condition leaves its item in the production bucket and costs a
+/// test row, while a misread one takes a production row and calls it a test.
+///
+/// The pending groups are held in a list rather than on the stack of the
+/// machine, so a condition nested to any depth costs memory and never the
+/// process.
+fn names_the_test_option(condition: Node<'_>, source: &str, inverted: bool) -> bool {
+    let mut pending = vec![(condition, inverted)];
+
+    while let Some((group, inverted)) = pending.pop() {
+        let mut position = 0_u32;
+        while let Some(child) = group.child(position) {
+            position = position.saturating_add(1);
+            if child.kind() != RUST_IDENTIFIER {
+                continue;
+            }
+            let Ok(name) = child.utf8_text(source.as_bytes()) else {
+                continue;
+            };
+
+            match group.child(position) {
+                Some(next) if next.kind() == RUST_TOKEN_TREE => {
+                    position = position.saturating_add(1);
+                    if name == RUST_NOT {
+                        pending.push((next, !inverted));
+                    } else if RUST_LISTS.contains(&name) {
+                        pending.push((next, inverted));
+                    }
+                }
+                // Step over the sign and the value of `feature = "x"`.
+                Some(next) if next.kind() == RUST_EQUALS => {
+                    position = position.saturating_add(2);
+                }
+                _ => {
+                    if !inverted && name == RUST_TEST_OPTION {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
 
 /// The literals a Rust file must hold before it is parsed.
 ///
-/// Every branch of [`RUST_ATTRIBUTE`] but one holds `test`: `cfg(test)`,
-/// `#[test]`, `#[tokio::test]`, `rstest`, `test_case`, and `proptest` all do,
-/// and so does the `#[cfg(test)] mod <name>;` the module pass reads. The one
-/// branch that does not is `bench`, which is why it is listed apart rather
-/// than folded into the first.
+/// Every attribute the rule above reads holds one of the two. The condition it
+/// reads names the option `test`, and so does the `#[cfg(test)] mod <name>;`
+/// the module pass reads. Of the names in [`RUST_TEST_ATTRIBUTES`], `test`,
+/// `rstest`, `test_case`, and `proptest` all hold `test`. The one that does
+/// not is `bench`, which is why it is listed apart rather than folded into the
+/// first.
 const RUST_NEEDLES: &[&str] = &["test", "bench"];
 
 /// The grammar of Rust.
@@ -205,7 +384,7 @@ const RUST_TREE: Option<TreeRule> = Some(TreeRule {
     query: RUST_QUERY,
     attribute_chain: Some(AttributeChain {
         kind: "attribute_item",
-        pattern: RUST_ATTRIBUTE,
+        reads_as_test: rust_attribute_marks_a_test,
     }),
     scope_kinds: &[],
     needles: RUST_NEEDLES,
