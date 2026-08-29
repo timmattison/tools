@@ -133,10 +133,39 @@ impl LineIndex {
 
     /// The number of rows. A source ending in a newline does not gain an empty
     /// last row.
+    ///
+    /// A caller that holds no index and wants only this number reads
+    /// [`row_count`] instead, which answers the same question over the bytes
+    /// and allocates nothing.
     #[must_use]
     pub fn row_count(&self) -> u32 {
         u32::try_from(self.starts.len()).unwrap_or(u32::MAX)
     }
+}
+
+/// The number of rows of `source`, counted rather than collected.
+///
+/// This is the rule of [`LineIndex::new`] read straight off the bytes: a source
+/// of no bytes has no rows, and a newline that ends the source closes the last
+/// row rather than opening an empty one after it.
+///
+/// [`Scanner::new`] wants that number and nothing else. A whole [`LineIndex`]
+/// built to read the length of its vector costs one allocation and one pass for
+/// every file the tool counts, and a file that is also parsed then pays for a
+/// second index — the one a byte offset really needs — in the tree rule.
+///
+/// The two readings agree by test rather than by construction. Every case of
+/// the classifier suite goes through one helper that asserts the count of the
+/// labels against [`LineIndex::row_count`] of the same source, so a rule that
+/// drifts between here and there fails at once.
+fn row_count(source: &str) -> usize {
+    // The last byte is dropped rather than searched, which is what keeps a
+    // newline at the end of the source from opening a row after it. Every other
+    // newline opens one, and the first row of a source stands in front of them
+    // all. A source of no bytes has no last byte to drop, and no rows.
+    source.as_bytes().split_last().map_or(0, |(_, head)| {
+        memchr::memchr_iter(b'\n', head).count().saturating_add(1)
+    })
 }
 
 /// What one pass over one source produced.
@@ -261,7 +290,7 @@ impl<'a> Scanner<'a> {
     /// A scanner standing at the first byte of `source`, with a flag for each
     /// of its rows.
     fn new(source: &'a str, language: Language) -> Self {
-        let rows = LineIndex::new(source).starts.len();
+        let rows = row_count(source);
         Scanner {
             bytes: source.as_bytes(),
             syntax: language.comment_syntax(),
