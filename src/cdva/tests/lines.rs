@@ -747,6 +747,90 @@ fn markdown_counts_every_row_that_is_not_blank_as_code() {
 }
 
 // ---------------------------------------------------------------------------
+// Batch, whose two comment tokens are read only at the start of a statement.
+// ---------------------------------------------------------------------------
+
+/// Rows of Batch that are wholly a comment.
+///
+/// `REM` is a command and `::` is a label, so each opens a comment where a
+/// command may stand: as the first thing on its row, white space aside. A
+/// command is a word, so the case of its letters says nothing.
+const BATCH_COMMENTS: &[&str] = &[
+    "REM a comment",
+    ":: a comment",
+    // Indented. White space before a command is still a place a command may
+    // stand, which is why this is not the anchoring of Ruby `=begin`.
+    "    REM a comment",
+    "\t:: a comment",
+    // A command word with nothing after it. The old table wrote the token as
+    // `REM ` with a trailing space, so this row read as code.
+    "REM",
+    "  REM",
+    // A label needs no space after it, and `::comment` is how most of them are
+    // written.
+    "::comment",
+    // Every casing of the one command.
+    "rem a comment",
+    "Rem a comment",
+    "rEm a comment",
+    "REm a comment",
+];
+
+/// Rows of Batch that are wholly code.
+///
+/// Each holds a comment token somewhere other than the start of a statement,
+/// where it is an argument, a word of an argument, or a piece of a path.
+const BATCH_CODE: &[&str] = &[
+    "echo rem is a word",
+    "echo REM is a word",
+    "echo a::b",
+    "set PATH=%PATH%;C:\\a::b",
+    // `remove` is a word that opens with the command. A comment token that is a
+    // command word ends where the word does.
+    "remove /f target",
+    "REMOVE /f target",
+    "  remark this is not a comment",
+];
+
+#[test]
+fn a_batch_comment_token_opens_a_comment_at_the_start_of_a_statement() {
+    for &row in BATCH_COMMENTS {
+        let source = format!("{row}\n");
+        assert_eq!(
+            tally(&source, Language::Batch),
+            counts(0, 1, 0),
+            "`{row}` is a Batch comment"
+        );
+    }
+}
+
+#[test]
+fn a_batch_comment_token_elsewhere_on_a_row_is_code() {
+    for &row in BATCH_CODE {
+        let source = format!("{row}\n");
+        assert_eq!(
+            tally(&source, Language::Batch),
+            counts(0, 0, 1),
+            "`{row}` is Batch code, because neither token opens a statement here"
+        );
+    }
+}
+
+#[test]
+fn a_batch_comment_ends_with_its_own_row() {
+    // The comment reaches the end of its row and no further, so the command
+    // under it is still counted.
+    assert_eq!(
+        tally("REM explain\nECHO hi\n", Language::Batch),
+        counts(0, 1, 1)
+    );
+    assert_eq!(
+        tally("echo rem\nREM explain\n", Language::Batch),
+        counts(0, 1, 1)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // LineIndex.
 // ---------------------------------------------------------------------------
 
