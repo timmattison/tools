@@ -92,6 +92,20 @@ fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).expect("the binary writes UTF-8 to standard error")
 }
 
+/// The label of every row the table prints, the total last.
+///
+/// The header and the rules are dropped, so the result is the order of the
+/// report itself, and the count of it is the count of the rows the report kept.
+fn labels(table: &str) -> Vec<String> {
+    table
+        .lines()
+        .skip(1)
+        .filter(|line| !line.starts_with('-'))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
 /// The fields of the table row that starts with `label`, with the bar dropped.
 fn fields(table: &str, label: &str) -> Vec<String> {
     let line = table
@@ -136,6 +150,11 @@ fn the_help_names_every_flag_of_the_command() {
     );
     let help = stdout(&output);
     for flag in [
+        "--by-file",
+        "--sort",
+        "--top",
+        "--tests-only",
+        "--production-only",
         "--hidden",
         NO_IGNORE,
         "--test-glob",
@@ -432,5 +451,115 @@ fn the_two_tree_flags_refuse_to_run_together() {
     assert!(
         complaint.contains("--no-tree") && complaint.contains("--tree"),
         "the failure names the two flags that conflict: {complaint}"
+    );
+}
+
+#[test]
+fn the_two_bucket_flags_refuse_to_run_together() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+
+    let output = cdva()
+        .arg(NO_IGNORE)
+        .arg("--tests-only")
+        .arg("--production-only")
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !output.status.success(),
+        "asking for the test bucket and the production bucket at once is a \
+         mistake, not a silent choice of one:\n{}",
+        stdout(&output)
+    );
+    let complaint = stderr(&output);
+    assert!(
+        complaint.contains("--tests-only") && complaint.contains("--production-only"),
+        "the failure names the two flags that conflict: {complaint}"
+    );
+}
+
+#[test]
+fn the_sort_flag_takes_a_kebab_case_column_and_refuses_anything_else() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+
+    let accepted = cdva()
+        .arg(NO_IGNORE)
+        .arg("--sort")
+        .arg("test-percent")
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+    assert!(
+        accepted.status.success(),
+        "a column of two words is spelled with a hyphen: {}",
+        stderr(&accepted)
+    );
+
+    let refused = cdva()
+        .arg(NO_IGNORE)
+        .arg("--sort")
+        .arg("nonsense")
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+    assert!(
+        !refused.status.success(),
+        "a column the report has no idea about is a mistake:\n{}",
+        stdout(&refused)
+    );
+    let complaint = stderr(&refused);
+    assert!(
+        complaint.contains("test-percent") && complaint.contains("test-files"),
+        "the failure lists the columns in the spelling the flag takes: {complaint}"
+    );
+}
+
+#[test]
+fn the_by_file_flag_names_the_files_and_the_top_flag_keeps_one_of_them() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+    write(root.path(), "tests/it.rs", INTEGRATION_TEST);
+
+    let run = |flags: &[&str]| {
+        let mut command = cdva();
+        command.arg(NO_IGNORE);
+        for flag in flags {
+            command.arg(flag);
+        }
+        let output = command.arg(root.path()).output().expect("the binary runs");
+        assert!(
+            output.status.success(),
+            "a readable tree counts under {flags:?}: {}",
+            stderr(&output)
+        );
+        stdout(&output)
+    };
+
+    let by_file = run(&["--by-file"]);
+    assert!(
+        by_file.starts_with("File"),
+        "the first column of a by-file report is the file:\n{by_file}"
+    );
+    let rows = labels(&by_file);
+    assert_eq!(rows.len(), 3, "two files and the total:\n{by_file}");
+    assert!(
+        rows[0].ends_with("it.rs") && rows[1].ends_with("lib.rs"),
+        "each file is named, the larger one first:\n{by_file}"
+    );
+
+    let trimmed = run(&["--by-file", "--top", "1"]);
+    let kept = labels(&trimmed);
+    assert_eq!(kept.len(), 2, "one file and the total:\n{trimmed}");
+    assert!(
+        kept[0].ends_with("it.rs"),
+        "the file of the most code is the one kept:\n{trimmed}"
+    );
+    assert_eq!(
+        fields(&trimmed, "Total")[FILES],
+        "2",
+        "the total still covers the file that was trimmed away:\n{trimmed}"
     );
 }

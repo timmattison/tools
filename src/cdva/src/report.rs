@@ -49,6 +49,54 @@ const BAR: &str = " |";
 /// The glyph the rule lines are drawn with.
 const RULE_GLYPH: char = '-';
 
+/// Which bucket the main columns report.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Bucket {
+    /// Both buckets: the main columns are the whole file, and the test columns
+    /// sit inside them.
+    #[default]
+    Both,
+    /// The test bucket alone.
+    TestsOnly,
+    /// The production bucket alone.
+    ProductionOnly,
+}
+
+/// The column a report is ordered by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum SortColumn {
+    /// The label: the language, or the path of the file.
+    Language,
+    /// The count of files.
+    Files,
+    /// The blank rows.
+    Blank,
+    /// The comment rows.
+    Comment,
+    /// The code rows, which is what a reader of a code counter asks for first.
+    #[default]
+    Code,
+    /// The count of files holding a test row.
+    TestFiles,
+    /// The test share of the code rows, as a count.
+    TestCode,
+    /// The test share of the code rows, as a percentage.
+    TestPercent,
+}
+
+/// What shapes a report: which rows it holds, in which order, and how many.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReportOptions {
+    /// One row per file, rather than one row per language.
+    pub by_file: bool,
+    /// Which bucket the main columns report.
+    pub bucket: Bucket,
+    /// The column the rows are ordered by.
+    pub sort: SortColumn,
+    /// Keep only the first N rows. The total still covers every file.
+    pub top: Option<usize>,
+}
+
 /// Which side of its column a cell sits on.
 #[derive(Clone, Copy)]
 enum Align {
@@ -65,7 +113,7 @@ enum Align {
 /// because the shape of the answer is a part of the answer: a reader who counted
 /// an empty tree learns more from a table of zeros than from an empty screen.
 #[must_use]
-pub fn render_table(summary: &Summary) -> String {
+pub fn render_table(summary: &Summary, _options: ReportOptions) -> String {
     let header = HEADERS.map(str::to_string);
     let body: Vec<[String; COLUMNS]> = summary.rows.iter().map(cells).collect();
     let total = cells(&summary.total);

@@ -27,6 +27,12 @@ pub struct Row {
     pub label: String,
     /// The files that landed in this row.
     pub files: u64,
+    /// The files of this row holding at least one production row.
+    ///
+    /// This and `test_files` do not sum to `files`. A file that holds both a
+    /// production row and a test row counts in both, and a file of no rows at
+    /// all counts in neither.
+    pub production_files: u64,
     /// The files of this row holding at least one test row.
     pub test_files: u64,
     /// The rows of this row's files that are production code.
@@ -41,6 +47,7 @@ impl Row {
         Self {
             label,
             files: 0,
+            production_files: 0,
             test_files: 0,
             production: Counts::default(),
             test: Counts::default(),
@@ -142,6 +149,20 @@ impl Summary {
             files,
             failed_parses,
         }
+    }
+
+    /// One row for each file counted, in the order the walk found them.
+    ///
+    /// This is what `--by-file` prints. The label is the path as the walk
+    /// produced it, and not a shortened one: a reader who wants to open the
+    /// file has to be able to paste the label into an editor.
+    ///
+    /// A file is one file, so `files` is one. It counts as a test file, or as a
+    /// production file, under exactly the rule a language row counts it by, so
+    /// the file rows of one language sum to that language's row field by field.
+    #[must_use]
+    pub fn file_rows(&self) -> Vec<Row> {
+        Vec::new()
     }
 }
 

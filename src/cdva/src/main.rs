@@ -31,8 +31,8 @@
 use anyhow::Result;
 use buildinfo::version_string;
 use cdva::{
-    render_table, resolve_test_modules, walk, Counter, FileCount, PathRules, Summary, TreeMode,
-    TreeRules, WalkOptions,
+    render_table, resolve_test_modules, walk, Counter, FileCount, PathRules, ReportOptions,
+    SortColumn, Summary, TreeMode, TreeRules, WalkOptions,
 };
 use clap::Parser;
 use rayon::prelude::*;
@@ -54,6 +54,21 @@ struct Cli {
     /// The paths to count.
     #[arg(value_name = "PATH", default_value = DEFAULT_PATH)]
     paths: Vec<PathBuf>,
+    /// One row for each file, rather than one row for each language.
+    #[arg(long)]
+    by_file: bool,
+    /// The column to order the rows by.
+    #[arg(long, value_enum, default_value_t = SortColumn::Code)]
+    sort: SortColumn,
+    /// Keep only the first N rows. The total still covers every file.
+    #[arg(long, value_name = "N")]
+    top: Option<usize>,
+    /// Report the test code alone.
+    #[arg(long)]
+    tests_only: bool,
+    /// Report the production code alone.
+    #[arg(long)]
+    production_only: bool,
     /// Count a hidden file or directory.
     #[arg(long)]
     hidden: bool,
@@ -104,7 +119,7 @@ fn main() -> Result<()> {
 
     let mut counted = count_all(&counter, &once_each(found));
     resolve_test_modules(&mut counted);
-    print!("{}", render_table(&Summary::new(counted)));
+    print!("{}", render_table(&Summary::new(counted), ReportOptions::default()));
 
     Ok(())
 }
