@@ -170,8 +170,14 @@ impl Excluded {
 
     /// The line for stderr, or `None` when the hash covered every file.
     ///
-    /// The line names only the flags that would change the outcome, so a run
-    /// that already passed `--hidden` is never told to pass it again.
+    /// The line names the flag that is sure to bring a group back in, and not
+    /// every flag that changes the outcome. For the ignored group that flag is
+    /// `--no-ignore`. The line never names `--no-ignore-vcs`, because a
+    /// `.ignore` file keeps a file out of a `--no-ignore-vcs` walk. That flag
+    /// brings the group back only when the VCS ignore files name every file in
+    /// it, and the counts do not tell the two cases apart. The line names a
+    /// flag only when that flag changes this run, so a run that already passed
+    /// `--hidden` is never told to pass it again.
     fn note(&self) -> Option<String> {
         match (self.hidden, self.ignored) {
             (0, 0) => None,
