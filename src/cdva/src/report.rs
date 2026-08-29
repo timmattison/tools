@@ -27,9 +27,23 @@
 //! of the two hundred.
 //!
 //! The output carries no color, so a pipe and a terminal read the same bytes.
+//!
+//! # Two reports for a program, and one for a reader
+//!
+//! [`render_json`] and [`render_csv`] answer the same question the table does,
+//! for a reader that is a program. A table leaves out what will not fit; these
+//! two leave out nothing, and every row of either carries both buckets *and*
+//! their sum, whichever bucket the table was asked to print. The flags that
+//! choose *rows* — one row for each file, the column they are ordered by, how
+//! many are kept, and which bucket has anything to say — go on choosing them,
+//! and all three reports read [`report_rows`] to make that choice once. Two
+//! copies of it is how a document and a table of one run come to name a
+//! different file as the largest.
 
 use crate::counts::{Row, Summary};
+use crate::lines::Counts;
 use num_format::{Locale, ToFormattedString};
+use serde::Serialize;
 use std::cmp::Ordering;
 use unicode_width::UnicodeWidthStr;
 
@@ -168,6 +182,64 @@ impl View {
     }
 }
 
+/// One row of a report, and the language it belongs to.
+///
+/// The language is the label itself on a language row, the language of the
+/// file on a file row, and nothing at all on the total, which belongs to every
+/// language the run found. The table has no column for it, because a language
+/// row already prints it and a reader of a by-file table reads the extension.
+/// A program cannot: an extension is not a language, and a machine format that
+/// left it out would make every consumer of `--by-file` build the same
+/// half-right table of suffixes.
+struct ReportRow {
+    /// The counts of the row, under the label the report prints.
+    row: Row,
+    /// The language of the row, which only the total is without.
+    language: Option<String>,
+}
+
+/// The rows of a report, chosen and ordered as `options` says.
+///
+/// Every report reads this one: the table, the JSON document, and the CSV.
+/// Which rows a report holds and what order they come in is one decision, and
+/// a second copy of it is how a document and a table of the same run come to
+/// disagree about which file is the largest — the kind of disagreement nobody
+/// finds, because nobody reads both at once.
+///
+/// The bucket chooses rows here, and never columns: a report of one bucket
+/// drops the rows that have nothing to say about it, and the machine formats
+/// still carry every number of the rows that are left.
+fn report_rows(summary: &Summary, options: ReportOptions) -> Vec<ReportRow> {
+    // `file_rows` maps over `files` one for one and in order, so a file and its
+    // row line up by position and neither list needs a key.
+    let mut rows: Vec<ReportRow> = if options.by_file {
+        summary
+            .files
+            .iter()
+            .zip(summary.file_rows())
+            .map(|(file, row)| ReportRow {
+                row,
+                language: Some(file.language.name().to_string()),
+            })
+            .collect()
+    } else {
+        summary
+            .rows
+            .iter()
+            .map(|row| ReportRow {
+                language: Some(row.label.clone()),
+                row: row.clone(),
+            })
+            .collect()
+    };
+    rows.retain(|row| !is_empty(&row.row, options.bucket));
+    rows.sort_by(|left, right| compare(&left.row, &right.row, options));
+    if let Some(top) = options.top {
+        rows.truncate(top);
+    }
+    rows
+}
+
 /// Render the table, as `options` shapes it. The `Test code` column is a part
 /// of `Code`, and not a column beside it.
 ///
@@ -178,19 +250,13 @@ impl View {
 /// reason.
 #[must_use]
 pub fn render_table(summary: &Summary, options: ReportOptions) -> String {
-    let mut rows = if options.by_file {
-        summary.file_rows()
-    } else {
-        summary.rows.clone()
-    };
-    rows.retain(|row| !is_empty(row, options.bucket));
-    rows.sort_by(|left, right| compare(left, right, options));
-    if let Some(top) = options.top {
-        rows.truncate(top);
-    }
+    let rows = report_rows(summary, options);
 
     let header = headers(options);
-    let body: Vec<Vec<String>> = rows.iter().map(|row| cells(row, options.bucket)).collect();
+    let body: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| cells(&row.row, options.bucket))
+        .collect();
     let total = cells(&summary.total, options.bucket);
 
     let widths = widths(&header, &body, &total);
@@ -360,16 +426,215 @@ fn push_line(table: &mut String, line: &str) {
     table.push('\n');
 }
 
-/// Render the report as one JSON document, pretty-printed and ended by a
-/// break.
-#[must_use]
-pub fn render_json(_summary: &Summary, _options: ReportOptions) -> String {
-    String::new()
+/// One row of a machine format: every number the tool knows about that row.
+///
+/// This is a type of its own rather than a `Serialize` on [`Row`], because
+/// these names are a contract with a program somebody else wrote. A field
+/// renamed inside this crate is a refactor; a key renamed in this document is
+/// a broken script, and the two must not be the same edit.
+///
+/// `blank`, `comment`, and `code` are the whole row, which is `production`
+/// plus `test` field by field. They are carried rather than left to be
+/// derived, because deriving them is exactly the arithmetic a consumer gets
+/// wrong — and a consumer that subtracts one bucket from the whole to reach
+/// the other gets it wrong in a way that still looks like a number.
+#[derive(Serialize)]
+struct Record {
+    /// The language, or the path of the file, or `Total`.
+    label: String,
+    /// The language of the row. The total names none, and carries no key at
+    /// all rather than a null: a key that is sometimes null is a key every
+    /// consumer has to test before it can read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+    /// Every file of the row.
+    files: u64,
+    /// The files of the row holding at least one production row.
+    production_files: u64,
+    /// The files of the row holding at least one test row.
+    test_files: u64,
+    /// The blank rows of both buckets.
+    blank: u64,
+    /// The comment rows of both buckets.
+    comment: u64,
+    /// The code rows of both buckets, of which the test code is a part.
+    code: u64,
+    /// The production bucket.
+    production: Counts,
+    /// The test bucket.
+    test: Counts,
+    /// The test share of the code, as a percentage rounded to one decimal.
+    test_percent: f64,
 }
 
-/// Render the report as CSV: a header, one record for each row, and the total
-/// last.
+/// The whole JSON report.
+#[derive(Serialize)]
+struct Document {
+    /// The rows the report holds, in the order it holds them.
+    rows: Vec<Record>,
+    /// The total, which covers every file the run counted whatever `--top` or
+    /// a bucket left out of the rows above.
+    total: Record,
+    /// The files whose parse failed. Always present, and empty when none did:
+    /// a consumer that has to tell an absent key from an empty list is a
+    /// consumer with two code paths where one would do.
+    failed_parses: Vec<String>,
+}
+
+/// The header of the CSV, which is the order of every record under it.
+const CSV_HEADERS: [&str; 15] = [
+    "label",
+    "language",
+    "files",
+    "production_files",
+    "test_files",
+    "blank",
+    "comment",
+    "code",
+    "production_blank",
+    "production_comment",
+    "production_code",
+    "test_blank",
+    "test_comment",
+    "test_code",
+    "test_percent",
+];
+
+/// The empty field the total carries where every other record names a
+/// language.
+const NO_LANGUAGE: &str = "";
+
+/// Render the report as one JSON document, pretty-printed and ended by a
+/// break.
+///
+/// Every row carries the full breakdown, whatever `--tests-only` or
+/// `--production-only` asked the table for: those flags choose *rows*, and a
+/// machine format that dropped a column would make its reader re-derive the
+/// number by subtraction. The row flags — one row for each file, the column
+/// the rows are ordered by, and how many are kept — shape this report exactly
+/// as they shape the table, because both read [`report_rows`].
+///
+/// # Panics
+///
+/// Never, in practice. `serde_json` refuses a map whose keys are not strings
+/// and a float that is not a number, and this document holds neither: every
+/// key is a field name, and its one float is a share of two counts, which is
+/// zero when there is no code to take a share of.
 #[must_use]
-pub fn render_csv(_summary: &Summary, _options: ReportOptions) -> String {
-    String::new()
+pub fn render_json(summary: &Summary, options: ReportOptions) -> String {
+    let document = Document {
+        rows: report_rows(summary, options).iter().map(record).collect(),
+        total: record(&ReportRow {
+            row: summary.total.clone(),
+            language: None,
+        }),
+        failed_parses: summary
+            .failed_parses
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+    };
+
+    let mut json = serde_json::to_string_pretty(&document)
+        .expect("a document of counts under field names always serializes");
+    json.push('\n');
+    json
+}
+
+/// Render the report as CSV: the header, one record for each row, and the
+/// total last.
+///
+/// The columns are the keys of the JSON document flattened, so the two reports
+/// carry the same numbers under the same names. The share of the test code
+/// carries no percent sign, because a `%` inside a field is a glyph every
+/// consumer has to strip before it can read a number.
+///
+/// # Panics
+///
+/// Never, in practice. The records go into a vector in memory, which answers
+/// every write, and every field is a `String`, so the bytes that come back out
+/// are the UTF-8 that went in.
+#[must_use]
+pub fn render_csv(summary: &Summary, options: ReportOptions) -> String {
+    let bytes =
+        csv_bytes(summary, options).expect("a writer over a vector in memory answers every write");
+    String::from_utf8(bytes).expect("every field of every record is a String")
+}
+
+/// The CSV, as the bytes the writer produced.
+fn csv_bytes(summary: &Summary, options: ReportOptions) -> Result<Vec<u8>, csv::Error> {
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer.write_record(CSV_HEADERS)?;
+    for row in report_rows(summary, options) {
+        writer.write_record(csv_fields(&record(&row)))?;
+    }
+    writer.write_record(csv_fields(&record(&ReportRow {
+        row: summary.total.clone(),
+        language: None,
+    })))?;
+    writer
+        .into_inner()
+        .map_err(|error| csv::Error::from(error.into_error()))
+}
+
+/// The fields of one CSV record, in the order [`CSV_HEADERS`] names them.
+///
+/// The two are arrays of one length, so a column added to one and forgotten in
+/// the other does not compile.
+fn csv_fields(record: &Record) -> [String; CSV_HEADERS.len()] {
+    [
+        record.label.clone(),
+        record
+            .language
+            .clone()
+            .unwrap_or_else(|| NO_LANGUAGE.to_string()),
+        record.files.to_string(),
+        record.production_files.to_string(),
+        record.test_files.to_string(),
+        record.blank.to_string(),
+        record.comment.to_string(),
+        record.code.to_string(),
+        record.production.blank.to_string(),
+        record.production.comment.to_string(),
+        record.production.code.to_string(),
+        record.test.blank.to_string(),
+        record.test.comment.to_string(),
+        record.test.code.to_string(),
+        format!("{:.1}", record.test_percent),
+    ]
+}
+
+/// Every number one row of a machine format carries.
+fn record(row: &ReportRow) -> Record {
+    Record {
+        label: row.row.label.clone(),
+        language: row.language.clone(),
+        files: row.row.files,
+        production_files: row.row.production_files,
+        test_files: row.row.test_files,
+        blank: row.row.blank(),
+        comment: row.row.comment(),
+        code: row.row.code(),
+        production: row.row.production,
+        test: row.row.test,
+        test_percent: rounded_percent(&row.row),
+    }
+}
+
+/// The test share of `row`, rounded to the one decimal the table prints.
+///
+/// The rounding runs through the same `{:.1}` the table formats with, rather
+/// than through arithmetic. Multiplying by ten, rounding, and dividing is a
+/// *second* rounding of a number that is already not the decimal it looks
+/// like, and the two part company at a half: a fifteen-hundredth share prints
+/// as `0.1` and rounds arithmetically to `0.2`. A consumer reading `0.2` out
+/// of the document while the table printed `0.1%` has found a disagreement
+/// inside a tool whose whole job is to count.
+///
+/// A string that `{:.1}` produced always reads back as a number, so the
+/// fallback is unreachable; it is there so that this stays a total function
+/// rather than a panic waiting on an input nobody has thought of.
+fn rounded_percent(row: &Row) -> f64 {
+    let percent = row.test_percent();
+    format!("{percent:.1}").parse().unwrap_or(percent)
 }

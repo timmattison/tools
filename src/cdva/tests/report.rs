@@ -1117,9 +1117,7 @@ fn a_summary_of_no_files_renders_an_empty_document_and_a_csv_of_a_header_and_a_t
     assert_eq!(records[0], CSV_HEADER, "the header names every column");
     assert_eq!(
         records[1],
-        [
-            "Total", "", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0.0"
-        ],
+        ["Total", "", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0.0"],
         "the total of no files is zero in every column, under no language"
     );
 }
@@ -1188,7 +1186,8 @@ fn a_label_of_multi_byte_characters_survives_both_formats() {
     let shaped = options(|it| it.by_file = true);
 
     assert_eq!(
-        document(&summary, shaped)["rows"][0]["label"], path,
+        document(&summary, shaped)["rows"][0]["label"],
+        path,
         "the document carries the path as it is, and not as bytes"
     );
     assert_eq!(

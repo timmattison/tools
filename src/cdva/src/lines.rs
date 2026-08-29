@@ -34,7 +34,10 @@ pub enum LineKind {
 }
 
 /// The count of one bucket.
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// The three field names are a contract with whatever reads the JSON or the
+/// CSV report, because they are the keys those two carry.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 pub struct Counts {
     /// The rows that hold nothing but white space.
     pub blank: u64,

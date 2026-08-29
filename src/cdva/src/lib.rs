@@ -23,6 +23,9 @@
 //! table, and [`ReportOptions`] is the whole of what shapes it: one row for
 //! each file rather than each language, the column the rows are ordered by, how
 //! many of them are kept, and which [`Bucket`] the columns report.
+//! [`render_json`] and [`render_csv`] print that same summary for a program to
+//! read: the same rows in the same order, and every number the tool knows
+//! about each of them rather than the ones a table has room for.
 //!
 //! The invariant that a reader of the report leans on lives in
 //! [`FileCount::total`] — the two buckets always sum to the count the tool
