@@ -129,6 +129,9 @@ struct TreeRule {
     attribute_chain: Option<AttributeChain>,
     /// The node kinds a `@test_scope` capture may climb to.
     scope_kinds: &'static [&'static str],
+    /// The literals that must appear in a file before it is worth parsing. See
+    /// [`Language::needles`].
+    needles: &'static [&'static str],
 }
 
 /// The nodes of a Rust file whose rows may be test rows.
@@ -149,6 +152,15 @@ const RUST_QUERY: &str = "(mod_item) @candidate\n(function_item) @candidate\n";
 /// `cloc`.
 const RUST_ATTRIBUTE: &str = r"^#\[\s*(cfg\s*\(.*\btest\b|cfg_attr\s*\(.*\btest\b|.*\btest\s*\]|.*::test\s*\]|rstest|bench|test_case|proptest)";
 
+/// The literals a Rust file must hold before it is parsed.
+///
+/// Every branch of [`RUST_ATTRIBUTE`] but one holds `test`: `cfg(test)`,
+/// `#[test]`, `#[tokio::test]`, `rstest`, `test_case`, and `proptest` all do,
+/// and so does the `#[cfg(test)] mod <name>;` the module pass reads. The one
+/// branch that does not is `bench`, which is why it is listed apart rather
+/// than folded into the first.
+const RUST_NEEDLES: &[&str] = &["test", "bench"];
+
 /// The grammar of Rust.
 fn rust_grammar() -> tree_sitter::Language {
     tree_sitter_rust::LANGUAGE.into()
@@ -163,6 +175,7 @@ const RUST_TREE: Option<TreeRule> = Some(TreeRule {
         pattern: RUST_ATTRIBUTE,
     }),
     scope_kinds: &[],
+    needles: RUST_NEEDLES,
 });
 
 /// A tree rule that says everything it has to say in its query.
@@ -172,12 +185,17 @@ const RUST_TREE: Option<TreeRule> = Some(TreeRule {
 /// reaches it and the two fields below have nothing to add. Only a language
 /// that spells its annotation as a sibling wants an attribute chain, and only
 /// one that marks an enclosing node wants a scope kind.
-const fn plain(grammar: fn() -> tree_sitter::Language, query: &'static str) -> Option<TreeRule> {
+const fn plain(
+    grammar: fn() -> tree_sitter::Language,
+    query: &'static str,
+    needles: &'static [&'static str],
+) -> Option<TreeRule> {
     Some(TreeRule {
         grammar,
         query,
         attribute_chain: None,
         scope_kinds: &[],
+        needles,
     })
 }
 
@@ -191,12 +209,24 @@ const GO_QUERY: &str = r#"((function_declaration name: (identifier) @_n) @test
  (#match? @_n "^(Test|Benchmark|Fuzz|Example)([A-Z_]|$)"))
 "#;
 
+/// The literals a Go file must hold before it is parsed.
+///
+/// One per prefix the pattern of the query names. Each is written with its
+/// capital letter, because `go test` reads the prefix of an exported name and
+/// the query anchors on it.
+const GO_NEEDLES: &[&str] = &["Test", "Benchmark", "Fuzz", "Example"];
+
 /// The tests of a Zig file.
 ///
 /// Zig is the clean case of the whole table. A test there is a language
 /// construct beside `fn` and `struct`, so the grammar names it outright and no
 /// heuristic over a name enters.
 const ZIG_QUERY: &str = "(test_declaration) @test\n";
+
+/// The literal a Zig file must hold before it is parsed. A `test_declaration`
+/// opens with the keyword `test`, so the one needle is exact rather than
+/// generous.
+const ZIG_NEEDLES: &[&str] = &["test"];
 
 /// The definitions of a Python file whose rows are test rows.
 ///
@@ -212,6 +242,14 @@ const PYTHON_QUERY: &str = r#"((function_definition name: (identifier) @_n) @tes
 ((class_definition superclasses: (argument_list) @_s) @test (#match? @_s "TestCase"))
 "#;
 
+/// The literals a Python file must hold before it is parsed.
+///
+/// `test` covers the `^test_` of the two function patterns and the `pytest` of
+/// the decorator pattern, and `Test` covers the `^Test` of the class pattern
+/// and the `TestCase` of the superclass pattern. The search is over bytes and
+/// therefore case-sensitive, so the two spellings are two needles.
+const PYTHON_NEEDLES: &[&str] = &["test", "Test"];
+
 /// The calls of a JavaScript, TypeScript, or TSX file whose rows are test rows.
 ///
 /// The three languages share one rule because they share one way of spelling a
@@ -226,6 +264,17 @@ const PYTHON_QUERY: &str = r#"((function_definition name: (identifier) @_n) @tes
 const SCRIPT_QUERY: &str = r#"((call_expression function: (_) @_f) @test
  (#match? @_f "^(describe|it|test|suite|bench|context)\\b"))
 "#;
+
+/// The literals a JavaScript, TypeScript, or TSX file must hold before it is
+/// parsed. They are the alternation of [`SCRIPT_QUERY`], word for word.
+///
+/// `it` appears in nearly every file of these languages — in `with`, `omit`,
+/// `split`, and a hundred other words — so the filter buys little here. That is
+/// the correct trade rather than an oversight: `it ('x', …)` with a space
+/// between the name and the parenthesis is legal, so a needle of `it(` would
+/// drop a real test, and a dropped test is a silent undercount while a needless
+/// parse is merely slow.
+const SCRIPT_NEEDLES: &[&str] = &["describe", "it", "test", "suite", "bench", "context"];
 
 /// The methods and classes of a Java file whose rows are test rows.
 ///
@@ -246,6 +295,15 @@ const JAVA_QUERY: &str = r#"((method_declaration (modifiers [(marker_annotation 
  (#match? @_a "^(RunWith|ExtendWith|SpringBootTest)$"))
 "#;
 
+/// The literals a Java file must hold before it is parsed.
+///
+/// Written without the `@`, because `@ Test` with a space between is legal Java
+/// and the annotation the query reads is the identifier rather than the sign.
+/// `Test` alone covers `ParameterizedTest`, `RepeatedTest`, and
+/// `SpringBootTest`, and `Before` and `After` cover the four lifecycle hooks
+/// between them.
+const JAVA_NEEDLES: &[&str] = &["Test", "Before", "After", "RunWith", "ExtendWith"];
+
 /// The functions of a Kotlin file whose rows are test rows.
 ///
 /// Kotlin spells one annotation kind rather than two: an annotation there is an
@@ -253,6 +311,11 @@ const JAVA_QUERY: &str = r#"((method_declaration (modifiers [(marker_annotation 
 const KOTLIN_QUERY: &str = r#"((function_declaration (modifiers (annotation (user_type (identifier) @_a)))) @test
  (#match? @_a "^(Test|ParameterizedTest|RepeatedTest|Before|After|BeforeEach|AfterEach)$"))
 "#;
+
+/// The literals a Kotlin file must hold before it is parsed. Three cover the
+/// seven names of the query: `Test` takes the three tests, and `Before` and
+/// `After` take the four hooks.
+const KOTLIN_NEEDLES: &[&str] = &["Test", "Before", "After"];
 
 /// The methods and classes of a C# file whose rows are test rows.
 ///
@@ -265,6 +328,11 @@ const CSHARP_QUERY: &str = r#"((method_declaration (attribute_list (attribute na
 ((class_declaration (attribute_list (attribute name: (identifier) @_a))) @test
  (#match? @_a "^(TestFixture|TestClass)$"))
 "#;
+
+/// The literals a C# file must hold before it is parsed. `Test` covers
+/// `TestMethod`, `TestCase`, `TestFixture`, and `TestClass` as well as the bare
+/// `Test` of NUnit.
+const CSHARP_NEEDLES: &[&str] = &["Test", "Fact", "Theory", "SetUp", "TearDown"];
 
 /// The blocks and classes of a Ruby file whose rows are test rows.
 ///
@@ -281,6 +349,14 @@ const RUBY_QUERY: &str = r#"((call method: (identifier) @_m block: (do_block)) @
  (#match? @_s "Minitest::Test|Test::Unit::TestCase|ActiveSupport::TestCase"))
 "#;
 
+/// The literals a Ruby file must hold before it is parsed: the six block names
+/// of the first pattern, and the two that cover the three superclasses of the
+/// second — `Test::Unit::TestCase` and `ActiveSupport::TestCase` both hold
+/// `TestCase`, and `Minitest::Test` holds `Minitest`.
+const RUBY_NEEDLES: &[&str] = &[
+    "describe", "context", "feature", "it", "specify", "scenario", "Minitest", "TestCase",
+];
+
 /// The classes and functions of a Swift file whose rows are test rows.
 ///
 /// XCTest and Quick both spell a test suite as a class that inherits one, which
@@ -291,6 +367,12 @@ const SWIFT_QUERY: &str = r#"((class_declaration (inheritance_specifier inherits
 ((function_declaration (modifiers (attribute (user_type (type_identifier) @_a)))) @test
  (#match? @_a "^(Test|Suite)$"))
 "#;
+
+/// The literals a Swift file must hold before it is parsed: the two classes the
+/// first pattern names, and the two attributes of the second. `Test` is listed
+/// although `XCTestCase` holds it, because the attribute of the Swift Testing
+/// library stands alone.
+const SWIFT_NEEDLES: &[&str] = &["XCTestCase", "QuickSpec", "Test", "Suite"];
 
 /// The calls of an Elixir file whose rows are test rows.
 ///
@@ -308,6 +390,10 @@ const ELIXIR_QUERY: &str = r#"((call target: (identifier) @_t (arguments (string
 ((call target: (identifier) @_t (arguments (alias) @_a)) @test_scope
  (#eq? @_t "use") (#match? @_a "ExUnit"))
 "#;
+
+/// The literals an Elixir file must hold before it is parsed: the three block
+/// names of the first pattern, and the `ExUnit` the second climbs from.
+const ELIXIR_NEEDLES: &[&str] = &["test", "describe", "property", "ExUnit"];
 
 /// The node kind an Elixir `@test_scope` capture climbs to.
 ///
@@ -382,37 +468,37 @@ fn elixir_grammar() -> tree_sitter::Language {
 }
 
 /// The tree rule of Go.
-const GO_TREE: Option<TreeRule> = plain(go_grammar, GO_QUERY);
+const GO_TREE: Option<TreeRule> = plain(go_grammar, GO_QUERY, GO_NEEDLES);
 
 /// The tree rule of Zig.
-const ZIG_TREE: Option<TreeRule> = plain(zig_grammar, ZIG_QUERY);
+const ZIG_TREE: Option<TreeRule> = plain(zig_grammar, ZIG_QUERY, ZIG_NEEDLES);
 
 /// The tree rule of Python.
-const PYTHON_TREE: Option<TreeRule> = plain(python_grammar, PYTHON_QUERY);
+const PYTHON_TREE: Option<TreeRule> = plain(python_grammar, PYTHON_QUERY, PYTHON_NEEDLES);
 
 /// The tree rule of JavaScript.
-const JAVASCRIPT_TREE: Option<TreeRule> = plain(javascript_grammar, SCRIPT_QUERY);
+const JAVASCRIPT_TREE: Option<TreeRule> = plain(javascript_grammar, SCRIPT_QUERY, SCRIPT_NEEDLES);
 
 /// The tree rule of TypeScript.
-const TYPESCRIPT_TREE: Option<TreeRule> = plain(typescript_grammar, SCRIPT_QUERY);
+const TYPESCRIPT_TREE: Option<TreeRule> = plain(typescript_grammar, SCRIPT_QUERY, SCRIPT_NEEDLES);
 
 /// The tree rule of TSX.
-const TSX_TREE: Option<TreeRule> = plain(tsx_grammar, SCRIPT_QUERY);
+const TSX_TREE: Option<TreeRule> = plain(tsx_grammar, SCRIPT_QUERY, SCRIPT_NEEDLES);
 
 /// The tree rule of Java.
-const JAVA_TREE: Option<TreeRule> = plain(java_grammar, JAVA_QUERY);
+const JAVA_TREE: Option<TreeRule> = plain(java_grammar, JAVA_QUERY, JAVA_NEEDLES);
 
 /// The tree rule of Kotlin.
-const KOTLIN_TREE: Option<TreeRule> = plain(kotlin_grammar, KOTLIN_QUERY);
+const KOTLIN_TREE: Option<TreeRule> = plain(kotlin_grammar, KOTLIN_QUERY, KOTLIN_NEEDLES);
 
 /// The tree rule of C#.
-const CSHARP_TREE: Option<TreeRule> = plain(csharp_grammar, CSHARP_QUERY);
+const CSHARP_TREE: Option<TreeRule> = plain(csharp_grammar, CSHARP_QUERY, CSHARP_NEEDLES);
 
 /// The tree rule of Ruby.
-const RUBY_TREE: Option<TreeRule> = plain(ruby_grammar, RUBY_QUERY);
+const RUBY_TREE: Option<TreeRule> = plain(ruby_grammar, RUBY_QUERY, RUBY_NEEDLES);
 
 /// The tree rule of Swift.
-const SWIFT_TREE: Option<TreeRule> = plain(swift_grammar, SWIFT_QUERY);
+const SWIFT_TREE: Option<TreeRule> = plain(swift_grammar, SWIFT_QUERY, SWIFT_NEEDLES);
 
 /// The tree rule of Elixir, the one rule of the table that marks a node it
 /// climbs to rather than one the query captured.
@@ -421,6 +507,7 @@ const ELIXIR_TREE: Option<TreeRule> = Some(TreeRule {
     query: ELIXIR_QUERY,
     attribute_chain: None,
     scope_kinds: ELIXIR_SCOPE_KINDS,
+    needles: ELIXIR_NEEDLES,
 });
 
 /// A language whose test code the path rule finds on its own, for now.
@@ -801,6 +888,6 @@ impl Language {
     /// parsed every time.
     #[must_use]
     pub fn needles(self) -> &'static [&'static str] {
-        &[]
+        self.tree_rule().map_or(&[], |rule| rule.needles)
     }
 }

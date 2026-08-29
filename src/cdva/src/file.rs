@@ -5,8 +5,8 @@
 //! test bucket. The path rule marks a whole file from its name, and the tree
 //! rule marks a region of one the path rule left unmarked. A counter built with
 //! [`Counter::new`] alone reads the path rule and nothing else, which is
-//! exactly what `--no-tree` will mean; [`Counter::with_tree_rules`] adds the
-//! parse.
+//! exactly what `--no-tree` means; [`Counter::with_tree_rules`] adds the parse,
+//! and a [`TreeMode`] says when it runs.
 //!
 //! # The order of the two rules
 //!
@@ -16,6 +16,13 @@
 //! whole, so a parse could only find rows that are already marked. Either way
 //! the parse buys nothing, and skipping it is what makes a run over a tree of
 //! test files cheap.
+//!
+//! A file the path rule leaves unmarked meets a second filter before it meets
+//! a parser: under [`TreeMode::Auto`] the tree rule reads the raw bytes for a
+//! literal of the language and drops a file that holds none. That filter lives
+//! behind [`TreeRules::outcome`], so this module asks one question — what are
+//! the test rows of this file — and never learns which of the answers cost a
+//! parse.
 //!
 //! # The invariant
 //!

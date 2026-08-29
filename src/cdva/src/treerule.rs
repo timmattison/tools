@@ -27,6 +27,31 @@
 //! a capture the rule quietly ignored would mark nothing, and a language that
 //! marks nothing reads exactly like a language with no test code in it.
 //!
+//! # The filter in front of the parser
+//!
+//! A parse costs far more than a scan of the rows, so the tool parses as few
+//! files as it can. Three filters stand in front of the parser, in order of
+//! what they cost: the path rule settles a whole file from its name and never
+//! opens it; a literal search over the raw bytes then drops every file that can
+//! hold no test at all, because a Rust file whose bytes hold neither `test` nor
+//! `bench` can hold no test node; and what survives both is parsed.
+//!
+//! [`TreeMode`] says which of the two later filters run.
+//! [`TreeMode::Auto`] is the default and the one described above.
+//! [`TreeMode::Never`] parses nothing, which is `--no-tree` and the fast mode.
+//! [`TreeMode::Always`] skips the literal search and parses every file of a
+//! language that has a rule, which is `--tree` and the mode a test of the
+//! filter reads.
+//!
+//! The needle set of a language must be a *superset* of everything its query
+//! can match, and the two mistakes are not symmetrical. A needle that filters
+//! nothing is merely slow. A needle that filters too much is a silent
+//! undercount: the file is never parsed, its test rows are never found, and the
+//! number that comes out reads exactly like a correct one. A test in
+//! `tests/treerule.rs` holds `Auto` and `Always` to the same marking over the
+//! fixture corpus and over this repository, which is what proves the sets
+//! complete.
+//!
 //! # A parse that did not hold
 //!
 //! Tree-sitter recovers from a syntax error and still returns a tree, so a
@@ -57,6 +82,7 @@
 use crate::file::{ParseStatus, Rule, Span};
 use crate::lang::{AttributeChain, Language};
 use crate::lines::LineIndex;
+use memchr::memmem::Finder;
 use regex::Regex;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -152,9 +178,15 @@ impl TreeRules {
 
     /// The test rows of `source`.
     ///
-    /// Returns `None` when the language has no tree rule, which is the answer
-    /// that leaves the whole file to the production bucket without opening a
-    /// parser at all.
+    /// Returns `None` for every file this rule does not read, and the three
+    /// ways a file reaches that answer cost three different amounts: the mode
+    /// is [`TreeMode::Never`] and nothing is read at all; the language has no
+    /// tree rule, which one comparison settles; or the mode is
+    /// [`TreeMode::Auto`] and no needle of the language appears in the bytes of
+    /// the file, which one pass over those bytes settles. All three leave the
+    /// whole file to the production bucket without opening a parser, and the
+    /// caller tells none of them apart — a file that was never parsed is a file
+    /// that was never parsed.
     ///
     /// # Panics
     ///
@@ -165,13 +197,14 @@ impl TreeRules {
     /// test asserts all three for every language, and an answer of "no test
     /// rows" instead would silently miscount every file of that language.
     #[must_use]
-    pub fn outcome(
-        &self,
-        source: &str,
-        language: Language,
-        _mode: TreeMode,
-    ) -> Option<TreeOutcome> {
+    pub fn outcome(&self, source: &str, language: Language, mode: TreeMode) -> Option<TreeOutcome> {
+        if mode == TreeMode::Never {
+            return None;
+        }
         let compiled = self.compiled(language)?;
+        if mode == TreeMode::Auto && !compiled.may_hold_a_test(source.as_bytes()) {
+            return None;
+        }
 
         // A fresh parser for every call. `tree_sitter::Parser` is `Send` but
         // not `Sync`, so one cannot be shared between the rayon threads that
@@ -256,6 +289,11 @@ struct Compiled {
     grammar: tree_sitter::Language,
     /// The query, compiled against that grammar.
     query: Query,
+    /// One searcher per needle of the language, built once and read from every
+    /// thread. `Finder::new` builds a skip table over the needle, which is the
+    /// work that makes the search fast and the work that must not be repeated
+    /// per file.
+    finders: Vec<Finder<'static>>,
     /// What each capture of the query marks, by capture index.
     markings: Vec<Option<Marking>>,
     /// The attribute chain and the compiled form of its pattern.
@@ -299,10 +337,40 @@ impl Compiled {
         Some(Self {
             grammar,
             query,
+            finders: language
+                .needles()
+                .iter()
+                .map(|needle| Finder::new(needle.as_bytes()).into_owned())
+                .collect(),
             markings,
             chain,
             scope_kinds: language.scope_kinds(),
         })
+    }
+
+    /// Whether `source` can hold a test of this language at all.
+    ///
+    /// This is the whole of the filter: a literal search over the raw bytes,
+    /// which costs one pass and no allocation, in front of a parse that costs
+    /// far more than that. A Rust file whose bytes hold neither `test` nor
+    /// `bench` can hold no test node, whatever else is in it.
+    ///
+    /// The search is over bytes rather than over characters, which is right for
+    /// two reasons. It is faster, and every needle is ASCII while UTF-8 never
+    /// spells an ASCII byte inside a character of several bytes, so a byte
+    /// found is a character found. Nothing here cuts the source at the offset
+    /// it found, so a file of Japanese is read exactly as one of ASCII is.
+    ///
+    /// A language that declares no needle answers `true` for every file, so a
+    /// row of the table that says nothing is parsed every time. That is the
+    /// safe direction: the cost of saying nothing is a slow run, and the cost
+    /// of saying too much is a file that is never read and never counted.
+    fn may_hold_a_test(&self, source: &[u8]) -> bool {
+        self.finders.is_empty()
+            || self
+                .finders
+                .iter()
+                .any(|finder| finder.find(source).is_some())
     }
 
     /// What the capture of this index marks, where it marks anything.

@@ -1587,12 +1587,23 @@ fn the_two_modes_mark_every_file_of_this_repository_the_same() {
     let mut held_back = 0_usize;
 
     for (path, relative) in &found {
-        let Ok(Some(under_auto)) = auto.count_path(path, relative) else {
+        // One read, two counts. A read per mode would let a file that somebody
+        // saved between the two of them look like a file the two modes
+        // disagree about, and this test would then fail for a reason that has
+        // nothing to do with the needles.
+        let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        let Ok(Some(under_always)) = always.count_path(path, relative) else {
+        let Ok(source) = String::from_utf8(bytes) else {
             continue;
         };
+        let Some(under_auto) = auto.count_source(path, relative, &source) else {
+            continue;
+        };
+        let under_always = always
+            .count_source(path, relative, &source)
+            .expect("the two modes read the language of a path alike");
+
         assert_modes_agree(&path.display().to_string(), &under_auto, &under_always);
         compared += 1;
         if under_auto.parse_status == ParseStatus::NotParsed

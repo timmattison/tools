@@ -14,6 +14,7 @@ buildinfo.workspace = true
 clap.workspace = true
 globset.workspace = true
 ignore.workspace = true
+memchr.workspace = true
 num-format.workspace = true
 rayon.workspace = true
 regex.workspace = true

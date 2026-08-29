@@ -9,6 +9,13 @@
 //! language with a tree rule is parsed so that the test nodes inside it are
 //! found. Every report but the table arrives in a later slice.
 //!
+//! A parse costs far more than a scan of the rows, so by default only a file
+//! whose bytes hold a literal of its language ever reaches a parser.
+//! `--no-tree` reads the path rule alone, which is the fast mode, and `--tree`
+//! parses every file of a language that has a rule, which is the slow and
+//! complete one. The two flags conflict, because asking for no parse and for
+//! every parse at once is a mistake rather than a silent choice of one.
+//!
 //! # Two things this command states rather than assumes
 //!
 //! **A file the walk found twice is counted once.** Two roots that overlap —

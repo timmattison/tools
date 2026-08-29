@@ -1126,6 +1126,7 @@ dependencies = [
  "clap",
  "globset",
  "ignore",
+ "memchr",
  "num-format",
  "rayon",
  "regex",

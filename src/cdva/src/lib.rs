@@ -11,7 +11,8 @@
 //! row of the language table announces itself. [`PathRules`] marks a whole file
 //! as test material from its path alone, which is the cheap half of the split,
 //! and [`TreeRules`] parses what the path rule leaves and marks the rows of a
-//! test node.
+//! test node — or rather parses the few of those files whose raw bytes hold a
+//! literal of the language, which is what [`TreeMode`] decides.
 //!
 //! [`walk`] finds the files, [`Counter`] reads one of them into a [`FileCount`]
 //! of two buckets, [`resolve_test_modules`] marks the files that a
