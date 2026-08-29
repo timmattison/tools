@@ -1,0 +1,14 @@
+. require "minitest/autorun"
+. 
+. # Register records amounts.
+. class Register
+.   def total
+.     0
+.   end
+. end
+. 
+T class RegisterCheck < Minitest::Test
+T   def test_total_starts_at_zero
+T     assert_equal 0, Register.new.total
+T   end
+T end

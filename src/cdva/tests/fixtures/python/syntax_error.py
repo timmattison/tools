@@ -1,0 +1,6 @@
+def compute(value)
+    return value + 1
+
+
+def test_compute():
+    assert compute(1) == 2

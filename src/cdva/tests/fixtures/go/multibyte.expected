@@ -1,0 +1,14 @@
+. package greet
+. 
+. import "testing"
+. 
+. // Greet greets in Japanese.
+. func Greet() string {
+. 	return "こんにちは"
+. }
+. 
+T func TestGreet(t *testing.T) {
+T 	if Greet() != "こんにちは" {
+T 		t.Fatalf("挨拶が違う: %s", Greet())
+T 	}
+T }

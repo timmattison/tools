@@ -1,0 +1,20 @@
+. using Xunit;
+. 
+. namespace Example.Calc
+. {
+.     public class Doubling
+.     {
+.         public int Doubled(int value)
+.         {
+.             return value * 2;
+.         }
+. 
+T         [Theory]
+T         [InlineData(1)]
+T         [InlineData(2)]
+T         public void DoublesEveryInput(int value)
+T         {
+T             Assert.True(Doubled(value) > value);
+T         }
+.     }
+. }

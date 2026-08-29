@@ -1,0 +1,14 @@
+. package com.example.greet
+. 
+. import kotlin.test.Test
+. import kotlin.test.assertEquals
+. 
+. fun greet(): String = "こんにちは"
+. 
+. class GreetingSpec {
+T     @Test
+T     fun greetsInJapanese() {
+T         // 挨拶を確かめる
+T         assertEquals("こんにちは", greet())
+T     }
+. }

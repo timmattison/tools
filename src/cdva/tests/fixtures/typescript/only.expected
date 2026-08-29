@@ -1,0 +1,7 @@
+. export function trim(value: string): string {
+.   return value.trim();
+. }
+. 
+T it.only("trims both ends", (): void => {
+T   expect(trim("  x  ")).toBe("x");
+T });

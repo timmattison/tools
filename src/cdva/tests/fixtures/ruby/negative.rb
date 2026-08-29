@@ -1,0 +1,13 @@
+# The describe below is a method of the ledger, and the call to it carries no
+# block, so neither one is test code.
+class Ledger
+  def helper(values)
+    values.sum
+  end
+
+  def describe(name)
+    "the ledger #{name}"
+  end
+end
+
+puts Ledger.new.describe("totals")

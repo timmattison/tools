@@ -1,0 +1,17 @@
+. export interface Point {
+.   x: number;
+.   y: number;
+. }
+. 
+. export function shift(point: Point, by: number): Point {
+.   return { x: point.x + by, y: point.y + by };
+. }
+. 
+T describe("shift", (): void => {
+T   const origin: Point = { x: 0, y: 0 };
+T 
+T   it("moves both axes", (): void => {
+T     const moved: Point = shift(origin, 2);
+T     expect(moved.x).toBe(2);
+T   });
+T });

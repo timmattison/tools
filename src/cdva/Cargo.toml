@@ -1,0 +1,43 @@
+[package]
+name = "cdva"
+version = "0.1.0"
+edition.workspace = true
+description = "Count da various attributes: a code counter that reports test code apart from production code"
+
+[[bin]]
+name = "cdva"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+csv.workspace = true
+globset.workspace = true
+ignore.workspace = true
+memchr.workspace = true
+num-format.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tree-sitter.workspace = true
+tree-sitter-c-sharp.workspace = true
+tree-sitter-elixir.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-kotlin-ng.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-ruby.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-swift.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-zig.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+testcolor.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,9 @@
+. export function Greeting() {
+.   return <p lang="ja">こんにちは</p>;
+. }
+. 
+T describe("Greeting", (): void => {
+T   it("は日本語で挨拶する", (): void => {
+T     expect(Greeting()).toBeTruthy();
+T   });
+T });

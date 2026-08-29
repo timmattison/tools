@@ -1,0 +1,23 @@
+. /// Greets whoever asks, in the language of the greeting.
+. pub fn greet() -> &'static str {
+.     "こんにちは"
+. }
+. 
+. pub fn shout() -> String {
+.     format!("{}!", greet())
+. }
+. 
+T #[cfg(test)]
+T mod tests {
+T     use super::{greet, shout};
+T 
+T     #[test]
+T     fn greet_is_polite() {
+T         assert_eq!(greet(), "こんにちは");
+T     }
+T 
+T     #[test]
+T     fn shout_is_loud() {
+T         assert!(shout().ends_with('!'));
+T     }
+T }

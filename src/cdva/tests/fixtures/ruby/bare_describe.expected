@@ -1,0 +1,14 @@
+. # Ledger holds a running total.
+. class Ledger
+.   def total
+.     0
+.   end
+. end
+. 
+T describe "the ledger" do
+T   context "when it is empty" do
+T     specify "the total is zero" do
+T       expect(Ledger.new.total).to eq(0)
+T     end
+T   end
+T end

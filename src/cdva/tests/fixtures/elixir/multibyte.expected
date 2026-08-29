@@ -1,0 +1,13 @@
+. defmodule Greeter do
+.   def greet do
+.     "こんにちは"
+.   end
+. end
+. 
+T defmodule GreeterChecks do
+T   use ExUnit.Case
+T 
+T   test "日本語で挨拶する" do
+T     assert Greeter.greet() == "こんにちは"
+T   end
+T end
