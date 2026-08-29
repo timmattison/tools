@@ -8,6 +8,13 @@ This document is the brief. It records the decisions that the issue left open,
 the module layout, the shared types, and the facts about `tree-sitter` that were
 measured rather than assumed.
 
+**The code is the authority on the exact shape of every type.** Each sketch
+below says what a type is for and names the fields that carry a decision. The
+crate is where the full field list lives, and the doc comments there say why
+each field is a field. A rule this document states is a different thing: a rule
+is a decision, so a rule the code contradicts is an error in this document and
+not a sketch that has grown a field.
+
 ## The decisions
 
 The issue closes with five open questions. Four are answered here. The fifth,
@@ -31,9 +38,10 @@ generated code, is a separate ask and stays out.
 > the same tool reports with the split turned off.
 
 The line classifier decides the *kind* of a line, which is blank, comment, or
-code. The path rule and the tree rule decide the *bucket* of a line, which is
-production or test. The two decisions are independent, so the invariant holds by
-construction. A test asserts it over the whole fixture corpus.
+code. The path rule, the tree rule, and the module pass decide the *bucket* of a
+line, which is production or test. The two decisions are independent, so the
+invariant holds by construction. A test asserts it over the whole fixture
+corpus.
 
 ## The module layout
 
@@ -47,10 +55,12 @@ src/cdva/
     lines.rs      LineIndex, and the blank/comment/code classifier
     pathrule.rs   the built-in globs, and the globs of the user
     treerule.rs   the parse, the query, the span, and the parse status
+    modpass.rs    the second pass: a `#[cfg(test)] mod <name>;` marks a file
     file.rs       one file: the counts of both buckets, and the spans
     counts.rs     the totals, by language and over all
+    walk.rs       the roots, the ignore files, and the files the tool counts
     report.rs     the table, --by-file, --json, --csv, and --explain
-    main.rs       clap, the walk, rayon, and the exit code
+    main.rs       clap, rayon, and the exit code
   tests/
     fixtures/<lang>/...
 ```
@@ -65,7 +75,12 @@ pub enum LineKind { Blank, Comment, Code }
 pub struct Counts { pub blank: u64, pub comment: u64, pub code: u64 }
 
 /// Which rule marked a span, for `--explain`.
-pub enum Rule { PathGlob(String), TreeQuery(&'static str), ModDeclaration(String) }
+///
+/// The tree rule names the *kind of the node* it matched, and never the text of
+/// the query that matched it. A node kind is a name of the grammar, so a reader
+/// of the report can look it up. One query holds many patterns, so its text
+/// answers a different question.
+pub enum Rule { PathGlob(String), TreeNode(String), ModDeclaration(String) }
 
 /// One marked region of one file, in 1-based inclusive rows.
 pub struct Span { pub first_row: u32, pub last_row: u32, pub rule: Rule }
@@ -78,6 +93,12 @@ pub struct FileCount {
     pub test: Counts,
     pub spans: Vec<Span>,
     pub parse_status: ParseStatus,
+    /// The scan of this file ended inside a string or a block comment. See
+    /// "the scan that does not end" below.
+    pub ends_unterminated: bool,
+    /// The `#[cfg(test)] mod <name>;` declarations this file holds. The second
+    /// pass resolves them once every file is counted.
+    pub test_mod_declarations: Vec<String>,
 }
 
 /// Tree-sitter recovers from a syntax error and still returns a tree, so a run
@@ -91,16 +112,47 @@ pub enum ParseStatus { NotParsed, Clean, Failed }
 
 ## The line classifier
 
-One pass of a state machine over the characters of the file. The states are
-Normal, InBlockComment, and InString. Each language gives the classifier a
-table:
+One pass of a state machine over the *bytes* of the file. Bytes are safe here
+because every delimiter the table holds is ASCII, and every byte of a character
+of more than one byte is 0x80 or above. So no such byte opens a delimiter, and
+no delimiter matches across the middle of a character. Nothing in the classifier
+indexes the source as a string, which is what keeps a file of Japanese from
+panicking the tool.
+
+The states are Normal, Block, Str, and RawString. The raw string of Rust holds a
+state of its own for the reason given below: the count of the hash marks that
+close it varies, and no fixed pair of delimiters describes it.
+
+Each language gives the classifier a table:
 
 ```rust
 pub struct CommentSyntax {
-    pub line: &'static [&'static str],
-    pub block: &'static [(&'static str, &'static str)],
+    pub line: &'static [LineSpec],
+    pub block: &'static [BlockSpec],
     pub nested_block: bool,
     pub strings: &'static [StringSpec],
+    /// This language spells a raw string as Rust does.
+    pub raw_hash_strings: bool,
+    /// A lookahead reads the single quote of this language.
+    pub char_literal_lookahead: bool,
+}
+
+pub struct LineSpec {
+    pub token: &'static str,
+    /// The token opens a comment only at a place where a statement starts.
+    pub line_anchored: bool,
+    /// The token is a word of the language, so case does not matter and the
+    /// word must end there.
+    pub command_word: bool,
+}
+
+pub struct BlockSpec {
+    pub open: &'static str,
+    pub close: &'static str,
+    /// The tokens read only at the very start of a row, before any white space.
+    pub line_anchored: bool,
+    /// The opener is the token and then at least one ASCII letter.
+    pub directive_open: bool,
 }
 
 pub struct StringSpec {
@@ -108,18 +160,40 @@ pub struct StringSpec {
     pub close: &'static str,
     pub escape: Option<char>,
     pub multiline: bool,
+    /// A string that opens its row counts as a comment, as a docstring does.
+    pub doc_when_line_leading: bool,
 }
 ```
 
+Each flag answers a language that spells a comment token as something else.
+Batch spells `REM` as a command and `::` as a label, so both read only at a
+place where a command stands, and `REM` reads as a word. Ruby `=begin` and the
+POD of Perl must be the first character of their row. POD opens on `=` and a
+letter, and the set of POD directives is open, so the shape of the opener
+states the rule where no list of tokens can.
+
 The classifier tracks two flags for each row: the row held a character of code,
 and the row held a character of a comment. A row with no character at all is
-blank. A row with a code character is code. Every other row is a comment. This
-is the rule of `cloc`.
+blank, and a row that holds only white space is blank too. A row with a code
+character is code. Every other row is a comment. This is the rule of `cloc`.
 
 A Rust raw string (`r#"..."#`) needs a rule of its own, because the count of the
-hash marks varies. The classifier holds one special case for it. Python and
-several other languages need a triple-quoted string, which the table expresses
-as a `StringSpec` with `multiline: true`.
+hash marks varies. `raw_hash_strings` turns that rule on, and the scan holds a
+state for it. Python and several other languages need a triple-quoted string,
+which the table expresses as a `StringSpec` with `multiline: true`.
+
+The single quote of Rust needs a rule of its own for the opposite reason: Rust
+spells the character literal `'"'` and the lifetime `&'static str` with the same
+byte, so neither reading of the quote can be the standing one. A `StringSpec` on
+the quote is therefore not an option, however much it looks like one. Such a
+spec opens a string at every lifetime, and a Rust string spans rows, so that
+phantom string then runs to the next quote anywhere in the file. The flag
+`char_literal_lookahead` turns on a bounded lookahead instead. The lookahead
+reads a quote, one character, and a quote as a literal. It reads a quote, a
+backslash, an escape body, and a quote as a literal too. It reads everything
+else as a lifetime, which is ordinary code, and it never crosses a row break.
+The lookahead counts characters and not bytes, because `'日'` is one character of
+three bytes.
 
 ### Two measured rules, and where `cloc` differs
 
@@ -130,18 +204,8 @@ numbers back.
 Python docstring as a comment, and so does `cdva`. The rule is positional: when
 the opener of a multi-line string is the first character of the row that is not
 white space, the whole string counts as a comment. When something precedes it,
-as in `s = """x"""`, the string is code. A `StringSpec` carries the flag:
-
-```rust
-pub struct StringSpec {
-    pub open: &'static str,
-    pub close: &'static str,
-    pub escape: Option<char>,
-    pub multiline: bool,
-    /// A string that opens its row counts as a comment, as a docstring does.
-    pub doc_when_line_leading: bool,
-}
-```
+as in `s = """x"""`, the string is code. `StringSpec::doc_when_line_leading`
+carries the rule.
 
 **A nested block comment nests.** `cloc` closes a Rust `/* a /* b */ c */` at
 the first `*/` and counts the rest as code. Rust nests such a comment, so
@@ -154,6 +218,29 @@ unsplit count of the same tool. It does not say that the total agrees with
 **A byte offset never indexes a string directly.** `LineIndex` holds the byte
 offset of the start of each row, and a binary search converts an offset to a
 row. `clippy::string_slice` is a warning in the workspace lint set.
+
+### The scan that does not end
+
+Valid source of a language almost never ends inside a string or a block comment.
+So a scan that ends in one of those states is a row of the language table
+reading a construct wrong, and every row behind that construct carries the wrong
+label. The classifier cannot say so on its own: it labels every row either way,
+and it prints a total that no reader can tell from a right one. That is how the
+single quote of Rust hid. `cdva` read the `"` of `'"'` as the opening of a
+string, and 56 comment rows of one file counted as code with nothing in the
+report saying so.
+
+`FileCount::ends_unterminated` is the answer to that question, one pass produces
+it beside the labels, and a second footer of the report names the files that
+answer yes. A test asks it of every source of this repository under the language
+of its own path, which catches the next table bug of the same shape without
+anybody thinking of the construct first.
+
+This is not the fault that `parse_status` reports, and the two stay apart
+because they cost different things. A failed parse puts every row of a file in
+the production bucket, which is the split this tool exists to report, and
+`--strict` fails the run over it. A scan that does not end moves rows between
+the comment count and the code count, and moves no row between the two buckets.
 
 ## The path rule
 
@@ -168,7 +255,8 @@ built-in set. The order makes an override possible.
 ## The tree rule
 
 Each language gets one tree-sitter query. A capture named `test` marks the span
-of the node it captures.
+of the node it captures. Two other capture names carry meaning, `candidate` and
+`test_scope`, and the appendix says what each one does.
 
 ### The measured facts
 
@@ -216,7 +304,16 @@ Each one needs a fixture of its own.
 - **An attribute is a sibling.** See above.
 - **`mod tests;` moves the test code to another file.** A second pass resolves a
   `#[cfg(test)] mod <name>;` declaration and marks `<name>.rs` and
-  `<name>/mod.rs` in the same directory as test files.
+  `<name>/mod.rs` as test files. Those two names sit in the *module directory*
+  of the declaring file, which is not the directory the declaring file lives in.
+  `mod.rs`, `lib.rs`, and `main.rs` declare their modules in their own parent
+  directory. Every other file adds its own stem, so a `mod bar;` in `src/foo.rs`
+  names `src/foo/bar.rs` and never `src/bar.rs`. The same-directory rule is
+  wrong in both directions: it misses the file that is there, and it marks a
+  file of a different module that is often production code. The pass matches a
+  candidate against the paths the walk already found, and it reads the
+  filesystem never, so a file outside the roots is silently nothing rather than
+  a file the counter opens behind the back of the walk.
 - **A parse error is silent.** The tool looks for an `ERROR` node and for a
   missing node. Such a file counts as production code, the footer names the
   count, and `--strict` makes the run fail.
