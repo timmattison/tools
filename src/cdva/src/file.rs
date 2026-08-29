@@ -103,6 +103,22 @@ pub struct FileCount {
     pub spans: Vec<Span>,
     /// Whether a parser ran over this file, and how it went.
     pub parse_status: ParseStatus,
+    /// Whether the scan of this file ended inside a string or a block comment.
+    ///
+    /// Valid source of a language almost never ends that way, so this is a row
+    /// of the language table reading a construct wrong rather than a fact about
+    /// the file, and every row behind that construct carries the wrong label.
+    ///
+    /// This is not the fault [`parse_status`] reports, and the two are kept
+    /// apart because they cost different things. A failed parse puts every row
+    /// of the file in the production bucket, which is the split this tool
+    /// exists to report. A scan that does not end moves rows between the
+    /// comment count and the code count, and moves no row between the two
+    /// buckets: the classifier decides the *kind* of a row, and the rules
+    /// decide its *bucket*.
+    ///
+    /// [`parse_status`]: FileCount::parse_status
+    pub ends_unterminated: bool,
     /// The names of the `#[cfg(test)] mod <name>;` declarations this file
     /// holds, each of which moves the test code of a module into another file.
     ///
@@ -198,7 +214,12 @@ impl Counter {
     #[must_use]
     pub fn count_source(&self, path: &Path, relative: &Path, source: &str) -> Option<FileCount> {
         let language = Language::from_path(path)?;
-        let kinds = lines::classify(source, language);
+        // One pass answers both questions this file needs of the classifier.
+        // Two calls would read every byte of every file of the tree twice.
+        let lines::Scanned {
+            kinds,
+            ends_unterminated,
+        } = lines::scan(source, language);
 
         let (production, test, spans, parse_status, test_mod_declarations) =
             match self.rules.verdict(relative) {
@@ -255,6 +276,7 @@ impl Counter {
             test,
             spans,
             parse_status,
+            ends_unterminated,
             test_mod_declarations,
         })
     }

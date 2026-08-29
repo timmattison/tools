@@ -27,6 +27,13 @@
 //! read: the same rows in the same order, and every number the tool knows
 //! about each of them rather than the ones a table has room for.
 //!
+//! Two footers go under the table, for the two faults a table of numbers
+//! swallows: [`render_failed_parses`] names the files nobody could parse, and
+//! [`render_unterminated_scans`] names the files whose scan ended inside a
+//! string or a block comment. The two lists stay apart, because a failed parse
+//! moves rows between the buckets and a scan that does not end moves rows
+//! between the comment count and the code count.
+//!
 //! The invariant that a reader of the report leans on lives in
 //! [`FileCount::total`] — the two buckets always sum to the count the tool
 //! would report with the split turned off.
@@ -48,8 +55,8 @@ pub use lines::{classify, count, ends_unterminated, Counts, LineIndex, LineKind}
 pub use modpass::resolve_test_modules;
 pub use pathrule::{PathRules, PathVerdict};
 pub use report::{
-    render_csv, render_explanation, render_failed_parses, render_json, render_table, Bucket,
-    ReportOptions, SortColumn,
+    render_csv, render_explanation, render_failed_parses, render_json, render_table,
+    render_unterminated_scans, Bucket, ReportOptions, SortColumn,
 };
 pub use treerule::{TreeMode, TreeOutcome, TreeRules};
 pub use walk::{walk, WalkOptions};

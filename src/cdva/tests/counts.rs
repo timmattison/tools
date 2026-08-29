@@ -165,6 +165,7 @@ fn counted(path: &str, language: Language, production: Counts, test: Counts) -> 
         test,
         spans: Vec::new(),
         parse_status: ParseStatus::NotParsed,
+        ends_unterminated: false,
         test_mod_declarations: Vec::new(),
     }
 }

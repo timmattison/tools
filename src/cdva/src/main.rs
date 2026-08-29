@@ -39,6 +39,14 @@
 //! them. The report is printed either way: a machine that asked for `--json
 //! --strict` wants the document as well as the status.
 //!
+//! A second footer names the files whose scan ended inside a string or a block
+//! comment. Valid source almost never ends that way, so such a file is a row of
+//! the language table reading a construct wrong, and every row behind that
+//! construct carries the wrong label. `--strict` says nothing about it: that
+//! flag guards the split between the two buckets, and this fault moves rows
+//! between the comment count and the code count alone. The machine formats
+//! carry both lists as data, under `failed_parses` and `unterminated_scans`.
+//!
 //! # Two things this command states rather than assumes
 //!
 //! **A file the walk found twice is counted once.** Two roots that overlap —
@@ -55,8 +63,8 @@ use anyhow::{anyhow, Error, Result};
 use buildinfo::version_string;
 use cdva::{
     render_csv, render_explanation, render_failed_parses, render_json, render_table,
-    resolve_test_modules, walk, Bucket, Counter, FileCount, Language, PathRules, ReportOptions,
-    SortColumn, Summary, TreeMode, TreeRules, WalkOptions,
+    render_unterminated_scans, resolve_test_modules, walk, Bucket, Counter, FileCount, Language,
+    PathRules, ReportOptions, SortColumn, Summary, TreeMode, TreeRules, WalkOptions,
 };
 use clap::Parser;
 use rayon::prelude::*;
@@ -188,17 +196,28 @@ impl Cli {
         }
     }
 
-    /// The footer under the report, or nothing at all.
+    /// What goes under the report, or nothing at all.
     ///
-    /// Only the table carries one. The two machine formats already carry the
-    /// same list as data, and a line of prose on standard output is a line
+    /// The two footers print in this order, and both print when both have
+    /// something to say. Each opens with a blank line of its own, so the second
+    /// stands apart from the first rather than reading as more paths under it.
+    ///
+    /// Only the table carries them. The two machine formats already carry the
+    /// same lists as data, and a line of prose on standard output is a line
     /// every consumer of them has to strip; an explanation answers for one
     /// file, and what the other files of the run did is not its answer.
     fn footer(&self, summary: &Summary) -> Option<String> {
         if self.json || self.csv || self.explain.is_some() {
             return None;
         }
-        render_failed_parses(summary)
+        let footers: String = [
+            render_failed_parses(summary),
+            render_unterminated_scans(summary),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!footers.is_empty()).then_some(footers)
     }
 
     /// When the tree rule runs, as the two flags say.

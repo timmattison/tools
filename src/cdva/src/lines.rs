@@ -139,14 +139,45 @@ impl LineIndex {
     }
 }
 
+/// What one pass over one source produced.
+///
+/// The two answers come out of one pass because they *are* one pass. Reading
+/// the labels and reading the state the pass ended in were two entrances to
+/// the same scan, so a caller that wanted both read every byte of the file
+/// twice — and the counter wants both, for every file of the tree.
+///
+/// The type stays inside this crate on purpose. A public one would be a fourth
+/// entrance beside the three this crate already exports, and no reader outside
+/// needs both answers at once: [`classify`], [`count`], and
+/// [`ends_unterminated`] each ask for one, and each is a reading of this.
+pub(crate) struct Scanned {
+    /// The label of every row, in order.
+    pub(crate) kinds: Vec<LineKind>,
+    /// Whether the pass ended inside a string or a block comment.
+    pub(crate) ends_unterminated: bool,
+}
+
+/// Read `source` once under the syntax of `language`.
+///
+/// This is the one place a scanner is built and run. Two copies of those three
+/// lines is how the labels of a file and the state its scan ended in come to
+/// answer for two different readings of one source.
+pub(crate) fn scan(source: &str, language: Language) -> Scanned {
+    let mut scanner = Scanner::new(source, language);
+    scanner.run();
+    let ends_unterminated = !matches!(scanner.state, Scan::Normal);
+    Scanned {
+        kinds: scanner.finish(),
+        ends_unterminated,
+    }
+}
+
 /// Label every row of `source` under the syntax of `language`.
 ///
 /// The returned vector has exactly [`LineIndex::row_count`] entries.
 #[must_use]
 pub fn classify(source: &str, language: Language) -> Vec<LineKind> {
-    let mut scanner = Scanner::new(source, language);
-    scanner.run();
-    scanner.finish()
+    scan(source, language).kinds
 }
 
 /// Whether the scan of `source` ended inside a string or a block comment.
@@ -160,14 +191,18 @@ pub fn classify(source: &str, language: Language) -> Vec<LineKind> {
 /// `cdva` read the `"` of `'"'` as the opening of a string, and because a Rust
 /// string spans rows that phantom string ran to the next quote anywhere in the
 /// file — 56 comment rows of `src/krt/src/source.rs` counted as code, with
-/// nothing in the report saying so. A test asks this of every Rust source of
-/// this repository, which catches the next table bug of the same shape without
-/// anyone having to think of the construct in advance.
+/// nothing in the report saying so. A test asks this of every source of this
+/// repository, under the language of its own path, which catches the next table
+/// bug of the same shape without anyone having to think of the construct in
+/// advance.
+///
+/// The tool asks it of every file it counts, and names the files that answer
+/// yes under the table. See [`render_unterminated_scans`].
+///
+/// [`render_unterminated_scans`]: crate::report::render_unterminated_scans
 #[must_use]
 pub fn ends_unterminated(source: &str, language: Language) -> bool {
-    let mut scanner = Scanner::new(source, language);
-    scanner.run();
-    !matches!(scanner.state, Scan::Normal)
+    scan(source, language).ends_unterminated
 }
 
 /// Sum the labels of [`classify`].

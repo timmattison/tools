@@ -106,6 +106,14 @@ pub struct Summary {
     pub files: Vec<FileCount>,
     /// The files whose parse failed, for the footer and for `--strict`.
     pub failed_parses: Vec<PathBuf>,
+    /// The files whose scan ended inside a string or a block comment, for the
+    /// second footer.
+    ///
+    /// This is a list of its own and not an addition to the one above. The two
+    /// faults cost different things — one moves rows between the buckets, the
+    /// other between the comment count and the code count — and a reader of one
+    /// list could not tell which of the two a path was in.
+    pub unterminated_scans: Vec<PathBuf>,
 }
 
 impl Summary {
@@ -148,11 +156,18 @@ impl Summary {
             .map(|file| file.path.clone())
             .collect();
 
+        let unterminated_scans = files
+            .iter()
+            .filter(|file| file.ends_unterminated)
+            .map(|file| file.path.clone())
+            .collect();
+
         Self {
             rows,
             total,
             files,
             failed_parses,
+            unterminated_scans,
         }
     }
 

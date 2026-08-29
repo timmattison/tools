@@ -157,6 +157,43 @@ always passes.** That is the honest answer to the question the flag asks, and it
 is not the answer a build wants. A check that means to catch a broken grammar
 must not also ask for the fast mode.
 
+### A scan that ends inside a string spoils the comment count
+
+The line classifier runs one pass of a state machine over the bytes of a file.
+A pass that ends inside a string or a block comment did not read that file the
+way its language does: valid source almost never ends that way, so the
+condition is a row of the language table reading a construct wrong. The
+unmodelled regular expression below is one such construct. Every row behind it
+carries the wrong label, and the classifier reports them all with numbers that
+look like any other numbers.
+
+So the table names those files under it as well:
+
+```text
+2 files ended inside a string or a block comment, so their comment and code counts are not to be trusted:
+    src/thing/regex.js
+    src/thing/verbatim.cs
+```
+
+**The two footers are two footers, and the two lists stay apart.** The faults
+cost different things. A failed parse moves every row of its file into the
+production bucket, which is the split this tool exists to report. A scan that
+does not end moves rows between the comment count and the code count, and moves
+no row between the buckets — the classifier decides the *kind* of a row, and the
+rules decide its *bucket*. One list of both would say that something is wrong
+and not what, and the two are fixed in different places.
+
+**`--strict` therefore answers for the parse and not for the scan.** It guards
+the split, and this fault does not touch it. A run under `--no-tree` parses
+nothing and still scans everything, so this footer holds there while `--strict`
+has nothing to fail over. `--json` and `--csv` carry no prose, and the JSON
+carries both lists as data, under `failed_parses` and `unterminated_scans`.
+
+A test of this repository asks the same question of every file it holds, under
+the language of that file's own path. That is what catches the next row of the
+table that reads a construct wrong, without anybody having to think of the
+construct in advance.
+
 ### A NUL byte reaches the parser as a space
 
 The lexer of a generated parser reads the value 0 as the end of the input,
@@ -180,20 +217,28 @@ nothing else. A declaration that names its file directly marks the two rows of
 itself and nothing more, so the file it points at is read on its own terms —
 by the path rule and the tree rule, as any other file is.
 
-### Three string forms are unmodelled
+### Four literal forms are unmodelled
 
-The line classifier holds a string table for each language, and three forms are
-missing from it. Each one can mis-count the row it stands on:
+The line classifier holds a string table for each language, and four literal
+forms are missing from it. Each one can mis-count a row:
 
 | Form | What happens |
 | --- | --- |
 | The C++ digit separator, `1'000'000` | The first `'` opens a character literal, which closes at the second. |
 | A C++ raw string, `R"delim(…)"` | Read as an ordinary string, so it ends at the row it opened on. A `//` on a later row of it reads as a comment. |
 | A C# verbatim string, `@"…"` | Read as an ordinary string, so the doubled `""` that a verbatim string escapes with reads as a close followed by an open. |
+| A JavaScript, TypeScript, or TSX regular expression that holds a backtick, `` /`/ `` | The backtick opens a template string, which spans rows. Every row below it reads as code until the next backtick of the file, and each backtick after that flips the state again. |
 
-None of the three moves a row between the production bucket and the test
-bucket. Each moves a row between the comment count and the code count, on the
-row it appears on. `cloc` gets the raw-string case wrong the same way.
+None of the four moves a row between the production bucket and the test bucket.
+The first three move a row between the comment count and the code count, on the
+row they appear on. `cloc` gets the raw-string case wrong the same way.
+
+The regular expression is the one that reaches past its own row, and it is the
+one the tool reports: a file it runs to the end of ends inside a string, so the
+footer above names that file. Telling a regular expression from a division needs
+the tokens that stand before the slash, which this classifier does not hold. A
+guess would trade one miscount for another, so `cdva` reports the condition
+rather than modelling the form.
 
 ### Where `cdva` and `cloc` disagree
 

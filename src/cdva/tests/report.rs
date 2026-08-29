@@ -36,8 +36,9 @@
 //! nothing at all.
 
 use cdva::{
-    render_csv, render_explanation, render_failed_parses, render_json, render_table, Bucket,
-    Counts, FileCount, Language, ParseStatus, ReportOptions, Row, Rule, SortColumn, Span, Summary,
+    render_csv, render_explanation, render_failed_parses, render_json, render_table,
+    render_unterminated_scans, Bucket, Counts, FileCount, Language, ParseStatus, ReportOptions,
+    Row, Rule, SortColumn, Span, Summary,
 };
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
@@ -113,7 +114,23 @@ const GOLDEN_TWO_FAILURES: &str = "
   src/b.rs
 ";
 
-/// How many paths the footer names before it starts counting the rest.
+/// The footer of a run whose one scan did not end, byte for byte.
+const GOLDEN_ONE_UNTERMINATED: &str = "
+1 file ended inside a string or a block comment, so its comment and code counts are not to be \
+trusted:
+  src/regex.js
+";
+
+/// The footer of a run whose two scans did not end, byte for byte. The mirror
+/// of the string above, in the plural.
+const GOLDEN_TWO_UNTERMINATED: &str = "
+2 files ended inside a string or a block comment, so their comment and code counts are not to be \
+trusted:
+  src/a.js
+  src/b.js
+";
+
+/// How many paths a footer names before it starts counting the rest.
 const NAMED_FAILURES: usize = 10;
 
 /// What the footer starts the line that counts the paths it did not name with,
@@ -155,6 +172,7 @@ fn summary(rows: Vec<Row>, total: Row) -> Summary {
         total,
         files: Vec::new(),
         failed_parses: Vec::new(),
+        unterminated_scans: Vec::new(),
     }
 }
 
@@ -176,6 +194,7 @@ fn counted(path: &str, language: Language, production: Counts, test: Counts) -> 
         test,
         spans: Vec::new(),
         parse_status: ParseStatus::NotParsed,
+        ends_unterminated: false,
         test_mod_declarations: Vec::new(),
     }
 }
@@ -190,6 +209,26 @@ fn failed(path: &str, language: Language) -> FileCount {
         test: Counts::default(),
         spans: Vec::new(),
         parse_status: ParseStatus::Failed,
+        ends_unterminated: false,
+        test_mod_declarations: Vec::new(),
+    }
+}
+
+/// One counted file whose scan ended inside a string or a block comment, whose
+/// parse held.
+///
+/// The parse holds so that a test of one footer cannot pass because the other
+/// footer said something. The two faults are two faults, and a fixture that
+/// carried both would prove neither.
+fn unterminated(path: &str, language: Language) -> FileCount {
+    FileCount {
+        path: PathBuf::from(path),
+        language,
+        production: counts(0, 0, 3),
+        test: Counts::default(),
+        spans: Vec::new(),
+        parse_status: ParseStatus::Clean,
+        ends_unterminated: true,
         test_mod_declarations: Vec::new(),
     }
 }
@@ -207,6 +246,22 @@ fn failures(paths: &[&str]) -> Summary {
         total: row("Total", [0, 0, 0], Counts::default(), Counts::default()),
         files: Vec::new(),
         failed_parses: paths.iter().map(PathBuf::from).collect(),
+        unterminated_scans: Vec::new(),
+    }
+}
+
+/// A summary whose scan did not end for exactly these paths, in this order.
+///
+/// The mirror of [`failures`], and empty where that one is full: a summary
+/// built here names no failed parse, so a footer that answered for the wrong
+/// list would print nothing at all.
+fn unterminated_scans(paths: &[&str]) -> Summary {
+    Summary {
+        rows: Vec::new(),
+        total: row("Total", [0, 0, 0], Counts::default(), Counts::default()),
+        files: Vec::new(),
+        failed_parses: Vec::new(),
+        unterminated_scans: paths.iter().map(PathBuf::from).collect(),
     }
 }
 
@@ -865,7 +920,8 @@ const GOLDEN_JSON: &str = r#"{
     },
     "test_percent": 39.6
   },
-  "failed_parses": []
+  "failed_parses": [],
+  "unterminated_scans": []
 }
 "#;
 
@@ -1314,6 +1370,7 @@ fn explained(
         test,
         spans,
         parse_status,
+        ends_unterminated: false,
         test_mod_declarations: Vec::new(),
     }
 }
@@ -1639,6 +1696,114 @@ fn the_footer_names_the_files_in_the_order_the_summary_holds_them() {
         named_paths(&footer),
         held,
         "the walk sorted these once, and the footer sorts them again over nobody's dead body:\n{footer}"
+    );
+}
+
+#[test]
+fn a_run_whose_every_scan_ended_prints_no_footer() {
+    assert!(
+        render_unterminated_scans(&two_languages()).is_none(),
+        "a summary of rows alone knows of no scan that did not end, so there is nothing to say"
+    );
+    assert!(
+        render_unterminated_scans(&two_files()).is_none(),
+        "two files whose scans both ended print no footer"
+    );
+    assert!(
+        render_unterminated_scans(&unterminated_scans(&[])).is_none(),
+        "an empty list is no fault at all"
+    );
+}
+
+#[test]
+fn one_unterminated_scan_is_named_in_the_singular() {
+    let summary = Summary::new(vec![
+        counted(
+            "src/lib.rs",
+            Language::Rust,
+            counts(0, 0, 10),
+            Counts::default(),
+        ),
+        unterminated("src/regex.js", Language::JavaScript),
+    ]);
+
+    assert_eq!(
+        render_unterminated_scans(&summary).as_deref(),
+        Some(GOLDEN_ONE_UNTERMINATED),
+        "the footer names the one file whose scan did not end, and the file beside it that scanned \
+         clean"
+    );
+}
+
+#[test]
+fn two_unterminated_scans_are_named_in_the_plural() {
+    assert_eq!(
+        render_unterminated_scans(&unterminated_scans(&["src/a.js", "src/b.js"])).as_deref(),
+        Some(GOLDEN_TWO_UNTERMINATED),
+        "two files have two comment counts, and every word of the sentence agrees with them"
+    );
+}
+
+#[test]
+fn each_footer_reads_its_own_list_and_the_two_print_together() {
+    // The one summary that holds both faults at once. A tool that rolled them
+    // into one list would print one footer here, and a reader of that footer
+    // could not tell which file to open a parser on and which to blame the
+    // language table for.
+    let summary = Summary::new(vec![
+        failed("src/broken.rs", Language::Rust),
+        unterminated("src/regex.js", Language::JavaScript),
+    ]);
+
+    let parses = render_failed_parses(&summary).expect("one parse failed");
+    let scans = render_unterminated_scans(&summary).expect("one scan did not end");
+
+    assert_eq!(
+        named_paths(&parses),
+        ["src/broken.rs"],
+        "the parse footer names the file nobody could parse, and nothing else:\n{parses}"
+    );
+    assert_eq!(
+        named_paths(&scans),
+        ["src/regex.js"],
+        "the scan footer names the file whose scan did not end, and nothing else:\n{scans}"
+    );
+    assert!(
+        parses.starts_with('\n') && scans.starts_with('\n'),
+        "each footer opens with a blank line of its own, so the second stands apart from the first \
+         rather than reading as more paths under it"
+    );
+}
+
+#[test]
+fn unterminated_scans_is_an_empty_array_when_every_scan_ended_and_names_the_paths_when_one_did_not()
+{
+    let held = document(&mixed(), ReportOptions::default());
+    assert_eq!(
+        held["unterminated_scans"].as_array().map(Vec::len),
+        Some(0),
+        "every scan ended, so the key is an empty array rather than absent: {held}"
+    );
+
+    let ragged = Summary::new(vec![
+        counted(
+            "src/lib.rs",
+            Language::Rust,
+            counts(0, 0, 10),
+            Counts::default(),
+        ),
+        unterminated("src/regex.js", Language::JavaScript),
+    ]);
+    let document = document(&ragged, ReportOptions::default());
+    assert_eq!(
+        document["unterminated_scans"],
+        serde_json::json!(["src/regex.js"]),
+        "the document names the file whose scan did not end"
+    );
+    assert_eq!(
+        document["failed_parses"],
+        serde_json::json!([]),
+        "and it names it under its own key, because the two faults are two faults"
     );
 }
 

@@ -998,7 +998,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     | Flag | What it does |
     | --- | --- |
     | `--by-file` | One row for each file rather than one for each language. `--sort` and `--top` order the rows and trim them, and the total still covers every file. |
-    | `--json` | The whole report as JSON: every row, both buckets, and the files whose parse failed. |
+    | `--json` | The whole report as JSON: every row, both buckets, the files whose parse failed, and the files whose scan ended inside a string. |
     | `--csv` | The same report as CSV, one row to a line. |
     | `--explain <PATH>` | Answer for one file instead of printing a table: the rows a rule marked, and which rule marked them. |
     | `--no-tree` | Read no syntax tree. The path rule alone decides, which is about three times faster and finds no test code inside a production file. |
@@ -1009,6 +1009,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     tree nobody could read and a silent one, so the table names such files under it. `--strict`
     puts the same news in the exit status. Careful with the pair: `--no-tree` parses nothing at
     all, so no parse can fail and `--strict` under it always passes.
+  - A second footer names the files whose scan ended inside a string or a block comment. Valid
+    source almost never ends that way, so such a file is a row of the language table reading a
+    construct wrong — a JavaScript regular expression that holds a backtick is one — and every row
+    behind that construct carries the wrong label. This fault moves rows between the comment count
+    and the code count and moves none between the two buckets, so `--strict` says nothing about it
+    and the two lists stay apart.
   - `src/cdva/README.md` carries the limits. The one to know before reading a number is that a
     test helper standing outside a test node counts as production code: tree-sitter reads syntax
     and resolves no names, so it sees `#[test]` and cannot see that a helper exists only to serve

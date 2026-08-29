@@ -42,13 +42,29 @@
 //!
 //! # The failures the table would otherwise swallow
 //!
-//! [`render_failed_parses`] is the footer under the table, and it exists
-//! because the safe reading of a file nobody could parse is also the silent
-//! one: every row of it counts as production code, and the table that results
-//! looks exactly like a correct table of a repository with less test code than
-//! it has. Only the table carries the footer. The two machine formats already
-//! carry the same list as data, and a line of prose in a document is a line
-//! every consumer has to strip.
+//! Two footers go under the table, and both exist because a wrong number here
+//! looks exactly like a right one.
+//!
+//! [`render_failed_parses`] names the files nobody could parse. The safe
+//! reading of such a file is also the silent one: every row of it counts as
+//! production code, and the table that results looks exactly like a correct
+//! table of a repository with less test code than it has.
+//!
+//! [`render_unterminated_scans`] names the files whose scan ended inside a
+//! string or a block comment. Valid source almost never ends that way, so such
+//! a file is a row of the language table reading a construct wrong, and every
+//! row behind that construct carries the wrong label.
+//!
+//! The two lists stay apart, because the two faults cost different things. A
+//! failed parse moves every row of its file into the production bucket, which
+//! is the split this tool exists to report. A scan that does not end moves rows
+//! between the comment count and the code count, and moves no row between the
+//! buckets. One list of both would tell a reader that something is wrong and
+//! not what.
+//!
+//! Only the table carries a footer. The two machine formats already carry the
+//! same lists as data, and a line of prose in a document is a line every
+//! consumer has to strip.
 //!
 //! # One file, and the reason for its number
 //!
@@ -65,6 +81,7 @@ use crate::lines::Counts;
 use num_format::{Locale, ToFormattedString};
 use serde::Serialize;
 use std::cmp::Ordering;
+use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
 
 /// The heading of the first column when each row is a language.
@@ -124,7 +141,7 @@ const PRODUCTION_LABEL: &str = "production";
 /// kinds those rows are.
 const BUCKET_CELLS: usize = 4;
 
-/// How many paths the footer names before it starts counting the rest.
+/// How many paths a footer names before it starts counting the rest.
 ///
 /// Ten is enough to fix a handful of broken files by hand and short enough that
 /// a tree where a grammar fails wholesale still leaves its table on the screen.
@@ -539,6 +556,10 @@ struct Document {
     /// a consumer that has to tell an absent key from an empty list is a
     /// consumer with two code paths where one would do.
     failed_parses: Vec<String>,
+    /// The files whose scan ended inside a string or a block comment. Always
+    /// present, for the reason above, and a key of its own because the two
+    /// faults are two faults.
+    unterminated_scans: Vec<String>,
 }
 
 /// The header of the CSV, which is the order of every record under it.
@@ -588,11 +609,8 @@ pub fn render_json(summary: &Summary, options: ReportOptions) -> String {
             row: summary.total.clone(),
             language: None,
         }),
-        failed_parses: summary
-            .failed_parses
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect(),
+        failed_parses: paths(&summary.failed_parses),
+        unterminated_scans: paths(&summary.unterminated_scans),
     };
 
     let mut json = serde_json::to_string_pretty(&document)
@@ -699,6 +717,11 @@ fn rounded_percent(row: &Row) -> f64 {
     format!("{percent:.1}").parse().unwrap_or(percent)
 }
 
+/// Every path of a list, as the machine formats write them.
+fn paths(list: &[PathBuf]) -> Vec<String> {
+    list.iter().map(|path| path.display().to_string()).collect()
+}
+
 /// The footer naming the files whose parse failed, or `None` when none did.
 ///
 /// A file whose parse failed counts entirely as production code, which is the
@@ -706,28 +729,56 @@ fn rounded_percent(row: &Row) -> f64 {
 /// where a grammar chokes on half the files otherwise reports a confident,
 /// wrong, low test share with nothing on screen to say so, and this footer is
 /// what turns that silent undercount into a visible one.
+#[must_use]
+pub fn render_failed_parses(summary: &Summary) -> Option<String> {
+    path_footer(&summary.failed_parses, failure_sentence)
+}
+
+/// The footer naming the files whose scan ended inside a string or a block
+/// comment, or `None` when none did.
+///
+/// Valid source of a language almost never ends that way. Such a file is a row
+/// of the language table reading a construct wrong — an unmodelled literal
+/// form, most often — and every row behind that construct carries the wrong
+/// label. The classifier cannot say so on its own: it labels every row either
+/// way and reports a total that no reader can tell from a right one.
+///
+/// This is a second footer rather than more paths under the first, because the
+/// two faults cost different things. A failed parse moves every row of its file
+/// into the production bucket; a scan that does not end moves rows between the
+/// comment count and the code count and moves none between the buckets. A
+/// reader of one list could not tell which of the two a path was in, and the
+/// two are fixed in different places.
+#[must_use]
+pub fn render_unterminated_scans(summary: &Summary) -> Option<String> {
+    path_footer(&summary.unterminated_scans, unterminated_sentence)
+}
+
+/// One footer: a sentence of its own, and the paths it is about.
+///
+/// Both footers are laid out here, so the two read alike under one table and a
+/// change to the layout reaches both. The blank line that opens a footer is a
+/// part of it rather than of its caller, so the one function that decides this
+/// layout decides all of it: a golden string of a footer is then the bytes a
+/// reader sees.
 ///
 /// It names at most [`NAMED_FAILURES`] paths and then counts the rest, because
 /// a tree where a grammar fails wholesale would otherwise push the table it
-/// belongs to off the screen with thousands of lines. The machine formats
-/// carry every one of them, and the last line says so.
+/// belongs to off the screen with thousands of lines. The machine formats carry
+/// every one of them, and the last line says so.
 ///
 /// The paths come out in the order the summary holds them, which is the order
-/// the walk sorted them into. Sorting them again here would be a second
-/// opinion about an order that is already settled.
-#[must_use]
-pub fn render_failed_parses(summary: &Summary) -> Option<String> {
-    let count = summary.failed_parses.len();
+/// the walk sorted them into. Sorting them again here would be a second opinion
+/// about an order that is already settled.
+fn path_footer(list: &[PathBuf], sentence: impl FnOnce(usize) -> String) -> Option<String> {
+    let count = list.len();
     if count == 0 {
         return None;
     }
 
-    // The blank line is a part of the footer rather than of its caller, so the
-    // one function that decides this layout decides all of it: a golden string
-    // of the footer is then the bytes a reader sees under the table.
     let mut footer = String::from("\n");
-    push_line(&mut footer, &failure_sentence(count));
-    for path in summary.failed_parses.iter().take(NAMED_FAILURES) {
+    push_line(&mut footer, &sentence(count));
+    for path in list.iter().take(NAMED_FAILURES) {
         push_line(&mut footer, &format!("{INDENT}{}", path.display()));
     }
     let unnamed = count.saturating_sub(NAMED_FAILURES);
@@ -740,8 +791,8 @@ pub fn render_failed_parses(summary: &Summary) -> Option<String> {
     Some(footer)
 }
 
-/// The sentence the footer opens with: how many files failed, and where their
-/// rows went.
+/// The sentence the parse footer opens with: how many files failed, and where
+/// their rows went.
 ///
 /// The verb agrees with the count. One file *counts* as production code and
 /// two files *count* as production code, and a tool that prints `1 files ...
@@ -751,6 +802,27 @@ fn failure_sentence(count: usize) -> String {
         format!("{count} file failed to parse and counts as production code:")
     } else {
         format!("{count} files failed to parse and count as production code:")
+    }
+}
+
+/// The sentence the scan footer opens with: how many scans did not end, and
+/// which numbers that spoils.
+///
+/// It agrees with its count as the sentence above does, and it names the
+/// consequence rather than the event alone. "A scan did not end" is news a
+/// reader can do nothing with; "the comment and code counts of that file are
+/// not to be trusted" says which cell of the table to stop believing.
+fn unterminated_sentence(count: usize) -> String {
+    if count == 1 {
+        format!(
+            "{count} file ended inside a string or a block comment, so its comment and code \
+             counts are not to be trusted:"
+        )
+    } else {
+        format!(
+            "{count} files ended inside a string or a block comment, so their comment and code \
+             counts are not to be trusted:"
+        )
     }
 }
 
