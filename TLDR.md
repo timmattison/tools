@@ -9,6 +9,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `beta` | Records and replays terminal sessions; exports to HTML players or MP4/GIF. |
 | `bm` | Bulk Move — recursively find and move files matching a pattern to a destination. |
 | `cdknuke` | Removes `cdk.out` directories from AWS CDK projects throughout a repo. |
+| `cdva` | Count da various attributes — counts the lines of a tree the way `cloc` does, and reports the test code apart from the production code, including the test code inside a production file. |
 | `cf` | Count Files — recursively counts files, with optional suffix/prefix/substring filters. |
 | `claude-usage` | Parses an Anthropic API usage CSV and computes per-model costs. |
 | `clipboard-random` | Generates random binary or Zalgo text data and copies it to the clipboard. |
