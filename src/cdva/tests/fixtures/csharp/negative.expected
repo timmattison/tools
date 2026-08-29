@@ -1,0 +1,18 @@
+. namespace Example.Ledger
+. {
+.     public class Register
+.     {
+.         public int Record(int amount)
+.         {
+.             return amount;
+.         }
+. 
+.         public void CheckRecord()
+.         {
+.             if (Record(1) != 1)
+.             {
+.                 throw new System.InvalidOperationException("recording is broken");
+.             }
+.         }
+.     }
+. }

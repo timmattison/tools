@@ -121,6 +121,49 @@ const TYPESCRIPT_FIXTURES: &[&str] = &["annotated_describe", "multibyte", "only"
 /// would fail to parse.
 const TSX_FIXTURES: &[&str] = &["component", "multibyte"];
 
+/// Every Java fixture. `annotated` and `runwith` are the two nodes the query
+/// names, `parameterized` holds both spellings of an annotation, and `negative`
+/// is the class whose *name* holds `Test` and whose methods carry nothing.
+const JAVA_FIXTURES: &[&str] = &[
+    "annotated",
+    "multibyte",
+    "negative",
+    "parameterized",
+    "runwith",
+];
+
+/// Every Kotlin fixture. Kotlin spells one annotation kind rather than two, so
+/// the corpus is a test, a lifecycle hook, and the function that carries
+/// neither.
+const KOTLIN_FIXTURES: &[&str] = &["annotated", "lifecycle", "multibyte", "negative"];
+
+/// Every C# fixture, one per node the query names — a method under one
+/// attribute, a method under a stack of them, and a class — plus the method
+/// that carries none.
+const CSHARP_FIXTURES: &[&str] = &["attributes", "fact", "multibyte", "negative", "theory"];
+
+/// Every Ruby fixture. `rspec` carries the receiver the pattern deliberately
+/// does not name, `bare_describe` carries none, `minitest` is the class the
+/// second pattern reads, and `negative` holds the call to a method named
+/// `describe` that carries no block.
+const RUBY_FIXTURES: &[&str] = &[
+    "bare_describe",
+    "minitest",
+    "multibyte",
+    "negative",
+    "rspec",
+];
+
+/// Every Swift fixture: the class that inherits a case, the function that
+/// carries an attribute, and the class that inherits something else.
+const SWIFT_FIXTURES: &[&str] = &["attributed", "multibyte", "negative", "xctest"];
+
+/// Every Elixir fixture. `test_block` is the block pattern on its own, inside a
+/// module that says nothing about itself, and `exunit` is the module that says
+/// `use ExUnit.Case` beside a module of production code — the pair that pins
+/// where the climb of `@test_scope` starts and where it stops.
+const ELIXIR_FIXTURES: &[&str] = &["exunit", "multibyte", "negative", "test_block"];
+
 /// No fixture of this corpus holds a defect.
 const NONE_DEFECTIVE: &[&str] = &[];
 
@@ -174,6 +217,50 @@ const CORPORA: &[Corpus] = &[
         directory: "tsx",
         extension: "tsx",
         fixtures: TSX_FIXTURES,
+        defective: NONE_DEFECTIVE,
+    },
+    Corpus {
+        language: Language::Java,
+        directory: "java",
+        extension: "java",
+        fixtures: JAVA_FIXTURES,
+        defective: NONE_DEFECTIVE,
+    },
+    Corpus {
+        language: Language::Kotlin,
+        directory: "kotlin",
+        extension: "kt",
+        fixtures: KOTLIN_FIXTURES,
+        defective: NONE_DEFECTIVE,
+    },
+    Corpus {
+        language: Language::CSharp,
+        directory: "csharp",
+        extension: "cs",
+        fixtures: CSHARP_FIXTURES,
+        defective: NONE_DEFECTIVE,
+    },
+    Corpus {
+        language: Language::Ruby,
+        directory: "ruby",
+        extension: "rb",
+        fixtures: RUBY_FIXTURES,
+        defective: NONE_DEFECTIVE,
+    },
+    Corpus {
+        language: Language::Swift,
+        directory: "swift",
+        extension: "swift",
+        fixtures: SWIFT_FIXTURES,
+        defective: NONE_DEFECTIVE,
+    },
+    // The extension is `ex` and not `exs`, because `*_test.exs` is a built-in
+    // glob and a fixture the path rule claims never reaches the tree rule.
+    Corpus {
+        language: Language::Elixir,
+        directory: "elixir",
+        extension: "ex",
+        fixtures: ELIXIR_FIXTURES,
         defective: NONE_DEFECTIVE,
     },
 ];
@@ -273,6 +360,24 @@ fn marked_rows(spans: &[Span]) -> BTreeSet<u32> {
     spans
         .iter()
         .flat_map(|span| span.first_row..=span.last_row)
+        .collect()
+}
+
+/// The rows of a fixture the tool marked, in order, with the indentation taken
+/// off.
+///
+/// An expectation pins every row of a fixture, which is what catches a row that
+/// moved. This reads one named row back out, for the assertions that have
+/// something to say about *why* a row is marked — which branch of a query
+/// reached it, or where a span opens.
+fn marked_lines(corpus: &Corpus, name: &str) -> Vec<String> {
+    let source = corpus.source(name);
+    let rows = marked_rows(&corpus.counted(name).spans);
+    source
+        .lines()
+        .enumerate()
+        .filter(|(offset, _)| rows.contains(&u32::try_from(offset + 1).unwrap_or(u32::MAX)))
+        .map(|(_, line)| line.trim().to_string())
         .collect()
 }
 
@@ -641,6 +746,265 @@ fn the_tsx_row_is_wired_to_a_grammar_of_its_own() {
         "the same source under the TSX row parses"
     );
     assert!(corpus.counted("component").test.total() > 0);
+}
+
+#[test]
+fn java_marks_a_method_that_carries_a_bare_annotation() {
+    Corpus::of(Language::Java).assert_marking("annotated");
+}
+
+#[test]
+fn java_reads_both_spellings_of_an_annotation() {
+    let corpus = Corpus::of(Language::Java);
+    corpus.assert_marking("parameterized");
+
+    // A bare `@ParameterizedTest` is a `marker_annotation` and `@RepeatedTest(3)`
+    // is an `annotation`, which are two node kinds and not two spellings of one.
+    // The second method is reachable through the `annotation` branch of the
+    // alternation alone, so its presence here is what proves that branch is
+    // doing work — the first method would pass on the marker branch by itself.
+    let marked = marked_lines(corpus, "parameterized");
+    assert!(
+        marked.contains(&"@ParameterizedTest".to_string()),
+        "the marker annotation is in the span: {marked:?}"
+    );
+    assert!(
+        marked.contains(&"@ValueSource(ints = {1, 2})".to_string()),
+        "the stack reaches back over both annotation rows: {marked:?}"
+    );
+    assert!(
+        marked.contains(&"@RepeatedTest(3)".to_string()),
+        "an annotation that carries arguments decides on its own: {marked:?}"
+    );
+}
+
+#[test]
+fn java_marks_a_class_that_names_a_runner() {
+    Corpus::of(Language::Java).assert_marking("runwith");
+}
+
+#[test]
+fn java_leaves_a_class_whose_name_merely_holds_test_in_the_production_bucket() {
+    assert_marks_nothing(Corpus::of(Language::Java), "negative");
+}
+
+#[test]
+fn java_marks_a_test_that_holds_characters_of_many_bytes() {
+    Corpus::of(Language::Java).assert_marking("multibyte");
+}
+
+#[test]
+fn kotlin_marks_a_function_that_carries_a_test_annotation() {
+    Corpus::of(Language::Kotlin).assert_marking("annotated");
+}
+
+#[test]
+fn kotlin_marks_a_function_that_runs_before_each_test() {
+    Corpus::of(Language::Kotlin).assert_marking("lifecycle");
+}
+
+#[test]
+fn kotlin_leaves_a_function_that_carries_no_annotation_in_the_production_bucket() {
+    assert_marks_nothing(Corpus::of(Language::Kotlin), "negative");
+}
+
+#[test]
+fn kotlin_marks_a_test_that_holds_characters_of_many_bytes() {
+    Corpus::of(Language::Kotlin).assert_marking("multibyte");
+}
+
+#[test]
+fn csharp_marks_a_method_that_carries_one_attribute() {
+    Corpus::of(Language::CSharp).assert_marking("fact");
+}
+
+#[test]
+fn csharp_marks_a_method_under_a_stack_of_attribute_lists() {
+    let corpus = Corpus::of(Language::CSharp);
+    corpus.assert_marking("theory");
+
+    // Each `[…]` is an `attribute_list` of its own, and the deciding one is the
+    // topmost of three. The span of the method holds all three, so the rows of
+    // the data the test runs over are test rows too.
+    let marked = marked_lines(corpus, "theory");
+    assert!(
+        marked.contains(&"[InlineData(2)]".to_string()),
+        "the whole stack of attribute lists is in the span: {marked:?}"
+    );
+}
+
+#[test]
+fn csharp_marks_a_class_that_carries_a_fixture_attribute() {
+    Corpus::of(Language::CSharp).assert_marking("attributes");
+}
+
+#[test]
+fn csharp_leaves_a_method_that_carries_no_attribute_in_the_production_bucket() {
+    assert_marks_nothing(Corpus::of(Language::CSharp), "negative");
+}
+
+#[test]
+fn csharp_marks_a_test_that_holds_characters_of_many_bytes() {
+    Corpus::of(Language::CSharp).assert_marking("multibyte");
+}
+
+#[test]
+fn ruby_marks_a_block_whose_receiver_is_the_runner() {
+    let corpus = Corpus::of(Language::Ruby);
+    corpus.assert_marking("rspec");
+
+    // The receiver does not enter the pattern, which is what makes one rule
+    // read `RSpec.describe … do` and a bare `describe … do` alike. A pattern
+    // anchored on a bare identifier would mark the `it` inside and lose the
+    // block that holds it.
+    let marked = marked_lines(corpus, "rspec");
+    assert_eq!(
+        marked.first().map(String::as_str),
+        Some("RSpec.describe Calculator do"),
+        "the span opens at the call that names a receiver: {marked:?}"
+    );
+}
+
+#[test]
+fn ruby_marks_a_bare_block_and_the_ones_nested_in_it() {
+    Corpus::of(Language::Ruby).assert_marking("bare_describe");
+}
+
+#[test]
+fn ruby_marks_a_class_that_inherits_a_test_case() {
+    Corpus::of(Language::Ruby).assert_marking("minitest");
+}
+
+#[test]
+fn ruby_leaves_a_call_that_carries_no_block_in_the_production_bucket() {
+    assert_marks_nothing(Corpus::of(Language::Ruby), "negative");
+}
+
+#[test]
+fn ruby_marks_a_test_that_holds_characters_of_many_bytes() {
+    Corpus::of(Language::Ruby).assert_marking("multibyte");
+}
+
+#[test]
+fn swift_marks_a_class_that_inherits_a_test_case() {
+    Corpus::of(Language::Swift).assert_marking("xctest");
+}
+
+#[test]
+fn swift_marks_a_function_that_carries_a_test_attribute() {
+    Corpus::of(Language::Swift).assert_marking("attributed");
+}
+
+#[test]
+fn swift_leaves_a_class_that_inherits_something_else_in_the_production_bucket() {
+    assert_marks_nothing(Corpus::of(Language::Swift), "negative");
+}
+
+#[test]
+fn swift_marks_a_test_that_holds_characters_of_many_bytes() {
+    Corpus::of(Language::Swift).assert_marking("multibyte");
+}
+
+#[test]
+fn elixir_marks_a_test_block_and_the_ones_nested_in_it() {
+    let corpus = Corpus::of(Language::Elixir);
+    corpus.assert_marking("test_block");
+
+    // No `use ExUnit.Case` is in this file, so the block pattern is the only
+    // one that can have marked anything. It marks the block and stops there:
+    // the `defmodule` that holds it stays production code, which is what tells
+    // this pattern apart from the scope of the fixture below.
+    let marked = marked_lines(corpus, "test_block");
+    assert_eq!(
+        marked.first().map(String::as_str),
+        Some("describe \"add/2\" do"),
+        "the span opens at the block and not at the module: {marked:?}"
+    );
+    assert!(
+        !marked.iter().any(|line| line.starts_with("defmodule")),
+        "a block marks itself, never the module around it: {marked:?}"
+    );
+}
+
+#[test]
+fn elixir_marks_the_module_that_uses_the_case_and_leaves_the_one_beside_it_alone() {
+    let corpus = Corpus::of(Language::Elixir);
+    corpus.assert_marking("exunit");
+
+    // `use ExUnit.Case` says nothing about its own row and everything about the
+    // module that holds it, so the capture climbs. What the climb must not do
+    // is overshoot: a `defmodule` is a `call` and so is the `use` inside it, so
+    // a walk that took the outermost `call` of the *file* would swallow the
+    // production module beside this one. This fixture holds both, and the two
+    // assertions below are the two halves of that — the whole test module is
+    // marked, and not one row before it is.
+    let source = corpus.source("exunit");
+    let counted = corpus.counted("exunit");
+    let marked = marked_rows(&counted.spans);
+
+    let opening = source
+        .lines()
+        .position(|line| line.starts_with("defmodule LedgerChecks"))
+        .expect("the fixture holds a module that uses the test case");
+    let first_test_row = u32::try_from(opening + 1).unwrap_or(u32::MAX);
+    let last_row = u32::try_from(source.lines().count()).unwrap_or(u32::MAX);
+
+    let production_rows: BTreeSet<u32> = (1..first_test_row).collect();
+    assert!(
+        !production_rows.is_empty(),
+        "the fixture holds a module of production code before the test module"
+    );
+    assert!(
+        marked.is_disjoint(&production_rows),
+        "the climb stopped at the test module, so no row of the production \
+         module above it is marked: {marked:?}"
+    );
+    assert_eq!(
+        marked,
+        (first_test_row..=last_row).collect::<BTreeSet<u32>>(),
+        "every row of the test module is marked, `use` and `end` included"
+    );
+    assert_eq!(
+        counted.production,
+        lines::count(
+            &source
+                .lines()
+                .take(opening)
+                .map(|line| format!("{line}\n"))
+                .collect::<String>(),
+            Language::Elixir
+        ),
+        "the production bucket is exactly the module the climb left alone"
+    );
+}
+
+#[test]
+fn elixir_leaves_a_module_of_production_code_alone() {
+    assert_marks_nothing(Corpus::of(Language::Elixir), "negative");
+}
+
+#[test]
+fn elixir_marks_a_test_that_holds_characters_of_many_bytes() {
+    Corpus::of(Language::Elixir).assert_marking("multibyte");
+}
+
+#[test]
+fn elixir_is_the_one_language_that_climbs_to_a_scope() {
+    // `@test_scope` is the third capture name of the engine and this is its one
+    // use in the whole table. A second language that quietly gained a scope
+    // kind would be marking whole enclosing nodes with nothing to say so.
+    let with_scope: BTreeSet<&str> = Language::all()
+        .iter()
+        .filter(|language| !language.scope_kinds().is_empty())
+        .map(|language| language.name())
+        .collect();
+
+    assert_eq!(with_scope, BTreeSet::from(["Elixir"]));
+    assert_eq!(
+        Language::Elixir.scope_kinds(),
+        ["call"],
+        "a `defmodule` is a call, which is what the capture climbs to"
+    );
 }
 
 #[test]

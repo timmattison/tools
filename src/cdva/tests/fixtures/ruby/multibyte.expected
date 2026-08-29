@@ -1,0 +1,12 @@
+. # Greeter greets in Japanese.
+. class Greeter
+.   def greet
+.     "こんにちは"
+.   end
+. end
+. 
+T RSpec.describe Greeter do
+T   it "日本語で挨拶する" do
+T     expect(Greeter.new.greet).to eq("こんにちは")
+T   end
+T end
