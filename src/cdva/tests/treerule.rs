@@ -78,6 +78,9 @@ struct Corpus {
 const RUST_FIXTURES: &[&str] = &[
     "bench_fn",
     "cfg_all_test",
+    "cfg_attr_test",
+    "cfg_feature_named_test",
+    "cfg_not_test",
     "cfg_test_mod",
     "cfg_test_mod_declaration",
     "doc_test",
@@ -523,6 +526,31 @@ fn tokio_test_fn_marks_a_test_attribute_that_names_a_path() {
 #[test]
 fn cfg_all_test_marks_a_module_gated_on_test_and_a_feature() {
     assert_marking("cfg_all_test");
+}
+
+#[test]
+fn cfg_not_test_leaves_a_module_that_the_tests_switch_off_in_the_production_bucket() {
+    // `not(test)` names the code that is compiled when the tests are OFF, so
+    // the module below it is production code. The `#[cfg(test)] mod tests` at
+    // the foot of the fixture is what proves the rule still reads the word
+    // `test` where the word decides.
+    assert_marking("cfg_not_test");
+}
+
+#[test]
+fn cfg_attr_test_leaves_a_function_that_only_changes_attributes_in_the_production_bucket() {
+    // `cfg_attr` says which attributes apply and never whether the item
+    // exists, so `#[cfg_attr(test, …)]` decorates production code. The `#[test]
+    // fn` below it is what proves the rule still marks a test in this file.
+    assert_marking("cfg_attr_test");
+}
+
+#[test]
+fn cfg_feature_named_test_leaves_a_function_gated_on_a_feature_in_the_production_bucket() {
+    // The `test` of `feature = "test-support"` is part of the name of a
+    // feature, and a feature is shipped. The `#[cfg(test)] mod tests` below it
+    // is what proves the rule still reads the option `test`.
+    assert_marking("cfg_feature_named_test");
 }
 
 #[test]
