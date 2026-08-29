@@ -49,6 +49,11 @@ const HELPER: &str = "fn helper() -> u64 {\n    7\n}\n";
 /// A test file of four rows of code, which the built-in `tests/**` marks.
 const INTEGRATION_TEST: &str = "#[test]\nfn works() {\n    assert_eq!(1, 1);\n}\n";
 
+/// A library whose test code is a module inside it: three rows of production
+/// code, and seven rows the tree rule alone can find. No glob names it, so
+/// `--no-tree` reports none of it as test code.
+const LIBRARY_WITH_A_TEST_MODULE: &str = "pub fn add(a: u64, b: u64) -> u64 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn works() {\n        assert_eq!(1, 1);\n    }\n}\n";
+
 /// A library of five rows of code that moves its test code into another file.
 const DECLARES_A_TEST_MODULE: &str =
     "pub fn add(a: u64, b: u64) -> u64 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests;\n";
@@ -130,7 +135,14 @@ fn the_help_names_every_flag_of_the_command() {
         stderr(&output)
     );
     let help = stdout(&output);
-    for flag in ["--hidden", NO_IGNORE, "--test-glob", "--production-glob"] {
+    for flag in [
+        "--hidden",
+        NO_IGNORE,
+        "--test-glob",
+        "--production-glob",
+        "--no-tree",
+        "--tree",
+    ] {
         assert!(help.contains(flag), "the help names `{flag}`:\n{help}");
     }
 }
@@ -343,5 +355,82 @@ fn a_file_that_cannot_be_read_is_warned_about_and_skipped() {
     assert_eq!(
         row[CODE], "3",
         "the rest of the tree is still counted:\n{table}"
+    );
+}
+
+#[test]
+fn the_fast_mode_reports_less_test_code_than_the_default_and_the_slow_mode_the_same() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY_WITH_A_TEST_MODULE);
+
+    let run = |flags: &[&str]| {
+        let mut command = cdva();
+        command.arg(NO_IGNORE);
+        for flag in flags {
+            command.arg(flag);
+        }
+        let output = command.arg(root.path()).output().expect("the binary runs");
+        assert!(
+            output.status.success(),
+            "a readable tree counts under {flags:?}: {}",
+            stderr(&output)
+        );
+        stdout(&output)
+    };
+
+    let default = run(&[]);
+    assert_eq!(
+        fields(&default, RUST_ROW)[CODE],
+        "10",
+        "every row of code is counted:\n{default}"
+    );
+    assert_eq!(
+        fields(&default, RUST_ROW)[TEST_CODE],
+        "7",
+        "the default mode parses the file and finds the module:\n{default}"
+    );
+
+    let fast = run(&["--no-tree"]);
+    assert_eq!(
+        fields(&fast, RUST_ROW)[TEST_CODE],
+        "0",
+        "--no-tree reads the path rule alone, and no glob names this file:\n{fast}"
+    );
+    assert_eq!(
+        fields(&fast, RUST_ROW)[CODE],
+        "10",
+        "the rows are still counted, only bucketed differently:\n{fast}"
+    );
+
+    assert_eq!(
+        run(&["--tree"]),
+        default,
+        "--tree skips the literal pre-filter and must reach the same table"
+    );
+}
+
+#[test]
+fn the_two_tree_flags_refuse_to_run_together() {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY_WITH_A_TEST_MODULE);
+
+    let output = cdva()
+        .arg(NO_IGNORE)
+        .arg("--no-tree")
+        .arg("--tree")
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !output.status.success(),
+        "asking for no parse and for every parse at once is a mistake, not a \
+         silent choice of one:\n{}",
+        stdout(&output)
+    );
+    let complaint = stderr(&output);
+    assert!(
+        complaint.contains("--no-tree") && complaint.contains("--tree"),
+        "the failure names the two flags that conflict: {complaint}"
     );
 }

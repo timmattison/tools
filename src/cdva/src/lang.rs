@@ -780,4 +780,27 @@ impl Language {
     pub fn scope_kinds(self) -> &'static [&'static str] {
         self.tree_rule().map_or(&[], |rule| rule.scope_kinds)
     }
+
+    /// Literal strings, any one of which must appear in a file before the tree
+    /// rule will parse it.
+    ///
+    /// A parse costs far more than a scan of the rows, so a file that can hold
+    /// no test is never handed to a parser: a Rust file whose bytes hold
+    /// neither `test` nor `bench` can hold no test node, whatever else is in
+    /// it.
+    ///
+    /// The set is therefore a *superset* of everything the query and the
+    /// attribute chain of the language can match, and the asymmetry of the two
+    /// mistakes is what settles every doubtful case in favour of the shorter,
+    /// commoner needle. A needle that filters nothing is merely slow. A needle
+    /// that filters too much is a silent undercount: the file is never parsed,
+    /// its test rows are never found, and the tool reports a clean number that
+    /// nobody can tell from a correct one.
+    ///
+    /// Empty for a language with no tree rule, and for one whose rule is to be
+    /// parsed every time.
+    #[must_use]
+    pub fn needles(self) -> &'static [&'static str] {
+        &[]
+    }
 }

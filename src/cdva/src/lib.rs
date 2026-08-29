@@ -40,5 +40,5 @@ pub use lines::{classify, count, ends_unterminated, Counts, LineIndex, LineKind}
 pub use modpass::resolve_test_modules;
 pub use pathrule::{PathRules, PathVerdict};
 pub use report::render_table;
-pub use treerule::{TreeOutcome, TreeRules};
+pub use treerule::{TreeMode, TreeOutcome, TreeRules};
 pub use walk::{walk, WalkOptions};

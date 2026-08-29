@@ -28,7 +28,7 @@
 use crate::lang::Language;
 use crate::lines::{self, Counts, LineKind};
 use crate::pathrule::{PathRules, PathVerdict};
-use crate::treerule::TreeRules;
+use crate::treerule::{TreeMode, TreeRules};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -134,22 +134,35 @@ pub struct Counter {
     /// The parser that marks a region of a file the globs left unmarked, where
     /// the run asked for one.
     tree: Option<TreeRules>,
+    /// When that parser runs.
+    mode: TreeMode,
 }
 
 impl Counter {
     /// A counter that reads the path rule alone.
     ///
     /// No file is ever parsed, so a file the globs do not mark is production
-    /// code from its first row to its last. This is what `--no-tree` selects.
+    /// code from its first row to its last. This is what `--no-tree` selects,
+    /// and a counter built with [`TreeMode::Never`] reads a file exactly as
+    /// this one does.
     #[must_use]
     pub const fn new(rules: PathRules) -> Self {
-        Self { rules, tree: None }
+        Self {
+            rules,
+            tree: None,
+            mode: TreeMode::Never,
+        }
     }
 
-    /// Read the file with the tree rule as well as the path rule.
+    /// Read the file with the tree rule as well as the path rule, in `mode`.
+    ///
+    /// The mode is an argument rather than a default because a caller that
+    /// says nothing would get the filtered mode, and a test of the filter that
+    /// silently ran filtered would pass by comparing a thing with itself.
     #[must_use]
-    pub fn with_tree_rules(mut self, tree: TreeRules) -> Self {
+    pub fn with_tree_rules(mut self, tree: TreeRules, mode: TreeMode) -> Self {
         self.tree = Some(tree);
+        self.mode = mode;
         self
     }
 
@@ -187,7 +200,7 @@ impl Counter {
                     match self
                         .tree
                         .as_ref()
-                        .and_then(|tree| tree.outcome(source, language))
+                        .and_then(|tree| tree.outcome(source, language, self.mode))
                     {
                         Some(outcome) => {
                             let (production, test) =

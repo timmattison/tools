@@ -18,7 +18,7 @@
 
 use cdva::{
     lines, resolve_test_modules, Counter, Counts, FileCount, Language, PathRules, Rule, Span,
-    TreeRules,
+    TreeMode, TreeRules,
 };
 use std::path::{Path, PathBuf};
 
@@ -51,8 +51,13 @@ fn count(path: &str, source: &str) -> FileCount {
 }
 
 /// One counted file, under globs the caller chose.
+///
+/// The tree rule runs over every file here, rather than over the files whose
+/// bytes hold a needle, because these tests are about the pass that reads a
+/// declaration and not about the filter in front of the parser. A test of the
+/// filter lives in `treerule.rs`.
 fn count_under(rules: PathRules, path: &str, source: &str) -> FileCount {
-    let counter = Counter::new(rules).with_tree_rules(TreeRules::new());
+    let counter = Counter::new(rules).with_tree_rules(TreeRules::new(), TreeMode::Always);
     let path = PathBuf::from(path);
     counter
         .count_source(&path, &path, source)

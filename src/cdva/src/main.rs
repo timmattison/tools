@@ -24,8 +24,8 @@
 use anyhow::Result;
 use buildinfo::version_string;
 use cdva::{
-    render_table, resolve_test_modules, walk, Counter, FileCount, PathRules, Summary, TreeRules,
-    WalkOptions,
+    render_table, resolve_test_modules, walk, Counter, FileCount, PathRules, Summary, TreeMode,
+    TreeRules, WalkOptions,
 };
 use clap::Parser;
 use rayon::prelude::*;
@@ -59,13 +59,34 @@ struct Cli {
     /// Hold a path out of the test bucket. Repeat for more than one glob.
     #[arg(long, value_name = "GLOB")]
     production_glob: Vec<String>,
+    /// Do not read any syntax tree. The path rule alone decides, which is fast.
+    #[arg(long, conflicts_with = "tree")]
+    no_tree: bool,
+    /// Read the syntax tree of every file, skipping the fast literal
+    /// pre-filter.
+    #[arg(long)]
+    tree: bool,
+}
+
+impl Cli {
+    /// When the tree rule runs, as the two flags say.
+    ///
+    /// The flags conflict, so clap has already refused the pair by the time
+    /// this reads them and no third answer is reachable here.
+    const fn tree_mode(&self) -> TreeMode {
+        match (self.no_tree, self.tree) {
+            (true, _) => TreeMode::Never,
+            (_, true) => TreeMode::Always,
+            _ => TreeMode::Auto,
+        }
+    }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let counter = Counter::new(PathRules::new(&cli.test_glob, &cli.production_glob)?)
-        .with_tree_rules(TreeRules::new());
+        .with_tree_rules(TreeRules::new(), cli.tree_mode());
     let found = walk(
         &cli.paths,
         WalkOptions {

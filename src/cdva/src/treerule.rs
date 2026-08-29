@@ -82,6 +82,20 @@ const FIELD_BODY: &str = "body";
 /// The field of a `mod` item that holds the name of the module.
 const FIELD_NAME: &str = "name";
 
+/// When the tree rule runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TreeMode {
+    /// Parse a file only when a needle of its language appears in it.
+    #[default]
+    Auto,
+    /// Never parse. The path rule alone decides, which is the fast mode.
+    Never,
+    /// Parse every file of a language that has a rule, skipping the needle
+    /// filter. This is the slow and complete mode that a test of the filter
+    /// uses.
+    Always,
+}
+
 /// The rows of a file that hold test code, and how the parse went.
 pub struct TreeOutcome {
     /// The 1-based rows that hold test code.
@@ -151,7 +165,12 @@ impl TreeRules {
     /// test asserts all three for every language, and an answer of "no test
     /// rows" instead would silently miscount every file of that language.
     #[must_use]
-    pub fn outcome(&self, source: &str, language: Language) -> Option<TreeOutcome> {
+    pub fn outcome(
+        &self,
+        source: &str,
+        language: Language,
+        _mode: TreeMode,
+    ) -> Option<TreeOutcome> {
         let compiled = self.compiled(language)?;
 
         // A fresh parser for every call. `tree_sitter::Parser` is `Send` but

@@ -19,12 +19,30 @@
 //! a fixture the globs claim never reaches the tree rule at all and its
 //! assertion would then pass for the wrong reason.
 //!
+//! # The needle filter, and why the assertions read `TreeMode::Always`
+//!
+//! A parse costs far more than a scan of the rows, so the tool parses only a
+//! file whose bytes hold a needle of its language. A missing needle is a silent
+//! undercount: the file is never parsed, its test rows are never found, and the
+//! number that comes out reads exactly like a correct one.
+//!
+//! Every assertion about what a *query* marks therefore runs in
+//! [`TreeMode::Always`], which parses every file and says nothing about the
+//! filter. Two tests then hold the mode the tool actually runs to that answer:
+//! [`the_two_modes_mark_every_fixture_of_the_corpus_the_same`] over this
+//! corpus, and [`the_two_modes_mark_every_file_of_this_repository_the_same`]
+//! over the repository the crate is built from — which is where a needle
+//! missing for a construct nobody wrote a fixture for shows up. A third test
+//! names the fixtures the filter actually stops, so the agreement of the two
+//! modes cannot pass by comparing a thing with itself.
+//!
 //! Nothing here writes a file, and nothing here shells out. The fixtures are
 //! read, never modified, so two copies of this file running at once cannot
 //! tread on each other.
 
 use cdva::{
-    lines, Counter, FileCount, Language, ParseStatus, PathRules, PathVerdict, Rule, Span, TreeRules,
+    lines, walk, Counter, FileCount, Language, ParseStatus, PathRules, PathVerdict, Rule, Span,
+    TreeMode, TreeRules, WalkOptions,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -300,12 +318,23 @@ impl Corpus {
         PathBuf::from("src").join(format!("{name}.{}", self.extension))
     }
 
-    /// Counts a fixture with both rules on.
-    fn counted(&self, name: &str) -> FileCount {
+    /// Counts a fixture with both rules on, in the mode named.
+    fn counted_in(&self, name: &str, mode: TreeMode) -> FileCount {
         let path = self.as_counted(name);
-        counter()
+        counter_in(mode)
             .count_source(&path, &path, &self.source(name))
             .unwrap_or_else(|| panic!("`{name}` is a language the tool counts"))
+    }
+
+    /// Counts a fixture with both rules on, and with every file parsed.
+    ///
+    /// The assertions of this file are about what the *query* of a language
+    /// marks, so they read the mode that parses every file. The mode the tool
+    /// runs by default parses only a file whose bytes hold a needle, and the
+    /// two are held to the same marking, file for file, by
+    /// [`the_two_modes_mark_every_fixture_of_the_corpus_the_same`].
+    fn counted(&self, name: &str) -> FileCount {
+        self.counted_in(name, TreeMode::Always)
     }
 
     /// Asserts that the tool marks a fixture exactly as its expectation says.
@@ -344,10 +373,14 @@ impl Corpus {
     }
 }
 
-/// A counter with the path rule and the tree rule both on, which is what the
-/// tool runs by default.
+/// A counter with the path rule and the tree rule both on, in the mode named.
+fn counter_in(mode: TreeMode) -> Counter {
+    Counter::new(PathRules::builtin()).with_tree_rules(TreeRules::new(), mode)
+}
+
+/// A counter that parses every file of a language that has a rule.
 fn counter() -> Counter {
-    Counter::new(PathRules::builtin()).with_tree_rules(TreeRules::new())
+    counter_in(TreeMode::Always)
 }
 
 /// Reads a file of the corpus, and says which one when it cannot.
@@ -1315,7 +1348,7 @@ fn the_tree_rule_of_every_language_in_the_table_compiles() {
         // capture name that marks nothing, and a pattern that is not a regular
         // expression. Asking for the outcome of an empty source is what makes
         // it compile, so this call is the assertion.
-        let outcome = rules.outcome("", language);
+        let outcome = rules.outcome("", language, TreeMode::Always);
         assert_eq!(
             outcome.is_some(),
             language.tree_query().is_some(),
@@ -1365,7 +1398,9 @@ fn a_language_with_no_tree_rule_is_not_parsed() {
         0,
         "C carries no tree rule, so nothing in it is ever marked"
     );
-    assert!(TreeRules::new().outcome(source, Language::C).is_none());
+    assert!(TreeRules::new()
+        .outcome(source, Language::C, TreeMode::Always)
+        .is_none());
 }
 
 #[test]
@@ -1410,4 +1445,282 @@ fn a_counter_with_no_tree_rules_marks_no_test_row() {
     assert!(counted.spans.is_empty());
     assert_eq!(counted.parse_status, ParseStatus::NotParsed);
     assert_eq!(counted.production, lines::count(&source, Language::Rust));
+}
+
+/// A Rust source whose bytes hold no needle of the language: no `test`, and no
+/// `bench`. An assertion below reads the needles of the table rather than
+/// trusting this comment.
+const NO_NEEDLE: &str = "pub fn add(a: u64, b: u64) -> u64 {\n    a + b\n}\n";
+
+/// The two shapes of a needle that says nothing about the file it is in: one
+/// inside a comment, and one inside a string.
+///
+/// Both carry characters of several bytes each before the needle, so the
+/// occurrence the filter finds starts at a byte offset that is not a character
+/// boundary of the source. The filter searches the raw bytes for exactly that
+/// reason, and a filter that cut the source at the offset it found would panic
+/// here.
+const GENEROUS: &[(&str, &str)] = &[
+    (
+        "a comment",
+        "// テスト — the test of the filter is deliberately generous.\npub fn add(a: u64, b: u64) -> u64 {\n    a + b\n}\n",
+    ),
+    (
+        "a string",
+        "pub fn label() -> &'static str {\n    \"テスト test bench\"\n}\n",
+    ),
+];
+
+/// The root of the repository this crate is built from.
+///
+/// `src/cdva` is two levels below it. Nothing here shells out to `git`: a test
+/// that ran `git rev-parse` would answer for whatever repository the
+/// environment of the run pointed it at, which under a pre-commit hook is not
+/// the one the sources are in.
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+}
+
+/// Asserts that the two modes said the same thing about a file.
+///
+/// They must agree on everything a reader of the report can see: both buckets,
+/// every span, and every declaration. They are allowed to differ in one field
+/// and in one direction — `Auto` answers `NotParsed` for a file whose bytes
+/// hold no needle, where `Always` opened it — because the tool must not claim
+/// it read a file it never opened. The other direction is asserted as well,
+/// although nothing can produce it: `Auto` parses a subset of what `Always`
+/// parses, so a filter wired backwards fails here rather than reading clean.
+fn assert_modes_agree(named: &str, auto: &FileCount, always: &FileCount) {
+    assert_eq!(
+        auto.production, always.production,
+        "{named}: the production bucket differs, so a needle is missing"
+    );
+    assert_eq!(
+        auto.test, always.test,
+        "{named}: the test bucket differs, so a needle is missing"
+    );
+    assert_eq!(
+        auto.spans, always.spans,
+        "{named}: the spans differ, so a needle is missing"
+    );
+    assert_eq!(
+        auto.test_mod_declarations, always.test_mod_declarations,
+        "{named}: the declarations differ, so a needle is missing"
+    );
+
+    if auto.parse_status != always.parse_status {
+        assert_eq!(
+            auto.parse_status,
+            ParseStatus::NotParsed,
+            "{named}: the filtered mode may skip a parse, and may not report another one"
+        );
+        assert_ne!(
+            always.parse_status,
+            ParseStatus::NotParsed,
+            "{named}: the unfiltered mode parses every file of a language with a rule"
+        );
+    }
+}
+
+#[test]
+fn the_two_modes_mark_every_fixture_of_the_corpus_the_same() {
+    for corpus in CORPORA {
+        for name in corpus.fixtures {
+            assert_modes_agree(
+                &format!("{}: `{name}`", corpus.language.name()),
+                &corpus.counted_in(name, TreeMode::Auto),
+                &corpus.counted_in(name, TreeMode::Always),
+            );
+        }
+    }
+}
+
+#[test]
+fn the_needle_filter_holds_a_fixture_of_the_corpus_back_from_the_parser() {
+    // The agreement above is worth nothing on its own: a filter that let every
+    // file through would satisfy it by comparing a thing with itself. This
+    // names the fixtures the filter actually stops, which is what makes the
+    // agreement a statement about the needles rather than about nothing.
+    let mut held_back = Vec::new();
+    for corpus in CORPORA {
+        for name in corpus.fixtures {
+            let auto = corpus.counted_in(name, TreeMode::Auto);
+            if auto.parse_status != ParseStatus::NotParsed {
+                continue;
+            }
+            assert_eq!(
+                auto.test.total(),
+                0,
+                "{}: `{name}` was never parsed, so nothing in it can be marked",
+                corpus.language.name()
+            );
+            held_back.push(format!("{}/{name}", corpus.directory));
+        }
+    }
+
+    assert!(
+        !held_back.is_empty(),
+        "no fixture of the corpus is held back, so the agreement of the two \
+         modes says nothing about the needles"
+    );
+}
+
+#[test]
+fn the_two_modes_mark_every_file_of_this_repository_the_same() {
+    // The corpus holds a fixture per syntactic form somebody thought of. This
+    // reads the repository the tool was built from, which holds the forms
+    // nobody thought of: a needle missing for a construct that has no fixture
+    // shows up here as a file the two modes disagree about.
+    let found = walk(&[repository_root()], WalkOptions::default())
+        .expect("the repository this crate is built from can be walked");
+    assert!(
+        found.len() > 100,
+        "the walk found {} files, which is not this repository",
+        found.len()
+    );
+
+    let auto = counter_in(TreeMode::Auto);
+    let always = counter_in(TreeMode::Always);
+    let mut compared = 0_usize;
+    let mut held_back = 0_usize;
+
+    for (path, relative) in &found {
+        let Ok(Some(under_auto)) = auto.count_path(path, relative) else {
+            continue;
+        };
+        let Ok(Some(under_always)) = always.count_path(path, relative) else {
+            continue;
+        };
+        assert_modes_agree(&path.display().to_string(), &under_auto, &under_always);
+        compared += 1;
+        if under_auto.parse_status == ParseStatus::NotParsed
+            && under_always.parse_status != ParseStatus::NotParsed
+        {
+            held_back += 1;
+        }
+    }
+
+    assert!(
+        compared > 100,
+        "only {compared} files of this repository were counted"
+    );
+    assert!(
+        held_back > 0,
+        "the filter parsed every one of the {compared} files it was handed, so \
+         this comparison says nothing about the needles"
+    );
+}
+
+#[test]
+fn the_never_mode_reads_the_path_rule_alone() {
+    let source = source("cfg_test_mod");
+    let path = rust().as_counted("cfg_test_mod");
+    let count_with = |mode| {
+        counter_in(mode)
+            .count_source(&path, &path, &source)
+            .expect("Rust is a language the tool counts")
+    };
+
+    let never = count_with(TreeMode::Never);
+    assert_eq!(
+        never.test.total(),
+        0,
+        "this is what --no-tree reports for a file whose test code is a \
+         #[cfg(test)] mod"
+    );
+    assert!(never.spans.is_empty());
+    assert_eq!(never.parse_status, ParseStatus::NotParsed);
+    assert_eq!(never.production, lines::count(&source, Language::Rust));
+
+    assert!(
+        count_with(TreeMode::Auto).test.total() > 0,
+        "the default mode finds the module the fast mode cannot see"
+    );
+
+    // A counter that was handed no tree rule at all and one told never to read
+    // the one it has must answer the same, or `--no-tree` would mean two
+    // different things depending on how the counter was built.
+    assert_eq!(
+        never,
+        Counter::new(PathRules::builtin())
+            .count_source(&path, &path, &source)
+            .expect("Rust is a language the tool counts")
+    );
+}
+
+#[test]
+fn a_file_whose_bytes_hold_no_needle_is_never_parsed() {
+    assert!(
+        Language::Rust
+            .needles()
+            .iter()
+            .all(|needle| !NO_NEEDLE.contains(needle)),
+        "the source of this test holds a needle after all, so it proves nothing"
+    );
+
+    let path = Path::new("src/add.rs");
+    let count_with = |mode| {
+        counter_in(mode)
+            .count_source(path, path, NO_NEEDLE)
+            .expect("Rust is a language the tool counts")
+    };
+
+    let auto = count_with(TreeMode::Auto);
+    assert_eq!(
+        auto.parse_status,
+        ParseStatus::NotParsed,
+        "the tool must not name a parse it never ran"
+    );
+    assert_eq!(
+        count_with(TreeMode::Always).parse_status,
+        ParseStatus::Clean,
+        "the same file parses when the filter is off, so the answer above is \
+         the filter and not a defect in the file"
+    );
+    assert_eq!(auto.test.total(), 0);
+    assert_eq!(auto.production, lines::count(NO_NEEDLE, Language::Rust));
+}
+
+#[test]
+fn a_needle_that_says_nothing_still_buys_a_parse_and_marks_nothing() {
+    for (where_it_is, source) in GENEROUS {
+        let path = Path::new("src/generous.rs");
+        let auto = counter_in(TreeMode::Auto)
+            .count_source(path, path, source)
+            .expect("Rust is a language the tool counts");
+
+        assert_eq!(
+            auto.parse_status,
+            ParseStatus::Clean,
+            "a needle in {where_it_is} reaches the parser: the filter reads \
+             bytes and knows nothing of syntax"
+        );
+        assert_eq!(
+            auto.test.total(),
+            0,
+            "a needle in {where_it_is} is not a test node"
+        );
+        assert_eq!(
+            auto,
+            counter_in(TreeMode::Always)
+                .count_source(path, path, source)
+                .expect("Rust is a language the tool counts"),
+            "a needle in {where_it_is}: the two modes read this file alike"
+        );
+    }
+}
+
+#[test]
+fn a_language_with_no_tree_rule_carries_no_needle() {
+    for &language in Language::all() {
+        if language.tree_query().is_none() {
+            assert!(
+                language.needles().is_empty(),
+                "{}: a needle filters a parse that never happens",
+                language.name()
+            );
+        }
+    }
 }

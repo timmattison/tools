@@ -6,6 +6,7 @@
 //! with no files in it.
 
 use cdva::Language;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Reads the language of a path written as a string, which is what every case
@@ -283,4 +284,90 @@ fn every_language_is_reachable_from_a_path() {
             language.name()
         );
     }
+}
+
+/// The needles of every language whose tree rule carries any, written out.
+///
+/// A needle is a literal that must appear in the bytes of a file before the
+/// tool will parse it, and the set of one language must be a superset of
+/// everything that language's query can match. This table is the declaration;
+/// the proof that it is a superset is in `treerule.rs`, where the mode that
+/// reads the filter and the mode that skips it are held to the same marking
+/// over the fixture corpus and over this repository.
+const NEEDLES: &[(Language, &[&str])] = &[
+    // `bench` is listed apart from `test` because `#[bench]` holds no `test`.
+    (Language::Rust, &["test", "bench"]),
+    (Language::Go, &["Test", "Benchmark", "Fuzz", "Example"]),
+    (Language::Zig, &["test"]),
+    (Language::Python, &["test", "Test"]),
+    (
+        Language::JavaScript,
+        &["describe", "it", "test", "suite", "bench", "context"],
+    ),
+    (
+        Language::TypeScript,
+        &["describe", "it", "test", "suite", "bench", "context"],
+    ),
+    (
+        Language::Tsx,
+        &["describe", "it", "test", "suite", "bench", "context"],
+    ),
+    // Written without the `@`, because `@ Test` with a space between is legal
+    // Java. `Test` alone already covers `ParameterizedTest`, `RepeatedTest`,
+    // and `SpringBootTest`.
+    (
+        Language::Java,
+        &["Test", "Before", "After", "RunWith", "ExtendWith"],
+    ),
+    (Language::Kotlin, &["Test", "Before", "After"]),
+    // `Test` covers `TestMethod`, `TestCase`, `TestFixture`, and `TestClass`.
+    (
+        Language::CSharp,
+        &["Test", "Fact", "Theory", "SetUp", "TearDown"],
+    ),
+    (
+        Language::Ruby,
+        &[
+            "describe", "context", "feature", "it", "specify", "scenario", "Minitest", "TestCase",
+        ],
+    ),
+    (
+        Language::Swift,
+        &["XCTestCase", "QuickSpec", "Test", "Suite"],
+    ),
+    (
+        Language::Elixir,
+        &["test", "describe", "property", "ExUnit"],
+    ),
+];
+
+#[test]
+fn every_language_declares_the_needles_of_its_query() {
+    for &(language, needles) in NEEDLES {
+        assert_eq!(
+            language.needles(),
+            needles,
+            "the needles of {}",
+            language.name()
+        );
+    }
+}
+
+#[test]
+fn the_languages_that_carry_needles_are_the_ones_this_table_names() {
+    let declared: BTreeSet<&str> = Language::all()
+        .iter()
+        .filter(|language| !language.needles().is_empty())
+        .map(|language| language.name())
+        .collect();
+    let listed: BTreeSet<&str> = NEEDLES
+        .iter()
+        .map(|&(language, _)| language.name())
+        .collect();
+
+    assert_eq!(
+        declared, listed,
+        "a language that gained a needle set and no row here, or a row whose \
+         language carries none"
+    );
 }
