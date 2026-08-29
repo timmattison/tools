@@ -42,7 +42,7 @@ struct Cli {
 /// that reaches every file on disk. The two ignore fields move together under
 /// `--no-ignore` and apart under `--no-ignore-vcs`, which is why they are two
 /// fields rather than one.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Filters {
     /// Skip a file whose path holds a component that starts with a dot.
     skip_hidden: bool,
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn every_flag_together_reaches_every_file() {
-        assert!(Filters::from_cli(&cli(true, true, true)) == Filters::NONE);
+        assert_eq!(Filters::from_cli(&cli(true, true, true)), Filters::NONE);
     }
 
     #[test]
