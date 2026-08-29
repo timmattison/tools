@@ -118,6 +118,29 @@ const FAILED_TO_PARSE: &str = "failed to parse";
 /// The footer a run whose one parse failed prints under its table.
 const ONE_FAILURE_FOOTER: &str = "1 file failed to parse and counts as production code:";
 
+/// A JavaScript library whose regular expression holds a backtick.
+///
+/// No row of the language table models a regular expression, so the backtick
+/// opens a template string. A template string of JavaScript spans rows, so the
+/// scan runs to the end of the file inside one: the comment row counts as code,
+/// and the scan ends where the scan of a whole file never ends. `cloc` 2.10
+/// reports comment 1 code 4 over this file, and `cdva` reports comment 0
+/// code 5.
+///
+/// Nothing here is a syntax error, and no row of it holds a needle of the tree
+/// rule, so the file reaches no parser and its parse never fails. The two
+/// faults are separate, and this fixture is the one that proves they stay
+/// separate.
+const REGEX_HOLDING_A_BACKTICK: &str = "const backtick = /`/;\nconst a = 1;\n// this comment must stay a comment\nconst b = 2;\nconst c = 3;\n";
+
+/// The words of the footer that names the scans that did not end, and which no
+/// other line of any report holds.
+const ENDED_INSIDE: &str = "ended inside a string or a block comment";
+
+/// The footer a run whose one scan did not end prints under its table.
+const ONE_UNTERMINATED_FOOTER: &str = "1 file ended inside a string or a block comment, so its \
+                                       comment and code counts are not to be trusted:";
+
 /// What the long help indents a flag by, which is less than it indents the
 /// prose under one. A section of the help therefore ends at the next line that
 /// starts a flag, and not at a line of prose that happens to name one.
@@ -189,6 +212,18 @@ fn broken_tree() -> tempfile::TempDir {
     let root = tempfile::tempdir().expect("a temporary directory is made");
     write(root.path(), "src/lib.rs", LIBRARY);
     write(root.path(), "src/broken.rs", BROKEN_LIBRARY);
+    root
+}
+
+/// A tree of one library that scans clean and one whose scan does not end.
+///
+/// The clean file is there for the reason it is there in [`broken_tree`]: a
+/// footer over a tree of nothing but bad files would not show that the rest of
+/// the report carried on.
+fn unterminated_tree() -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("a temporary directory is made");
+    write(root.path(), "src/lib.rs", LIBRARY);
+    write(root.path(), "src/regex.js", REGEX_HOLDING_A_BACKTICK);
     root
 }
 
@@ -690,7 +725,7 @@ fn the_json_flag_writes_one_document_and_nothing_else() {
 
     let document: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("the report parses as JSON");
-    for key in ["rows", "total", "failed_parses"] {
+    for key in ["rows", "total", "failed_parses", "unterminated_scans"] {
         assert!(
             document.get(key).is_some(),
             "the document holds `{key}`: {document}"
@@ -1273,6 +1308,147 @@ fn a_machine_format_prints_no_footer_and_the_json_names_the_failure() {
             .as_str()
             .is_some_and(|path| path.ends_with("broken.rs")),
         "the document names the file, as the footer would have: {parsed}"
+    );
+}
+
+#[test]
+fn a_file_whose_scan_ended_unterminated_is_named_in_a_footer_and_a_clean_tree_prints_none() {
+    let root = unterminated_tree();
+
+    let output = cdva()
+        .arg(NO_IGNORE)
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        output.status.success(),
+        "a scan that did not end alone does not fail the run: {}",
+        stderr(&output)
+    );
+    let report = stdout(&output);
+    assert!(
+        report.contains(ONE_UNTERMINATED_FOOTER),
+        "the footer says how many scans did not end, and which counts that spoils:\n{report}"
+    );
+    assert!(
+        report.contains("regex.js"),
+        "the footer names the file, so a reader can go and look at it:\n{report}"
+    );
+    assert!(
+        !report.contains("src/lib.rs"),
+        "the file that scanned clean is not a fault:\n{report}"
+    );
+    assert!(
+        !report.contains(FAILED_TO_PARSE),
+        "a scan that did not end is not a parse that failed, and one footer must not answer for \
+         the other:\n{report}"
+    );
+
+    let clean = tempfile::tempdir().expect("a temporary directory is made");
+    write(clean.path(), "src/lib.rs", LIBRARY);
+    let quiet = cdva()
+        .arg(NO_IGNORE)
+        .arg(clean.path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !stdout(&quiet).contains(ENDED_INSIDE),
+        "a tree that scanned clean has no footer at all:\n{}",
+        stdout(&quiet)
+    );
+
+    let broken = cdva()
+        .arg(NO_IGNORE)
+        .arg(broken_tree().path())
+        .output()
+        .expect("the binary runs");
+
+    assert!(
+        !stdout(&broken).contains(ENDED_INSIDE),
+        "a parse that failed is not a scan that did not end, and one footer must not answer for \
+         the other:\n{}",
+        stdout(&broken)
+    );
+}
+
+#[test]
+fn a_machine_format_prints_no_unterminated_footer_and_the_json_names_the_scan() {
+    let root = unterminated_tree();
+
+    for flag in ["--json", "--csv"] {
+        let output = cdva()
+            .arg(NO_IGNORE)
+            .arg(flag)
+            .arg(root.path())
+            .output()
+            .expect("the binary runs");
+
+        assert!(
+            output.status.success(),
+            "{flag} counts a tree holding a file whose scan did not end: {}",
+            stderr(&output)
+        );
+        assert!(
+            !stdout(&output).contains(ENDED_INSIDE),
+            "{flag} carries the scans as data, so a line of prose in it is a line to strip:\n{}",
+            stdout(&output)
+        );
+    }
+
+    let document = cdva()
+        .arg(NO_IGNORE)
+        .arg("--json")
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&document.stdout).expect("the report parses as JSON");
+    let scans = parsed["unterminated_scans"]
+        .as_array()
+        .expect("the document carries a list of the scans that did not end");
+    assert_eq!(scans.len(), 1, "one scan did not end: {parsed}");
+    assert!(
+        scans[0]
+            .as_str()
+            .is_some_and(|path| path.ends_with("regex.js")),
+        "the document names the file, as the footer would have: {parsed}"
+    );
+    assert_eq!(
+        parsed["failed_parses"].as_array().map(Vec::len),
+        Some(0),
+        "no parse failed over this tree, and the two lists are two lists: {parsed}"
+    );
+}
+
+#[test]
+fn strict_passes_over_an_unterminated_scan_because_no_row_left_its_bucket() {
+    let root = unterminated_tree();
+
+    let output = cdva()
+        .arg(NO_IGNORE)
+        .arg(STRICT)
+        .arg(root.path())
+        .output()
+        .expect("the binary runs");
+
+    // The two faults are not one fault. A parse that failed puts every row of
+    // its file in the production bucket, which is the split this tool exists
+    // to report. A scan that did not end moves rows between the comment count
+    // and the code count of one file and moves no row between the buckets, so
+    // it is the smaller fault and it is a documented limit of the language
+    // table rather than a broken tree. `--strict` answers for the parse, and
+    // the footer answers for the scan.
+    assert!(
+        output.status.success(),
+        "{STRICT} asks about the parse, and no parse failed over this tree:\n{}",
+        stdout(&output)
+    );
+    assert!(
+        stdout(&output).contains(ENDED_INSIDE),
+        "the report still names the file, whatever {STRICT} makes of it:\n{}",
+        stdout(&output)
     );
 }
 

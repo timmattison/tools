@@ -4,7 +4,10 @@
 //! them were measured against `cloc` 2.x rather than reasoned about, and each
 //! says so where it stands.
 
-use cdva::{classify, count, ends_unterminated, Counts, Language, LineIndex, LineKind};
+use cdva::{
+    classify, count, ends_unterminated, walk, Counts, Language, LineIndex, LineKind, WalkOptions,
+};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// The three numbers of a bucket, which reads better in an assertion than the
@@ -384,7 +387,7 @@ fn ends_unterminated_reads_the_state_the_scan_ended_in() {
 }
 
 // ---------------------------------------------------------------------------
-// Every Rust source of this repository.
+// Every source of this repository, under the language of its own path.
 // ---------------------------------------------------------------------------
 
 /// The root of this repository, found from the manifest directory of this
@@ -402,71 +405,145 @@ fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Every `*.rs` file under a directory, read from the working tree.
+/// The directories of the repository root that hold no source anybody wrote.
 ///
-/// The walk reads and never writes, so any number of copies of this test may
-/// run at once. It follows no symbolic link, because the type of a directory
-/// entry is the type of the link itself.
-fn collect_rust_sources(directory: &Path, skip: &Path, found: &mut Vec<PathBuf>) {
-    if directory == skip {
-        return;
-    }
-    let entries = std::fs::read_dir(directory)
-        .unwrap_or_else(|error| panic!("{} reads: {error}", directory.display()));
+/// Both are build output that the repository's own `.gitignore` names, and
+/// `target` alone runs to several gigabytes. They are named here rather than
+/// left to the ignore files because this walk turns the ignore files off; see
+/// [`HOW`].
+const BUILD_DIRECTORIES: &[&str] = &["target", "node_modules"];
+
+/// How the walk reads the tree.
+///
+/// `no_ignore` is on so that a contributor's *global* gitignore, or the
+/// `.git/info/exclude` of one checkout, cannot change which files this guard
+/// reads. Neither of those files is committed, so a walk that obeyed them would
+/// measure a different repository on every machine, and a clean report here
+/// would then mean whatever that machine happened to exclude.
+const HOW: WalkOptions = WalkOptions {
+    hidden: false,
+    no_ignore: true,
+};
+
+/// How few sources make this guard meaningless.
+///
+/// A run that reads a handful of files reports clean for the same reason a
+/// correct one does, so the floor fails such a run rather than letting it pass.
+const FEWEST_SOURCES: usize = 300;
+
+/// How few languages make this guard the old one again.
+///
+/// The bug this guard was widened for lives in the JavaScript row, and a guard
+/// that quietly went back to reading one language would report clean over it.
+const FEWEST_LANGUAGES: usize = 5;
+
+/// Every top-level entry of the repository worth walking.
+///
+/// The entries are derived from the directory itself rather than listed, so a
+/// directory added to the repository tomorrow is read without anybody
+/// remembering to add it here. A guard that reads four of seven directories
+/// reports clean for exactly the same reason a correct one does.
+///
+/// A hidden entry is dropped as well, because the walk drops a hidden file
+/// anywhere below a root and a hidden root would otherwise be the one
+/// exception.
+fn roots() -> Vec<PathBuf> {
+    let root = repository_root();
+    let entries = std::fs::read_dir(&root)
+        .unwrap_or_else(|error| panic!("{} reads: {error}", root.display()));
+
+    let mut roots = Vec::new();
     for entry in entries {
-        let entry = entry.expect("a directory entry reads");
-        let path = entry.path();
-        let kind = entry.file_type().expect("a directory entry has a type");
-        if kind.is_dir() {
-            // A build directory holds generated sources, which nobody here
-            // committed and which say nothing about the language table.
-            if path.file_name().is_some_and(|name| name == "target") {
-                continue;
-            }
-            collect_rust_sources(&path, skip, found);
-        } else if kind.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
-            found.push(path);
+        let entry = entry.expect("a directory entry of the repository root reads");
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with('.') || BUILD_DIRECTORIES.contains(&name) {
+            continue;
         }
+        roots.push(entry.path());
     }
+    roots.sort();
+    roots
+}
+
+/// The one corpus of deliberately defective sources.
+///
+/// The tree rule needs a file that no parser can read and files whose literals
+/// stand in every awkward place a language allows, so the corpus under this
+/// directory holds sources nobody would write. A file there that ends
+/// unterminated says nothing about the language table, which is what this guard
+/// asks about.
+fn defective_fixtures() -> PathBuf {
+    repository_root()
+        .join("src")
+        .join("cdva")
+        .join("tests")
+        .join("fixtures")
 }
 
 #[test]
-fn no_rust_source_of_this_repository_ends_unterminated() {
-    // This is the guard the character literal of Rust needed. A file that ends
-    // inside a string or a block comment is almost never a file somebody wrote
-    // that way; it is the language table reading a construct wrong, and every
-    // row of that file behind the construct is in the wrong bucket. The
-    // classifier reports such a file with numbers that look like any other, so
-    // nothing but this question tells the difference.
+fn no_source_of_this_repository_ends_unterminated() {
+    // This is the guard the character literal of Rust needed, and it asks its
+    // question of every language rather than of one. A file that ends inside a
+    // string or a block comment is almost never a file somebody wrote that way.
+    // It is the language table reading a construct wrong, and every row behind
+    // that construct is in the wrong count. The classifier reports such a file
+    // with numbers that look like any other, so nothing but this question tells
+    // the difference.
+    //
+    // The Rust row is the row this started on, and it is the row a guard of one
+    // language can never grow past. The backtick of a JavaScript regular
+    // expression opens a template string, which spans rows exactly as the
+    // phantom string of `'"'` did, and no reading of `*.rs` alone ever sees it.
     let root = repository_root();
-    // The one deliberately malformed source of the corpus. It is a fixture of
-    // the tree rule, which needs a file that does not parse.
-    let skip = root.join("src").join("cdva").join("tests").join("fixtures");
+    let fixtures = defective_fixtures();
 
-    let mut sources = Vec::new();
-    collect_rust_sources(&root.join("src"), &skip, &mut sources);
-    assert!(
-        sources.len() > 100,
-        "the walk found only {} Rust sources under {}, so it is reading the wrong tree and a clean \
-         report here would mean nothing",
-        sources.len(),
-        root.display()
-    );
+    let found = walk(&roots(), HOW).expect("the repository this crate is built from can be walked");
 
-    let mut unterminated = Vec::new();
-    for path in &sources {
-        let source = std::fs::read_to_string(path)
-            .unwrap_or_else(|error| panic!("{} reads: {error}", path.display()));
-        if ends_unterminated(&source, Language::Rust) {
-            unterminated.push(path.display().to_string());
+    let mut languages: BTreeSet<&'static str> = BTreeSet::new();
+    let mut read = 0_usize;
+    let mut unterminated: Vec<String> = Vec::new();
+    for (path, _) in &found {
+        if path.starts_with(&fixtures) {
+            continue;
+        }
+        let Some(language) = Language::from_path(path) else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(source) = String::from_utf8(bytes) else {
+            continue;
+        };
+        read += 1;
+        languages.insert(language.name());
+        if ends_unterminated(&source, language) {
+            unterminated.push(format!("{} ({})", path.display(), language.name()));
         }
     }
     unterminated.sort();
 
     assert!(
+        read > FEWEST_SOURCES,
+        "the walk read only {read} sources of {}, so it is reading the wrong tree and a clean \
+         report here would mean nothing",
+        root.display()
+    );
+    assert!(
+        languages.len() > FEWEST_LANGUAGES,
+        "the walk read {} language(s) — {} — so this guard has narrowed back to one corner of the \
+         table and a clean report here would mean nothing",
+        languages.len(),
+        languages.into_iter().collect::<Vec<&str>>().join(", ")
+    );
+
+    assert!(
         unterminated.is_empty(),
-        "these sources end inside a string or a block comment, which means the Rust row of the \
-         language table reads one of their constructs wrong:\n{}",
+        "these sources end inside a string or a block comment, which means the row of the language \
+         table named beside each one reads a construct of it wrong:\n{}",
         unterminated.join("\n")
     );
 }
