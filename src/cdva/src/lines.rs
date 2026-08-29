@@ -321,7 +321,7 @@ impl<'a> Scanner<'a> {
             if spec.line_anchored && self.pos != self.row_start {
                 continue;
             }
-            if self.matches(spec.open) {
+            if self.matches_block_open(spec) {
                 self.state = Scan::Block { depth: 1, spec };
                 self.mark_comment();
                 self.pos += spec.open.len();
@@ -401,7 +401,7 @@ impl<'a> Scanner<'a> {
             return;
         }
 
-        if self.syntax.nested_block && anchored_here && self.matches(spec.open) {
+        if self.syntax.nested_block && anchored_here && self.matches_block_open(spec) {
             self.state = Scan::Block {
                 depth: depth.saturating_add(1),
                 spec,
@@ -633,6 +633,31 @@ impl<'a> Scanner<'a> {
             None => true,
             Some(&byte) => byte == b'\n' || is_space(byte),
         }
+    }
+
+    /// Whether the opener of a block comment stands at the cursor.
+    ///
+    /// An ordinary opener is read exactly, as every other delimiter of the
+    /// table is. A [directive] opener is read as the language reads a
+    /// directive: the token, and then a letter. That is one rule and not two
+    /// spellings of one token, because the set of directives is open — a POD
+    /// reader takes `=frobnicate` as a directive as readily as `=head1`.
+    ///
+    /// The letter is read as a byte, which is what the rest of this scan reads.
+    /// Every byte of a character of more than one byte is 0x80 or above, so no
+    /// such byte is an ASCII letter and nothing here indexes a string.
+    ///
+    /// [directive]: crate::lang::BlockSpec::directive_open
+    fn matches_block_open(&self, spec: &BlockSpec) -> bool {
+        if !self.matches(spec.open) {
+            return false;
+        }
+        if !spec.directive_open {
+            return true;
+        }
+        self.bytes
+            .get(self.pos.saturating_add(spec.open.len()))
+            .is_some_and(u8::is_ascii_alphabetic)
     }
 
     /// Whether the bytes at the cursor open with this delimiter.

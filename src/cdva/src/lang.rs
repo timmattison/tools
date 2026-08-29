@@ -106,10 +106,30 @@ pub struct BlockSpec {
     /// The token that closes it.
     pub close: &'static str,
     /// Whether the two tokens are read only at the very start of a row, before
-    /// any white space. Ruby `=begin` and Perl `=pod` are such tokens: an
+    /// any white space. Ruby `=begin` and the POD of Perl are such tokens: an
     /// indented one is not a comment, and neither is one in the middle of a
     /// row.
     pub line_anchored: bool,
+    /// Whether the opener is a *directive*: the token, and then at least one
+    /// ASCII letter.
+    ///
+    /// Perl is the one language here that needs this. POD opens on `=` and an
+    /// identifier — `=head1`, `=over`, `=item`, `=back`, `=pod` — and `=head1`
+    /// is the commonest opening of all. A table that holds `=pod` alone reads
+    /// every other POD block as code, from its first row to its last. No list
+    /// of tokens states the rule either, because a POD reader takes a directive
+    /// it does not know as a directive all the same. The shape states it.
+    ///
+    /// The flag is what admits an opener this short, and it is the whole reason
+    /// the flag is a flag. An anchored `=` without it opens a comment on every
+    /// row that starts with `=`, and `= 1;` and `=42;` are code: the letter is
+    /// what tells the directive of a document from the operator of an
+    /// expression. So the pair is spelled by one constructor,
+    /// `anchored_directive`, and never by hand.
+    ///
+    /// This says nothing about the terminator, which stays exact. Perl closes
+    /// POD on `=cut` and on nothing else.
+    pub directive_open: bool,
 }
 
 /// One string form.
@@ -797,6 +817,7 @@ const fn block(open: &'static str, close: &'static str) -> BlockSpec {
         open,
         close,
         line_anchored: false,
+        directive_open: false,
     }
 }
 
@@ -806,6 +827,18 @@ const fn anchored(open: &'static str, close: &'static str) -> BlockSpec {
         open,
         close,
         line_anchored: true,
+        directive_open: false,
+    }
+}
+
+/// A block comment that opens on a directive: read only at the very start of a
+/// row, and only where at least one letter follows the token.
+const fn anchored_directive(open: &'static str, close: &'static str) -> BlockSpec {
+    BlockSpec {
+        open,
+        close,
+        line_anchored: true,
+        directive_open: true,
     }
 }
 
@@ -889,8 +922,13 @@ const LUA_BLOCK: BlockSpec = block("--[[", "]]");
 const HASKELL_BLOCK: BlockSpec = block("{-", "-}");
 /// `=begin`/`=end`, of Ruby, which is read only at the start of a row.
 const RUBY_BLOCK: BlockSpec = anchored("=begin", "=end");
-/// `=pod`/`=cut`, the POD of Perl, which is read only at the start of a row.
-const PERL_BLOCK: BlockSpec = anchored("=pod", "=cut");
+/// The POD of Perl, which opens on `=` and a directive at the start of a row
+/// and closes on `=cut`.
+///
+/// `=head1`, `=over`, `=item`, `=back`, and `=pod` all open one, and `=head1`
+/// is the commonest of them. `= 1;` opens none, because a directive needs a
+/// letter. See [`BlockSpec::directive_open`].
+const PERL_BLOCK: BlockSpec = anchored_directive("=", "=cut");
 
 /// Declares the language table, and everything derived from it.
 ///
