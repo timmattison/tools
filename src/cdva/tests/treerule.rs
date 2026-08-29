@@ -8,7 +8,7 @@
 //! the two strings, so a failure names the row that moved. A count alone never
 //! does: two rows swapping buckets leaves the count unchanged.
 //!
-//! There is one fixture per syntactic form the rule has to read, and three
+//! There is one fixture per syntactic form the rule has to read, and four
 //! guards keep the corpus honest. A coverage test asserts that the list of each
 //! [`Corpus`] is the set of files on disk, so a fixture added without an
 //! expectation — or an expectation left behind by a fixture that was renamed —
@@ -17,7 +17,10 @@
 //! language that gains a rule and gains no fixture shows up the same way. A
 //! third asserts that no fixture path is one the *path* rule would mark, since
 //! a fixture the globs claim never reaches the tree rule at all and its
-//! assertion would then pass for the wrong reason.
+//! assertion would then pass for the wrong reason. A fourth asserts that every
+//! corpus holds a fixture the rule marks nothing in, since a corpus whose
+//! fixtures all hold a test says nothing about the production code the query
+//! must leave alone.
 //!
 //! # The needle filter, and why the assertions read `TreeMode::Always`
 //!
@@ -348,6 +351,18 @@ impl Corpus {
         );
     }
 
+    /// Whether the tool leaves every row of a fixture in the production
+    /// bucket.
+    ///
+    /// A fixture marks nothing when the count of it holds no span and no test
+    /// row. [`assert_marks_nothing`] holds one fixture the test names to that,
+    /// and [`every_corpus_holds_a_fixture_of_production_code_alone`] asks it of
+    /// the fixtures of a corpus in turn.
+    fn marks_nothing(&self, name: &str) -> bool {
+        let counted = self.counted(name);
+        counted.test.total() == 0 && counted.spans.is_empty()
+    }
+
     /// The base names of the files in the fixture directory with this
     /// extension.
     fn names_on_disk(&self, extension: &str) -> BTreeSet<String> {
@@ -454,14 +469,12 @@ fn assert_marking(name: &str) {
 /// Asserts that a fixture puts no row at all in the test bucket.
 fn assert_marks_nothing(corpus: &Corpus, name: &str) {
     corpus.assert_marking(name);
-    let counted = corpus.counted(name);
-    assert_eq!(
-        counted.test.total(),
-        0,
-        "{}: `{name}` holds no test code",
-        corpus.language.name()
+    assert!(
+        corpus.marks_nothing(name),
+        "{}: `{name}` holds no test code: {:?}",
+        corpus.language.name(),
+        corpus.counted(name).spans
     );
-    assert!(counted.spans.is_empty());
 }
 
 /// The modules a Rust fixture declares its test code lives in, in the order the
@@ -1166,6 +1179,40 @@ fn no_fixture_path_is_marked_by_the_path_rule() {
             );
         }
     }
+}
+
+/// Every corpus holds a fixture of production code alone.
+///
+/// A fixture that holds a test says what the query marks. It says nothing about
+/// what the query leaves alone, because every row of the test region is a row
+/// the expectation lets the query take. A corpus whose fixtures all hold a test
+/// therefore keeps a query that marks production code green, and the false
+/// positive reaches a user as an undercount of the production bucket.
+///
+/// The corpora that hold no such fixture show up as the difference of the two
+/// sets, and not as a bare `false`.
+#[test]
+fn every_corpus_holds_a_fixture_of_production_code_alone() {
+    let every: BTreeSet<&str> = CORPORA
+        .iter()
+        .map(|corpus| corpus.language.name())
+        .collect();
+    let with_one: BTreeSet<&str> = CORPORA
+        .iter()
+        .filter(|corpus| {
+            corpus
+                .fixtures
+                .iter()
+                .any(|name| corpus.marks_nothing(name))
+        })
+        .map(|corpus| corpus.language.name())
+        .collect();
+
+    assert_eq!(
+        every, with_one,
+        "a corpus whose every fixture holds a test, so nothing in it catches a \
+         query that marks production code"
+    );
 }
 
 #[test]
