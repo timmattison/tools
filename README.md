@@ -972,7 +972,8 @@ Hidden files are a separate group: no ignore flag brings them in, and `--hidden`
 
 ### Features
 
-- **Respects ignore files**: Automatically excludes files listed in .gitignore, .ignore, and other standard ignore files
+- **Skips hidden files**: Automatically excludes hidden files and hidden directories
+- **Respects ignore files**: Automatically excludes the files that .gitignore, .ignore, and the other standard ignore files name
 - **Clean output**: Outputs only the final hash to stdout for easy scripting
 - **Informative messages**: Counts the excluded files on stderr, hidden ones apart from ignored ones, and names the
   flag that brings each group in:
@@ -1007,12 +1008,12 @@ hashes will be the same. The subdirectory names and locations are ignored.
 
 ### Examples
 
-Basic usage (respects .gitignore):
+Basic usage (skips hidden files and ignored files):
 ```bash
 dirhash /path/to/directory
 ```
 
-Include all files (ignore .gitignore):
+Ignore .gitignore but keep .ignore files:
 ```bash
 dirhash --no-ignore-vcs /path/to/directory
 ```
