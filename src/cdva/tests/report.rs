@@ -42,8 +42,7 @@ Total         489  10,322    7,016  70,771 |         219     28,025   39.6%
 /// the file as the walk produced it. Every other column reads exactly as it
 /// does in the default table, because a file row and a language row are the
 /// same row over a different set of files.
-const GOLDEN_BY_FILE_TABLE: &str =
-    r"File         Files  Blank  Comment  Code |  Test files  Test code  Test %
+const GOLDEN_BY_FILE_TABLE: &str = r"File         Files  Blank  Comment  Code |  Test files  Test code  Test %
 -------------------------------------------------------------------------
 src/lib.rs       1     12        6   150 |           1         30   20.0%
 tests/it.rs      1      4        2    44 |           1         44  100.0%
@@ -201,12 +200,7 @@ fn sortable() -> Summary {
             row("Ada", [3, 3, 0], counts(9, 1, 30), Counts::default()),
             row("Go", [10, 8, 4], counts(7, 2, 20), counts(2, 2, 100)),
         ],
-        row(
-            "Total",
-            [26, 24, 9],
-            counts(22, 17, 180),
-            counts(3, 3, 150),
-        ),
+        row("Total", [26, 24, 9], counts(22, 17, 180), counts(3, 3, 150)),
     )
 }
 
@@ -278,7 +272,10 @@ fn the_by_file_table_renders_exactly_this_way() {
 #[test]
 fn the_tests_only_table_renders_exactly_this_way() {
     assert_eq!(
-        render_table(&two_languages(), options(|it| it.bucket = Bucket::TestsOnly)),
+        render_table(
+            &two_languages(),
+            options(|it| it.bucket = Bucket::TestsOnly)
+        ),
         GOLDEN_TESTS_ONLY_TABLE,
         "the main columns report the test bucket, and the test columns are gone"
     );
@@ -608,12 +605,7 @@ fn a_production_only_report_drops_a_language_with_no_production_code() {
         &summary(
             vec![
                 row("Rust", [2, 2, 1], counts(1, 2, 30), counts(0, 0, 5)),
-                row(
-                    "JSON",
-                    [3, 0, 3],
-                    Counts::default(),
-                    counts(0, 0, 40),
-                ),
+                row("JSON", [3, 0, 3], Counts::default(), counts(0, 0, 40)),
             ],
             row("Total", [5, 2, 4], counts(1, 2, 30), counts(0, 0, 45)),
         ),

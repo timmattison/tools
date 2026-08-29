@@ -3,11 +3,16 @@
 //! Counts the lines of code of a tree, as `cloc` does, and reports the test
 //! code apart from the production code.
 //!
-//! This slice carries the command line, the walk, and the default table. The
-//! numbers it prints are both rules: a file whose path says it is test material
-//! is test material from its first row to its last, and every other file of a
-//! language with a tree rule is parsed so that the test nodes inside it are
-//! found. Every report but the table arrives in a later slice.
+//! This slice carries the command line, the walk, and the table. The numbers
+//! it prints are both rules: a file whose path says it is test material is test
+//! material from its first row to its last, and every other file of a language
+//! with a tree rule is parsed so that the test nodes inside it are found.
+//!
+//! Five flags shape the table. `--by-file` prints one row for each file rather
+//! than one for each language, `--sort` and `--top` order the rows and trim
+//! them, and `--tests-only` and `--production-only` narrow every column to one
+//! bucket. None of the five touches the total, which always covers every file
+//! the walk counted. Every report but the table arrives in a later slice.
 //!
 //! A parse costs far more than a scan of the rows, so by default only a file
 //! whose bytes hold a literal of its language ever reaches a parser.
@@ -31,7 +36,7 @@
 use anyhow::Result;
 use buildinfo::version_string;
 use cdva::{
-    render_table, resolve_test_modules, walk, Counter, FileCount, PathRules, ReportOptions,
+    render_table, resolve_test_modules, walk, Bucket, Counter, FileCount, PathRules, ReportOptions,
     SortColumn, Summary, TreeMode, TreeRules, WalkOptions,
 };
 use clap::Parser;
@@ -64,7 +69,7 @@ struct Cli {
     #[arg(long, value_name = "N")]
     top: Option<usize>,
     /// Report the test code alone.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "production_only")]
     tests_only: bool,
     /// Report the production code alone.
     #[arg(long)]
@@ -91,6 +96,28 @@ struct Cli {
 }
 
 impl Cli {
+    /// How the report is shaped, as the five flags of the report say.
+    const fn report_options(&self) -> ReportOptions {
+        ReportOptions {
+            by_file: self.by_file,
+            bucket: self.bucket(),
+            sort: self.sort,
+            top: self.top,
+        }
+    }
+
+    /// Which bucket the main columns report, as the two flags say.
+    ///
+    /// The flags conflict, so clap has already refused the pair by the time
+    /// this reads them and no third answer is reachable here.
+    const fn bucket(&self) -> Bucket {
+        match (self.tests_only, self.production_only) {
+            (true, _) => Bucket::TestsOnly,
+            (_, true) => Bucket::ProductionOnly,
+            _ => Bucket::Both,
+        }
+    }
+
     /// When the tree rule runs, as the two flags say.
     ///
     /// The flags conflict, so clap has already refused the pair by the time
@@ -119,7 +146,10 @@ fn main() -> Result<()> {
 
     let mut counted = count_all(&counter, &once_each(found));
     resolve_test_modules(&mut counted);
-    print!("{}", render_table(&Summary::new(counted), ReportOptions::default()));
+    print!(
+        "{}",
+        render_table(&Summary::new(counted), cli.report_options())
+    );
 
     Ok(())
 }

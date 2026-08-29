@@ -132,6 +132,20 @@ impl FileCount {
     pub fn is_test_file(&self) -> bool {
         self.test.total() > 0
     }
+
+    /// Whether this file counts as a production file.
+    ///
+    /// The mirror of [`is_test_file`], and not its opposite: a file that holds
+    /// both a production row and a test row counts as both, which is exactly
+    /// what a library with a test module inside it is. `--production-only`
+    /// counts the files this way, so the `Files` column of that report names
+    /// the files it is reporting the code of.
+    ///
+    /// [`is_test_file`]: FileCount::is_test_file
+    #[must_use]
+    pub fn is_production_file(&self) -> bool {
+        self.production.total() > 0
+    }
 }
 
 /// Counts one file at a time under a set of rules.

@@ -19,10 +19,14 @@
 //! `#[cfg(test)] mod <name>;` declaration moved the test code into — the one
 //! rule that reads across files, so it runs once every file is counted — and
 //! [`Summary`] rolls those up by language. Together they are the whole run:
-//! walk, count, resolve, add up. [`render_table`] prints that summary
-//! as the default report. The invariant that a reader of the report leans on
-//! lives in [`FileCount::total`] — the two buckets always sum to the count the
-//! tool would report with the split turned off.
+//! walk, count, resolve, add up. [`render_table`] prints that summary as a
+//! table, and [`ReportOptions`] is the whole of what shapes it: one row for
+//! each file rather than each language, the column the rows are ordered by, how
+//! many of them are kept, and which [`Bucket`] the columns report.
+//!
+//! The invariant that a reader of the report leans on lives in
+//! [`FileCount::total`] — the two buckets always sum to the count the tool
+//! would report with the split turned off.
 
 pub mod counts;
 pub mod file;

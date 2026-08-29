@@ -1,9 +1,10 @@
 //! The totals: every counted file, rolled up by language and over all.
 //!
-//! [`Summary`] is what the report of a later slice prints. It holds one [`Row`]
-//! for each language the walk found, one row for the total, and the files
-//! themselves, because `--by-file` and `--json` print them one at a time and a
-//! summary that dropped them would make the caller walk the tree twice.
+//! [`Summary`] is what the report prints. It holds one [`Row`] for each
+//! language the walk found, one row for the total, and the files themselves,
+//! because `--by-file` prints them one at a time — [`Summary::file_rows`] is
+//! that report's rows — and a summary that dropped them would make the caller
+//! walk the tree twice.
 //!
 //! A row carries the two buckets rather than one number for each column,
 //! because `Test code` is a *part* of `Code` and not a column beside it. So
@@ -85,6 +86,7 @@ impl Row {
     /// Adds another row's counts into this one, leaving the label alone.
     fn absorb(&mut self, other: &Row) {
         self.files = self.files.saturating_add(other.files);
+        self.production_files = self.production_files.saturating_add(other.production_files);
         self.test_files = self.test_files.saturating_add(other.test_files);
         self.production += other.production;
         self.test += other.test;
@@ -117,6 +119,9 @@ impl Summary {
                 .entry(file.language)
                 .or_insert_with(|| Row::empty(file.language.name().to_string()));
             row.files = row.files.saturating_add(1);
+            if file.is_production_file() {
+                row.production_files = row.production_files.saturating_add(1);
+            }
             if file.is_test_file() {
                 row.test_files = row.test_files.saturating_add(1);
             }
@@ -162,7 +167,17 @@ impl Summary {
     /// the file rows of one language sum to that language's row field by field.
     #[must_use]
     pub fn file_rows(&self) -> Vec<Row> {
-        Vec::new()
+        self.files
+            .iter()
+            .map(|file| Row {
+                label: file.path.display().to_string(),
+                files: 1,
+                production_files: u64::from(file.is_production_file()),
+                test_files: u64::from(file.is_test_file()),
+                production: file.production,
+                test: file.test,
+            })
+            .collect()
     }
 }
 
