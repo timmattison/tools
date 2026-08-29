@@ -27,6 +27,12 @@
 //! complete one. The two flags conflict, because asking for no parse and for
 //! every parse at once is a mistake rather than a silent choice of one.
 //!
+//! `--explain` answers for one file instead of printing a table: the rows a
+//! rule marked, and which rule marked them. It runs the whole walk to do it,
+//! because one rule of the tool reads across files, so the explanation is the
+//! explanation of the number the table would have printed and not of a file
+//! read on its own.
+//!
 //! # Two things this command states rather than assumes
 //!
 //! **A file the walk found twice is counted once.** Two roots that overlap —
@@ -39,16 +45,17 @@
 //! counter nobody could use. The path and the reason go to standard error, the
 //! file is left out of the table, and the run carries on.
 
-use anyhow::Result;
+use anyhow::{anyhow, Error, Result};
 use buildinfo::version_string;
 use cdva::{
-    render_csv, render_json, render_table, resolve_test_modules, walk, Bucket, Counter, FileCount,
-    PathRules, ReportOptions, SortColumn, Summary, TreeMode, TreeRules, WalkOptions,
+    render_csv, render_explanation, render_json, render_table, resolve_test_modules, walk, Bucket,
+    Counter, FileCount, Language, PathRules, ReportOptions, SortColumn, Summary, TreeMode,
+    TreeRules, WalkOptions,
 };
 use clap::Parser;
 use rayon::prelude::*;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 /// The path the tool counts when the command line names none.
 const DEFAULT_PATH: &str = ".";
@@ -189,9 +196,93 @@ fn main() -> Result<()> {
 
     let mut counted = count_all(&counter, &once_each(found));
     resolve_test_modules(&mut counted);
+
+    if let Some(target) = cli.explain.as_deref() {
+        print!("{}", explain(target, &counted)?);
+        return Ok(());
+    }
+
     print!("{}", cli.render(&Summary::new(counted)));
 
     Ok(())
+}
+
+/// The explanation of one file of the run, or the reason there is none.
+///
+/// The file is looked for among the files the run counted rather than counted
+/// again on its own, and that is the whole point of the flag: one rule of the
+/// tool reads across files, so a `#[cfg(test)] mod tests;` in `lib.rs` is what
+/// marks the whole of `tests.rs`. A file explained on its own would report no
+/// span at all while the table went on calling it test code, and an explanation
+/// that contradicts the number it explains is worse than none.
+///
+/// # Errors
+///
+/// Returns an error when the run counted no such file, naming which of the
+/// three reasons it was.
+fn explain(target: &Path, counted: &[FileCount]) -> Result<String> {
+    let canonical = std::fs::canonicalize(target).ok();
+    counted
+        .iter()
+        .find(|file| is_the_same_file(canonical.as_deref(), target, &file.path))
+        .map(render_explanation)
+        .ok_or_else(|| uncounted(target))
+}
+
+/// Whether two paths name one file.
+///
+/// The canonical path answers it wherever the file system can be asked, because
+/// `./src/foo.rs` and `src/foo.rs` are one file under two names and a user
+/// types whichever one they were looking at. Where it cannot — a file that has
+/// gone since the walk, a permission that stops the resolution — the two names
+/// are compared with the `.` components dropped, which is the same comparison
+/// the module pass makes and is right for exactly the two spellings above.
+fn is_the_same_file(canonical: Option<&Path>, target: &Path, candidate: &Path) -> bool {
+    match (canonical, std::fs::canonicalize(candidate).ok()) {
+        (Some(target_path), Some(candidate_path)) => target_path == candidate_path,
+        _ => lexical(target) == lexical(candidate),
+    }
+}
+
+/// A path with every `.` component dropped, so a walk of `.` and a name typed
+/// on the command line spell one file the same way.
+fn lexical(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|component| !matches!(component, Component::CurDir))
+        .collect()
+}
+
+/// Why the run counted no such file.
+///
+/// The three reasons are three different mistakes and get three different
+/// answers, because the fix for each is different: a path that is wrong, a file
+/// this tool does not count at all, and a file it does count that this run
+/// never saw. One message covering all three would tell a user with a
+/// `.gitignore` in the way that they had typed the name wrong.
+fn uncounted(target: &Path) -> Error {
+    let path = target.display();
+
+    if !target.try_exists().unwrap_or(false) {
+        return anyhow!("`{path}` does not exist, so there is nothing to explain");
+    }
+
+    let Some(language) = Language::from_path(target) else {
+        return match target.extension().and_then(std::ffi::OsStr::to_str) {
+            Some(extension) => anyhow!(
+                "`{path}` is not counted: the extension `{extension}` names no language cdva counts"
+            ),
+            None => anyhow!(
+                "`{path}` is not counted: it carries no extension, and no name cdva counts either"
+            ),
+        };
+    };
+
+    anyhow!(
+        "`{path}` is a {} file this run did not count: an ignore file may exclude it, it may be \
+         hidden, or it may lie outside the paths given. Try --no-ignore, or --hidden, or naming \
+         the path it lies under.",
+        language.name()
+    )
 }
 
 /// Every file of the walk, with a file two roots both found kept once.

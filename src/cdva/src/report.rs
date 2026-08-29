@@ -39,9 +39,18 @@
 //! and all three reports read [`report_rows`] to make that choice once. Two
 //! copies of it is how a document and a table of one run come to name a
 //! different file as the largest.
+//!
+//! # One file, and the reason for its number
+//!
+//! [`render_explanation`] answers a different question from the three reports
+//! above: not what the tree holds, but why one file of it was marked the way it
+//! was. It reads one [`FileCount`] and nothing else — no summary, no options,
+//! no file system — so the explanation of a number and the number itself come
+//! from one place, and a reader who disputes a cell of the table can read that
+//! cell again as a header, a list of marked regions, and two buckets.
 
 use crate::counts::{Row, Summary};
-use crate::file::FileCount;
+use crate::file::{FileCount, ParseStatus, Rule, Span};
 use crate::lines::Counts;
 use num_format::{Locale, ToFormattedString};
 use serde::Serialize;
@@ -76,6 +85,34 @@ const BAR: &str = " |";
 
 /// The glyph the rule lines are drawn with.
 const RULE_GLYPH: char = '-';
+
+/// What separates the three parts of the header of an explanation.
+const HEADER_SEPARATOR: &str = " — ";
+
+/// What every line of an explanation under the header starts with.
+const INDENT: &str = "  ";
+
+/// What separates the rows of a span from the rule that marked them.
+const SPAN_GAP: &str = "    ";
+
+/// What a range of rows is called, so a reader knows what the numbers are.
+const ROWS_LABEL: &str = "rows";
+
+/// What an explanation prints in place of a list of spans, for a file no rule
+/// marked. A file with nothing to list says where its rows went; an empty list
+/// says nothing at all.
+const NO_SPANS_SENTENCE: &str = "No rule marked any row, so every row counts as production code.";
+
+/// The name of the test bucket, which an explanation prints first: it is the
+/// bucket a reader of a code counter that splits its count came to read.
+const TEST_LABEL: &str = "test";
+
+/// The name of the production bucket.
+const PRODUCTION_LABEL: &str = "production";
+
+/// The numbers one bucket line prints: the rows of the bucket, and the three
+/// kinds those rows are.
+const BUCKET_CELLS: usize = 4;
 
 /// Which bucket the main columns report.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -641,7 +678,162 @@ fn rounded_percent(row: &Row) -> f64 {
 }
 
 /// Explain how one file was marked, span by span.
+///
+/// The header names the file, its language, and what a parser made of it. Under
+/// it comes one line for each region a rule marked, and under those the two
+/// buckets, each broken into blank, comment, and code. Every number is the
+/// number the table prints, formatted the way the table formats it, because a
+/// reader who disputes a cell of the table has come here to read that cell
+/// again in words.
+///
+/// The spans are ordered by their first row, then their last, then the words of
+/// the rule that marked them. The order a query happened to yield is not an
+/// order: two runs over one file would print the same lines in two orders, and
+/// a reader could not diff them.
+///
+/// Two spans over the same rows are both printed. The tool holds a set of rows
+/// and never adds the lengths of the spans, so a `#[test] fn` inside a
+/// `#[cfg(test)] mod` is counted once and marked twice — and a reader who sees
+/// both lines is seeing how the file was really read.
 #[must_use]
-pub fn render_explanation(_file: &FileCount) -> String {
-    String::new()
+pub fn render_explanation(file: &FileCount) -> String {
+    let mut explanation = String::new();
+
+    push_line(
+        &mut explanation,
+        &format!(
+            "{}{HEADER_SEPARATOR}{}{HEADER_SEPARATOR}{}",
+            file.path.display(),
+            file.language.name(),
+            parse_phrase(file.parse_status)
+        ),
+    );
+
+    explanation.push('\n');
+    let spans = span_lines(&file.spans);
+    if spans.is_empty() {
+        push_line(&mut explanation, &format!("{INDENT}{NO_SPANS_SENTENCE}"));
+    } else {
+        for span in &spans {
+            push_line(&mut explanation, span);
+        }
+    }
+
+    explanation.push('\n');
+    for bucket in bucket_lines(file) {
+        push_line(&mut explanation, &bucket);
+    }
+
+    explanation
+}
+
+/// What a parser made of the file, in words.
+///
+/// A failed parse says where the rows went as well as what happened, because
+/// that is the question a reader of a surprising number is really asking: the
+/// tool trusts no marking of a tree it could not read, so every row of such a
+/// file counts as production code.
+const fn parse_phrase(status: ParseStatus) -> &'static str {
+    match status {
+        ParseStatus::NotParsed => "not parsed",
+        ParseStatus::Clean => "parsed clean",
+        ParseStatus::Failed => "the parse failed, so every row counts as production",
+    }
+}
+
+/// One line for each span, ordered and aligned.
+///
+/// The ordering key is the text of the rule rather than the rule itself,
+/// because that text is what a reader compares: two spans over the same rows
+/// print in the order their lines read, and a reader who sorted the output by
+/// hand would get the same list back.
+fn span_lines(spans: &[Span]) -> Vec<String> {
+    let mut ordered: Vec<(u32, u32, String)> = spans
+        .iter()
+        .map(|span| (span.first_row, span.last_row, describe(&span.rule)))
+        .collect();
+    ordered.sort();
+
+    let width = ordered
+        .iter()
+        .map(|(first, last, _)| rows_label(*first, *last).width())
+        .max()
+        .unwrap_or(0);
+
+    ordered
+        .iter()
+        .map(|(first, last, description)| {
+            format!(
+                "{INDENT}{}{SPAN_GAP}{description}",
+                pad(&rows_label(*first, *last), width, Align::Left)
+            )
+        })
+        .collect()
+}
+
+/// The rows a span covers, as the explanation names them.
+fn rows_label(first_row: u32, last_row: u32) -> String {
+    format!("{ROWS_LABEL} {first_row}..={last_row}")
+}
+
+/// Which rule marked a span, in words.
+///
+/// A reader of an explanation is not reading Rust, so no line here names a
+/// variant of [`Rule`]. Each one names instead the thing a reader can act on:
+/// the glob to change, the kind of node the query matched, or the declaration
+/// in the other file that moved this one.
+fn describe(rule: &Rule) -> String {
+    match rule {
+        Rule::PathGlob(glob) => format!("the path rule matched the glob {glob}"),
+        Rule::TreeNode(kind) => format!("the tree rule matched a {kind}"),
+        Rule::ModDeclaration(module) => {
+            format!("another file declares this whole file with #[cfg(test)] mod {module};")
+        }
+    }
+}
+
+/// One line for each bucket: how many rows it holds, and of which kinds.
+///
+/// The columns are as wide as the widest number in them, so a reader compares
+/// the two buckets by looking straight down rather than by counting digits.
+fn bucket_lines(file: &FileCount) -> Vec<String> {
+    let buckets = [(TEST_LABEL, file.test), (PRODUCTION_LABEL, file.production)];
+    let label_width = buckets
+        .iter()
+        .map(|(label, _)| label.width())
+        .max()
+        .unwrap_or(0);
+
+    let cells: Vec<[String; BUCKET_CELLS]> = buckets
+        .iter()
+        .map(|(_, counts)| {
+            [
+                thousands(counts.total()),
+                thousands(counts.blank),
+                thousands(counts.comment),
+                thousands(counts.code),
+            ]
+        })
+        .collect();
+    let mut widths = [0_usize; BUCKET_CELLS];
+    for row in &cells {
+        for (width, cell) in widths.iter_mut().zip(row.iter()) {
+            *width = (*width).max(cell.width());
+        }
+    }
+
+    buckets
+        .iter()
+        .zip(cells.iter())
+        .map(|((label, _), row)| {
+            format!(
+                "{INDENT}{}{SEPARATOR}{} rows:{SEPARATOR}{} blank, {} comment, {} code",
+                pad(label, label_width, Align::Left),
+                pad(&row[0], widths[0], Align::Right),
+                pad(&row[1], widths[1], Align::Right),
+                pad(&row[2], widths[2], Align::Right),
+                pad(&row[3], widths[3], Align::Right),
+            )
+        })
+        .collect()
 }
