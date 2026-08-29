@@ -180,15 +180,17 @@ const KOTLIN_FIXTURES: &[&str] = &["annotated", "lifecycle", "multibyte", "negat
 /// that carries none.
 const CSHARP_FIXTURES: &[&str] = &["attributes", "fact", "multibyte", "negative", "theory"];
 
-/// Every Ruby fixture. `rspec` carries the receiver the pattern deliberately
-/// does not name, `bare_describe` carries none, `minitest` is the class the
-/// second pattern reads, and `negative` holds the call to a method named
-/// `describe` that carries no block.
+/// Every Ruby fixture. `rspec` carries the one receiver the query admits,
+/// `bare_describe` carries none, `minitest` is the class the third pattern
+/// reads, `negative` holds the call to a method named `describe` that carries
+/// no block, and `receiver_block` holds the production methods that carry a
+/// block on a receiver of their own.
 const RUBY_FIXTURES: &[&str] = &[
     "bare_describe",
     "minitest",
     "multibyte",
     "negative",
+    "receiver_block",
     "rspec",
 ];
 
@@ -1003,6 +1005,24 @@ fn ruby_marks_a_class_that_inherits_a_test_case() {
 #[test]
 fn ruby_leaves_a_call_that_carries_no_block_in_the_production_bucket() {
     assert_marks_nothing(Corpus::of(Language::Ruby), "negative");
+}
+
+#[test]
+fn ruby_leaves_a_block_on_a_receiver_of_its_own_in_the_production_bucket() {
+    let corpus = Corpus::of(Language::Ruby);
+    corpus.assert_marking("receiver_block");
+
+    // A name of the six on a receiver that is not the runner is a method of
+    // that receiver, and a block after it is production code. The fixture
+    // holds a test below the two such methods, so the assertion says both
+    // things at once: the query leaves `logger.context … do` alone, and it
+    // still reads the `RSpec.describe … do` under it.
+    let marked = marked_lines(corpus, "receiver_block");
+    assert_eq!(
+        marked.first().map(String::as_str),
+        Some("RSpec.describe Ledger do"),
+        "the first marked row is the test, not the method above it: {marked:?}"
+    );
 }
 
 #[test]
