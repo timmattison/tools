@@ -5,7 +5,39 @@
 //! of the URL. This module builds that URL and signs it with AWS Signature
 //! Version 4.
 
+use sha2::Digest;
 use std::time::SystemTime;
+
+/// The name AWS gives the IoT service that accepts the MQTT WebSocket.
+const SERVICE: &str = "iotdevicegateway";
+
+/// The name of the signature algorithm.
+const ALGORITHM: &str = "AWS4-HMAC-SHA256";
+
+/// The HTTP method of the handshake.
+const METHOD: &str = "GET";
+
+/// The path of the MQTT WebSocket of AWS IoT Core.
+const PATH: &str = "/mqtt";
+
+/// The one header the handshake signs.
+const SIGNED_HEADERS: &str = "host";
+
+/// The last part of a credential scope.
+const SCOPE_TERMINATOR: &str = "aws4_request";
+
+/// The lowercase hex SHA-256 of the empty byte string.
+///
+/// The handshake carries no body, so the canonical request always ends with
+/// this hash. The value is a constant of SHA-256, and not a secret.
+const EMPTY_STRING_SHA256: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// The format of the long date, as `chrono` states it.
+const LONG_DATE_FORMAT: &str = "%Y%m%dT%H%M%SZ";
+
+/// The format of the short date, as `chrono` states it.
+const SHORT_DATE_FORMAT: &str = "%Y%m%d";
 
 /// A failure of the presigner.
 #[derive(Debug, thiserror::Error)]
@@ -36,8 +68,103 @@ pub fn presign_websocket_url(
     credentials: &aws_credential_types::Credentials,
     now: SystemTime,
 ) -> Result<String, PresignError> {
-    let _ = (endpoint, region, credentials, now);
-    unimplemented!("presign_websocket_url")
+    let moment = utc(now)?;
+    let date_long = moment.format(LONG_DATE_FORMAT).to_string();
+    let date_short = moment.format(SHORT_DATE_FORMAT).to_string();
+    let scope = format!("{date_short}/{region}/{SERVICE}/{SCOPE_TERMINATOR}");
+    let credential = format!("{}/{scope}", credentials.access_key_id());
+
+    let query = query_string(&[
+        ("X-Amz-Algorithm", ALGORITHM),
+        ("X-Amz-Credential", &credential),
+        ("X-Amz-Date", &date_long),
+        ("X-Amz-SignedHeaders", SIGNED_HEADERS),
+    ]);
+
+    let canonical_request = [
+        METHOD,
+        PATH,
+        &query,
+        &format!("host:{endpoint}"),
+        "",
+        SIGNED_HEADERS,
+        EMPTY_STRING_SHA256,
+    ]
+    .join("\n");
+
+    let string_to_sign = [
+        ALGORITHM,
+        &date_long,
+        &scope,
+        &sha256_hex(canonical_request.as_bytes()),
+    ]
+    .join("\n");
+
+    let signing_key = aws_sigv4::sign::v4::generate_signing_key(
+        credentials.secret_access_key(),
+        now,
+        region,
+        SERVICE,
+    );
+    let signature =
+        aws_sigv4::sign::v4::calculate_signature(signing_key, string_to_sign.as_bytes());
+
+    let mut url = format!("wss://{endpoint}{PATH}?{query}&X-Amz-Signature={signature}");
+
+    // The session token comes after the signature and is no part of it. AWS
+    // documents the IoT WebSocket handshake that way, and the Go client that
+    // works does the same.
+    if let Some(token) = credentials.session_token() {
+        url.push_str("&X-Amz-Security-Token=");
+        url.push_str(&encode_query_value(token));
+    }
+
+    Ok(url)
+}
+
+/// Reads a moment of the clock as a date and a time in UTC.
+///
+/// # Errors
+///
+/// Gives [`PresignError::ClockOutOfRange`] when the moment is before the Unix
+/// epoch, or after the last date `chrono` states.
+fn utc(now: SystemTime) -> Result<chrono::DateTime<chrono::Utc>, PresignError> {
+    let since_epoch = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|_| PresignError::ClockOutOfRange(now))?;
+
+    let seconds =
+        i64::try_from(since_epoch.as_secs()).map_err(|_| PresignError::ClockOutOfRange(now))?;
+
+    chrono::DateTime::from_timestamp(seconds, since_epoch.subsec_nanos())
+        .ok_or(PresignError::ClockOutOfRange(now))
+}
+
+/// Joins query parameters into the query string the signature covers.
+///
+/// The names go in unchanged, because every name of the handshake holds
+/// letters and hyphens only. Each value takes the encoding of a query value.
+/// The order of `parameters` is the order of the query string, and the
+/// signature covers that order.
+fn query_string(parameters: &[(&str, &str)]) -> String {
+    parameters
+        .iter()
+        .map(|(name, value)| format!("{name}={}", encode_query_value(value)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Encodes one value of a query string.
+///
+/// This is the encoding `application/x-www-form-urlencoded` states, which is
+/// the encoding the Go client applies with `url.QueryEscape`.
+fn encode_query_value(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+/// Gives the SHA-256 of some bytes as lowercase hex digits.
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(sha2::Sha256::digest(bytes))
 }
 
 #[cfg(test)]
