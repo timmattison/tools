@@ -8,9 +8,11 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
+use std::fs;
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -253,24 +255,83 @@ pub fn compress_stream<R: Read, W: Write>(
     Ok(read_bytes)
 }
 
+/// A writer that counts the bytes that it gives to another writer.
+///
+/// The count of the compressed bytes must come from the stream itself. A read
+/// of the size of the output file can happen before the last bytes of the
+/// stream reach that file. The Go tool that this crate replaces had that
+/// fault, thus it reported a size that was too small.
+struct CountingWriter<'a, W: Write> {
+    /// The writer that gets the bytes.
+    inner: W,
+    /// The count of the bytes that went to the writer.
+    count: &'a mut u64,
+}
+
+impl<W: Write> Write for CountingWriter<'_, W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        *self.count += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Compress the file at `input` into a gzip file at `output`.
+///
+/// The function makes the output file and writes the gzip stream into it. It
+/// then answers the sizes of the two files and the time that the run took. The
+/// size of the output is the count of the bytes of the stream, thus it holds
+/// the last bytes of the stream as well.
+///
+/// The function removes a part of an output file when the run fails, and also
+/// when the user stops the run. A part of a gzip stream looks like a complete
+/// one, thus a run that leaves such a file gives a broken file to the user.
 ///
 /// # Errors
 ///
 /// Answers [`CompressError::OpenInput`] when the input file does not open, and
 /// [`CompressError::CreateOutput`] when the output file does not open. Answers
-/// the error of [`compress_stream`] when the stream fails.
+/// [`CompressError::ReadInput`], [`CompressError::WriteOutput`], or
+/// [`CompressError::Cancelled`] when the stream stops short.
 pub fn compress_file(
-    _input: &Path,
-    _output: &Path,
-    _cancelled: &dyn Fn() -> bool,
-    _on_progress: &mut dyn FnMut(u64),
+    input: &Path,
+    output: &Path,
+    cancelled: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(u64),
 ) -> Result<Stats, CompressError> {
-    Ok(Stats {
-        original_size: 0,
-        new_size: 0,
-        duration: Duration::ZERO,
-    })
+    let source = File::open(input).map_err(|source| CompressError::OpenInput {
+        path: input.to_path_buf(),
+        source,
+    })?;
+    let target = File::create(output).map_err(|source| CompressError::CreateOutput {
+        path: output.to_path_buf(),
+        source,
+    })?;
+    let start = Instant::now();
+    let mut new_size = 0_u64;
+    let counter = CountingWriter {
+        inner: target,
+        count: &mut new_size,
+    };
+    let result = compress_stream(source, counter, cancelled, on_progress);
+    let duration = start.elapsed();
+    match result {
+        Ok(original_size) => Ok(Stats {
+            original_size,
+            new_size,
+            duration,
+        }),
+        Err(error) => {
+            // A failure to remove the file does not change the error that the
+            // caller gets. The caller must know why the run stopped.
+            let _ = fs::remove_file(output);
+            Err(error)
+        }
+    }
 }
 
 /// The suffix that marks a gzip file. A run that gets no output name adds
