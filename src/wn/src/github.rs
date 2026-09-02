@@ -285,6 +285,24 @@ mod tests {
             .collect()
     }
 
+    /// The message GitHub writes for a repository the credential may read in
+    /// part and not in whole.
+    const REFUSED_MESSAGE: &str = "Resource not accessible by integration";
+
+    /// A body that answers `null` for #42, with `kind` as the reason beside
+    /// the null.
+    ///
+    /// This is the shape of every per-field error: the alias answers `null`,
+    /// and the entry in the top-level `errors` list names that alias in its
+    /// `path`. Only the `type` says whether the repository has the number.
+    fn refused_body(kind: &str) -> String {
+        format!(
+            r#"{{"data":{{"repository":{{"i42":null}}}},
+               "errors":[{{"type":"{kind}","path":["repository","i42"],
+               "message":"{REFUSED_MESSAGE}"}}]}}"#
+        )
+    }
+
     #[test]
     fn a_repository_is_two_parts_divided_by_one_slash() {
         let repo = Repo::parse("timmattison/tools").expect("that is a repository");
@@ -410,6 +428,96 @@ mod tests {
         let body = r#"{"data":{"repository":{}}}"#;
         let entries = parse_response(body, &chain(&[1])).expect("that body is an answer");
         assert_eq!(statuses(&entries), vec![(1, Status::Missing)]);
+    }
+
+    #[test]
+    fn a_number_github_could_not_answer_for_is_an_error_and_not_a_missing_number() {
+        // GitHub writes the same null for a number it refuses to answer for
+        // as for a number the repository does not have. Only the type beside
+        // the null parts the two. A tool that reads the null alone reports a
+        // number the repository does have as one it lacks, and the reader
+        // then hunts for a typo they did not make.
+        //
+        // The last type is one this tool has never seen, because a type that
+        // is not NOT_FOUND is a refusal whether this tool knows it or not.
+        for kind in ["FORBIDDEN", "INTERNAL", "SERVICE_UNAVAILABLE", "RATIONED"] {
+            let err = parse_response(&refused_body(kind), &chain(&[42]))
+                .expect_err("GitHub could not answer for that number");
+            assert!(
+                err.to_string().contains(REFUSED_MESSAGE),
+                "the error carries what GitHub said about {kind}, in {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_error_names_the_number_github_could_not_answer_for() {
+        // A chain of six that fails has to say which of the six it failed on,
+        // or the reader walks the whole chain again by hand.
+        let body = r#"{"data":{"repository":{
+            "i1":{"__typename":"Issue","number":1,"title":"One","state":"CLOSED","stateReason":"COMPLETED"},
+            "i2":{"__typename":"Issue","number":2,"title":"Two","state":"CLOSED","stateReason":"COMPLETED"},
+            "i3":{"__typename":"Issue","number":3,"title":"Three","state":"OPEN","stateReason":null},
+            "i4":null,
+            "i5":{"__typename":"Issue","number":5,"title":"Five","state":"OPEN","stateReason":null},
+            "i6":{"__typename":"Issue","number":6,"title":"Six","state":"OPEN","stateReason":null}
+        }},"errors":[{"type":"SERVICE_UNAVAILABLE","path":["repository","i4"],"message":"Something went wrong while executing your query."}]}"#;
+        let err = parse_response(body, &chain(&[1, 2, 3, 4, 5, 6]))
+            .expect_err("GitHub could not answer for one of the six");
+        assert!(
+            err.to_string().contains("#4"),
+            "the error names the number, in {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_number_github_could_not_answer_for_beats_a_number_the_repository_does_not_have() {
+        // One body carries both: #999 is a typo, and GitHub refused to answer
+        // for #42. The run fails, because a wrong answer is worse than no
+        // answer.
+        let body = r#"{"data":{"repository":{
+            "i277":{"__typename":"Issue","number":277,"title":"First","state":"OPEN","stateReason":null},
+            "i999":null,
+            "i42":null
+        }},"errors":[
+            {"type":"NOT_FOUND","path":["repository","i999"],"message":"Could not resolve to an issue or pull request with the number of 999."},
+            {"type":"FORBIDDEN","path":["repository","i42"],"message":"Resource not accessible by integration"}
+        ]}"#;
+        let err = parse_response(body, &chain(&[277, 999, 42]))
+            .expect_err("GitHub could not answer for #42");
+        assert!(
+            err.to_string().contains(REFUSED_MESSAGE),
+            "the error carries what GitHub said, in {err:#}"
+        );
+        assert!(
+            err.to_string().contains("#42"),
+            "the error names the number GitHub could not answer for, in {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_null_answer_with_no_reason_beside_it_is_missing() {
+        // The one entry of the errors list names another alias, so it says
+        // nothing about #999. A null with no reason beside it stays a number
+        // the repository does not have.
+        let body = r#"{"data":{"repository":{"i999":null}},
+            "errors":[{"type":"FORBIDDEN","path":["repository","i1"],
+            "message":"Resource not accessible by integration"}]}"#;
+        let entries = parse_response(body, &chain(&[999])).expect("that body is an answer");
+        assert_eq!(statuses(&entries), vec![(999, Status::Missing)]);
+    }
+
+    #[test]
+    fn an_error_that_names_no_alias_belongs_to_no_number() {
+        // An entry with no path, and one whose path is not a list of names,
+        // belong to no alias of the query. Reading either of them as the
+        // reason for #999 would fail a run over a number that is a typo.
+        let body = r#"{"data":{"repository":{"i999":null}},"errors":[
+            {"type":"FORBIDDEN","message":"Resource not accessible by integration"},
+            {"type":"INTERNAL","path":[1,2],"message":"Something went wrong."}
+        ]}"#;
+        let entries = parse_response(body, &chain(&[999])).expect("that body is an answer");
+        assert_eq!(statuses(&entries), vec![(999, Status::Missing)]);
     }
 
     #[test]

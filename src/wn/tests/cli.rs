@@ -395,6 +395,32 @@ fn reports_a_repository_nobody_can_read() {
 }
 
 #[test]
+fn reports_a_number_github_would_not_answer_for() {
+    // A null answer with a FORBIDDEN beside it is not a number the repository
+    // does not have. Printing the `?` row and the note would tell the reader
+    // to hunt for a typo they did not make, so the whole run fails instead.
+    let body = r#"{"data":{"repository":{
+"i277":{"__typename":"Issue","number":277,"title":"First thing","state":"OPEN","stateReason":null},
+"i278":null
+}},"errors":[{"type":"FORBIDDEN","path":["repository","i278"],"message":"Resource not accessible by integration"}]}"#;
+    let gh = FakeGh::with_status(body, 1);
+    let output = run(&gh, &["--repo", REPO, "#277 → #278"], "80", false);
+
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("Resource not accessible by integration"),
+        "the error carries what GitHub said, in {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("#278"),
+        "the error names the number, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
 fn says_so_when_the_github_cli_is_not_installed() {
     let dir = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_wn"))
