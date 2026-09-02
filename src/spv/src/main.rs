@@ -481,6 +481,7 @@ fn is_lsof_available() -> bool {
 // Note: NAME (index 8+) may contain spaces, so we join all remaining fields.
 const LSOF_FIELD_FD: usize = 3;
 const LSOF_FIELD_TYPE: usize = 4;
+const LSOF_FIELD_NODE: usize = 7;
 const LSOF_FIELD_NAME_START: usize = 8;
 const LSOF_MIN_FIELDS: usize = 9;
 
@@ -708,8 +709,18 @@ struct NetConnection {
 ///
 /// The connection, or `None` when the line holds too few fields to be one.
 fn parse_lsof_net_line(line: &str) -> Option<NetConnection> {
-    let _ = line;
-    None
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.len() < LSOF_MIN_FIELDS {
+        return None;
+    }
+    Some(NetConnection {
+        fd: fields[LSOF_FIELD_FD].to_string(),
+        family: fields[LSOF_FIELD_TYPE].to_string(),
+        protocol: fields[LSOF_FIELD_NODE].to_string(),
+        // The NAME field holds the addresses and, for TCP, the state in
+        // parentheses, so every remaining field belongs to it.
+        name: fields[LSOF_FIELD_NAME_START..].join(" "),
+    })
 }
 
 /// Prints processes in table format using comfy-table.
