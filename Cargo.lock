@@ -9336,6 +9336,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "wn"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buildinfo",
+ "clap",
+ "colored",
+ "serde_json",
+ "tempfile",
+ "termsize",
+ "testcolor",
+ "textfit",
+ "thiserror 2.0.20",
+ "unicode-width",
+]
+
+[[package]]
 name = "wolly"
 version = "0.1.0"
 dependencies = [
