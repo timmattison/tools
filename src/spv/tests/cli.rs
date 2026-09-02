@@ -95,6 +95,111 @@ impl Drop for Sleeper {
     }
 }
 
+/// Starts a child, waits for it to finish, and returns the id it no longer uses.
+fn reaped_pid() -> u32 {
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("exit 0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("/bin/sh starts");
+    let pid = child.id();
+    let _ = child.wait();
+    pid
+}
+
+#[test]
+fn a_name_that_matches_nothing_is_reported_and_the_run_fails() {
+    let name = unique_token("spv_no_such_process_");
+    let (ok, _stdout, stderr) = run(spv().arg(&name).output().expect("spv runs"));
+
+    assert!(!ok, "a search that matches nothing fails");
+    assert!(
+        stderr.contains(&name),
+        "the message names the pattern; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn no_argument_prints_the_usage_text_and_fails() {
+    let (ok, _stdout, stderr) = run(spv().output().expect("spv runs"));
+
+    assert!(!ok, "a run without a pattern fails");
+    assert!(
+        stderr.contains("Usage"),
+        "the run prints the usage text; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn a_process_id_that_is_gone_gives_a_message_and_not_a_panic() {
+    let pid = reaped_pid();
+    let (ok, _stdout, stderr) = run(spv().args(["--all", &pid.to_string()]).output().expect("spv runs"));
+
+    assert!(!ok, "a process that is gone is not found");
+    assert!(
+        stderr.contains(&pid.to_string()),
+        "the message names the process id; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "the run never panics; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn the_two_searches_disagree_on_a_name_whose_case_differs() {
+    let mixed = unique_token("SpvCase_");
+    let lowered = mixed.to_lowercase();
+    let _child = Sleeper::spawn(&mixed, &[]);
+
+    let found_ignoring_case = spv()
+        .args(["--full", &lowered])
+        .output()
+        .expect("spv runs")
+        .status
+        .success();
+    assert!(
+        found_ignoring_case,
+        "the default search ignores case, so {lowered} finds {mixed}"
+    );
+
+    let found_respecting_case = spv()
+        .args(["--full", "--case-sensitive", &lowered])
+        .output()
+        .expect("spv runs")
+        .status
+        .success();
+    assert!(
+        !found_respecting_case,
+        "--case-sensitive respects case, so {lowered} misses {mixed}"
+    );
+
+    let found_exactly = spv()
+        .args(["--full", "--case-sensitive", &mixed])
+        .output()
+        .expect("spv runs")
+        .status
+        .success();
+    assert!(found_exactly, "--case-sensitive finds the exact name {mixed}");
+}
+
+#[test]
+fn a_command_line_of_multi_byte_characters_is_found_and_shown() {
+    let marker = format!("日本語🎉{}", unique_token(""));
+    let _child = Sleeper::spawn(&marker, &[]);
+
+    let (ok, stdout, stderr) = run(spv().args(["--full", &marker]).output().expect("spv runs"));
+
+    assert!(ok, "spv finds the child; stderr: {stderr}");
+    assert!(
+        stdout.contains("日本語"),
+        "the command column shows the characters; stdout: {stdout}"
+    );
+}
+
 /// Runs `spv` so that it inspects its own process.
 ///
 /// The shell expands `$$` to its own process id and then replaces itself with
