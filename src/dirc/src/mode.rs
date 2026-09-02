@@ -72,7 +72,7 @@ pub enum PasteError {
 /// language passes through whole.
 #[must_use]
 pub fn escape_single_quotes(path: &str) -> String {
-    todo!("escape every single quote for a single-quoted shell word")
+    path.replace('\'', r"'\''")
 }
 
 /// The `cd` line for the directory that `copied` names.
@@ -93,7 +93,30 @@ pub fn escape_single_quotes(path: &str) -> String {
 /// directory, and [`PasteError::Absolute`] when the path cannot be made
 /// absolute.
 pub fn cd_command(copied: &str) -> Result<String, PasteError> {
-    todo!("give the cd line for the directory the clipboard names")
+    if copied.is_empty() {
+        return Err(PasteError::Empty);
+    }
+
+    let path = copied.trim();
+    if path.is_empty() {
+        return Err(PasteError::OnlyWhitespace);
+    }
+
+    let found = std::fs::metadata(path).map_err(|cause| PasteError::InvalidPath {
+        path: path.to_string(),
+        cause: cause.to_string(),
+    })?;
+    if !found.is_dir() {
+        return Err(PasteError::NotADirectory {
+            path: path.to_string(),
+        });
+    }
+
+    let absolute = std::path::absolute(path).map_err(|cause| PasteError::Absolute {
+        path: path.to_string(),
+        cause: cause.to_string(),
+    })?;
+    cd_line(path, &absolute)
 }
 
 /// The `cd` line for `absolute`, the resolved form of `path`.
@@ -107,7 +130,11 @@ pub fn cd_command(copied: &str) -> Result<String, PasteError> {
 ///
 /// Gives [`PasteError::Absolute`] when `absolute` is not text.
 fn cd_line(path: &str, absolute: &Path) -> Result<String, PasteError> {
-    todo!("write the escaped absolute path into a cd line")
+    let written = absolute.to_str().ok_or_else(|| PasteError::Absolute {
+        path: path.to_string(),
+        cause: NOT_UTF8.to_string(),
+    })?;
+    Ok(format!("cd '{}'", escape_single_quotes(written)))
 }
 
 #[cfg(test)]
@@ -255,10 +282,7 @@ mod tests {
         let missing = base.path().join("no-such-directory");
         let missing_text = text(&missing);
         let err = cd_command(missing_text).expect_err("the path is not there");
-        assert!(
-            matches!(err, PasteError::InvalidPath { .. }),
-            "{err:?}"
-        );
+        assert!(matches!(err, PasteError::InvalidPath { .. }), "{err:?}");
         // The cause is the text of the operating system, so the test pins the
         // shape of the message and the path in it, and not the cause.
         let message = err.to_string();
