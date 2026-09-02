@@ -412,6 +412,28 @@ mod tests {
     }
 
     #[test]
+    fn the_short_help_and_the_long_help_say_the_same_thing() {
+        // `-h` and `--help` must both carry the whole text. A doc comment of
+        // two paragraphs on `Cli` makes clap derive a `long_about` out of it,
+        // and `--help` then prints that doc comment in place of ABOUT, while
+        // `-h` keeps ABOUT. The longer help would say less than the short one,
+        // and neither would name the two modes.
+        let mut command = Cli::command();
+        assert!(
+            command.get_long_about().is_none(),
+            "{:?}",
+            command.get_long_about()
+        );
+
+        let short = command.render_help().to_string();
+        let long = command.render_long_help().to_string();
+        for help in [&short, &long] {
+            assert!(help.contains(ABOUT), "{help}");
+            assert!(help.contains(AFTER_HELP), "{help}");
+        }
+    }
+
+    #[test]
     fn the_command_line_is_well_formed() {
         Cli::command().debug_assert();
     }
