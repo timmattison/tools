@@ -1069,44 +1069,6 @@ pub fn branches_behind_main_with_a_pathspec_magic_path_repo() -> TestRepo {
     repo
 }
 
-/// [`conflicting_repo`]'s shape, moved into `café.txt` and stretched to two
-/// contested regions: both branches rewrite line 10 and line 22 of the same
-/// file, twelve lines apart so git's 3-line diff context cannot merge them into
-/// one hunk.
-///
-/// Two regions rather than one is the whole point. A conflicted file is counted
-/// by reading it back off disk by the name git reported, so a name git quoted on
-/// the way out names nothing on disk — and the count falls back to the one
-/// decision a file with no readable content still costs. One contested region
-/// would score one either way; two makes the fallback visible.
-///
-/// # Panics
-///
-/// Panics if the repository cannot be built — git missing, or a command failing.
-pub fn two_region_conflict_in_a_quoted_path_repo() -> TestRepo {
-    const FIRST_CONTESTED_LINE: usize = 10;
-    const SECOND_CONTESTED_LINE: usize = 22;
-    const CONTESTED_FILE: &str = "café.txt";
-
-    let repo = TestRepo::init();
-    let base = numbered_lines(30);
-    repo.commit_file(CONTESTED_FILE, &base, "base");
-
-    repo.branch("left");
-    let left = replace_line(&base, FIRST_CONTESTED_LINE, "left-edit-first");
-    let left = replace_line(&left, SECOND_CONTESTED_LINE, "left-edit-second");
-    repo.commit_file(CONTESTED_FILE, &left, "left work");
-
-    repo.checkout("main");
-    repo.branch("right");
-    let right = replace_line(&base, FIRST_CONTESTED_LINE, "right-edit-first");
-    let right = replace_line(&right, SECOND_CONTESTED_LINE, "right-edit-second");
-    repo.commit_file(CONTESTED_FILE, &right, "right work");
-
-    repo.checkout("main");
-    repo
-}
-
 /// A branch whose first commit arrives at content `main` has since reached by a
 /// different route, followed by a second commit that is real work. Replaying the
 /// branch onto `main` empties that first commit while the second one still has
