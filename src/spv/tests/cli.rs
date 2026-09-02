@@ -431,3 +431,84 @@ fn the_environment_of_another_process_is_refused_with_a_reason() {
         "a refusal never reads as an empty environment; stdout: {stdout}"
     );
 }
+
+/// A PATH that holds no `lsof`.
+const PATH_WITHOUT_LSOF: &str = "/nonexistent";
+
+/// Runs `spv` on one process with a PATH that holds no `lsof`.
+///
+/// `spv()` names the binary by its absolute path, so an empty PATH leaves `spv`
+/// itself alone and stops only the sections that read `lsof`. `spv` looks for
+/// `lsof` once and keeps that answer for the life of the process, so each run
+/// needs a child of its own.
+///
+/// # Arguments
+///
+/// * `flag` - The section flag to pass to `spv`
+/// * `pid` - The process to inspect
+///
+/// # Returns
+///
+/// The output of the run.
+fn spv_without_lsof(flag: &str, pid: u32) -> Output {
+    spv()
+        .args([flag, &pid.to_string()])
+        .env("PATH", PATH_WITHOUT_LSOF)
+        .output()
+        .expect("spv runs")
+}
+
+/// Finds the line of a section that says the section is unavailable.
+///
+/// # Arguments
+///
+/// * `stdout` - The whole standard output of a run
+///
+/// # Returns
+///
+/// The line, or `None` when the run printed no such line.
+fn unavailable_line(stdout: &str) -> Option<&str> {
+    stdout.lines().find(|line| line.contains("unavailable:"))
+}
+
+#[test]
+fn the_open_files_section_names_the_missing_lsof() {
+    // The marker never holds the name of the tool, because the command column
+    // of the table prints the marker back into the same output.
+    let child = Sleeper::spawn(&unique_token("spv_no_tool_files_"), &[]);
+
+    let (ok, stdout, stderr) = run(spv_without_lsof("--lsof", child.pid()));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stdout.contains("Open files for"),
+        "the section names itself; stdout: {stdout}"
+    );
+    let note = unavailable_line(&stdout)
+        .unwrap_or_else(|| panic!("the section says it is unavailable; stdout: {stdout}"));
+    assert!(
+        note.contains("lsof"),
+        "the section names the tool it cannot find: {note}"
+    );
+}
+
+#[test]
+fn the_network_section_names_the_missing_lsof() {
+    // The marker never holds the name of the tool, because the command column
+    // of the table prints the marker back into the same output.
+    let child = Sleeper::spawn(&unique_token("spv_no_tool_net_"), &[]);
+
+    let (ok, stdout, stderr) = run(spv_without_lsof("--net", child.pid()));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stdout.contains("Network connections for"),
+        "the section names itself; stdout: {stdout}"
+    );
+    let note = unavailable_line(&stdout)
+        .unwrap_or_else(|| panic!("the section says it is unavailable; stdout: {stdout}"));
+    assert!(
+        note.contains("lsof"),
+        "the section names the tool it cannot find: {note}"
+    );
+}
