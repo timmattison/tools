@@ -343,7 +343,9 @@ impl Git {
 
 #[cfg(test)]
 mod tests {
-    use super::{Git, INHERITED_IDENTITY_VARS, SCRATCH_USER_EMAIL, SCRATCH_USER_NAME};
+    use super::{
+        Git, NoInheritedRepository, INHERITED_IDENTITY_VARS, SCRATCH_USER_EMAIL, SCRATCH_USER_NAME,
+    };
     use crate::testing::TestRepo;
 
     /// `core.quotePath=false` needs its own test now that it protects nothing a
@@ -374,6 +376,83 @@ mod tests {
             staged, "日本語.txt",
             "git must report the path as it is stored, not C-quoted and \
              octal-escaped"
+        );
+    }
+
+    /// A file name git can carry that is not valid UTF-8: `bad-`, two bytes no
+    /// UTF-8 sequence may begin with, and `.txt`.
+    ///
+    /// `0xff` and `0xfe` are the two bytes the encoding never uses at all, so
+    /// nothing here depends on a lossy conversion's taste in replacement
+    /// boundaries: whatever it does with them, it cannot hand these two back.
+    const BAD_NAME: &[u8] = b"bad-\xff\xfe.txt";
+
+    /// A path is a string of bytes on unix, not a string of characters, and git
+    /// reports one as it is stored. So the reader has to hand those bytes back
+    /// untouched, and a lossy conversion is exactly the defect
+    /// `core.quotePath=false` and `-z` were pinned to remove: the name comes
+    /// back with U+FFFD where the bytes were, which prints a name nobody typed
+    /// and opens no file on disk - and in this crate a conflicted file that
+    /// cannot be opened is floored at one hunk, so a file contested in two
+    /// regions reports one and the total still looks plausible.
+    ///
+    /// The name never touches the filesystem. APFS refuses one outright
+    /// (`Errno 92`, illegal byte sequence), so a fixture that wrote the file
+    /// could not run on the machine this crate is developed on; git will carry
+    /// the name in the *index* on any platform, which is all the reader needs to
+    /// be asked about.
+    ///
+    /// `update-index --index-info` reads its records from stdin and
+    /// [`TestRepo::git`] passes none, so that one spawn is made directly here -
+    /// scrubbed through [`NoInheritedRepository`] like every other spawn in this
+    /// crate, because an inherited `GIT_INDEX_FILE` would otherwise stage this
+    /// name into whichever repository the hook that started the run belongs to.
+    #[test]
+    fn a_path_git_reports_comes_back_byte_for_byte_even_when_it_is_not_utf8() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let repo = TestRepo::init();
+        repo.commit_file("seed.txt", "seed\n", "base");
+        // Any blob will do - the index entry is about the name, not the content.
+        let blob = repo.git(&["hash-object", "-w", "seed.txt"]);
+
+        let mut record = format!("100644 {blob}\t").into_bytes();
+        record.extend_from_slice(BAD_NAME);
+        record.push(0);
+
+        let mut child = Command::new("git")
+            .args(["update-index", "-z", "--index-info"])
+            .current_dir(repo.path())
+            .without_inherited_repository()
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("spawn git update-index");
+        child
+            .stdin
+            .take()
+            .expect("the piped stdin of the child just spawned")
+            .write_all(&record)
+            .expect("hand git the index record");
+        assert!(
+            child.wait().expect("wait for git update-index").success(),
+            "git could not be made to hold a non-UTF-8 name in its index"
+        );
+
+        let staged = Git::new(repo.path(), "")
+            .nul_separated(&["diff", "--cached", "--name-only"])
+            .expect("list the staged path");
+
+        assert_eq!(
+            staged.len(),
+            1,
+            "exactly one path is staged beyond HEAD, got {staged:?}"
+        );
+        assert_eq!(
+            staged[0].as_bytes(),
+            BAD_NAME,
+            "git reports a path as it is stored, so the reader must carry those \
+             bytes back untouched rather than replacing them"
         );
     }
 
