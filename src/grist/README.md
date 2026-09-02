@@ -1,6 +1,7 @@
 # grist
 
-Work out which order to squash-merge branches in, before you commit to one.
+Git Ranks Its Squash Trials — work out which order to squash-merge branches in,
+before you commit to one. A trial is one ordering, replayed and costed.
 
 If your question is about *one* branch — would rebasing HEAD onto it conflict,
 and by how much? — that's [`grind`](../grind/README.md), which ships alongside
