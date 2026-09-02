@@ -738,7 +738,7 @@ const LSOF_MIN_FIELDS: usize = 9;
 ///
 /// # Returns
 ///
-/// A vector of open files, or `None` if lsof is unavailable or the command fails.
+/// The open files, or a sentence that says why lsof gave none.
 ///
 /// # Design Note
 ///
