@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use buildinfo::version_string;
 use chrono::{Local, TimeZone, Utc};
 use comfy_table::{presets::UTF8_FULL, Cell, Color, ContentArrangement, Table};
-use serde::Deserialize;
+use serde::de::{MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use std::fmt;
 use std::process::Command;
 
 /// The core rate limit resource name. Used in tests for consistency with other
@@ -43,76 +45,65 @@ struct NamedRateLimit<'a> {
     rate_limit: &'a RateLimit,
 }
 
-/// Macro that defines the Resources struct, RESOURCE_COUNT constant, and collect_rate_limits
-/// function from a single list of field names. This ensures they cannot get out of sync.
+/// Every rate limit resource of a response, in the order that GitHub sent them.
 ///
-/// When adding a new GitHub API rate limit resource:
-/// 1. Add the field name to this macro invocation (in the order it appears in the API response)
-/// 2. That's it! The struct, constant, and collection function are all updated automatically.
-macro_rules! define_rate_limit_resources {
-    ($($name:ident),* $(,)?) => {
-        /// Contains all GitHub API rate limit resources
-        #[derive(Debug, Deserialize)]
-        struct Resources {
-            $($name: RateLimit,)*
-        }
+/// GitHub changes this set without notice. It removed `code_scanning_upload`,
+/// and it added `copilot_usage_records` and `enterprise_token_inventory`. So
+/// this type names no resource. It keeps what the response holds, which makes
+/// a new resource appear on its own, and makes a resource that goes away a
+/// non-event.
+#[derive(Debug)]
+struct Resources(Vec<(String, RateLimit)>);
 
-        /// Collects all rate limit resources into a vector for easier processing.
-        /// The returned vector contains all resources in the same order as defined in the struct.
-        fn collect_rate_limits(resources: &Resources) -> Vec<NamedRateLimit<'_>> {
-            vec![
-                $(NamedRateLimit { name: stringify!($name), rate_limit: &resources.$name },)*
-            ]
-        }
+impl<'de> Deserialize<'de> for Resources {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        /// Reads the resource map and keeps the order of the response.
+        struct ResourcesVisitor;
 
-        /// Number of rate limit resources defined in the GitHub API.
-        /// This constant is automatically kept in sync with the Resources struct and collect_rate_limits.
-        /// Only used in tests to verify the partitioning logic.
-        #[cfg(test)]
-        const RESOURCE_COUNT: usize = [$( stringify!($name) ),*].len();
+        impl<'de> Visitor<'de> for ResourcesVisitor {
+            type Value = Resources;
 
-        /// Creates a Resources struct for testing where all resources have the given remaining count.
-        /// Uses the test module's make_rate_limit function.
-        #[cfg(test)]
-        fn make_all_resources_with_remaining(remaining: u32) -> Resources {
-            use crate::tests::make_rate_limit;
-            Resources {
-                $($name: make_rate_limit(remaining),)*
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map of resource names to rate limits")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Resources, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut limits = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                while let Some(entry) = map.next_entry::<String, RateLimit>()? {
+                    limits.push(entry);
+                }
+                Ok(Resources(limits))
             }
         }
-    };
+
+        deserializer.deserialize_map(ResourcesVisitor)
+    }
 }
 
-// Define all GitHub API rate limit resources in a single place.
-// The macro generates: Resources struct, RESOURCE_COUNT constant, collect_rate_limits function,
-// and the test helper make_all_resources_with_remaining.
-define_rate_limit_resources! {
-    core,
-    graphql,
-    search,
-    code_search,
-    code_scanning_upload,
-    code_scanning_autofix,
-    actions_runner_registration,
-    integration_manifest,
-    source_import,
-    dependency_snapshots,
-    dependency_sbom,
-    scim,
-    audit_log,
-    audit_log_streaming,
+/// Collects all rate limit resources into a vector for easier processing.
+/// The returned vector keeps the order of the response.
+fn collect_rate_limits(resources: &Resources) -> Vec<NamedRateLimit<'_>> {
+    resources
+        .0
+        .iter()
+        .map(|(name, rate_limit)| NamedRateLimit { name, rate_limit })
+        .collect()
 }
 
-/// Top-level response structure from GitHub API rate_limit endpoint
+/// Top-level response structure from GitHub API rate_limit endpoint.
+///
+/// The response also holds a `rate` field, which repeats the core rate limit.
+/// gr8 does not read it, and serde ignores a field that no member names, so a
+/// field that GitHub adds or removes beside `resources` costs nothing here.
 #[derive(Debug, Deserialize)]
 struct RateLimitResponse {
     resources: Resources,
-    /// Rate limit for the core API (duplicates resources.core, kept for API structure completeness)
-    #[allow(
-        dead_code,
-        reason = "Required by GitHub API response structure but not used"
-    )]
-    rate: RateLimit,
 }
 
 /// Executes the `gh api rate_limit` command and returns the JSON output
@@ -407,12 +398,36 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    // Note: RESOURCE_COUNT is defined at module level by the define_rate_limit_resources! macro,
-    // ensuring it always matches the actual number of resources.
+    /// The resources that the tests build a response from. gr8 reads whatever
+    /// set the response holds, so this is a sample and not the true set.
+    const SAMPLE_RESOURCES: [&str; 4] = [CORE_RESOURCE, GRAPHQL_RESOURCE, "search", "code_search"];
+
+    /// Number of resources in a response that the tests build.
+    const RESOURCE_COUNT: usize = SAMPLE_RESOURCES.len();
+
+    /// Creates a Resources where every sample resource has the given remaining count.
+    fn make_all_resources_with_remaining(remaining: u32) -> Resources {
+        Resources(
+            SAMPLE_RESOURCES
+                .iter()
+                .map(|name| ((*name).to_string(), make_rate_limit(remaining)))
+                .collect(),
+        )
+    }
+
+    /// Replaces the rate limit of one resource.
+    /// Panics if the response holds no resource of that name.
+    fn set_remaining(resources: &mut Resources, name: &str, remaining: u32) {
+        let entry = resources
+            .0
+            .iter_mut()
+            .find(|(resource_name, _)| resource_name == name)
+            .unwrap_or_else(|| panic!("{name} is not one of the sample resources"));
+        entry.1 = make_rate_limit(remaining);
+    }
 
     /// Creates a RateLimit with the given remaining count for testing.
-    /// This function is used by the macro-generated make_all_resources_with_remaining.
-    pub fn make_rate_limit(remaining: u32) -> RateLimit {
+    fn make_rate_limit(remaining: u32) -> RateLimit {
         RateLimit {
             limit: 5000,
             used: 5000 - remaining,
@@ -428,8 +443,8 @@ mod tests {
         graphql_remaining: u32,
     ) -> Resources {
         let mut resources = make_all_resources_with_remaining(100);
-        resources.core = make_rate_limit(core_remaining);
-        resources.graphql = make_rate_limit(graphql_remaining);
+        set_remaining(&mut resources, CORE_RESOURCE, core_remaining);
+        set_remaining(&mut resources, GRAPHQL_RESOURCE, graphql_remaining);
         resources
     }
 
@@ -440,8 +455,7 @@ mod tests {
         assert_eq!(
             collected.len(),
             RESOURCE_COUNT,
-            "collect_rate_limits returned {} items but RESOURCE_COUNT is {} \
-             (both are generated by the same macro, so this should never fail)",
+            "collect_rate_limits returned {} items but the response holds {} resources",
             collected.len(),
             RESOURCE_COUNT
         );
@@ -900,7 +914,7 @@ mod tests {
         assert_eq!(named.rate_limit.limit, 1750);
         assert_eq!(named.rate_limit.used, 0);
         assert_eq!(named.rate_limit.remaining, 1750);
-        assert_eq!(named.rate_limit.reset, 1788313546);
+        assert_eq!(named.rate_limit.reset, 1_788_313_546);
     }
 
     #[test]
