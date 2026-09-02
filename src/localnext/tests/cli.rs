@@ -11,18 +11,25 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// How long to wait for a line of the child's banner before failing.
 ///
-/// Deliberately generous, yet finite: a child that never prints must fail this
-/// one test rather than block the whole suite forever. The banner itself takes
-/// milliseconds; the budget covers the seconds macOS spends scanning a freshly
-/// built binary on its first execution, measured here in the low single digits
-/// per spawn. A tighter bound would fail unrelated commits for a reason that has
-/// nothing to do with the code.
+/// This budget covers a HUNG child and nothing else. Every cost that is not the
+/// code — chiefly the scan macOS runs over a freshly built binary the first time
+/// it executes, measured here at ten seconds and more — is paid by
+/// [`warm_the_binary`] before the clock starts. So the wait no longer measures
+/// the machine's load, which is how a timed test starts failing commits that
+/// have nothing to do with it.
 const BANNER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the wait looks up from the channel to ask whether the child died.
+///
+/// A child that exits without printing must fail at once with the reason, rather
+/// than burn [`BANNER_TIMEOUT`] and then report a timeout — the wrong diagnosis
+/// for the commonest fault.
+const LIVENESS_POLL: Duration = Duration::from_millis(100);
 
 /// The prefix of the banner line that names the served root.
 const SERVING_PREFIX: &str = "Serving ";
@@ -61,15 +68,37 @@ fn export_fixture() -> TempDir {
     dir
 }
 
+/// Runs the binary once and waits for it to exit, so the operating system has
+/// already examined the file before any timed spawn.
+///
+/// macOS scans a freshly built, unsigned binary the first time it runs. That scan
+/// took over ten seconds per spawn when this crate was written, and several tests
+/// in this file spawn the same fresh binary at the same moment. Paying that cost
+/// inside [`serving_root`]'s bounded wait made the wait a measurement of the
+/// machine rather than of the code, and it failed once for exactly that reason.
+/// `--version` exits at once and `Command::output` carries no deadline, so the
+/// cost lands here, where nothing is timed.
+fn warm_the_binary() {
+    let _ = Command::new(env!("CARGO_BIN_EXE_localnext"))
+        .arg("--version")
+        .output();
+}
+
 /// Starts `localnext --port 0` with its working directory at `cwd` and returns
 /// the export root its banner names.
 ///
 /// The child's stdout is drained on a separate thread that forwards each line
-/// over a channel, so the test thread can bound its wait with `recv_timeout`. A
-/// direct `lines().next()` on a child that never prints would block forever.
-/// Rust's `Stdout` is line-buffered even when it is a pipe, so `println!` flushes
-/// the banner on its own newline and no handshake is needed.
+/// over a channel, so the test thread can bound its wait. A direct
+/// `lines().next()` on a child that never prints would block forever. Rust's
+/// `Stdout` is line-buffered even when it is a pipe, so `println!` flushes the
+/// banner on its own newline and no handshake is needed.
+///
+/// The wait ends for one of three reasons, and each names its own fault: the
+/// banner arrives, the child closes stdout or exits, or [`BANNER_TIMEOUT`] runs
+/// out on a child that is still alive and still silent.
 fn serving_root(cwd: &Path) -> String {
+    warm_the_binary();
+
     let mut child = Command::new(env!("CARGO_BIN_EXE_localnext"))
         .args(["--port", "0"])
         .current_dir(cwd)
@@ -81,7 +110,7 @@ fn serving_root(cwd: &Path) -> String {
     let stdout = child.stdout.take().expect("stdout is piped");
     // The guard owns the child from here on, so every exit from this function —
     // including a panicking assertion below — kills the server.
-    let _guard = ChildGuard(child);
+    let mut guard = ChildGuard(child);
 
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -93,15 +122,29 @@ fn serving_root(cwd: &Path) -> String {
         }
     });
 
+    let deadline = Instant::now() + BANNER_TIMEOUT;
     loop {
-        let line = receiver
-            .recv_timeout(BANNER_TIMEOUT)
-            .expect("localnext should print its banner before the timeout");
-        if let Some(rest) = line.strip_prefix(SERVING_PREFIX) {
-            let (root, _url) = rest
-                .rsplit_once(ON_URL)
-                .unwrap_or_else(|| panic!("the banner should name a URL, got: {line}"));
-            return root.to_string();
+        match receiver.recv_timeout(LIVENESS_POLL) {
+            Ok(line) => {
+                if let Some(rest) = line.strip_prefix(SERVING_PREFIX) {
+                    let (root, _url) = rest
+                        .rsplit_once(ON_URL)
+                        .unwrap_or_else(|| panic!("the banner should name a URL, got: {line}"));
+                    return root.to_string();
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("localnext closed its stdout without printing a banner");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Ok(Some(status)) = guard.0.try_wait() {
+                    panic!("localnext exited before printing a banner: {status}");
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "localnext stayed alive and silent for {BANNER_TIMEOUT:?} without a banner"
+                );
+            }
         }
     }
 }
