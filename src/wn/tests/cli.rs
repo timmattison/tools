@@ -26,6 +26,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use unicode_width::UnicodeWidthStr;
+
 /// The repository the fake `gh` answers for.
 const REPO: &str = "timmattison/tools";
 
@@ -306,5 +308,29 @@ fn cuts_a_long_title_to_the_window() {
     assert_eq!(
         stdout(&output).lines().next().unwrap(),
         "→ #1  A title that …"
+    );
+}
+
+#[test]
+fn a_row_stops_one_column_short_of_the_window() {
+    // A row that fills the window exactly is one column too wide. A terminal
+    // with auto-wrap moves the last glyph of such a row to the next line, and
+    // right-edge chrome takes the same column, so the window keeps its last
+    // column empty and a long title is cut one column earlier.
+    let body = r#"{"data":{"repository":{
+"i1":{"__typename":"Issue","number":1,"title":"A title that is far too long for the window it has to fit in","state":"OPEN","stateReason":null}
+}}}"#;
+    let gh = FakeGh::new(body);
+    let output = run(&gh, &["--repo", REPO, "#1"], "20", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let row = stdout(&output)
+        .lines()
+        .next()
+        .expect("the block holds a row")
+        .to_string();
+    assert_eq!(
+        UnicodeWidthStr::width(row.as_str()),
+        19,
+        "the row stops one column short of the 20-column window, in {row:?}"
     );
 }
