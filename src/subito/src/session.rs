@@ -203,7 +203,16 @@ where
 
         let wait = waits.take();
         report_retry(&failure, wait, output)?;
-        tokio::time::sleep(wait).await;
+
+        // The interrupt ends the wait as well as the run. A user who presses
+        // Ctrl-C while the tool waits waits for nothing more.
+        tokio::select! {
+            signal = shutdown.as_mut() => {
+                signal.map_err(SessionError::Signal)?;
+                return Ok(());
+            }
+            () = tokio::time::sleep(wait) => (),
+        }
     }
 }
 
