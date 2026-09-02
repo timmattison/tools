@@ -86,6 +86,21 @@ pub enum SessionError {
     Signal(#[source] std::io::Error),
 }
 
+impl SessionError {
+    /// Gives the failure of a tool that never reached a broker.
+    ///
+    /// The supervisor builds the options of each attempt, and that work reads
+    /// credentials and signs a URL. Neither step touches the broker, so a
+    /// failure of either one is not a failure of the connection. A new attempt
+    /// repairs both, so the supervisor waits and tries again.
+    #[must_use]
+    pub fn connect(source: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        SessionError::Connection(Box::new(rumqttc::ConnectionError::Io(
+            std::io::Error::other(source),
+        )))
+    }
+}
+
 /// The wait between one attempt to run a session and the next.
 ///
 /// The wait starts at `first`, doubles after each failure, and stops at
@@ -668,5 +683,62 @@ fn qos_number(qos: QoS) -> u8 {
         QoS::AtMostOnce => QOS_AT_MOST_ONCE,
         QoS::AtLeastOnce => QOS_AT_LEAST_ONCE,
         QoS::ExactlyOnce => QOS_EXACTLY_ONCE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The longest a test waits for the supervisor to answer the interrupt.
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// The wait the supervisor takes after the failure of an attempt.
+    ///
+    /// The wait is long, so the interrupt of the test arrives inside it and
+    /// the supervisor never starts a second attempt.
+    const LONG_WAIT: Duration = Duration::from_secs(30);
+
+    /// The wait before the test interrupts the supervisor.
+    const BEFORE_INTERRUPT: Duration = Duration::from_millis(200);
+
+    /// What the credentials chain said when it found nothing.
+    const NO_CREDENTIALS: &str = "no credentials";
+
+    #[tokio::test]
+    async fn a_failure_to_prepare_a_connection_names_only_itself() {
+        let mut output: Vec<u8> = Vec::new();
+        let topics = ["sensors/temperature".to_string()];
+
+        let run = run_forever_with(
+            || async { Err(SessionError::connect(NO_CREDENTIALS.into())) },
+            &topics,
+            QoS::AtMostOnce,
+            false,
+            &mut output,
+            async {
+                tokio::time::sleep(BEFORE_INTERRUPT).await;
+                Ok(())
+            },
+            Backoff::new(LONG_WAIT, LONG_WAIT),
+        );
+
+        let ended = tokio::time::timeout(TEST_TIMEOUT, run)
+            .await
+            .expect("the supervisor held its wait and did not answer the interrupt");
+
+        assert!(ended.is_ok(), "the interrupt ends the run: {ended:?}");
+
+        let printed = String::from_utf8(output).expect("the tool prints text");
+
+        assert_eq!(
+            printed,
+            format!(
+                "the tool could not open a connection to the broker: {NO_CREDENTIALS}. \
+Trying again in 30s.\n"
+            ),
+            "a failure that never reached a broker must not read as a failure of the \
+connection, and must not name its cause twice"
+        );
     }
 }
