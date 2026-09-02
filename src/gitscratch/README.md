@@ -195,7 +195,9 @@ wrong span of the file reports clean without ever having seen the table.
 the next heading whatever its level: demoting the heading below the inventory —
 one character — would otherwise widen it to swallow the prose here, which names
 `--literal-pathspecs` and `core.hooksPath`, the exact two guards matched by bare
-name, so both would be satisfiable with no row for either.
+name, so both would be satisfiable with no row for either. Its last fixture ends
+the section at a setext heading — `Testing` over a rule of dashes — the one
+heading spelling that carries no `#`, so a lexical cut cannot pass this test.
 `an_inventory_section_that_nothing_closes_is_refused_rather_than_run_to_the_end`
 shuts the same gap from the other side: a section with no heading after it is
 refused outright rather than read to the end of the file.

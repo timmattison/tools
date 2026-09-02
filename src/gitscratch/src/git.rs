@@ -451,8 +451,9 @@ mod tests {
     /// heading?" is a question about syntax and every lexical answer to it has
     /// been wrong here: `\n## ` missed a heading demoted by one character, then
     /// `starts_with('#')` cut this README's `## Testing` nineteen lines early
-    /// at a wrapped `#329`, with a fenced `# comment` and a setext heading two
-    /// more spellings still to come. A parse settles all four at once.
+    /// at a wrapped `#329`, and a fenced `# comment` and a setext heading are
+    /// two more spellings a `#` matcher reads wrong. A parse settles all four
+    /// at once, and the tests below hold one fixture for each of them.
     fn inventory_section<'a>(document: &'a str, heading: &str) -> &'a str {
         // The line a source offset opens, `\n` included, so summing it with the
         // offset lands on the character after the heading.
@@ -605,16 +606,29 @@ mod tests {
     /// about every level rather than filtered back down to one. So each level
     /// gets its own fixture rather than the one that prompted this, and each
     /// fixture's stray sentence is the sentence that would do the damage.
+    ///
+    /// The last fixture is a setext heading — `Testing` over a rule of dashes —
+    /// and it is the spelling that tells a parse apart from a matcher. A
+    /// corrected `#` matcher reads every level above correctly and still reads
+    /// this one wrong, because a setext heading opens with no `#` at all. Put
+    /// `.filter(|&offset| document[offset..].starts_with('#'))` on the heading
+    /// collection and the levels above stay green while this fixture fails, so
+    /// this fixture is what keeps the parse from becoming a lexical cut again.
     #[test]
     fn the_inventory_section_stops_at_the_next_heading_of_any_level() {
         const STRAY_GUARD: &str = "--literal-pathspecs";
 
-        for level in ["# ", "### ", "#### "] {
+        for (spelling, prefix, suffix) in [
+            ("`# Testing`", "# ", ""),
+            ("`### Testing`", "### ", ""),
+            ("`#### Testing`", "#### ", ""),
+            ("setext `Testing` over a rule of dashes", "", "\n-------"),
+        ] {
             let document = format!(
                 "# gitscratch\n\n{INVENTORY_HEADING}\n\n\
                  | Guard | Why |\n| --- | --- |\n\
                  | `gc.auto=0` | A gc could collect a loose simulated commit. |\n\n\
-                 {level}Testing\n\n\
+                 {prefix}Testing{suffix}\n\n\
                  The suite pins the {STRAY_GUARD} guard by mutation.\n\n\
                  ## Used by\n\ngrist.\n"
             );
@@ -623,14 +637,14 @@ mod tests {
 
             assert!(
                 !inventory.contains(STRAY_GUARD),
-                "a `{level}` heading ends the `{INVENTORY_HEADING}` section as surely as a `## ` \
-                 one does, so the prose under it is outside the inventory; swallowing it lets a \
+                "{spelling} ends the `{INVENTORY_HEADING}` section as surely as a `## ` heading \
+                 does, so the prose under it is outside the inventory; swallowing it lets a \
                  sentence stand in for the row `{STRAY_GUARD}` needs: {inventory}"
             );
             assert!(
                 inventory.contains("gc.auto=0"),
-                "the cut has to keep the table it is scoping to, or the check below would pass \
-                 against nothing for the opposite reason: {inventory}"
+                "the cut at {spelling} has to keep the table it is scoping to, or the check below \
+                 would pass against nothing for the opposite reason: {inventory}"
             );
         }
     }
@@ -673,7 +687,9 @@ mod tests {
     /// Fenced code is the same mistake with a different spelling: `# a comment`
     /// inside a ```` ```sh ```` block is shell, not a section boundary. Each
     /// spelling gets its own fixture, because enumerating spellings is what this
-    /// is meant to stop.
+    /// is meant to stop. The spelling that runs the other way — a heading that
+    /// carries no `#` — is a fixture in
+    /// [`the_inventory_section_stops_at_the_next_heading_of_any_level`].
     #[test]
     fn a_hash_that_is_not_a_heading_does_not_end_a_section() {
         // Placed after the stray `#` in every fixture, so a section cut there
