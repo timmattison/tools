@@ -8,10 +8,12 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use num_format::ToFormattedString;
+use thiserror::Error;
 
 pub use num_format::Locale;
 
@@ -141,6 +143,64 @@ pub fn format_duration(duration: Duration, locale: &Locale) -> String {
     };
     let number = format_float(value, locale);
     format!("{number}{suffix}")
+}
+
+/// Why a compression run stopped short.
+#[derive(Debug, Error)]
+pub enum CompressError {
+    /// The run could not open the input file.
+    #[error("could not open the input file {}", path.display())]
+    OpenInput {
+        /// The path of the input file.
+        path: PathBuf,
+        /// The error that the file system gave.
+        #[source]
+        source: io::Error,
+    },
+    /// The run could not read the bytes of the input.
+    #[error("could not read the input file")]
+    ReadInput {
+        /// The error that the file system gave.
+        #[source]
+        source: io::Error,
+    },
+    /// The run could not make the output file.
+    #[error("could not create the output file {}", path.display())]
+    CreateOutput {
+        /// The path of the output file.
+        path: PathBuf,
+        /// The error that the file system gave.
+        #[source]
+        source: io::Error,
+    },
+    /// The run could not write the bytes of the gzip stream.
+    #[error("could not write the output file")]
+    WriteOutput {
+        /// The error that the file system gave.
+        #[source]
+        source: io::Error,
+    },
+    /// The user stopped the run before it was complete.
+    #[error("the user stopped the run")]
+    Cancelled,
+}
+
+/// Compress the bytes of `reader` into `writer` as a gzip stream.
+///
+/// The function answers the count of the uncompressed bytes that it read.
+///
+/// # Errors
+///
+/// Answers [`CompressError::ReadInput`] when a read of the input fails, and
+/// [`CompressError::WriteOutput`] when a write of the gzip stream fails.
+/// Answers [`CompressError::Cancelled`] when `cancelled` answers true.
+pub fn compress_stream<R: Read, W: Write>(
+    _reader: R,
+    _writer: W,
+    _cancelled: &dyn Fn() -> bool,
+    _on_progress: &mut dyn FnMut(u64),
+) -> Result<u64, CompressError> {
+    Ok(0)
 }
 
 /// The suffix that marks a gzip file. A run that gets no output name adds

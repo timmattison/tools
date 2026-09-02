@@ -9,10 +9,13 @@
     reason = "every unwrap and expect in this file is an assertion, not an unhandled error"
 )]
 
+use std::cell::Cell;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use prgz::{default_output_path, Stats};
+use flate2::read::GzDecoder;
+use prgz::{compress_stream, default_output_path, CompressError, Stats};
 
 /// The largest difference that two fractions can have and still count as equal.
 const TOLERANCE: f64 = 1e-9;
@@ -133,5 +136,124 @@ fn a_duration_of_zero_gives_a_rate_of_zero() {
     assert!(
         close(written_rate, 0.0),
         "the written rate is {written_rate}"
+    );
+}
+
+/// The count of bytes in an input that covers more than one read buffer.
+const MANY_BUFFERS: usize = 500_000;
+
+/// A reader that answers a set count of bytes and then fails.
+struct FailingReader {
+    /// The count of bytes that the reader gives before it fails.
+    remaining: usize,
+}
+
+impl Read for FailingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 {
+            return Err(io::Error::other("the reader stopped"));
+        }
+        let count = self.remaining.min(buffer.len());
+        buffer[..count].fill(b'a');
+        self.remaining -= count;
+        Ok(count)
+    }
+}
+
+/// A writer that fails every write and every flush.
+struct FailingWriter;
+
+impl Write for FailingWriter {
+    fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+        Err(io::Error::other("the writer stopped"))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::other("the writer stopped"))
+    }
+}
+
+#[test]
+fn compress_stream_makes_a_gzip_stream_of_the_input() {
+    let input = b"the same line, over and over, compresses well. ".repeat(100);
+    let mut output = Vec::new();
+    let count = compress_stream(input.as_slice(), &mut output, &|| false, &mut |_| {}).unwrap();
+    assert_eq!(count, input.len() as u64);
+    assert!(!output.is_empty(), "the output holds no bytes");
+    let mut decoded = Vec::new();
+    GzDecoder::new(output.as_slice())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert_eq!(decoded, input);
+}
+
+#[test]
+fn compress_stream_reports_the_count_after_each_buffer() {
+    let input = vec![b'x'; MANY_BUFFERS];
+    let mut output = Vec::new();
+    let mut counts: Vec<u64> = Vec::new();
+    let count = compress_stream(input.as_slice(), &mut output, &|| false, &mut |read| {
+        counts.push(read);
+    })
+    .unwrap();
+    assert_eq!(count, MANY_BUFFERS as u64);
+    assert!(counts.len() > 1, "the count of reports is {}", counts.len());
+    assert!(
+        counts.windows(2).all(|pair| pair[0] < pair[1]),
+        "the reports do not rise: {counts:?}"
+    );
+    assert_eq!(counts.last().copied(), Some(MANY_BUFFERS as u64));
+}
+
+#[test]
+fn a_stream_that_the_user_stops_says_the_user_stopped_it() {
+    let input = vec![b'x'; MANY_BUFFERS];
+    let mut output = Vec::new();
+    let calls = Cell::new(0_u32);
+    let stopped = || {
+        let seen = calls.get();
+        calls.set(seen + 1);
+        seen > 0
+    };
+    let error = compress_stream(input.as_slice(), &mut output, &stopped, &mut |_| {}).unwrap_err();
+    assert!(
+        matches!(error, CompressError::Cancelled),
+        "the error is {error}"
+    );
+}
+
+#[test]
+fn a_read_that_fails_after_progress_gives_a_read_error() {
+    let reader = FailingReader {
+        remaining: MANY_BUFFERS,
+    };
+    let mut output = Vec::new();
+    let mut reports = 0_u32;
+    let error = compress_stream(reader, &mut output, &|| false, &mut |_| reports += 1).unwrap_err();
+    assert!(
+        matches!(error, CompressError::ReadInput { .. }),
+        "the error is {error}"
+    );
+    assert!(reports > 0, "the run made no progress before it failed");
+}
+
+#[test]
+fn a_write_that_fails_gives_a_write_error() {
+    let input = vec![b'x'; MANY_BUFFERS];
+    let error =
+        compress_stream(input.as_slice(), FailingWriter, &|| false, &mut |_| {}).unwrap_err();
+    assert!(
+        matches!(error, CompressError::WriteOutput { .. }),
+        "the error is {error}"
+    );
+}
+
+#[test]
+fn a_write_that_only_fails_at_the_finish_gives_a_write_error() {
+    let empty: &[u8] = &[];
+    let error = compress_stream(empty, FailingWriter, &|| false, &mut |_| {}).unwrap_err();
+    assert!(
+        matches!(error, CompressError::WriteOutput { .. }),
+        "the error is {error}"
     );
 }
