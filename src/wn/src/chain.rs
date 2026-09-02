@@ -32,7 +32,7 @@ use thiserror::Error;
 /// of this repository are written with, plus the comma and the semicolon that
 /// a hand-typed list falls back on. Whitespace separates as well, and it is
 /// not in the list because [`char::is_whitespace`] already names it.
-const SEPARATORS: &[char] = &[
+pub(crate) const SEPARATORS: &[char] = &[
     '\u{2192}', // → RIGHTWARDS ARROW
     '\u{27f6}', // ⟶ LONG RIGHTWARDS ARROW
     '\u{21d2}', // ⇒ RIGHTWARDS DOUBLE ARROW
@@ -199,7 +199,7 @@ fn tokens(input: &str) -> Vec<String> {
 }
 
 /// The issue number `token` names, or `None` when it names none.
-fn read_number(token: &str) -> Option<IssueNumber> {
+pub(crate) fn read_number(token: &str) -> Option<IssueNumber> {
     let digits = token.strip_prefix(HASH).unwrap_or(token);
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
         return None;
