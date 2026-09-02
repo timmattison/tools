@@ -34,9 +34,9 @@ use image::DynamicImage;
 use crate::cursor::{write_image_with_cursor_contract, CursorContract};
 use crate::detect::{display_routine_for, Capabilities, DisplayRoutine};
 use crate::geometry::{
-    calculate_aspect_preserving_size, calculate_sixel_dimensions, cell_aspect_ratio,
-    cell_pixels_or_estimate, downscale_to_display_pixels, image_rows, image_rows_in_cells,
-    sixel_pixel_budget, terminal_pixels,
+    calculate_aspect_preserving_size, calculate_sixel_dimensions, cell_aspect_of,
+    cell_pixels_or_estimate_of, downscale_to_display_pixels, image_rows, image_rows_in_cells,
+    sixel_pixel_budget, window_pixels,
 };
 
 /// The number of base64 characters that one Kitty graphics command carries.
@@ -221,8 +221,10 @@ impl Capabilities {
 /// # Arguments
 /// * `request` - The request that names the cursor.
 /// * `image_rows` - Gives the height of the image in terminal rows. It runs
-///   only for [`Cursor::BelowImage`], which keeps the read of the terminal off
-///   the path of a video frame.
+///   only for [`Cursor::BelowImage`], and [`CursorContract::below_image`] reads
+///   the height of the terminal only there as well. A video frame asks for
+///   [`Cursor::Held`] one time for each frame, so neither the arithmetic nor
+///   that read stands on its path.
 ///
 /// # Returns
 /// The promise that the writer must keep.
@@ -261,6 +263,12 @@ fn write_kitty<W: Write>(
     image: &DynamicImage,
     request: &Request,
 ) -> Result<(), DrawError> {
+    // The window arrives one time, and every size of this image comes off it.
+    // Two reads can name two terminals, and a picture laid out for one terminal
+    // and reserved for another fits neither.
+    let window = termsize::drawing_window();
+    let (cell_width_px, cell_height_px) = cell_pixels_or_estimate_of(window);
+
     // The display size is in terminal cells, and it serves two roles: the `c=`
     // and `r=` keys that tell the terminal how many cells the image spans, and
     // the target of the downscale that caps the pixels this writer sends.
@@ -270,19 +278,24 @@ fn write_kitty<W: Write>(
         request.budget.columns,
         request.budget.rows,
         request.preserve_aspect,
-        cell_aspect_ratio(),
+        cell_aspect_of(cell_width_px, cell_height_px),
     );
 
     // The downscale keeps the payload off the terminal: a panorama of 16384
     // pixels by 8192 is about 384 megabytes of raw pixels before base64.
-    let image = downscale_to_display_pixels(image, display_width, display_height);
+    let image = downscale_to_display_pixels(
+        image,
+        display_width,
+        display_height,
+        cell_width_px,
+        cell_height_px,
+    );
 
     // The protocol takes the raw pixels, so this path needs no image encoder.
     let rgb = image.to_rgb8();
     let base64_data = BASE64_STANDARD.encode(rgb.as_raw());
 
     let contract = cursor_contract(request, || {
-        let (cell_width_px, cell_height_px) = cell_pixels_or_estimate();
         image_rows_in_cells(
             image.width(),
             image.height(),
@@ -359,12 +372,16 @@ fn write_sixel<W: Write>(
     image: &DynamicImage,
     request: &Request,
 ) -> Result<(), DrawError> {
-    // The cell size comes from the terminal when it reports a pixel size, and
-    // from the estimates when it does not.
-    let (cell_width_px, cell_height_px) = cell_pixels_or_estimate();
+    // The window arrives one time, and both bounds of this image come off it.
+    // The margin takes the pixel size of the window and the budget of the caller
+    // takes the size of one cell, so two reads can bound one image by two
+    // terminals. The cell size comes from the terminal when it reports a pixel
+    // size, and from the estimates when it does not.
+    let window = termsize::drawing_window();
+    let (cell_width_px, cell_height_px) = cell_pixels_or_estimate_of(window);
 
     let (target_pixel_width, target_pixel_height) = sixel_pixel_budget(
-        terminal_pixels(),
+        window_pixels(window),
         request.budget.columns,
         request.budget.rows,
         cell_width_px,
@@ -425,6 +442,12 @@ fn write_iterm2<W: Write>(
     image: &DynamicImage,
     request: &Request,
 ) -> Result<(), DrawError> {
+    // The window arrives one time, and every size of this image comes off it.
+    // Two reads can name two terminals, and a picture laid out for one terminal
+    // and reserved for another fits neither.
+    let window = termsize::drawing_window();
+    let (cell_width_px, cell_height_px) = cell_pixels_or_estimate_of(window);
+
     // The display size is in terminal cells, and it serves as both the size
     // arguments of the protocol and the target of the downscale.
     let (display_width, display_height) = calculate_aspect_preserving_size(
@@ -433,10 +456,16 @@ fn write_iterm2<W: Write>(
         request.budget.columns,
         request.budget.rows,
         request.preserve_aspect,
-        cell_aspect_ratio(),
+        cell_aspect_of(cell_width_px, cell_height_px),
     );
 
-    let image = downscale_to_display_pixels(image, display_width, display_height);
+    let image = downscale_to_display_pixels(
+        image,
+        display_width,
+        display_height,
+        cell_width_px,
+        cell_height_px,
+    );
 
     let rgb = image.to_rgb8();
     let rgb_data = rgb.as_raw();
@@ -447,7 +476,6 @@ fn write_iterm2<W: Write>(
     let base64_data = BASE64_STANDARD.encode(&pnm_data);
 
     let contract = cursor_contract(request, || {
-        let (cell_width_px, cell_height_px) = cell_pixels_or_estimate();
         image_rows_in_cells(
             image.width(),
             image.height(),

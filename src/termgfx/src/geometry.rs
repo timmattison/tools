@@ -6,8 +6,6 @@
 //! holds that measure and every size that comes off it.
 
 use std::borrow::Cow;
-use std::io;
-use std::os::unix::io::AsRawFd;
 
 use image::DynamicImage;
 use termsize::Window;
@@ -56,8 +54,8 @@ const FALLBACK_TERMINAL_COLS: u32 = 80;
 /// read the real height.
 const FALLBACK_TERMINAL_ROWS: u32 = 24;
 
-/// The size of the terminal that standard output writes to, in columns and then
-/// rows.
+/// The size of the window that a tool draws its picture into, in columns and
+/// then rows.
 ///
 /// The answer is 80 columns by 24 rows when no probe measured a terminal, and
 /// that pair is not a guess about this machine. It is the size of the VT100,
@@ -70,19 +68,24 @@ const FALLBACK_TERMINAL_ROWS: u32 = 24;
 /// terminal whatever the terminal reports. It needs a number to lay a picture
 /// out with, and a `None` only moves the same guess up into the caller, where
 /// each caller would spell it differently. A caller that has a second way to
-/// draw must not call this function: it must ask `termsize` itself, where a
-/// terminal that reported nothing answers `None`, and then pick the way that
-/// needs no size. [`cell_pixels`] is the same rule for the size of a cell.
+/// draw must not call this function: it must call [`termsize::drawing_window`],
+/// where a run that measured no terminal answers `None`, and then pick the way
+/// that needs no size. [`cell_pixels`] is the same rule for the size of a cell.
 ///
-/// The probe reads standard output, because a caller of this function writes
-/// its picture there. `src/termsize/src/lib.rs` says why a size of zero columns
-/// or zero rows is no answer, and the fallback stands for such a terminal too.
+/// The probe reads standard output, then standard error, then standard input,
+/// and then the controlling terminal. The picture goes to standard output, so
+/// that descriptor comes first. `/dev/tty` comes last, because a standard output
+/// that somebody captured is no proof that there is no terminal: a caller that
+/// keeps the bytes of a run in a file still sits at the terminal that the
+/// picture appears on. GitHub issue #350 reports what the read of standard
+/// output alone did to such a run. `ic` measured nothing, drew the image at the
+/// guessed size of a cell, and then reserved rows that the image did not cover.
+///
+/// `src/termsize/src/lib.rs` says why a size of zero columns or zero rows is no
+/// answer, and the fallback stands for such a terminal too.
 #[must_use]
 pub fn terminal_cells() -> (u32, u32) {
-    termsize::stdout_size().map_or(
-        (FALLBACK_TERMINAL_COLS, FALLBACK_TERMINAL_ROWS),
-        |(cols, rows)| (u32::from(cols), u32::from(rows)),
-    )
+    cells_of(termsize::drawing_window())
 }
 
 /// The size of the window in character cells, with the fallback for a run that
@@ -103,50 +106,11 @@ pub fn terminal_cells() -> (u32, u32) {
 /// The number of columns and then the number of rows of that window, or
 /// [`FALLBACK_TERMINAL_COLS`] by [`FALLBACK_TERMINAL_ROWS`] when the probe
 /// measured no window.
-fn cells_of(_window: Option<Window>) -> (u32, u32) {
-    (FALLBACK_TERMINAL_COLS, FALLBACK_TERMINAL_ROWS)
-}
-
-/// The size of the terminal window in pixels, when the terminal reports one.
-///
-/// The probe is the `TIOCGWINSZ` ioctl, which carries a pixel width and a pixel
-/// height beside the column count and the row count of the same window. Many
-/// terminals leave the two pixel fields at zero, because the fields are older
-/// than the terminals and nothing made them fill them in. A pane of Zellij and
-/// a ttyd panel both answer with zeros, and so does a pseudo-terminal that
-/// nobody ever sized.
-///
-/// The answer is `None` for such a terminal, and `None` for a failed ioctl. A
-/// zero is no size, so both of the two fields must be above zero for the answer
-/// to stand.
-#[must_use]
-pub(crate) fn terminal_pixels() -> Option<(u32, u32)> {
-    #[repr(C)]
-    struct Winsize {
-        ws_row: libc::c_ushort,
-        ws_col: libc::c_ushort,
-        ws_xpixel: libc::c_ushort,
-        ws_ypixel: libc::c_ushort,
-    }
-
-    let mut ws = Winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-
-    let fd = io::stdout().as_raw_fd();
-    // SAFETY: TIOCGWINSZ is a standard ioctl that only reads the terminal window size
-    // into the provided Winsize struct. It does not modify any other state and the
-    // Winsize struct is properly initialized.
-    let result = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
-
-    if result == 0 && ws.ws_xpixel > 0 && ws.ws_ypixel > 0 {
-        Some((u32::from(ws.ws_xpixel), u32::from(ws.ws_ypixel)))
-    } else {
-        None
-    }
+fn cells_of(window: Option<Window>) -> (u32, u32) {
+    window.map_or((FALLBACK_TERMINAL_COLS, FALLBACK_TERMINAL_ROWS), |window| {
+        let (columns, rows) = window.cells();
+        (u32::from(columns), u32::from(rows))
+    })
 }
 
 /// The measured size of one character cell, in pixels, when the terminal
@@ -203,8 +167,21 @@ pub fn cell_pixels() -> Option<(u32, u32)> {
 /// The width and the height of one cell in pixels, or `None` when the probe
 /// measured no window, when the terminal reports no pixel size, or when either
 /// quotient is zero.
-fn cell_pixels_of(_window: Option<Window>) -> Option<(u32, u32)> {
-    None
+fn cell_pixels_of(window: Option<Window>) -> Option<(u32, u32)> {
+    let (pixels_wide, pixels_tall) = window_pixels(window)?;
+    let (columns, rows) = window?.cells();
+
+    // A count of zero used to fail a guard here. `termsize::Window` holds that
+    // rule now, and it makes no window of zero columns and no window of zero
+    // rows, so no count of zero reaches this division. The tests of that rule
+    // live in `src/termsize/src/lib.rs`.
+    let cell_width = pixels_wide / u32::from(columns);
+    let cell_height = pixels_tall / u32::from(rows);
+    if cell_width == 0 || cell_height == 0 {
+        return None;
+    }
+
+    Some((cell_width, cell_height))
 }
 
 /// The size of the window in pixels, when the terminal reports one.
@@ -221,37 +198,9 @@ fn cell_pixels_of(_window: Option<Window>) -> Option<(u32, u32)> {
 /// The width and then the height of the window in pixels, or `None` when the
 /// probe measured no window and when the terminal reports no pixel size. A pane
 /// of Zellij reports none, and a ttyd panel reports none.
-pub(crate) fn window_pixels(_window: Option<Window>) -> Option<(u32, u32)> {
-    None
-}
-
-/// The size of one character cell in pixels, with an estimate for a terminal
-/// that reports none.
-///
-/// This is the measure that a tool takes when it must draw an image whatever
-/// the terminal says, which is what `ic` does: a run of `ic` has no second way
-/// to show the picture, so an image at an estimated size beats no image at all.
-/// [`cell_pixels`] is the same question for a caller that does have a second
-/// way. That one answers `None` for a terminal that reports no pixel size, and
-/// the caller then draws the thing that needs no measure.
-///
-/// The estimate is 10 pixels by 20, which is about the cell of a modern
-/// terminal at its default font, and the ratio of the two carries the shape of
-/// a cell better than either number carries its size.
-///
-/// A window of very few pixels over very many columns divides down to a cell of
-/// zero pixels, and this function hands that zero back rather than call it an
-/// estimate. Every consumer of the answer therefore holds a floor of one, and
-/// [`image_rows`] states that floor.
-#[must_use]
-pub(crate) fn cell_pixels_or_estimate() -> (u32, u32) {
-    if let Some((total_px_w, total_px_h)) = terminal_pixels() {
-        let (term_cols, term_rows) = terminal_cells();
-        if term_cols > 0 && term_rows > 0 {
-            return (total_px_w / term_cols, total_px_h / term_rows);
-        }
-    }
-    (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX)
+pub(crate) fn window_pixels(window: Option<Window>) -> Option<(u32, u32)> {
+    let (pixels_wide, pixels_tall) = window?.pixels()?;
+    Some((u32::from(pixels_wide), u32::from(pixels_tall)))
 }
 
 /// The size of one character cell in pixels, with the estimate for a window
@@ -276,25 +225,39 @@ pub(crate) fn cell_pixels_or_estimate() -> (u32, u32) {
 /// The width and the height of one character cell in pixels. Both numbers are
 /// above zero, because [`cell_pixels_of`] refuses a quotient of zero and the
 /// estimate then stands.
-pub(crate) fn cell_pixels_or_estimate_of(_window: Option<Window>) -> (u32, u32) {
-    (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX)
+pub(crate) fn cell_pixels_or_estimate_of(window: Option<Window>) -> (u32, u32) {
+    cell_pixels_of(window).unwrap_or((ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX))
 }
 
-/// Returns the cell aspect ratio (height / width in pixels).
-/// Uses actual terminal cell dimensions when available, falling back to estimates.
+/// The shape of one character cell, as its height over its width.
+///
+/// A character cell is taller than it is wide, so an image of a given number of
+/// columns and rows is not the shape that those two counts suggest. This ratio
+/// carries the difference, and [`calculate_aspect_preserving_size`] takes it.
+///
+/// The size of the cell arrives from the caller, and this function reads no
+/// terminal. One writer of `draw` reads the window one time and then hands the
+/// same measure to every step of one image, so no two steps of one image can
+/// name two terminals.
+///
+/// # Arguments
+/// * `cell_width_px` - The width of one character cell in pixels.
+/// * `cell_height_px` - The height of one character cell in pixels.
+///
+/// # Returns
+/// The height of the cell over its width. A typical terminal gives about 2.
 #[must_use]
 #[allow(
     clippy::cast_precision_loss,
     reason = "a character cell is a few tens of pixels, far inside the exact range of f64"
 )]
-pub(crate) fn cell_aspect_ratio() -> f64 {
-    let (cell_w, cell_h) = cell_pixels_or_estimate();
-    cell_h as f64 / cell_w as f64
+pub(crate) fn cell_aspect_of(cell_width_px: u32, cell_height_px: u32) -> f64 {
+    cell_height_px as f64 / cell_width_px as f64
 }
 
 /// Convert character cell display dimensions to target pixel dimensions.
 ///
-/// The caller reads the size of one cell from [`cell_pixels_or_estimate`], so
+/// The caller reads the size of one cell from [`cell_pixels_or_estimate_of`], so
 /// that one read covers every conversion of one image.
 fn cells_to_pixels(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> (u32, u32) {
     (cols * cell_w, rows * cell_h)
@@ -304,9 +267,9 @@ fn cells_to_pixels(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> (u32, u32)
 ///
 /// Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
 /// via the `cell_aspect` parameter (cell height / cell width in pixels). Callers
-/// obtain this from [`cell_aspect_ratio`], which uses actual terminal
-/// dimensions when available and falls back to an estimate of the cell. This
-/// function works in terminal character cells, not pixels.
+/// obtain this from [`cell_aspect_of`], which takes the cell that
+/// [`cell_pixels_or_estimate_of`] measured. This function works in terminal
+/// character cells, not pixels.
 ///
 /// The casts from f64 to u32 are intentional - display dimensions are always positive
 /// and will never exceed u32::MAX for any reasonable terminal size.
@@ -363,25 +326,38 @@ pub(crate) fn calculate_aspect_preserving_size(
 
 /// Downscale an image to fit the display pixel dimensions if it exceeds them.
 ///
-/// Converts character cell display dimensions to pixel dimensions using either the
-/// actual terminal pixel size (via ioctl) or an estimate of the cell, then resizes
-/// the image if it's larger than the target. This prevents sending hundreds of megabytes
-/// of pixel data to the terminal for very large images (e.g., panoramas).
+/// The function converts the display size in character cells to a size in
+/// pixels, and it then resizes the image when the image is larger than that
+/// target. This keeps hundreds of megabytes of pixel data off the terminal for a
+/// very large image, such as a panorama.
 ///
-/// Returns a borrowed reference to the original image when no downscaling is needed
-/// (dimensions unspecified or image already fits), avoiding an unnecessary clone.
-/// Returns an owned downscaled image when the original exceeds the target pixel dimensions.
+/// The size of the cell arrives from the caller, and this function reads no
+/// terminal. One writer of `draw` reads the window one time and hands the same
+/// measure to every step of one image, and a test states a cell without a
+/// terminal to state it with.
+///
+/// # Arguments
+/// * `img` - The image to draw.
+/// * `display_width` - The width that the caller asks for, in character cells.
+/// * `display_height` - The height that the caller asks for, in character cells.
+/// * `cell_width_px` - The width of one character cell in pixels.
+/// * `cell_height_px` - The height of one character cell in pixels.
+///
+/// # Returns
+/// A borrowed reference to the image when no downscale is necessary, which is
+/// the case when the caller states no size and when the image already fits. That
+/// borrow keeps a copy of the whole image off the heap. An owned and smaller
+/// image comes back when the image is larger than the target.
 #[must_use]
 pub(crate) fn downscale_to_display_pixels<'a>(
     img: &'a DynamicImage,
     display_width: Option<u32>,
     display_height: Option<u32>,
+    cell_width_px: u32,
+    cell_height_px: u32,
 ) -> Cow<'a, DynamicImage> {
     let (target_pixel_w, target_pixel_h) = match (display_width, display_height) {
-        (Some(cols), Some(rows)) => {
-            let (cell_w, cell_h) = cell_pixels_or_estimate();
-            cells_to_pixels(cols, rows, cell_w, cell_h)
-        }
+        (Some(cols), Some(rows)) => cells_to_pixels(cols, rows, cell_width_px, cell_height_px),
         _ => return Cow::Borrowed(img),
     };
 
@@ -514,9 +490,11 @@ pub(crate) fn sixel_pixel_budget(
 ///
 /// # Returns
 /// The row count. The result is always 1 or more, so the caller never asks the
-/// terminal for a movement of zero rows. A `cell_height_px` of 0 counts as 1,
-/// because [`cell_pixels_or_estimate`] divides the terminal pixel height by the
-/// row count and can give 0.
+/// terminal for a movement of zero rows. A `cell_height_px` of 0 counts as 1.
+/// No caller hands one over today, because [`cell_pixels_or_estimate_of`] takes
+/// the estimate for a window that divides down to a cell of no pixels. The floor
+/// stays because a division by zero panics, and the arithmetic of this module
+/// must not.
 #[must_use]
 pub(crate) fn image_rows(height_px: u32, cell_height_px: u32) -> u32 {
     height_px.div_ceil(cell_height_px.max(1)).max(1)
@@ -747,6 +725,25 @@ mod tests {
 
     /// Standard cell aspect ratio used in tests (typical terminal: cells ~2x tall as wide).
     const TEST_CELL_ASPECT: f64 = 2.0;
+
+    #[test]
+    fn a_cell_aspect_is_the_height_of_the_cell_over_its_width() {
+        assert_eq!(
+            cell_aspect_of(REPORTED_CELL.0, REPORTED_CELL.1),
+            TEST_CELL_ASPECT,
+            "a cell of 10 pixels by 20 is twice as tall as it is wide"
+        );
+        assert_eq!(
+            cell_aspect_of(DENSE_CELL.0, DENSE_CELL.1),
+            TEST_CELL_ASPECT,
+            "a cell of 20 pixels by 40 holds the same shape, and the shape is what this ratio carries"
+        );
+        assert_eq!(
+            cell_aspect_of(16, 16),
+            1.0,
+            "a square cell gives an image the shape that the column count and the row count state"
+        );
+    }
 
     #[test]
     fn aspect_preserving_returns_original_when_disabled() {
@@ -1128,32 +1125,50 @@ mod tests {
     #[test]
     fn downscale_returns_borrowed_when_no_dimensions() {
         let img = make_test_image(100, 100);
-        let result = downscale_to_display_pixels(&img, None, None);
+        let result =
+            downscale_to_display_pixels(&img, None, None, TEST_CELL_WIDTH_PX, TEST_CELL_HEIGHT_PX);
         assert!(matches!(result, Cow::Borrowed(_)));
     }
 
     #[test]
     fn downscale_returns_borrowed_when_only_width() {
         let img = make_test_image(100, 100);
-        let result = downscale_to_display_pixels(&img, Some(50), None);
+        let result = downscale_to_display_pixels(
+            &img,
+            Some(50),
+            None,
+            TEST_CELL_WIDTH_PX,
+            TEST_CELL_HEIGHT_PX,
+        );
         assert!(matches!(result, Cow::Borrowed(_)));
     }
 
     #[test]
     fn downscale_returns_borrowed_when_only_height() {
         let img = make_test_image(100, 100);
-        let result = downscale_to_display_pixels(&img, None, Some(50));
+        let result = downscale_to_display_pixels(
+            &img,
+            None,
+            Some(50),
+            TEST_CELL_WIDTH_PX,
+            TEST_CELL_HEIGHT_PX,
+        );
         assert!(matches!(result, Cow::Borrowed(_)));
     }
 
     #[test]
     fn downscale_returns_borrowed_when_image_fits() {
-        // With estimated cell dimensions (10x20), 80 cols x 24 rows = 800x480 pixels.
-        // A 100x100 image fits within that, so no downscale needed.
-        // Note: in CI/test environments, terminal_pixels() returns None,
-        // so the estimate of the cell is used.
+        // A cell of 10 pixels by 20 gives 80 columns by 24 rows a box of 800
+        // pixels by 480. A 100x100 image fits inside that box, so no downscale
+        // is necessary.
         let img = make_test_image(100, 100);
-        let result = downscale_to_display_pixels(&img, Some(80), Some(24));
+        let result = downscale_to_display_pixels(
+            &img,
+            Some(80),
+            Some(24),
+            TEST_CELL_WIDTH_PX,
+            TEST_CELL_HEIGHT_PX,
+        );
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(result.width(), 100);
         assert_eq!(result.height(), 100);
@@ -1161,12 +1176,18 @@ mod tests {
 
     #[test]
     fn downscale_shrinks_oversized_image() {
-        // 10 cols x 5 rows, pixel target depends on actual cell dimensions
-        let (cell_w, cell_h) = cell_pixels_or_estimate();
-        let (max_w, max_h) = cells_to_pixels(10, 5, cell_w, cell_h);
-        // Image must be larger than the target to trigger downscaling
+        // A cell of 10 pixels by 20 gives 10 columns by 5 rows a box of 100
+        // pixels by 100. The image is five times that box on each axis, so the
+        // downscale must run.
+        let (max_w, max_h) = cells_to_pixels(10, 5, TEST_CELL_WIDTH_PX, TEST_CELL_HEIGHT_PX);
         let img = make_test_image(max_w * 5, max_h * 5);
-        let result = downscale_to_display_pixels(&img, Some(10), Some(5));
+        let result = downscale_to_display_pixels(
+            &img,
+            Some(10),
+            Some(5),
+            TEST_CELL_WIDTH_PX,
+            TEST_CELL_HEIGHT_PX,
+        );
         assert!(matches!(result, Cow::Owned(_)));
         assert!(result.width() <= max_w);
         assert!(result.height() <= max_h);
@@ -1178,11 +1199,18 @@ mod tests {
         reason = "the dimensions of a test image are a few hundred pixels, far inside the exact range of f64"
     )]
     fn downscale_preserves_aspect_ratio() {
-        // Wide image with 5:1 aspect ratio, larger than any reasonable target
-        let (cell_w, cell_h) = cell_pixels_or_estimate();
-        let (max_w, max_h) = cells_to_pixels(10, 5, cell_w, cell_h);
+        // A cell of 10 pixels by 20 gives 10 columns by 5 rows a box of 100
+        // pixels by 100. The image is 5 times as wide as it is tall, and it is
+        // larger than the box on both axes.
+        let (max_w, max_h) = cells_to_pixels(10, 5, TEST_CELL_WIDTH_PX, TEST_CELL_HEIGHT_PX);
         let img = make_test_image(max_w * 10, max_h * 2);
-        let result = downscale_to_display_pixels(&img, Some(10), Some(5));
+        let result = downscale_to_display_pixels(
+            &img,
+            Some(10),
+            Some(5),
+            TEST_CELL_WIDTH_PX,
+            TEST_CELL_HEIGHT_PX,
+        );
         assert!(matches!(result, Cow::Owned(_)));
         assert!(result.width() <= max_w);
         assert!(result.height() <= max_h);
@@ -1196,11 +1224,18 @@ mod tests {
 
     #[test]
     fn downscale_handles_panoramic_image() {
-        // Very large panorama, target depends on actual cell dimensions
-        let (cell_w, cell_h) = cell_pixels_or_estimate();
-        let (max_w, max_h) = cells_to_pixels(80, 24, cell_w, cell_h);
+        // A cell of 10 pixels by 20 gives 80 columns by 24 rows a box of 800
+        // pixels by 480. A panorama of 16384 pixels by 4096 is far larger than
+        // that box, and the raw pixels of it are about 200 megabytes.
+        let (max_w, max_h) = cells_to_pixels(80, 24, TEST_CELL_WIDTH_PX, TEST_CELL_HEIGHT_PX);
         let img = make_test_image(16384, 4096);
-        let result = downscale_to_display_pixels(&img, Some(80), Some(24));
+        let result = downscale_to_display_pixels(
+            &img,
+            Some(80),
+            Some(24),
+            TEST_CELL_WIDTH_PX,
+            TEST_CELL_HEIGHT_PX,
+        );
         assert!(matches!(result, Cow::Owned(_)));
         assert!(result.width() <= max_w);
         assert!(result.height() <= max_h);
@@ -1234,8 +1269,10 @@ mod tests {
 
     #[test]
     fn image_rows_survives_a_zero_cell_height() {
-        // cell_pixels_or_estimate divides the terminal pixel height by the row
-        // count, so it can give 0. A cell height of 0 counts as 1 pixel.
+        // A division by zero panics. No caller hands a cell of no height over
+        // today, because cell_pixels_or_estimate_of takes the estimate for a
+        // window that divides down to a cell of no pixels, and the floor holds
+        // the arithmetic if one ever does.
         assert_eq!(image_rows(100, 0), 100);
     }
 
