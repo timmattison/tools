@@ -942,6 +942,23 @@ mod tests {
         assert_scratch_identity();
     }
 
+    /// Printed by a child half that ran its assertions and returned, and
+    /// required by [`run_child_half`] before it calls the run a pass.
+    ///
+    /// A zero exit is not evidence that anything ran. libtest exits 0 when a
+    /// filter matches no test, so a filter gone stale hands the parent exactly
+    /// the exit status a passing child hands it. Only a child that reached the
+    /// end of its body prints this line, so the parent reads proof of work
+    /// instead of absence of failure. `--nocapture` is already on the child's
+    /// command line, so the line arrives in the child's stdout with no more
+    /// plumbing.
+    ///
+    /// The value is a token no libtest output holds, because the parent looks
+    /// for it in the whole of that output. A sentinel that a test name or a
+    /// progress line could spell would report the work of libtest as the work
+    /// of the child.
+    const CHILD_RAN: &str = "GITSCRATCH_CHILD_HALF_RAN";
+
     /// Re-execute this test binary on one test, under an environment
     /// `configure` sets, and report what the child wrote when the run failed.
     ///
@@ -957,6 +974,13 @@ mod tests {
     /// environment arrives as a closure because the two spell their values
     /// differently: the hook test holds `&str` and the redirected test holds
     /// `PathBuf`.
+    ///
+    /// A run counts only when the child exits 0 **and** prints
+    /// [`CHILD_RAN`](CHILD_RAN). The second half is the whole point of the one
+    /// helper: `filter` is a string, nothing ties it to the test it names, and
+    /// a rename leaves it matching nothing - which libtest reports as a
+    /// success. See
+    /// [`a_child_half_that_matched_no_test_is_a_failure_not_a_pass`].
     fn run_child_half(
         marker: &str,
         filter: &str,
@@ -974,11 +998,21 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        if output.status.success() {
-            return Ok(());
+        if !output.status.success() {
+            return Err(format!("the child half failed:\n{stdout}{stderr}"));
         }
 
-        Err(format!("{stdout}{stderr}"))
+        if !stdout.contains(CHILD_RAN) {
+            return Err(format!(
+                "`{filter}` matched no test, so the child exited 0 with nothing run and this \
+                 guard checked nothing. libtest calls an empty filter a success, so the exit \
+                 status cannot tell the two apart; the child prints `{CHILD_RAN}` when it \
+                 reaches the end of its body, and it printed nothing. Point the filter back at \
+                 the test it names.\n{stdout}{stderr}"
+            ));
+        }
+
+        Ok(())
     }
 
     /// Marks the child of
@@ -1026,7 +1060,11 @@ mod tests {
     /// [`the_pinned_identity_survives_a_hook_environment`].
     const CHILD_MARKER: &str = "GITSCRATCH_HOOK_ENVIRONMENT_CHILD";
 
-    /// libtest's exact filter for the one test the child half runs.
+    /// libtest's exact filter for the one test the child half runs. The
+    /// compiler never checks this string against the test it names, and a
+    /// rename that leaves it matching nothing is a run libtest calls a success,
+    /// so [`run_child_half`] requires the child to say it ran rather than
+    /// trusting this constant to stay current.
     const HOOK_TEST_PATH: &str = "git::tests::the_pinned_identity_survives_a_hook_environment";
 
     /// The identity variables git exports into every hook it runs, carrying
@@ -1052,6 +1090,9 @@ mod tests {
     fn the_pinned_identity_survives_a_hook_environment() {
         if std::env::var_os(CHILD_MARKER).is_some() {
             assert_scratch_identity();
+            // Reached only when the assertion above held, and read by the
+            // parent as the one proof that this branch ran at all.
+            println!("{CHILD_RAN}");
             return;
         }
 
@@ -1062,7 +1103,7 @@ mod tests {
         });
 
         if let Err(report) = outcome {
-            panic!("the pinned identity did not survive a hook environment:\n{report}");
+            panic!("the hook-environment guard did not report a pass:\n{report}");
         }
     }
 
@@ -1090,6 +1131,9 @@ mod tests {
     fn ignores_an_inherited_git_environment_naming_another_identity_or_repository() {
         if std::env::var_os(REDIRECTED_CHILD_MARKER).is_some() {
             assert_the_inherited_environment_is_ignored();
+            // Reached only when the assertions above held, and read by the
+            // parent as the one proof that this branch ran at all.
+            println!("{CHILD_RAN}");
             return;
         }
 
@@ -1110,7 +1154,7 @@ mod tests {
         });
 
         if let Err(report) = outcome {
-            panic!("an inherited git environment reached the runner:\n{report}");
+            panic!("the inherited-environment guard did not report a pass:\n{report}");
         }
     }
 
@@ -1118,7 +1162,11 @@ mod tests {
     /// [`ignores_an_inherited_git_environment_naming_another_identity_or_repository`].
     const REDIRECTED_CHILD_MARKER: &str = "GITSCRATCH_REDIRECTED_ENVIRONMENT_CHILD";
 
-    /// libtest's exact filter for the one test the child half runs.
+    /// libtest's exact filter for the one test the child half runs. The
+    /// compiler never checks this string against the test it names, and a
+    /// rename that leaves it matching nothing is a run libtest calls a success,
+    /// so [`run_child_half`] requires the child to say it ran rather than
+    /// trusting this constant to stay current.
     const REDIRECTED_TEST_PATH: &str =
         "git::tests::ignores_an_inherited_git_environment_naming_another_identity_or_repository";
 

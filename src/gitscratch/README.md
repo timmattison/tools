@@ -157,13 +157,18 @@ which adds another repository's `GIT_DIR` and `GIT_INDEX_FILE` to that
 environment and watches neither reach git. Both of those last two run in a
 re-executed child of the test binary rather than in it: the environment is
 process-wide, and mutating it in place would reach every sibling test and every
-concurrent run of the suite.
-`a_child_half_that_matched_no_test_is_a_failure_not_a_pass` pins what the parent
-half of each accepts as a run. It hands the shared child runner a filter naming
-no test in this file and requires a refusal, because libtest exits 0 when a
-filter matches nothing: a parent reading the exit status alone calls a renamed
-test a pass, and the rename that breaks the filter is the rename that hides the
-breakage. **The UTF-8
+concurrent run of the suite. Each of them names the child by a libtest filter,
+which is a string the compiler never checks against the test it names, so a
+child that ran counts only when it *says* it ran — one sentinel line, printed
+at the end of the child's body and required in its output alongside a
+successful exit. The exit status alone cannot carry that, because libtest
+exits 0 when a filter matches no test at all, so a renamed test and a passing
+one look the same from the parent's side.
+`a_child_half_that_matched_no_test_is_a_failure_not_a_pass` pins the refusal:
+it hands the shared child runner a filter naming no test in this file and
+requires a failure that says so. The rename that breaks a filter is the rename
+that hides the breakage, which is why the two guards cannot be left to police
+their own filters. **The UTF-8
 refusal in `Git::paths`** —
 `refuses_a_path_that_is_not_valid_utf_8_rather_than_replacing_the_byte` — covers
 the one loss the `-z` round trip cannot undo: a byte that is not UTF-8 has no
