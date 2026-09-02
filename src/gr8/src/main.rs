@@ -519,13 +519,13 @@ mod tests {
     #[test]
     fn test_collect_rate_limits_returns_all_resources() {
         let resources = make_all_resources_with_remaining(100);
-        let collected = collect_rate_limits(&resources);
+        let names: Vec<&str> = collect_rate_limits(&resources)
+            .iter()
+            .map(|named| named.name)
+            .collect();
         assert_eq!(
-            collected.len(),
-            RESOURCE_COUNT,
-            "collect_rate_limits returned {} items but the response holds {} resources",
-            collected.len(),
-            RESOURCE_COUNT
+            names, SAMPLE_RESOURCES,
+            "collect_rate_limits must keep every resource of the response, in order"
         );
     }
 
