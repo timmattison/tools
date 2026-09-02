@@ -5,6 +5,13 @@
 //! child carries the process id of the test and a nanosecond timestamp, so two
 //! concurrent runs of the same test stay apart.
 
+// Every child of this file starts in a process group of its own, through
+// `CommandExt::process_group`, and `Drop` kills that group with `libc::kill`.
+// Windows has neither call. `spv` itself still builds there, because it keeps a
+// `#[cfg(not(unix))]` path for the user name and for the root check. So the
+// crate stays portable and this test target stands on Unix only.
+#![cfg(unix)]
+
 use std::net::TcpListener;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output, Stdio};
@@ -62,6 +69,12 @@ fn run(output: Output) -> (bool, String, String) {
 /// reported that the process they had just started did not exist.
 const SLEEPER_SECONDS: u32 = 300;
 
+/// The `PATH` that every child of this file starts with.
+///
+/// The child is a shell that runs `sleep`, so it needs a `PATH` that holds the
+/// standard tools of the system.
+const CHILD_PATH: &str = "/usr/bin:/bin";
+
 /// A child process that the test starts, inspects, and kills.
 ///
 /// The shell holds the marker in its own command line, because `sleep` is not
@@ -72,6 +85,20 @@ struct Sleeper {
 
 impl Sleeper {
     /// Starts a child whose command line holds `marker`.
+    ///
+    /// The environment starts empty. A test below reads the environment of this
+    /// child with `--env`, and it prints the whole standard output in its
+    /// failure message. The environment of the test runner holds the real
+    /// credentials of whoever runs the suite, so an inherited environment puts
+    /// them in the output of the tool and then in the log. macOS hides that
+    /// leak today, because it refuses the environment of another process. One
+    /// change in that behavior turns the leak loose, so this helper clears the
+    /// environment itself rather than trust the kernel.
+    ///
+    /// `PATH` then comes back with a fixed value, because `/bin/sh` must still
+    /// find `sleep`. A shell that gets no `PATH` falls back to a default of its
+    /// own, and a test must depend on no such hidden default. The caller sets
+    /// its own variables last, so a caller that gives a `PATH` wins.
     ///
     /// # Arguments
     ///
@@ -85,6 +112,8 @@ impl Sleeper {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .env_clear()
+            .env("PATH", CHILD_PATH)
             // The shell forks `sleep`, so killing the shell alone leaves the
             // grandchild behind, reparented to process 1. A group of its own
             // lets `Drop` kill both with one call.
