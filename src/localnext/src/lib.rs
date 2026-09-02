@@ -316,8 +316,10 @@ const OCTET_STREAM: &str = "application/octet-stream";
 /// `println!`.
 #[must_use]
 pub fn banner(version: &str, root: &Path, addr: SocketAddr) -> String {
-    let _ = (version, root, addr);
-    String::new()
+    format!(
+        "localnext {version}\nServing {} on http://{addr}",
+        root.display()
+    )
 }
 
 /// Spawns a fixed pool of `workers` threads serving `root` on `server`.

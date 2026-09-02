@@ -16,9 +16,13 @@ use tempfile::TempDir;
 
 /// How long to wait for a line of the child's banner before failing.
 ///
-/// Generous for a loopback bind, yet finite: a child that never prints must fail
-/// this one test rather than block the whole suite forever.
-const BANNER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Deliberately generous, yet finite: a child that never prints must fail this
+/// one test rather than block the whole suite forever. The banner itself takes
+/// milliseconds; the budget covers the seconds macOS spends scanning a freshly
+/// built binary on its first execution, measured here in the low single digits
+/// per spawn. A tighter bound would fail unrelated commits for a reason that has
+/// nothing to do with the code.
+const BANNER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The prefix of the banner line that names the served root.
 const SERVING_PREFIX: &str = "Serving ";
@@ -43,14 +47,17 @@ impl Drop for ChildGuard {
 
 /// Builds a minimal static export: a `TempDir` holding an `out/index.html`.
 ///
-/// Returns the `TempDir` (the caller must hold it: dropping it deletes the tree)
-/// alongside the project directory's path.
+/// The `TempDir` itself is the project directory. The caller must hold it for as
+/// long as the child runs, because dropping it deletes the tree.
 fn export_fixture() -> TempDir {
     let dir = TempDir::new().expect("temp dir");
     let out = dir.path().join(localnext::ROOT_DIRECTORY);
     std::fs::create_dir(&out).expect("create out dir");
-    std::fs::write(out.join("index.html"), b"<!doctype html><title>home</title>")
-        .expect("write index.html");
+    std::fs::write(
+        out.join("index.html"),
+        b"<!doctype html><title>home</title>",
+    )
+    .expect("write index.html");
     dir
 }
 
@@ -182,7 +189,10 @@ fn a_directory_with_no_export_aborts_startup() {
 #[test]
 fn a_taken_port_aborts_startup() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-    let port = listener.local_addr().expect("read the bound address").port();
+    let port = listener
+        .local_addr()
+        .expect("read the bound address")
+        .port();
     let dir = export_fixture();
 
     let output = Command::new(env!("CARGO_BIN_EXE_localnext"))

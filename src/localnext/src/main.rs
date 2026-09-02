@@ -1,4 +1,28 @@
+use buildinfo::version_string;
+use clap::Parser;
 use std::path::Path;
+use std::sync::Arc;
+
+/// The size of the worker pool. A small fixed pool: a local preview server
+/// answers one browser, and a thread per request would cost more than it saves.
+const WORKER_THREADS: usize = 4;
+
+/// The interface the server binds. A preview of an unbuilt site stays on the
+/// loopback interface, off the LAN.
+const BIND_ADDRESS: &str = "127.0.0.1";
+
+#[derive(Parser)]
+#[command(name = "localnext")]
+#[command(version = version_string!())]
+#[command(
+    about = "Serve a statically exported Next.js build from its `out` directory",
+    long_about = None
+)]
+struct Cli {
+    /// Override the port derived from the project directory and the git branch.
+    #[arg(short, long)]
+    port: Option<u16>,
+}
 
 /// The directory whose `portplz` derivation supplies the default port.
 ///
@@ -15,12 +39,64 @@ use std::path::Path;
 /// git repository the choice makes no difference, because the repository name and
 /// the current branch decide the hash.
 fn port_basis(root: &Path) -> &Path {
-    root
+    root.parent().unwrap_or(root)
 }
 
+/// Renders every startup failure through its `Display` form.
+///
+/// Returning a `Box<dyn Error>` straight out of `main` would print it through
+/// `Debug` — `Error: "failed to bind …"`, message quoted — because that is what
+/// `Termination` does. The split keeps the message readable.
 fn main() {
-    // The CLI arrives in a later slice; this binary exists so the crate builds
-    // with both a library and a binary target from the start.
+    if let Err(e) = run() {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+/// Locates the export, picks a port, binds it, announces itself, and serves.
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    let cwd = std::env::current_dir()?;
+    let root = localnext::find_root(&cwd)?;
+
+    let port = match cli.port {
+        Some(port) => port,
+        None => {
+            // Render a malformed `PORTPLZ_UID` through `Display` so the user gets
+            // the helpful message rather than its `Debug` form.
+            let user = portplz_core::UserSalt::current().map_err(|e| e.to_string())?;
+            portplz_core::derive(port_basis(&root), false, &user)?
+                .port
+                .get()
+        }
+    };
+
+    // `Server::http` errors as `Box<dyn Error + Send + Sync>`, which does not
+    // coerce into this function's `Box<dyn Error>` through `?`; render it to a
+    // String that names the address and the cause instead. Reporting this at all
+    // is the point: the Go tool this ports discarded the equivalent error, so a
+    // taken port exited 0 in silence and nothing was ever served.
+    let address = format!("{BIND_ADDRESS}:{port}");
+    let server = Arc::new(
+        tiny_http::Server::http(&address).map_err(|e| format!("failed to bind {address}: {e}"))?,
+    );
+
+    // Read the address back from the server rather than reusing `port`: `--port 0`
+    // lets the operating system assign one, and the banner has to name the port
+    // that is actually listening. `server_addr` is an enum covering Unix sockets
+    // too, and only an IP address was ever asked for above.
+    let bound = server
+        .server_addr()
+        .to_ip()
+        .ok_or_else(|| format!("bound {address}, but it resolved to no IP address"))?;
+    println!("{}", localnext::banner(version_string!(), &root, bound));
+
+    for handle in localnext::serve(server, Arc::new(root), WORKER_THREADS) {
+        let _ = handle.join();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
