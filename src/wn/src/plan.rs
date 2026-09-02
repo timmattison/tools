@@ -412,6 +412,16 @@ fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
 
 /// The streams the body of a table writes.
 ///
+/// The table ends at the first line that is no row of it, because a report of
+/// parallel work holds more than the stream table. A Housekeeping table and a
+/// table of the work already in flight stand under it, and neither one is more
+/// streams to start: a reader that ran to the end of the page named the rows
+/// of those tables as work, and a row whose cell under the `Order` column
+/// holds a word rather than a number took the whole plan down with it.
+///
+/// The empty row and the rule under the header are rows of this table, so they
+/// are stepped over rather than taken as the end of it.
+///
 /// # Errors
 ///
 /// Gives [`PlanError::NoOrder`] for a table with no `Order` column, and the
@@ -422,7 +432,7 @@ fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>
     let mut streams: Vec<Stream> = Vec::new();
     for line in text.lines().skip(body) {
         let Some(cells) = table_cells(line) else {
-            continue;
+            break;
         };
         if cells.iter().all(|cell| cell.is_empty()) || is_delimiter(&cells) {
             continue;

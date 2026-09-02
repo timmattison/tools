@@ -1062,7 +1062,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     in every stream, under one summary that carries all of them. Both written forms work: the
     records a terminal prints, and the Markdown table a file holds. No flag says which shape the
     text is, because the shape of the text already does, so `pbpaste | wn` answers a plan the same
-    way it answers a chain.
+    way it answers a chain. A table ends at the first line that is not a row of it, so a whole
+    report pastes in cleanly: the Housekeeping table under the streams is not more work to start.
   - Only the `Order` field is a chain. `Stream`, `Zone`, and `Notes` are never read for numbers,
     and that rule is what makes the feature work: `Notes` is prose about code, and prose about
     code is full of numbers. `main.rs:1566-1650` is not `#1566` and `#1650`, and `265 lines apart
