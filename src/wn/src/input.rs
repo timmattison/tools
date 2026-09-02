@@ -445,6 +445,37 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
     }
 
     #[test]
+    fn a_cause_that_ends_with_a_period_loses_it() {
+        // `arboard` writes a whole sentence, period included: "The selected
+        // clipboard is not supported with the current system configuration."
+        // The message puts the cause in parentheses and then continues, so a
+        // period the cause carries reads as ".)." to the person at the
+        // terminal.
+        let cause = ClipboardUnavailable::new(&"the clipboard is not supported.");
+        assert_eq!(cause.to_string(), "the clipboard is not supported");
+        assert_eq!(
+            InputError::Unavailable(cause).to_string(),
+            "the clipboard could not be read (the clipboard is not supported). \
+Pass it as an argument, in quotes: wn \"#277 → #278\""
+        );
+    }
+
+    #[test]
+    fn the_space_around_a_cause_is_dropped() {
+        assert_eq!(
+            ClipboardUnavailable::new(&"  no display \n").to_string(),
+            "no display"
+        );
+    }
+
+    #[test]
+    fn a_cause_of_nothing_but_a_period_is_kept_as_it_is() {
+        // Nothing is worse than something, and an error that names no cause at
+        // all reads as a bug in the tool rather than as a state of the machine.
+        assert_eq!(ClipboardUnavailable::new(&".").to_string(), ".");
+    }
+
+    #[test]
     fn no_input_at_all_gives_the_message_the_tool_printed_before() {
         let err = Sources {
             argument: &[],
