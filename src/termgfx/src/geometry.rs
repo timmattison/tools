@@ -106,7 +106,7 @@ pub fn terminal_cells() -> (u32, u32) {
 /// The number of columns and then the number of rows of that window, or
 /// [`FALLBACK_TERMINAL_COLS`] by [`FALLBACK_TERMINAL_ROWS`] when the probe
 /// measured no window.
-fn cells_of(window: Option<Window>) -> (u32, u32) {
+pub(crate) fn cells_of(window: Option<Window>) -> (u32, u32) {
     window.map_or((FALLBACK_TERMINAL_COLS, FALLBACK_TERMINAL_ROWS), |window| {
         let (columns, rows) = window.cells();
         (u32::from(columns), u32::from(rows))

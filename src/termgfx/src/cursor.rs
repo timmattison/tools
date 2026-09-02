@@ -83,7 +83,11 @@ impl CursorContract {
     ///
     /// # Returns
     /// The promise that the display routine must keep.
-    pub(crate) fn below_image(no_newline: bool, image_rows: impl FnOnce() -> u32) -> Self {
+    pub(crate) fn below_image(
+        no_newline: bool,
+        _term_rows: u32,
+        image_rows: impl FnOnce() -> u32,
+    ) -> Self {
         if no_newline {
             return CursorContract::CallerManaged;
         }
@@ -185,6 +189,47 @@ mod tests {
         assert_eq!(reservation_rows(1, 1), 1);
         assert_eq!(reservation_rows(5, 0), 1);
         assert_eq!(reservation_rows(0, 24), 1);
+    }
+
+    // =========================================================================
+    // Tests for CursorContract::below_image
+    // =========================================================================
+
+    /// The rows that one contract reserves, or `None` when the caller states
+    /// the position of the cursor itself.
+    ///
+    /// [`CursorContract`] carries no `PartialEq`, so a test names the variant
+    /// through this function instead of comparing two contracts.
+    fn reserved_rows(contract: CursorContract) -> Option<u32> {
+        match contract {
+            CursorContract::CallerManaged => None,
+            CursorContract::BelowImage { rows } => Some(rows),
+        }
+    }
+
+    #[test]
+    fn below_image_bounds_the_reservation_by_the_rows_it_is_given() {
+        // The writer measures one window and hands the rows of that window
+        // over, so the bound must come off the number in the argument and off
+        // no other terminal. The two cases below state two different terminals
+        // for one image of 50 rows, and no one terminal answers both: a
+        // reservation that read a terminal of its own would give the same
+        // bound to both calls.
+        assert_eq!(
+            reserved_rows(CursorContract::below_image(false, 7, || 50)),
+            Some(6),
+            "an image of 50 rows in a terminal of 7 leaves the last row for the cursor to land on"
+        );
+        assert_eq!(
+            reserved_rows(CursorContract::below_image(false, 100, || 50)),
+            Some(50),
+            "an image of 50 rows fits inside a terminal of 100, so the reservation keeps every row of it"
+        );
+        assert_eq!(
+            reserved_rows(CursorContract::below_image(true, 7, || 50)),
+            None,
+            "the caller that asks for no newline states the position of the cursor itself"
+        );
     }
 
     // =========================================================================

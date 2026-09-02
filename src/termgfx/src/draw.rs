@@ -35,8 +35,8 @@ use crate::cursor::{write_image_with_cursor_contract, CursorContract};
 use crate::detect::{display_routine_for, Capabilities, DisplayRoutine};
 use crate::geometry::{
     calculate_aspect_preserving_size, calculate_sixel_dimensions, cell_aspect_of,
-    cell_pixels_or_estimate_of, downscale_to_display_pixels, image_rows, image_rows_in_cells,
-    sixel_pixel_budget, window_pixels,
+    cell_pixels_or_estimate_of, cells_of, downscale_to_display_pixels, image_rows,
+    image_rows_in_cells, sixel_pixel_budget, window_pixels,
 };
 
 /// The number of base64 characters that one Kitty graphics command carries.
@@ -228,8 +228,16 @@ impl Capabilities {
 ///
 /// # Returns
 /// The promise that the writer must keep.
-fn cursor_contract(request: &Request, image_rows: impl FnOnce() -> u32) -> CursorContract {
-    CursorContract::below_image(matches!(request.cursor, Cursor::Held { .. }), image_rows)
+fn cursor_contract(
+    request: &Request,
+    term_rows: u32,
+    image_rows: impl FnOnce() -> u32,
+) -> CursorContract {
+    CursorContract::below_image(
+        matches!(request.cursor, Cursor::Held { .. }),
+        term_rows,
+        image_rows,
+    )
 }
 
 /// Write an image with the Kitty graphics protocol.
@@ -295,7 +303,7 @@ fn write_kitty<W: Write>(
     let rgb = image.to_rgb8();
     let base64_data = BASE64_STANDARD.encode(rgb.as_raw());
 
-    let contract = cursor_contract(request, || {
+    let contract = cursor_contract(request, cells_of(window).1, || {
         image_rows_in_cells(
             image.width(),
             image.height(),
@@ -409,7 +417,9 @@ fn write_sixel<W: Write>(
     )
     .map_err(|error| DrawError::Encode(error.to_string()))?;
 
-    let contract = cursor_contract(request, || image_rows(resized.height(), cell_height_px));
+    let contract = cursor_contract(request, cells_of(window).1, || {
+        image_rows(resized.height(), cell_height_px)
+    });
 
     write_image_with_cursor_contract(out, contract, |sink| write!(sink, "{payload}"))?;
 
@@ -475,7 +485,7 @@ fn write_iterm2<W: Write>(
     pnm_data.extend_from_slice(rgb_data);
     let base64_data = BASE64_STANDARD.encode(&pnm_data);
 
-    let contract = cursor_contract(request, || {
+    let contract = cursor_contract(request, cells_of(window).1, || {
         image_rows_in_cells(
             image.width(),
             image.height(),
