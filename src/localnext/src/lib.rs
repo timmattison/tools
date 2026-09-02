@@ -56,7 +56,22 @@ pub enum RootError {
 /// canonical path (it was removed between the check and the resolution, or a
 /// component of it is unreadable).
 pub fn find_root(cwd: &Path) -> Result<PathBuf, RootError> {
-    Err(RootError::NotFound(cwd.to_path_buf()))
+    let candidate = if cwd.file_name().is_some_and(|name| name == ROOT_DIRECTORY) {
+        cwd.to_path_buf()
+    } else {
+        let child = cwd.join(ROOT_DIRECTORY);
+        if !child.exists() {
+            return Err(RootError::NotFound(cwd.to_path_buf()));
+        }
+        child
+    };
+
+    candidate
+        .canonicalize()
+        .map_err(|source| RootError::Canonicalize {
+            path: candidate.clone(),
+            source,
+        })
 }
 
 #[cfg(test)]
