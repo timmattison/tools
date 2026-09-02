@@ -38,6 +38,12 @@ const SCRUBBED_PREFIXES: [&str; 2] = ["AWS_", "GIT_"];
 /// The name of the tool, as the version line and the help start.
 const TOOL_NAME: &str = "subito";
 
+/// The message the tool prints when the command line names no topic.
+///
+/// This is the message of the Go tool that this one replaces, character for
+/// character.
+const NO_TOPIC_MESSAGE: &str = "You must provide at least one AWS IoT topic to subscribe to";
+
 /// The count of hex digits of the short commit hash of a version line.
 const SHORT_HASH_LENGTH: usize = 7;
 
@@ -187,5 +193,31 @@ fn a_quality_of_service_of_three_is_refused() {
     assert!(
         complained.contains("--qos") && complained.contains('3'),
         "the tool names the flag and the value it refused: {complained}"
+    );
+}
+
+#[test]
+fn with_no_topic_the_tool_says_a_topic_is_missing_and_stops() {
+    let (status, printed, complained) = run(&[]);
+
+    assert_eq!(
+        status,
+        Some(1),
+        "a command line with no topic stops the tool with a failure: {printed}"
+    );
+    assert_eq!(
+        complained,
+        format!("{NO_TOPIC_MESSAGE}\n"),
+        "the tool prints the message of the Go tool and nothing else"
+    );
+}
+
+#[test]
+fn with_no_topic_the_tool_prints_nothing_on_standard_output() {
+    let (_status, printed, _complained) = run(&[]);
+
+    assert_eq!(
+        printed, "",
+        "a run that subscribes to nothing prints nothing a pipe can read"
     );
 }
