@@ -36,7 +36,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::chain::{ChainError, Snippet};
+use crate::chain::ChainError;
 
 /// The variable that turns the clipboard fallback off. Any value with a
 /// character in it turns it off.
@@ -135,19 +135,21 @@ impl Chain {
     /// see, so the reason stands on its own. A chain that came from the
     /// clipboard is not, and a reader who typed no argument and reads
     /// `"an" is not an issue number` has no way to know where the word came
-    /// from — the clipboard was read on the tool's initiative, so the tool says
-    /// what it found there.
+    /// from. The clipboard was read on the initiative of the tool, so the
+    /// message names it.
     ///
-    /// The text is a [`Snippet`], and so is the text `err` names, so a clipboard
-    /// of a whole page cannot push the reason off the line it is written on.
+    /// The message names the clipboard and it writes nothing out of it. The
+    /// clipboard is the one input the reader did not choose, and it holds a
+    /// password, a token, or a recovery code as readily as it holds a chain. A
+    /// message that repeats the clipboard puts that secret in the scrollback,
+    /// and in every log that keeps standard error. The reason `err` gives
+    /// names as much of the text as the argument and the pipe already name,
+    /// and no more.
     #[must_use]
     pub fn blame(&self, err: ChainError) -> anyhow::Error {
         match self.source {
             Source::Argument | Source::Stdin => anyhow::Error::new(err),
-            Source::Clipboard => anyhow::anyhow!(
-                "the clipboard holds {:?}, which is not a chain: {err}",
-                Snippet::new(&self.text)
-            ),
+            Source::Clipboard => anyhow::anyhow!("the clipboard is not a chain: {err}"),
         }
     }
 }
@@ -272,7 +274,7 @@ fn from_arboard(result: Result<String, arboard::Error>) -> ClipboardRead {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::{parse_chain, SNIPPET_CHARS};
+    use crate::chain::parse_chain;
 
     /// The chain the tests type, whichever input they type it into.
     const CHAIN: &str = "#277 → #278";
@@ -535,8 +537,7 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
         let err = parse_chain(prose).expect_err("prose is not a chain");
         assert_eq!(
             clipboard_chain(prose).blame(err).to_string(),
-            "the clipboard holds \"let me know what you think\", \
-which is not a chain: \"let\" is not an issue number"
+            "the clipboard is not a chain: \"let\" is not an issue number"
         );
     }
 
@@ -546,8 +547,7 @@ which is not a chain: \"let\" is not an issue number"
         let err = parse_chain(arrows).expect_err("arrows alone are not a chain");
         assert_eq!(
             clipboard_chain(arrows).blame(err).to_string(),
-            "the clipboard holds \"→ → →\", \
-which is not a chain: no issue number found in \"→ → →\""
+            "the clipboard is not a chain: no issue number found in \"→ → →\""
         );
     }
 
@@ -568,24 +568,27 @@ which is not a chain: no issue number found in \"→ → →\""
     }
 
     #[test]
-    fn a_long_clipboard_text_is_cut_in_the_blame() {
+    fn a_long_clipboard_text_is_not_echoed_in_the_blame() {
+        // A page of prose on the clipboard is the reader's page. The message
+        // names the clipboard and stops there.
         let long = "word ".repeat(30);
         let err = parse_chain(&long).expect_err("words are not a chain");
         let message = clipboard_chain(&long).blame(err).to_string();
-        let expected: String = long.trim().chars().take(SNIPPET_CHARS).collect();
-        assert!(message.contains(&format!("{expected}…")), "{message}");
+        assert!(message.contains("clipboard"), "{message}");
         assert!(!message.contains(long.trim()), "{message}");
     }
 
     #[test]
-    fn a_clipboard_of_multi_byte_characters_is_cut_without_a_panic() {
+    fn a_clipboard_of_multi_byte_characters_is_not_echoed_without_a_panic() {
+        // The clipboard of a person who reads Japanese holds Japanese. The
+        // message is built out of such a clipboard without a panic, and it
+        // still writes none of it.
         for word in ["日本語", "🎉", "café"] {
             let text = format!("{word} ").repeat(40);
             let err = parse_chain(&text).expect_err("the text is not a chain");
             let message = clipboard_chain(&text).blame(err).to_string();
-            let expected: String = text.trim().chars().take(SNIPPET_CHARS).collect();
-            assert_eq!(expected.chars().count(), SNIPPET_CHARS);
-            assert!(message.contains(&format!("{expected}…")), "{message}");
+            assert!(message.contains("clipboard"), "{message}");
+            assert!(!message.contains(text.trim()), "{message}");
         }
     }
 
