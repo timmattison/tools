@@ -721,6 +721,29 @@ fn quick_backoff() -> Backoff {
     Backoff::new(TEST_WAIT, TEST_WAIT)
 }
 
+/// A wait so long that only a supervisor that watches the interrupt ends.
+const SLOW_WAIT: Duration = Duration::from_secs(30);
+
+/// The time a test gives a supervisor to answer an interrupt.
+///
+/// The time is far under [`SLOW_WAIT`], so a supervisor that answers the
+/// interrupt only when its wait ends fails this test instead of passing it
+/// thirty seconds later.
+const PROMPT: Duration = Duration::from_secs(2);
+
+/// Accepts one connection and closes it at once.
+///
+/// The client then sees the connection fail, which is what makes the
+/// supervisor wait before it tries again.
+async fn drop_one_connection(listener: &TcpListener) {
+    let (stream, _) = tokio::time::timeout(STEP_TIMEOUT, listener.accept())
+        .await
+        .expect("the supervisor never opened a connection")
+        .expect("the test could not accept the connection of the supervisor");
+
+    drop(stream);
+}
+
 /// Fails when a second connection arrives within [`NO_RETRY_WAIT`].
 async fn no_second_connection(listener: &TcpListener) {
     assert!(
@@ -894,4 +917,61 @@ async fn a_policy_that_denies_every_topic_is_never_tried_again() {
         "a run that subscribed to nothing stops and says so: {result:?}"
     );
     assert_eq!(attempts.count(), 1, "the supervisor connected once");
+}
+
+#[tokio::test]
+async fn an_interrupt_ends_the_wait_between_two_attempts() {
+    let (listener, port) = listening().await;
+    let topics = vec!["sensors/#".to_string()];
+    let (mut output, mut printed) = recording();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let (done, ended) = tokio::sync::oneshot::channel::<()>();
+
+    let session = async {
+        let result = run_forever_with(
+            move || async move { Ok(options_for(port)) },
+            &topics,
+            QoS::AtMostOnce,
+            false,
+            &mut output,
+            async move {
+                stopped.await.ok();
+                Ok(())
+            },
+            Backoff::new(SLOW_WAIT, SLOW_WAIT),
+        )
+        .await;
+
+        done.send(()).ok();
+
+        result
+    };
+
+    let script = async {
+        // The first attempt fails, so the supervisor starts its wait.
+        drop_one_connection(&listener).await;
+
+        let told = printed.lines(1).await;
+        assert!(
+            told[0].ends_with(&format!("Trying again in {SLOW_WAIT:?}.")),
+            "the supervisor says how long it waits: {:?}",
+            told[0]
+        );
+
+        // A user who presses Ctrl-C during that wait waits for nothing.
+        stop.send(())
+            .expect("the supervisor stopped before the interrupt arrived");
+
+        tokio::time::timeout(PROMPT, ended)
+            .await
+            .expect("the supervisor held its wait and did not answer the interrupt")
+            .expect("the supervisor ended without telling the test");
+    };
+
+    let result = together(session, script).await;
+
+    assert!(
+        result.is_ok(),
+        "an interrupt ends the run and is not a failure: {result:?}"
+    );
 }
