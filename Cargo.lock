@@ -3646,6 +3646,7 @@ dependencies = [
  "tempfile",
  "termsize",
  "testcolor",
+ "textfit",
  "unicode-width",
 ]
 
@@ -7644,6 +7645,13 @@ name = "testcolor"
 version = "0.1.0"
 dependencies = [
  "colored",
+]
+
+[[package]]
+name = "textfit"
+version = "0.1.0"
+dependencies = [
+ "unicode-width",
 ]
 
 [[package]]
