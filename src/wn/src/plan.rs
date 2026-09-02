@@ -23,6 +23,14 @@
 //! two numbers: `PR#344 (#341)` is a pull request that closes an issue. The
 //! step holds both, because the state of the work is the state of the pull
 //! request and the reader still wants to see which issue it finishes.
+//!
+//! A plan writes the same pair the other way round as well: `#4 (in flight,
+//! PR #15)` is the issue `#4`, whose work is the pull request `#15`. So a
+//! group in parentheses annotates the step to its left, and it never opens
+//! one. Inside a group, only a word that carries the `#` is a number, and the
+//! `PR` in front of one marks that number as the work. Every other word is
+//! prose the reader drops, which is what lets `#12 (human)` and `#4 (30-line
+//! window)` each hold one number.
 
 use thiserror::Error;
 
@@ -52,9 +60,10 @@ const GROUP_CLOSE: char = ')';
 
 /// The prefix a plan writes before the number of a pull request.
 ///
-/// It carries no meaning for this module, because GitHub numbers a pull
-/// request out of the same series as an issue. It is read and dropped so a
-/// plan written the way a reader reads it is a plan this module reads too.
+/// It marks which number of a pair is the work. GitHub numbers a pull request
+/// out of the same series as an issue, so the mark is the only thing that says
+/// `PR#344 (#341)` and `#4 (in flight, PR #15)` name the work in opposite
+/// places.
 const PULL_REQUEST_PREFIX: &str = "pr";
 
 /// The word a stream with no `Stream` field takes as the first half of its
@@ -187,6 +196,14 @@ pub enum PlanError {
         /// The label of the stream that holds the group.
         stream: Snippet,
         /// The group itself.
+        token: Snippet,
+    },
+    /// A group opens and never closes, so where it ends is a guess.
+    #[error("stream {stream:?}: {token:?} has no closing parenthesis")]
+    UnclosedGroup {
+        /// The label of the stream that holds the group.
+        stream: Snippet,
+        /// The group, from its opening parenthesis to the end of the field.
         token: Snippet,
     },
     /// A second group stands on one step, and a step closes one issue.
@@ -521,103 +538,241 @@ fn label_of(named: Option<&str>, place: usize) -> String {
 ///
 /// Gives [`PlanError::NotAnIssue`] for a token that names no issue,
 /// [`PlanError::UnattachedPair`] for a group that stands before every step,
-/// [`PlanError::SecondPair`] for a second group on one step, and
-/// [`PlanError::NoIssues`] for a field with no number in it.
+/// [`PlanError::SecondPair`] for a second group on one step,
+/// [`PlanError::NoIssues`] for a field with no number in it, and
+/// [`PlanError::UnclosedGroup`] for a group that opens and never closes.
 fn read_order(order: &str, label: &str) -> Result<Vec<Step>, PlanError> {
-    let mut steps: Vec<Step> = Vec::new();
-    for piece in pieces(order) {
+    let mut readings: Vec<Reading> = Vec::new();
+    let pieces = pieces(order).map_err(|open| PlanError::UnclosedGroup {
+        stream: Snippet::new(label),
+        token: Snippet::new(&format!("{GROUP_OPEN}{open}")),
+    })?;
+    for piece in pieces {
         match piece {
             Piece::Step(token) => {
-                let number = step_number(&token).ok_or_else(|| PlanError::NotAnIssue {
-                    stream: Snippet::new(label),
-                    token: Snippet::new(&token),
-                })?;
+                let (number, marked) =
+                    marked_number(&token).ok_or_else(|| PlanError::NotAnIssue {
+                        stream: Snippet::new(label),
+                        token: Snippet::new(&token),
+                    })?;
                 // Through the constructor, so one place builds a step. A
                 // group that follows attaches to it below.
-                steps.push(Step::new(number, None));
+                readings.push(Reading {
+                    step: Step::new(number, None),
+                    marked,
+                });
             }
-            Piece::Group(token) => {
+            Piece::Group(text) => {
                 // The group is repeated back with its parentheses, because
                 // that is how the reader wrote it and how they find it again.
-                let written = format!("{GROUP_OPEN}{token}{GROUP_CLOSE}");
-                let number = step_number(&token).ok_or_else(|| PlanError::NotAnIssue {
-                    stream: Snippet::new(label),
-                    token: Snippet::new(&written),
-                })?;
-                let step = steps.last_mut().ok_or_else(|| PlanError::UnattachedPair {
-                    stream: Snippet::new(label),
-                    token: Snippet::new(&written),
-                })?;
-                if step.closes.is_some() {
+                let written = group_text(&text);
+                // A group annotates the step to its left, and it never opens
+                // one. So a group that stands first attaches to nothing,
+                // whatever it holds.
+                if readings.is_empty() {
+                    return Err(PlanError::UnattachedPair {
+                        stream: Snippet::new(label),
+                        token: Snippet::new(&written),
+                    });
+                }
+                let Some(annotation) = annotation_of(&text, label)? else {
+                    continue;
+                };
+                let reading = readings.last_mut().expect("the list holds a step");
+                if reading.step.closes.is_some() {
                     return Err(PlanError::SecondPair {
                         stream: Snippet::new(label),
                         token: Snippet::new(&written),
                     });
                 }
-                step.closes = Some(number);
+                reading.annotate(annotation);
             }
         }
     }
-    if steps.is_empty() {
+    if readings.is_empty() {
         return Err(PlanError::NoIssues(Snippet::new(label)));
     }
-    Ok(steps)
+    Ok(readings.into_iter().map(|reading| reading.step).collect())
+}
+
+/// One step of a stream, with the mark the plan wrote on its number.
+///
+/// The mark stands here and not on [`Step`], because it says nothing to a
+/// reader of the answer. It settles one question inside this module: which of
+/// the two numbers of a pair is the work.
+struct Reading {
+    /// The step itself.
+    step: Step,
+    /// The number of the step carries a `PR` in front of it.
+    marked: bool,
+}
+
+impl Reading {
+    /// Give the step the number its annotation names.
+    ///
+    /// A step holds the work and the issue the work closes, in that order. The
+    /// plan marks the work with `PR`, so a marked number inside the group and
+    /// an unmarked number outside it means the two arrived the other way round
+    /// and swap here. A group that marks a step which is marked already names
+    /// a second pull request for one piece of work, and the number that opened
+    /// the step stands as the work, because it opened it.
+    fn annotate(&mut self, annotation: Annotation) {
+        if annotation.marked && !self.marked {
+            self.step.closes = Some(self.step.number);
+            self.step.number = annotation.number;
+            self.marked = true;
+            return;
+        }
+        self.step.closes = Some(annotation.number);
+    }
+}
+
+/// The number one group gives the step before it.
+struct Annotation {
+    /// The number itself.
+    number: IssueNumber,
+    /// The plan wrote `PR` in front of it, so this number is the work.
+    marked: bool,
 }
 
 /// One piece of an `Order` field.
 enum Piece {
     /// A step of the stream, as the field writes it.
     Step(String),
-    /// A group: the issue the step before it closes.
+    /// The text of a group, without the parentheses around it.
     Group(String),
 }
 
 /// Cut `order` into its steps and its groups.
 ///
-/// Whitespace, a separator of a chain, and a parenthesis each end a token. So
-/// does a `#` that arrives while a token is open, which is what makes `#1#2`
-/// two steps written with no separator at all. A `#` that arrives on the `PR`
-/// of a pull request ends nothing, because `PR#344` is one number written the
-/// way a plan writes it.
-fn pieces(order: &str) -> Vec<Piece> {
+/// A parenthesis opens and closes a group, and every character between the two
+/// belongs to it. The text outside them is cut into steps by [`tokens_of`].
+///
+/// A closing parenthesis with no group open belongs to the token it arrived
+/// in, so `#4)` is one token that names no issue and earns the message that
+/// says so.
+///
+/// # Errors
+///
+/// Gives the text of a group that opens and never closes, so the caller can
+/// name the stream it stands in.
+fn pieces(order: &str) -> Result<Vec<Piece>, String> {
     let mut pieces: Vec<Piece> = Vec::new();
-    let mut token = String::new();
-    let mut in_group = false;
+    let mut outer = String::new();
+    let mut group: Option<String> = None;
     for c in order.chars() {
-        if c == GROUP_OPEN || c == GROUP_CLOSE {
-            end_token(&mut token, in_group, &mut pieces);
-            in_group = c == GROUP_OPEN;
-            continue;
+        match group.as_mut() {
+            Some(text) if c == GROUP_CLOSE => {
+                pieces.push(Piece::Group(std::mem::take(text)));
+                group = None;
+            }
+            Some(text) => text.push(c),
+            None if c == GROUP_OPEN => {
+                push_steps(&mut outer, &mut pieces);
+                group = Some(String::new());
+            }
+            None => outer.push(c),
         }
+    }
+    if let Some(text) = group {
+        return Err(text);
+    }
+    push_steps(&mut outer, &mut pieces);
+    Ok(pieces)
+}
+
+/// Put the steps `outer` writes into `pieces`, and empty it.
+fn push_steps(outer: &mut String, pieces: &mut Vec<Piece>) {
+    pieces.extend(tokens_of(outer).into_iter().map(Piece::Step));
+    outer.clear();
+}
+
+/// Cut `text` into the tokens that each name one number.
+///
+/// Whitespace and a separator of a chain each end a token. So does a `#` that
+/// arrives while a token is open, which is what makes `#1#2` two steps written
+/// with no separator at all. A `#` that arrives on the `PR` of a pull request
+/// ends nothing, because `PR#344` is one number written the way a plan writes
+/// it.
+fn tokens_of(text: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut token = String::new();
+    for c in text.chars() {
         if c.is_whitespace() || SEPARATORS.contains(&c) {
-            end_token(&mut token, in_group, &mut pieces);
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
             continue;
         }
         if c == HASH && !token.is_empty() && !token.eq_ignore_ascii_case(PULL_REQUEST_PREFIX) {
-            end_token(&mut token, in_group, &mut pieces);
+            tokens.push(std::mem::take(&mut token));
         }
         token.push(c);
     }
-    end_token(&mut token, in_group, &mut pieces);
-    pieces
-}
-
-/// Put the token that is open into `pieces`, and open a new one.
-fn end_token(token: &mut String, in_group: bool, pieces: &mut Vec<Piece>) {
-    if token.is_empty() {
-        return;
+    if !token.is_empty() {
+        tokens.push(token);
     }
-    let text = std::mem::take(token);
-    pieces.push(if in_group {
-        Piece::Group(text)
-    } else {
-        Piece::Step(text)
-    });
+    tokens
 }
 
-/// The issue number `token` names, or `None` when it names none.
-fn step_number(token: &str) -> Option<IssueNumber> {
-    read_number(without_pull_request_prefix(token))
+/// The number one group gives its step, or `None` when the group is prose
+/// alone.
+///
+/// Only a token that carries the `#` is a number here. Every other word is
+/// prose the reader drops, so an annotation states a count, a width, or who
+/// does the work without any of it reaching the chain.
+///
+/// # Errors
+///
+/// Gives [`PlanError::NotAnIssue`] for a token that carries the `#` and names
+/// no issue, and [`PlanError::SecondPair`] for a second number in one group,
+/// because a step closes one issue.
+fn annotation_of(text: &str, label: &str) -> Result<Option<Annotation>, PlanError> {
+    let mut found: Option<Annotation> = None;
+    let mut marked = false;
+    for token in tokens_of(text) {
+        if token.eq_ignore_ascii_case(PULL_REQUEST_PREFIX) {
+            marked = true;
+            continue;
+        }
+        let bare = without_pull_request_prefix(&token);
+        let glued = bare.len() != token.len();
+        if !bare.starts_with(HASH) {
+            // Prose, and prose that stands between a mark and a number takes
+            // the mark with it: `PR` marks the number it stands in front of.
+            marked = false;
+            continue;
+        }
+        let number = read_number(bare).ok_or_else(|| PlanError::NotAnIssue {
+            stream: Snippet::new(label),
+            token: Snippet::new(&group_text(&token)),
+        })?;
+        if found.is_some() {
+            return Err(PlanError::SecondPair {
+                stream: Snippet::new(label),
+                token: Snippet::new(&group_text(&token)),
+            });
+        }
+        found = Some(Annotation {
+            number,
+            marked: marked || glued,
+        });
+        marked = false;
+    }
+    Ok(found)
+}
+
+/// `text` with the parentheses of a group around it, as a message writes it.
+fn group_text(text: &str) -> String {
+    format!("{GROUP_OPEN}{text}{GROUP_CLOSE}")
+}
+
+/// The number `token` names and whether it carries the `PR` mark, or `None`
+/// when it names no number.
+fn marked_number(token: &str) -> Option<(IssueNumber, bool)> {
+    let bare = without_pull_request_prefix(token);
+    let marked = bare.len() != token.len();
+    read_number(bare).map(|number| (number, marked))
 }
 
 /// `token` with its `PR` dropped, or `token` when it carries none.
