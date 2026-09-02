@@ -119,13 +119,18 @@ pub async fn run(
 /// every topic, [`SessionError::Output`] when the output refuses a line, and
 /// [`SessionError::Signal`] when the process cannot wait for the interrupt.
 pub async fn run_until(
-    options: MqttOptions,
+    mut options: MqttOptions,
     topics: &[String],
     qos: QoS,
     pretty_json: bool,
     output: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
 ) -> Result<(), SessionError> {
+    // `rumqttc` rolls `last_pkid` back to zero at `max_inflight`, so a run
+    // with more topics than that limit reuses a packet identifier before the
+    // first SUBACK arrives, and the answer then names the wrong topic.
+    raise_inflight_limit(&mut options, topics.len());
+
     let (client, mut eventloop) = AsyncClient::new(options, topics.len() + SPARE_CAPACITY);
 
     for topic in topics {
@@ -146,6 +151,23 @@ pub async fn run_until(
         shutdown,
     )
     .await
+}
+
+/// Gives `options` one packet identifier for each topic of the run.
+///
+/// `rumqttc` counts its packet identifiers up to `max_inflight` and then
+/// starts again at one. A run with more topics than that limit therefore gives
+/// one identifier to two topics, and the second SUBACK to arrive names the
+/// wrong one. The identifiers of a subscription are free of the flow control
+/// this limit exists for, because this tool sends no message of its own.
+///
+/// The limit never goes down. A caller that asked for a larger one keeps it.
+fn raise_inflight_limit(options: &mut MqttOptions, topics: usize) {
+    let needed = u16::try_from(topics).unwrap_or(u16::MAX);
+
+    if options.inflight() < needed {
+        options.set_inflight(needed);
+    }
 }
 
 /// Drives the event loop until the run stops.
