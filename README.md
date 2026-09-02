@@ -122,7 +122,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - localnext
     - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
       directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work
-      with [the templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates)
+      with [the templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates).
+      Run it from the project directory or from inside `out`; either way it serves the same directory. Extensionless
+      routes resolve to their `.html` file, and anything it cannot find falls back to `index.html`. The listening port
+      is derived automatically from the project directory, the git branch, and the current user (the same algorithm as
+      `portplz`), so a given project always serves on a stable port and two projects never collide; override it with
+      `-p/--port`. Binds `127.0.0.1`.
     - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
