@@ -9,8 +9,6 @@
 
 use std::io::{self, Write};
 
-use crate::geometry::terminal_cells;
-
 /// Control sequence introducer. It starts a CSI escape sequence.
 const CSI: &str = "\x1b[";
 
@@ -64,38 +62,46 @@ pub(crate) enum CursorContract {
 impl CursorContract {
     /// Give the contract for one image of a display routine.
     ///
-    /// This is the one place that reads the height of the terminal and bounds
-    /// the reservation by it, so no display routine can reserve more rows than
-    /// the terminal has. An image taller than the screen has no row below it,
-    /// and CUU and CUD both stop at the edge of the screen, so a reservation
-    /// larger than the screen only scrolls the content of the user out of view
-    /// and gives nothing back for it. The bound therefore holds the scroll to
-    /// one screen.
+    /// This is the one place that bounds the reservation by the height of the
+    /// terminal, so no display routine can reserve more rows than the terminal
+    /// has. An image taller than the screen has no row below it, and CUU and
+    /// CUD both stop at the edge of the screen, so a reservation larger than
+    /// the screen only scrolls the content of the user out of view and gives
+    /// nothing back for it. The bound therefore holds the scroll to one screen.
+    ///
+    /// The height of the terminal arrives from the caller, and this function
+    /// reads no terminal itself. The writer of one image measures one window
+    /// and hands the rows of that window to every step of that image, so the
+    /// picture and the reservation below it name one terminal. A second read
+    /// here could name a second one, and a picture laid out for one window and
+    /// reserved for another fits neither. That is the mismatch of GitHub issue
+    /// #350.
     ///
     /// The row count of the image arrives as a closure, because the caller must
-    /// read the size of a character cell from the terminal to compute it. Video
-    /// playback asks for [`CursorContract::CallerManaged`] one time for each
-    /// frame, and the closure keeps that path clear of the terminal.
+    /// convert the pixels of the image with the size of a character cell to
+    /// compute it. Video playback asks for [`CursorContract::CallerManaged`]
+    /// one time for each frame, and the closure keeps that arithmetic off that
+    /// path.
     ///
     /// # Arguments
     /// * `no_newline` - True when the caller puts the cursor where it wants it.
+    /// * `term_rows` - The height of the terminal in rows, off the one window
+    ///   that the writer measured.
     /// * `image_rows` - Gives the height of the image in terminal rows.
     ///
     /// # Returns
     /// The promise that the display routine must keep.
     pub(crate) fn below_image(
         no_newline: bool,
-        _term_rows: u32,
+        term_rows: u32,
         image_rows: impl FnOnce() -> u32,
     ) -> Self {
         if no_newline {
             return CursorContract::CallerManaged;
         }
 
-        let (_, term_height) = terminal_cells();
-
         CursorContract::BelowImage {
-            rows: reservation_rows(image_rows(), term_height),
+            rows: reservation_rows(image_rows(), term_rows),
         }
     }
 }

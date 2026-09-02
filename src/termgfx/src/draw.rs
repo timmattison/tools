@@ -220,11 +220,13 @@ impl Capabilities {
 ///
 /// # Arguments
 /// * `request` - The request that names the cursor.
+/// * `term_rows` - The height of the terminal in rows, off the one window that
+///   the writer measured. [`CursorContract::below_image`] bounds the
+///   reservation by it, so the picture and the reservation below it name one
+///   terminal.
 /// * `image_rows` - Gives the height of the image in terminal rows. It runs
-///   only for [`Cursor::BelowImage`], and [`CursorContract::below_image`] reads
-///   the height of the terminal only there as well. A video frame asks for
-///   [`Cursor::Held`] one time for each frame, so neither the arithmetic nor
-///   that read stands on its path.
+///   only for [`Cursor::BelowImage`]. A video frame asks for [`Cursor::Held`]
+///   one time for each frame, so that arithmetic never stands on its path.
 ///
 /// # Returns
 /// The promise that the writer must keep.
@@ -553,9 +555,10 @@ mod tests {
     /// the command, which is the part between `ESC _ G` and the semicolon.
     ///
     /// The cursor is [`Cursor::Held`], which takes the caller managed cursor
-    /// contract. That contract reads nothing off the terminal, so the command
-    /// is the same in every terminal that runs the suite. [`Cursor::BelowImage`]
-    /// reads the height of the terminal, so no test here draws with it.
+    /// contract. That contract reserves no rows, so the command is the same in
+    /// every terminal that runs the suite. [`Cursor::BelowImage`] bounds its
+    /// reservation by the height of the window that the writer measures, so no
+    /// test here draws with it.
     fn kitty_control_data() -> String {
         let request = Request {
             cursor: Cursor::Held { id: 1 },

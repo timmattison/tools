@@ -46,12 +46,12 @@ const SIXEL_HORIZONTAL_MARGIN: f64 = 0.95;
 /// of the caller in character cells.
 const SIXEL_VERTICAL_MARGIN: f64 = 0.90;
 
-/// The width of the terminal that [`terminal_cells`] assumes when it cannot
-/// read the real width.
+/// The width of the terminal that [`cells_of`] assumes for a run that measured
+/// no window.
 const FALLBACK_TERMINAL_COLS: u32 = 80;
 
-/// The height of the terminal that [`terminal_cells`] assumes when it cannot
-/// read the real height.
+/// The height of the terminal that [`cells_of`] assumes for a run that measured
+/// no window.
 const FALLBACK_TERMINAL_ROWS: u32 = 24;
 
 /// The size of the window that a tool draws its picture into, in columns and
@@ -97,6 +97,10 @@ pub fn terminal_cells() -> (u32, u32) {
 /// controlling terminal and measures the window of the person who typed the
 /// command. A test that called a probe would therefore assert on the size of
 /// that window.
+///
+/// [`terminal_cells`] probes for the window. A writer of `draw` measured one
+/// window already, and it hands that window over instead, so the picture and
+/// the rows that the cursor contract reserves below it come off one read.
 ///
 /// # Arguments
 /// * `window` - The window that the probe measured, or `None` when the probe
