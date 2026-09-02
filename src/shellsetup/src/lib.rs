@@ -1246,41 +1246,38 @@ alias ll='ls -la'
     #[test]
     fn test_different_tools_dont_interfere() {
         let cwt = ShellIntegration::new("cwt", "Change Worktree", "\nfunction wt() { cwt; }\n");
-        let prcp = ShellIntegration::new(
-            "prcp",
-            "Progress Copy",
-            "\nfunction prmv() { prcp --rm; }\n",
-        );
+        let nwt =
+            ShellIntegration::new("nwt", "New Worktree", "\nfunction nwt() { command nwt; }\n");
 
         let file_with_both = r"# cwt - Change Worktree shell integration
 function wt() { OLD_CWT; }
 # End cwt shell integration
 
-# prcp - Progress Copy shell integration
-function prmv() { OLD_PRCP; }
-# End prcp shell integration
+# nwt - New Worktree shell integration
+function nwt() { OLD_NWT; }
+# End nwt shell integration
 ";
-        // Replacing cwt should not affect prcp
+        // Replacing cwt should not affect nwt
         let after_cwt_replace = cwt.replace_block(file_with_both);
 
         assert!(!after_cwt_replace.needs_warning);
         assert!(after_cwt_replace.content.contains("function wt() { cwt; }"));
         assert!(after_cwt_replace
             .content
-            .contains("function prmv() { OLD_PRCP; }"));
+            .contains("function nwt() { OLD_NWT; }"));
         assert!(!after_cwt_replace.content.contains("OLD_CWT"));
 
-        // Replacing prcp should not affect cwt
-        let after_prcp_replace = prcp.replace_block(&after_cwt_replace.content);
+        // Replacing nwt should not affect cwt
+        let after_both_replaces = nwt.replace_block(&after_cwt_replace.content);
 
-        assert!(!after_prcp_replace.needs_warning);
-        assert!(after_prcp_replace
+        assert!(!after_both_replaces.needs_warning);
+        assert!(after_both_replaces
             .content
             .contains("function wt() { cwt; }"));
-        assert!(after_prcp_replace
+        assert!(after_both_replaces
             .content
-            .contains("function prmv() { prcp --rm; }"));
-        assert!(!after_prcp_replace.content.contains("OLD_PRCP"));
+            .contains("function nwt() { command nwt; }"));
+        assert!(!after_both_replaces.content.contains("OLD_NWT"));
     }
 
     // ========== yadm-aware config target resolution ==========
