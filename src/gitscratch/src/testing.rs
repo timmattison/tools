@@ -21,6 +21,12 @@ use crate::git::NoInheritedRepository;
 use crate::repo::Repo;
 use crate::scratch::Scratch;
 
+/// The name every fixture commit is authored and committed under.
+const FIXTURE_USER_NAME: &str = "gitscratch test";
+
+/// The email every fixture commit is authored and committed under.
+const FIXTURE_USER_EMAIL: &str = "gitscratch@example.com";
+
 /// A throwaway repository that deletes itself when dropped.
 pub struct TestRepo {
     dir: TempDir,
@@ -38,8 +44,8 @@ impl TestRepo {
         let repo = Self { dir };
 
         repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.email", "gitscratch@example.com"]);
-        repo.git(&["config", "user.name", "gitscratch test"]);
+        repo.git(&["config", "user.email", FIXTURE_USER_EMAIL]);
+        repo.git(&["config", "user.name", FIXTURE_USER_NAME]);
         // A commit-signing config in the developer's global gitconfig would
         // otherwise make every fixture commit prompt or fail.
         repo.git(&["config", "commit.gpgsign", "false"]);
@@ -693,4 +699,129 @@ pub fn conflicting_repo() -> TestRepo {
 
     repo.checkout("main");
     repo
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TestRepo, FIXTURE_USER_EMAIL, FIXTURE_USER_NAME};
+
+    /// Marks the re-executed child half of
+    /// [`a_fixture_commits_under_its_own_identity_in_a_hook_environment`].
+    const CHILD_MARKER: &str = "GITSCRATCH_FIXTURE_IDENTITY_CHILD";
+
+    /// libtest's exact filter for the one test the child half runs.
+    const IDENTITY_TEST_PATH: &str =
+        "testing::tests::a_fixture_commits_under_its_own_identity_in_a_hook_environment";
+
+    /// What libtest prints when exactly one test ran and passed.
+    ///
+    /// A filter matching nothing exits zero, so a rename that missed
+    /// [`IDENTITY_TEST_PATH`] would otherwise leave the parent green over a
+    /// child that ran nothing at all.
+    const ONE_TEST_PASSED: &str = "1 passed";
+
+    /// A timestamp no run of this suite can produce on its own, so a commit
+    /// carrying it can only have taken it from the environment.
+    ///
+    /// Written in git's raw `<epoch> <timezone>` form, which `--date=raw`
+    /// prints back byte for byte. Every other spelling git accepts here it
+    /// also reformats on the way out — an ISO date set as `+00:00` comes back
+    /// as `Z` — so an assertion against one of those could only ever fail to
+    /// match, which is a test that passes for the wrong reason.
+    const LEAKED_DATE: &str = "1000000000 +0000";
+
+    /// Everything git tells a hook about who is committing, carrying values
+    /// that stand in for a consuming tool's own identity.
+    ///
+    /// All six, not just the four that name a person. A fixture builder that
+    /// scrubbed only the names would still let every commit it makes share one
+    /// timestamp, which is how a fixture that depends on commit order stops
+    /// meaning what it says.
+    const HOOK_ENVIRONMENT: [(&str, &str); 6] = [
+        ("GIT_AUTHOR_NAME", "Consuming Tool"),
+        ("GIT_AUTHOR_EMAIL", "consumer@example.invalid"),
+        ("GIT_AUTHOR_DATE", LEAKED_DATE),
+        ("GIT_COMMITTER_NAME", "Consuming Tool"),
+        ("GIT_COMMITTER_EMAIL", "consumer@example.invalid"),
+        ("GIT_COMMITTER_DATE", LEAKED_DATE),
+    ];
+
+    /// Build a fixture, commit into it, and assert the commit carries the
+    /// fixture's own identity rather than whatever the environment holds.
+    ///
+    /// Read back through `git log` rather than `git var`, because the question
+    /// here is what a fixture commit actually ends up stamped with — the
+    /// identity has to survive [`TestRepo::init`]'s `git config` *and* the
+    /// commit that follows it.
+    fn assert_fixture_identity() {
+        let repo = TestRepo::init();
+        repo.commit_file("seed.txt", "seed\n", "seed");
+
+        let stamped = repo.git(&[
+            "log",
+            "-1",
+            "--date=raw",
+            "--format=%an|%ae|%cn|%ce|%ad|%cd",
+        ]);
+
+        let expected = format!(
+            "{FIXTURE_USER_NAME}|{FIXTURE_USER_EMAIL}|{FIXTURE_USER_NAME}|{FIXTURE_USER_EMAIL}|"
+        );
+        assert!(
+            stamped.starts_with(&expected),
+            "a fixture commit must be authored and committed by the fixture, not \
+             by whichever tool is driving the suite.\n  \
+             expected: {expected}...\n  \
+             got:      {stamped}\n\
+             An identity variable outranks every config source, so the `git config \
+             user.name` TestRepo::init sets loses to a GIT_AUTHOR_NAME the process \
+             inherited — and git exports all six of them into every hook it runs."
+        );
+        assert!(
+            !stamped.contains(LEAKED_DATE),
+            "a fixture commit must be timestamped when it was made, not when an \
+             inherited GIT_AUTHOR_DATE and GIT_COMMITTER_DATE say: {stamped}"
+        );
+    }
+
+    /// A consuming tool invoked from a git hook inherits `GIT_AUTHOR_NAME` and
+    /// its five siblings, and those variables outrank the `user.name` this
+    /// module's fixture builder configures. `.husky/pre-commit` in this
+    /// repository is such a hook, and it runs `cargo test --workspace`, so
+    /// this is the environment a hand-typed commit hands the whole suite.
+    ///
+    /// The environment belongs to a re-executed child of this test binary
+    /// rather than to this process. `std::env::set_var` would leak into every
+    /// other test in the binary, and a child process keeps concurrent runs of
+    /// this suite isolated from each other.
+    #[test]
+    fn a_fixture_commits_under_its_own_identity_in_a_hook_environment() {
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            assert_fixture_identity();
+            return;
+        }
+
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("path of the running test binary"),
+        );
+        child
+            .args([IDENTITY_TEST_PATH, "--exact", "--nocapture"])
+            .env(CHILD_MARKER, "1");
+        for (name, value) in HOOK_ENVIRONMENT {
+            child.env(name, value);
+        }
+
+        let output = child.output().expect("re-run this test binary");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            output.status.success(),
+            "a fixture commit did not survive a hook environment:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains(ONE_TEST_PASSED),
+            "the child must have run exactly one test, got:\n{stdout}"
+        );
+    }
 }
