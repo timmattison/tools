@@ -144,6 +144,57 @@ const PLAN_ANSWER: &str = concat!(
     "  S3 wn          → #411  si 411\n",
 );
 
+/// The report of the `plan-parallel-work` skill, as it arrives on the
+/// clipboard.
+///
+/// The same file the reader of the plan reads in its own tests, so the paste
+/// this test drives the binary with is the paste that reader was written for.
+const BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work.txt");
+
+/// What GitHub says about every number of [`BOX_TABLE`].
+///
+/// Three of the ten are done, so each of the four streams has one issue to
+/// start and none of them is the first step of its stream in every case.
+const BOX_ISSUES: &str = r#"{"data":{"repository":{
+"i15":{"__typename":"PullRequest","number":15,"title":"The visualizer branch","state":"OPEN"},
+"i4":{"__typename":"Issue","number":4,"title":"The visualizers","state":"OPEN","stateReason":null},
+"i7":{"__typename":"Issue","number":7,"title":"Keep or delete","state":"OPEN","stateReason":null},
+"i11":{"__typename":"Issue","number":11,"title":"The oscillator","state":"CLOSED","stateReason":"COMPLETED"},
+"i5":{"__typename":"Issue","number":5,"title":"The Scaled mapping","state":"OPEN","stateReason":null},
+"i13":{"__typename":"Issue","number":13,"title":"The sort tone","state":"OPEN","stateReason":null},
+"i9":{"__typename":"Issue","number":9,"title":"The MIDI array","state":"CLOSED","stateReason":"COMPLETED"},
+"i10":{"__typename":"Issue","number":10,"title":"The MIDI flags","state":"CLOSED","stateReason":"COMPLETED"},
+"i12":{"__typename":"Issue","number":12,"title":"Listen to it","state":"OPEN","stateReason":null},
+"i6":{"__typename":"Issue","number":6,"title":"The manifest","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`BOX_TABLE`] earns: one block for each of the four streams,
+/// and one summary that names an issue to start in each of them.
+const BOX_ANSWER: &str = concat!(
+    "A — visualizers\n",
+    "  → #15 (#4)  The visualizer branch\n",
+    "  · #7        Keep or delete\n",
+    "\n",
+    "B — audio engine\n",
+    "  ✓ #11  The oscillator\n",
+    "  → #5   The Scaled mapping\n",
+    "  · #13  The sort tone\n",
+    "\n",
+    "C — MIDI array\n",
+    "  ✓ #9   The MIDI array\n",
+    "  ✓ #10  The MIDI flags\n",
+    "  → #12  Listen to it\n",
+    "\n",
+    "D — manifest\n",
+    "  → #6  The manifest\n",
+    "\n",
+    "Take one from each stream:\n",
+    "  A — visualizers   → #15  si 15\n",
+    "  B — audio engine  → #5   si 5\n",
+    "  C — MIDI array    → #12  si 12\n",
+    "  D — manifest      → #6   si 6\n",
+);
+
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
     dir: tempfile::TempDir,
@@ -896,4 +947,78 @@ fn a_pull_request_and_the_issue_it_closes_are_one_row() {
             "  S1 gitscratch  → #330  si 330\n",
         )
     );
+}
+
+#[test]
+fn answers_the_paste_of_the_plan_parallel_work_skill() {
+    // The whole point of the feature: copy the report of the skill out of a
+    // terminal, type `wn`, and read the issue to start in each stream. The
+    // paste draws its table with `│` and `┌─┬─┐`, it wraps two of its rows
+    // onto a second line, and its Order fields annotate two steps in
+    // parentheses.
+    let gh = FakeGh::new(BOX_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", BOX_TABLE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), BOX_ANSWER);
+}
+
+#[test]
+fn a_pull_request_an_annotation_names_is_the_work_of_its_step() {
+    // `#4 (in flight, PR #15)` is the issue #4 whose work is the pull request
+    // #15, so the row is the pull request and the state of the row is the
+    // state of it. A merged pull request over an open issue earns the same
+    // note the `PR#344 (#341)` order earns, because it is the same step.
+    let body = r#"{"data":{"repository":{
+"i15":{"__typename":"PullRequest","number":15,"title":"The visualizer branch","state":"MERGED"},
+"i4":{"__typename":"Issue","number":4,"title":"The visualizers","state":"OPEN","stateReason":null},
+"i7":{"__typename":"Issue","number":7,"title":"Keep or delete","state":"OPEN","stateReason":null}
+}}}"#;
+    let gh = FakeGh::new(body);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "Stream: A visualizers\nOrder: #4 (in flight, PR #15) → #7\n",
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "A visualizers\n",
+            "  ✓ #15 (#4)  The visualizer branch\n",
+            "  → #7        Keep or delete\n",
+            "\n",
+            "  #15 is closed and #4 is open.\n",
+            "\n",
+            "Take one from each stream:\n",
+            "  A visualizers  → #7  si 7\n",
+        )
+    );
+}
+
+#[test]
+fn refuses_a_row_whose_cell_count_the_header_does_not_have() {
+    // A note holding a bar it did not escape puts every cell after that bar
+    // under the wrong column. The message prints the row, and the run answers
+    // nothing.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let row = "| S1 | #350 | src/ic | a note with a | bar |";
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        &format!("| Stream | Order | Zone | Notes |\n| --- | --- | --- | --- |\n{row}\n"),
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("row has 5 cells, the header has 4"),
+        "the error names both counts, in {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains(row),
+        "the error prints the row, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
 }
