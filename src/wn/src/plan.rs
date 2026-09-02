@@ -204,6 +204,16 @@ pub enum PlanError {
         /// The group itself.
         token: Snippet,
     },
+    /// A row of a table splits into a cell count the header does not have.
+    #[error("row has {cells} cells, the header has {header}: {line:?}")]
+    RowWidth {
+        /// The number of cells the row splits into.
+        cells: usize,
+        /// The number of columns the header names.
+        header: usize,
+        /// The row itself, as the table writes it.
+        line: Snippet,
+    },
     /// A group opens and never closes, so where it ends is a guess.
     #[error("stream {stream:?}: {token:?} has no closing parenthesis")]
     UnclosedGroup {
@@ -458,8 +468,9 @@ fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
 ///
 /// # Errors
 ///
-/// Gives [`PlanError::NoOrder`] for a table with no `Order` column, and the
-/// errors of [`stream_of`] for one row of it.
+/// Gives [`PlanError::NoOrder`] for a table with no `Order` column,
+/// [`PlanError::RowWidth`] for a row whose cell count the header does not
+/// have, and the errors of [`stream_of`] for one row of it.
 fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>, PlanError> {
     let order_at = column_of(header, Key::Order).ok_or(PlanError::NoOrder)?;
     let stream_at = column_of(header, Key::Stream);
@@ -473,6 +484,17 @@ fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>
         };
         if cells.iter().all(|cell| cell.is_empty()) {
             continue;
+        }
+        // The header names the column count, and a row that splits into
+        // another one puts every cell after its stray bar under the wrong
+        // column. Such a cell is rare, and guessing at it is worse than
+        // refusing it, because the guess reads a note as a chain.
+        if cells.len() != header.len() {
+            return Err(PlanError::RowWidth {
+                cells: cells.len(),
+                header: header.len(),
+                line: Snippet::new(line),
+            });
         }
         if continues_a_row(&cells, order_at) {
             // A continuation with no row above it continues nothing. The plan
