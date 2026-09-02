@@ -688,6 +688,40 @@ fn redact_env_value(name: &str, value: &str, show_secrets: bool) -> String {
     value.to_string()
 }
 
+/// Decides whether a process matches a name pattern.
+///
+/// The retired `procinfo` searched with `pgrep -f`, which reads the whole command
+/// line. `match_full_command` gives that reach back.
+///
+/// # Arguments
+///
+/// * `pattern` - The substring to look for, ignored when `regex` is given
+/// * `regex` - The compiled pattern, when the caller asked for `--regex`
+/// * `name` - The executable name of the process
+/// * `command` - The whole command line of the process
+/// * `match_full_command` - Whether to search the command line instead of the name
+/// * `case_sensitive` - Whether the substring search respects case
+///
+/// # Returns
+///
+/// `true` when the process matches.
+///
+/// # Note
+///
+/// `case_sensitive` governs the substring search only. A regular expression
+/// carries its own case rule in the `(?i)` inline flag.
+fn matches_name_pattern(
+    pattern: &str,
+    regex: Option<&Regex>,
+    name: &str,
+    command: &str,
+    match_full_command: bool,
+    case_sensitive: bool,
+) -> bool {
+    let _ = (pattern, regex, name, command, match_full_command, case_sensitive);
+    false
+}
+
 /// Warns that a matched process belongs to another user.
 ///
 /// A section that comes back empty teaches the user that the process holds
@@ -1464,6 +1498,77 @@ mod tests {
             warning.contains("nobody, root"),
             "the owners come once each and in order: {warning}"
         );
+    }
+
+    #[test]
+    fn a_substring_search_ignores_case_by_default() {
+        assert!(matches_name_pattern(
+            "NODE", None, "node", "node app.js", false, false
+        ));
+    }
+
+    #[test]
+    fn case_sensitive_makes_a_substring_search_exact() {
+        assert!(!matches_name_pattern(
+            "NODE", None, "node", "node app.js", false, true
+        ));
+        assert!(matches_name_pattern(
+            "node", None, "node", "node app.js", false, true
+        ));
+    }
+
+    #[test]
+    fn the_full_command_line_reaches_past_the_executable_name() {
+        assert!(!matches_name_pattern(
+            "deploy",
+            None,
+            "zsh",
+            "zsh -c deploy.sh",
+            false,
+            false
+        ));
+        assert!(matches_name_pattern(
+            "deploy",
+            None,
+            "zsh",
+            "zsh -c deploy.sh",
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn the_full_command_line_falls_back_to_the_name_when_it_is_empty() {
+        // A kernel thread carries no command line.
+        assert!(matches_name_pattern(
+            "kernel",
+            None,
+            "kernel_task",
+            "",
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn a_regex_runs_against_the_subject_the_flags_chose() {
+        let re = Regex::new("deploy.*sh").expect("this pattern compiles");
+        assert!(!matches_name_pattern(
+            "",
+            Some(&re),
+            "zsh",
+            "zsh -c deploy.sh",
+            false,
+            false
+        ));
+        assert!(matches_name_pattern(
+            "",
+            Some(&re),
+            "zsh",
+            "zsh -c deploy.sh",
+            true,
+            false
+        ));
     }
 
     #[cfg(target_os = "macos")]
