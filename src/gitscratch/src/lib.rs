@@ -16,11 +16,14 @@
 //! pointed at, and it exports them into every hook it runs. Run from inside one
 //! — a pre-push gate, `git bisect run`, `rebase --exec`, `cargo test` from
 //! `.husky/pre-commit` — an unscrubbed tool would aim the whole simulation at
-//! the hook's repository. [`NoInheritedRepository`] takes them back off, at the
-//! single place a git process is created and at every fixture spawn besides.
-//! A hook exports who is committing as well as where, and those variables
-//! outrank every config source, so [`NoInheritedIdentity`] takes that second set
-//! off at the same two places — otherwise the identity pinned below loses to
+//! the hook's repository. [`NoInheritedGitEnvironment`] takes them back off, at
+//! the single place a git process is created and at every fixture spawn
+//! besides. A hook exports who is committing as well as where, and those
+//! variables outrank every config source, so the same sweep takes that second
+//! set off at the same two places — otherwise the identity pinned below loses
+//! to whichever tool is driving the run. The rule is the `GIT_` prefix and
+//! never a list of names, because a list strips nothing new the day git adds a
+//! variable and reports the same clean answer either way.
 //! whichever tool is driving the run.
 //!
 //! Every one of those guarantees is a guard that a second implementation would
@@ -68,10 +71,7 @@ pub mod scratch;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use git::{
-    shed_inherited_git_environment, Git, GitOutput, NoInheritedIdentity, NoInheritedRepository,
-    INHERITED_IDENTITY_VARS, REPOSITORY_LOCATION_VARS,
-};
+pub use git::{shed_inherited_git_environment, Git, GitOutput, NoInheritedGitEnvironment};
 pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
 pub use repo::Repo;
 pub use report::Report;

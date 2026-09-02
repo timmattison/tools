@@ -77,7 +77,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `vpn-tunnel` | Generates Docker-based gluetun + ProtonVPN + WireGuard tunnels with helper scripts. |
 | `wifiqr` | Generates WiFi QR codes (with optional logo) for automatic device connection. |
 | `wl` | Shows which process is listening on a given port. |
-| `wn` | What's next — walks a chain of GitHub issues in order and names the first one still open. The answer names the command that starts it, `si 278`. `si` is a shell function you supply, and `WN_START_COMMAND` names a different one. |
+| `wn` | What's next — walks a chain of GitHub issues in order and names the first one still open. Takes the chain from the argument, then standard input, then the clipboard, so `wn` alone answers the chain you just copied (`WN_NO_CLIPBOARD` turns that off). The answer names the command that starts it, `si 278`. `si` is a shell function you supply, and `WN_START_COMMAND` names a different one. |
 | `wolly` | Wake-on-LAN tool that sends magic packets with auto subnet broadcast detection. |
 | `wu` | Cross-platform "who's using" a file/directory/device (process name, PID, user, mode). |
 | `zth` | Zero the Hero — recursively finds non-empty files that contain nothing but zero bytes. |

@@ -13,7 +13,7 @@ use gitscratch::testing::{
     contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
     multi_byte_names_repo, nested_conflict_repo, not_a_repository, TestRepo,
 };
-use gitscratch::NoInheritedRepository;
+use gitscratch::NoInheritedGitEnvironment;
 use unicode_width::UnicodeWidthStr;
 
 /// Exit code for a replay that hit no conflicts.
@@ -55,7 +55,7 @@ fn grind(repo: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_grind"))
         .args(args)
         .current_dir(repo)
-        .without_inherited_repository()
+        .without_inherited_git_environment()
         .output()
         .expect("failed to run grind")
 }
@@ -387,7 +387,7 @@ fn grind_with_nowhere_to_put_a_scratch(
     let output = Command::new(env!("CARGO_BIN_EXE_grind"))
         .arg(branch)
         .current_dir(repo.path())
-        .without_inherited_repository()
+        .without_inherited_git_environment()
         .env("TMPDIR", missing)
         .output()
         .expect("failed to run grind");
@@ -495,7 +495,7 @@ fn a_head_with_no_commit_on_it_is_refused_in_grinds_own_words_and_costs_no_workt
     let output = Command::new(env!("CARGO_BIN_EXE_grind"))
         .arg("beta")
         .current_dir(repo.path())
-        .without_inherited_repository()
+        .without_inherited_git_environment()
         .env("TMPDIR", &scratch_tmp)
         .output()
         .expect("failed to run grind");
@@ -861,7 +861,7 @@ fn grind_into_an_unread_pipe(repo: &Path, args: &[&str], unread: Unread) -> (Opt
     command
         .args(args)
         .current_dir(repo)
-        .without_inherited_repository();
+        .without_inherited_git_environment();
     match unread {
         Unread::Stdout => {
             command.stdout(Stdio::from(writer)).stderr(Stdio::piped());

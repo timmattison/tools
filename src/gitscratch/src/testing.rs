@@ -9,22 +9,21 @@
 //! pre-commit hook's and yours) never share a path. A private path is only half
 //! of it, though: a `cargo test` run *from* the pre-commit hook inherits the
 //! hook's git environment, which names the developer's real repository, so every
-//! spawn here goes through [`NoInheritedRepository`] as well. See
-//! [`REPOSITORY_LOCATION_VARS`](crate::git::REPOSITORY_LOCATION_VARS).
+//! spawn here goes through [`NoInheritedGitEnvironment`] as well.
 //!
 //! The same hook exports who is committing, and an identity variable outranks
 //! the `user.name` [`TestRepo::init`] configures — so a fixture built under a
 //! hand-typed `git commit` would otherwise stamp the developer's own name, and
-//! one timestamp, on every commit it makes. Every spawn that can write a commit
-//! therefore goes through [`NoInheritedIdentity`] too. See
-//! [`INHERITED_IDENTITY_VARS`](crate::git::INHERITED_IDENTITY_VARS).
+//! one timestamp, on every commit it makes. The one sweep takes that second set
+//! off too, because the rule it applies is the `GIT_` prefix rather than a list
+//! of names.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
 
-use crate::git::{NoInheritedIdentity, NoInheritedRepository};
+use crate::git::NoInheritedGitEnvironment;
 use crate::repo::Repo;
 use crate::scratch::Scratch;
 
@@ -77,19 +76,17 @@ impl TestRepo {
 
     fn git_in(&self, cwd: &Path, args: &[&str]) -> String {
         let mut command = Command::new("git");
-        // The same immunity the runner has, from the same list, because a
-        // fixture is not exempt from an inherited environment just because it is
-        // only building something to test with. A test suite run from inside a
-        // git hook inherits a *relative* `GIT_INDEX_FILE`, and a linked
-        // worktree's `.git` is a file, so a fixture that keeps it cannot add one
-        // at all - it fails before the code under test is ever reached.
-        crate::git::shed_inherited_git_environment(&mut command);
-
         let output = command
             .args(args)
             .current_dir(cwd)
-            .without_inherited_repository()
-            .without_inherited_identity()
+            // The same immunity the runner has, from the same rule, because a
+            // fixture is not exempt from an inherited environment just because
+            // it is only building something to test with. A test suite run from
+            // inside a git hook inherits a *relative* `GIT_INDEX_FILE`, and a
+            // linked worktree's `.git` is a file, so a fixture that keeps it
+            // cannot add one at all - it fails before the code under test is
+            // ever reached.
+            .without_inherited_git_environment()
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
 
@@ -400,7 +397,7 @@ pub fn not_a_repository() -> NotARepo {
     let probe = Command::new("git")
         .args(["rev-parse", "--git-dir"])
         .current_dir(dir.path())
-        .without_inherited_repository()
+        .without_inherited_git_environment()
         .output()
         .expect("failed to spawn git rev-parse --git-dir");
 

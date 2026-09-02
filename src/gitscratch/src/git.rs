@@ -7,11 +7,11 @@
 //! otherwise move the very branch refs being simulated.
 //!
 //! The other half of "against the right repository" is the *environment*, which
-//! [`NoInheritedRepository`] strips, because a git invocation obeys it before it
-//! obeys the directory it was pointed at. [`NoInheritedIdentity`] strips the
-//! rest of what a hook hands its children — who is committing, and when — for
-//! the same reason: an environment variable outranks every config source, so
-//! the identity pinned here only holds once they are gone.
+//! [`NoInheritedGitEnvironment`] strips, because a git invocation obeys it
+//! before it obeys the directory it was pointed at. The same sweep takes the
+//! rest of what a hook hands its children — who is committing, and when —
+//! because an environment variable outranks every config source, so the
+//! identity pinned here only holds once they are gone.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -24,126 +24,75 @@ use anyhow::{Context, Result};
 const HARNESS_NAME: &str = "gitscratch";
 const HARNESS_EMAIL: &str = "gitscratch@localhost";
 
-/// Every environment variable that answers "who is committing, and when?"
-/// before configuration gets a say.
-///
-/// Git sets all six for every hook it runs, and sets the author trio again for
-/// each commit that rebase, cherry-pick, or am replays. An environment variable
-/// outranks every config source, `-c` included, so a `user.name` pinned in
-/// configuration is only in force once these are gone.
-///
-/// The two `DATE` variables ride along with the four that name a person because
-/// they leak the same way and are the quieter half: left in place, every commit
-/// a run makes carries one identical timestamp, so anything that reads history
-/// in date order stops meaning what it says.
-///
-/// One constant rather than a `.env_remove` chain per call site, for the reason
-/// [`REPOSITORY_LOCATION_VARS`] is one: the sites cannot be allowed to drift,
-/// and a spawn that scrubs four of six is a spawn with a hole in it.
-pub const INHERITED_IDENTITY_VARS: [&str; 6] = [
-    "GIT_AUTHOR_NAME",
-    "GIT_AUTHOR_EMAIL",
-    "GIT_AUTHOR_DATE",
-    "GIT_COMMITTER_NAME",
-    "GIT_COMMITTER_EMAIL",
-    "GIT_COMMITTER_DATE",
-];
+/// The prefix that makes a variable git's, and therefore one
+/// [`NoInheritedGitEnvironment`] removes.
+const GIT_ENVIRONMENT_PREFIX: &str = "GIT_";
 
-/// Every environment variable that answers "which repository?" before the
-/// working directory gets a say.
+/// Spawn a command that takes its repository, and its identity, from nothing it
+/// inherited.
 ///
-/// Git exports the first four into every hook it runs, so anything a hook
-/// spawns inherits them — and `.husky/pre-commit` in this repository spawns
-/// `cargo test`. A tool run this way looks like it is working on the directory
-/// it was handed and is in fact working on the hook's repository.
+/// **The rule is the `GIT_` prefix, and never a list of names.** A list strips
+/// nothing new the day git adds a variable, and from then on it returns the same
+/// clean-looking answer as a list that works. This scrub was a fifteen-name list
+/// once, and `GIT_CONFIG_PARAMETERS` walked straight through it — a variable git
+/// exports to every hook, which injects arbitrary configuration (`user.email`,
+/// `core.bare`, `core.hooksPath`) into every git this crate spawns. It is not a
+/// location variable, so no amount of adding location names would have caught
+/// it. Enumerating [`std::env::vars_os`] sweeps whatever git invents next
+/// without anyone editing this file. Pinned by `tests/inherited-environment.rs`.
 ///
-/// The list is one constant rather than a `.env_remove` chain per call site
-/// because the sites cannot be allowed to drift: a spawn that scrubs three of
-/// them is a spawn with a hole in it, and holes of this shape are silent.
+/// Three families the old lists named are worth keeping in mind, because the
+/// prefix now covers all of them. The location variables — `GIT_DIR`,
+/// `GIT_WORK_TREE`, `GIT_INDEX_FILE` and their kin — aim git at a repository
+/// other than the one the runner is rooted in, and git hands several of them to
+/// its hooks, `GIT_INDEX_FILE` often *relative* so it silently re-anchors on
+/// whatever directory each command runs in. The attribution variables —
+/// `GIT_AUTHOR_NAME` and its five siblings — are read in preference to `-c`
+/// *and* to `git config`, so leaving them in place re-attributes anything this
+/// crate commits, and the two `DATE` variables are the quieter half: left in
+/// place, every commit a run makes carries one identical timestamp. The
+/// configuration variables — `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`,
+/// `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` — hand the caller a way to set any
+/// key at all.
 ///
-/// | Variable | Leak |
-/// | --- | --- |
-/// | `GIT_DIR` | Exported to every hook. Names the repository outright, so `git init` re-initialises it and every read and write goes there. |
-/// | `GIT_WORK_TREE` | Travels with `GIT_DIR`. Moves the *files* git compares against, so pathspecs resolve somewhere else entirely. |
-/// | `GIT_INDEX_FILE` | Exported to `pre-commit` and friends. The subtler half: discovery still finds the right repository, so a run looks fine while `git add` stages phantom entries into the hook's index. |
-/// | `GIT_PREFIX` | Exported to every hook. Names the subdirectory the hook was invoked from, so relative pathspecs resolve against the wrong directory. |
-/// | `GIT_COMMON_DIR` | Not exported by hooks, but honoured whenever it is set — and it is what worktree-manipulating scripts export. Scrubbing `GIT_DIR` without it leaves the same door open by its other name: refs and config still come from the repository it points at. |
-/// | `GIT_OBJECT_DIRECTORY` | Set by `receive-pack` for `pre-receive`/`update` hooks, which run with the push quarantined. Objects written under it are discarded when the push is rejected, so a replay's commits evaporate for no visible reason. |
-/// | `GIT_ALTERNATE_OBJECT_DIRECTORIES` | Set alongside the above by the same quarantine. Read-only contamination rather than a write, but it is what lets a scratch repository resolve objects it does not have — so a test that asserts an object is absent passes for the wrong reason. |
-/// | `GIT_NAMESPACE` | Redirects a ref write, but only within the repository git has already selected. |
-/// | `GIT_CEILING_DIRECTORIES` | Cannot redirect discovery, only stop it, so it makes a run fail rather than succeed against the wrong repository. |
+/// Removing `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` costs nothing, because
+/// removing a variable is not the same as pinning it to `/dev/null`: with them
+/// gone git falls back to the host's `~/.gitconfig` and `/etc/gitconfig` exactly
+/// as it does in a normal shell.
 ///
-/// The last two are the weakest of the nine, and are here for completeness
-/// rather than for a leak either one causes on its own. A throwaway replay has
-/// no use for either, so stripping them costs nothing and leaves two fewer ways
-/// for an inherited environment to matter.
-pub const REPOSITORY_LOCATION_VARS: [&str; 9] = [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_PREFIX",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_NAMESPACE",
-    "GIT_CEILING_DIRECTORIES",
-];
-
-/// Spawn a command that takes its repository from its working directory alone.
+/// One trait rather than one per family, because the prefix cannot tell the
+/// families apart, and any split back into halves is a list again. A call site
+/// that asked for the location half alone would be asking for the shape this
+/// crate stopped trusting.
 ///
 /// Public, and an extension trait rather than a private helper, because the
 /// commands that need it are not all git: a consumer's test suite spawning its
-/// own binary inherits exactly the same environment, and a second copy of
-/// [`REPOSITORY_LOCATION_VARS`] living in a test file is the drift this exists
-/// to prevent.
-pub trait NoInheritedRepository {
-    /// Remove every variable in [`REPOSITORY_LOCATION_VARS`] from the
-    /// environment this command will be spawned with.
-    ///
-    /// A no-op in normal use — nothing sets these outside a hook — which is
-    /// precisely why it has to be unconditional. The one run where it matters
-    /// is the one nobody is watching.
-    fn without_inherited_repository(&mut self) -> &mut Self;
-}
-
-impl NoInheritedRepository for Command {
-    fn without_inherited_repository(&mut self) -> &mut Self {
-        for name in REPOSITORY_LOCATION_VARS {
-            self.env_remove(name);
-        }
-
-        self
-    }
-}
-
-/// Spawn a command that stamps the identity it was configured with, not the one
-/// it was handed.
-///
-/// Public, and separate from [`NoInheritedRepository`], because the two answer
-/// different questions and a call site may honestly want only the first: a
-/// probe that reads and writes nothing has no identity to protect, while a
-/// command that commits has both to protect. Splitting them keeps each name
-/// true at the call site rather than making one of them a half-truth.
-///
-/// Public for the same reason its sibling is, too. A consumer's own fixture
-/// builder commits into throwaway repositories exactly as this crate's does,
-/// inherits exactly the same hook environment, and would otherwise need a
-/// second copy of [`INHERITED_IDENTITY_VARS`] to defend itself — which is the
-/// drift these two traits exist to prevent.
-pub trait NoInheritedIdentity {
-    /// Remove every variable in [`INHERITED_IDENTITY_VARS`] from the
-    /// environment this command will be spawned with.
+/// own binary inherits exactly the same environment, and a second copy of this
+/// rule living in a test file is the drift this exists to prevent.
+pub trait NoInheritedGitEnvironment {
+    /// Remove every `GIT_`-prefixed variable from the environment this command
+    /// will be spawned with.
     ///
     /// A no-op in normal use — nothing sets these outside a hook or a replay —
     /// which is precisely why it has to be unconditional. The one run where it
     /// matters is the one nobody is watching.
-    fn without_inherited_identity(&mut self) -> &mut Self;
+    ///
+    /// A caller that wants one of these variables set does so *after* calling
+    /// this, and wins — which is how [`Git::command`] pins `GIT_EDITOR` and the
+    /// harness identity on top of a swept command.
+    ///
+    /// Keys are compared through [`std::ffi::OsStr::to_string_lossy`]: lossy
+    /// conversion replaces invalid bytes with U+FFFD, so it can never
+    /// manufacture a `GIT_` prefix out of bytes that did not spell one.
+    fn without_inherited_git_environment(&mut self) -> &mut Self;
 }
 
-impl NoInheritedIdentity for Command {
-    fn without_inherited_identity(&mut self) -> &mut Self {
-        for name in INHERITED_IDENTITY_VARS {
-            self.env_remove(name);
+impl NoInheritedGitEnvironment for Command {
+    fn without_inherited_git_environment(&mut self) -> &mut Self {
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with(GIT_ENVIRONMENT_PREFIX) {
+                self.env_remove(&key);
+            }
         }
 
         self
@@ -153,20 +102,14 @@ impl NoInheritedIdentity for Command {
 /// Detach `command` from every part of the git environment this process
 /// inherited: the repository it names and the identity it carries, in one call.
 ///
-/// The union of [`NoInheritedRepository`] and [`NoInheritedIdentity`], for a
-/// call site that wants both and has no reason to name them apart. A fixture
-/// builder that makes a throwaway repository and commits into it is the
-/// everyday case: it needs the same immunity the runner has, on both counts at
-/// once.
+/// The free-function spelling of [`NoInheritedGitEnvironment`], for a call site
+/// that holds a `&mut Command` rather than a builder chain.
 ///
-/// A caller that honestly wants only one half should reach for that trait
-/// instead, so the name at the call site stays true.
-///
-/// Public for the reason both traits are. Anything in this repository that
-/// spawns git - a tool that adds a worktree, a test that builds a throwaway
-/// repository - is broken the same way by the same environment, and a second
-/// copy of either list living in one of them is the drift these exist to
-/// prevent.
+/// Public because the danger is not this crate's alone. Anything in this
+/// repository that spawns git - a tool that adds a worktree, a test that builds
+/// a throwaway repository - is broken the same way by the same environment, and
+/// the rule for what to shed is worth keeping in one reusable place rather than
+/// copied into each of them to drift.
 ///
 /// That is an offer, not a guarantee. Nothing - no lint, no type, no guard -
 /// obliges a git spawn in this repository to call this, so immunity holds where
@@ -177,9 +120,7 @@ impl NoInheritedIdentity for Command {
 /// gitscratch::shed_inherited_git_environment(&mut command);
 /// ```
 pub fn shed_inherited_git_environment(command: &mut Command) {
-    command
-        .without_inherited_repository()
-        .without_inherited_identity();
+    command.without_inherited_git_environment();
 }
 
 /// The outcome of one git invocation.
@@ -227,15 +168,14 @@ impl Git {
             // `cwd` is only where the repository is if nothing in the inherited
             // environment says otherwise. Run from inside a git hook - a
             // pre-push gate, `git bisect run`, `rebase --exec` - something does.
-            .without_inherited_repository()
-            // Config alone does not settle the identity. Whichever tool drives
-            // this crate may itself be running under a git that exported the
-            // identity into the environment - every hook gets it, and so does
-            // every commit replayed by rebase, cherry-pick, or am - and those
-            // variables outrank the `user.name` pinned in safety_config. Left
-            // in place they put the developer's own name on scratch commits,
-            // which is the single thing the pin exists to prevent.
-            .without_inherited_identity()
+            // Config alone does not settle the identity either: a hook exports
+            // the identity into the environment, and every commit that rebase,
+            // cherry-pick, or am replays exports it again - and those variables
+            // outrank the `user.name` pinned in safety_config. Left in place
+            // they put the developer's own name on scratch commits, which is
+            // the single thing the pin exists to prevent. Both halves leave
+            // with the one sweep, because the rule is the `GIT_` prefix.
+            .without_inherited_git_environment()
             // A rebase that stops would otherwise try to open an editor and
             // hang forever on a commit message or a todo list.
             .env("GIT_EDITOR", "true")
@@ -540,7 +480,7 @@ impl Git {
         // harness that actually made them.
         .chain([
             // These two settle the identity only in company with
-            // `NoInheritedIdentity`, which takes back off the identity
+            // `NoInheritedGitEnvironment`, which takes back off the identity
             // variables that would otherwise outrank them.
             format!("user.name={HARNESS_NAME}"),
             format!("user.email={HARNESS_EMAIL}"),
@@ -605,7 +545,9 @@ mod tests {
     use pulldown_cmark::{Event, Parser, Tag};
     use tempfile::TempDir;
 
-    use super::{Git, NoInheritedRepository, HARNESS_EMAIL, HARNESS_NAME, INHERITED_IDENTITY_VARS};
+    use super::{
+        Git, NoInheritedGitEnvironment, GIT_ENVIRONMENT_PREFIX, HARNESS_EMAIL, HARNESS_NAME,
+    };
     use crate::testing::TestRepo;
 
     /// `core.quotePath=false` needs its own test now that it protects nothing a
@@ -664,7 +606,7 @@ mod tests {
     ///
     /// `update-index --index-info` reads its records from stdin and
     /// [`TestRepo::git`] passes none, so that one spawn is made directly here -
-    /// scrubbed through [`NoInheritedRepository`] like every other spawn in this
+    /// scrubbed through [`NoInheritedGitEnvironment`] like every other spawn in this
     /// crate, because an inherited `GIT_INDEX_FILE` would otherwise stage this
     /// name into whichever repository the hook that started the run belongs to.
     #[test]
@@ -684,7 +626,7 @@ mod tests {
         let mut child = Command::new("git")
             .args(["update-index", "-z", "--index-info"])
             .current_dir(repo.path())
-            .without_inherited_repository()
+            .without_inherited_git_environment()
             .stdin(Stdio::piped())
             .spawn()
             .expect("spawn git update-index");
@@ -1246,25 +1188,25 @@ mod tests {
         }
     }
 
-    /// The identity variables this process holds, named and valued, for a
-    /// failure message. Reports their absence just as plainly: a mismatch with
-    /// nothing inherited means something other than the environment outranked
-    /// the pin, and that is a different bug worth saying out loud.
+    /// The `GIT_*` variables this process holds, named and valued, for a failure
+    /// message. Reports their absence just as plainly: a mismatch with nothing
+    /// inherited means something other than the environment outranked the pin,
+    /// and that is a different bug worth saying out loud.
     ///
-    /// Reads [`INHERITED_IDENTITY_VARS`] rather than a list of its own, so the
-    /// diagnosis names the variables the runner actually acts on. A second copy
-    /// here would go stale the first time that list changed, and it would go
+    /// Applies [`shed_inherited_git_environment`]'s own rule — the `GIT_`
+    /// prefix, read off [`std::env::vars_os`] — rather than a list of its own,
+    /// so the diagnosis names the variables the runner actually acts on. A list
+    /// here would go stale the first time the rule widened, and it would go
     /// stale silently: the message would simply stop mentioning the variable
-    /// that caused the failure it is trying to explain.
-    fn inherited_identity() -> String {
-        let held: Vec<String> = INHERITED_IDENTITY_VARS
-            .iter()
-            .filter_map(|name| {
-                std::env::var(name)
-                    .ok()
-                    .map(|value| format!("{name}={value}"))
-            })
+    /// that caused the failure it is trying to explain. That is how the six
+    /// attribution names used to be spelled here, and it is exactly the shape
+    /// this crate stopped trusting.
+    fn inherited_git_environment() -> String {
+        let mut held: Vec<String> = std::env::vars_os()
+            .filter(|(key, _)| key.to_string_lossy().starts_with(GIT_ENVIRONMENT_PREFIX))
+            .map(|(key, value)| format!("{}={}", key.to_string_lossy(), value.to_string_lossy()))
             .collect();
+        held.sort();
 
         if held.is_empty() {
             "nothing (so the pin lost to something other than the environment)".to_string()
@@ -1302,11 +1244,12 @@ mod tests {
              got:         {ident}\n  \
              inherited:   {}\n\
              An identity variable outranks every config source, `-c` included, so \
-             NoInheritedIdentity removes the six of them and Git::command pins the \
-             four name and email variables back to the harness before git is \
-             spawned. git exports them into every hook it runs, and into every \
-             commit that rebase, cherry-pick, or am replays.",
-            inherited_identity()
+             NoInheritedGitEnvironment removes every `GIT_` variable and \
+             Git::command pins the four name and email variables back to the \
+             harness before git is spawned. git exports them into every hook it \
+             runs, and into every commit that rebase, cherry-pick, or am \
+             replays.",
+            inherited_git_environment()
         );
     }
 

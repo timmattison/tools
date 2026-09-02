@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+arboard.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 colored.workspace = true

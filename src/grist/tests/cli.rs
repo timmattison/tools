@@ -7,7 +7,7 @@ use gitscratch::testing::{
     contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
     not_a_repository,
 };
-use gitscratch::NoInheritedRepository;
+use gitscratch::NoInheritedGitEnvironment;
 
 const TIE_ADVICE: &str = "Every order costs the same";
 
@@ -23,7 +23,7 @@ fn grist(repo: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_grist"))
         .args(args)
         .current_dir(repo)
-        .without_inherited_repository()
+        .without_inherited_git_environment()
         .output()
         .expect("failed to run grist")
 }
