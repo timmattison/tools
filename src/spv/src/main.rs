@@ -688,6 +688,30 @@ fn redact_env_value(name: &str, value: &str, show_secrets: bool) -> String {
     value.to_string()
 }
 
+/// Warns that a matched process belongs to another user.
+///
+/// A section that comes back empty teaches the user that the process holds
+/// nothing, which is worse than a refusal. So the warning goes out before the
+/// sections do.
+///
+/// # Arguments
+///
+/// * `processes` - The processes that matched
+/// * `current_user` - The name of the user who runs this tool
+/// * `is_root` - Whether this tool runs as root, which can read every process
+///
+/// # Returns
+///
+/// The warning, or `None` when every matched process is readable.
+fn permission_warning(
+    processes: &[ProcessInfo],
+    current_user: &str,
+    is_root: bool,
+) -> Option<String> {
+    let _ = (processes, current_user, is_root);
+    None
+}
+
 /// A network connection reported by `lsof -i`.
 struct NetConnection {
     fd: String,
@@ -1372,6 +1396,57 @@ mod tests {
     #[test]
     fn a_line_with_too_few_fields_is_not_a_connection() {
         assert!(parse_lsof_net_line("nginx 512 root 6u IPv4").is_none());
+    }
+
+    /// Builds a process whose only interesting field is its owner.
+    fn process_owned_by(pid: u32, user: &str) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            name: "tool".to_string(),
+            user: user.to_string(),
+            cpu_usage: 0.0,
+            memory: 0,
+            status: "Sleep".to_string(),
+            command: "tool".to_string(),
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn your_own_processes_raise_no_warning() {
+        let processes = [process_owned_by(1, "tim"), process_owned_by(2, "tim")];
+        assert!(permission_warning(&processes, "tim", false).is_none());
+    }
+
+    #[test]
+    fn another_users_process_raises_a_warning_that_names_both_users() {
+        let processes = [process_owned_by(1, "root"), process_owned_by(2, "tim")];
+        let warning =
+            permission_warning(&processes, "tim", false).expect("root is not tim, so warn");
+        assert!(warning.contains("root"), "the warning names the owner: {warning}");
+        assert!(warning.contains("tim"), "the warning names the caller: {warning}");
+        assert!(warning.contains("sudo"), "the warning names the remedy: {warning}");
+    }
+
+    #[test]
+    fn root_reads_every_process_and_raises_no_warning() {
+        let processes = [process_owned_by(1, "root"), process_owned_by(2, "nobody")];
+        assert!(permission_warning(&processes, "root", true).is_none());
+    }
+
+    #[test]
+    fn a_warning_names_each_other_owner_once_and_in_order() {
+        let processes = [
+            process_owned_by(1, "root"),
+            process_owned_by(2, "nobody"),
+            process_owned_by(3, "root"),
+            process_owned_by(4, "tim"),
+        ];
+        let warning = permission_warning(&processes, "tim", false).expect("two owners differ");
+        assert!(
+            warning.contains("nobody, root"),
+            "the owners come once each and in order: {warning}"
+        );
     }
 
     #[cfg(target_os = "macos")]
