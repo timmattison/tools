@@ -1043,8 +1043,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     plan, an issue, or a comment, so `wn` alone answers the chain you just copied. A pipe still
     outranks the clipboard, because a pipe is explicit, and an empty pipe walks on to the
     clipboard — a run whose parent handed it `/dev/null` did not ask for an empty chain. Set
-    `WN_NO_CLIPBOARD` to any value to turn the clipboard off, which gives back the error a run
-    with no chain printed before.
+    `WN_NO_CLIPBOARD` to any value with a character in it to turn the clipboard off, which gives
+    back the error a run with no chain printed before. An empty value leaves the clipboard on,
+    because an exported but empty variable is a common accident.
   - The whole chain is one GraphQL query through `gh`, so a chain of six issues costs one round
     trip and one unit of the rate limit, and the credential is the one `gh` already holds. Pull
     request numbers work too: merged counts as done, and closed without a merge counts as

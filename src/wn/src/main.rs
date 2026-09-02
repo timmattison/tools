@@ -94,8 +94,9 @@ A double bar is read as an arrow, because the chain is a plan to walk in order.\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
-because a pipe is explicit. Set WN_NO_CLIPBOARD to any value to turn the clipboard off, which \
-gives back the error a run with no chain printed before.\n\n\
+because a pipe is explicit. Set WN_NO_CLIPBOARD to any value with a character in it to turn the \
+clipboard off, which gives back the error a run with no chain printed before. An empty value \
+leaves the clipboard on, because an exported but empty variable is a common accident.\n\n\
 The answer names the command that starts the work: `si 278`. This tool ships no `si` — it is a \
 shell function you supply. Set WN_START_COMMAND to name a different one, for example \
 `export WN_START_COMMAND='gh issue develop'`."
