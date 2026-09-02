@@ -211,6 +211,10 @@ impl Subscriptions {
 
     /// Prints what the broker answered about one subscription.
     ///
+    /// A grant prints the topic and the quality of service the broker gave,
+    /// which is not always the one the client asked for. A refusal says so,
+    /// and the run goes on, because the other topics of the run still work.
+    ///
     /// An answer for an identifier this run never sent names no topic, so the
     /// session prints nothing for it.
     ///
@@ -227,9 +231,15 @@ impl Subscriptions {
         };
 
         for code in &ack.return_codes {
-            if let SubscribeReasonCode::Success(granted) = code {
-                writeln!(output, "Subscribed: {name} (QoS {})", qos_number(*granted))
-                    .map_err(SessionError::Output)?;
+            match code {
+                SubscribeReasonCode::Success(granted) => {
+                    writeln!(output, "Subscribed: {name} (QoS {})", qos_number(*granted))
+                        .map_err(SessionError::Output)?;
+                }
+                SubscribeReasonCode::Failure => {
+                    writeln!(output, "Subscription refused: {name}")
+                        .map_err(SessionError::Output)?;
+                }
             }
         }
 
