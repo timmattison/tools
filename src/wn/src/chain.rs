@@ -44,6 +44,39 @@ const SEPARATORS: &[char] = &[
 /// The character that marks a number as an issue number.
 const HASH: char = '#';
 
+/// The characters of a text an error message repeats back.
+///
+/// A clipboard holds a page of prose as easily as it holds a chain, and an
+/// error that repeats the whole page hides its own last line. Sixty characters
+/// is enough for the reader to recognize what was copied.
+pub const SNIPPET_CHARS: usize = 60;
+
+/// Text that an error message repeats back.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Snippet(String);
+
+impl Snippet {
+    /// The snippet of `text`, with the space around it dropped.
+    #[must_use]
+    pub fn new(text: &str) -> Self {
+        Self(text.trim().to_string())
+    }
+}
+
+impl fmt::Display for Snippet {
+    /// Writes the text, with nothing around it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Debug for Snippet {
+    /// Writes the text as a quoted string, the way a [`String`] writes itself.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
 /// The number of an issue or a pull request, as GitHub numbers them.
 ///
 /// A newtype rather than a `u64`, so a number that reached the GitHub API can
@@ -80,10 +113,10 @@ impl fmt::Display for IssueNumber {
 pub enum ChainError {
     /// The text holds no issue number at all.
     #[error("no issue number found in {0:?}")]
-    NoIssues(String),
+    NoIssues(Snippet),
     /// The text holds a token that is not an issue number.
     #[error("{0:?} is not an issue number")]
-    NotAnIssue(String),
+    NotAnIssue(Snippet),
 }
 
 /// Read the issue numbers of `input`, in the order they are written.
@@ -98,13 +131,14 @@ pub enum ChainError {
 pub fn parse_chain(input: &str) -> Result<Vec<IssueNumber>, ChainError> {
     let mut numbers: Vec<IssueNumber> = Vec::new();
     for token in tokens(input) {
-        let number = read_number(&token).ok_or(ChainError::NotAnIssue(token))?;
+        let number =
+            read_number(&token).ok_or_else(|| ChainError::NotAnIssue(Snippet::new(&token)))?;
         if !numbers.contains(&number) {
             numbers.push(number);
         }
     }
     if numbers.is_empty() {
-        return Err(ChainError::NoIssues(input.to_string()));
+        return Err(ChainError::NoIssues(Snippet::new(input)));
     }
     Ok(numbers)
 }
@@ -195,11 +229,11 @@ mod tests {
     fn refuses_a_token_that_is_not_a_number() {
         assert_eq!(
             parse_chain("#277 an #278"),
-            Err(ChainError::NotAnIssue("an".to_string()))
+            Err(ChainError::NotAnIssue(Snippet::new("an")))
         );
         assert_eq!(
             parse_chain("#277 v2"),
-            Err(ChainError::NotAnIssue("v2".to_string()))
+            Err(ChainError::NotAnIssue(Snippet::new("v2")))
         );
     }
 
@@ -209,22 +243,70 @@ mod tests {
         // rather than an issue.
         assert_eq!(
             parse_chain("#0"),
-            Err(ChainError::NotAnIssue("#0".to_string()))
+            Err(ChainError::NotAnIssue(Snippet::new("#0")))
         );
         assert_eq!(
             parse_chain("#99999999999999999999999"),
-            Err(ChainError::NotAnIssue(
-                "#99999999999999999999999".to_string()
-            ))
+            Err(ChainError::NotAnIssue(Snippet::new(
+                "#99999999999999999999999"
+            )))
         );
     }
 
     #[test]
     fn refuses_text_that_holds_no_number() {
-        assert_eq!(parse_chain(""), Err(ChainError::NoIssues(String::new())));
+        assert_eq!(parse_chain(""), Err(ChainError::NoIssues(Snippet::new(""))));
         assert_eq!(
             parse_chain("   →  "),
-            Err(ChainError::NoIssues("   →  ".to_string()))
+            Err(ChainError::NoIssues(Snippet::new("   →  ")))
+        );
+    }
+
+    #[test]
+    fn a_token_with_no_separator_in_it_is_cut_in_the_message() {
+        // The clipboard of a reader holds a URL, a token, or a password as
+        // easily as it holds prose, and none of those hold a separator. A
+        // message that repeats the whole of one hides its own last line.
+        let token = "a".repeat(200);
+        let message = parse_chain(&token)
+            .expect_err("one long word is not a chain")
+            .to_string();
+        let cut: String = token.chars().take(SNIPPET_CHARS).collect();
+        assert!(!message.contains(&token), "{message}");
+        assert!(message.contains(&format!("\"{cut}…\"")), "{message}");
+    }
+
+    #[test]
+    fn text_that_holds_no_number_at_all_is_cut_in_the_message() {
+        let arrows = "→ ".repeat(100);
+        let message = parse_chain(&arrows)
+            .expect_err("arrows alone are not a chain")
+            .to_string();
+        let cut: String = arrows.trim().chars().take(SNIPPET_CHARS).collect();
+        assert!(!message.contains(arrows.trim()), "{message}");
+        assert!(message.contains(&format!("\"{cut}…\"")), "{message}");
+    }
+
+    #[test]
+    fn a_token_of_multi_byte_characters_is_cut_by_characters() {
+        // A cut through the middle of a multi-byte character panics, and the
+        // clipboard of a person who reads Japanese holds Japanese.
+        let token = "日本語🎉café".repeat(20);
+        let message = parse_chain(&token)
+            .expect_err("one long word is not a chain")
+            .to_string();
+        let cut: String = token.chars().take(SNIPPET_CHARS).collect();
+        assert_eq!(cut.chars().count(), SNIPPET_CHARS);
+        assert!(message.contains(&format!("\"{cut}…\"")), "{message}");
+    }
+
+    #[test]
+    fn a_short_token_arrives_whole_and_carries_no_mark() {
+        assert_eq!(
+            parse_chain("#277 an #278")
+                .expect_err("the word is not an issue number")
+                .to_string(),
+            "\"an\" is not an issue number"
         );
     }
 
