@@ -108,15 +108,132 @@ enum Confined {
     Missing,
 }
 
-/// Confines `relative` under `root`, which MUST already be canonical.
-fn confine(_root: &Path, _relative: &str) -> Confined {
-    Confined::Missing
+/// Confines the relative request path `relative` under `root`.
+///
+/// `root` MUST already be canonical, because the containment check compares
+/// canonical paths.
+///
+/// The path is rebuilt from only its normal components: a `.` (current dir) and
+/// a leading `/` (root) are skipped, while a `..` (parent) or a Windows prefix
+/// component returns [`Confined::Forbidden`] outright. The candidate is then
+/// canonicalized — which resolves symlinks — and confirmed to still live under
+/// `root`, so a symlink that sits inside the root but points outside it is
+/// rejected as well. The textual component check alone cannot see that link;
+/// the canonical containment check alone would accept a `..` that lands back
+/// inside the root. Both are needed.
+///
+/// Rejecting every `..` outright is stricter than the Go tool this ports, which
+/// hands `a/../b` to `filepath.Join` and resolves it back inside the root. The
+/// stricter rule is deliberate and matches [`sirn`](https://github.com/timmattison/tools):
+/// no legitimate request from a static export carries a `..`, and a rule with no
+/// exceptions is a rule with no gaps.
+fn confine(root: &Path, relative: &str) -> Confined {
+    use std::path::Component;
+
+    let mut sanitized = PathBuf::new();
+    for component in Path::new(relative).components() {
+        match component {
+            Component::Normal(name) => sanitized.push(name),
+            Component::CurDir | Component::RootDir => {}
+            Component::ParentDir | Component::Prefix(_) => return Confined::Forbidden,
+        }
+    }
+
+    // A path that does not exist has no canonical form, so this is also the
+    // "missing" test.
+    let Ok(canonical) = root.join(&sanitized).canonicalize() else {
+        return Confined::Missing;
+    };
+
+    // A symlink that pointed outside the root now canonicalizes outside it.
+    if !canonical.starts_with(root) {
+        return Confined::Forbidden;
+    }
+
+    Confined::Allowed(canonical)
 }
 
 /// Resolves an HTTP request target against the export root.
+///
+/// `root` MUST already be canonical — [`find_root`] guarantees that, and the
+/// confinement check compares canonical paths. `target` is the raw request
+/// target as `tiny_http::Request::url()` gives it: a percent-encoded path that
+/// may carry a `?query`. Stripping the query and percent-decoding happen inside
+/// this function, so no caller can bypass the traversal defense by forgetting a
+/// step.
+///
+/// The target is decoded exactly **once**. That is part of the security
+/// property, not an oversight: a doubly-encoded `%252e%252e%252f` decodes to the
+/// literal text `%2e%2e%2f`, which is an ordinary path component that matches no
+/// file — never to `../`.
+///
+/// A decoded path under `/static/` is confined under `<root>/static` and is
+/// answered on its own terms: a regular file is served, and anything else — a
+/// missing asset, or the directory itself — is [`Resolution::NotFound`] rather
+/// than the single-page fallback, because an asset that 200s with HTML is worse
+/// than one that 404s.
+///
+/// Every other path is trimmed of leading and trailing `/` — matching the Go
+/// tool's `strings.Trim(path, "/")` — and then tried in order: the path itself,
+/// then that path as a directory holding an `index.html`, then the path with
+/// `.html` appended, then the fallback. A path that is empty once trimmed (`/`,
+/// or nothing at all) is the export's own index.
+///
+/// Two notes on the directory step, which the issue's summary of the Go tool
+/// omits:
+///
+/// - **A directory holding an `index.html` serves that file.** The Go code hands
+///   the resolved path to `http.ServeFile`, which does exactly this. A Next.js
+///   export configured with `trailingSlash: true` writes `out/about/index.html`,
+///   so dropping the step would send every such route to the fallback.
+/// - **A directory with no `index.html` does not get a listing.** `http.ServeFile`
+///   renders one; this port does not, because a listing exposes the whole export
+///   tree and this tool already has a better answer for an unmatched path. Such a
+///   directory falls through to the `.html` step and then to the fallback.
 #[must_use]
-pub fn resolve_request(_root: &Path, _target: &str) -> Resolution {
-    Resolution::Fallback(PathBuf::new())
+pub fn resolve_request(root: &Path, target: &str) -> Resolution {
+    let path = target.split('?').next().unwrap_or(target);
+    let decoded = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
+
+    if let Some(asset) = decoded.strip_prefix(STATIC_PREFIX) {
+        return match confine(&root.join(STATIC_DIRECTORY), asset) {
+            Confined::Forbidden => Resolution::Forbidden,
+            Confined::Allowed(path) if path.is_file() => Resolution::File(path),
+            Confined::Allowed(_) | Confined::Missing => Resolution::NotFound,
+        };
+    }
+
+    let fallback = root.join(INDEX_FILE);
+
+    let trimmed = decoded.trim_matches('/');
+    if trimmed.is_empty() {
+        return Resolution::File(fallback);
+    }
+
+    match confine(root, trimmed) {
+        Confined::Forbidden => return Resolution::Forbidden,
+        Confined::Allowed(path) => {
+            if path.is_file() {
+                return Resolution::File(path);
+            }
+            // `is_file` is what keeps a directory off the file-serving path, so
+            // the directory's own index is the only way it can be served.
+            let index = path.join(INDEX_FILE);
+            if index.is_file() {
+                return Resolution::File(index);
+            }
+        }
+        Confined::Missing => {}
+    }
+
+    let html = format!("{trimmed}{HTML_SUFFIX}");
+    if let Confined::Allowed(path) = confine(root, &html) {
+        if path.is_file() {
+            return Resolution::File(path);
+        }
+    }
+
+    Resolution::Fallback(fallback)
 }
 
 #[cfg(test)]
@@ -344,10 +461,7 @@ mod tests {
         let html = root.join("café.html");
         touch(&html);
 
-        assert_eq!(
-            resolve_request(&root, "/caf%C3%A9"),
-            Resolution::File(html)
-        );
+        assert_eq!(resolve_request(&root, "/caf%C3%A9"), Resolution::File(html));
     }
 
     #[test]
