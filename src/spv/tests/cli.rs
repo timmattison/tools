@@ -219,6 +219,41 @@ fn the_network_section_says_it_found_nothing() {
     );
 }
 
+#[test]
+fn a_process_owned_by_another_user_raises_a_warning() {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        // As root every process is readable, so there is nothing to warn about.
+        return;
+    }
+
+    // PID 1 belongs to root on every Unix.
+    let (ok, _stdout, stderr) = run(spv().args(["--net", "1"]).output().expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stderr.contains("Warning"),
+        "the run warns about the owner; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("root") && stderr.contains("sudo"),
+        "the warning names the owner and the remedy; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn a_run_without_a_section_raises_no_warning() {
+    let (ok, _stdout, stderr) = run(spv().arg("1").output().expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        !stderr.contains("Warning"),
+        "a plain listing needs no permission, so it warns about none; stderr: {stderr}"
+    );
+}
+
 /// macOS hands the environment of another process to root only. A run without
 /// root must say so rather than print an empty section, because an empty
 /// section teaches the reader that the process carries no environment.
