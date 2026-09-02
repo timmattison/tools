@@ -11,6 +11,7 @@
 
 mod chain;
 mod github;
+mod input;
 mod render;
 mod report;
 
