@@ -14,8 +14,14 @@
 //! These tests drive the real binary and look at the bytes it writes. They
 //! measure the cursor movement that the stream *requests*, not the exact escape
 //! sequences, so a change of spelling keeps them alive.
+//!
+//! Every expectation below rests on a terminal that `ic` cannot measure, so
+//! [`ic_command`] takes the controlling terminal away from each child. The
+//! terminal of the person who typed `cargo test` therefore cannot change a
+//! single number in this file.
 
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::process;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,9 +74,10 @@ const TEST_IMAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_i
 
 /// The number of rows of the terminal that `ic` sees in these tests.
 ///
-/// `get_terminal_size` falls back to 80 columns by 24 rows when it cannot read
-/// the size of the terminal. The tests give `ic` a pipe for stdout, so `ic`
-/// always uses this fallback.
+/// `terminal_cells` falls back to 80 columns by 24 rows when no probe of the
+/// size of the terminal answers. [`ic_command`] gives each child no
+/// controlling terminal, so no probe of `ic` finds a terminal to measure and
+/// the fallback stands.
 const TERMINAL_ROWS: i64 = 24;
 
 /// The row that the shell prompt returns to below the image.
@@ -177,9 +184,11 @@ fn unreachable_path_dir() -> String {
 /// The number of terminal rows that the test image occupies.
 ///
 /// The test invocation makes a Sixel image of 100 pixels by 100 pixels. One
-/// character cell is 20 pixels high, so the image fills 5 rows. The Kitty
-/// routine and the iTerm2 routine take the size of the image in character
-/// cells, and the same test invocation asks them for 5 rows.
+/// character cell is 20 pixels high, because a child with no controlling
+/// terminal measures no cell and `cell_pixels_or_estimate` gives the estimate
+/// of 10 pixels by 20. The image therefore fills 5 rows. The Kitty routine and
+/// the iTerm2 routine take the size of the image in character cells, and the
+/// same test invocation asks them for 5 rows.
 const EXPECTED_ROWS: i64 = 5;
 
 /// The cursor movement that a byte stream requests, in rows.
@@ -414,12 +423,27 @@ fn kitty_key_list(bytes: &[u8]) -> Vec<String> {
 
 /// Make a command that runs `ic` through one display routine.
 ///
+/// The child gets no controlling terminal. `setsid` puts it in a new session,
+/// and a session with no controlling terminal answers `ENXIO` to every open of
+/// `/dev/tty`. Every probe of the size of the terminal therefore fails, and
+/// `ic` falls back to 80 columns by 24 rows and to a character cell of 10
+/// pixels by 20. [`TERMINAL_ROWS`] and [`EXPECTED_ROWS`] hold those two
+/// fallbacks, and every expectation of this file counts on them.
+///
+/// A pipe for standard output is not enough on its own. `cargo test` captures
+/// the standard output of a test binary, so a probe that reads `/dev/tty`
+/// measures the terminal of the person who typed `cargo test`. The test would
+/// then pass in a redirected run and fail from a terminal, on a condition the
+/// test does not control. The new session is how the test states which
+/// terminal it wants, which is none.
+///
 /// # Arguments
 /// * `routine` - The display routine that `ic` must use.
 /// * `args` - The full command line for `ic`.
 ///
 /// # Returns
-/// A command with the environment and the pipes of the tests already set.
+/// A command with the environment, the pipes and the new session of the tests
+/// already set.
 fn ic_command(routine: Routine, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
     command
@@ -429,6 +453,22 @@ fn ic_command(routine: Routine, args: &[&str]) -> Command {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // SAFETY: the closure runs in the child between the fork and the exec, and
+    // it calls one function. `setsid` is async-signal-safe, it takes no
+    // argument and it touches no memory of this process, so it is safe in that
+    // window. The child is never a process group leader there, because the
+    // fork gave it a new process id and the process group is still the one of
+    // the parent, so the one documented failure of `setsid` cannot happen.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            Ok(())
+        });
+    }
 
     for (name, value) in routine.environment() {
         command.env(name, value);

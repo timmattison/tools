@@ -4139,6 +4139,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "image",
+ "libc",
  "notify",
  "termgfx",
  "termion",
