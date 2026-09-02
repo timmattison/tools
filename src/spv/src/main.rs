@@ -80,11 +80,55 @@ struct Args {
     #[arg(long, short = 'f')]
     full: bool,
 
+    /// Show environment variables.
+    ///
+    /// A value whose name reads like a credential is hidden. Add
+    /// `--show-secrets` to print every value in full.
+    #[arg(long)]
+    env: bool,
+
+    /// Print every environment value in full, credentials included.
+    #[arg(long)]
+    show_secrets: bool,
+
+    /// Show network connections (uses lsof).
+    #[arg(long)]
+    net: bool,
+
+    /// Show every section: working directory, open files, environment, network.
+    #[arg(long)]
+    all: bool,
+
     /// Raw output without table formatting.
     ///
     /// Produces columnar output similar to traditional ps.
     #[arg(long)]
     raw: bool,
+}
+
+/// The sections to print under the process table.
+#[derive(Debug, PartialEq, Eq)]
+struct Sections {
+    cwd: bool,
+    files: bool,
+    env: bool,
+    net: bool,
+}
+
+impl Args {
+    /// Resolves which sections to print.
+    ///
+    /// # Returns
+    ///
+    /// The sections the flags asked for. `--all` turns on every one.
+    fn sections(&self) -> Sections {
+        Sections {
+            cwd: false,
+            files: false,
+            env: false,
+            net: false,
+        }
+    }
 }
 
 /// How a name pattern is compared against a process.
@@ -1611,6 +1655,58 @@ mod tests {
             true,
             false
         ));
+    }
+
+    #[test]
+    fn no_section_flag_prints_no_section() {
+        assert_eq!(
+            Args::parse_from(["spv", "zsh"]).sections(),
+            Sections {
+                cwd: false,
+                files: false,
+                env: false,
+                net: false
+            }
+        );
+    }
+
+    #[test]
+    fn all_turns_on_every_section() {
+        assert_eq!(
+            Args::parse_from(["spv", "--all", "zsh"]).sections(),
+            Sections {
+                cwd: true,
+                files: true,
+                env: true,
+                net: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_single_section_flag_turns_on_only_that_section() {
+        assert_eq!(
+            Args::parse_from(["spv", "--env", "zsh"]).sections(),
+            Sections {
+                cwd: false,
+                files: false,
+                env: true,
+                net: false
+            }
+        );
+    }
+
+    #[test]
+    fn section_flags_combine() {
+        assert_eq!(
+            Args::parse_from(["spv", "--cwd", "--net", "zsh"]).sections(),
+            Sections {
+                cwd: true,
+                files: false,
+                env: false,
+                net: true
+            }
+        );
     }
 
     #[cfg(target_os = "macos")]
