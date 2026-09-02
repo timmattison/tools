@@ -206,6 +206,38 @@ fn answer(report: &Report, start: &StartCommand) -> String {
     )
 }
 
+/// One stream of a plan, painted as one block.
+///
+/// The label and the report arrive together because the block writes both: the
+/// label heads the block, and the same label stands in the summary line of that
+/// stream. A stream that carried its label somewhere else would let the two
+/// part company.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamReport {
+    /// The label the plan gave the stream, such as `S1 gitscratch → grime`.
+    pub label: String,
+    /// What GitHub says about every step of that stream.
+    pub report: Report,
+}
+
+/// Paint a plan: one block for each stream, and one summary under them all.
+///
+/// `repo`, `width`, and `start` mean what they mean in [`render`].
+///
+/// A stream block carries no answer of its own. The summary holds the answer
+/// of every stream in one place, so the reader reads it once and picks the
+/// stream they want.
+#[must_use]
+pub fn render_plan(
+    streams: &[StreamReport],
+    repo: &str,
+    width: usize,
+    start: &StartCommand,
+) -> String {
+    let _ = (streams, repo, width, start);
+    String::from("no plan")
+}
+
 /// Write a list of numbers the way a sentence reads one.
 fn list(numbers: &[IssueNumber]) -> String {
     let written: Vec<String> = numbers.iter().map(ToString::to_string).collect();
@@ -219,6 +251,8 @@ fn list(numbers: &[IssueNumber]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::report::Closes;
 
     /// The repository the test states come from.
     const REPO: &str = "timmattison/tools";
@@ -463,5 +497,347 @@ mod tests {
         // parse_chain never gives an empty chain, so this row of the table is
         // about the type rather than about a run of the tool.
         assert_eq!(glyphs(&Report::build(Vec::new()), 80), "");
+    }
+
+    /// The entry of a step that names a pull request and the issue it closes.
+    fn paired(
+        number: u64,
+        status: Status,
+        title: &str,
+        closes: u64,
+        closes_status: Status,
+    ) -> Entry {
+        Entry {
+            closes: Some(Closes {
+                number: IssueNumber::new(closes).expect("the test number is an issue number"),
+                status: closes_status,
+            }),
+            ..entry(number, status, title)
+        }
+    }
+
+    /// One stream of a plan, from its label and the states of its steps.
+    fn stream(label: &str, entries: Vec<Entry>) -> StreamReport {
+        StreamReport {
+            label: label.to_string(),
+            report: Report::build(entries),
+        }
+    }
+
+    /// Paint the plan, and take the color back out. See [`glyphs`].
+    fn plan_glyphs(streams: &[StreamReport], width: usize) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            render_plan(streams, REPO, width, &StartCommand::new(None))
+        }))
+    }
+
+    /// A plan of three streams, each with an issue to start.
+    fn a_plan() -> Vec<StreamReport> {
+        vec![
+            stream(
+                "S1 gitscratch",
+                vec![
+                    entry(344, Status::Done, "First thing"),
+                    entry(330, Status::Open, "Second thing"),
+                ],
+            ),
+            stream(
+                "S2 ic",
+                vec![
+                    entry(350, Status::Open, "Third thing"),
+                    entry(187, Status::Open, "Fourth thing"),
+                ],
+            ),
+            stream("S3 wn", vec![entry(411, Status::Open, "Fifth thing")]),
+        ]
+    }
+
+    #[test]
+    fn a_block_for_each_stream_and_one_summary_under_them() {
+        assert_eq!(
+            plan_glyphs(&a_plan(), 80),
+            concat!(
+                "S1 gitscratch\n",
+                "  ✓ #344  First thing\n",
+                "  → #330  Second thing\n",
+                "\n",
+                "S2 ic\n",
+                "  → #350  Third thing\n",
+                "  · #187  Fourth thing\n",
+                "\n",
+                "S3 wn\n",
+                "  → #411  Fifth thing\n",
+                "\n",
+                "Take one from each stream:\n",
+                "  S1 gitscratch  → #330  si 330\n",
+                "  S2 ic          → #350  si 350\n",
+                "  S3 wn          → #411  si 411",
+            )
+        );
+    }
+
+    #[test]
+    fn a_closed_stream_says_so_in_the_summary_and_names_no_command() {
+        let streams = vec![
+            stream("S1", vec![entry(344, Status::Done, "First")]),
+            stream("S2", vec![entry(350, Status::Open, "Second")]),
+        ];
+        let block = plan_glyphs(&streams, 80);
+        assert_eq!(
+            block,
+            concat!(
+                "S1\n",
+                "  ✓ #344  First\n",
+                "\n",
+                "S2\n",
+                "  → #350  Second\n",
+                "\n",
+                "Take one from each stream:\n",
+                "  S1  every issue is closed\n",
+                "  S2  → #350  si 350",
+            )
+        );
+        assert!(
+            !block.contains("si 344"),
+            "a closed stream names no command, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn a_stream_with_nothing_open_and_a_missing_number_is_not_called_closed() {
+        let streams = vec![
+            stream(
+                "S1",
+                vec![
+                    entry(344, Status::Done, "First"),
+                    entry(999, Status::Missing, ""),
+                ],
+            ),
+            stream("S2", vec![entry(350, Status::Open, "Second")]),
+        ];
+        let block = plan_glyphs(&streams, 80);
+        assert!(
+            block.contains("  S1  no issue is open\n"),
+            "the summary does not claim the stream is finished, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_number_keeps_its_row_and_its_note_inside_its_own_block() {
+        let streams = vec![
+            stream(
+                "S1",
+                vec![
+                    entry(999, Status::Missing, ""),
+                    entry(344, Status::Open, "First"),
+                ],
+            ),
+            stream("S2", vec![entry(350, Status::Open, "Second")]),
+        ];
+        assert_eq!(
+            plan_glyphs(&streams, 80),
+            concat!(
+                "S1\n",
+                "  ? #999  (no such issue)\n",
+                "  → #344  First\n",
+                "\n",
+                "  #999 is not in timmattison/tools.\n",
+                "\n",
+                "S2\n",
+                "  → #350  Second\n",
+                "\n",
+                "Take one from each stream:\n",
+                "  S1  → #344  si 344\n",
+                "  S2  → #350  si 350",
+            )
+        );
+    }
+
+    #[test]
+    fn a_pair_whose_two_states_differ_earns_a_note() {
+        let streams = vec![stream(
+            "S1",
+            vec![
+                paired(344, Status::Done, "First", 341, Status::Open),
+                entry(330, Status::Open, "Second"),
+            ],
+        )];
+        assert_eq!(
+            plan_glyphs(&streams, 80),
+            concat!(
+                "S1\n",
+                "  ✓ #344 (#341)  First\n",
+                "  → #330         Second\n",
+                "\n",
+                "  #344 is closed and #341 is open.\n",
+                "\n",
+                "Take one from each stream:\n",
+                "  S1  → #330  si 330",
+            )
+        );
+    }
+
+    #[test]
+    fn a_dropped_pull_request_over_an_open_issue_says_the_work_was_not_done() {
+        let streams = vec![stream(
+            "S1",
+            vec![
+                paired(342, Status::Dropped, "First", 328, Status::Open),
+                entry(330, Status::Open, "Second"),
+            ],
+        )];
+        let block = plan_glyphs(&streams, 80);
+        assert!(
+            block.contains(
+                "  #342 is closed without the work being done and #328 is open.\n"
+            ),
+            "the note writes the word of each state, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn the_notes_of_a_block_stand_in_one_order() {
+        // The number the repository does not have comes first, because it is
+        // the one that turns a green run red. The pair that disagrees comes
+        // next, and the work done out of order stands last.
+        let streams = vec![stream(
+            "S1",
+            vec![
+                entry(999, Status::Missing, ""),
+                paired(344, Status::Done, "First", 341, Status::Open),
+                entry(330, Status::Open, "Second"),
+                entry(350, Status::Done, "Third"),
+            ],
+        )];
+        let block = plan_glyphs(&streams, 80);
+        assert!(
+            block.contains(concat!(
+                "  #999 is not in timmattison/tools.\n",
+                "  #344 is closed and #341 is open.\n",
+                "  #350 is already closed, out of order.\n",
+            )),
+            "the three notes stand in one order, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn a_pair_writes_both_numbers_and_a_lone_number_lines_up_under_it() {
+        let streams = vec![stream(
+            "S1",
+            vec![
+                paired(344, Status::Open, "First", 341, Status::Open),
+                entry(330, Status::Open, "Second"),
+            ],
+        )];
+        let block = plan_glyphs(&streams, 80);
+        let rows: Vec<&str> = block.lines().skip(1).take(2).collect();
+        assert_eq!(
+            rows,
+            vec!["  → #344 (#341)  First", "  · #330         Second"]
+        );
+    }
+
+    #[test]
+    fn each_block_lines_up_under_itself_and_not_under_its_neighbour() {
+        let streams = vec![
+            stream(
+                "S1",
+                vec![paired(344, Status::Open, "First", 341, Status::Open)],
+            ),
+            stream("S2", vec![entry(350, Status::Open, "Second")]),
+        ];
+        let block = plan_glyphs(&streams, 80);
+        assert!(
+            block.contains("  → #344 (#341)  First\n"),
+            "the wide block holds its own column, in {block:?}"
+        );
+        assert!(
+            block.contains("  → #350  Second\n"),
+            "the narrow block is not padded to the column of the wide one, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn the_summary_lines_up_under_itself() {
+        let streams = vec![
+            stream(
+                "S1 a long stream label",
+                vec![entry(344, Status::Open, "First")],
+            ),
+            stream("S2 ic", vec![entry(350, Status::Open, "Second")]),
+        ];
+        let block = plan_glyphs(&streams, 80);
+        assert!(
+            block.ends_with(concat!(
+                "  S1 a long stream label  → #344  si 344\n",
+                "  S2 ic                   → #350  si 350",
+            )),
+            "the short label is padded to the width of the long one, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_stream_label_is_cut_to_the_window() {
+        let streams = vec![stream(
+            "S1 a very long stream label that goes on",
+            vec![entry(350, Status::Open, "Third thing")],
+        )];
+        let block = plan_glyphs(&streams, 30);
+        assert_eq!(
+            block,
+            concat!(
+                "S1 a very long stream label t…\n",
+                "  → #350  Third thing\n",
+                "\n",
+                "Take one from each stream:\n",
+                "  S1 a very l…  → #350  si 350",
+            )
+        );
+        for line in block.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= 30,
+                "no line is wider than the window, in {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_of_a_plan_is_cut_to_the_columns_the_indent_leaves() {
+        let streams = vec![stream(
+            "S1",
+            vec![entry(
+                277,
+                Status::Open,
+                "A title that is far too long for the window it has to fit in",
+            )],
+        )];
+        let block = plan_glyphs(&streams, 20);
+        let row = block.lines().nth(1).expect("the block holds a row");
+        assert_eq!(row, "  → #277  A title t…");
+        assert_eq!(
+            UnicodeWidthStr::width(row),
+            20,
+            "the row fills the width it was given"
+        );
+    }
+
+    #[test]
+    fn a_plan_of_no_streams_renders_nothing_and_does_not_panic() {
+        assert_eq!(plan_glyphs(&[], 80), "");
+    }
+
+    #[test]
+    fn the_plan_carries_color_and_strips_back_to_the_glyphs() {
+        let painted = testcolor::with_forced_ansi(|| {
+            render_plan(&a_plan(), REPO, 80, &StartCommand::new(None))
+        });
+        assert!(
+            painted.contains('\u{1b}'),
+            "the plan is painted, in {painted:?}"
+        );
+        assert!(
+            testcolor::strip_ansi(&painted).starts_with("S1 gitscratch\n  ✓ #344  First thing\n"),
+            "the paint comes back out, in {painted:?}"
+        );
     }
 }
