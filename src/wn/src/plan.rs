@@ -1273,6 +1273,38 @@ Notes: Independent of everything above.";
     }
 
     #[test]
+    fn refuses_a_row_whose_cell_count_the_header_does_not_have() {
+        // A cell that holds a stray bar is rare, and guessing at it is worse
+        // than refusing it: every cell after that bar stands under the wrong
+        // column, so the Notes of the row become its Order.
+        let row = "| S1 | #350 | src/ic | a note with a | bar |";
+        let message = parse(&format!(
+            "| Stream | Order | Zone | Notes |\n| --- | --- | --- | --- |\n{row}"
+        ))
+        .expect_err("a row of five cells is no row of a table of four")
+        .to_string();
+        assert!(message.contains("5 cells"), "{message}");
+        assert!(message.contains("the header has 4"), "{message}");
+        assert!(message.contains(row), "{message}");
+    }
+
+    #[test]
+    fn a_long_row_is_cut_in_the_message() {
+        // A row of a box-drawn table is 250 columns wide, and a message that
+        // repeats the whole of one hides its own last line.
+        let notes = "n".repeat(200);
+        let row = format!("| S1 | #350 | src/ic | {notes} | and one cell too many |");
+        let message = parse(&format!(
+            "| Stream | Order | Zone | Notes |\n| --- | --- | --- | --- |\n{row}"
+        ))
+        .expect_err("a row of five cells is no row of a table of four")
+        .to_string();
+        assert!(!message.contains(&notes), "{message}");
+        let cut: String = row.chars().take(crate::chain::SNIPPET_CHARS).collect();
+        assert!(message.contains(&format!("\"{cut}…\"")), "{message}");
+    }
+
+    #[test]
     fn a_group_names_the_issue_the_step_before_it_closes() {
         let steps = steps_at(&plan_of("Order: PR#344 (#341) → #330"), 0);
         assert_eq!(steps, vec![(344, Some(341)), (330, None)]);
