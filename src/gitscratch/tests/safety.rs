@@ -177,9 +177,9 @@ fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
         "the contested file should have conflicted"
     );
     assert!(
-        conflicts.file_names().contains("shared.txt"),
+        conflicts.file_hunks().any(|(name, _)| name == "shared.txt"),
         "the contested file should be named in the conflicts: {:?}",
-        conflicts.file_names()
+        conflicts.file_hunks().collect::<Vec<_>>()
     );
     assert!(
         conflicts.hunks() > Hunks::new(0),
@@ -451,9 +451,9 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
         "the contested file should have conflicted"
     );
     assert!(
-        conflicts.file_names().contains("shared.txt"),
+        conflicts.file_hunks().any(|(name, _)| name == "shared.txt"),
         "the contested file should be named in the conflicts: {:?}",
-        conflicts.file_names()
+        conflicts.file_hunks().collect::<Vec<_>>()
     );
     assert!(
         conflicts.hunks() > Hunks::new(0),
@@ -587,9 +587,9 @@ fn never_fires_a_hook_from_the_developer_s_repository() {
         "the contested file should have conflicted"
     );
     assert!(
-        conflicts.file_names().contains("shared.txt"),
+        conflicts.file_hunks().any(|(name, _)| name == "shared.txt"),
         "the contested file should be named in the conflicts: {:?}",
-        conflicts.file_names()
+        conflicts.file_hunks().collect::<Vec<_>>()
     );
     assert!(
         conflicts.hunks() > Hunks::new(0),
@@ -719,9 +719,9 @@ fn never_touches_the_real_working_tree_or_index() {
         "the contested file should have conflicted"
     );
     assert!(
-        conflicts.file_names().contains("shared.txt"),
+        conflicts.file_hunks().any(|(name, _)| name == "shared.txt"),
         "the contested file should be named in the conflicts: {:?}",
-        conflicts.file_names()
+        conflicts.file_hunks().collect::<Vec<_>>()
     );
     assert!(
         conflicts.hunks() > Hunks::new(0),
@@ -941,9 +941,9 @@ fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
             "the contested file should have conflicted"
         );
         assert!(
-            conflicts.file_names().contains("shared.txt"),
+            conflicts.file_hunks().any(|(name, _)| name == "shared.txt"),
             "the contested file should be named in the conflicts: {:?}",
-            conflicts.file_names()
+            conflicts.file_hunks().collect::<Vec<_>>()
         );
         assert!(
             conflicts.hunks() > Hunks::new(0),
@@ -1179,9 +1179,9 @@ fn replays_without_hanging_or_failing_when_commit_signing_is_enabled() {
         "the contested file should have conflicted"
     );
     assert!(
-        conflicts.file_names().contains("shared.txt"),
+        conflicts.file_hunks().any(|(name, _)| name == "shared.txt"),
         "the contested file should be named in the conflicts: {:?}",
-        conflicts.file_names()
+        conflicts.file_hunks().collect::<Vec<_>>()
     );
     assert!(
         conflicts.hunks() > Hunks::new(0),
