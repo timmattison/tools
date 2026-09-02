@@ -10,6 +10,15 @@
 //! dedicated tab-rename tests *simulate* the multiplexer with a recording fake
 //! so they can assert exactly when a rename does and does not fire.
 //!
+//! The same class of escape exists for git, and
+//! [`gitscratch::shed_inherited_git_environment`] is the single answer to it:
+//! every `git` child this module spawns — the fixture's own commands and the
+//! real `nwt` binary alike — has the entire inherited `GIT_*` family removed, so
+//! it can only act on the directory it was handed. The rule is the prefix, never
+//! a list of names, and it lives in `gitscratch` because every git-spawning
+//! caller in this repository is broken the same way by the same environment.
+//! That function explains why a list is the bug.
+//!
 //! Each integration test file is compiled as its own crate that pulls this
 //! module in via `mod support;`, so not every binary uses every helper — hence
 //! the crate-level dead-code allowance below.
@@ -28,12 +37,34 @@ use tempfile::TempDir;
 /// Runs a git command in `dir` with stdin/stdout/stderr nulled, returning
 /// whether it succeeded. Output is nulled so concurrent test runs (a background
 /// `bacon` loop alongside the pre-commit hook's own run) don't interleave noise.
+///
+/// Sheds the whole inherited `GIT_*` family through
+/// [`gitscratch::shed_inherited_git_environment`], which is what makes `dir` the
+/// repo git operates on. `current_dir(dir)` alone is not enough: when the suite
+/// runs from inside a git hook, git exports its own variables into the hook's
+/// environment, `cargo test` inherits them, and `GIT_DIR` overrides cwd-based
+/// discovery — so a fixture's `git config`/`commit` lands in the *real* repo.
+/// That is how `Test <t@example.com>` got written into this repo's own
+/// `.git/config` and then authored every later commit until it was noticed. A
+/// config write is sticky: one leak outlives the run that caused it.
+///
+/// The rule is the `GIT_` prefix and never a list of names, and it lives in
+/// `gitscratch` so this suite and every other git-spawning caller in the
+/// repository share one answer instead of each keeping a copy to drift. See
+/// that function for why a list is the bug and which variables walked through
+/// the last one. Pinned here by `tests/git-env-isolation.rs` and
+/// `tests/builder-guard.rs`, which probe the behaviour at this call site rather
+/// than trusting the helper.
+///
+/// Shedding also drops `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, and that costs
+/// nothing: removing a variable is not the same as pinning it to `/dev/null`.
+/// With them gone git falls back to the host's `~/.gitconfig` and
+/// `/etc/gitconfig` exactly as it does in a normal shell, so settings the
+/// fixtures rely on — `init.defaultBranch` among them — still apply.
 pub fn run_git(dir: &Path, args: &[&str]) -> bool {
-    let mut command = Command::new("git");
-    shed_inherited_git_environment(&mut command);
-
-    command
-        .args(args)
+    let mut cmd = Command::new("git");
+    shed_inherited_git_environment(&mut cmd);
+    cmd.args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -98,19 +129,23 @@ pub fn init_repo() -> (TempDir, PathBuf) {
 /// scrubs the terminal-multiplexer environment from the child so a suite
 /// launched from inside zellij/tmux can never hijack the user's real tab.
 ///
+/// It likewise sheds the whole inherited `GIT_*` family via
+/// [`gitscratch::shed_inherited_git_environment`], so the spawned `nwt` — which
+/// shells out to `git worktree add` — operates on
+/// `repo` and not on whatever repo an inherited `GIT_DIR` names, writes its
+/// objects into `repo`'s own store, and reads no config the launching
+/// environment injected. Both scrubs guard the same class of bug: a fixture
+/// reaching out and acting on the developer's real session.
+///
+/// `ZELLIJ`/`TMUX` stay named one at a time because they are not a prefix
+/// family — there is no `MULTIPLEXER_*` to sweep — while the git variables are,
+/// which is why they get the prefix rule instead of a list.
+///
 /// Tests that deliberately *exercise* the multiplexer behaviour (see
 /// [`FakeMultiplexer`]) re-add `ZELLIJ`/`TMUX` on the returned command; because
 /// those `.env(...)` calls run after the scrub here, they win for that child.
 pub fn nwt_command(repo: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
-    // The suite can be run from inside a git hook - the pre-commit hook runs it
-    // on every commit - and git hands a hook an environment describing the
-    // commit being made, including a *relative* `GIT_INDEX_FILE`. `nwt` adds a
-    // worktree, and a worktree's `.git` is a file, so an inherited index path
-    // resolves inside it and git refuses with "not a directory" before nwt gets
-    // to do anything. Shed it, from the one list that knows which variables
-    // these are.
-    shed_inherited_git_environment(&mut cmd);
     cmd.current_dir(repo)
         .stdin(Stdio::null())
         // Issue #283: strip the terminal-multiplexer env so a suite launched
@@ -119,6 +154,12 @@ pub fn nwt_command(repo: &Path) -> Command {
         // re-add ZELLIJ/TMUX after calling this (a later `.env(..)` wins).
         .env_remove("ZELLIJ")
         .env_remove("TMUX");
+    // Same idea for git: a hook exports these, `cargo test` inherits them, and
+    // GIT_DIR beats `current_dir`. Left in place, the spawned nwt would add its
+    // worktree to the real repo, write objects into it, or run under config the
+    // launching shell injected. Shed by prefix, never by name — see `run_git`
+    // above, and `gitscratch::shed_inherited_git_environment` for the rule.
+    shed_inherited_git_environment(&mut cmd);
     cmd
 }
 

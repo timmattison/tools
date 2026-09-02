@@ -17,41 +17,9 @@ use anyhow::{Context, Result};
 const HARNESS_NAME: &str = "gitscratch";
 const HARNESS_EMAIL: &str = "gitscratch@localhost";
 
-/// Environment that would aim git at a repository other than the one the runner
-/// is rooted in, and is therefore stripped from every invocation.
-///
-/// This is not a hypothetical set. A tool built on this crate can be invoked
-/// from inside a git hook, and git hands its hooks `GIT_INDEX_FILE` - often
-/// *relative*, so it silently re-anchors on the runner's own working directory -
-/// along with `GIT_DIR` and `GIT_WORK_TREE` for several hooks. Inheriting any of
-/// them would point the replay at the developer's real repository and index,
-/// which is precisely what a scratch worktree exists to avoid. The rest are here
-/// for the same reason: each one redirects some part of where git reads or
-/// writes, and none of them can mean anything useful to a throwaway replay.
-const REDIRECTING_ENVIRONMENT: [&str; 9] = [
-    "GIT_DIR",
-    "GIT_COMMON_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_NAMESPACE",
-    "GIT_PREFIX",
-    "GIT_CEILING_DIRECTORIES",
-];
-
-/// Who a hook says the commit it is running for belongs to, and when. Git reads
-/// all six in preference to `-c` *and* to `git config`, so leaving them in place
-/// silently re-attributes anything this crate commits - and a caller that set an
-/// identity of its own would find it ignored.
-const INHERITED_ATTRIBUTION: [&str; 6] = [
-    "GIT_AUTHOR_NAME",
-    "GIT_AUTHOR_EMAIL",
-    "GIT_AUTHOR_DATE",
-    "GIT_COMMITTER_NAME",
-    "GIT_COMMITTER_EMAIL",
-    "GIT_COMMITTER_DATE",
-];
+/// The prefix that makes a variable git's, and therefore one
+/// [`shed_inherited_git_environment`] removes.
+const GIT_ENVIRONMENT_PREFIX: &str = "GIT_";
 
 /// Detach `command` from whatever git environment this process inherited.
 ///
@@ -60,10 +28,46 @@ const INHERITED_ATTRIBUTION: [&str; 6] = [
 /// build the repository the runner is supposed to replay, so both need the same
 /// immunity and neither should be describing the danger in its own words.
 ///
+/// **The rule is the `GIT_` prefix, and never a list of names.** A list strips
+/// nothing new the day git adds a variable, and from then on it returns the same
+/// clean-looking answer as a list that works. This function was a fifteen-name
+/// list once, and `GIT_CONFIG_PARAMETERS` walked straight through it — a
+/// variable git exports to every hook, which injects arbitrary configuration
+/// (`user.email`, `core.bare`, `core.hooksPath`) into every git this crate
+/// spawns. It is not a location variable, so no amount of adding location names
+/// would have caught it. Enumerating [`std::env::vars_os`] sweeps whatever git
+/// invents next without anyone editing this file. Pinned by
+/// `tests/inherited-environment.rs`.
+///
+/// Three families the old list named are worth keeping in mind, because the
+/// prefix now covers all of them. The location variables — `GIT_DIR`,
+/// `GIT_WORK_TREE`, `GIT_INDEX_FILE` and their kin — aim git at a repository
+/// other than the one the runner is rooted in, and git hands several of them to
+/// its hooks, `GIT_INDEX_FILE` often *relative* so it silently re-anchors on
+/// whatever directory each command runs in. The attribution variables —
+/// `GIT_AUTHOR_NAME` and its five siblings — are read in preference to `-c`
+/// *and* to `git config`, so leaving them in place re-attributes anything this
+/// crate commits. The configuration variables — `GIT_CONFIG_PARAMETERS`,
+/// `GIT_CONFIG_COUNT`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` — hand the
+/// caller a way to set any key at all.
+///
+/// Removing `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` costs nothing, because
+/// removing a variable is not the same as pinning it to `/dev/null`: with them
+/// gone git falls back to the host's `~/.gitconfig` and `/etc/gitconfig` exactly
+/// as it does in a normal shell.
+///
+/// Keys are compared through [`std::ffi::OsStr::to_string_lossy`]: lossy
+/// conversion replaces invalid bytes with U+FFFD, so it can never manufacture a
+/// `GIT_` prefix out of bytes that did not spell one.
+///
+/// A caller that wants one of these variables set does so *after* calling this,
+/// and wins — which is how [`Git::command`] pins `GIT_EDITOR` and the harness
+/// identity on top of a swept command.
+///
 /// Public because the danger is not this crate's alone. Anything in this
 /// repository that spawns git - a tool that adds a worktree, a test that builds
 /// a throwaway repository - is broken the same way by the same environment, and
-/// the list of what to shed is worth keeping in one reusable place rather than
+/// the rule for what to shed is worth keeping in one reusable place rather than
 /// copied into each of them to drift.
 ///
 /// That is an offer, not a guarantee. Most of the repository's git spawns still
@@ -77,11 +81,10 @@ const INHERITED_ATTRIBUTION: [&str; 6] = [
 /// gitscratch::shed_inherited_git_environment(&mut command);
 /// ```
 pub fn shed_inherited_git_environment(command: &mut Command) {
-    for variable in REDIRECTING_ENVIRONMENT
-        .into_iter()
-        .chain(INHERITED_ATTRIBUTION)
-    {
-        command.env_remove(variable);
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with(GIT_ENVIRONMENT_PREFIX) {
+            command.env_remove(&key);
+        }
     }
 }
 
@@ -353,7 +356,7 @@ mod tests {
     use pulldown_cmark::{Event, Parser, Tag};
     use tempfile::TempDir;
 
-    use super::{Git, HARNESS_EMAIL, HARNESS_NAME, INHERITED_ATTRIBUTION};
+    use super::{Git, GIT_ENVIRONMENT_PREFIX, HARNESS_EMAIL, HARNESS_NAME};
     use crate::testing::TestRepo;
 
     /// Exactly the invocation `stopped_commit_is_already_in_head` makes to find
@@ -887,25 +890,25 @@ mod tests {
         }
     }
 
-    /// The identity variables this process holds, named and valued, for a
-    /// failure message. Reports their absence just as plainly: a mismatch with
-    /// nothing inherited means something other than the environment outranked
-    /// the pin, and that is a different bug worth saying out loud.
+    /// The `GIT_*` variables this process holds, named and valued, for a failure
+    /// message. Reports their absence just as plainly: a mismatch with nothing
+    /// inherited means something other than the environment outranked the pin,
+    /// and that is a different bug worth saying out loud.
     ///
-    /// Reads [`INHERITED_ATTRIBUTION`] rather than a list of its own, so the
-    /// diagnosis names the variables the runner actually acts on. A second copy
-    /// here would go stale the first time that list changed, and it would go
+    /// Applies [`shed_inherited_git_environment`]'s own rule — the `GIT_`
+    /// prefix, read off [`std::env::vars_os`] — rather than a list of its own,
+    /// so the diagnosis names the variables the runner actually acts on. A list
+    /// here would go stale the first time the rule widened, and it would go
     /// stale silently: the message would simply stop mentioning the variable
-    /// that caused the failure it is trying to explain.
-    fn inherited_identity() -> String {
-        let held: Vec<String> = INHERITED_ATTRIBUTION
-            .iter()
-            .filter_map(|name| {
-                std::env::var(name)
-                    .ok()
-                    .map(|value| format!("{name}={value}"))
-            })
+    /// that caused the failure it is trying to explain. That is how the six
+    /// attribution names used to be spelled here, and it is exactly the shape
+    /// this crate stopped trusting.
+    fn inherited_git_environment() -> String {
+        let mut held: Vec<String> = std::env::vars_os()
+            .filter(|(key, _)| key.to_string_lossy().starts_with(GIT_ENVIRONMENT_PREFIX))
+            .map(|(key, value)| format!("{}={}", key.to_string_lossy(), value.to_string_lossy()))
             .collect();
+        held.sort();
 
         if held.is_empty() {
             "nothing (so the pin lost to something other than the environment)".to_string()
@@ -947,7 +950,7 @@ mod tests {
              drops the two dates before it spawns git. git exports them into every \
              hook it runs, and into every commit that rebase, cherry-pick, or am \
              replays.",
-            inherited_identity()
+            inherited_git_environment()
         );
     }
 
