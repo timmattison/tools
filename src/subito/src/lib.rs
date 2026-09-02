@@ -3,8 +3,10 @@
 //! The crate holds the parts of the tool that a test can drive without a
 //! network and without an AWS account. [`cli`] states the command line,
 //! [`payload`] turns the bytes of one MQTT message into the text the tool
-//! prints, and [`presign`] builds the signed WebSocket URL that AWS IoT Core
-//! accepts for an MQTT connection.
+//! prints, [`presign`] builds the signed WebSocket URL that AWS IoT Core
+//! accepts for an MQTT connection, and [`endpoint`] asks AWS for the name of
+//! the data endpoint of the account, because a user knows the region and does
+//! not know that name.
 //!
 //! [`payload::format_payload`] is the part that keeps a terminal safe. An MQTT
 //! payload is a byte string of any content, and a byte string that holds an
@@ -16,5 +18,6 @@
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
 pub mod cli;
+pub mod endpoint;
 pub mod payload;
 pub mod presign;
