@@ -12,6 +12,8 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use num_format::ToFormattedString;
 use thiserror::Error;
 
@@ -185,22 +187,70 @@ pub enum CompressError {
     Cancelled,
 }
 
+/// The count of bytes in the buffer that holds one block of the input. A
+/// larger buffer makes fewer read calls, and a smaller buffer makes the
+/// progress report more frequent. 64 kibibytes is a common size for a read of
+/// a disk, thus this size keeps the count of read calls low and it still
+/// reports the progress many times for a file of a few megabytes.
+const BUFFER_SIZE: usize = 64 * 1024;
+
+/// The message of the error that a reader gets when it answers a count of
+/// bytes that is larger than the buffer. Such a reader breaks the contract of
+/// [`Read::read`].
+const TOO_MANY_BYTES: &str = "the reader answered more bytes than the buffer holds";
+
 /// Compress the bytes of `reader` into `writer` as a gzip stream.
 ///
-/// The function answers the count of the uncompressed bytes that it read.
+/// The function answers the count of the uncompressed bytes that it read. It
+/// reads one buffer at a time. After each buffer it gives the running count of
+/// the read bytes to `on_progress`. Before each buffer it asks `cancelled`
+/// whether the user stopped the run.
+///
+/// The function finishes the gzip stream before it answers, thus the writer
+/// holds every byte of the stream when the function is complete. The function
+/// owns no file, thus a caller that made a file must remove that file when
+/// this function fails.
 ///
 /// # Errors
 ///
 /// Answers [`CompressError::ReadInput`] when a read of the input fails, and
-/// [`CompressError::WriteOutput`] when a write of the gzip stream fails.
+/// [`CompressError::WriteOutput`] when a write of the gzip stream fails. A
+/// write that only fails at the end of the stream gives the same error.
 /// Answers [`CompressError::Cancelled`] when `cancelled` answers true.
 pub fn compress_stream<R: Read, W: Write>(
-    _reader: R,
-    _writer: W,
-    _cancelled: &dyn Fn() -> bool,
-    _on_progress: &mut dyn FnMut(u64),
+    mut reader: R,
+    writer: W,
+    cancelled: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(u64),
 ) -> Result<u64, CompressError> {
-    Ok(0)
+    let mut encoder = GzEncoder::new(writer, Compression::default());
+    let mut buffer = vec![0_u8; BUFFER_SIZE];
+    let mut read_bytes = 0_u64;
+    loop {
+        if cancelled() {
+            return Err(CompressError::Cancelled);
+        }
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|source| CompressError::ReadInput { source })?;
+        if count == 0 {
+            break;
+        }
+        let block = buffer
+            .get(..count)
+            .ok_or_else(|| CompressError::ReadInput {
+                source: io::Error::other(TOO_MANY_BYTES),
+            })?;
+        encoder
+            .write_all(block)
+            .map_err(|source| CompressError::WriteOutput { source })?;
+        read_bytes += count as u64;
+        on_progress(read_bytes);
+    }
+    encoder
+        .finish()
+        .map_err(|source| CompressError::WriteOutput { source })?;
+    Ok(read_bytes)
 }
 
 /// The suffix that marks a gzip file. A run that gets no output name adds
