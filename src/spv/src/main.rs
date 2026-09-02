@@ -687,6 +687,31 @@ fn redact_env_value(name: &str, value: &str, show_secrets: bool) -> String {
     value.to_string()
 }
 
+/// A network connection reported by `lsof -i`.
+struct NetConnection {
+    fd: String,
+    family: String,
+    protocol: String,
+    name: String,
+}
+
+/// Parses one line of `lsof -nP -i -a -p <pid>` output.
+///
+/// The columns are the same as the ones `get_open_files` reads, with two more in
+/// play: NODE carries the protocol, and NAME carries the addresses and the state.
+///
+/// # Arguments
+///
+/// * `line` - One line of output, without the header
+///
+/// # Returns
+///
+/// The connection, or `None` when the line holds too few fields to be one.
+fn parse_lsof_net_line(line: &str) -> Option<NetConnection> {
+    let _ = line;
+    None
+}
+
 /// Prints processes in table format using comfy-table.
 ///
 /// # Arguments
@@ -1300,6 +1325,42 @@ mod tests {
     fn a_negative_argument_count_yields_nothing() {
         let buffer = procargs2_fixture(-1, "/usr/bin/tool", &["/usr/bin/tool"], &[], &[]);
         assert!(env_block_from_procargs2(&buffer).is_none());
+    }
+
+    #[test]
+    fn an_established_connection_line_parses() {
+        // Captured from `lsof -nP -i` on macOS 15.
+        let line = "2.1.258 7323 timmattison   12u  IPv4 0xa466e292ab820022      0t0  TCP 192.168.0.128:61932->160.79.104.10:443 (ESTABLISHED)";
+        let connection = parse_lsof_net_line(line).expect("this line names a connection");
+        assert_eq!(connection.fd, "12u");
+        assert_eq!(connection.family, "IPv4");
+        assert_eq!(connection.protocol, "TCP");
+        assert_eq!(
+            connection.name,
+            "192.168.0.128:61932->160.79.104.10:443 (ESTABLISHED)"
+        );
+    }
+
+    #[test]
+    fn a_listening_socket_line_parses() {
+        let line = "nginx  512 root    6u  IPv4 0x1234567890abcdef      0t0  TCP *:8080 (LISTEN)";
+        let connection = parse_lsof_net_line(line).expect("this line names a listening socket");
+        assert_eq!(connection.protocol, "TCP");
+        assert_eq!(connection.name, "*:8080 (LISTEN)");
+    }
+
+    #[test]
+    fn a_datagram_socket_line_has_no_state() {
+        let line = "mDNSRespo  200 nobody   9u  IPv6 0xfedcba0987654321      0t0  UDP *:5353";
+        let connection = parse_lsof_net_line(line).expect("this line names a datagram socket");
+        assert_eq!(connection.protocol, "UDP");
+        assert_eq!(connection.family, "IPv6");
+        assert_eq!(connection.name, "*:5353");
+    }
+
+    #[test]
+    fn a_line_with_too_few_fields_is_not_a_connection() {
+        assert!(parse_lsof_net_line("nginx 512 root 6u IPv4").is_none());
     }
 
     #[cfg(target_os = "macos")]
