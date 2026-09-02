@@ -189,7 +189,7 @@ index measured under identical rules, not as an exact prediction.
 | `gpg.format=openpgp` | Belt to `commit.gpgsign`'s braces. `gpg.format = ssh` is a different signing backend entirely, with its own key and helper program; pinning the format back to git's default means that configuration is never consulted, so signing cannot be attempted through it. |
 | `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. |
 | `rebase.autoStash=false`, `rebase.autosquash=false` | The replay must be the operation as written, not a rewritten variant of it. |
-| `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. |
+| `user.name=gitscratch`, `user.email=gitscratch@localhost`, and `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_AUTHOR_DATE`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`, `GIT_COMMITTER_DATE` **removed** | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. The config half settles nothing on its own: an identity variable outranks every config source, `-c` included, and git exports all six into every hook it runs and re-exports the author trio for each commit `rebase`, `cherry-pick` or `am` replays. The two `DATE` variables are the quieter half — left in place, every commit a run makes carries one identical timestamp. Removed at the single place a git process is created, at every fixture spawn that can write a commit, and — via the public `NoInheritedIdentity` — at the consumers' own spawns, so the list cannot drift between them. |
 | `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job (above); this narrows what a call site that reaches around it can get wrong. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
@@ -236,9 +236,16 @@ the backend its halted rebase is inspected under, and each gets a bullet:
   cannot resolve. The replay runs under a timeout, so the test catches a hang on
   a passphrase prompt and not only an outright failure.
 
-A tenth guarantee — **the `user.name`/`user.email` identity** — is pinned by a
-unit test in `src/git.rs` instead, which reads back `git var GIT_AUTHOR_IDENT`
-rather than building a repository to commit into.
+A tenth guarantee — **the identity**, config and environment halves together —
+is pinned by two unit tests instead of by `tests/safety.rs`, one per surface
+that stamps a commit. `src/git.rs` covers the replay runner, reading back
+`git var GIT_AUTHOR_IDENT` rather than building a repository to commit into.
+`src/testing.rs` covers the fixture builder, which needs an actual commit to ask
+about: it reads `git log` back for author, committer and both raw dates. Both
+re-execute their own test binary with a hook's identity variables set on the
+*child*, since `std::env::set_var` is process-global and would race every other
+test in the binary — the same mechanism `tests/isolation.rs` reaches for, and
+for the same reason.
 
 **`core.quotePath=false`**, the last row above, is pinned by a second unit test
 in `src/git.rs`, for a reason worth stating: it used to be pinned from the other

@@ -8,7 +8,10 @@
 //!
 //! The other half of "against the right repository" is the *environment*, which
 //! [`NoInheritedRepository`] strips, because a git invocation obeys it before it
-//! obeys the directory it was pointed at.
+//! obeys the directory it was pointed at. [`NoInheritedIdentity`] strips the
+//! rest of what a hook hands its children — who is committing, and when — for
+//! the same reason: an environment variable outranks every config source, so
+//! the identity pinned here only holds once they are gone.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -21,12 +24,23 @@ const SCRATCH_USER_NAME: &str = "gitscratch";
 /// The email every scratch commit is authored and committed under.
 const SCRATCH_USER_EMAIL: &str = "gitscratch@localhost";
 
-/// The identity git hands a child through the environment instead of through
-/// configuration. git sets all six for every hook it runs, and sets the author
-/// trio again for each commit that rebase, cherry-pick, or am replays. An
-/// environment variable outranks every config source, `-c` included, so
-/// `Git::output` removes them to keep the pinned identity in force.
-const INHERITED_IDENTITY_VARS: [&str; 6] = [
+/// Every environment variable that answers "who is committing, and when?"
+/// before configuration gets a say.
+///
+/// Git sets all six for every hook it runs, and sets the author trio again for
+/// each commit that rebase, cherry-pick, or am replays. An environment variable
+/// outranks every config source, `-c` included, so a `user.name` pinned in
+/// configuration is only in force once these are gone.
+///
+/// The two `DATE` variables ride along with the four that name a person because
+/// they leak the same way and are the quieter half: left in place, every commit
+/// a run makes carries one identical timestamp, so anything that reads history
+/// in date order stops meaning what it says.
+///
+/// One constant rather than a `.env_remove` chain per call site, for the reason
+/// [`REPOSITORY_LOCATION_VARS`] is one: the sites cannot be allowed to drift,
+/// and a spawn that scrubs four of six is a spawn with a hole in it.
+pub const INHERITED_IDENTITY_VARS: [&str; 6] = [
     "GIT_AUTHOR_NAME",
     "GIT_AUTHOR_EMAIL",
     "GIT_AUTHOR_DATE",
@@ -99,6 +113,40 @@ impl NoInheritedRepository for Command {
     }
 }
 
+/// Spawn a command that stamps the identity it was configured with, not the one
+/// it was handed.
+///
+/// Public, and separate from [`NoInheritedRepository`], because the two answer
+/// different questions and a call site may honestly want only the first: a
+/// probe that reads and writes nothing has no identity to protect, while a
+/// command that commits has both to protect. Splitting them keeps each name
+/// true at the call site rather than making one of them a half-truth.
+///
+/// Public for the same reason its sibling is, too. A consumer's own fixture
+/// builder commits into throwaway repositories exactly as this crate's does,
+/// inherits exactly the same hook environment, and would otherwise need a
+/// second copy of [`INHERITED_IDENTITY_VARS`] to defend itself — which is the
+/// drift these two traits exist to prevent.
+pub trait NoInheritedIdentity {
+    /// Remove every variable in [`INHERITED_IDENTITY_VARS`] from the
+    /// environment this command will be spawned with.
+    ///
+    /// A no-op in normal use — nothing sets these outside a hook or a replay —
+    /// which is precisely why it has to be unconditional. The one run where it
+    /// matters is the one nobody is watching.
+    fn without_inherited_identity(&mut self) -> &mut Self;
+}
+
+impl NoInheritedIdentity for Command {
+    fn without_inherited_identity(&mut self) -> &mut Self {
+        for name in INHERITED_IDENTITY_VARS {
+            self.env_remove(name);
+        }
+
+        self
+    }
+}
+
 /// The outcome of one git invocation.
 pub struct GitOutput {
     pub success: bool,
@@ -147,23 +195,19 @@ impl Git {
             // environment says otherwise. Run from inside a git hook - a
             // pre-push gate, `git bisect run`, `rebase --exec` - something does.
             .without_inherited_repository()
+            // Config alone does not settle the identity. Whichever tool drives
+            // this crate may itself be running under a git that exported the
+            // identity into the environment - every hook gets it, and so does
+            // every commit replayed by rebase, cherry-pick, or am - and those
+            // variables outrank the `user.name` pinned in safety_config. Left
+            // in place they put the developer's own name on scratch commits,
+            // which is the single thing the pin exists to prevent.
+            .without_inherited_identity()
             // A rebase that stops would otherwise try to open an editor and
             // hang forever on a commit message or a todo list.
             .env("GIT_EDITOR", "true")
             .env("GIT_SEQUENCE_EDITOR", "true")
             .env("GIT_TERMINAL_PROMPT", "0");
-
-        // Config alone does not settle the identity. Whichever tool drives this
-        // crate may itself be running under a git that exported the identity
-        // into the environment - every hook gets it, and so does every commit
-        // replayed by rebase, cherry-pick, or am - and those variables outrank
-        // the `user.name` pinned in safety_config. Left in place they put the
-        // developer's own name on scratch commits, which is the single thing
-        // the pin exists to prevent. Same leak class as the GIT_DIR scrub the
-        // repository's pre-commit hook performs before it runs the test suite.
-        for variable in INHERITED_IDENTITY_VARS {
-            command.env_remove(variable);
-        }
 
         command
             .output()
@@ -371,8 +415,8 @@ impl Git {
             // The identity belongs to this crate, not to whichever tool is
             // driving it, so every consumer's scratch commits are attributable
             // to the harness that actually made them. These two settle it only
-            // in company with the environment scrub in `try_run`, which removes
-            // the identity variables that would otherwise outrank them.
+            // in company with `NoInheritedIdentity`, which takes back off the
+            // identity variables that would otherwise outrank them.
             format!("user.name={SCRATCH_USER_NAME}"),
             format!("user.email={SCRATCH_USER_EMAIL}"),
             format!("core.hooksPath={}", self.hooks_path),
@@ -574,9 +618,9 @@ mod tests {
              got:         {ident}\n  \
              inherited:   {}\n\
              An identity variable outranks every config source, `-c` included, so \
-             Git::try_run removes the six of them before it spawns git. git exports \
-             them into every hook it runs, and into every commit that rebase, \
-             cherry-pick, or am replays.",
+             NoInheritedIdentity removes the six of them before git is spawned. git \
+             exports them into every hook it runs, and into every commit that \
+             rebase, cherry-pick, or am replays.",
             inherited_identity()
         );
     }

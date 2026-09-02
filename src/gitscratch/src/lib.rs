@@ -18,6 +18,10 @@
 //! `.husky/pre-commit` — an unscrubbed tool would aim the whole simulation at
 //! the hook's repository. [`NoInheritedRepository`] takes them back off, at the
 //! single place a git process is created and at every fixture spawn besides.
+//! A hook exports who is committing as well as where, and those variables
+//! outrank every config source, so [`NoInheritedIdentity`] takes that second set
+//! off at the same two places — otherwise the identity pinned below loses to
+//! whichever tool is driving the run.
 //!
 //! Every one of those guarantees is a guard that a second implementation would
 //! silently be missing. So this crate owns them, and it owns them behind a
@@ -64,7 +68,10 @@ pub mod scratch;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use git::{Git, GitOutput, NoInheritedRepository, REPOSITORY_LOCATION_VARS};
+pub use git::{
+    Git, GitOutput, NoInheritedIdentity, NoInheritedRepository, INHERITED_IDENTITY_VARS,
+    REPOSITORY_LOCATION_VARS,
+};
 pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
 pub use repo::Repo;
 pub use report::Report;
