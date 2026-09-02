@@ -1,0 +1,17 @@
+//! `subito` — subscribe to AWS IoT Core topics over a signed WebSocket.
+//!
+//! The crate holds the parts of the tool that a test can drive without a
+//! network and without an AWS account. [`cli`] states the command line, and
+//! [`payload`] turns the bytes of one MQTT message into the text the tool
+//! prints.
+//!
+//! [`payload::format_payload`] is the part that keeps a terminal safe. An MQTT
+//! payload is a byte string of any content, and a byte string that holds an
+//! escape sequence changes the terminal that prints it. The function gives
+//! text only for a payload that is text, and a hex dump for every other
+//! payload.
+
+#![cfg_attr(not(test), warn(clippy::unwrap_used))]
+#![cfg_attr(not(test), warn(clippy::expect_used))]
+
+pub mod cli;
