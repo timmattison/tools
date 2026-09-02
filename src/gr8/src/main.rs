@@ -750,4 +750,184 @@ mod tests {
         let rate_limit = make_rate_limit_with_timing(100, 4900, 3570);
         assert_eq!(format_rate(&rate_limit), "—");
     }
+
+    /// A real response from the GitHub API, captured on 2026-09-01.
+    ///
+    /// It has no `code_scanning_upload`, which GitHub removed. It has
+    /// `copilot_usage_records` and `enterprise_token_inventory`, which GitHub
+    /// added. gr8 must read such a response.
+    const LIVE_RESPONSE: &str = r#"
+        {
+            "resources": {
+                "core": {
+                    "limit": 5000,
+                    "used": 0,
+                    "remaining": 5000,
+                    "reset": 1788313546
+                },
+                "search": {
+                    "limit": 30,
+                    "used": 0,
+                    "remaining": 30,
+                    "reset": 1788310006
+                },
+                "graphql": {
+                    "limit": 5000,
+                    "used": 0,
+                    "remaining": 5000,
+                    "reset": 1788313546
+                },
+                "integration_manifest": {
+                    "limit": 5000,
+                    "used": 0,
+                    "remaining": 5000,
+                    "reset": 1788313546
+                },
+                "source_import": {
+                    "limit": 100,
+                    "used": 0,
+                    "remaining": 100,
+                    "reset": 1788310006
+                },
+                "code_scanning_autofix": {
+                    "limit": 10,
+                    "used": 0,
+                    "remaining": 10,
+                    "reset": 1788310006
+                },
+                "actions_runner_registration": {
+                    "limit": 10000,
+                    "used": 0,
+                    "remaining": 10000,
+                    "reset": 1788313546
+                },
+                "scim": {
+                    "limit": 15000,
+                    "used": 0,
+                    "remaining": 15000,
+                    "reset": 1788313546
+                },
+                "dependency_snapshots": {
+                    "limit": 100,
+                    "used": 0,
+                    "remaining": 100,
+                    "reset": 1788310006
+                },
+                "dependency_sbom": {
+                    "limit": 100,
+                    "used": 0,
+                    "remaining": 100,
+                    "reset": 1788310006
+                },
+                "audit_log": {
+                    "limit": 1750,
+                    "used": 0,
+                    "remaining": 1750,
+                    "reset": 1788313546
+                },
+                "audit_log_streaming": {
+                    "limit": 15,
+                    "used": 0,
+                    "remaining": 15,
+                    "reset": 1788313546
+                },
+                "code_search": {
+                    "limit": 10,
+                    "used": 0,
+                    "remaining": 10,
+                    "reset": 1788310006
+                },
+                "copilot_usage_records": {
+                    "limit": 1750,
+                    "used": 0,
+                    "remaining": 1750,
+                    "reset": 1788313546
+                },
+                "enterprise_token_inventory": {
+                    "limit": 1750,
+                    "used": 0,
+                    "remaining": 1750,
+                    "reset": 1788313546
+                }
+            },
+            "rate": {
+                "limit": 5000,
+                "used": 0,
+                "remaining": 5000,
+                "reset": 1788313546
+            }
+        }
+    "#;
+
+    /// Reads the fixture and returns the resource names, in display order.
+    fn live_response_names(response: &RateLimitResponse) -> Vec<&str> {
+        collect_rate_limits(&response.resources)
+            .iter()
+            .map(|named| named.name)
+            .collect()
+    }
+
+    #[test]
+    fn reads_a_response_whose_resource_set_changed() {
+        let response: RateLimitResponse = serde_json::from_str(LIVE_RESPONSE)
+            .expect("gr8 must read a response whose resource set changed");
+        let names = live_response_names(&response);
+
+        assert!(
+            !names.contains(&"code_scanning_upload"),
+            "GitHub removed code_scanning_upload, so gr8 must not need it"
+        );
+        assert!(
+            names.contains(&"copilot_usage_records"),
+            "GitHub added copilot_usage_records, so gr8 must show it: {names:?}"
+        );
+        assert!(
+            names.contains(&"enterprise_token_inventory"),
+            "GitHub added enterprise_token_inventory, so gr8 must show it: {names:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_the_numbers_of_a_resource_that_github_added() {
+        let response: RateLimitResponse = serde_json::from_str(LIVE_RESPONSE)
+            .expect("gr8 must read a response whose resource set changed");
+        let collected = collect_rate_limits(&response.resources);
+        let named = collected
+            .iter()
+            .find(|named| named.name == "copilot_usage_records")
+            .expect("copilot_usage_records is in the fixture");
+
+        assert_eq!(named.rate_limit.limit, 1750);
+        assert_eq!(named.rate_limit.used, 0);
+        assert_eq!(named.rate_limit.remaining, 1750);
+        assert_eq!(named.rate_limit.reset, 1788313546);
+    }
+
+    #[test]
+    fn keeps_the_order_of_the_response() {
+        let response: RateLimitResponse = serde_json::from_str(LIVE_RESPONSE)
+            .expect("gr8 must read a response whose resource set changed");
+
+        assert_eq!(
+            live_response_names(&response),
+            [
+                "core",
+                "search",
+                "graphql",
+                "integration_manifest",
+                "source_import",
+                "code_scanning_autofix",
+                "actions_runner_registration",
+                "scim",
+                "dependency_snapshots",
+                "dependency_sbom",
+                "audit_log",
+                "audit_log_streaming",
+                "code_search",
+                "copilot_usage_records",
+                "enterprise_token_inventory",
+            ],
+            "gr8 must show the resources in the order that GitHub sent them"
+        );
+    }
 }
