@@ -304,9 +304,7 @@ fn ic_command(pty: &Pty, args: &[&str]) -> Command {
 /// exits with a failure.
 fn run_ic(args: &[&str]) -> Vec<u8> {
     let pty = Pty::open();
-    let mut child = ic_command(&pty, args)
-        .spawn()
-        .expect("failed to start ic");
+    let mut child = ic_command(&pty, args).spawn().expect("failed to start ic");
 
     let mut stdin = child.stdin.take().expect("ic has no stdin pipe");
     stdin
