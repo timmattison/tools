@@ -61,22 +61,32 @@ const DIRTY_STATE: &str = "dirty";
 fn subito() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_subito"));
 
-    for name in scrubbed_names() {
+    for name in scrubbed_names(std::env::vars_os().map(|(name, _value)| name)) {
         command.env_remove(name);
     }
 
     command
 }
 
-/// Gives the name of every variable of this process that a child must lose.
+/// Gives the name of every variable of `names` that a child must lose.
+///
+/// The names are a parameter, and not a call to [`std::env::vars_os`], so a
+/// test reads the rule against a list it writes itself. A scrub that matched
+/// nothing would otherwise report a clean environment for the same reason a
+/// working scrub does, and the two answers would look the same.
 ///
 /// The name of a variable is not always UTF-8, so the filter reads a lossy
 /// copy and the answer keeps the name as the operating system holds it. A
 /// lossy copy replaces each bad byte with a character that is not ASCII, so no
 /// name gains a prefix of [`SCRUBBED_PREFIXES`] that it did not have.
-fn scrubbed_names() -> Vec<OsString> {
-    std::env::vars_os()
-        .map(|(name, _value)| name)
+fn scrubbed_names<I, N>(names: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = N>,
+    N: Into<OsString>,
+{
+    names
+        .into_iter()
+        .map(Into::into)
         .filter(|name| {
             let text = name.to_string_lossy().to_ascii_uppercase();
             SCRUBBED_PREFIXES
@@ -219,5 +229,74 @@ fn with_no_topic_the_tool_prints_nothing_on_standard_output() {
     assert_eq!(
         printed, "",
         "a run that subscribes to nothing prints nothing a pipe can read"
+    );
+}
+
+#[test]
+fn the_scrub_takes_every_aws_and_git_name_and_leaves_every_other_one() {
+    // The last two names of each list are the ones a prefix match without the
+    // underscore would get wrong. `AWSOME` and `GITHUB_TOKEN` start with the
+    // letters and not with the prefix, and a scrub that took them would take
+    // variables a child needs.
+    let goes = [
+        "AWS_REGION",
+        "AWS_PROFILE",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_ENDPOINT_URL",
+        "AWS_CONFIG_FILE",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "aws_region",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_WORK_TREE",
+        "GIT_AUTHOR_NAME",
+        "git_dir",
+    ];
+    let stays = [
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "LOGNAME",
+        "CARGO_MANIFEST_DIR",
+        "MY_AWS_REGION",
+        "AWSOME",
+        "GITHUB_TOKEN",
+    ];
+
+    let kept: Vec<&str> = goes
+        .iter()
+        .copied()
+        .filter(|name| scrubbed_names([*name]).is_empty())
+        .collect();
+    assert_eq!(
+        kept,
+        Vec::<&str>::new(),
+        "the scrub takes every AWS and git variable, and it kept these"
+    );
+    assert_eq!(
+        scrubbed_names(stays),
+        Vec::<OsString>::new(),
+        "the scrub leaves every name that is not an AWS or a git variable"
+    );
+}
+
+#[test]
+fn the_command_removes_the_variables_the_scrub_names() {
+    let mut expected = scrubbed_names(std::env::vars_os().map(|(name, _value)| name));
+    expected.sort();
+
+    let command = subito();
+    let mut removed: Vec<OsString> = command
+        .get_envs()
+        .filter(|(_name, value)| value.is_none())
+        .map(|(name, _value)| name.to_owned())
+        .collect();
+    removed.sort();
+
+    assert_eq!(
+        removed, expected,
+        "the command takes out the names the scrub gives and no other one"
     );
 }
