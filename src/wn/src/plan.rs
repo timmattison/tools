@@ -940,6 +940,46 @@ Notes: Independent of everything above.";
     }
 
     #[test]
+    fn an_annotation_names_the_pull_request_of_the_step_before_it() {
+        // `#4 (in flight, PR #15)` is the issue #4, whose work is the pull
+        // request #15. The mark says which of the two numbers is the work, so
+        // the step holds the pull request and the issue that work closes, the
+        // way `PR#344 (#341)` does.
+        assert_eq!(
+            steps_at(&plan_of("Order: #4 (in flight, PR #15) → #7"), 0),
+            vec![(15, Some(4)), (7, None)]
+        );
+    }
+
+    #[test]
+    fn a_glued_mark_inside_an_annotation_marks_the_number_as_well() {
+        assert_eq!(
+            steps_at(&plan_of("Order: #4 (PR#15)"), 0),
+            vec![(15, Some(4))]
+        );
+    }
+
+    #[test]
+    fn an_annotation_that_names_no_issue_is_prose() {
+        // `#12 (human)` is one step of one number, and the word is a note the
+        // reader wrote for themselves.
+        assert_eq!(
+            steps_at(&plan_of("Order: #9 → #10 → #12 (human)"), 0),
+            vec![(9, None), (10, None), (12, None)]
+        );
+    }
+
+    #[test]
+    fn a_number_of_an_annotation_that_carries_no_hash_is_prose() {
+        // The hash is what makes an annotation safe to read. A count of lines
+        // carries none, so it stays prose and never reaches the chain.
+        assert_eq!(
+            steps_at(&plan_of("Order: #4 (30-line window)"), 0),
+            vec![(4, None)]
+        );
+    }
+
+    #[test]
     fn a_key_is_read_whatever_its_case() {
         let plan = plan_of("stream: S1\nORDER: #1 → #2");
         assert_eq!(steps_at(&plan, 0), vec![(1, None), (2, None)]);
