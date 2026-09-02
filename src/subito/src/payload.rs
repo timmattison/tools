@@ -1,4 +1,25 @@
 //! The payload printer of `subito`.
+//!
+//! An MQTT payload is a byte string of any content. This module turns one such
+//! byte string into text that a terminal can print without damage.
+
+/// The text an empty payload gives.
+const EMPTY_PAYLOAD: &str = "(empty)";
+
+/// The count of bytes one line of the hex dump shows.
+const BYTES_PER_LINE: usize = 16;
+
+/// The count of bytes after which the hex field takes one more space.
+const HALF_LINE: usize = 8;
+
+/// The lowest byte the ASCII gutter prints as itself.
+const FIRST_PRINTABLE: u8 = 0x20;
+
+/// The highest byte the ASCII gutter prints as itself.
+const LAST_PRINTABLE: u8 = 0x7e;
+
+/// The character the ASCII gutter prints for every other byte.
+const UNPRINTABLE: char = '.';
 
 /// Turns the bytes of one MQTT message into the text the tool prints.
 ///
@@ -18,8 +39,78 @@
 /// hex dump holds hex digits and printable ASCII only.
 #[must_use]
 pub fn format_payload(payload: &[u8], pretty_json: bool) -> String {
-    let _ = (payload, pretty_json);
-    unimplemented!("the payload printer")
+    if payload.is_empty() {
+        return EMPTY_PAYLOAD.to_string();
+    }
+
+    if pretty_json {
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) {
+            if let Ok(indented) = serde_json::to_string_pretty(&value) {
+                return indented;
+            }
+        }
+    }
+
+    if let Ok(text) = std::str::from_utf8(payload) {
+        if text.chars().all(is_safe_to_print) {
+            return text.to_string();
+        }
+    }
+
+    hex_dump(payload)
+}
+
+/// Says whether a terminal can print one character without damage.
+///
+/// A control character other than the tab, the line feed and the carriage
+/// return is not safe. The escape character is the one that matters most,
+/// because it starts a terminal escape sequence.
+fn is_safe_to_print(character: char) -> bool {
+    !character.is_control() || matches!(character, '\t' | '\n' | '\r')
+}
+
+/// Gives the hex dump of a payload.
+///
+/// Each line holds the offset, the bytes as hex digits, and the bytes again as
+/// printable ASCII between two `|` characters. A short last line pads with
+/// spaces, so the gutter of every line starts in the same column. The lines
+/// join with a line feed, and the text has no line feed at its end.
+fn hex_dump(payload: &[u8]) -> String {
+    let mut dump = String::new();
+
+    for (line, chunk) in payload.chunks(BYTES_PER_LINE).enumerate() {
+        if line > 0 {
+            dump.push('\n');
+        }
+
+        let offset = line * BYTES_PER_LINE;
+        dump.push_str(&format!("{offset:08x}  "));
+
+        for slot in 0..BYTES_PER_LINE {
+            if slot > 0 {
+                dump.push(' ');
+            }
+            if slot == HALF_LINE {
+                dump.push(' ');
+            }
+            match chunk.get(slot) {
+                Some(byte) => dump.push_str(&format!("{byte:02x}")),
+                None => dump.push_str("  "),
+            }
+        }
+
+        dump.push_str("  |");
+        for byte in chunk {
+            dump.push(if (FIRST_PRINTABLE..=LAST_PRINTABLE).contains(byte) {
+                char::from(*byte)
+            } else {
+                UNPRINTABLE
+            });
+        }
+        dump.push('|');
+    }
+
+    dump
 }
 
 #[cfg(test)]
