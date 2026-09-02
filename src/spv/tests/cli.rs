@@ -5,6 +5,7 @@
 //! child carries the process id of the test and a nanosecond timestamp, so two
 //! concurrent runs of the same test stay apart.
 
+use std::net::TcpListener;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -165,6 +166,56 @@ fn show_secrets_prints_the_credential_in_full() {
     assert!(
         stdout.contains("s3cret"),
         "--show-secrets prints the value; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn the_network_section_shows_a_socket_this_test_opened() {
+    // Port 0 asks the operating system for a free port, so two concurrent runs
+    // of this test never claim the same one.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("the loopback interface accepts a bind");
+    let port = listener
+        .local_addr()
+        .expect("a bound listener carries an address")
+        .port();
+
+    let (ok, stdout, stderr) = run(
+        spv()
+            .args(["--net", &std::process::id().to_string()])
+            .output()
+            .expect("spv runs"),
+    );
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stdout.contains("Network connections for"),
+        "the section names itself; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(&port.to_string()),
+        "the section shows the port this test opened ({port}); stdout: {stdout}"
+    );
+}
+
+#[test]
+fn the_network_section_says_it_found_nothing() {
+    let child = Sleeper::spawn("quiet", &[]);
+
+    let (ok, stdout, stderr) = run(
+        spv()
+            .args(["--net", &child.pid().to_string()])
+            .output()
+            .expect("spv runs"),
+    );
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stdout.contains("Network connections for"),
+        "the section names itself even with nothing to show; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("none found"),
+        "the section says it found nothing; stdout: {stdout}"
     );
 }
 
