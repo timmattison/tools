@@ -68,10 +68,16 @@ TIP: Add this alias to your shell config:
 DIRC_CLIPBOARD_FILE names a file to read and write in place of the clipboard
 of the machine.";
 
-/// The command line of `dirc`.
-///
-/// One flag, because there are two modes and copy mode is the default. A run
-/// with no arguments copies.
+/// The command line of `dirc`: one flag, because there are two modes and copy
+/// mode is the default, so a run with no arguments copies.
+//
+// The documentation comment above stays one paragraph, and this note is a plain
+// comment so that it stays out of it. `clap` derives `about` from the first
+// paragraph of a documentation comment and `long_about` from the whole of it. A
+// derived `long_about` wins over ABOUT in `--help`, while `-h` keeps ABOUT, so
+// a second paragraph here makes the longer help say less than the short one.
+// The test `the_short_help_and_the_long_help_say_the_same_thing` fails the day
+// one arrives.
 #[derive(Debug, Parser)]
 #[command(name = "dirc", version = version_string!(), about = ABOUT, after_help = AFTER_HELP)]
 struct Cli {
