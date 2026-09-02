@@ -228,6 +228,7 @@ mod tests {
             number: IssueNumber::new(number).expect("the test number is an issue number"),
             title: title.to_string(),
             status,
+            closes: None,
         }
     }
 

@@ -270,6 +270,7 @@ fn entry_of(repository: &Value, reasons: &Reasons<'_>, number: IssueNumber) -> R
             number,
             title: String::new(),
             status: Status::Missing,
+            closes: None,
         });
     };
 
@@ -290,6 +291,7 @@ fn entry_of(repository: &Value, reasons: &Reasons<'_>, number: IssueNumber) -> R
         status: status_of(state, kind, reason).ok_or_else(|| {
             anyhow!("GitHub gave {number} the state {state}, which wn cannot read")
         })?,
+        closes: None,
     })
 }
 
