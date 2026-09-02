@@ -27,6 +27,10 @@
 //! A plan also names one number in two streams. [`States`] holds the answer
 //! of GitHub for each number once, so one query answers the whole plan and
 //! every stream that names a number reads the same state for it.
+#![allow(
+    dead_code,
+    reason = "the report of a stream lands before the run that reads a plan calls it; take this attribute out with the call"
+)]
 
 use std::collections::HashMap;
 
@@ -105,7 +109,10 @@ impl Entry {
     /// place and can never part company.
     #[must_use]
     pub fn label(&self) -> String {
-        self.number.to_string()
+        match self.closes {
+            Some(closes) => format!("{} ({})", self.number, closes.number),
+            None => self.number.to_string(),
+        }
     }
 }
 
@@ -128,9 +135,11 @@ impl States {
     /// one number cannot arrive. The last of them stands if one ever does.
     #[must_use]
     pub fn of(entries: Vec<Entry>) -> Self {
-        let _ = entries;
         Self {
-            entries: HashMap::new(),
+            entries: entries
+                .into_iter()
+                .map(|entry| (entry.number, entry))
+                .collect(),
         }
     }
 
@@ -236,8 +245,15 @@ impl Report {
     pub fn missing(&self) -> Vec<IssueNumber> {
         self.entries
             .iter()
-            .filter(|entry| entry.status == Status::Missing)
-            .map(|entry| entry.number)
+            .flat_map(|entry| {
+                let step = (entry.status == Status::Missing).then_some(entry.number);
+                let closes = entry
+                    .closes
+                    .filter(|closes| closes.status == Status::Missing)
+                    .map(|closes| closes.number);
+                [step, closes]
+            })
+            .flatten()
             .collect()
     }
 
@@ -254,7 +270,12 @@ impl Report {
     pub fn pairs_that_disagree(&self) -> Vec<&Entry> {
         self.entries
             .iter()
-            .filter(|entry| entry.closes.is_some())
+            .filter(|entry| {
+                entry.status != Status::Missing
+                    && entry.closes.is_some_and(|closes| {
+                        closes.status != Status::Missing && closes.status != entry.status
+                    })
+            })
             .collect()
     }
 }
