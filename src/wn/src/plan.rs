@@ -689,6 +689,35 @@ Notes: Independent of everything above.";
 | S6 vpn-tunnel | #191 → #192 | src/vpn-tunnel | Both edits land within a 30-line window of compose.rs. |
 | S7 dwt | #196 | src/dwt | Independent of everything above. |";
 
+    /// A table of one stream, and the Housekeeping table a report writes under
+    /// it.
+    ///
+    /// A report of parallel work holds more than the stream table. The rows of
+    /// this second one are issues to close, and an issue to close is no stream
+    /// of work to start.
+    const TABLE_AND_HOUSEKEEPING: &str = "\
+| Stream | Order | Zone | Notes |
+|---|---|---|---|
+| S1 | #344 | src/a | fine |
+
+## Housekeeping
+| Closeable | #330 |
+| Stale | #331 |";
+
+    /// The same report, with a header of its own on the second table.
+    ///
+    /// The cell of the second table that stands where the `Order` column
+    /// stands holds a word, so a reader that walks into the table names that
+    /// word as an issue that is not one.
+    const TABLE_AND_A_TABLE_OF_PROSE: &str = "\
+| Stream | Order | Zone | Notes |
+|---|---|---|---|
+| S1 | #344 | src/a | fine |
+
+## Housekeeping
+| Issue | Action |
+| #330 | close |";
+
     /// The numbers of one step: the work, and the issue the work closes.
     type StepNumbers = (u64, Option<u64>);
 
@@ -853,6 +882,28 @@ Notes: Independent of everything above.";
         let plan = plan_of(&bare);
         assert_eq!(plan.streams().len(), 7);
         assert_eq!(plan, plan_of(TABLE));
+    }
+
+    #[test]
+    fn a_table_of_a_plan_ends_where_the_table_ends() {
+        // The empty line under S1 closes the table. Every row below it belongs
+        // to another section of the report, and another table is not more work
+        // to start.
+        assert_eq!(
+            shape(&plan_of(TABLE_AND_HOUSEKEEPING)),
+            vec![("S1", vec![(344, None)])]
+        );
+    }
+
+    #[test]
+    fn a_later_table_of_prose_leaves_the_plan_alone() {
+        // A reader that walks past the end of the table reads the cell under
+        // `Action` as an issue number, and one word of a section the plan
+        // never named takes the whole plan down.
+        assert_eq!(
+            shape(&plan_of(TABLE_AND_A_TABLE_OF_PROSE)),
+            vec![("S1", vec![(344, None)])]
+        );
     }
 
     #[test]
