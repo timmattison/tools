@@ -6,6 +6,8 @@ description = "Directory Clipboard — copies the current directory to the clipb
 
 [dependencies]
 arboard.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
