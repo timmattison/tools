@@ -10,11 +10,14 @@
 //! dedicated tab-rename tests *simulate* the multiplexer with a recording fake
 //! so they can assert exactly when a rename does and does not fire.
 //!
-//! The same class of escape exists for git, and [`scrub_git_env`] is the single
-//! answer to it: every `git` child this module spawns — the fixture's own
-//! commands and the real `nwt` binary alike — has the entire inherited `GIT_*`
-//! family removed, so it can only act on the directory it was handed. The rule
-//! is the prefix, never a list of names; [`scrub_git_env`] explains why.
+//! The same class of escape exists for git, and
+//! [`gitscratch::shed_inherited_git_environment`] is the single answer to it:
+//! every `git` child this module spawns — the fixture's own commands and the
+//! real `nwt` binary alike — has the entire inherited `GIT_*` family removed, so
+//! it can only act on the directory it was handed. The rule is the prefix, never
+//! a list of names, and it lives in `gitscratch` because every git-spawning
+//! caller in this repository is broken the same way by the same environment.
+//! That function explains why a list is the bug.
 //!
 //! Each integration test file is compiled as its own crate that pulls this
 //! module in via `mod support;`, so not every binary uses every helper — hence
@@ -28,72 +31,44 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
-
-/// The prefix that identifies a variable as git's, and therefore as one
-/// [`scrub_git_env`] removes.
-const GIT_ENV_PREFIX: &str = "GIT_";
-
-/// Removes every inherited `GIT_*` variable from `cmd`'s child environment,
-/// returning `cmd` so it chains inside a builder expression.
-///
-/// This is the one entrance every `git`-touching child in this suite goes
-/// through, and it is why a fixture can only act on the directory it was handed.
-/// Without it, `current_dir(dir)` is not enough: when the suite runs from inside
-/// a git hook, git exports its own variables into the hook's environment,
-/// `cargo test` inherits them, and `GIT_DIR` overrides cwd-based discovery — so
-/// a fixture's `git config`/`commit` lands in the *real* repo. That is how
-/// `Test <t@example.com>` got written into this repo's own `.git/config` and
-/// then authored every later commit until it was noticed. A config write is
-/// sticky: one leak outlives the run that caused it.
-///
-/// **The rule is the `GIT_` prefix, and never a list of names.** A named list of
-/// `GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, …` goes stale the day git adds a
-/// variable, and from then on it strips nothing new while returning the same
-/// clean-looking answer as one that works. This function was a three-name list
-/// once, and two variables walked straight through it: `GIT_OBJECT_DIRECTORY`,
-/// which redirects a fixture's blob and tree writes into a foreign repository's
-/// object store, and `GIT_CONFIG_PARAMETERS`, which injects arbitrary config
-/// (`user.email`, `core.bare`, `core.hooksPath`) into the fixture's git. Neither
-/// is a location variable, so no amount of adding location names would have
-/// caught them. Enumerating [`std::env::vars_os`] sweeps whatever git invents
-/// next without anyone editing this file. Pinned by
-/// `tests/git-env-isolation.rs` and `tests/builder-guard.rs`.
-///
-/// `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are swept along with the rest, and
-/// that costs nothing: removing them is not the same as pinning them to
-/// `/dev/null`. With the variables gone, git falls back to the host's
-/// `~/.gitconfig` and `/etc/gitconfig` exactly as it does in a normal shell, so
-/// settings the fixtures rely on — `init.defaultBranch` among them — still
-/// apply.
-///
-/// Keys are compared through `OsStr::to_string_lossy`: lossy conversion replaces
-/// invalid bytes with U+FFFD and so can never manufacture a `GIT_` prefix out of
-/// bytes that did not spell one.
-pub fn scrub_git_env(cmd: &mut Command) -> &mut Command {
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with(GIT_ENV_PREFIX) {
-            cmd.env_remove(&key);
-        }
-    }
-    cmd
-}
 
 /// Runs a git command in `dir` with stdin/stdout/stderr nulled, returning
 /// whether it succeeded. Output is nulled so concurrent test runs (a background
 /// `bacon` loop alongside the pre-commit hook's own run) don't interleave noise.
 ///
-/// Scrubs the whole inherited `GIT_*` family via [`scrub_git_env`] so that `dir`
-/// is the repo git operates on — see that function for how the leak happens and
-/// why the rule is a prefix rather than a list of names.
+/// Sheds the whole inherited `GIT_*` family through
+/// [`gitscratch::shed_inherited_git_environment`], which is what makes `dir` the
+/// repo git operates on. `current_dir(dir)` alone is not enough: when the suite
+/// runs from inside a git hook, git exports its own variables into the hook's
+/// environment, `cargo test` inherits them, and `GIT_DIR` overrides cwd-based
+/// discovery — so a fixture's `git config`/`commit` lands in the *real* repo.
+/// That is how `Test <t@example.com>` got written into this repo's own
+/// `.git/config` and then authored every later commit until it was noticed. A
+/// config write is sticky: one leak outlives the run that caused it.
+///
+/// The rule is the `GIT_` prefix and never a list of names, and it lives in
+/// `gitscratch` so this suite and every other git-spawning caller in the
+/// repository share one answer instead of each keeping a copy to drift. See
+/// that function for why a list is the bug and which variables walked through
+/// the last one. Pinned here by `tests/git-env-isolation.rs` and
+/// `tests/builder-guard.rs`, which probe the behaviour at this call site rather
+/// than trusting the helper.
+///
+/// Shedding also drops `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, and that costs
+/// nothing: removing a variable is not the same as pinning it to `/dev/null`.
+/// With them gone git falls back to the host's `~/.gitconfig` and
+/// `/etc/gitconfig` exactly as it does in a normal shell, so settings the
+/// fixtures rely on — `init.defaultBranch` among them — still apply.
 pub fn run_git(dir: &Path, args: &[&str]) -> bool {
     let mut cmd = Command::new("git");
+    shed_inherited_git_environment(&mut cmd);
     cmd.args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    scrub_git_env(&mut cmd)
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -154,8 +129,9 @@ pub fn init_repo() -> (TempDir, PathBuf) {
 /// scrubs the terminal-multiplexer environment from the child so a suite
 /// launched from inside zellij/tmux can never hijack the user's real tab.
 ///
-/// It likewise scrubs the whole inherited `GIT_*` family via [`scrub_git_env`],
-/// so the spawned `nwt` — which shells out to `git worktree add` — operates on
+/// It likewise sheds the whole inherited `GIT_*` family via
+/// [`gitscratch::shed_inherited_git_environment`], so the spawned `nwt` — which
+/// shells out to `git worktree add` — operates on
 /// `repo` and not on whatever repo an inherited `GIT_DIR` names, writes its
 /// objects into `repo`'s own store, and reads no config the launching
 /// environment injected. Both scrubs guard the same class of bug: a fixture
@@ -181,9 +157,9 @@ pub fn nwt_command(repo: &Path) -> Command {
     // Same idea for git: a hook exports these, `cargo test` inherits them, and
     // GIT_DIR beats `current_dir`. Left in place, the spawned nwt would add its
     // worktree to the real repo, write objects into it, or run under config the
-    // launching shell injected. Swept by prefix, never by name — see
-    // `scrub_git_env` above.
-    scrub_git_env(&mut cmd);
+    // launching shell injected. Shed by prefix, never by name — see `run_git`
+    // above, and `gitscratch::shed_inherited_git_environment` for the rule.
+    shed_inherited_git_environment(&mut cmd);
     cmd
 }
 

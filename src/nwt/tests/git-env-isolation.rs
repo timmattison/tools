@@ -77,9 +77,10 @@ const PROBE_VARS: &[&str] = &[
 /// Removes every inherited `GIT_*` variable from `cmd`'s child environment.
 ///
 /// This is deliberately a private copy of the rule rather than a call to
-/// `support::scrub_git_env`: `support` holds the helper under test, and a probe
-/// that borrows its sandbox from the code it is probing cannot fail. Before the
-/// fix, `support`'s scrub is exactly what leaks.
+/// `support::run_git`'s scrub or to
+/// `gitscratch::shed_inherited_git_environment` itself: those are the code under
+/// test, and a probe that borrows its sandbox from the code it is probing cannot
+/// fail. Before the fix, that scrub is exactly what leaks.
 ///
 /// The rule is the `GIT_` prefix, never a list of names — see this module's
 /// header. Enumerating `std::env::vars_os()` means a variable git adds tomorrow
