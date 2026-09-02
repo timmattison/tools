@@ -123,7 +123,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
       directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work
       with [the templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates)
-    - To install: `go install github.com/timmattison/tools/cmd/localnext@latest`
+    - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
     - To install: `cargo install --git https://github.com/timmattison/tools unescapeboard`
