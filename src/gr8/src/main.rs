@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use buildinfo::version_string;
 use chrono::{Local, TimeZone, Utc};
 use comfy_table::{presets::UTF8_FULL, Cell, Color, ContentArrangement, Table};
-use serde::Deserialize;
+use serde::de::{MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use std::fmt;
 use std::process::Command;
 
 /// The core rate limit resource name. Used in tests for consistency with other
@@ -43,76 +45,101 @@ struct NamedRateLimit<'a> {
     rate_limit: &'a RateLimit,
 }
 
-/// Macro that defines the Resources struct, RESOURCE_COUNT constant, and collect_rate_limits
-/// function from a single list of field names. This ensures they cannot get out of sync.
+/// Every rate limit resource of a response, in the order that GitHub sent them.
 ///
-/// When adding a new GitHub API rate limit resource:
-/// 1. Add the field name to this macro invocation (in the order it appears in the API response)
-/// 2. That's it! The struct, constant, and collection function are all updated automatically.
-macro_rules! define_rate_limit_resources {
-    ($($name:ident),* $(,)?) => {
-        /// Contains all GitHub API rate limit resources
-        #[derive(Debug, Deserialize)]
-        struct Resources {
-            $($name: RateLimit,)*
-        }
+/// GitHub changes this set without notice. It removed `code_scanning_upload`,
+/// and it added `copilot_usage_records` and `enterprise_token_inventory`. So
+/// this type names no resource. It keeps what the response holds, which makes
+/// a new resource appear on its own, and makes a resource that goes away a
+/// non-event.
+///
+/// A resource that GitHub adds can also hold a set of fields that gr8 does not
+/// know. Such a resource costs its own row and nothing more. gr8 keeps the name
+/// of it and reads the other resources as usual.
+#[derive(Debug)]
+struct Resources {
+    /// The resources whose numbers gr8 read, in the order of the response.
+    readable: Vec<(String, RateLimit)>,
+    /// The names of the resources whose numbers gr8 could not read, in the
+    /// order of the response.
+    unreadable: Vec<String>,
+}
 
-        /// Collects all rate limit resources into a vector for easier processing.
-        /// The returned vector contains all resources in the same order as defined in the struct.
-        fn collect_rate_limits(resources: &Resources) -> Vec<NamedRateLimit<'_>> {
-            vec![
-                $(NamedRateLimit { name: stringify!($name), rate_limit: &resources.$name },)*
-            ]
-        }
+impl<'de> Deserialize<'de> for Resources {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        /// Reads the resource map and keeps the order of the response.
+        struct ResourcesVisitor;
 
-        /// Number of rate limit resources defined in the GitHub API.
-        /// This constant is automatically kept in sync with the Resources struct and collect_rate_limits.
-        /// Only used in tests to verify the partitioning logic.
-        #[cfg(test)]
-        const RESOURCE_COUNT: usize = [$( stringify!($name) ),*].len();
+        impl<'de> Visitor<'de> for ResourcesVisitor {
+            type Value = Resources;
 
-        /// Creates a Resources struct for testing where all resources have the given remaining count.
-        /// Uses the test module's make_rate_limit function.
-        #[cfg(test)]
-        fn make_all_resources_with_remaining(remaining: u32) -> Resources {
-            use crate::tests::make_rate_limit;
-            Resources {
-                $($name: make_rate_limit(remaining),)*
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map of resource names to rate limits")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Resources, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut readable = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                let mut unreadable = Vec::new();
+                // Each value becomes a JSON value first, and then a RateLimit.
+                // Thus a resource whose set of fields gr8 does not know costs
+                // its own row, and it does not stop gr8 from reading the other
+                // resources of the response.
+                while let Some((name, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    match serde_json::from_value::<RateLimit>(value) {
+                        Ok(rate_limit) => readable.push((name, rate_limit)),
+                        Err(_) => unreadable.push(name),
+                    }
+                }
+                Ok(Resources {
+                    readable,
+                    unreadable,
+                })
             }
         }
-    };
+
+        deserializer.deserialize_map(ResourcesVisitor)
+    }
 }
 
-// Define all GitHub API rate limit resources in a single place.
-// The macro generates: Resources struct, RESOURCE_COUNT constant, collect_rate_limits function,
-// and the test helper make_all_resources_with_remaining.
-define_rate_limit_resources! {
-    core,
-    graphql,
-    search,
-    code_search,
-    code_scanning_upload,
-    code_scanning_autofix,
-    actions_runner_registration,
-    integration_manifest,
-    source_import,
-    dependency_snapshots,
-    dependency_sbom,
-    scim,
-    audit_log,
-    audit_log_streaming,
+/// Collects all rate limit resources into a vector for easier processing.
+/// The returned vector keeps the order of the response.
+fn collect_rate_limits(resources: &Resources) -> Vec<NamedRateLimit<'_>> {
+    resources
+        .readable
+        .iter()
+        .map(|(name, rate_limit)| NamedRateLimit { name, rate_limit })
+        .collect()
 }
 
-/// Top-level response structure from GitHub API rate_limit endpoint
+/// Formats the note that names the resources whose numbers gr8 could not read.
+/// Returns None when gr8 read every resource that the response holds.
+fn format_unreadable_note(resources: &Resources) -> Option<String> {
+    let count = resources.unreadable.len();
+    if count == 0 {
+        return None;
+    }
+
+    let noun = if count == 1 { "resource" } else { "resources" };
+    Some(format!(
+        "Skipped {count} {noun} that gr8 could not read: {}",
+        resources.unreadable.join(", ")
+    ))
+}
+
+/// Top-level response structure from GitHub API rate_limit endpoint.
+///
+/// The response also holds a `rate` field, which repeats the core rate limit.
+/// gr8 does not read it, and serde ignores a field that no member names, so a
+/// field that GitHub adds or removes beside `resources` costs nothing here.
 #[derive(Debug, Deserialize)]
 struct RateLimitResponse {
     resources: Resources,
-    /// Rate limit for the core API (duplicates resources.core, kept for API structure completeness)
-    #[allow(
-        dead_code,
-        reason = "Required by GitHub API response structure but not used"
-    )]
-    rate: RateLimit,
 }
 
 /// Executes the `gh api rate_limit` command and returns the JSON output
@@ -303,6 +330,38 @@ fn remaining_color(rate_limit: &RateLimit) -> Color {
     }
 }
 
+/// Splits the rate limits of a response into the available ones and the
+/// exhausted ones, and sorts each list so that graphql is last.
+///
+/// Stops when gr8 can show no rate limit at all. An empty report reads the same
+/// as a report of a healthy account, so gr8 says why it has nothing to show
+/// instead of showing nothing.
+fn partition_rate_limits(
+    resources: &Resources,
+) -> Result<(Vec<NamedRateLimit<'_>>, Vec<NamedRateLimit<'_>>)> {
+    let all_limits = collect_rate_limits(resources);
+
+    if all_limits.is_empty() {
+        if resources.unreadable.is_empty() {
+            anyhow::bail!("The rate limit response held no resources");
+        }
+        anyhow::bail!(
+            "The rate limit response held no resource that gr8 can read. It could not read: {}",
+            resources.unreadable.join(", ")
+        );
+    }
+
+    let (mut available, mut exhausted): (Vec<_>, Vec<_>) = all_limits
+        .into_iter()
+        .partition(|named| named.rate_limit.remaining > 0);
+
+    // Sort each list so graphql appears last for visibility (most commonly monitored)
+    sort_graphql_last(&mut available);
+    sort_graphql_last(&mut exhausted);
+
+    Ok((available, exhausted))
+}
+
 /// Builds a table row for a single rate limit resource
 fn build_rate_limit_row(named: &NamedRateLimit) -> Vec<Cell> {
     let rate_limit = named.rate_limit;
@@ -380,25 +439,24 @@ fn main() -> Result<()> {
     let response: RateLimitResponse =
         serde_json::from_str(&json_data).context("Failed to parse JSON response")?;
 
+    // Split the rate limits before the header, so a response that gr8 can show
+    // nothing from gives an error and not a header above an empty report.
+    let (available, exhausted) = partition_rate_limits(&response.resources)?;
+
     // Print header
     let now = Local::now().format("%Y-%m-%d %H:%M:%S");
     println!("\nGitHub API Rate Limits (as of {})\n", now);
-
-    // Collect and partition rate limits into available (remaining > 0) and exhausted (remaining == 0)
-    let all_limits = collect_rate_limits(&response.resources);
-    let (mut available, mut exhausted): (Vec<_>, Vec<_>) = all_limits
-        .into_iter()
-        .partition(|named| named.rate_limit.remaining > 0);
-
-    // Sort each list so graphql appears last for visibility (most commonly monitored)
-    sort_graphql_last(&mut available);
-    sort_graphql_last(&mut exhausted);
 
     // Print available rate limits first (easier to scroll past)
     print_rate_limit_table("Available Rate Limits", &available);
 
     // Print exhausted rate limits last (easier to find at bottom of terminal)
     print_rate_limit_table("Exhausted Rate Limits", &exhausted);
+
+    // Name the resources that gr8 skipped, so a skip is never silent.
+    if let Some(note) = format_unreadable_note(&response.resources) {
+        println!("{note}\n");
+    }
 
     Ok(())
 }
@@ -407,12 +465,37 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    // Note: RESOURCE_COUNT is defined at module level by the define_rate_limit_resources! macro,
-    // ensuring it always matches the actual number of resources.
+    /// The resources that the tests build a response from. gr8 reads whatever
+    /// set the response holds, so this is a sample and not the true set.
+    const SAMPLE_RESOURCES: [&str; 4] = [CORE_RESOURCE, GRAPHQL_RESOURCE, "search", "code_search"];
+
+    /// Number of resources in a response that the tests build.
+    const RESOURCE_COUNT: usize = SAMPLE_RESOURCES.len();
+
+    /// Creates a Resources where every sample resource has the given remaining count.
+    fn make_all_resources_with_remaining(remaining: u32) -> Resources {
+        Resources {
+            readable: SAMPLE_RESOURCES
+                .iter()
+                .map(|name| ((*name).to_string(), make_rate_limit(remaining)))
+                .collect(),
+            unreadable: Vec::new(),
+        }
+    }
+
+    /// Replaces the rate limit of one resource.
+    /// Panics if the response holds no resource of that name.
+    fn set_remaining(resources: &mut Resources, name: &str, remaining: u32) {
+        let entry = resources
+            .readable
+            .iter_mut()
+            .find(|(resource_name, _)| resource_name == name)
+            .unwrap_or_else(|| panic!("{name} is not one of the sample resources"));
+        entry.1 = make_rate_limit(remaining);
+    }
 
     /// Creates a RateLimit with the given remaining count for testing.
-    /// This function is used by the macro-generated make_all_resources_with_remaining.
-    pub fn make_rate_limit(remaining: u32) -> RateLimit {
+    fn make_rate_limit(remaining: u32) -> RateLimit {
         RateLimit {
             limit: 5000,
             used: 5000 - remaining,
@@ -428,22 +511,21 @@ mod tests {
         graphql_remaining: u32,
     ) -> Resources {
         let mut resources = make_all_resources_with_remaining(100);
-        resources.core = make_rate_limit(core_remaining);
-        resources.graphql = make_rate_limit(graphql_remaining);
+        set_remaining(&mut resources, CORE_RESOURCE, core_remaining);
+        set_remaining(&mut resources, GRAPHQL_RESOURCE, graphql_remaining);
         resources
     }
 
     #[test]
     fn test_collect_rate_limits_returns_all_resources() {
         let resources = make_all_resources_with_remaining(100);
-        let collected = collect_rate_limits(&resources);
+        let names: Vec<&str> = collect_rate_limits(&resources)
+            .iter()
+            .map(|named| named.name)
+            .collect();
         assert_eq!(
-            collected.len(),
-            RESOURCE_COUNT,
-            "collect_rate_limits returned {} items but RESOURCE_COUNT is {} \
-             (both are generated by the same macro, so this should never fail)",
-            collected.len(),
-            RESOURCE_COUNT
+            names, SAMPLE_RESOURCES,
+            "collect_rate_limits must keep every resource of the response, in order"
         );
     }
 
@@ -451,11 +533,8 @@ mod tests {
     fn test_partition_separates_exhausted_from_available() {
         // core exhausted (0), graphql available (100), others available (100)
         let resources = make_resources_with_specific_exhausted(0, 100);
-        let all_limits = collect_rate_limits(&resources);
-
-        let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
-            .into_iter()
-            .partition(|named| named.rate_limit.remaining > 0);
+        let (available, exhausted) =
+            partition_rate_limits(&resources).expect("the sample response holds resources");
 
         // Core should be in exhausted
         assert!(
@@ -481,11 +560,8 @@ mod tests {
     fn test_partition_all_exhausted() {
         // All resources exhausted (remaining=0)
         let resources = make_all_resources_with_remaining(0);
-
-        let all_limits = collect_rate_limits(&resources);
-        let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
-            .into_iter()
-            .partition(|named| named.rate_limit.remaining > 0);
+        let (available, exhausted) =
+            partition_rate_limits(&resources).expect("the sample response holds resources");
 
         assert!(
             available.is_empty(),
@@ -502,11 +578,8 @@ mod tests {
     fn test_partition_none_exhausted() {
         // All resources available (remaining > 0)
         let resources = make_all_resources_with_remaining(100);
-        let all_limits = collect_rate_limits(&resources);
-
-        let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
-            .into_iter()
-            .partition(|named| named.rate_limit.remaining > 0);
+        let (available, exhausted) =
+            partition_rate_limits(&resources).expect("the sample response holds resources");
 
         assert!(exhausted.is_empty(), "No resources are exhausted");
         assert_eq!(
@@ -577,13 +650,9 @@ mod tests {
     fn test_graphql_sorted_last_in_available() {
         // All resources available
         let resources = make_all_resources_with_remaining(100);
-        let all_limits = collect_rate_limits(&resources);
-        let (mut available, _): (Vec<_>, Vec<_>) = all_limits
-            .into_iter()
-            .partition(|named| named.rate_limit.remaining > 0);
-
         // Use the same function as main() to ensure consistency
-        sort_graphql_last(&mut available);
+        let (available, _) =
+            partition_rate_limits(&resources).expect("the sample response holds resources");
 
         assert_eq!(
             available.last().map(|n| n.name),
@@ -596,13 +665,9 @@ mod tests {
     fn test_graphql_sorted_last_in_exhausted() {
         // All resources exhausted
         let resources = make_all_resources_with_remaining(0);
-        let all_limits = collect_rate_limits(&resources);
-        let (_, mut exhausted): (Vec<_>, Vec<_>) = all_limits
-            .into_iter()
-            .partition(|named| named.rate_limit.remaining > 0);
-
         // Use the same function as main() to ensure consistency
-        sort_graphql_last(&mut exhausted);
+        let (_, exhausted) =
+            partition_rate_limits(&resources).expect("the sample response holds resources");
 
         assert_eq!(
             exhausted.last().map(|n| n.name),
@@ -749,5 +814,185 @@ mod tests {
         // Only 30 seconds elapsed
         let rate_limit = make_rate_limit_with_timing(100, 4900, 3570);
         assert_eq!(format_rate(&rate_limit), "—");
+    }
+
+    /// A real response from the GitHub API, captured on 2026-09-01.
+    ///
+    /// It has no `code_scanning_upload`, which GitHub removed. It has
+    /// `copilot_usage_records` and `enterprise_token_inventory`, which GitHub
+    /// added. gr8 must read such a response.
+    const LIVE_RESPONSE: &str = r#"
+        {
+            "resources": {
+                "core": {
+                    "limit": 5000,
+                    "used": 0,
+                    "remaining": 5000,
+                    "reset": 1788313546
+                },
+                "search": {
+                    "limit": 30,
+                    "used": 0,
+                    "remaining": 30,
+                    "reset": 1788310006
+                },
+                "graphql": {
+                    "limit": 5000,
+                    "used": 0,
+                    "remaining": 5000,
+                    "reset": 1788313546
+                },
+                "integration_manifest": {
+                    "limit": 5000,
+                    "used": 0,
+                    "remaining": 5000,
+                    "reset": 1788313546
+                },
+                "source_import": {
+                    "limit": 100,
+                    "used": 0,
+                    "remaining": 100,
+                    "reset": 1788310006
+                },
+                "code_scanning_autofix": {
+                    "limit": 10,
+                    "used": 0,
+                    "remaining": 10,
+                    "reset": 1788310006
+                },
+                "actions_runner_registration": {
+                    "limit": 10000,
+                    "used": 0,
+                    "remaining": 10000,
+                    "reset": 1788313546
+                },
+                "scim": {
+                    "limit": 15000,
+                    "used": 0,
+                    "remaining": 15000,
+                    "reset": 1788313546
+                },
+                "dependency_snapshots": {
+                    "limit": 100,
+                    "used": 0,
+                    "remaining": 100,
+                    "reset": 1788310006
+                },
+                "dependency_sbom": {
+                    "limit": 100,
+                    "used": 0,
+                    "remaining": 100,
+                    "reset": 1788310006
+                },
+                "audit_log": {
+                    "limit": 1750,
+                    "used": 0,
+                    "remaining": 1750,
+                    "reset": 1788313546
+                },
+                "audit_log_streaming": {
+                    "limit": 15,
+                    "used": 0,
+                    "remaining": 15,
+                    "reset": 1788313546
+                },
+                "code_search": {
+                    "limit": 10,
+                    "used": 0,
+                    "remaining": 10,
+                    "reset": 1788310006
+                },
+                "copilot_usage_records": {
+                    "limit": 1750,
+                    "used": 0,
+                    "remaining": 1750,
+                    "reset": 1788313546
+                },
+                "enterprise_token_inventory": {
+                    "limit": 1750,
+                    "used": 0,
+                    "remaining": 1750,
+                    "reset": 1788313546
+                }
+            },
+            "rate": {
+                "limit": 5000,
+                "used": 0,
+                "remaining": 5000,
+                "reset": 1788313546
+            }
+        }
+    "#;
+
+    /// Reads the fixture and returns the resource names, in display order.
+    fn live_response_names(response: &RateLimitResponse) -> Vec<&str> {
+        collect_rate_limits(&response.resources)
+            .iter()
+            .map(|named| named.name)
+            .collect()
+    }
+
+    #[test]
+    fn reads_a_response_whose_resource_set_changed() {
+        let response: RateLimitResponse = serde_json::from_str(LIVE_RESPONSE)
+            .expect("gr8 must read a response whose resource set changed");
+        let names = live_response_names(&response);
+
+        assert!(
+            !names.contains(&"code_scanning_upload"),
+            "GitHub removed code_scanning_upload, so gr8 must not need it"
+        );
+        assert!(
+            names.contains(&"copilot_usage_records"),
+            "GitHub added copilot_usage_records, so gr8 must show it: {names:?}"
+        );
+        assert!(
+            names.contains(&"enterprise_token_inventory"),
+            "GitHub added enterprise_token_inventory, so gr8 must show it: {names:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_the_numbers_of_a_resource_that_github_added() {
+        let response: RateLimitResponse = serde_json::from_str(LIVE_RESPONSE)
+            .expect("gr8 must read a response whose resource set changed");
+        let collected = collect_rate_limits(&response.resources);
+        let named = collected
+            .iter()
+            .find(|named| named.name == "copilot_usage_records")
+            .expect("copilot_usage_records is in the fixture");
+
+        assert_eq!(named.rate_limit.limit, 1750);
+        assert_eq!(named.rate_limit.used, 0);
+        assert_eq!(named.rate_limit.remaining, 1750);
+        assert_eq!(named.rate_limit.reset, 1_788_313_546);
+    }
+
+    #[test]
+    fn keeps_the_order_of_the_response() {
+        let response: RateLimitResponse = serde_json::from_str(LIVE_RESPONSE)
+            .expect("gr8 must read a response whose resource set changed");
+
+        assert_eq!(
+            live_response_names(&response),
+            [
+                "core",
+                "search",
+                "graphql",
+                "integration_manifest",
+                "source_import",
+                "code_scanning_autofix",
+                "actions_runner_registration",
+                "scim",
+                "dependency_snapshots",
+                "dependency_sbom",
+                "audit_log",
+                "audit_log_streaming",
+                "code_search",
+                "copilot_usage_records",
+                "enterprise_token_inventory",
+            ],
+            "gr8 must show the resources in the order that GitHub sent them"
+        );
     }
 }
