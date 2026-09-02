@@ -80,7 +80,17 @@ impl ClipboardError {
     /// period is kept as it is, because an error that names no cause at all
     /// reads as a bug in the tool rather than as a state of the machine.
     fn new(cause: &impl fmt::Display) -> Self {
-        todo!("the green commit writes this")
+        let written = cause.to_string();
+        let clause = written.trim();
+        let shortened = clause.strip_suffix('.').unwrap_or(clause);
+        Self(
+            if shortened.is_empty() {
+                clause
+            } else {
+                shortened
+            }
+            .to_string(),
+        )
     }
 }
 
@@ -97,13 +107,15 @@ impl SystemClipboard {
     /// Gives [`ClipboardError`] when the clipboard cannot be opened. A machine
     /// with no display is such a machine, and so is a session over SSH.
     pub fn new() -> Result<Self, ClipboardError> {
-        todo!("the green commit writes this")
+        arboard::Clipboard::new()
+            .map(Self)
+            .map_err(|cause| ClipboardError::new(&cause))
     }
 }
 
 impl Clipboard for SystemClipboard {
     fn read(&mut self) -> Result<String, ClipboardError> {
-        todo!("the green commit writes this")
+        from_arboard(self.0.get_text())
     }
 
     /// Puts `text` on the clipboard of the machine.
@@ -111,7 +123,9 @@ impl Clipboard for SystemClipboard {
     /// The plain `set_text`, with no `SetExtLinux`. The module comment says
     /// what that costs on X11 and why the other choice costs more.
     fn write(&mut self, text: &str) -> Result<(), ClipboardError> {
-        todo!("the green commit writes this")
+        self.0
+            .set_text(text)
+            .map_err(|cause| ClipboardError::new(&cause))
     }
 }
 
@@ -122,17 +136,36 @@ impl FileClipboard {
     /// clipboard that holds nothing, which is what a clipboard that was never
     /// written holds.
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        todo!("the green commit writes this")
+        Self { path: path.into() }
+    }
+
+    /// The file, named for a message.
+    ///
+    /// `Debug` and not `Display`, because a path that is not text loses bytes
+    /// to `Display` and keeps them as escapes under `Debug`. The reader of the
+    /// message set this path, so the name is what tells them which file the
+    /// failure was about.
+    fn named(&self) -> String {
+        format!("{:?}", self.path)
     }
 }
 
 impl Clipboard for FileClipboard {
     fn read(&mut self) -> Result<String, ClipboardError> {
-        todo!("the green commit writes this")
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => Ok(text),
+            // A clipboard that was never written holds nothing, and a file
+            // that is not there is that clipboard. Every other failure is a
+            // clipboard that could not be reached, the file of bytes that are
+            // not text included.
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(cause) => Err(ClipboardError::new(&format!("{}: {cause}", self.named()))),
+        }
     }
 
     fn write(&mut self, text: &str) -> Result<(), ClipboardError> {
-        todo!("the green commit writes this")
+        std::fs::write(&self.path, text)
+            .map_err(|cause| ClipboardError::new(&format!("{}: {cause}", self.named())))
     }
 }
 
@@ -146,7 +179,10 @@ impl Clipboard for FileClipboard {
 /// Gives [`ClipboardError`] when `value` names no file and the clipboard of the
 /// machine cannot be opened.
 pub fn open_named(value: Option<&str>) -> Result<Box<dyn Clipboard>, ClipboardError> {
-    todo!("the green commit writes this")
+    match named_file(value) {
+        Some(path) => Ok(Box::new(FileClipboard::new(path))),
+        None => Ok(Box::new(SystemClipboard::new()?)),
+    }
 }
 
 /// The clipboard the environment names.
@@ -156,7 +192,11 @@ pub fn open_named(value: Option<&str>) -> Result<Box<dyn Clipboard>, ClipboardEr
 /// Gives [`ClipboardError`] when the environment names no file and the
 /// clipboard of the machine cannot be opened.
 pub fn open() -> Result<Box<dyn Clipboard>, ClipboardError> {
-    todo!("the green commit writes this")
+    // A value that is not text names no file either. Such a value cannot be a
+    // path this tool can open, and the clipboard of the machine is the same
+    // friendlier answer an empty value gets.
+    let named = std::env::var(CLIPBOARD_FILE_ENV).ok();
+    open_named(named.as_deref())
 }
 
 /// The file `value` names, or `None` when it names none.
@@ -169,7 +209,7 @@ pub fn open() -> Result<Box<dyn Clipboard>, ClipboardError> {
 /// with a space, so the whitespace is read as an answer to one question only:
 /// did the person name a file at all.
 fn named_file(value: Option<&str>) -> Option<&str> {
-    todo!("the green commit writes this")
+    value.filter(|named| !named.trim().is_empty())
 }
 
 /// The read `result` as text.
@@ -183,7 +223,14 @@ fn named_file(value: Option<&str>) -> Option<&str> {
 ///
 /// Gives [`ClipboardError`] for every other failure.
 fn from_arboard(result: Result<String, arboard::Error>) -> Result<String, ClipboardError> {
-    todo!("the green commit writes this")
+    match result {
+        Ok(text) => Ok(text),
+        Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
+        // `arboard::Error` is `#[non_exhaustive]`, so this arm is required and
+        // a new variant of a later version arrives here as a failure that
+        // names itself, rather than as a build that stops.
+        Err(cause) => Err(ClipboardError::new(&cause)),
+    }
 }
 
 #[cfg(test)]
@@ -312,9 +359,13 @@ mod tests {
         }))
         .expect_err("the read failed")
         .to_string();
-        assert_eq!(
-            message,
-            "Failed to reach the clipboard: the window server said no"
+        // `arboard` writes its own sentence around the description, so the
+        // test pins the description and the shape of the message, and not the
+        // wording `arboard` puts between them.
+        assert!(
+            message.starts_with("Failed to reach the clipboard: "),
+            "{message}"
         );
+        assert!(message.contains("the window server said no"), "{message}");
     }
 }

@@ -173,7 +173,29 @@ pub enum CopyError {
 /// Gives [`CopyError::Absolute`] when the path cannot be made absolute, and
 /// when the absolute path is not text.
 pub fn copied_path(current_dir: &Path) -> Result<String, CopyError> {
-    todo!("the green commit writes this")
+    let absolute = std::path::absolute(current_dir).map_err(|cause| CopyError::Absolute {
+        path: named(current_dir),
+        cause: cause.to_string(),
+    })?;
+    absolute
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| CopyError::Absolute {
+            path: named(current_dir),
+            cause: NOT_UTF8.to_string(),
+        })
+}
+
+/// `path`, named for a message.
+///
+/// The path of a directory that copy mode refuses can hold bytes that no string
+/// holds. `Debug` writes those bytes as escapes and drops none of them, where
+/// `to_string_lossy` and `Path::display` write a replacement character and the
+/// reader then cannot tell which byte was there. A path that is text is written
+/// as it is, so the usual message reads the same as the one paste mode gives.
+fn named(path: &Path) -> String {
+    path.to_str()
+        .map_or_else(|| format!("{path:?}"), str::to_string)
 }
 
 #[cfg(test)]
