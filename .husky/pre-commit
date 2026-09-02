@@ -65,8 +65,9 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo
     # for two reasons. It is per-INVOCATION, so it protects nothing about the
     # other routes to the same `cargo test` - a pre-push hook, `git bisect run`,
     # `rebase --exec`, `swt`'s green check called from a hook - which is why
-    # `gitscratch` scrubs the same variables at every git spawn of its own
-    # (`REPOSITORY_LOCATION_VARS`, pinned by `src/gitscratch/tests/isolation.rs`).
+    # `gitscratch` sheds every `GIT_`-prefixed variable, and not a list of
+    # names, at every git spawn of its own - the rule `NoInheritedGitEnvironment`
+    # applies, pinned by `src/gitscratch/tests/isolation.rs`.
     # And it is workspace-wide, where that fix is not: every other crate's
     # fixtures still lean on this line.
     #
