@@ -2,12 +2,17 @@
 //! not against the file that standard output points at.
 //!
 //! A caller that captures the standard output of `ic` takes away the one file
-//! descriptor that every probe of the size of the terminal reads today. `ic`
-//! then falls back to 80 columns by 24 rows and to a character cell of 10
-//! pixels by 20, and it draws the image at that guessed size. The guess is
-//! wrong on every display of a high pixel density, so the image comes out too
-//! small and `ic` reserves more rows than the image covers. GitHub issue #350
-//! reports this.
+//! descriptor that `ic` once read for every probe of the size of the terminal.
+//! `ic` then fell back to 80 columns by 24 rows and to a character cell of 10
+//! pixels by 20, and it drew the image at that guessed size. The guess is
+//! wrong on every display of a high pixel density, so the image came out too
+//! small and `ic` reserved more rows than the image covered. GitHub issue #350
+//! reports that.
+//!
+//! The probe now reads standard output, then standard error, then standard
+//! input, and then `/dev/tty`. A captured run therefore measures the terminal
+//! of the session and draws the image at the size that terminal gives. These
+//! tests hold `ic` to that behavior.
 //!
 //! Each test here gives the child a pipe for standard output and a
 //! pseudo-terminal of a known size as its controlling terminal. The session
@@ -20,12 +25,6 @@
 //! number is a multiple of the estimate of 10 pixels by 20, so an answer that
 //! comes from the estimate can never look like an answer that comes from the
 //! terminal.
-//!
-//! **These tests fail today, and they fail on purpose.** `ic` reads the size
-//! of the terminal from standard output alone, so a captured run measures
-//! nothing and draws at the guessed size. A later change must make `ic` read
-//! the terminal of the session through `/dev/tty` when standard output is not
-//! a terminal.
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -481,9 +480,10 @@ fn sixel_raster_size(bytes: &[u8]) -> (u32, u32) {
 /// * 400 pixels over a cell 40 pixels high is 10 rows, and `ic` reserves one
 ///   row for each row of the image.
 ///
-/// `ic` reads the size of the terminal from standard output alone today, so it
-/// measures nothing here. It falls back to a character cell of 10 pixels by 20
-/// and draws 200 pixels by 200, and this test fails on the raster attributes.
+/// A probe that read standard output alone would measure nothing here,
+/// because standard output is a pipe. It would fall back to a character cell
+/// of 10 pixels by 20 and draw 200 pixels by 200, so this test fails on the
+/// raster attributes if `ic` ever stops reading the terminal of the session.
 #[test]
 fn a_sized_terminal_gives_the_pixel_size_of_the_image() {
     let stdout = run_ic(&["--stdin", "--width", "20", "--height", "10"]);
@@ -514,12 +514,13 @@ fn a_sized_terminal_gives_the_pixel_size_of_the_image() {
 ///   pixels by 400.
 /// * That is 10 rows of 40 pixels, the same as the test above.
 ///
-/// `ic` measures nothing here today. With no pixel size and only one axis of
-/// the budget, `sixel_pixel_budget` gives its default of 800 pixels by 600, a
-/// square image turns that into 600 pixels by 600, and 600 pixels over the
-/// estimated cell of 20 pixels is 30 rows. The height of the fallback terminal
-/// then bounds the reservation down to 23 rows. This test therefore fails on
-/// the raster attributes and on the row count.
+/// A probe that read standard output alone would measure nothing here. With
+/// no pixel size and only one axis of the budget, `sixel_pixel_budget` gives
+/// its default of 800 pixels by 600, a square image turns that into 600 pixels
+/// by 600, and 600 pixels over the estimated cell of 20 pixels is 30 rows. The
+/// height of the fallback terminal then bounds the reservation down to 23
+/// rows. This test therefore fails on the raster attributes and on the row
+/// count if `ic` ever stops reading the terminal of the session.
 #[test]
 fn a_sized_terminal_bounds_the_axis_that_the_user_leaves_out() {
     let stdout = run_ic(&["--stdin", "--width", "20"]);
