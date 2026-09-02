@@ -74,6 +74,51 @@ pub fn find_root(cwd: &Path) -> Result<PathBuf, RootError> {
         })
 }
 
+/// The URL prefix that routes to [`STATIC_DIRECTORY`] inside the export root.
+const STATIC_PREFIX: &str = "/static/";
+
+/// The file a directory (and the single-page fallback) is served from.
+const INDEX_FILE: &str = "index.html";
+
+/// The extension appended to an extensionless route before the fallback is used.
+const HTML_SUFFIX: &str = ".html";
+
+/// What a request resolves to under the export root.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Resolution {
+    /// Serve this existing regular file with `200`.
+    File(PathBuf),
+    /// Nothing under the root matched. Serve this path — always
+    /// `<root>/index.html` — as the single-page fallback, after the caller logs
+    /// a warning.
+    Fallback(PathBuf),
+    /// A request under `/static/` matched no file -> `404`.
+    NotFound,
+    /// The request tried to leave the root -> `403`.
+    Forbidden,
+}
+
+/// The result of confining one relative request path under a directory.
+enum Confined {
+    /// The path exists and its canonical form lives under the directory.
+    Allowed(PathBuf),
+    /// The path tried to leave the directory.
+    Forbidden,
+    /// The path does not exist.
+    Missing,
+}
+
+/// Confines `relative` under `root`, which MUST already be canonical.
+fn confine(_root: &Path, _relative: &str) -> Confined {
+    Confined::Missing
+}
+
+/// Resolves an HTTP request target against the export root.
+#[must_use]
+pub fn resolve_request(_root: &Path, _target: &str) -> Resolution {
+    Resolution::Fallback(PathBuf::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{find_root, RootError, ROOT_DIRECTORY};
@@ -125,5 +170,212 @@ mod tests {
         let expected = outer.canonicalize().expect("canonicalize expected root");
 
         assert_eq!(find_root(&outer).expect("find root"), expected);
+    }
+
+    use super::{resolve_request, Resolution, INDEX_FILE, STATIC_DIRECTORY, STATIC_PREFIX};
+    use std::path::{Path, PathBuf};
+
+    /// Creates a temp dir and returns it alongside its canonicalized path.
+    ///
+    /// The root MUST be canonicalized: on macOS a `TempDir` lives under `/var`,
+    /// which is a symlink to `/private/var`, so an uncanonicalized root would make
+    /// the confinement check reject the root's own files.
+    fn canonical_root() -> (TempDir, PathBuf) {
+        let dir = temp_dir();
+        let root = dir.path().canonicalize().expect("canonicalize root");
+        (dir, root)
+    }
+
+    /// Writes an empty file at `path`, creating every parent directory first.
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent directories");
+        }
+        std::fs::write(path, b"").expect("write file");
+    }
+
+    #[test]
+    fn the_static_url_prefix_names_the_static_directory() {
+        assert_eq!(STATIC_PREFIX, format!("/{STATIC_DIRECTORY}/"));
+    }
+
+    #[test]
+    fn the_root_request_serves_index_html() {
+        let (_dir, root) = canonical_root();
+        let index = root.join(INDEX_FILE);
+        touch(&index);
+
+        assert_eq!(resolve_request(&root, "/"), Resolution::File(index));
+    }
+
+    #[test]
+    fn an_exact_file_beats_the_html_file_of_the_same_name() {
+        let (_dir, root) = canonical_root();
+        let exact = root.join("about");
+        touch(&exact);
+        touch(&root.join("about.html"));
+
+        assert_eq!(resolve_request(&root, "/about"), Resolution::File(exact));
+    }
+
+    #[test]
+    fn the_html_file_beats_the_fallback() {
+        let (_dir, root) = canonical_root();
+        let html = root.join("about.html");
+        touch(&html);
+
+        assert_eq!(resolve_request(&root, "/about"), Resolution::File(html));
+    }
+
+    #[test]
+    fn an_unknown_path_falls_back_to_index_html() {
+        let (_dir, root) = canonical_root();
+        touch(&root.join(INDEX_FILE));
+
+        assert_eq!(
+            resolve_request(&root, "/nothing/here"),
+            Resolution::Fallback(root.join(INDEX_FILE))
+        );
+    }
+
+    #[test]
+    fn a_directory_holding_an_index_serves_that_index() {
+        let (_dir, root) = canonical_root();
+        let index = root.join("about").join(INDEX_FILE);
+        touch(&index);
+
+        assert_eq!(resolve_request(&root, "/about"), Resolution::File(index));
+    }
+
+    #[test]
+    fn a_directory_without_an_index_falls_through_to_the_html_file() {
+        let (_dir, root) = canonical_root();
+        std::fs::create_dir(root.join("about")).expect("create directory");
+        let html = root.join("about.html");
+        touch(&html);
+
+        assert_eq!(resolve_request(&root, "/about"), Resolution::File(html));
+    }
+
+    #[test]
+    fn a_static_request_serves_the_static_file() {
+        let (_dir, root) = canonical_root();
+        let asset = root.join(STATIC_DIRECTORY).join("app.css");
+        touch(&asset);
+
+        assert_eq!(
+            resolve_request(&root, "/static/app.css"),
+            Resolution::File(asset)
+        );
+    }
+
+    #[test]
+    fn a_missing_static_file_is_not_found_rather_than_the_fallback() {
+        let (_dir, root) = canonical_root();
+        touch(&root.join(STATIC_DIRECTORY).join("app.css"));
+        touch(&root.join(INDEX_FILE));
+
+        assert_eq!(
+            resolve_request(&root, "/static/missing.css"),
+            Resolution::NotFound
+        );
+    }
+
+    #[test]
+    fn the_static_directory_itself_is_not_found() {
+        let (_dir, root) = canonical_root();
+        touch(&root.join(STATIC_DIRECTORY).join("app.css"));
+
+        assert_eq!(resolve_request(&root, "/static/"), Resolution::NotFound);
+    }
+
+    #[test]
+    fn a_traversal_attempt_is_forbidden() {
+        let (_dir, root) = canonical_root();
+        touch(&root.join(INDEX_FILE));
+
+        assert_eq!(
+            resolve_request(&root, "/../../etc/passwd"),
+            Resolution::Forbidden
+        );
+    }
+
+    #[test]
+    fn an_encoded_traversal_attempt_is_forbidden() {
+        let (_dir, root) = canonical_root();
+        touch(&root.join(INDEX_FILE));
+
+        assert_eq!(
+            resolve_request(&root, "/%2e%2e%2fetc/passwd"),
+            Resolution::Forbidden
+        );
+    }
+
+    #[test]
+    fn a_double_encoded_traversal_never_leaves_the_root() {
+        let (_dir, root) = canonical_root();
+        touch(&root.join(INDEX_FILE));
+
+        let resolution = resolve_request(&root, "/%252e%252e%252fetc/passwd");
+
+        assert_ne!(resolution, Resolution::Forbidden);
+        assert_eq!(resolution, Resolution::Fallback(root.join(INDEX_FILE)));
+    }
+
+    #[test]
+    fn a_query_string_is_stripped() {
+        let (_dir, root) = canonical_root();
+        let html = root.join("about.html");
+        touch(&html);
+
+        assert_eq!(
+            resolve_request(&root, "/about?utm=1"),
+            Resolution::File(html)
+        );
+        assert_eq!(
+            resolve_request(&root, "/about?utm=1"),
+            resolve_request(&root, "/about")
+        );
+    }
+
+    #[test]
+    fn a_multi_byte_name_is_reachable_through_its_encoded_form() {
+        let (_dir, root) = canonical_root();
+        let html = root.join("café.html");
+        touch(&html);
+
+        assert_eq!(
+            resolve_request(&root, "/caf%C3%A9"),
+            Resolution::File(html)
+        );
+    }
+
+    #[test]
+    fn leading_and_trailing_slashes_are_trimmed() {
+        let (_dir, root) = canonical_root();
+        let html = root.join("about.html");
+        touch(&html);
+
+        assert_eq!(resolve_request(&root, "//about//"), Resolution::File(html));
+        assert_eq!(
+            resolve_request(&root, "//about//"),
+            resolve_request(&root, "/about")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_that_points_outside_the_root_is_forbidden() {
+        let (_dir, root) = canonical_root();
+        let (_outside_dir, outside) = canonical_root();
+        let secret = outside.join("secret.html");
+        touch(&secret);
+
+        std::os::unix::fs::symlink(&secret, root.join("escape.html")).expect("create symlink");
+
+        assert_eq!(
+            resolve_request(&root, "/escape.html"),
+            Resolution::Forbidden
+        );
     }
 }
