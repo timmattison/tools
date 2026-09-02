@@ -6034,7 +6034,6 @@ dependencies = [
  "glob",
  "indicatif",
  "libc",
- "shellsetup",
  "tempfile",
  "termbar",
  "testcolor",
