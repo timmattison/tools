@@ -15,3 +15,4 @@
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
 pub mod cli;
+pub mod payload;
