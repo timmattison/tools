@@ -99,10 +99,14 @@ GitHub about every number in it, and names the first one that is still open.\n\n
 Every separator means the same thing: the issue on the left comes before the issue on the right. \
 A double bar is read as an arrow, because the chain is a plan to walk in order.\n\n\
 A plan of parallel work is a second shape of input. `wn` reads the plan the plan-parallel-work \
-skill writes — the records it prints and the Markdown table it names alike — and names the issue \
-to start in every stream of it. Only the Order field of a plan is read as a chain, because the \
-Notes field is prose about code and prose about code is full of numbers. A pull request and the \
-issue it closes, written PR#344 (#341), are one step of a stream and not two.\n\n\
+skill writes — the records it prints, the Markdown table it names, and the box-drawn table it \
+arrives on the clipboard as — and names the issue to start in every stream of it. Only the Order \
+field of a plan is read as a chain, because the Notes field is prose about code and prose about \
+code is full of numbers.\n\n\
+A pull request and the issue it closes are one step of a stream and not two, written PR#344 \
+(#341) or the other way round as #4 (in flight, PR #15). A group in parentheses annotates the \
+step to its left. Inside it, only a word carrying the # is a number, a PR in front of one marks \
+that number as the work, and every other word is prose.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
