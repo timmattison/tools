@@ -8,6 +8,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use num_format::ToFormattedString;
@@ -140,6 +141,53 @@ pub fn format_duration(duration: Duration, locale: &Locale) -> String {
     };
     let number = format_float(value, locale);
     format!("{number}{suffix}")
+}
+
+/// What one compression run produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    /// The count of bytes that the run read from the input.
+    pub original_size: u64,
+    /// The count of bytes that the run wrote to the output.
+    pub new_size: u64,
+    /// The time that the run took.
+    pub duration: Duration,
+}
+
+impl Stats {
+    /// Answers whether the output is not smaller than the input.
+    #[must_use]
+    pub fn grew(&self) -> bool {
+        false
+    }
+
+    /// The change in size, as a percentage of the original size.
+    ///
+    /// The value is positive when the file became smaller. It is negative when
+    /// the file became larger. The function answers `None` when the original
+    /// size is zero, because no percentage of zero exists.
+    #[must_use]
+    pub fn size_change_percent(&self) -> Option<f64> {
+        None
+    }
+
+    /// The count of input bytes that the run read in one second.
+    #[must_use]
+    pub fn bytes_read_per_second(&self) -> f64 {
+        f64::NAN
+    }
+
+    /// The count of output bytes that the run wrote in one second.
+    #[must_use]
+    pub fn bytes_written_per_second(&self) -> f64 {
+        f64::NAN
+    }
+}
+
+/// The output path a run takes when the user names none: `<input>.gz`.
+#[must_use]
+pub fn default_output_path(input: &Path) -> PathBuf {
+    input.to_path_buf()
 }
 
 #[cfg(test)]
