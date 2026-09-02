@@ -123,10 +123,10 @@ impl Args {
     /// The sections the flags asked for. `--all` turns on every one.
     fn sections(&self) -> Sections {
         Sections {
-            cwd: false,
-            files: false,
-            env: false,
-            net: false,
+            cwd: self.all || self.cwd,
+            files: self.all || self.lsof,
+            env: self.all || self.env,
+            net: self.all || self.net,
         }
     }
 }
