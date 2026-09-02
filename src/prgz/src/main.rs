@@ -22,15 +22,20 @@ use std::sync::Arc;
 use buildinfo::version_string;
 use clap::{CommandFactory, Parser};
 use indicatif::ProgressBar;
-use prgz::{compress_file, default_output_path, format_report, CompressError, Locale, Stats};
+use prgz::{
+    compress_file, default_output_path, format_report, locale_from_lang, CompressError, Stats,
+};
 use termbar::{ProgressStyleBuilder, TerminalWidth};
 use thiserror::Error;
 
 /// The name of the tool. It starts every line that reports a failure.
 const PROGRAM_NAME: &str = "prgz";
 
-/// The locale that sets the separators of every number of the report.
-const REPORT_LOCALE: Locale = Locale::en;
+/// The name of the environment variable that carries the locale of the user.
+/// The locale sets the separators of every number of the report. A process
+/// that carries no such variable gets the locale of an empty value, which is
+/// American English.
+const LANG_VARIABLE: &str = "LANG";
 
 /// The text that joins an error to the cause under it.
 const CAUSE_SEPARATOR: &str = ": ";
@@ -76,9 +81,10 @@ fn main() -> ExitCode {
     let output = cli
         .output
         .unwrap_or_else(|| default_output_path(input.as_path()));
+    let locale = locale_from_lang(&std::env::var(LANG_VARIABLE).unwrap_or_default());
     match compress_with_progress(input.as_path(), output.as_path()) {
         Ok(stats) => {
-            println!("{}", format_report(&stats, &REPORT_LOCALE));
+            println!("{}", format_report(&stats, &locale));
             ExitCode::SUCCESS
         }
         Err(error) => {
