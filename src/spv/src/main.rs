@@ -535,6 +535,38 @@ fn get_open_files(pid: u32) -> Option<Vec<OpenFile>> {
     Some(files)
 }
 
+/// Substrings that mark a credential wherever they appear in an uppercased name.
+///
+/// Each one is long enough that an ordinary name does not hold it by accident.
+/// `AUTH` is absent on purpose, because `AUTHOR` and `SSH_AUTH_SOCK` hold it and
+/// neither is a secret.
+const CREDENTIAL_SUBSTRINGS: &[&str] = &[
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "PASSPHRASE",
+    "APIKEY",
+    "CREDENTIAL",
+    "AUTHORIZATION",
+    "PRIVATE_KEY",
+    "SIGNING_KEY",
+    "SIGNATURE",
+    "COOKIE",
+    "SESSION_ID",
+    "ACCESS_KEY",
+];
+
+/// Underscore-separated segments that mark a credential when a whole segment
+/// equals one of them.
+///
+/// A substring test on these would hit `KEYBOARD_LAYOUT` and `PWD`, so the whole
+/// segment must match.
+const CREDENTIAL_SEGMENTS: &[&str] = &["KEY", "PASS", "PW", "TOKEN", "SECRET"];
+
+/// The text that stands in for a hidden value.
+const REDACTED_PLACEHOLDER: &str = "<redacted>";
+
 /// Decides whether an environment variable name looks like it holds a credential.
 ///
 /// The dump of an environment goes to a terminal, and a terminal scrolls into a
@@ -548,8 +580,16 @@ fn get_open_files(pid: u32) -> Option<Vec<OpenFile>> {
 ///
 /// `true` when the name looks like it holds a credential.
 fn looks_like_credential(name: &str) -> bool {
-    let _ = name;
-    false
+    let upper = name.to_uppercase();
+    if CREDENTIAL_SUBSTRINGS
+        .iter()
+        .any(|marker| upper.contains(marker))
+    {
+        return true;
+    }
+    upper
+        .split('_')
+        .any(|segment| CREDENTIAL_SEGMENTS.contains(&segment))
 }
 
 /// Prints processes in table format using comfy-table.
