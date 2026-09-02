@@ -977,6 +977,18 @@ Notes: Independent of everything above.";
     /// parentheses.
     const BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work.txt");
 
+    /// The same report of the same skill, drawn with a narrower `Order`
+    /// column.
+    ///
+    /// The plan of this repository, character for character as it arrives on
+    /// the clipboard. Its `Order` column is 28 columns wide, so the chain of
+    /// S1 wraps twice, and neither line it wraps onto says that it continues a
+    /// row: the second one opens with the annotation `(#329)`, and the third
+    /// one opens with the step `#330`. The `├─┼─┤` rules are what say where
+    /// each row of this table ends.
+    const NARROW_BOX_TABLE: &str =
+        include_str!("../fixtures/plan-parallel-work-narrow-order.txt");
+
     /// The numbers of one step: the work, and the issue the work closes.
     type StepNumbers = (u64, Option<u64>);
 
@@ -1180,6 +1192,56 @@ Notes: Independent of everything above.";
                 "B — audio engine",
                 "C — MIDI array",
                 "D — manifest",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_row_that_wraps_between_a_step_and_its_annotation_stays_one_row() {
+        // `PR#343` ends the first line of the `Order` cell of S1, and `(#329)`
+        // opens the second. A reader that takes that second line for a row of
+        // its own refuses the whole plan, because an annotation annotates the
+        // step to its left and this one has none:
+        //
+        //     wn: stream "grind → grime": "(#329)" stands before any issue
+        //     number
+        assert_eq!(
+            steps_at(&plan_of(NARROW_BOX_TABLE), 0),
+            vec![
+                (344, Some(341)),
+                (343, Some(329)),
+                (342, Some(328)),
+                (330, None),
+                (331, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_row_that_wraps_between_two_steps_stays_one_row() {
+        // The third line of the `Order` cell of S1 is `#330 → #331`, which
+        // opens a chain and is one. Nothing in that line says it continues a
+        // row, so a reader that asks the line gives the plan an eighth stream
+        // that carries no label and two steps that belong to S1.
+        assert_eq!(
+            shape(&plan_of(NARROW_BOX_TABLE)),
+            vec![
+                (
+                    "S1 gitscratch → grind → grime",
+                    vec![
+                        (344, Some(341)),
+                        (343, Some(329)),
+                        (342, Some(328)),
+                        (330, None),
+                        (331, None),
+                    ],
+                ),
+                ("S2 ic", vec![(350, None), (187, None), (188, None)]),
+                ("S3 crap", vec![(314, None), (296, None)]),
+                ("S4 prcp", vec![(265, None), (295, None)]),
+                ("S5 tvfind", vec![(321, None)]),
+                ("S6 vpn-tunnel", vec![(191, None)]),
+                ("S7 dwt", vec![(196, None)]),
             ]
         );
     }
