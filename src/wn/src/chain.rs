@@ -15,6 +15,11 @@
 //! error that names the token, rather than a number this module quietly did
 //! not find. `#277 an #278` is a typo, and a reader that answers it with the
 //! two numbers hides the word in the middle.
+//!
+//! The text such an error names is cut ([`Snippet`]), because the text arrives
+//! from the clipboard as readily as from the keyboard. A clipboard holds a URL,
+//! a token, or a page of prose, and none of those hold a separator, so the
+//! whole of one arrives here as a single token.
 
 use std::fmt;
 
@@ -48,30 +53,53 @@ const HASH: char = '#';
 ///
 /// A clipboard holds a page of prose as easily as it holds a chain, and an
 /// error that repeats the whole page hides its own last line. Sixty characters
-/// is enough for the reader to recognize what was copied.
+/// is enough for the reader to recognize what was copied. One number, because
+/// every text a message of this tool repeats back is a [`Snippet`], and a
+/// reader who meets two different lengths reads them as two different rules.
 pub const SNIPPET_CHARS: usize = 60;
 
-/// Text that an error message repeats back.
+/// Text that an error message repeats back, already cut.
+///
+/// A newtype rather than a `String`, because the cut is then a rule of the
+/// type and not a rule a caller remembers. The text is cut where the value is
+/// built, so an error never holds more than [`SNIPPET_CHARS`] characters of it:
+/// a message written later is cut, a `{:?}` of the error is cut, and a variant
+/// added later is cut as well, because [`new`](Snippet::new) is the only way
+/// text gets in.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Snippet(String);
 
 impl Snippet {
-    /// The snippet of `text`, with the space around it dropped.
+    /// `text`, with the space around it dropped and cut to [`SNIPPET_CHARS`]
+    /// characters. A cut ends with `…`, so a text that stops reads differently
+    /// from a text that was cut.
+    ///
+    /// Cuts by characters and never by bytes: a cut through the middle of a
+    /// multi-byte character panics, and the clipboard of a person who reads
+    /// Japanese holds Japanese.
     #[must_use]
     pub fn new(text: &str) -> Self {
-        Self(text.trim().to_string())
+        let trimmed = text.trim();
+        let mut cut: String = trimmed.chars().take(SNIPPET_CHARS).collect();
+        if trimmed.chars().nth(SNIPPET_CHARS).is_some() {
+            cut.push('…');
+        }
+        Self(cut)
     }
 }
 
 impl fmt::Display for Snippet {
-    /// Writes the text, with nothing around it.
+    /// Writes the cut text, with nothing around it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
 impl fmt::Debug for Snippet {
-    /// Writes the text as a quoted string, the way a [`String`] writes itself.
+    /// Writes the cut text as a quoted string, the way a [`String`] writes
+    /// itself. Every message that holds a snippet quotes it, and the quoting of
+    /// a string is what keeps such a message on one line: a snippet out of a
+    /// clipboard of several lines writes its newlines as `\n`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&self.0, f)
     }

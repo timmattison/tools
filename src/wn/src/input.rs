@@ -36,7 +36,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::chain::ChainError;
+use crate::chain::{ChainError, Snippet};
 
 /// The variable that turns the clipboard fallback off. Any value with a
 /// character in it turns it off.
@@ -49,13 +49,6 @@ pub const NO_CLIPBOARD_ENV: &str = "WN_NO_CLIPBOARD";
 /// instructions, and the wording drifts the first time one of the three
 /// messages is edited on its own.
 const PASS_IT_AS_AN_ARGUMENT: &str = "Pass it as an argument, in quotes: wn \"#277 → #278\"";
-
-/// The characters of the clipboard an error message repeats back.
-///
-/// A clipboard holds a page of prose as easily as it holds a chain, and an
-/// error that repeats the whole page hides its own last line. Sixty characters
-/// is enough for the reader to recognize what was copied.
-const SNIPPET_CHARS: usize = 60;
 
 /// What a read of the clipboard gave back.
 ///
@@ -144,13 +137,16 @@ impl Chain {
     /// `"an" is not an issue number` has no way to know where the word came
     /// from — the clipboard was read on the tool's initiative, so the tool says
     /// what it found there.
+    ///
+    /// The text is a [`Snippet`], and so is the text `err` names, so a clipboard
+    /// of a whole page cannot push the reason off the line it is written on.
     #[must_use]
     pub fn blame(&self, err: ChainError) -> anyhow::Error {
         match self.source {
             Source::Argument | Source::Stdin => anyhow::Error::new(err),
             Source::Clipboard => anyhow::anyhow!(
                 "the clipboard holds {:?}, which is not a chain: {err}",
-                snippet(&self.text)
+                Snippet::new(&self.text)
             ),
         }
     }
@@ -273,24 +269,10 @@ fn from_arboard(result: Result<String, arboard::Error>) -> ClipboardRead {
     }
 }
 
-/// The text, cut short enough for one line of an error message.
-///
-/// Cuts by characters and never by bytes: a cut through the middle of a
-/// multi-byte character panics, and the clipboard of a person who reads
-/// Japanese holds Japanese.
-fn snippet(text: &str) -> String {
-    let trimmed = text.trim();
-    let mut cut: String = trimmed.chars().take(SNIPPET_CHARS).collect();
-    if trimmed.chars().nth(SNIPPET_CHARS).is_some() {
-        cut.push('…');
-    }
-    cut
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::parse_chain;
+    use crate::chain::{parse_chain, SNIPPET_CHARS};
 
     /// The chain the tests type, whichever input they type it into.
     const CHAIN: &str = "#277 → #278";
