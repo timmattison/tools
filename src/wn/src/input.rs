@@ -32,11 +32,6 @@
 //! test that reads it is a test that races the person at the keyboard, and a
 //! test that writes it destroys what that person copied.
 
-#![allow(
-    dead_code,
-    reason = "the run in main.rs reads its chain through this module in the next commit; until then every item here is reached only by the tests below, and `dead_code` is denied by the clippy gate"
-)]
-
 use std::fmt;
 
 use thiserror::Error;
