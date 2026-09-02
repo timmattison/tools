@@ -31,6 +31,9 @@ use unicode_width::UnicodeWidthStr;
 /// The repository the fake `gh` answers for.
 const REPO: &str = "timmattison/tools";
 
+/// The variable that names the command the answer prints.
+const START_COMMAND_ENV: &str = "WN_START_COMMAND";
+
 /// A chain of three issues: one closed, two open.
 const THREE_ISSUES: &str = r#"{"data":{"repository":{
 "i277":{"__typename":"Issue","number":277,"title":"First thing","state":"CLOSED","stateReason":"COMPLETED"},
@@ -88,11 +91,26 @@ exit {status}
     }
 }
 
-/// Run `wn` with an environment built from nothing.
+/// Run `wn` with an environment built from nothing, and with no start command
+/// named.
 ///
 /// `columns` and `color` are the two inputs that change what the tool prints,
 /// so each test states both.
 fn run(gh: &FakeGh, args: &[&str], columns: &str, color: bool) -> Output {
+    run_with_start(gh, args, columns, color, None)
+}
+
+/// The same, with [`START_COMMAND_ENV`] set to `start`.
+///
+/// `None` leaves the variable out of the environment, which is the state of a
+/// machine that never set it.
+fn run_with_start(
+    gh: &FakeGh,
+    args: &[&str],
+    columns: &str,
+    color: bool,
+    start: Option<&str>,
+) -> Output {
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
     let mut command = Command::new(env!("CARGO_BIN_EXE_wn"));
     command
@@ -101,6 +119,9 @@ fn run(gh: &FakeGh, args: &[&str], columns: &str, color: bool) -> Output {
         .env("COLUMNS", columns);
     if !color {
         command.env("NO_COLOR", "1");
+    }
+    if let Some(start) = start {
+        command.env(START_COMMAND_ENV, start);
     }
     command.args(args).output().unwrap()
 }
@@ -127,6 +148,94 @@ fn walks_the_chain_and_names_the_issue_to_start() {
             "\n",
             "Start #278 next with 'si 278'\n",
         )
+    );
+}
+
+/// The chain the start-command tests walk, and the number they expect.
+const ONE_OPEN_CHAIN: &str = "#277 → #278";
+
+#[test]
+fn names_si_when_the_environment_names_no_start_command() {
+    // This repository ships no `si`, so the default is a name the reader
+    // supplies. It stays the default all the same, because it is the name the
+    // plans of this repository are written with.
+    let gh = FakeGh::new(THREE_ISSUES);
+    let output = run_with_start(&gh, &["--repo", REPO, ONE_OPEN_CHAIN], "80", false, None);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with("Start #278 next with 'si 278'\n"),
+        "the default command stands, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn the_environment_names_the_start_command() {
+    let gh = FakeGh::new(THREE_ISSUES);
+    let output = run_with_start(
+        &gh,
+        &["--repo", REPO, ONE_OPEN_CHAIN],
+        "80",
+        false,
+        Some("start"),
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with("Start #278 next with 'start 278'\n"),
+        "the answer names the command of the environment, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_start_command_of_more_than_one_word_goes_in_as_it_is_written() {
+    // The command is a command line and not a program name, so a reader who
+    // has no shell function at all can name a whole command.
+    let gh = FakeGh::new(THREE_ISSUES);
+    let output = run_with_start(
+        &gh,
+        &["--repo", REPO, ONE_OPEN_CHAIN],
+        "80",
+        false,
+        Some("gh issue develop"),
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with("Start #278 next with 'gh issue develop 278'\n"),
+        "every word of the command comes through, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn an_empty_start_command_falls_back_to_the_default() {
+    // An exported but empty variable is a common accident, and an answer that
+    // reads `Start #278 next with ' 278'` names no command at all.
+    let gh = FakeGh::new(THREE_ISSUES);
+    let output = run_with_start(&gh, &["--repo", REPO, ONE_OPEN_CHAIN], "80", false, Some(""));
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with("Start #278 next with 'si 278'\n"),
+        "the default command stands, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_start_command_of_only_whitespace_falls_back_to_the_default() {
+    let gh = FakeGh::new(THREE_ISSUES);
+    let output = run_with_start(
+        &gh,
+        &["--repo", REPO, ONE_OPEN_CHAIN],
+        "80",
+        false,
+        Some("   "),
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with("Start #278 next with 'si 278'\n"),
+        "the default command stands, in {}",
+        stdout(&output)
     );
 }
 
