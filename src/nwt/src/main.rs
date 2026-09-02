@@ -2114,14 +2114,25 @@ mod tests {
 
     use std::ffi::OsStr;
 
-    /// The git-location variables this fixture has always removed by name.
-    ///
-    /// A named list is what [`scrub_git_env_from`] currently applies, and the
-    /// test below is the record of why it cannot stay one.
-    const GIT_LOCATION_VARS: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+    /// The prefix that identifies a variable as git's, and therefore as one
+    /// [`scrub_git_env`] removes.
+    const GIT_ENV_PREFIX: &str = "GIT_";
 
     /// Removes every `GIT_*` variable in `vars` from `cmd`'s child environment,
     /// returning `cmd` so it chains inside a builder expression.
+    ///
+    /// **The rule is the `GIT_` prefix, and never a list of names.** A list goes
+    /// stale the day git adds a variable, and from then on it strips nothing new
+    /// while reporting the same clean-looking answer as a scrub that works. This
+    /// fixture was a three-name list of `GIT_DIR`, `GIT_WORK_TREE` and
+    /// `GIT_INDEX_FILE` until the test below caught what walked through it:
+    /// `GIT_OBJECT_DIRECTORY`, which redirects the fixture's blob, tree and
+    /// commit writes into a foreign repository's object store, and
+    /// `GIT_CONFIG_PARAMETERS`, which injects arbitrary config (`user.email`,
+    /// `core.bare`, `core.hooksPath`) into the fixture's git. Neither is a
+    /// location variable, so no amount of adding location names would have
+    /// caught them. Sweeping the whole prefix picks up whatever git invents next
+    /// without anyone editing this file.
     ///
     /// The key source is a parameter rather than [`std::env::vars_os`] so this
     /// can be tested without ever mutating the process environment. That is
@@ -2130,16 +2141,17 @@ mod tests {
     /// a real `GIT_*` variable to prove the scrub works would redirect every
     /// sibling thread's `git` child while it did so. A synthetic key list keeps
     /// the test parallel-safe.
+    ///
+    /// Keys are compared through `OsStr::to_string_lossy`: lossy conversion
+    /// replaces invalid bytes with U+FFFD and so can never manufacture a `GIT_`
+    /// prefix out of bytes that did not spell one.
     fn scrub_git_env_from<I, K>(cmd: &mut Command, vars: I) -> &mut Command
     where
         I: IntoIterator<Item = K>,
         K: AsRef<OsStr>,
     {
         for key in vars {
-            if GIT_LOCATION_VARS
-                .iter()
-                .any(|name| key.as_ref() == OsStr::new(name))
-            {
+            if key.as_ref().to_string_lossy().starts_with(GIT_ENV_PREFIX) {
                 cmd.env_remove(key.as_ref());
             }
         }
@@ -2150,7 +2162,20 @@ mod tests {
     /// returning `cmd` so it chains inside a builder expression.
     ///
     /// This is [`scrub_git_env_from`] fed the real process environment, which is
-    /// the only key source a spawned child actually inherits.
+    /// the only key source a spawned child actually inherits, and it is why a
+    /// fixture here can only act on the directory it was handed. Without it,
+    /// `current_dir(dir)` is not enough: when the suite runs from inside a git
+    /// hook, git exports its own variables into the hook's environment,
+    /// `cargo test` inherits them, and `GIT_DIR` overrides cwd-based discovery —
+    /// so a fixture's `git config`/`commit` lands in the *real* repo. A config
+    /// write is sticky, and one leak outlives the run that caused it.
+    ///
+    /// `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are swept along with the rest,
+    /// and that costs nothing: removing them is not the same as pinning them to
+    /// `/dev/null`. With the variables gone, git falls back to the host's
+    /// `~/.gitconfig` and `/etc/gitconfig` exactly as it does in a normal shell,
+    /// so settings the fixtures rely on — `init.defaultBranch` among them —
+    /// still apply.
     fn scrub_git_env(cmd: &mut Command) -> &mut Command {
         scrub_git_env_from(cmd, std::env::vars_os().map(|(key, _)| key))
     }
@@ -2242,19 +2267,19 @@ mod tests {
     /// `bootstrap_hooks_tests`) which both need a real git repo for their
     /// integration tests. Stdout/stderr are nulled so concurrent test runs
     /// don't interleave noise.
+    ///
+    /// The whole inherited `GIT_*` family is removed via [`scrub_git_env`], so
+    /// `dir` is the repo git operates on even when the suite runs from inside
+    /// the pre-commit hook's own `cargo test` — see that function for how the
+    /// leak happens, and [`scrub_git_env_from`] for why the rule is the prefix
+    /// rather than a list of names.
     fn run_git(dir: &Path, args: &[&str]) -> bool {
-        Command::new("git")
-            .args(args)
+        let mut cmd = Command::new("git");
+        cmd.args(args)
             .current_dir(dir)
-            // Scrub git-location vars git exports to a hook (absolute GIT_DIR/
-            // GIT_INDEX_FILE in a worktree) so fixture git commands target `dir`,
-            // not the real repo, when these tests run from inside the pre-commit
-            // hook's own `cargo test`.
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        scrub_git_env(&mut cmd)
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
