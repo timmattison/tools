@@ -17,7 +17,7 @@
 //! alone would answer `null` for that number, and the tool would then report a
 //! pull request that exists as a number the repository does not have.
 //!
-//! # A missing number is an answer, not a failure
+//! # A missing number is an answer, and a refusal is not
 //!
 //! GraphQL answers a number the repository does not have with `null` for that
 //! alias and an entry in a top-level `errors` list. `gh` reads that list and
@@ -25,7 +25,18 @@
 //! answer, so this module reads the body whenever there is one and reads the
 //! exit status only for a run that printed nothing at all. One typo in a chain
 //! of six thus costs one row of the output rather than the whole run.
+//!
+//! The `null` alone does not say the repository lacks the number. GitHub
+//! writes the same `null` for an alias it refuses to answer for, and puts an
+//! error beside it in the same list. Only the `type` of that error parts the
+//! two: `NOT_FOUND` is the number the repository does not have, and every
+//! other type — `FORBIDDEN`, `INTERNAL`, `SERVICE_UNAVAILABLE` — says GitHub
+//! could not answer. So this module reads the reason beside each `null`, and
+//! it fails on a reason that is not `NOT_FOUND`. A run that reported such a
+//! number as missing would print the red note `#N is not in owner/name` and
+//! send the reader to hunt for a typo they did not make.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::process::Command;
 
@@ -150,8 +161,9 @@ pub fn build_query(numbers: &[IssueNumber]) -> String {
 /// # Errors
 ///
 /// Fails when the body is not JSON, when it carries no repository (a name
-/// nobody can read, or a credential that cannot see it), or when GitHub gives
-/// a state this tool does not know.
+/// nobody can read, or a credential that cannot see it), when GitHub could
+/// not answer for one number of the chain, or when GitHub gives a state this
+/// tool does not know.
 pub fn parse_response(body: &str, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
     let answer: Value = serde_json::from_str(body)
         .with_context(|| format!("GitHub answered with no JSON: {}", body.trim()))?;
@@ -163,17 +175,97 @@ pub fn parse_response(body: &str, numbers: &[IssueNumber]) -> Result<Vec<Entry>>
         );
     };
 
+    let reasons = Reasons::read(&answer);
     numbers
         .iter()
-        .map(|number| entry_of(repository, *number))
+        .map(|number| entry_of(repository, &reasons, *number))
         .collect()
 }
 
+/// The `type` GitHub gives for a number the repository does not have. Every
+/// other type says GitHub could not answer for the number, which is a
+/// different thing.
+const NOT_FOUND: &str = "NOT_FOUND";
+
+/// What to write for an error that carries neither a message nor a type.
+const NO_REASON: &str = "it gave no reason";
+
+/// Why GitHub answered `null` for an alias, read one time for the whole
+/// chain.
+///
+/// An error that belongs to one field names that field in its `path`, which
+/// is a list such as `["repository", "i999"]`. So this lookup is keyed by the
+/// names in that path, and an entry with no path — or with a path that holds
+/// no names — belongs to no alias and answers for no number.
+///
+/// The whole chain is one question and it gets one answer, so the list is
+/// read one time rather than one time for each number of the chain.
+struct Reasons<'a> {
+    by_alias: HashMap<&'a str, &'a Value>,
+}
+
+impl<'a> Reasons<'a> {
+    /// Read the top-level `errors` list of `answer`.
+    ///
+    /// The first error that names an alias is the reason for that alias.
+    fn read(answer: &'a Value) -> Self {
+        let mut by_alias: HashMap<&'a str, &'a Value> = HashMap::new();
+        for error in answer
+            .get("errors")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(path) = error.get("path").and_then(Value::as_array) else {
+                continue;
+            };
+            for name in path.iter().filter_map(Value::as_str) {
+                by_alias.entry(name).or_insert(error);
+            }
+        }
+        Self { by_alias }
+    }
+
+    /// What GitHub said about the alias of `number`, when what it said is not
+    /// that the repository does not have the number.
+    ///
+    /// `None` for an alias with no error of its own, and for [`NOT_FOUND`],
+    /// which is the answer for a number the repository does not have. The
+    /// text is the message GitHub wrote, because that message is the only
+    /// thing that says what to do next. It falls back to the type, and then
+    /// to [`NO_REASON`], for an error that carries less than that.
+    fn refusal(&self, number: IssueNumber) -> Option<&'a str> {
+        let error = self.by_alias.get(alias(number).as_str()).copied()?;
+        let kind = error
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if kind == NOT_FOUND {
+            return None;
+        }
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        Some(match (message, kind) {
+            ("", "") => NO_REASON,
+            ("", kind) => kind,
+            (message, _) => message,
+        })
+    }
+}
+
 /// Read one number out of the answer.
-fn entry_of(repository: &Value, number: IssueNumber) -> Result<Entry> {
+fn entry_of(repository: &Value, reasons: &Reasons<'_>, number: IssueNumber) -> Result<Entry> {
     // An alias GitHub could not resolve is null, and one it never carried is
-    // absent. Both say the same thing: the repository has no such number.
+    // absent. Two answers arrive in that shape, and the reason beside the
+    // null parts them: a number the repository does not have, which is one
+    // row of the output, and a number GitHub could not answer for, which
+    // stops the run.
     let Some(node) = repository.get(alias(number)).filter(|v| !v.is_null()) else {
+        if let Some(reason) = reasons.refusal(number) {
+            bail!("GitHub could not answer for {number}: {reason}");
+        }
         return Ok(Entry {
             number,
             title: String::new(),
@@ -240,7 +332,8 @@ fn errors_of(answer: &Value) -> Option<String> {
 ///
 /// Fails when `gh` cannot run, and when the answer holds no repository. A
 /// number the repository does not have is [`Status::Missing`] rather than an
-/// error.
+/// error, and a number GitHub could not answer for is an error rather than
+/// [`Status::Missing`]. The reason beside the `null` answer parts the two.
 pub fn fetch(repo: &Repo, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
     let query = build_query(numbers);
     let output = Command::new(GH)
