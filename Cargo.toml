@@ -119,6 +119,8 @@ env_logger = "0.11"
 # Misc
 syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }
 proc-macro2 = "1"
+# CommonMark parser. Default features off: only the parser is wanted, not the
+# `getopts` binary or the `html` renderer.
 pulldown-cmark = { version = "0.13", default-features = false }
 tiktoken-rs = "0.5"
 num-format = "0.4"
@@ -154,10 +156,6 @@ tree-sitter-zig = "1.1"
 # Dev dependencies
 tempfile = "3"
 mockito = "1.7"
-# CommonMark parser, for tests that ask a document where its headings are
-# instead of guessing from the text. Default features off: the `getopts` binary
-# and the `html` renderer are not wanted, only the parser.
-pulldown-cmark = { version = "0.13", default-features = false }
 
 # Platform-specific
 procfs = "0.17"
