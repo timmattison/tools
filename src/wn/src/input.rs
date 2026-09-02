@@ -32,6 +32,11 @@
 //! test that reads it is a test that races the person at the keyboard, and a
 //! test that writes it destroys what that person copied.
 
+#![allow(
+    dead_code,
+    reason = "the run in main.rs reads its chain through this module in the next commit; until then every item here is reached only by the tests below, and `dead_code` is denied by the clippy gate"
+)]
+
 use std::fmt;
 
 use thiserror::Error;
@@ -128,7 +133,13 @@ impl Chain {
     /// what it found there.
     #[must_use]
     pub fn blame(&self, err: ChainError) -> anyhow::Error {
-        anyhow::Error::new(err)
+        match self.source {
+            Source::Argument | Source::Stdin => anyhow::Error::new(err),
+            Source::Clipboard => anyhow::anyhow!(
+                "the clipboard holds {:?}, which is not a chain: {err}",
+                snippet(&self.text)
+            ),
+        }
     }
 }
 
@@ -156,7 +167,31 @@ impl Sources<'_> {
     /// holds no text, and [`InputError::NoChain`] when the clipboard was not
     /// tried and no other input answered.
     pub fn chain(&self) -> Result<Chain, InputError> {
-        Err(InputError::NoChain)
+        if !self.argument.is_empty() {
+            // A shell splits an unquoted chain into one argument for each
+            // word, and a quoted one into a single argument. Joining with a
+            // space gives the same line either way, because the parser reads
+            // whitespace as a separator.
+            return Ok(Chain::new(self.argument.join(" "), Source::Argument));
+        }
+
+        if let Some(read) = self.stdin {
+            let piped = read().map_err(|cause| InputError::Stdin(cause.to_string()))?;
+            if !piped.trim().is_empty() {
+                return Ok(Chain::new(piped, Source::Stdin));
+            }
+        }
+
+        let Some(read) = self.clipboard else {
+            return Err(InputError::NoChain);
+        };
+        match read() {
+            Ok(Some(copied)) if !copied.trim().is_empty() => {
+                Ok(Chain::new(copied, Source::Clipboard))
+            }
+            Ok(_) => Err(InputError::EmptyClipboard),
+            Err(cause) => Err(InputError::Unavailable(cause)),
+        }
     }
 }
 
@@ -187,8 +222,8 @@ pub enum InputError {
 /// empty variable is a common accident, and it is not the same statement as
 /// `WN_NO_CLIPBOARD=1`.
 #[must_use]
-pub fn clipboard_is_off(_value: Option<&str>) -> bool {
-    false
+pub fn clipboard_is_off(value: Option<&str>) -> bool {
+    value.is_some_and(|named| !named.trim().is_empty())
 }
 
 /// Read the system clipboard.
@@ -199,7 +234,9 @@ pub fn clipboard_is_off(_value: Option<&str>) -> bool {
 /// could not be read. A machine with no display is such a machine, and so is a
 /// session over SSH.
 pub fn system_clipboard() -> ClipboardRead {
-    Ok(None)
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|cause| ClipboardUnavailable::new(&cause))?;
+    from_arboard(clipboard.get_text())
 }
 
 /// The read `result` as a [`ClipboardRead`].
@@ -215,6 +252,10 @@ pub fn system_clipboard() -> ClipboardRead {
 fn from_arboard(result: Result<String, arboard::Error>) -> ClipboardRead {
     match result {
         Ok(text) => Ok(Some(text)),
+        Err(arboard::Error::ContentNotAvailable) => Ok(None),
+        // `arboard::Error` is `#[non_exhaustive]`, so this arm is required and
+        // a new variant of a later version arrives here as a failure that
+        // names itself, rather than as a build that stops.
         Err(cause) => Err(ClipboardUnavailable::new(&cause)),
     }
 }
