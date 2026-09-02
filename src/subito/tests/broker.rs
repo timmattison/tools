@@ -16,7 +16,9 @@
 
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
-use rumqttc::mqttbytes::v4::{ConnAck, ConnectReturnCode, Packet, SubAck, SubscribeReasonCode};
+use rumqttc::mqttbytes::v4::{
+    ConnAck, ConnectReturnCode, Packet, Publish, SubAck, SubscribeReasonCode,
+};
 use rumqttc::{MqttOptions, QoS, Transport};
 use std::time::{Duration, SystemTime};
 use subito::session::{run_until, SessionError};
@@ -314,6 +316,16 @@ impl Broker {
         .await;
     }
 
+    /// Sends one message to the client.
+    async fn publish(&mut self, topic: &str, payload: &[u8]) {
+        self.write_packet(&Packet::Publish(Publish::new(
+            topic,
+            QoS::AtMostOnce,
+            payload.to_vec(),
+        )))
+        .await;
+    }
+
     /// Waits until the client closes the connection.
     ///
     /// The broker holds its end open, so the connection ends only when the run
@@ -498,5 +510,67 @@ async fn a_run_whose_every_subscription_is_refused_stops() {
     assert!(
         matches!(result, Err(SessionError::AllSubscriptionsRefused)),
         "a run that subscribed to nothing stops and says so: {result:?}"
+    );
+}
+
+/// A payload of sixteen bytes that no terminal can print without damage.
+///
+/// The bytes hold `\x1b[31m`, which is the escape sequence that paints a
+/// terminal red. A tool that writes such a payload to a terminal changes the
+/// terminal of the user, which is the corruption the hex dump stops.
+const UNPRINTABLE_PAYLOAD: &[u8] = b"binary\x00\x1b[31m\xff\xfe\xfd\xfc";
+
+#[tokio::test]
+async fn a_publish_prints_its_topic_and_its_payload() {
+    let (listener, port) = listening().await;
+    let topics = vec!["sensors/#".to_string()];
+    let (mut output, mut printed) = recording();
+
+    let session = run_until(
+        options_for(port),
+        &topics,
+        QoS::AtMostOnce,
+        false,
+        &mut output,
+        never(),
+    );
+
+    let script = async {
+        let mut broker = Broker::accept(listener).await;
+        broker.accept_connection().await;
+
+        let filter = broker.read_subscribe().await;
+        broker.grant(filter.pkid, QoS::AtMostOnce).await;
+
+        broker
+            .publish("sensors/kitchen", br#"{"temperature":21}"#)
+            .await;
+        broker.publish("sensors/hallway", UNPRINTABLE_PAYLOAD).await;
+
+        assert_eq!(
+            printed.lines(7).await,
+            [
+                "Subscribed: sensors/# (QoS 0)",
+                // The topic of the message, and not the filter of the
+                // subscription.
+                "Topic: sensors/kitchen",
+                r#"Message: {"temperature":21}"#,
+                "",
+                "Topic: sensors/hallway",
+                // The payload printer is on this path, so a payload that no
+                // terminal can print arrives as a hex dump.
+                "Message: 00000000  62 69 6e 61 72 79 00 1b  5b 33 31 6d ff fe fd fc  |binary..[31m....|",
+                "",
+            ]
+        );
+
+        drop(broker);
+    };
+
+    let result = together(session, script).await;
+
+    assert!(
+        matches!(result, Err(SessionError::Connection(_))),
+        "a connection that ends is a failure of the connection: {result:?}"
     );
 }
