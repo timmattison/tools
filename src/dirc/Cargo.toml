@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Directory Clipboard — copies the current directory to the clipboard, or gives a cd command for the directory in the clipboard"
 
 [dependencies]
+arboard.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -9,9 +9,16 @@
 //! parent. So `dirc` writes the `cd` line to standard output, and the shell
 //! runs that line: `eval $(dirc --paste)`.
 //!
+//! The clipboard itself is a trait, [`clipboard::Clipboard`], with the clipboard
+//! of the machine behind it and one file behind it as well. The clipboard is a
+//! resource of the whole machine, so a test that reads it races the person at
+//! the keyboard and a test that writes it destroys what that person copied. The
+//! file is what every test uses instead.
+//!
 //! That `eval` is the reason [`mode::cd_command`] quotes the path. The shell
 //! reads the output of `dirc` as a command, so a directory whose name holds a
 //! space, a dollar sign, or a quote is a directory whose name holds shell
 //! syntax.
 
+pub mod clipboard;
 pub mod mode;

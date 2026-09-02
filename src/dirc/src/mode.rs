@@ -1,4 +1,14 @@
-//! Paste mode: the `cd` line for the directory the clipboard names.
+//! The path work of both modes.
+//!
+//! Copy mode makes the directory of the shell absolute, and the caller puts
+//! that path on the clipboard. Paste mode reads the path the clipboard holds
+//! and gives back the `cd` line for it. Neither one touches the clipboard: the
+//! text comes in as an argument and goes out as a return value, so the whole of
+//! both modes is tested without one. A test that reads the real clipboard races
+//! the person at the keyboard, and a test that writes it destroys what that
+//! person copied.
+//!
+//! # Paste mode quotes what it gives the shell
 //!
 //! A shell runs this line, so every character of the path is shell syntax until
 //! it is quoted. A single-quoted word is the strongest quote a POSIX shell has,
@@ -11,21 +21,19 @@
 //! that names a file, gets a message that names the path and names `dirc`. An
 //! unchecked `cd` gets the message of the shell instead, and the reader must
 //! then find which of the two programs said it.
-//!
-//! Nothing here reads the clipboard. The text of the clipboard comes in as an
-//! argument, so the whole of paste mode is tested without one. A test that
-//! reads the real clipboard races the person at the keyboard, and a test that
-//! writes it destroys what that person copied.
 
 use std::path::Path;
 
-/// The cause [`PasteError::Absolute`] names when the absolute path is not text.
+/// The cause [`PasteError::Absolute`] and [`CopyError::Absolute`] name when the
+/// absolute path is not text.
 ///
 /// The clipboard holds text, so a path that comes out of it is UTF-8. The
-/// directory of the process is not text, and `std::path::absolute` puts that
-/// directory in front of a relative path. The result can thus hold bytes that
-/// are not UTF-8. A `cd` line built from replacement characters points at a
-/// different directory, so such a path is refused instead.
+/// directory of a process is not text, and `std::path::absolute` puts that
+/// directory in front of a relative path. Copy mode starts from that directory
+/// and paste mode can be given a relative path, so the absolute path of either
+/// mode can hold bytes that are not UTF-8. A `cd` line, or a clipboard, built
+/// from replacement characters points at a different directory, so such a path
+/// is refused instead.
 const NOT_UTF8: &str = "the absolute path is not valid UTF-8";
 
 /// What paste mode could not do.
@@ -135,6 +143,37 @@ fn cd_line(path: &str, absolute: &Path) -> Result<String, PasteError> {
         cause: NOT_UTF8.to_string(),
     })?;
     Ok(format!("cd '{}'", escape_single_quotes(written)))
+}
+
+/// What copy mode could not do.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CopyError {
+    /// The path could not be made absolute, or the absolute path is not text.
+    #[error("Failed to resolve an absolute path: {path} ({cause})")]
+    Absolute {
+        /// The path copy mode was given.
+        path: String,
+        /// Why the absolute path could not be made or could not be written.
+        cause: String,
+    },
+}
+
+/// The absolute path that copy mode puts on the clipboard.
+///
+/// `current_dir` is the directory of the shell. It is made absolute, because
+/// the shell that reads the clipboard is another shell in another directory,
+/// and a relative path means a different directory there.
+///
+/// The path comes back as a `String` and never through `to_string_lossy`. A
+/// replacement character names a directory that is not the one the reader is
+/// in, and a clipboard that holds it sends the other shell somewhere else.
+///
+/// # Errors
+///
+/// Gives [`CopyError::Absolute`] when the path cannot be made absolute, and
+/// when the absolute path is not text.
+pub fn copied_path(current_dir: &Path) -> Result<String, CopyError> {
+    todo!("the green commit writes this")
 }
 
 #[cfg(test)]
@@ -334,6 +373,57 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!("Failed to resolve an absolute path: here ({NOT_UTF8})")
+        );
+    }
+
+    #[test]
+    fn an_absolute_directory_is_copied_as_it_is() {
+        let (_base, child) = directory_named("plain");
+        assert_eq!(
+            copied_path(&child).expect("the path is absolute"),
+            text(&child)
+        );
+    }
+
+    #[test]
+    fn a_relative_directory_is_copied_absolute() {
+        // The shell that reads the clipboard is another shell in another
+        // directory, so a relative path names a different directory there.
+        let here = std::env::current_dir().expect("the process has a directory");
+        assert_eq!(
+            copied_path(Path::new("some/child")).expect("the path is made absolute"),
+            text(&here.join("some").join("child"))
+        );
+    }
+
+    #[test]
+    fn a_directory_whose_name_holds_multi_byte_characters_is_copied_whole() {
+        let (_base, child) = directory_named("日本語 café 🎉");
+        assert_eq!(
+            copied_path(&child).expect("the path is absolute"),
+            text(&child)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_whose_name_is_not_text_is_refused() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        // 0xFF is not a byte of any UTF-8 sequence, so this is a path a Unix
+        // kernel accepts and a Rust string cannot hold.
+        let not_text = PathBuf::from(OsString::from_vec(vec![b'/', 0xff, b'x']));
+        let err = copied_path(&not_text).expect_err("the path is not text");
+        let message = err.to_string();
+        let CopyError::Absolute { path, cause } = err;
+        assert_eq!(cause, NOT_UTF8);
+        // The bytes that no string holds are written as escapes and not as
+        // replacement characters, so the reader sees which byte was there.
+        assert!(!path.contains('\u{fffd}'), "{path}");
+        assert_eq!(
+            message,
+            format!("Failed to resolve an absolute path: {path} ({NOT_UTF8})")
         );
     }
 }
