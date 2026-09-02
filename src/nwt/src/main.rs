@@ -2112,6 +2112,131 @@ fn warn_if_hooks_missing(worktree: &Path) {
 mod tests {
     use super::*;
 
+    use std::ffi::OsStr;
+
+    /// The git-location variables this fixture has always removed by name.
+    ///
+    /// A named list is what [`scrub_git_env_from`] currently applies, and the
+    /// test below is the record of why it cannot stay one.
+    const GIT_LOCATION_VARS: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+
+    /// Removes every `GIT_*` variable in `vars` from `cmd`'s child environment,
+    /// returning `cmd` so it chains inside a builder expression.
+    ///
+    /// The key source is a parameter rather than [`std::env::vars_os`] so this
+    /// can be tested without ever mutating the process environment. That is
+    /// load-bearing, not decoration: this file's test binary holds well over a
+    /// hundred tests and cargo runs them on parallel threads, so a test that set
+    /// a real `GIT_*` variable to prove the scrub works would redirect every
+    /// sibling thread's `git` child while it did so. A synthetic key list keeps
+    /// the test parallel-safe.
+    fn scrub_git_env_from<I, K>(cmd: &mut Command, vars: I) -> &mut Command
+    where
+        I: IntoIterator<Item = K>,
+        K: AsRef<OsStr>,
+    {
+        for key in vars {
+            if GIT_LOCATION_VARS
+                .iter()
+                .any(|name| key.as_ref() == OsStr::new(name))
+            {
+                cmd.env_remove(key.as_ref());
+            }
+        }
+        cmd
+    }
+
+    /// Removes every inherited `GIT_*` variable from `cmd`'s child environment,
+    /// returning `cmd` so it chains inside a builder expression.
+    ///
+    /// This is [`scrub_git_env_from`] fed the real process environment, which is
+    /// the only key source a spawned child actually inherits.
+    fn scrub_git_env(cmd: &mut Command) -> &mut Command {
+        scrub_git_env_from(cmd, std::env::vars_os().map(|(key, _)| key))
+    }
+
+    /// Every variable the scrub must remove, paired with what leaving it in
+    /// place does to a fixture that only meant to touch its own temp dir.
+    ///
+    /// The consequence travels with the name so a regression explains itself in
+    /// the failure message instead of naming a variable and leaving the reader
+    /// to guess why it mattered.
+    const GIT_ENV_LEAKS: &[(&str, &str)] = &[
+        (
+            "GIT_DIR",
+            "points git at a foreign repository, and it beats both `current_dir` and `git -C`",
+        ),
+        (
+            "GIT_WORK_TREE",
+            "aims the fixture's checkout and its `git add` at a foreign working tree",
+        ),
+        (
+            "GIT_INDEX_FILE",
+            "stages the fixture's files into a foreign repository's index, and git exports it to every pre-commit hook",
+        ),
+        (
+            "GIT_OBJECT_DIRECTORY",
+            "writes the fixture's blobs, trees and commits into a foreign repository's object store",
+        ),
+        (
+            "GIT_CONFIG_PARAMETERS",
+            "injects arbitrary config (user.email, core.bare, core.hooksPath) into the fixture's git",
+        ),
+        (
+            "GIT_AUTHOR_NAME",
+            "authors the fixture's commits under whatever identity the launching environment carried",
+        ),
+    ];
+
+    /// A variable the scrub must leave alone, paired with what removing it would
+    /// cost.
+    const NON_GIT_ENV_KEEP: (&str, &str) = (
+        "PATH",
+        "is how the child finds `git` at all, so removing it would break every fixture",
+    );
+
+    /// The scrub is defined by the `GIT_` prefix, never by a list of names.
+    ///
+    /// A named list reports the same clean-looking answer as a working scrub
+    /// while missing whatever git added since the list was written, and the two
+    /// variables that walked through the three-name version are not location
+    /// variables at all — so no amount of adding location names would have
+    /// caught them.
+    ///
+    /// The keys are synthetic and the process environment is never touched, so
+    /// this test is safe to run beside the rest of the binary's tests on
+    /// parallel threads.
+    #[test]
+    fn scrub_removes_every_git_prefixed_key_and_nothing_else() {
+        let mut cmd = Command::new("git");
+        let keys: Vec<&str> = GIT_ENV_LEAKS
+            .iter()
+            .map(|(key, _)| *key)
+            .chain(std::iter::once(NON_GIT_ENV_KEEP.0))
+            .collect();
+        scrub_git_env_from(&mut cmd, &keys);
+
+        let removed: Vec<String> = cmd
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+
+        for (key, consequence) in GIT_ENV_LEAKS {
+            assert!(
+                removed.iter().any(|scrubbed| scrubbed == key),
+                "{key} must be scrubbed from the fixture's git children: left in place it {consequence}. \
+                 The rule is the `GIT_` prefix, never a list of names."
+            );
+        }
+
+        let (kept, cost) = NON_GIT_ENV_KEEP;
+        assert!(
+            !removed.iter().any(|scrubbed| scrubbed == kept),
+            "{kept} must survive the scrub: it {cost}"
+        );
+    }
+
     /// Helper to run a git command in a directory, returning whether it
     /// succeeded. Shared across child test modules (`env_copy_tests`,
     /// `bootstrap_hooks_tests`) which both need a real git repo for their
