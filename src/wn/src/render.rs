@@ -18,6 +18,17 @@
 //! title is cut to the columns the row has left, through
 //! [`textfit::truncate_to_budget`], which gives an empty title rather than a
 //! marker that is itself one column too wide.
+//!
+//! # A plan is one block for each stream
+//!
+//! A plan of parallel work holds many streams, and [`render_plan`] paints one
+//! block for each of them. A block carries no answer of its own: the summary
+//! under the last block names the issue to start in every stream, so the
+//! reader reads the answers together and picks the stream they want.
+#![allow(
+    dead_code,
+    reason = "the paint of a plan lands before the run that reads a plan calls it; take this attribute out with the call"
+)]
 
 use colored::{ColoredString, Colorize};
 use textfit::{pad_right, truncate_to_budget};
@@ -48,6 +59,21 @@ const MARK_WIDTH: usize = 1;
 /// The title of a row whose number names no issue.
 const MISSING_TITLE: &str = "(no such issue)";
 
+/// The columns a row of a plan stands in from the left edge. A block reads as
+/// one thing under the label of its stream, and the indent is what makes it
+/// one thing.
+const PLAN_INDENT: usize = 2;
+
+/// The line that opens the summary of a plan.
+const SUMMARY_HEADING: &str = "Take one from each stream:";
+
+/// The answer of a stream where every step is finished.
+const EVERY_ISSUE_CLOSED: &str = "every issue is closed";
+
+/// The answer of a stream where nothing is open and something could not be
+/// read.
+const NO_ISSUE_OPEN: &str = "no issue is open";
+
 /// Paint the chain, the notes it earns, and the answer.
 ///
 /// `repo` names the repository the states came from, and appears only in the
@@ -63,7 +89,7 @@ pub fn render(report: &Report, repo: &str, width: usize, start: &StartCommand) -
 
     let number_width = entries
         .iter()
-        .map(|entry| UnicodeWidthStr::width(entry.number.to_string().as_str()))
+        .map(|entry| UnicodeWidthStr::width(entry.label().as_str()))
         .max()
         .unwrap_or(0);
 
@@ -125,9 +151,13 @@ fn style(status: Status, is_next: bool) -> Style {
 ///
 /// A row that has no columns left for a title ends at the number, rather than
 /// in the spaces that would have stood before one.
+///
+/// The number a row writes is [`Entry::label`], so a step of a plan that names
+/// a pull request and the issue it closes writes both. The width of the column
+/// comes out of the same call, and the two can never part company.
 fn row(entry: &Entry, is_next: bool, number_width: usize, width: usize) -> String {
     let style = style(entry.status, is_next);
-    let number = entry.number.to_string();
+    let number = entry.label();
     let mark = style.mark.to_string();
 
     let spent = MARK_WIDTH + 1 + number_width + COLUMN_GAP;
@@ -166,6 +196,25 @@ fn notes(report: &Report, repo: &str) -> Vec<String> {
         );
     }
 
+    notes.extend(
+        report
+            .pairs_that_disagree()
+            .into_iter()
+            .filter_map(|entry| {
+                entry.closes.map(|closes| {
+                    format!(
+                        "{} is {} and {} is {}.",
+                        entry.number,
+                        word(entry.status),
+                        closes.number,
+                        word(closes.status)
+                    )
+                    .yellow()
+                    .to_string()
+                })
+            }),
+    );
+
     let early = report.finished_out_of_order();
     if !early.is_empty() {
         let verb = if early.len() == 1 { "is" } else { "are" };
@@ -177,6 +226,21 @@ fn notes(report: &Report, repo: &str) -> Vec<String> {
     }
 
     notes
+}
+
+/// The word a sentence writes for one state.
+///
+/// A note reads as a sentence, so a state stands in it as a word and not as
+/// the mark of a row. [`Status::Missing`] never reaches the note about a pair,
+/// because [`Report::pairs_that_disagree`] drops a step whose state nobody
+/// knows, and the red note about that number already tells the reader to look.
+fn word(status: Status) -> &'static str {
+    match status {
+        Status::Open => "open",
+        Status::Done => "closed",
+        Status::Dropped => "closed without the work being done",
+        Status::Missing => "not in the repository",
+    }
 }
 
 /// The answer: the issue to start and the command that starts it.
@@ -234,8 +298,187 @@ pub fn render_plan(
     width: usize,
     start: &StartCommand,
 ) -> String {
-    let _ = (streams, repo, width, start);
-    String::from("no plan")
+    if streams.is_empty() {
+        return String::new();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for stream in streams {
+        lines.push(truncate_to_budget(&stream.label, width).bold().to_string());
+        lines.extend(block(&stream.report, repo, width));
+        // The blank line parts this block from the next one, and the last one
+        // from the summary. The text ends at the summary, so no blank line
+        // stands at the end of it.
+        lines.push(String::new());
+    }
+    lines.push(SUMMARY_HEADING.to_string());
+    lines.extend(summary(streams, width, start));
+    lines.join("\n")
+}
+
+/// The rows of one stream and the notes they earn, indented under the label of
+/// that stream.
+///
+/// The width of the number column is the width of the widest label of this
+/// stream alone. Each block thus lines up under itself, and one stream that
+/// names a pair does not push the numbers of every other stream to the right.
+fn block(report: &Report, repo: &str, width: usize) -> Vec<String> {
+    let entries = report.entries();
+    let number_width = entries
+        .iter()
+        .map(|entry| UnicodeWidthStr::width(entry.label().as_str()))
+        .max()
+        .unwrap_or(0);
+    let row_width = width.saturating_sub(PLAN_INDENT);
+
+    let mut lines: Vec<String> = entries
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| {
+            indent(&row(
+                entry,
+                report.next() == Some(position),
+                number_width,
+                row_width,
+            ))
+        })
+        .collect();
+
+    let notes = notes(report, repo);
+    if !notes.is_empty() {
+        lines.push(String::new());
+        lines.extend(notes.iter().map(|note| indent(note)));
+    }
+    lines
+}
+
+/// Move one line in under the label it belongs to.
+fn indent(line: &str) -> String {
+    format!("{}{line}", " ".repeat(PLAN_INDENT))
+}
+
+/// The answer of one stream, as the summary writes it.
+enum Tail {
+    /// The stream holds an open issue, and this is the number to start.
+    Next(IssueNumber),
+    /// The stream names nothing to start, and this says why.
+    Nothing(&'static str),
+}
+
+impl Tail {
+    /// The answer one stream gives.
+    fn of(report: &Report) -> Self {
+        match report.next_entry() {
+            Some(entry) => Self::Next(entry.number),
+            None if report
+                .entries()
+                .iter()
+                .all(|entry| entry.status.is_finished()) =>
+            {
+                Self::Nothing(EVERY_ISSUE_CLOSED)
+            }
+            // Nothing is open and something is not an issue at all, so the
+            // stream is not finished. Saying it is would be a guess about the
+            // number nobody could read.
+            None => Self::Nothing(NO_ISSUE_OPEN),
+        }
+    }
+
+    /// The columns `→ #344` occupies, for a stream that names an issue.
+    ///
+    /// The widest of these is what every such tail is padded to, so the
+    /// commands of the summary stand in one column.
+    fn mark_width(&self) -> Option<usize> {
+        match self {
+            Self::Next(number) => Some(UnicodeWidthStr::width(marked(*number).as_str())),
+            Self::Nothing(_) => None,
+        }
+    }
+
+    /// The columns the whole tail occupies, once `→ #344` is padded to
+    /// `mark_width`. This is what the label of a summary line has to give way
+    /// to.
+    fn width(&self, mark_width: usize, start: &StartCommand) -> usize {
+        match self {
+            Self::Next(number) => {
+                mark_width + COLUMN_GAP + UnicodeWidthStr::width(command(start, *number).as_str())
+            }
+            Self::Nothing(text) => UnicodeWidthStr::width(*text),
+        }
+    }
+
+    /// The tail, painted the way the answer of a chain is painted: the mark is
+    /// yellow, the number is bold, and the command is cyan.
+    fn paint(&self, mark_width: usize, start: &StartCommand) -> String {
+        match self {
+            Self::Next(number) => {
+                let pad =
+                    mark_width.saturating_sub(UnicodeWidthStr::width(marked(*number).as_str()));
+                format!(
+                    "{} {}{}{}{}",
+                    MARK_NEXT.to_string().yellow().bold(),
+                    number.to_string().bold(),
+                    " ".repeat(pad),
+                    " ".repeat(COLUMN_GAP),
+                    command(start, *number).cyan().bold()
+                )
+            }
+            Self::Nothing(text) => text.dimmed().to_string(),
+        }
+    }
+}
+
+/// `→ #344`: the mark of the issue to start, and its number.
+fn marked(number: IssueNumber) -> String {
+    format!("{MARK_NEXT} {number}")
+}
+
+/// `si 344`: the command that starts one issue.
+fn command(start: &StartCommand, number: IssueNumber) -> String {
+    format!("{} {}", start.as_str(), number.get())
+}
+
+/// One line for each stream: its label, and the issue to start in it.
+///
+/// The tail is what the reader came for, so it takes its columns first and the
+/// label is cut to what is left. A label that pushed the command off the window
+/// would take the answer away.
+fn summary(streams: &[StreamReport], width: usize, start: &StartCommand) -> Vec<String> {
+    let tails: Vec<Tail> = streams
+        .iter()
+        .map(|stream| Tail::of(&stream.report))
+        .collect();
+    let mark_width = tails.iter().filter_map(Tail::mark_width).max().unwrap_or(0);
+    let tail_width = tails
+        .iter()
+        .map(|tail| tail.width(mark_width, start))
+        .max()
+        .unwrap_or(0);
+
+    let budget = width.saturating_sub(PLAN_INDENT + COLUMN_GAP + tail_width);
+    let labels: Vec<String> = streams
+        .iter()
+        .map(|stream| truncate_to_budget(&stream.label, budget))
+        .collect();
+    let label_width = labels
+        .iter()
+        .map(|label| UnicodeWidthStr::width(label.as_str()))
+        .max()
+        .unwrap_or(0);
+
+    labels
+        .iter()
+        .zip(&tails)
+        .map(|(label, tail)| {
+            format!(
+                "{}{}{}{}",
+                " ".repeat(PLAN_INDENT),
+                pad_right(label, label_width),
+                " ".repeat(COLUMN_GAP),
+                tail.paint(mark_width, start)
+            )
+        })
+        .collect()
 }
 
 /// Write a list of numbers the way a sentence reads one.
@@ -688,9 +931,7 @@ mod tests {
         )];
         let block = plan_glyphs(&streams, 80);
         assert!(
-            block.contains(
-                "  #342 is closed without the work being done and #328 is open.\n"
-            ),
+            block.contains("  #342 is closed without the work being done and #328 is open.\n"),
             "the note writes the word of each state, in {block:?}"
         );
     }
