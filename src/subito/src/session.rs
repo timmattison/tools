@@ -11,6 +11,11 @@
 //! with the MQTT session open. This module prints what the broker answered, it
 //! stops when the broker refuses every topic, and it sends a DISCONNECT before
 //! it gives control back.
+//!
+//! [`run_forever`] holds one more part of the Go tool: the MQTT client under
+//! it reconnects on its own, so the tool runs until the user stops it. A
+//! signed AWS IoT URL covers one handshake, so each attempt of the supervisor
+//! builds its options again, from credentials it reads again.
 
 use crate::payload::format_payload;
 use rumqttc::{
