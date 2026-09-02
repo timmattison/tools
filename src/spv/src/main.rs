@@ -481,14 +481,22 @@ fn collect_processes(
         let matches = match pattern {
             PatternType::SinglePid(p) => pid_u32 == *p,
             PatternType::MultiplePids(pids) => pids.contains(&pid_u32),
-            PatternType::NamePattern(p) => matches_name_pattern(
-                p,
-                regex.as_ref(),
-                &name,
-                &command,
-                options.match_full_command,
-                options.case_sensitive,
-            ),
+            // A name search never matches spv itself. The command line of this
+            // very process holds the pattern the user typed, so `--full` would
+            // otherwise report a match for every search. `pgrep` leaves itself
+            // out for the same reason. An explicit process id still reaches
+            // this process, which is how a caller reads its own environment.
+            PatternType::NamePattern(p) => {
+                pid_u32 != std::process::id()
+                    && matches_name_pattern(
+                        p,
+                        regex.as_ref(),
+                        &name,
+                        &command,
+                        options.match_full_command,
+                        options.case_sensitive,
+                    )
+            }
         };
 
         if matches {
