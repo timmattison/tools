@@ -710,9 +710,25 @@ async fn every_topic_of_a_list_longer_than_the_inflight_limit_keeps_its_own_line
 /// reason.
 const TEST_WAIT: Duration = Duration::from_millis(50);
 
+/// The time a test watches a port for a connection that must not arrive.
+///
+/// The wait is far above [`TEST_WAIT`], so a supervisor that tries again
+/// arrives inside it.
+const NO_RETRY_WAIT: Duration = Duration::from_millis(500);
+
 /// Gives a backoff that always waits [`TEST_WAIT`].
 fn quick_backoff() -> Backoff {
     Backoff::new(TEST_WAIT, TEST_WAIT)
+}
+
+/// Fails when a second connection arrives within [`NO_RETRY_WAIT`].
+async fn no_second_connection(listener: &TcpListener) {
+    assert!(
+        tokio::time::timeout(NO_RETRY_WAIT, listener.accept())
+            .await
+            .is_err(),
+        "the supervisor opened a second connection, and this failure must never be tried again"
+    );
 }
 
 /// Counts the attempts a supervisor made to build connection options.
@@ -815,4 +831,67 @@ async fn a_connection_that_drops_comes_back_and_subscribes_again() {
         result.is_ok(),
         "a clean shutdown is the end of a run and not a failure: {result:?}"
     );
+}
+
+#[tokio::test]
+async fn a_policy_that_denies_every_topic_is_never_tried_again() {
+    let (listener, port) = listening().await;
+    let topics = vec!["denied/one".to_string(), "denied/two".to_string()];
+    let (mut output, mut printed) = recording();
+    let attempts = Attempts::new();
+
+    let connect = {
+        let attempts = attempts.clone();
+
+        move || {
+            let attempts = attempts.clone();
+
+            async move {
+                attempts.add_one();
+                Ok(options_for(port))
+            }
+        }
+    };
+
+    let session = run_forever_with(
+        connect,
+        &topics,
+        QoS::AtMostOnce,
+        false,
+        &mut output,
+        never(),
+        quick_backoff(),
+    );
+
+    let script = async {
+        let mut broker = Broker::accept(&listener).await;
+        broker.accept_connection().await;
+
+        let first = broker.read_subscribe().await;
+        let second = broker.read_subscribe().await;
+        broker.refuse(first.pkid).await;
+        broker.refuse(second.pkid).await;
+
+        assert_eq!(
+            printed.lines(2).await,
+            [
+                "Subscription refused: denied/one",
+                "Subscription refused: denied/two"
+            ]
+        );
+
+        broker.read_nothing_more().await;
+
+        // A policy that denies every topic denies it again, so another attempt
+        // only reads the same answer.
+        no_second_connection(&listener).await;
+    };
+
+    let result = together(session, script).await;
+
+    assert!(
+        matches!(result, Err(SessionError::AllSubscriptionsRefused)),
+        "a run that subscribed to nothing stops and says so: {result:?}"
+    );
+    assert_eq!(attempts.count(), 1, "the supervisor connected once");
 }
