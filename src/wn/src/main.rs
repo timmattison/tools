@@ -92,13 +92,17 @@ GitHub about every number in it, and names the first one that is still open.\n\n
 Every separator means the same thing: the issue on the left comes before the issue on the right. \
 A double bar is read as an arrow, because the chain is a plan to walk in order.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
+The chain comes out of the first input that holds one: the argument, then standard input, then \
+the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
+because a pipe is explicit. Set WN_NO_CLIPBOARD to any value to turn the clipboard off, which \
+gives back the error a run with no chain printed before.\n\n\
 The answer names the command that starts the work: `si 278`. This tool ships no `si` — it is a \
 shell function you supply. Set WN_START_COMMAND to name a different one, for example \
 `export WN_START_COMMAND='gh issue develop'`."
 )]
 struct Cli {
     /// The chain, for example "#277 → #278 ∥ #279". Read from standard input
-    /// when it is not given.
+    /// when it is not given, and from the clipboard when neither gives one.
     #[arg(value_name = "CHAIN")]
     chain: Vec<String>,
 
