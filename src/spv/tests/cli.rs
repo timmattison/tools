@@ -94,17 +94,33 @@ impl Drop for Sleeper {
     }
 }
 
+/// Runs `spv` so that it inspects its own process.
+///
+/// The shell expands `$$` to its own process id and then replaces itself with
+/// `spv`, which keeps that id. Every platform gives a process its own
+/// environment, and macOS gives the environment of another process to root
+/// only, so this is the one way a test without root reads a real environment.
+///
+/// # Arguments
+///
+/// * `flags` - The flags to pass to `spv`, before the process id
+/// * `env` - Extra environment variables for `spv`
+fn spv_on_itself(flags: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(format!("exec \"$0\" {} $$", flags.join(" ")))
+        .arg(env!("CARGO_BIN_EXE_spv"));
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().expect("spv runs")
+}
+
 #[test]
 fn the_environment_section_shows_a_chosen_variable() {
     let name = unique_token("SPV_MARK_");
-    let child = Sleeper::spawn("plain", &[(name.as_str(), "hello")]);
-
-    let (ok, stdout, stderr) = run(
-        spv()
-            .args(["--env", &child.pid().to_string()])
-            .output()
-            .expect("spv runs"),
-    );
+    let (ok, stdout, stderr) = run(spv_on_itself(&["--env"], &[(name.as_str(), "hello")]));
 
     assert!(ok, "spv should succeed; stderr: {stderr}");
     assert!(
@@ -120,14 +136,7 @@ fn the_environment_section_shows_a_chosen_variable() {
 #[test]
 fn the_environment_section_hides_a_credential() {
     let name = unique_token("SPV_TOKEN_");
-    let child = Sleeper::spawn("secret", &[(name.as_str(), "s3cret")]);
-
-    let (ok, stdout, stderr) = run(
-        spv()
-            .args(["--env", &child.pid().to_string()])
-            .output()
-            .expect("spv runs"),
-    );
+    let (ok, stdout, stderr) = run(spv_on_itself(&["--env"], &[(name.as_str(), "s3cret")]));
 
     assert!(ok, "spv should succeed; stderr: {stderr}");
     assert!(
@@ -147,18 +156,51 @@ fn the_environment_section_hides_a_credential() {
 #[test]
 fn show_secrets_prints_the_credential_in_full() {
     let name = unique_token("SPV_TOKEN_");
-    let child = Sleeper::spawn("secret", &[(name.as_str(), "s3cret")]);
+    let (ok, stdout, stderr) = run(spv_on_itself(
+        &["--env", "--show-secrets"],
+        &[(name.as_str(), "s3cret")],
+    ));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stdout.contains("s3cret"),
+        "--show-secrets prints the value; stdout: {stdout}"
+    );
+}
+
+/// macOS hands the environment of another process to root only. A run without
+/// root must say so rather than print an empty section, because an empty
+/// section teaches the reader that the process carries no environment.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_environment_of_another_process_is_refused_with_a_reason() {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        // As root the kernel hands the environment over, so there is nothing to refuse.
+        return;
+    }
+    let child = Sleeper::spawn("plain", &[("SPV_PLAIN", "hello")]);
 
     let (ok, stdout, stderr) = run(
         spv()
-            .args(["--env", "--show-secrets", &child.pid().to_string()])
+            .args(["--env", &child.pid().to_string()])
             .output()
             .expect("spv runs"),
     );
 
     assert!(ok, "spv should succeed; stderr: {stderr}");
     assert!(
-        stdout.contains("s3cret"),
-        "--show-secrets prints the value; stdout: {stdout}"
+        stdout.contains("Environment for"),
+        "the section names itself; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("unavailable:") && stdout.contains("sudo"),
+        "the section says why it is empty and names the remedy; stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("none found"),
+        "a refusal never reads as an empty environment; stdout: {stdout}"
     );
 }

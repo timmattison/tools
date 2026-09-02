@@ -239,6 +239,51 @@ fn get_username(uid: u32) -> String {
     }
 }
 
+/// The name of the user who runs this tool.
+///
+/// # Returns
+///
+/// The name behind the effective user id.
+#[cfg(unix)]
+fn current_username() -> String {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    let uid = unsafe { libc::geteuid() };
+    get_username(uid)
+}
+
+/// The name of the user who runs this tool.
+///
+/// # Returns
+///
+/// The name Windows keeps in `USERNAME`, or `unknown`.
+#[cfg(not(unix))]
+fn current_username() -> String {
+    std::env::var("USERNAME").unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Whether this tool runs as root, which can read every process.
+///
+/// # Returns
+///
+/// `true` when the effective user id is zero.
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Whether this tool runs as root, which can read every process.
+///
+/// # Returns
+///
+/// Always `false`, because Windows has no root.
+#[cfg(not(unix))]
+fn running_as_root() -> bool {
+    false
+}
+
 /// Process information from sysctl on macOS.
 ///
 /// The sysinfo crate uses proc_pidinfo() which requires elevated privileges to
@@ -662,6 +707,162 @@ fn looks_like_credential(name: &str) -> bool {
         .any(|segment| CREDENTIAL_SEGMENTS.contains(&segment))
 }
 
+/// Reads the raw, NUL-separated environment block of a process.
+///
+/// Linux keeps it in `/proc/<pid>/environ`.
+///
+/// # Arguments
+///
+/// * `pid` - The process to read
+///
+/// # Returns
+///
+/// The block, or a sentence that says why the read failed.
+#[cfg(target_os = "linux")]
+fn read_env_block(pid: u32) -> Result<Vec<u8>, String> {
+    let path = format!("/proc/{pid}/environ");
+    std::fs::read(&path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::PermissionDenied => format!(
+            "the kernel refused {path}; the process belongs to another user, so run spv with sudo"
+        ),
+        std::io::ErrorKind::NotFound => format!("the process {pid} is gone"),
+        _ => format!("cannot read {path}: {error}"),
+    })
+}
+
+/// Reads the raw, NUL-separated environment block of a process.
+///
+/// macOS keeps it in the tail of the `KERN_PROCARGS2` buffer, and it refuses the
+/// call for a process that belongs to another user.
+///
+/// # Arguments
+///
+/// * `pid` - The process to read
+///
+/// # Returns
+///
+/// The block, or a sentence that says why the read failed.
+#[cfg(target_os = "macos")]
+fn read_env_block(pid: u32) -> Result<Vec<u8>, String> {
+    let Ok(kernel_pid) = i32::try_from(pid) else {
+        return Err(format!("the process id {pid} does not fit a macOS process id"));
+    };
+
+    let buffer = procargs2_buffer(kernel_pid).map_err(|errno| match errno {
+        libc::EINVAL => format!(
+            "macOS refused the environment of process {pid}; the process belongs to \
+             another user or it is gone, so run spv with sudo"
+        ),
+        libc::ESRCH => format!("the process {pid} is gone"),
+        libc::EPERM | libc::EACCES => {
+            format!("macOS refused the environment of process {pid}; run spv with sudo")
+        }
+        other => format!("sysctl(KERN_PROCARGS2) failed with errno {other}"),
+    })?;
+
+    let block = env_block_from_procargs2(&buffer)
+        .ok_or_else(|| "the kernel returned an argument buffer this tool cannot read".to_string())?;
+
+    // macOS truncates the buffer after the arguments unless the caller is root
+    // or the caller is the process itself. The environment then looks empty,
+    // and an empty section teaches the reader that the process carries no
+    // environment. Say what really happened.
+    if block.is_empty() && !running_as_root() && pid != std::process::id() {
+        return Err(format!(
+            "macOS hands the environment of process {pid} to root only; run spv with sudo"
+        ));
+    }
+
+    Ok(block.to_vec())
+}
+
+/// Reads the raw, NUL-separated environment block of a process.
+///
+/// No other platform gives one.
+///
+/// # Arguments
+///
+/// * `pid` - The process to read
+///
+/// # Returns
+///
+/// Always a sentence that says the platform gives no environment.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_env_block(pid: u32) -> Result<Vec<u8>, String> {
+    Err(format!(
+        "this platform gives no way to read the environment of process {pid}"
+    ))
+}
+
+/// Asks the kernel for the `KERN_PROCARGS2` buffer of a process.
+///
+/// # Arguments
+///
+/// * `pid` - The process to read
+///
+/// # Returns
+///
+/// The buffer, or the `errno` that `sysctl` set.
+#[cfg(target_os = "macos")]
+fn procargs2_buffer(pid: i32) -> Result<Vec<u8>, i32> {
+    // SAFETY: sysctl is a standard BSD system call. The first call reads
+    // KERN_ARGMAX, an int, into a variable of that exact size. The second call
+    // writes at most `size` bytes into a buffer of `size` bytes, and reports
+    // through `size` how many it wrote. Neither call keeps a pointer.
+    unsafe {
+        let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_ARGMAX, 0];
+        let mut argmax: libc::c_int = 0;
+        let mut argmax_size: libc::size_t = std::mem::size_of::<libc::c_int>();
+        if libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            std::ptr::addr_of_mut!(argmax).cast(),
+            &mut argmax_size,
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+        {
+            return Err(*libc::__error());
+        }
+
+        let Ok(capacity) = usize::try_from(argmax) else {
+            return Err(libc::EOVERFLOW);
+        };
+        let mut buffer: Vec<u8> = vec![0; capacity];
+        let mut size: libc::size_t = capacity;
+
+        mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        if libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+        {
+            return Err(*libc::__error());
+        }
+
+        buffer.truncate(size);
+        Ok(buffer)
+    }
+}
+
+/// Reads the environment of a process.
+///
+/// # Arguments
+///
+/// * `pid` - The process to read
+///
+/// # Returns
+///
+/// The name and value of each variable, or a sentence that says why the read
+/// failed.
+fn read_process_env(pid: u32) -> Result<Vec<(String, String)>, String> {
+    Ok(parse_environ_block(&read_env_block(pid)?))
+}
+
 /// Finds the environment block inside a `KERN_PROCARGS2` buffer.
 ///
 /// The kernel lays the buffer out as a 32-bit `argc`, the saved executable path,
@@ -987,6 +1188,37 @@ fn print_open_files(processes: &[ProcessInfo]) {
     }
 }
 
+/// Prints the environment of each process.
+///
+/// A section that cannot be read says why, because a section that comes back
+/// empty teaches the reader that the process holds nothing.
+///
+/// # Arguments
+///
+/// * `processes` - The processes to show the environment of
+/// * `show_secrets` - Whether to print credential-looking values in full
+fn print_environments(processes: &[ProcessInfo], show_secrets: bool) {
+    for proc in processes {
+        println!("\nEnvironment for {} (PID {}):", proc.name, proc.pid);
+        match read_process_env(proc.pid) {
+            Err(reason) => println!("  unavailable: {reason}"),
+            Ok(variables) if variables.is_empty() => println!("  none found"),
+            Ok(variables) => {
+                let mut table = Table::new();
+                table
+                    .load_preset(UTF8_FULL)
+                    .set_content_arrangement(ContentArrangement::Dynamic)
+                    .set_header(vec!["NAME", "VALUE"]);
+                for (name, value) in variables {
+                    let shown = redact_env_value(&name, &value, show_secrets);
+                    table.add_row(vec![name, shown]);
+                }
+                println!("{table}");
+            }
+        }
+    }
+}
+
 /// Truncates a string to a maximum length (in characters), adding "..." if truncated.
 ///
 /// This function is UTF-8 safe and will never panic on multi-byte characters.
@@ -1061,6 +1293,7 @@ fn format_memory(bytes: u64) -> String {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let sections = args.sections();
 
     // Parse the pattern
     let pattern = parse_pattern(&args.pattern);
@@ -1072,7 +1305,7 @@ fn main() -> Result<()> {
         .with_memory()
         .with_user(UpdateKind::Always);
 
-    if args.cwd {
+    if sections.cwd {
         refresh_kind = refresh_kind.with_cwd(UpdateKind::Always);
     }
 
@@ -1086,7 +1319,7 @@ fn main() -> Result<()> {
         case_sensitive: args.case_sensitive,
         match_full_command: args.full,
     };
-    let processes = collect_processes(&system, &pattern, &match_options, args.cwd)?;
+    let processes = collect_processes(&system, &pattern, &match_options, sections.cwd)?;
 
     if processes.is_empty() {
         match &pattern {
@@ -1111,14 +1344,19 @@ fn main() -> Result<()> {
 
     // Print output
     if args.raw {
-        print_raw(&processes, args.cwd);
+        print_raw(&processes, sections.cwd);
     } else {
-        print_table(&processes, args.cwd);
+        print_table(&processes, sections.cwd);
     }
 
     // Print open files if requested
-    if args.lsof {
+    if sections.files {
         print_open_files(&processes);
+    }
+
+    // Print the environment if requested
+    if sections.env {
+        print_environments(&processes, args.show_secrets);
     }
 
     Ok(())
