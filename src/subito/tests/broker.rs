@@ -187,6 +187,10 @@ struct Broker {
 
 impl Broker {
     /// Accepts one connection and completes the WebSocket handshake.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the `Callback` trait of `tungstenite` states the answer of a handshake callback, and its `Err` variant is a whole HTTP response. This callback never builds one: it adds the subprotocol header and gives the response back"
+    )]
     async fn accept(listener: TcpListener) -> Self {
         let (stream, _) = tokio::time::timeout(STEP_TIMEOUT, listener.accept())
             .await

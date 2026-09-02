@@ -12,10 +12,8 @@
 //! stops when the broker refuses every topic, and it sends a DISCONNECT before
 //! it gives control back.
 
-use crate::payload::format_payload;
 use rumqttc::{
-    AsyncClient, Event, EventLoop, MqttOptions, Outgoing, Packet, Publish, QoS, SubAck,
-    SubscribeReasonCode,
+    AsyncClient, Event, MqttOptions, Outgoing, Packet, QoS, SubAck, SubscribeReasonCode,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -127,5 +125,126 @@ pub async fn run_until(
     output: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
 ) -> Result<(), SessionError> {
-    unimplemented!("the session does not run yet")
+    let (client, mut eventloop) = AsyncClient::new(options, topics.len() + SPARE_CAPACITY);
+
+    for topic in topics {
+        client
+            .subscribe(topic.clone(), qos)
+            .await
+            .map_err(SessionError::Request)?;
+    }
+
+    let subscriptions = Subscriptions::new(topics);
+
+    drive(&mut eventloop, subscriptions, pretty_json, output, shutdown).await
+}
+
+/// Drives the event loop until the run stops.
+///
+/// The shutdown and the event loop wait together, so an interrupt that arrives
+/// while nothing is on the wire still ends the run.
+async fn drive(
+    eventloop: &mut rumqttc::EventLoop,
+    mut subscriptions: Subscriptions,
+    _pretty_json: bool,
+    output: &mut impl Write,
+    shutdown: impl Future<Output = std::io::Result<()>>,
+) -> Result<(), SessionError> {
+    let mut shutdown = std::pin::pin!(shutdown);
+
+    loop {
+        let event = tokio::select! {
+            signal = shutdown.as_mut() => {
+                signal.map_err(SessionError::Signal)?;
+                return Ok(());
+            }
+            event = eventloop.poll() => {
+                event.map_err(|error| SessionError::Connection(Box::new(error)))?
+            }
+        };
+
+        match event {
+            Event::Outgoing(Outgoing::Subscribe(pkid)) => subscriptions.record(pkid),
+            Event::Incoming(Packet::SubAck(ack)) => subscriptions.answer(&ack, output)?,
+            _ => (),
+        }
+    }
+}
+
+/// The topics of one run, and the packet identifier each one carries.
+///
+/// MQTT names a subscription by a packet identifier, and the broker answers
+/// with that identifier and no topic. A broker answers in any order, so the
+/// order the answers arrive names nothing. This type holds the one pairing that
+/// does: the identifier the client chose for each topic.
+struct Subscriptions {
+    /// The topics, in the order the caller gave them.
+    names: Vec<String>,
+
+    /// The topic each packet identifier belongs to, as an index into `names`.
+    by_pkid: HashMap<u16, usize>,
+
+    /// The index of the topic that takes the next packet identifier.
+    ///
+    /// The event loop takes one subscription at a time, in the order the
+    /// client sent them, so the identifiers arrive in the order of the topics.
+    next: usize,
+}
+
+impl Subscriptions {
+    /// Takes the topics of one run, in the order the caller gave them.
+    fn new(topics: &[String]) -> Self {
+        Self {
+            names: topics.to_vec(),
+            by_pkid: HashMap::new(),
+            next: 0,
+        }
+    }
+
+    /// Pairs one packet identifier with the topic it belongs to.
+    fn record(&mut self, pkid: u16) {
+        if self.next < self.names.len() {
+            self.by_pkid.insert(pkid, self.next);
+            self.next += 1;
+        }
+    }
+
+    /// Prints what the broker answered about one subscription.
+    ///
+    /// An answer for an identifier this run never sent names no topic, so the
+    /// session prints nothing for it.
+    ///
+    /// # Errors
+    ///
+    /// Gives [`SessionError::Output`] when the output refuses a line.
+    fn answer(&mut self, ack: &SubAck, output: &mut impl Write) -> Result<(), SessionError> {
+        let Some(name) = self
+            .by_pkid
+            .get(&ack.pkid)
+            .and_then(|index| self.names.get(*index))
+        else {
+            return Ok(());
+        };
+
+        for code in &ack.return_codes {
+            if let SubscribeReasonCode::Success(granted) = code {
+                writeln!(output, "Subscribed: {name} (QoS {})", qos_number(*granted))
+                    .map_err(SessionError::Output)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Gives the number MQTT states for one quality of service.
+///
+/// The match is complete, so a new quality of service in a later version of
+/// the MQTT client breaks the build instead of printing the wrong number.
+fn qos_number(qos: QoS) -> u8 {
+    match qos {
+        QoS::AtMostOnce => QOS_AT_MOST_ONCE,
+        QoS::AtLeastOnce => QOS_AT_LEAST_ONCE,
+        QoS::ExactlyOnce => QOS_EXACTLY_ONCE,
+    }
 }
