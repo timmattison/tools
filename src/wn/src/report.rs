@@ -230,27 +230,33 @@ impl Report {
             .collect()
     }
 
-    /// The numbers the repository does not have, in the order the text wrote
-    /// them.
+    /// The numbers the repository does not have, each one once, in the order
+    /// of its first appearance.
     ///
     /// The number of a pair counts the same as the number of the step itself,
     /// and each one stands at its place: the step first, then the issue it
     /// closes. A pair whose issue the repository does not have is a typo the
     /// same way a step is, and one such number is what turns a green run red.
+    ///
+    /// A stream names one number as a step and as the issue a pair closes, so
+    /// the number arrives twice and is reported once. A note that writes one
+    /// number twice reads as a fault of the tool.
     #[must_use]
     pub fn missing(&self) -> Vec<IssueNumber> {
-        self.entries
-            .iter()
-            .flat_map(|entry| {
-                let step = (entry.status == Status::Missing).then_some(entry.number);
-                let closes = entry
-                    .closes
-                    .filter(|closes| closes.status == Status::Missing)
-                    .map(|closes| closes.number);
-                [step, closes]
-            })
-            .flatten()
-            .collect()
+        let mut missing: Vec<IssueNumber> = Vec::new();
+        for entry in &self.entries {
+            let step = (entry.status == Status::Missing).then_some(entry.number);
+            let closes = entry
+                .closes
+                .filter(|closes| closes.status == Status::Missing)
+                .map(|closes| closes.number);
+            for number in [step, closes].into_iter().flatten() {
+                if !missing.contains(&number) {
+                    missing.push(number);
+                }
+            }
+        }
+        missing
     }
 
     /// Every step whose pull request and whose issue say different things.
