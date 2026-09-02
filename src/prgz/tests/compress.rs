@@ -10,12 +10,15 @@
 )]
 
 use std::cell::Cell;
+use std::fs;
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use flate2::read::GzDecoder;
-use prgz::{compress_stream, default_output_path, CompressError, Stats};
+use prgz::{compress_file, compress_stream, default_output_path, CompressError, Stats};
+use tempfile::TempDir;
 
 /// The largest difference that two fractions can have and still count as equal.
 const TOLERANCE: f64 = 1e-9;
@@ -256,4 +259,173 @@ fn a_write_that_only_fails_at_the_finish_gives_a_write_error() {
         matches!(error, CompressError::WriteOutput { .. }),
         "the error is {error}"
     );
+}
+
+/// The start value of the generator of bytes that gzip cannot compress.
+const RANDOM_SEED: u64 = 0x2545_f491_4f6c_dd1d;
+
+/// The count of bytes in the block that gzip cannot compress.
+const RANDOM_BYTES: usize = 64 * 1024;
+
+/// Makes a temporary directory for one test. Each directory has its own name,
+/// thus two copies of this test binary do not touch the same files.
+fn temp_dir() -> TempDir {
+    TempDir::new().unwrap()
+}
+
+/// Makes a block of bytes that gzip cannot make smaller. The generator is a
+/// xorshift, thus the same seed always gives the same bytes.
+fn incompressible_bytes(count: usize) -> Vec<u8> {
+    let mut state = RANDOM_SEED;
+    let mut bytes = Vec::with_capacity(count);
+    while bytes.len() < count {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        bytes.extend_from_slice(&state.to_le_bytes());
+    }
+    bytes.truncate(count);
+    bytes
+}
+
+/// Reads the bytes that a gzip file holds.
+fn decompress(path: &Path) -> Vec<u8> {
+    let mut decoded = Vec::new();
+    GzDecoder::new(File::open(path).unwrap())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    decoded
+}
+
+#[test]
+fn a_compressed_file_gives_the_input_bytes_back() {
+    let dir = temp_dir();
+    let input = dir.path().join("input.txt");
+    let output = default_output_path(&input);
+    let bytes = b"one line that repeats many times. ".repeat(500);
+    fs::write(&input, &bytes).unwrap();
+    let stats = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap();
+    assert_eq!(stats.original_size, bytes.len() as u64);
+    assert_eq!(stats.new_size, fs::metadata(&output).unwrap().len());
+    assert!(!stats.grew());
+    assert_eq!(decompress(&output), bytes);
+}
+
+#[test]
+fn an_empty_input_gives_an_empty_gzip_stream_that_grew() {
+    let dir = temp_dir();
+    let input = dir.path().join("empty.bin");
+    let output = default_output_path(&input);
+    fs::write(&input, b"").unwrap();
+    let stats = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap();
+    assert_eq!(stats.original_size, 0);
+    assert!(stats.new_size > 0, "the gzip stream holds no bytes");
+    assert_eq!(stats.new_size, fs::metadata(&output).unwrap().len());
+    assert!(stats.grew());
+    assert_eq!(stats.size_change_percent(), None);
+    assert!(decompress(&output).is_empty());
+}
+
+#[test]
+fn bytes_that_gzip_cannot_compress_give_a_larger_file() {
+    let dir = temp_dir();
+    let input = dir.path().join("random.bin");
+    let output = default_output_path(&input);
+    let bytes = incompressible_bytes(RANDOM_BYTES);
+    fs::write(&input, &bytes).unwrap();
+    let stats = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap();
+    assert!(
+        stats.new_size > stats.original_size,
+        "the output holds {} bytes and the input holds {} bytes",
+        stats.new_size,
+        stats.original_size
+    );
+    assert!(stats.grew());
+    let percent = stats.size_change_percent().unwrap();
+    assert!(percent < 0.0, "the percent is {percent}");
+    assert_eq!(decompress(&output), bytes);
+}
+
+#[test]
+fn a_file_of_many_buffers_reports_the_progress_of_the_read() {
+    let dir = temp_dir();
+    let input = dir.path().join("many.bin");
+    let output = default_output_path(&input);
+    fs::write(&input, vec![b'x'; MANY_BUFFERS]).unwrap();
+    let mut counts: Vec<u64> = Vec::new();
+    let stats = compress_file(&input, &output, &|| false, &mut |read| {
+        counts.push(read);
+    })
+    .unwrap();
+    assert_eq!(stats.original_size, MANY_BUFFERS as u64);
+    assert!(counts.len() > 1, "the count of reports is {}", counts.len());
+    assert!(
+        counts.windows(2).all(|pair| pair[0] < pair[1]),
+        "the reports do not rise: {counts:?}"
+    );
+    assert_eq!(counts.last().copied(), Some(MANY_BUFFERS as u64));
+}
+
+#[test]
+fn a_missing_input_file_says_it_could_not_open_the_input() {
+    let dir = temp_dir();
+    let input = dir.path().join("missing.txt");
+    let output = default_output_path(&input);
+    let error = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap_err();
+    assert!(
+        matches!(error, CompressError::OpenInput { .. }),
+        "the error is {error}"
+    );
+    assert!(!output.exists(), "the run made an output file");
+}
+
+#[test]
+fn an_output_in_a_missing_directory_says_it_could_not_create_the_output() {
+    let dir = temp_dir();
+    let input = dir.path().join("input.txt");
+    fs::write(&input, b"some bytes").unwrap();
+    let output = dir.path().join("no-such-directory").join("input.txt.gz");
+    let error = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap_err();
+    assert!(
+        matches!(error, CompressError::CreateOutput { .. }),
+        "the error is {error}"
+    );
+    assert!(!output.exists(), "the run made an output file");
+}
+
+/// A directory opens as a file, and the first read of that file fails. The run
+/// thus makes the output file and then fails on the read.
+#[cfg(unix)]
+#[test]
+fn a_read_that_fails_leaves_no_output_file() {
+    let dir = temp_dir();
+    let input = dir.path().join("a-directory");
+    fs::create_dir(&input).unwrap();
+    let output = default_output_path(&input);
+    let error = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap_err();
+    assert!(
+        matches!(error, CompressError::ReadInput { .. }),
+        "the error is {error}"
+    );
+    assert!(!output.exists(), "the run left an output file");
+}
+
+#[test]
+fn a_run_that_the_user_stops_leaves_no_output_file() {
+    let dir = temp_dir();
+    let input = dir.path().join("many.bin");
+    let output = default_output_path(&input);
+    fs::write(&input, vec![b'x'; MANY_BUFFERS]).unwrap();
+    let calls = Cell::new(0_u32);
+    let stopped = || {
+        let seen = calls.get();
+        calls.set(seen + 1);
+        seen > 0
+    };
+    let error = compress_file(&input, &output, &stopped, &mut |_| {}).unwrap_err();
+    assert!(
+        matches!(error, CompressError::Cancelled),
+        "the error is {error}"
+    );
+    assert!(!output.exists(), "the run left an output file");
 }

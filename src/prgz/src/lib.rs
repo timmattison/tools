@@ -253,6 +253,26 @@ pub fn compress_stream<R: Read, W: Write>(
     Ok(read_bytes)
 }
 
+/// Compress the file at `input` into a gzip file at `output`.
+///
+/// # Errors
+///
+/// Answers [`CompressError::OpenInput`] when the input file does not open, and
+/// [`CompressError::CreateOutput`] when the output file does not open. Answers
+/// the error of [`compress_stream`] when the stream fails.
+pub fn compress_file(
+    _input: &Path,
+    _output: &Path,
+    _cancelled: &dyn Fn() -> bool,
+    _on_progress: &mut dyn FnMut(u64),
+) -> Result<Stats, CompressError> {
+    Ok(Stats {
+        original_size: 0,
+        new_size: 0,
+        duration: Duration::ZERO,
+    })
+}
+
 /// The suffix that marks a gzip file. A run that gets no output name adds
 /// this suffix to the input name.
 const GZIP_SUFFIX: &str = ".gz";
