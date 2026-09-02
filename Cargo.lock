@@ -2631,6 +2631,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gitscratch",
+ "pulldown-cmark",
  "tempfile",
  "unicode-width",
 ]
@@ -3658,7 +3659,9 @@ dependencies = [
  "notify",
  "tempfile",
  "termsize",
+ "termwindow",
  "testcolor",
+ "textfit",
  "unicode-width",
 ]
 
@@ -5398,6 +5401,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "dirs",
+ "gitscratch",
  "names",
  "repowalker",
  "serde",
@@ -7611,6 +7615,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "termwindow"
+version = "0.1.0"
+
+[[package]]
 name = "termwiz"
 version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7657,6 +7665,13 @@ name = "testcolor"
 version = "0.1.0"
 dependencies = [
  "colored",
+]
+
+[[package]]
+name = "textfit"
+version = "0.1.0"
+dependencies = [
+ "unicode-width",
 ]
 
 [[package]]
@@ -9338,6 +9353,24 @@ dependencies = [
  "buildinfo",
  "clap",
  "listeners",
+]
+
+[[package]]
+name = "wn"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buildinfo",
+ "clap",
+ "colored",
+ "serde_json",
+ "tempfile",
+ "termsize",
+ "termwindow",
+ "testcolor",
+ "textfit",
+ "thiserror 2.0.20",
+ "unicode-width",
 ]
 
 [[package]]

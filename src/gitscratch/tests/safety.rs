@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use gitscratch::testing::conflicting_repo;
-use gitscratch::{Conflicts, Files, Hunks, NoInheritedRepository, Repo, Scratch};
+use gitscratch::{Conflicts, Files, Hunks, Repo, Scratch};
 
 /// Replay `branch` onto `onto` the way a consumer does: check it out detached
 /// in the scratch worktree, then rebase.
@@ -270,26 +270,19 @@ fn never_disturbs_other_worktrees_whose_directories_are_temporarily_missing() {
         "replay dropped an unrelated worktree from the repo:\n{listed}"
     );
 
-    // The volume comes back.
+    // The volume comes back, and the worktree still works - asked through the
+    // fixture rather than by spawning git here, because the fixture is what
+    // sheds the git environment this process inherited. A bare `git status`
+    // under a hook's relative `GIT_INDEX_FILE` resolves the index inside this
+    // very worktree, where `.git` is a file, and fails for a reason that has
+    // nothing to do with what is being tested. If it fails now, the panic
+    // carries git's own account of why.
     std::fs::rename(&parked, &elsewhere).expect("restore the worktree directory");
-    // Scrubbed like every other spawn in this crate: an inherited `GIT_DIR`
-    // outranks even `-C`, so this would report on the hook's repository - which
-    // is alive and well - and call the restored worktree healthy without ever
-    // having looked at it.
-    let status = Command::new("git")
-        .args([
-            "-C",
-            elsewhere.to_str().expect("utf-8 worktree path"),
-            "status",
-        ])
-        .without_inherited_repository()
-        .output()
-        .expect("run git status in the restored worktree");
-    assert!(
-        status.status.success(),
-        "the restored worktree is no longer a working worktree:\n{}",
-        String::from_utf8_lossy(&status.stderr)
-    );
+    repo.git(&[
+        "-C",
+        elsewhere.to_str().expect("utf-8 worktree path"),
+        "status",
+    ]);
 }
 
 /// `rerere` - "reuse recorded resolution" - is the one git feature that makes a

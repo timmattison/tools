@@ -28,9 +28,10 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
-use crate::{
-    collect_snapshot, effective_terminal_height, effective_terminal_width, render_frame,
-    FrameTiming, Render, RenderConfig, DEFAULT_TERMINAL_HEIGHT, DEFAULT_TERMINAL_WIDTH,
+use crate::{collect_snapshot, render_frame, FrameTiming, Render, RenderConfig};
+use termwindow::{
+    effective_terminal_height, effective_terminal_width, DEFAULT_TERMINAL_HEIGHT,
+    DEFAULT_TERMINAL_WIDTH,
 };
 
 /// Which rendering mode `gsw` is running in. The mode — not ambient env
@@ -1670,8 +1671,8 @@ fn restore_terminal() {
 mod tests {
     use super::*;
     use crate::testrepo;
-    use crate::WRAPPER_CHROME_ROWS;
     use ignore::gitignore::GitignoreBuilder;
+    use termwindow::WRAPPER_CHROME_ROWS;
 
     /// A [`RenderConfig`] for the fixture-backed walk tests: no explicit base,
     /// no caps, no log rows, no color. Only the git work matters here — the

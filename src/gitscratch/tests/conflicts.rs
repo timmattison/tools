@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use gitscratch::testing::awkward_names_repo;
 use gitscratch::testing::{
     conflicting_repo, contested_region_repo, equal_hunks_unequal_stops_repo,
-    independent_branches_repo, multi_byte_names_repo,
+    independent_branches_repo, multi_byte_names_repo, two_region_conflict_in_a_quoted_path_repo,
 };
-use gitscratch::{Conflicts, Hunks, Scratch, Stops};
+use gitscratch::{Conflicts, Files, Hunks, Scratch, Stops};
 
 /// Replay `branch` onto `onto` the way a consumer does: check it out detached
 /// in the scratch worktree, then rebase.
@@ -219,4 +219,40 @@ fn absorbing_a_step_folds_its_breakdown_into_the_running_total() {
         "a file hit by both steps should carry the sum of the two"
     );
     assert_eq!(total.hunks(), Hunks::new(10));
+}
+
+/// Git C-quotes a non-ASCII path when it prints one per line, so the name it
+/// reports for a conflicted `café.txt` is `"caf\303\251.txt"` - which names
+/// nothing on disk. Read literally it costs the replay both of its answers at
+/// once: the hunk count collapses to the one decision an unreadable conflict
+/// still costs, however many regions the file really has, and the name the
+/// caller is shown is git's escaping rather than the file the developer would
+/// have to open.
+#[test]
+fn counts_every_region_of_a_conflicted_file_git_reports_under_a_quoted_name() {
+    let repo = two_region_conflict_in_a_quoted_path_repo();
+    let scratch = repo.scratch("main");
+
+    let conflicts = replay(&scratch, "right", "left");
+
+    // The shape first, so the assertions that matter cannot pass by having
+    // replayed something other than the one two-region conflict.
+    assert_eq!(
+        conflicts.stops(),
+        Stops::new(1),
+        "both edits arrive in one commit, so the rebase should halt exactly once: {conflicts:?}"
+    );
+    assert_eq!(
+        conflicts.files(),
+        Files::new(1),
+        "one file is contested, so one file should be reported: {conflicts:?}"
+    );
+
+    assert_eq!(
+        conflicts.file_hunks().collect::<Vec<_>>(),
+        vec![(Path::new("café.txt"), Hunks::new(2))],
+        "the two contested regions are twelve lines apart, so git leaves two conflict markers in \
+         the file and a human has two decisions to make - a count of one means the file was never \
+         read, because the name it was looked up under was git's escaping of it: {conflicts:?}"
+    );
 }

@@ -125,6 +125,72 @@ fn still_calls_it_a_tie_when_the_whole_cost_key_matches() {
     assert!(stdout.contains(TIE_ADVICE), "got:\n{stdout}");
 }
 
+/// The same rule as the library keeps, stated where the user actually meets it:
+/// a replay grist could not carry out may reach them as an explanation, never as
+/// a number.
+///
+/// The branches here touch nothing in common, which is why this is the input
+/// worth testing. Unsealed, this repository is
+/// [`still_calls_it_a_tie_when_the_whole_cost_key_matches`] — every ordering
+/// costs zero and grist rightly says the order does not matter. Sealed, a replay
+/// whose failure got swallowed would collapse to those same zeroes and print
+/// that same shrug, and the user would take "pick whichever you prefer" as an
+/// answer to a question grist never asked git.
+///
+/// So the whole of stdout is the assertion: no table, no winner, no tie advice.
+/// The reason has to go to stderr, where a non-zero exit says the run is not an
+/// answer.
+#[cfg(unix)]
+#[test]
+fn a_failed_replay_never_reaches_the_user_as_a_cost_or_a_shrug() {
+    use gitscratch::testing::branches_behind_main_repo;
+
+    let repo = branches_behind_main_repo();
+
+    // Sealed for the run only. `main` has moved ahead of both branches, so
+    // replaying either has to write a commit and a read-only object database
+    // cannot - while `git worktree add` writes no objects, so what fails is the
+    // replay rather than grist's setup.
+    let sealed = repo.seal_object_store();
+    let output = grist(repo.path(), &["--onto", "main", "alpha", "beta"]);
+    // Released before a single assertion runs, so a failing one cannot leave a
+    // read-only directory behind for the temporary directory to trip over.
+    drop(sealed);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "grist replayed nothing, so exiting zero tells the shell the ranking is good. \
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("Hunks"),
+        "no replay finished, so there are no costs to tabulate, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Land them in this order"),
+        "grist cannot recommend an order it failed to price, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(TIE_ADVICE),
+        "costs that are all zero because nothing was replayed are not a tie, got:\n{stdout}"
+    );
+    assert!(
+        !stderr.trim().is_empty(),
+        "a non-zero exit with nothing said leaves the user guessing what went wrong"
+    );
+    // Named, not merely present. A swallowed replay still fails this run later
+    // on - the squash cannot write against a sealed store either - so a bare
+    // non-zero exit is satisfied by the wrong failure entirely, and only the
+    // replay's own attribution tells the two apart.
+    assert!(
+        stderr.contains("could not replay 'alpha'"),
+        "stderr should name the replay that failed, got:\n{stderr}"
+    );
+}
+
 /// A branch list grist will not simulate has to be turned away cleanly. The
 /// ordering count for 25 branches does not fit in a `usize`, so announcing the
 /// run before the list is validated either panics or prints a wrapped, nonsense

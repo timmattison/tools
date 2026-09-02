@@ -17,9 +17,10 @@ use colored::{ColoredString, Colorize};
 
 use crate::age::{format_age_detailed, scale_rgb};
 use crate::lines::LineSplitter;
-use crate::render::{truncate_right, Snapshot, UpstreamStatus};
+use crate::render::{Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
 use crate::watch::{Dimensions, InputMode};
+use textfit::truncate_right;
 
 /// Most rows a status message is allowed to occupy under the frame.
 ///

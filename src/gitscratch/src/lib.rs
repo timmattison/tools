@@ -69,8 +69,8 @@ pub mod scratch;
 pub mod testing;
 
 pub use git::{
-    Git, GitOutput, NoInheritedIdentity, NoInheritedRepository, INHERITED_IDENTITY_VARS,
-    REPOSITORY_LOCATION_VARS,
+    shed_inherited_git_environment, Git, GitOutput, NoInheritedIdentity, NoInheritedRepository,
+    INHERITED_IDENTITY_VARS, REPOSITORY_LOCATION_VARS,
 };
 pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
 pub use repo::Repo;

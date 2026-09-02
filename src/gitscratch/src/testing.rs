@@ -76,7 +76,16 @@ impl TestRepo {
     }
 
     fn git_in(&self, cwd: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        // The same immunity the runner has, from the same list, because a
+        // fixture is not exempt from an inherited environment just because it is
+        // only building something to test with. A test suite run from inside a
+        // git hook inherits a *relative* `GIT_INDEX_FILE`, and a linked
+        // worktree's `.git` is a file, so a fixture that keeps it cannot add one
+        // at all - it fails before the code under test is ever reached.
+        crate::git::shed_inherited_git_environment(&mut command);
+
+        let output = command
             .args(args)
             .current_dir(cwd)
             .without_inherited_repository()
@@ -128,6 +137,93 @@ impl TestRepo {
             self.git(&["add", name]);
         }
         self.git(&["commit", "-q", "-m", message]);
+    }
+
+    /// Commit `contents` under a file name given as raw bytes, and return the
+    /// id of the commit that holds it.
+    ///
+    /// `name` never reaches the filesystem: the blob, the tree and the commit
+    /// are written straight into the object database, by `hash-object`,
+    /// `mktree` and `commit-tree`. That is not a shortcut, it is the only route
+    /// there. A name that is not valid UTF-8 cannot be created on disk on macOS
+    /// at all — APFS rejects it with `EILSEQ`, so `std::fs::write` fails before
+    /// git is asked anything — and `#[cfg(unix)]` does not rescue an on-disk
+    /// fixture either, because macOS *is* unix. The object store has no such
+    /// opinion on any platform, which is what makes this portable.
+    ///
+    /// It is also the honest fixture rather than a contrivance. Git records a
+    /// path as bytes, so a repository cloned from a filesystem that does permit
+    /// such a name — a latin-1 name on Linux, say — holds exactly what this
+    /// builds, and the developer running the replay is on the machine that
+    /// cannot spell it.
+    ///
+    /// The tree record goes in on stdin, which is what lets a byte no `&str`
+    /// argument could carry become a path. The commit is parentless and nothing
+    /// references it, so it is reachable only by the id returned here.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `git` cannot be spawned or any of the three steps fails.
+    pub fn commit_file_named_by_bytes(&self, name: &[u8], contents: &str, message: &str) -> String {
+        let blob = self.git_with_stdin(&["hash-object", "-w", "--stdin"], contents.as_bytes());
+
+        // `mktree`'s build-tree-entry format: mode, type and object id
+        // space-separated, then a tab, then the name. `-z` terminates the
+        // record with a NUL instead of a newline, and turns off the quoting git
+        // would otherwise apply to the name on the way *in* as well as out.
+        let mut record = format!("100644 blob {blob}\t").into_bytes();
+        record.extend_from_slice(name);
+        record.push(0);
+        let tree = self.git_with_stdin(&["mktree", "-z"], &record);
+
+        self.git(&["commit-tree", &tree, "-m", message])
+    }
+
+    /// Run a git command in the repo with `stdin` piped to it, panicking on
+    /// failure.
+    ///
+    /// Separate from [`TestRepo::git`] because that one's arguments are `&str`,
+    /// and the one thing a fixture cannot say in UTF-8 is a path git records as
+    /// bytes. Stdin is the way in that has no such constraint.
+    fn git_with_stdin(&self, args: &[&str], stdin: &[u8]) -> String {
+        use std::io::Write as _;
+
+        let mut command = Command::new("git");
+        // The same immunity `git_in` takes, for the same reason: a fixture that
+        // inherits a redirected `GIT_DIR` or `GIT_INDEX_FILE` writes its
+        // objects into the developer's real repository instead of this one.
+        crate::git::shed_inherited_git_environment(&mut command);
+
+        let mut child = command
+            .args(args)
+            .current_dir(self.dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+
+        // Taken and dropped, so git sees end-of-input rather than waiting on a
+        // pipe this process still holds open.
+        child
+            .stdin
+            .take()
+            .expect("git's stdin was piped")
+            .write_all(stdin)
+            .unwrap_or_else(|e| panic!("failed to write stdin to git {args:?}: {e}"));
+
+        let output = child
+            .wait_with_output()
+            .unwrap_or_else(|e| panic!("failed to wait for git {args:?}: {e}"));
+
+        assert!(
+            output.status.success(),
+            "git {args:?} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     /// Create `name` at HEAD and check it out.
@@ -316,6 +412,88 @@ pub fn not_a_repository() -> NotARepo {
     );
 
     NotARepo { dir }
+}
+
+#[cfg(unix)]
+impl TestRepo {
+    /// Make the repository's object database unwritable until the returned
+    /// guard is dropped, so any git command that has to add an object fails.
+    ///
+    /// This is the one cause of a failed commit write that is reachable through
+    /// this harness. Signing, hooks and the editor — the other everyday ways a
+    /// commit fails to be written — are all pinned off by `Git::safety_config`,
+    /// and a scratch worktree does not get an object database of its own: it
+    /// writes its objects straight into the developer's real one. Sealing that
+    /// database is therefore how a test puts a replay in the state where git
+    /// halts the rebase with nothing left to merge and the commit *not*
+    /// written.
+    ///
+    /// Only directories are sealed, and only their write bits, so git can still
+    /// read and traverse the store — it simply cannot add to it. Every original
+    /// mode is restored on drop, which the temporary directory's own removal
+    /// depends on.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the object database cannot be walked or its permissions cannot
+    /// be changed.
+    #[must_use]
+    pub fn seal_object_store(&self) -> SealedObjectStore {
+        let mut restore = Vec::new();
+        seal_directories_under(&self.dir.path().join(".git").join("objects"), &mut restore);
+        SealedObjectStore { restore }
+    }
+}
+
+/// A repository object database held read-only for as long as this guard lives.
+///
+/// Built by [`TestRepo::seal_object_store`], which explains what it is for.
+#[cfg(unix)]
+pub struct SealedObjectStore {
+    /// Every directory sealed, with the mode it had beforehand, in walk order.
+    restore: Vec<(PathBuf, std::fs::Permissions)>,
+}
+
+#[cfg(unix)]
+impl Drop for SealedObjectStore {
+    fn drop(&mut self) {
+        // Exactly the walk, run backwards. The order is not load-bearing -
+        // only write bits were ever touched, so traversal never stopped
+        // working - but an unwind that mirrors the walk is one less thing to
+        // reason about. Best effort: a panic here would replace whatever
+        // failure the test was actually reporting.
+        for (path, permissions) in self.restore.drain(..).rev() {
+            let _ = std::fs::set_permissions(&path, permissions);
+        }
+    }
+}
+
+/// Strip the write bits from `path` and every directory beneath it, recording
+/// what each one had so the guard can put it back.
+#[cfg(unix)]
+fn seal_directories_under(path: &Path, restore: &mut Vec<(PathBuf, std::fs::Permissions)>) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let original = std::fs::metadata(path)
+        .unwrap_or_else(|e| panic!("read permissions of {}: {e}", path.display()))
+        .permissions();
+
+    // Children before their parent, so the root of the walk is recorded last
+    // and the guard's reverse unwind starts there.
+    for entry in std::fs::read_dir(path)
+        .unwrap_or_else(|e| panic!("list {}: {e}", path.display()))
+        .flatten()
+    {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            seal_directories_under(&entry.path(), restore);
+        }
+    }
+
+    let mut sealed = original.clone();
+    sealed.set_mode(original.mode() & !0o222);
+    std::fs::set_permissions(path, sealed)
+        .unwrap_or_else(|e| panic!("seal {}: {e}", path.display()));
+    restore.push((path.to_path_buf(), original));
 }
 
 /// A numbered file with `count` lines, so edits can be placed far enough apart
@@ -675,6 +853,250 @@ pub fn nested_conflict_repo() -> TestRepo {
     }
 
     repo.checkout("main");
+    repo
+}
+
+/// A branch that modifies the file main deleted, so replaying `branch` onto
+/// `main` is a modify/delete conflict.
+///
+/// That conflict is the shape for testing what happens when git cannot *write*
+/// a commit, because its auto-resolution needs no new object: staging the
+/// surviving version of `x.txt` stages a blob the object database already
+/// holds. So `git add -A` still succeeds against a sealed object store - see
+/// [`TestRepo::seal_object_store`] - the replay gets all the way to
+/// `rebase --continue`, and the commit write is the only thing that fails,
+/// leaving the resolution staged and the rebase halted with nothing unmerged.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn modify_delete_repo() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit_file("x.txt", "base\n", "base");
+
+    repo.branch("branch");
+    repo.commit_file("x.txt", "the branch's version\n", "branch modifies x");
+
+    repo.checkout("main");
+    repo.git(&["rm", "-q", "x.txt"]);
+    repo.git(&["commit", "-q", "-m", "main deletes x"]);
+
+    repo
+}
+
+/// Two independent branches, plus a `main` that has moved on since they were
+/// cut. Nothing conflicts — each branch owns a file of its own, and main's extra
+/// commit touches neither — but neither branch is a fast-forward any more, so
+/// replaying one onto `main` has to *write* a commit rather than just move a
+/// ref.
+///
+/// That is what makes a failed commit write observable. The pick applies
+/// cleanly, so git has nothing to leave unmerged and nothing to leave staged;
+/// when it cannot write the commit it rolls the index back and reschedules the
+/// pick. The rebase is then halted with nothing unmerged and nothing dirty
+/// anywhere — a state that uncommitted content alone cannot tell apart from a
+/// commit that genuinely became empty. Seal the object database with
+/// [`TestRepo::seal_object_store`] to reach it.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn branches_behind_main_repo() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit_file("shared.txt", &numbered_lines(30), "base");
+
+    repo.branch("alpha");
+    repo.commit_file("alpha.txt", "alpha work\n", "alpha work");
+
+    repo.checkout("main");
+    repo.branch("beta");
+    repo.commit_file("beta.txt", "beta work\n", "beta work");
+
+    repo.checkout("main");
+    repo.commit_file("main.txt", "main moved on\n", "main moves ahead");
+
+    repo
+}
+
+/// [`branches_behind_main_repo`]'s shape with the branch's work moved into two
+/// paths git will not hand back verbatim: `café.txt`, which git C-quotes into
+/// `"caf\303\251.txt"` whenever it prints a path on a line of its own, and
+/// ` leading space.txt`, which git prints as it is but which any trimming of
+/// that line silently shortens.
+///
+/// Both are here because a replay reads paths out of one git invocation and
+/// feeds them straight back into the next as pathspecs, and git does not dequote
+/// a pathspec — so a name that changed on the way out matches nothing on the way
+/// back in, and a commit whose work is nowhere in the new base looks like a
+/// commit that adds nothing to it. Neither name is plainly spelled,
+/// deliberately: one ordinary path in the same commit would come back matching,
+/// the probe would find *its* work missing and refuse on that alone, and the
+/// silence of the other two would never show.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn branches_behind_main_with_quoted_and_space_led_paths_repo() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit_file("shared.txt", &numbered_lines(30), "base");
+
+    repo.branch("branch");
+    repo.commit_files(
+        &[
+            ("café.txt", "the branch's work\n"),
+            (" leading space.txt", "more of the branch's work\n"),
+        ],
+        "branch work",
+    );
+
+    repo.checkout("main");
+    repo.commit_file("main.txt", "main moved on\n", "main moves ahead");
+
+    repo
+}
+
+/// [`branches_behind_main_repo`]'s shape with the branch's work moved into a
+/// path git hands back verbatim and then reads back as something else entirely:
+/// `:/foo.txt`, a `foo.txt` inside a directory literally named `:`.
+///
+/// Nothing is lost on the way out here — the name is plain ASCII, so git neither
+/// quotes it nor leaves anything for a trim to eat — and that is the point. The
+/// mangling happens on the way back in, because a pathspec is not a path: a
+/// leading `:` is pathspec magic, and `:/` specifically means *from the top of
+/// the working tree*. Fed back as a pathspec the name therefore asks about the
+/// root `foo.txt` instead of the one the commit added, and `foo.txt` at the root
+/// is exactly what this fixture puts there — committed in the base, touched by
+/// neither side afterwards, and so identical in the replayed commit and the new
+/// base. A probe asking whether the commit's work is already in the new base
+/// gets an empty diff back, the honest answer about the *other* file, and reads
+/// it as yes.
+///
+/// That points the opposite way from the quoted names in
+/// [`branches_behind_main_with_quoted_and_space_led_paths_repo`], which is why
+/// it is worth a fixture of its own. A pathspec that matches nothing can only
+/// grow the set of paths a probe finds missing, and a bigger set only ever
+/// produces a refusal nobody needed; a pathspec that matches the *wrong* file
+/// can shrink that set to empty, which is a commit reclassified as adding
+/// nothing to the new base, skipped, and gone.
+///
+/// The branch's commit touches no plainly-spelled path at all, for the same
+/// reason that one does not: one ordinary file alongside would come back
+/// matching, the probe would find *its* work missing and refuse on that alone,
+/// and the magic name's silence would never show.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, the `:` directory or
+/// the file inside it not writable, or a command failing.
+pub fn branches_behind_main_with_a_pathspec_magic_path_repo() -> TestRepo {
+    // The file the branch adds, and - at the repository root, where `:/` sends
+    // anything that reads the name as magic - the decoy that answers for it.
+    const DECOY: &str = "foo.txt";
+    const MAGIC_DIRECTORY: &str = ":";
+
+    let repo = TestRepo::init();
+    repo.commit_files(
+        &[
+            ("shared.txt", &numbered_lines(30)),
+            (DECOY, "the file pathspec magic answers about instead\n"),
+        ],
+        "base",
+    );
+
+    repo.branch("branch");
+    // Not `commit_files`: it would neither make the `:` directory nor stage what
+    // landed in it, because it stages by handing the name to `git add`, where a
+    // leading `:` is read as magic exactly as it is everywhere else. Staging
+    // this file needs the same literal reading the code under test needs.
+    std::fs::create_dir(repo.path().join(MAGIC_DIRECTORY)).expect("create the ':' directory");
+    std::fs::write(
+        repo.path().join(MAGIC_DIRECTORY).join(DECOY),
+        "the branch's work\n",
+    )
+    .expect("write fixture file");
+    let magic_path = format!("{MAGIC_DIRECTORY}/{DECOY}");
+    repo.git(&["--literal-pathspecs", "add", "--", &magic_path]);
+    repo.git(&["commit", "-q", "-m", "branch work"]);
+
+    repo.checkout("main");
+    repo.commit_file("main.txt", "main moved on\n", "main moves ahead");
+
+    repo
+}
+
+/// [`conflicting_repo`]'s shape, moved into `café.txt` and stretched to two
+/// contested regions: both branches rewrite line 10 and line 22 of the same
+/// file, twelve lines apart so git's 3-line diff context cannot merge them into
+/// one hunk.
+///
+/// Two regions rather than one is the whole point. A conflicted file is counted
+/// by reading it back off disk by the name git reported, so a name git quoted on
+/// the way out names nothing on disk — and the count falls back to the one
+/// decision a file with no readable content still costs. One contested region
+/// would score one either way; two makes the fallback visible.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn two_region_conflict_in_a_quoted_path_repo() -> TestRepo {
+    const FIRST_CONTESTED_LINE: usize = 10;
+    const SECOND_CONTESTED_LINE: usize = 22;
+    const CONTESTED_FILE: &str = "café.txt";
+
+    let repo = TestRepo::init();
+    let base = numbered_lines(30);
+    repo.commit_file(CONTESTED_FILE, &base, "base");
+
+    repo.branch("left");
+    let left = replace_line(&base, FIRST_CONTESTED_LINE, "left-edit-first");
+    let left = replace_line(&left, SECOND_CONTESTED_LINE, "left-edit-second");
+    repo.commit_file(CONTESTED_FILE, &left, "left work");
+
+    repo.checkout("main");
+    repo.branch("right");
+    let right = replace_line(&base, FIRST_CONTESTED_LINE, "right-edit-first");
+    let right = replace_line(&right, SECOND_CONTESTED_LINE, "right-edit-second");
+    repo.commit_file(CONTESTED_FILE, &right, "right work");
+
+    repo.checkout("main");
+    repo
+}
+
+/// A branch whose first commit arrives at content `main` has since reached by a
+/// different route, followed by a second commit that is real work. Replaying the
+/// branch onto `main` empties that first commit while the second one still has
+/// to survive — the legitimate half of the halt that a commit git could not write
+/// shares.
+///
+/// The *different route* is what makes the shape work. `main` walks
+/// `x1 -> x2 -> x3` in two commits and the branch jumps `x1 -> x3` in one, so no
+/// commit on either side shares a patch id with a commit on the other. Without
+/// that, git recognises the branch's commit as already upstream and drops it
+/// before the rebase ever halts; with it, the commit applies, produces exactly
+/// what HEAD already holds, and git stops on it.
+///
+/// `y.txt` is untouched by `main` and rewritten by the branch's second commit,
+/// so a replay that walks the whole rebase leaves `x.txt` at `x3` and `y.txt` at
+/// `y2`, and one that gave up somewhere in the middle does not.
+///
+/// Reaching the stop still takes `--empty=stop` on git's command line — see the
+/// test that uses this repo for why nothing else gets there.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn commit_emptied_by_main_repo() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit_files(&[("x.txt", "x1\n"), ("y.txt", "y1\n")], "base");
+
+    repo.branch("branch");
+    repo.commit_file("x.txt", "x3\n", "branch jumps x straight to x3");
+    repo.commit_file("y.txt", "y2\n", "branch's real work on y");
+
+    repo.checkout("main");
+    repo.commit_file("x.txt", "x2\n", "main steps x to x2");
+    repo.commit_file("x.txt", "x3\n", "main steps x to x3");
+
     repo
 }
 
