@@ -66,11 +66,35 @@ struct Args {
     #[arg(long)]
     lsof: bool,
 
+    /// Respect case in the name search.
+    ///
+    /// Without this flag a substring search ignores case. A regular expression
+    /// carries its own case rule in the `(?i)` inline flag, so this flag leaves
+    /// `--regex` alone.
+    #[arg(long)]
+    case_sensitive: bool,
+
+    /// Search the whole command line, not only the executable name.
+    ///
+    /// This is the reach that `pgrep -f` has.
+    #[arg(long, short = 'f')]
+    full: bool,
+
     /// Raw output without table formatting.
     ///
     /// Produces columnar output similar to traditional ps.
     #[arg(long)]
     raw: bool,
+}
+
+/// How a name pattern is compared against a process.
+struct MatchOptions {
+    /// Treat the pattern as a regular expression.
+    use_regex: bool,
+    /// Respect case in the substring search.
+    case_sensitive: bool,
+    /// Search the whole command line instead of the executable name.
+    match_full_command: bool,
 }
 
 /// Represents the type of pattern provided by the user.
@@ -325,7 +349,7 @@ fn status_code_to_string(status: u8) -> String {
 ///
 /// * `system` - The sysinfo System instance
 /// * `pattern` - The parsed pattern type
-/// * `use_regex` - Whether to use regex matching for name patterns
+/// * `options` - How a name pattern is compared
 /// * `include_cwd` - Whether to include CWD information
 ///
 /// # Returns
@@ -338,12 +362,12 @@ fn status_code_to_string(status: u8) -> String {
 fn collect_processes(
     system: &System,
     pattern: &PatternType,
-    use_regex: bool,
+    options: &MatchOptions,
     include_cwd: bool,
 ) -> Result<Vec<ProcessInfo>> {
     let mut processes = Vec::new();
     let regex = match pattern {
-        PatternType::NamePattern(p) if use_regex => {
+        PatternType::NamePattern(p) if options.use_regex => {
             Some(Regex::new(p).context("Invalid regex pattern")?)
         }
         _ => None,
@@ -358,16 +382,24 @@ fn collect_processes(
         let pid_u32 = pid.as_u32();
         let name = process.name().to_string_lossy().to_string();
 
+        let command = process
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+
         let matches = match pattern {
             PatternType::SinglePid(p) => pid_u32 == *p,
             PatternType::MultiplePids(pids) => pids.contains(&pid_u32),
-            PatternType::NamePattern(p) => {
-                if let Some(ref re) = regex {
-                    re.is_match(&name)
-                } else {
-                    name.to_lowercase().contains(&p.to_lowercase())
-                }
-            }
+            PatternType::NamePattern(p) => matches_name_pattern(
+                p,
+                regex.as_ref(),
+                &name,
+                &command,
+                options.match_full_command,
+                options.case_sensitive,
+            ),
         };
 
         if matches {
@@ -423,13 +455,6 @@ fn collect_processes(
                     sysinfo_status
                 }
             };
-
-            let command = process
-                .cmd()
-                .iter()
-                .map(|s| s.to_string_lossy().to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
 
             let cwd = if include_cwd {
                 process.cwd().map(|p| p.to_string_lossy().to_string())
@@ -718,8 +743,20 @@ fn matches_name_pattern(
     match_full_command: bool,
     case_sensitive: bool,
 ) -> bool {
-    let _ = (pattern, regex, name, command, match_full_command, case_sensitive);
-    false
+    // A kernel thread carries no command line, so the name is all there is.
+    let subject = if match_full_command && !command.is_empty() {
+        command
+    } else {
+        name
+    };
+
+    if let Some(re) = regex {
+        return re.is_match(subject);
+    }
+    if case_sensitive {
+        return subject.contains(pattern);
+    }
+    subject.to_lowercase().contains(&pattern.to_lowercase())
 }
 
 /// Warns that a matched process belongs to another user.
@@ -1000,7 +1037,12 @@ fn main() -> Result<()> {
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
 
     // Collect matching processes
-    let processes = collect_processes(&system, &pattern, args.regex, args.cwd)?;
+    let match_options = MatchOptions {
+        use_regex: args.regex,
+        case_sensitive: args.case_sensitive,
+        match_full_command: args.full,
+    };
+    let processes = collect_processes(&system, &pattern, &match_options, args.cwd)?;
 
     if processes.is_empty() {
         match &pattern {
