@@ -76,9 +76,27 @@ pub struct ClipboardUnavailable(String);
 
 impl ClipboardUnavailable {
     /// The failure `cause` names.
+    ///
+    /// The space around the cause is dropped, and so is a period at the end of
+    /// it. A cause is a clause of a longer sentence here — the message puts it
+    /// in parentheses and then goes on with the instruction — and `arboard`
+    /// writes a whole sentence with a period on it. Keeping that period gives
+    /// the reader `.).` in the middle of one line. A cause that is nothing but
+    /// a period is kept as it is, because an error that names no cause at all
+    /// reads as a bug in the tool rather than as a state of the machine.
     #[must_use]
     pub fn new(cause: &impl fmt::Display) -> Self {
-        Self(cause.to_string())
+        let written = cause.to_string();
+        let clause = written.trim();
+        let shortened = clause.strip_suffix('.').unwrap_or(clause);
+        Self(
+            if shortened.is_empty() {
+                clause
+            } else {
+                shortened
+            }
+            .to_string(),
+        )
     }
 }
 
