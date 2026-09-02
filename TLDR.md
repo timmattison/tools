@@ -50,7 +50,6 @@ A one-line description of every program documented in the [README](./README.md),
 | `prcp` | Copies files with a Unicode progress bar; wildcards, multi-file, and verified move mode. |
 | `prgz` | Like `prcp` but gzip-compresses the file, showing progress in the console. |
 | `prhash` | Hashes files (MD5/SHA1/SHA256/SHA512/Blake3) with a progress bar, shasum-compatible output. |
-| `procinfo` | Detailed info about running processes matching a name (cwd, open files, connections). |
 | `r2-bucket-cleaner` | Lists and optionally clears all objects from a Cloudflare R2 bucket via wrangler. |
 | `rcc` | Rust Cross Compiler — simplifies cross-compilation (target detection, `Cross.toml`, build). |
 | `reposize` | Calculates the total size of a git repository, human-readable. |
@@ -61,7 +60,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `seescc` | Self-refreshing terminal viewer for sccache statistics, with sparklines and a one-shot JSON mode. |
 | `sf` | Size of Files — total size of files in directories, with optional suffix/prefix/substring filters. |
 | `sirn` | Serve It Right Now — a zero-config HTTP file server; serves files or the current directory on a git-derived port. |
-| `spv` | Smart Process Viewer — find and view processes by PID/name/regex, with optional cwd and open files. |
+| `spv` | Smart Process Viewer — find and view processes by PID/name/regex, with optional cwd, open files, environment, and network connections. |
 | `subito` | Subscribes to AWS IoT Core topics and prints received messages. |
 | `swt` | Subagent Worktree — isolated-worktree helper for parallel TDD (create/merge with green checks). |
 | `symfix` | Recursively finds and optionally fixes broken symlinks. |

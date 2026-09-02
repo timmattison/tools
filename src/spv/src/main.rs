@@ -30,15 +30,19 @@ static LSOF_AVAILABLE: OnceLock<bool> = OnceLock::new();
 /// spv 77763,82313     - Show multiple PIDs
 /// spv node            - Find processes containing 'node'
 /// spv --regex 'node.*' - Find with regex
+/// spv --full deploy   - Search the whole command line, as `pgrep -f` does
 /// spv --cwd zsh       - Show processes with their working directories
 /// spv --lsof $$       - Show open files for current shell
+/// spv --env $$        - Show the environment, credentials hidden
+/// spv --net node      - Show network connections
+/// spv --all zsh       - Show every section
 /// ```
 #[derive(Parser)]
 #[command(
     name = "spv",
     version = version_string!(),
     about = "Smart process viewer with enhanced filtering and display",
-    long_about = "Examples:\n  spv 77763           - Show process with PID 77763\n  spv 77763,82313     - Show multiple PIDs\n  spv node            - Find processes containing 'node'\n  spv --regex 'node.*' - Find with regex\n  spv --cwd zsh       - Show processes with their CWD\n  spv --lsof $$       - Show open files for process"
+    long_about = "Examples:\n  spv 77763           - Show process with PID 77763\n  spv 77763,82313     - Show multiple PIDs\n  spv node            - Find processes containing 'node'\n  spv --regex 'node.*' - Find with regex\n  spv --full deploy   - Search the whole command line, as `pgrep -f` does\n  spv --cwd zsh       - Show processes with their CWD\n  spv --lsof $$       - Show open files for process\n  spv --env $$        - Show the environment, credentials hidden\n  spv --net node      - Show network connections\n  spv --all zsh       - Show every section"
 )]
 struct Args {
     /// PID(s) or name pattern to match.
