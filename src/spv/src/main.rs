@@ -592,6 +592,25 @@ fn looks_like_credential(name: &str) -> bool {
         .any(|segment| CREDENTIAL_SEGMENTS.contains(&segment))
 }
 
+/// Parses a NUL-separated block of `NAME=VALUE` entries.
+///
+/// Both platforms deliver the environment of a process in this shape: Linux in
+/// `/proc/<pid>/environ`, macOS in the tail of the `KERN_PROCARGS2` buffer.
+///
+/// # Arguments
+///
+/// * `block` - The raw bytes of the environment block
+///
+/// # Returns
+///
+/// The name and value of each entry, in the order the kernel gave them. A value
+/// that is not valid UTF-8 is converted lossily, because a terminal cannot print
+/// the raw bytes anyway. An entry that holds no `=` gets an empty value.
+fn parse_environ_block(block: &[u8]) -> Vec<(String, String)> {
+    let _ = block;
+    Vec::new()
+}
+
 /// Hides the value of a credential-looking environment variable.
 ///
 /// # Arguments
@@ -1087,6 +1106,51 @@ mod tests {
     fn an_ordinary_value_stays_visible() {
         assert_eq!(redact_env_value("HOME", "/Users/tim", false), "/Users/tim");
         assert_eq!(redact_env_value("GREETING", "こんにちは", false), "こんにちは");
+    }
+
+    #[test]
+    fn an_environ_block_becomes_name_and_value_pairs() {
+        let block = b"HOME=/root\0PATH=/bin:/usr/bin\0";
+        assert_eq!(
+            parse_environ_block(block),
+            vec![
+                ("HOME".to_string(), "/root".to_string()),
+                ("PATH".to_string(), "/bin:/usr/bin".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_environ_value_keeps_its_own_equals_signs() {
+        assert_eq!(
+            parse_environ_block(b"OPTS=a=b=c\0"),
+            vec![("OPTS".to_string(), "a=b=c".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_environ_entry_without_an_equals_sign_gets_an_empty_value() {
+        assert_eq!(
+            parse_environ_block(b"WEIRD\0"),
+            vec![("WEIRD".to_string(), String::new())]
+        );
+    }
+
+    #[test]
+    fn an_environ_block_carries_multi_byte_characters_through() {
+        assert_eq!(
+            parse_environ_block("GREETING=こんにちは\0EMOJI=🎉\0".as_bytes()),
+            vec![
+                ("GREETING".to_string(), "こんにちは".to_string()),
+                ("EMOJI".to_string(), "🎉".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_environ_block_holds_no_entries() {
+        assert!(parse_environ_block(b"").is_empty());
+        assert!(parse_environ_block(b"\0\0").is_empty());
     }
 
     #[cfg(target_os = "macos")]
