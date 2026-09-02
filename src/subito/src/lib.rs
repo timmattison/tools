@@ -1,9 +1,10 @@
 //! `subito` — subscribe to AWS IoT Core topics over a signed WebSocket.
 //!
 //! The crate holds the parts of the tool that a test can drive without a
-//! network and without an AWS account. [`cli`] states the command line, and
+//! network and without an AWS account. [`cli`] states the command line,
 //! [`payload`] turns the bytes of one MQTT message into the text the tool
-//! prints.
+//! prints, and [`presign`] builds the signed WebSocket URL that AWS IoT Core
+//! accepts for an MQTT connection.
 //!
 //! [`payload::format_payload`] is the part that keeps a terminal safe. An MQTT
 //! payload is a byte string of any content, and a byte string that holds an
@@ -16,3 +17,4 @@
 
 pub mod cli;
 pub mod payload;
+pub mod presign;
