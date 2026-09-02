@@ -171,13 +171,11 @@ async fn subscribe(cli: &Cli) -> Result<()> {
 /// The supervisor reads a [`SessionError`], and it starts another attempt for
 /// every failure that a new connection repairs. A credentials chain that timed
 /// out and a clock that moved are both such failures, so this function gives
-/// [`SessionError::Connection`]: the tool reached no broker, and the next
-/// attempt reads the credentials again.
+/// [`SessionError::connect`]: the tool reached no broker, and the next attempt
+/// reads the credentials again.
 ///
 /// The message of `failure` and of every failure under it stays in the answer,
 /// because the supervisor prints the whole chain of what it retries.
 fn connect_failure(failure: &anyhow::Error, what: &str) -> SessionError {
-    SessionError::Connection(Box::new(rumqttc::ConnectionError::Io(
-        std::io::Error::other(format!("{what}: {failure:#}")),
-    )))
+    SessionError::connect(format!("{what}: {failure:#}").into())
 }

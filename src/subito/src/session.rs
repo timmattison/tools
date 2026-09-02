@@ -84,6 +84,15 @@ pub enum SessionError {
     /// The process could not wait for the interrupt signal.
     #[error("the process could not wait for the interrupt signal")]
     Signal(#[source] std::io::Error),
+
+    /// The tool could not build the connection of an attempt.
+    ///
+    /// Reading the credentials and signing the URL both happen before the
+    /// tool opens a connection, so neither failure is a failure of the
+    /// connection. The box takes the failure of whichever step it was, and
+    /// [`SessionError::connect`] is the one entrance.
+    #[error("the tool could not open a connection to the broker")]
+    Connect(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl SessionError {
@@ -95,9 +104,7 @@ impl SessionError {
     /// repairs both, so the supervisor waits and tries again.
     #[must_use]
     pub fn connect(source: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        SessionError::Connection(Box::new(rumqttc::ConnectionError::Io(
-            std::io::Error::other(source),
-        )))
+        SessionError::Connect(source)
     }
 }
 
