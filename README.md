@@ -66,7 +66,6 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - prcp
     - Copies files with a beautiful progress bar using Unicode block characters. Supports wildcards, multi-file copy,
       and move mode (`--rm`) that verifies SHA256 before removing source. Press space to pause/resume, Ctrl+C to cancel.
-      Run `prcp --shell-setup` to add a `prmv` command for convenient moves.
     - To install: `cargo install --git https://github.com/timmattison/tools prcp`
 - prgz
     - Similar to `prcp` but instead of copying a file it gzip compresses it. It draws the same one-line progress bar
@@ -1369,13 +1368,20 @@ Copy files with a beautiful progress bar: `prcp <source>... <destination>`
 - `--continue-on-error` to keep going if some files fail
 - `-y` to skip confirmation prompts
 
-**Shell Integration:**
+**Want a `prmv` shorthand?**
 
-Run `prcp --shell-setup` to add a `prmv` function to your shell config. This provides a convenient move command:
+`prcp` installs nothing into your shell config. `prcp --rm` is the whole move
+command, and a shorthand for it is yours to define:
 
 ```bash
-prmv file.txt destination/   # Same as: prcp --rm file.txt destination/
+alias prmv='prcp --rm'       # add this to your ~/.zshrc or ~/.bashrc
+prmv file.txt destination/   # same as: prcp --rm file.txt destination/
 ```
+
+Earlier versions of `prcp` had a `--shell-setup` flag that wrote that function
+for you. The flag is gone. A `prmv` function it already wrote keeps working,
+because `prcp --rm` is unchanged, and you can replace it with the alias above
+whenever you like.
 
 ## prhash
 
