@@ -123,9 +123,9 @@ impl ShellCommand {
 /// information about available commands.
 #[derive(Debug, Clone)]
 pub struct ShellIntegration {
-    /// Short name of the tool (e.g., "cwt", "prcp").
+    /// Short name of the tool (e.g., "cwt", "nwt").
     tool_name: String,
-    /// Human-readable description (e.g., "Change Worktree", "Progress Copy").
+    /// Human-readable description (e.g., "Change Worktree", "New Worktree").
     tool_description: String,
     /// The shell code to add (functions, aliases, etc.).
     shell_code: String,
@@ -1185,46 +1185,6 @@ alias ll='ls -la'
         assert!(result.content.contains("alias wtn='wt -n'"));
         // Should have end marker
         assert!(result.content.contains("# End cwt shell integration"));
-    }
-
-    #[test]
-    fn test_prcp_old_format_upgrade() {
-        // Simulates the actual old prcp format (before end marker was added)
-        let integration = ShellIntegration::new(
-            "prcp",
-            "Progress Copy",
-            r#"
-function prmv() {
-    prcp --rm "$@"
-}
-"#,
-        )
-        .with_old_end_marker(r#"prcp --rm "$@""#);
-
-        let old_zshrc = r#"# User config
-export EDITOR=vim
-
-# prcp - Progress Copy shell integration
-# Added by: prcp --shell-setup
-function prmv() {
-    prcp --rm "$@"
-}
-
-# Other aliases
-alias ll='ls -la'
-"#;
-        let result = integration.upgrade_old_installation(old_zshrc);
-
-        // Should not need warning (old end marker was found)
-        assert!(!result.needs_warning);
-        // Should preserve user config before
-        assert!(result.content.contains("export EDITOR=vim"));
-        // Should preserve other aliases after
-        assert!(result.content.contains("alias ll='ls -la'"));
-        // Should have end marker now
-        assert!(result.content.contains("# End prcp shell integration"));
-        // Should have new function
-        assert!(result.content.contains("function prmv()"));
     }
 
     // ========== Safety tests ==========
