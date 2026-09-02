@@ -117,7 +117,9 @@ fn copy(
     current_dir: &Path,
     out: &mut dyn Write,
 ) -> Result<(), RunError> {
-    todo!("copy mode writes the absolute directory to the clipboard")
+    let copied = mode::copied_path(current_dir)?;
+    clipboard.write(&copied)?;
+    writeln!(out, "Copied to clipboard: {copied}").map_err(RunError::Output)
 }
 
 /// Paste mode: writes the `cd` line for the directory the clipboard names.
@@ -132,7 +134,9 @@ fn copy(
 /// [`RunError::Paste`] when the clipboard names no directory this tool can go
 /// to, and [`RunError::Output`] when the line cannot be written.
 fn paste(clipboard: &mut dyn Clipboard, out: &mut dyn Write) -> Result<(), RunError> {
-    todo!("paste mode writes the cd line for the directory in the clipboard")
+    let copied = clipboard.read()?;
+    let line = mode::cd_command(&copied)?;
+    writeln!(out, "{line}").map_err(RunError::Output)
 }
 
 /// The mode `cli` names, over the clipboard the environment names.
@@ -239,7 +243,10 @@ mod tests {
 
         copy(&mut clipboard, &child, &mut out).expect("the directory is copied");
 
-        assert_eq!(clipboard.read().expect("the clipboard is read"), text(&child));
+        assert_eq!(
+            clipboard.read().expect("the clipboard is read"),
+            text(&child)
+        );
         assert_eq!(
             written(out),
             format!("Copied to clipboard: {}\n", text(&child))
@@ -256,7 +263,10 @@ mod tests {
 
         copy(&mut clipboard, &child, &mut out).expect("the directory is copied");
 
-        assert_eq!(clipboard.read().expect("the clipboard is read"), text(&child));
+        assert_eq!(
+            clipboard.read().expect("the clipboard is read"),
+            text(&child)
+        );
         assert!(!written(out).contains('\u{fffd}'));
     }
 
