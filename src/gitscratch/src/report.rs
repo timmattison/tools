@@ -124,10 +124,19 @@ impl<'a> Report<'a> {
         // characters. A path can be any of the three lengths at once - a CJK
         // name is one character and three bytes per glyph but two terminal
         // columns - and only the third is what a reader sees line up.
+        //
+        // `to_string_lossy` is the one place a name stops being the bytes git
+        // reported, and it is here rather than anywhere upstream on purpose: a
+        // terminal can only be handed text, so a name that is not valid UTF-8
+        // has to become U+FFFD to be printed at all. Converting it any earlier
+        // would put that name back into the map, where it names no file and
+        // costs the file its real hunk count. The measurement and the printing
+        // both read the same converted name, so the column a reader sees is the
+        // column the padding was computed for.
         let indent = " ".repeat(self.tool.width() + LABEL_SEPARATOR_WIDTH);
         let widest = conflicts
             .file_hunks()
-            .map(|(name, _)| name.width())
+            .map(|(name, _)| name.to_string_lossy().width())
             .max()
             .unwrap_or_default();
 
@@ -149,6 +158,7 @@ impl<'a> Report<'a> {
         ];
 
         for (name, hunks) in conflicts.file_hunks() {
+            let name = name.to_string_lossy();
             let gap = " ".repeat(widest.saturating_sub(name.width()) + COUNT_GAP);
             lines.push(format!("{FILE_INDENT}{name}{gap}{}", hunks.phrase()));
         }
@@ -192,6 +202,7 @@ impl<'a> Report<'a> {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
+    use std::path::PathBuf;
 
     use unicode_width::UnicodeWidthStr;
 
@@ -214,9 +225,9 @@ mod tests {
     /// The count is a [`NonZeroUsize`] in the constructor, because a file that
     /// conflicted cost at least one decision, so every fixture goes through
     /// this rather than repeating the wrap at each call site.
-    fn file(name: &str, hunks: usize) -> (String, NonZeroUsize) {
+    fn file(name: &str, hunks: usize) -> (PathBuf, NonZeroUsize) {
         (
-            name.to_string(),
+            PathBuf::from(name),
             NonZeroUsize::new(hunks).expect("a conflicted file contributes at least one hunk"),
         )
     }

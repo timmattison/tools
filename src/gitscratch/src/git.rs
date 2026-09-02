@@ -135,8 +135,8 @@ impl Git {
     /// around by anything above. Private because raw output is a footgun in the
     /// one way this crate cares about: everything public either trims it deliberately
     /// ([`Git::try_run`], [`Git::run`]) or deliberately does not
-    /// ([`Git::nul_separated`]), and which of those a caller wants is not a
-    /// choice worth re-making per call site.
+    /// ([`Git::nul_separated`], [`Git::nul_separated_paths`]), and which of
+    /// those a caller wants is not a choice worth re-making per call site.
     fn output(&self, args: &[&str]) -> Result<Output> {
         let mut command = Command::new("git");
         command
@@ -172,10 +172,10 @@ impl Git {
 
     /// Run git, returning the outcome whether or not it succeeded.
     ///
-    /// Both streams come back trimmed, which is what a caller reporting them to
-    /// a human wants and what every caller of this method does with them. A
-    /// caller reading *paths* wants the opposite and must use
-    /// [`Git::nul_separated`].
+    /// Both streams come back trimmed, and lossily decoded, which is what a
+    /// caller reporting them to a human wants and what every caller of this
+    /// method does with them. A caller reading *paths* wants the opposite on
+    /// both counts and must use [`Git::nul_separated_paths`].
     ///
     /// # Errors
     ///
@@ -211,15 +211,31 @@ impl Git {
 
     /// Run git with `-z` and return stdout split on NUL, byte for byte.
     ///
-    /// The only way to read a list of paths out of git, and the only reader
-    /// this type offers, because the line-oriented alternative it replaced could
-    /// not be made correct. `-z` is the single output mode in which git prints a
-    /// path exactly as it is stored: no C-quoting, no octal escaping, and no
-    /// ambiguity about where one path ends, since NUL is the one byte a path
-    /// cannot contain. That last part is why nothing here trims. A path may
-    /// legitimately begin or end with a space - or with U+3000, which Rust's
-    /// Unicode-aware `str::trim` eats just as readily - and a separator that
-    /// cannot occur inside a path means there is nothing to trim *for*.
+    /// The one reader that keeps git's output intact, and the base of the only
+    /// way to read a list of paths out of git, because the line-oriented
+    /// alternative it replaced could not be made correct. `-z` is the single
+    /// output mode in which git prints a path exactly as it is stored: no
+    /// C-quoting, no octal escaping, and no ambiguity about where one path ends,
+    /// since NUL is the one byte a path cannot contain. That last part is why
+    /// nothing here trims. A path may legitimately begin or end with a space -
+    /// or with U+3000, which Rust's Unicode-aware `str::trim` eats just as
+    /// readily - and a separator that cannot occur inside a path means there is
+    /// nothing to trim *for*.
+    ///
+    /// **Bytes, not text.** A field comes back as the bytes git wrote, because
+    /// on unix that is what a path *is* - an arbitrary byte string with no
+    /// encoding promised - and a lossy conversion to `String` destroys exactly
+    /// the names this reader exists to preserve: every byte outside UTF-8
+    /// becomes U+FFFD, which prints a name nobody typed and opens no file on
+    /// disk. That is the same two-part failure C-quoting causes, arriving by a
+    /// different door, and the second half is the quiet one - in this crate a
+    /// conflicted file that cannot be opened is floored at one hunk, so a file
+    /// contested in two regions reports one and the total still looks plausible.
+    ///
+    /// A caller reading a list of *paths* wants [`Git::nul_separated_paths`],
+    /// which is this plus that one conversion. This one is for output whose
+    /// fields are not paths: a `status --porcelain -z` record is `XY <path>`,
+    /// so it is read as bytes and only its tail is ever a path.
     ///
     /// `-z` goes in straight after the subcommand rather than on the end, so an
     /// argument list that finishes with `--` and a pathspec still gets it as a
@@ -232,7 +248,7 @@ impl Git {
     /// # Errors
     ///
     /// Returns an error if git could not be spawned or exited non-zero.
-    pub fn nul_separated(&self, args: &[&str]) -> Result<Vec<String>> {
+    pub fn nul_separated(&self, args: &[&str]) -> Result<Vec<Vec<u8>>> {
         let mut with_nul = args.to_vec();
         with_nul.insert(args.len().min(1), "-z");
 
@@ -246,10 +262,31 @@ impl Git {
             String::from_utf8_lossy(&output.stderr).trim()
         );
 
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .split('\0')
+        Ok(output
+            .stdout
+            .split(|byte| *byte == b'\0')
             .filter(|field| !field.is_empty())
-            .map(ToOwned::to_owned)
+            .map(<[u8]>::to_vec)
+            .collect())
+    }
+
+    /// The same NUL-separated fields, read as the paths they name.
+    ///
+    /// **The reader a call site reading a path list must use.** Everything
+    /// [`Git::nul_separated`] says about `-z`, about trimming and about bytes
+    /// applies here unchanged; this adds the one conversion that turns those
+    /// bytes into a path, and it is a conversion rather than a parse - on unix
+    /// the bytes *are* the path, so nothing is interpreted, validated or
+    /// replaced on the way.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned or exited non-zero.
+    pub fn nul_separated_paths(&self, args: &[&str]) -> Result<Vec<PathBuf>> {
+        Ok(self
+            .nul_separated(args)?
+            .into_iter()
+            .map(path_from_git)
             .collect())
     }
 
@@ -311,14 +348,18 @@ impl Git {
             // quoted and escaped with this pinned, and are just as unopenable,
             // and cost just as many uncounted hunks, as a Japanese name would
             // be without it. A path list therefore cannot be read off git's
-            // lines under any setting, which is why the only reader this type
-            // offers is [`Git::nul_separated`]: `-z` turns quoting off outright
-            // and separates on the one byte a path cannot contain.
+            // lines under any setting, which is why the reader this type offers
+            // for one is [`Git::nul_separated_paths`]: `-z` turns quoting off
+            // outright and separates on the one byte a path cannot contain, and
+            // the bytes between two separators become the path without being
+            // decoded on the way - a path on unix is bytes, and a name that is
+            // not valid UTF-8 is destroyed by a lossy conversion exactly as
+            // thoroughly as by an octal escape.
             //
             // Kept anyway, because it costs one `-c` and it narrows what a
             // future call site can do wrong. Anything reading a path back
-            // through `run` rather than `nul_separated` is a bug, but with this
-            // pinned it is a bug that survives the common case instead of
+            // through `run` rather than `nul_separated_paths` is a bug, but with
+            // this pinned it is a bug that survives the common case instead of
             // mangling every non-ASCII name in the repository. Pinning it on
             // the single door every git call goes through is what makes that
             // free.
@@ -341,6 +382,34 @@ impl Git {
     }
 }
 
+/// Take the bytes git wrote for one path as that path.
+///
+/// Free rather than a `From` impl, and defined on both platforms with the one
+/// call site in [`Git::nul_separated_paths`], because the alternative shape - a
+/// function on unix and an inline conversion elsewhere - is how the two halves
+/// drift apart unnoticed: nothing on this platform can warn that the other one
+/// is wrong, since it is never compiled here.
+///
+/// On unix a path is an arbitrary byte string, so this is a move rather than a
+/// conversion: no encoding is assumed and no byte is replaced.
+#[cfg(unix)]
+fn path_from_git(field: Vec<u8>) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+
+    PathBuf::from(std::ffi::OsString::from_vec(field))
+}
+
+/// Take the bytes git wrote for one path as that path.
+///
+/// Windows filenames are Unicode - the kernel stores them as UTF-16, and git
+/// writes them out as UTF-8 - so the lossy conversion loses nothing real here.
+/// A byte sequence this replaces is one no Windows filesystem could have been
+/// holding a name for in the first place.
+#[cfg(not(unix))]
+fn path_from_git(field: Vec<u8>) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(&field).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -353,7 +422,7 @@ mod tests {
     ///
     /// It used to be pinned indirectly, by `tests/conflicts.rs` asserting the
     /// answer a non-ASCII conflicted path produces. That stopped being a test of
-    /// this setting the moment [`Git::nul_separated`] became the only path
+    /// this setting the moment [`Git::nul_separated_paths`] became the only path
     /// reader: `-z` output is unquoted whatever `quotePath` says, so removing
     /// the pin would leave every one of those tests green. A guard nothing can
     /// fail is a guard that quietly stops working, so this asserts it against
@@ -449,8 +518,7 @@ mod tests {
             "exactly one path is staged beyond HEAD, got {staged:?}"
         );
         assert_eq!(
-            staged[0].as_bytes(),
-            BAD_NAME,
+            staged[0], BAD_NAME,
             "git reports a path as it is stored, so the reader must carry those \
              bytes back untouched rather than replacing them"
         );

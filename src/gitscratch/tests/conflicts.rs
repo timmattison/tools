@@ -5,6 +5,7 @@
 //! conflicted at all, and where the hunks landed.
 
 use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use gitscratch::testing::awkward_names_repo;
@@ -31,9 +32,9 @@ fn replay(scratch: &Scratch, branch: &str, onto: &str) -> Conflicts {
 /// `Conflicts::from_files` takes a [`NonZeroUsize`] per file, because a file
 /// that conflicted cost at least one decision, so every fixture wraps its count
 /// here rather than at each call site.
-fn file(name: &str, hunks: usize) -> (String, NonZeroUsize) {
+fn file(name: &str, hunks: usize) -> (PathBuf, NonZeroUsize) {
     (
-        name.to_string(),
+        PathBuf::from(name),
         NonZeroUsize::new(hunks).expect("a conflicted file contributes at least one hunk"),
     )
 }
@@ -82,7 +83,10 @@ fn the_breakdown_says_which_file_each_hunk_belonged_to() {
 
     assert_eq!(
         conflicts.file_hunks().collect::<Vec<_>>(),
-        vec![("x.txt", Hunks::new(1)), ("y.txt", Hunks::new(1))],
+        vec![
+            (Path::new("x.txt"), Hunks::new(1)),
+            (Path::new("y.txt"), Hunks::new(1))
+        ],
         "each contested file should carry its own hunk count"
     );
 }
@@ -105,7 +109,7 @@ fn a_file_that_conflicts_repeatedly_accumulates_against_its_own_name() {
         1,
         "only one file was ever contested, got {breakdown:?}"
     );
-    assert_eq!(breakdown[0].0, "shared.txt");
+    assert_eq!(breakdown[0].0, Path::new("shared.txt"));
     assert!(
         breakdown[0].1 > Hunks::new(1),
         "three colliding commits should leave more than one hunk on the file, got {breakdown:?}"
@@ -139,7 +143,10 @@ fn a_conflicted_non_ascii_path_keeps_its_real_name_and_its_real_hunk_count() {
 
     assert_eq!(
         conflicts.file_hunks().collect::<Vec<_>>(),
-        vec![("readme.md", Hunks::new(1)), ("日本語.txt", Hunks::new(2))],
+        vec![
+            (Path::new("readme.md"), Hunks::new(1)),
+            (Path::new("日本語.txt"), Hunks::new(2))
+        ],
         "a non-ASCII path must survive the round trip through git by name and \
          by count"
     );
@@ -176,12 +183,12 @@ fn a_conflicted_path_git_cannot_print_plainly_keeps_its_name_and_its_hunk_count(
     assert_eq!(
         conflicts.file_hunks().collect::<Vec<_>>(),
         vec![
-            (" lead.txt", Hunks::new(2)),
-            ("back\\slash.txt", Hunks::new(2)),
-            ("plain.txt", Hunks::new(2)),
-            ("quo\"te.txt", Hunks::new(2)),
-            ("trail.txt ", Hunks::new(2)),
-            ("\u{3000}wide.txt ", Hunks::new(2)),
+            (Path::new(" lead.txt"), Hunks::new(2)),
+            (Path::new("back\\slash.txt"), Hunks::new(2)),
+            (Path::new("plain.txt"), Hunks::new(2)),
+            (Path::new("quo\"te.txt"), Hunks::new(2)),
+            (Path::new("trail.txt "), Hunks::new(2)),
+            (Path::new("\u{3000}wide.txt "), Hunks::new(2)),
         ],
         "a path git quotes, or one a trim would erode, must survive the round \
          trip through git by name and by count"
@@ -205,9 +212,9 @@ fn absorbing_a_step_folds_its_breakdown_into_the_running_total() {
     assert_eq!(
         total.file_hunks().collect::<Vec<_>>(),
         vec![
-            ("README.md", Hunks::new(4)),
-            ("src/lib.rs", Hunks::new(5)),
-            ("src/main.rs", Hunks::new(1))
+            (Path::new("README.md"), Hunks::new(4)),
+            (Path::new("src/lib.rs"), Hunks::new(5)),
+            (Path::new("src/main.rs"), Hunks::new(1))
         ],
         "a file hit by both steps should carry the sum of the two"
     );

@@ -17,6 +17,7 @@
 //! exact prediction.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 #[cfg(any(test, feature = "testing"))]
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -166,7 +167,8 @@ impl Scratch {
             );
             rounds += 1;
 
-            let conflicted = git.nul_separated(&["diff", "--name-only", "--diff-filter=U"])?;
+            let conflicted =
+                git.nul_separated_paths(&["diff", "--name-only", "--diff-filter=U"])?;
 
             if conflicted.is_empty() {
                 // The rebase halted without unmerged paths - typically a commit
@@ -235,7 +237,17 @@ pub struct Conflicts {
     /// the sum of this map by definition. Storing the total alongside the names
     /// would let the two drift the moment anything updated one without the
     /// other; here they cannot disagree, so no invariant has to be remembered.
-    files: BTreeMap<String, usize>,
+    ///
+    /// Keyed on an [`OsString`] rather than on the [`PathBuf`] every public
+    /// method speaks in, because the key decides the order the breakdown prints
+    /// in and the two types disagree about it. `OsString` orders by bytes on
+    /// unix, which is git's own order and today's output. `Path` orders by
+    /// *component*, so it puts `src/lib.rs` before `src.txt` where a byte
+    /// comparison puts `src.txt` first (`.` is `0x2e`, `/` is `0x2f`) - a
+    /// reordering no test here would have caught and every reader of a
+    /// breakdown would have seen. Handing the names back out as `&Path` costs
+    /// nothing, since `Path::new` on an `&OsStr` is a cast.
+    files: BTreeMap<OsString, usize>,
 }
 
 impl Conflicts {
@@ -273,7 +285,7 @@ impl Conflicts {
     #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn from_files(
-        files: impl IntoIterator<Item = (String, NonZeroUsize)>,
+        files: impl IntoIterator<Item = (PathBuf, NonZeroUsize)>,
         stops: Stops,
     ) -> Self {
         let mut conflicts = Self {
@@ -300,7 +312,7 @@ impl Conflicts {
     pub fn absorb(&mut self, other: Self) {
         self.stops += other.stops;
         for (name, hunks) in other.files {
-            self.add_file(name, hunks);
+            self.add_file(PathBuf::from(name), hunks);
         }
     }
 
@@ -316,8 +328,14 @@ impl Conflicts {
     /// the rule holds for every route in - the replay loop and the fixture
     /// constructor alike - and the invariant [`Conflicts::is_clean`] rests on
     /// is structural rather than incidental.
-    fn add_file(&mut self, name: String, hunks: usize) {
-        *self.files.entry(name).or_default() += hunks.max(1);
+    ///
+    /// Takes the name as a [`PathBuf`] - what git reported, unaltered - and
+    /// stores it as the [`OsString`] the map is keyed on, which is the same
+    /// bytes under a type whose ordering is git's own. Neither step interprets
+    /// the name, so a path that is not valid UTF-8 keeps every byte of itself
+    /// from the reader through to the breakdown.
+    fn add_file(&mut self, name: PathBuf, hunks: usize) {
+        *self.files.entry(name.into_os_string()).or_default() += hunks.max(1);
     }
 
     /// Whether the replay finished without a single conflict.
@@ -374,10 +392,16 @@ impl Conflicts {
     /// and immediately rebuilds it to say the word "hunk" - and cannot pair a
     /// bare number with the wrong noun if it forgets which of the three counts
     /// it is holding.
-    pub fn file_hunks(&self) -> impl Iterator<Item = (&str, Hunks)> {
+    ///
+    /// Each name comes out as a [`Path`] rather than as a `&str`, because that
+    /// is what it is: git reported it as bytes and it was never decoded, so on
+    /// unix it may be a name no `str` can hold. A caller printing one converts
+    /// it lossily at that point and no earlier - a U+FFFD on the screen is a
+    /// legible answer, while a U+FFFD in the map is a name that opens no file.
+    pub fn file_hunks(&self) -> impl Iterator<Item = (&Path, Hunks)> {
         self.files
             .iter()
-            .map(|(name, hunks)| (name.as_str(), Hunks::new(*hunks)))
+            .map(|(name, hunks)| (Path::new(name), Hunks::new(*hunks)))
     }
 }
 
@@ -423,7 +447,7 @@ fn count_conflict_hunks(path: &Path) -> Result<usize> {
 mod tests {
     use anyhow::Result;
 
-    use super::{Conflicts, NonZeroUsize};
+    use super::{Conflicts, NonZeroUsize, Path, PathBuf};
     use crate::metrics::{Hunks, Stops};
     use crate::testing::contested_region_repo;
 
@@ -489,7 +513,7 @@ mod tests {
     #[test]
     fn a_conflicted_file_that_measured_no_hunks_still_costs_one() {
         let mut conflicts = Conflicts::default();
-        conflicts.add_file("src/lib.rs".to_string(), 0);
+        conflicts.add_file(PathBuf::from("src/lib.rs"), 0);
 
         assert!(
             !conflicts.is_clean(),
@@ -515,7 +539,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "has to agree with itself")]
     fn a_hand_built_result_cannot_claim_stops_it_has_no_conflicted_files_for() {
-        let _ = Conflicts::from_files(std::iter::empty::<(String, NonZeroUsize)>(), Stops::new(7));
+        let _ = Conflicts::from_files(std::iter::empty::<(PathBuf, NonZeroUsize)>(), Stops::new(7));
     }
 
     /// The other direction of the same disagreement. A file only ever enters
@@ -527,7 +551,42 @@ mod tests {
     fn a_hand_built_result_cannot_claim_conflicted_files_it_has_no_stops_for() {
         let one = NonZeroUsize::new(1).expect("1 is not zero");
 
-        let _ = Conflicts::from_files([("src/lib.rs".to_string(), one)], Stops::new(0));
+        let _ = Conflicts::from_files([(PathBuf::from("src/lib.rs"), one)], Stops::new(0));
+    }
+
+    /// The breakdown prints in git's order, which is the order of the bytes.
+    ///
+    /// The keys are names, and there are two orderings for a name. `OsString`
+    /// compares bytes, which is what git sorts its own output by and what this
+    /// crate has always printed. `Path` compares *components*, and the two
+    /// disagree the moment a separator meets a byte below it: `.` is `0x2e` and
+    /// `/` is `0x2f`, so a byte comparison puts `src.txt` before `src/lib.rs`
+    /// while a component comparison puts the directory first.
+    ///
+    /// Keying the map on a `PathBuf` - the type every public method here speaks
+    /// in - would therefore have quietly reordered every breakdown containing a
+    /// pair like this one, in output nobody was asserting on. This is the guard
+    /// that makes that change loud instead.
+    #[test]
+    fn the_breakdown_is_ordered_by_bytes_the_way_git_orders_its_own_output() {
+        let one = NonZeroUsize::new(1).expect("1 is not zero");
+        let conflicts = Conflicts::from_files(
+            [
+                (PathBuf::from("src/lib.rs"), one),
+                (PathBuf::from("src.txt"), one),
+            ],
+            Stops::new(1),
+        );
+
+        assert_eq!(
+            conflicts
+                .file_hunks()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            vec![Path::new("src.txt"), Path::new("src/lib.rs")],
+            "'.' sorts before '/', so a byte ordering names src.txt first; a \
+             component ordering would name the directory first"
+        );
     }
 
     /// The other side of the same boundary: the budget still has to bite.

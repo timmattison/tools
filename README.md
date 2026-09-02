@@ -50,9 +50,11 @@ environment a halted rebase can't hang on. Path *names* get the same treatment: 
 a name, which then matches no file on disk, so a conflicted `日本語.txt` came back under a name nobody typed *and*
 silently floored at "1 hunk" — a plausible-looking wrong total. `core.quotePath=false` is pinned against the
 common case, but it only governs non-ASCII, so the fix that actually holds is that the runner offers exactly one
-way to read a list of paths — `-z`, split on NUL, never trimmed — and no line-oriented alternative to forget it
-for. A scratch worktree can only be built through `Scratch`, and a `Scratch` only hands out a git runner that
-already carries that configuration, so no tool can drift onto a weaker version of it. Teardown removes the scratch
+way to read a list of paths — `-z`, split on NUL, never trimmed, and handed back as the bytes git wrote rather
+than as text, since a path is a byte string on unix and decoding one lossily replaces exactly the names this
+exists to preserve — and no line-oriented alternative to forget it for. A scratch worktree can only be built
+through `Scratch`, and a `Scratch` only hands out a git runner that already carries that configuration, so no
+tool can drift onto a weaker version of it. Teardown removes the scratch
 worktree by path and deliberately never runs the repo-wide `git worktree prune`, which would delete the
 administrative state of any worktree whose directory is merely missing right now. Used by `grist` and `grind`.
 

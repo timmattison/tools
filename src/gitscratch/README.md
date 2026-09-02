@@ -26,9 +26,11 @@ if conflicts.is_clean() {
     // Nothing conflicted.
 } else {
     for (file, hunks) in conflicts.file_hunks() {
-        // `hunks` is a `Hunks` — the same type the headline total comes back
-        // as, so it already knows its own noun.
-        println!("{file}: {}", hunks.phrase());
+        // `file` is a `&Path` — git's own bytes, never decoded, so it is
+        // converted lossily here at the moment of printing and nowhere
+        // earlier. `hunks` is a `Hunks` — the same type the headline total
+        // comes back as, so it already knows its own noun.
+        println!("{}: {}", file.display(), hunks.phrase());
     }
 }
 ```
@@ -40,12 +42,13 @@ tracked beside it, so the total and the list underneath it cannot tell a reader
 two different stories.
 
 Every count that crosses the boundary is one of the newtypes in `metrics`, in
-both directions: `file_hunks()` yields `Hunks` for the same reason `hunks()`
-does, so a renderer never throws the type away and immediately rebuilds it, and
-counts that are all `usize` underneath can never be transposed on the way in or
-out. That holds off the conflict path too — `Repo::uncommitted_files()` returns
-an `Uncommitted`, whose noun is the whole `"uncommitted file"`, so the one count
-that is *not* about conflicts still arrives knowing what to call itself.
+both directions: `file_hunks()` yields a `&Path` and a `Hunks` for the same
+reason `hunks()` does, so a renderer never throws the type away and immediately
+rebuilds it, and counts that are all `usize` underneath can never be transposed
+on the way in or out. That holds off the conflict path too —
+`Repo::uncommitted_files()` returns an `Uncommitted`, whose noun is the whole
+`"uncommitted file"`, so the one count that is *not* about conflicts still
+arrives knowing what to call itself.
 
 `is_clean()` reads the file set rather than the counts, and the agreement
 between them is structural rather than observed. Adding to the breakdown is the
@@ -60,12 +63,20 @@ also getting the hardening — nor without first having established that the
 directory is a repository at all, which is the pre-flight's job below.
 
 That `Git` offers exactly one way to read a **list of paths** back out of git,
-`nul_separated`, which inserts `-z` and splits stdout on NUL without trimming
-anything:
+`nul_separated_paths`, which inserts `-z`, splits stdout on NUL without trimming
+anything, and takes each field as the path those bytes spell:
 
 ```rust
-let conflicted = git.nul_separated(&["diff", "--name-only", "--diff-filter=U"])?;
+let conflicted = git.nul_separated_paths(&["diff", "--name-only", "--diff-filter=U"])?;
 ```
+
+The contract is byte-exact in both halves. `nul_separated` underneath it hands
+back `Vec<Vec<u8>>` — git's bytes, for output whose fields are not all paths,
+such as a `status --porcelain -z` record of `XY <path>` — and
+`nul_separated_paths` converts each field with no decoding step at all, because
+on unix a path *is* an arbitrary byte string. Decoding one lossily would put
+`U+FFFD` where the bytes were, which is the same two-part failure C-quoting
+causes: a name nobody typed, and a name that opens no file.
 
 There is deliberately no line-oriented equivalent, because one cannot be made
 correct. Git C-quotes a path containing `"`, `\` or a control character no
@@ -76,8 +87,8 @@ and strips `U+3000` as readily as a space. Either way the path cannot be opened,
 and in this crate a conflicted file that cannot be opened is floored at one hunk
 — a wrong total that looks entirely plausible. `-z` is the one mode with no
 quoting and a separator no path can contain, so the reader that uses it is the
-only reader there is. `run` and `try_run` trim, and are for output meant for a
-human.
+only reader there is. `run` and `try_run` trim *and* decode lossily, and are for
+output meant for a human.
 
 ## The pre-flight
 
@@ -179,7 +190,7 @@ index measured under identical rules, not as an exact prediction.
 | `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. |
 | `rebase.autoStash=false`, `rebase.autosquash=false` | The replay must be the operation as written, not a rewritten variant of it. |
 | `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. |
-| `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated`'s job (above); this narrows what a call site that reaches around it can get wrong. |
+| `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job (above); this narrows what a call site that reaches around it can get wrong. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the
@@ -232,8 +243,8 @@ rather than building a repository to commit into.
 **`core.quotePath=false`**, the last row above, is pinned by a second unit test
 in `src/git.rs`, for a reason worth stating: it used to be pinned from the other
 direction, by `tests/conflicts.rs` asserting the *answer* a non-ASCII path
-produces. That stopped testing this setting the moment `nul_separated` became
-the only path reader, because `-z` output is unquoted whatever `quotePath` says
+produces. That stopped testing this setting the moment `nul_separated_paths`
+became the only path reader: `-z` output is unquoted whatever `quotePath` says
 — remove the pin today and all eighteen integration tests stay green, verified.
 The unit test asserts it against `Git::run` instead, the surface it still
 covers.

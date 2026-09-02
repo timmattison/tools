@@ -212,7 +212,9 @@ fn works_when_the_branches_are_checked_out_in_other_worktrees() {
         "the contested file should have conflicted"
     );
     assert!(
-        conflicts.file_hunks().any(|(name, _)| name == "shared.txt"),
+        conflicts
+            .file_hunks()
+            .any(|(name, _)| name == Path::new("shared.txt")),
         "the contested file should be named in the conflicts: {:?}",
         conflicts.file_hunks().collect::<Vec<_>>()
     );

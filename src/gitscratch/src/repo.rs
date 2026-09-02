@@ -166,17 +166,17 @@ impl Repo {
 /// containing ` -> ` would otherwise be unparseable. Counting fields would call
 /// that two uncommitted files. It is one file, moved.
 ///
-/// The status is the first two characters of the record - one for the index,
-/// one for the working tree - and either may carry the letter. Read as
-/// characters rather than bytes so a path is never sliced mid-codepoint; the
-/// path cannot reach these two positions anyway, since a space always separates
-/// it from the status.
-fn moved_from_elsewhere(record: &str) -> bool {
-    /// Index status and worktree status, in that order.
-    const STATUS_WIDTH: usize = 2;
-
-    record
-        .chars()
-        .take(STATUS_WIDTH)
-        .any(|status| status == 'R' || status == 'C')
+/// The status is the first two bytes of the record - one for the index, one for
+/// the working tree - and either may carry the letter. Both are ASCII by
+/// definition: git writes one of a fixed set of letters and spaces there, and a
+/// space always separates them from the path, so the path can never reach these
+/// two positions. Reading them as bytes is therefore exact, and it is what lets
+/// the record stay the bytes git wrote - a path is a byte string on unix, and a
+/// record decoded into a `str` on the way here would have replaced every byte of
+/// one that is not valid UTF-8.
+fn moved_from_elsewhere(record: &[u8]) -> bool {
+    [record.first(), record.get(1)]
+        .into_iter()
+        .flatten()
+        .any(|status| *status == b'R' || *status == b'C')
 }
