@@ -456,6 +456,39 @@ fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
 
 /// The streams the body of a table writes.
 ///
+/// # Errors
+///
+/// Gives [`PlanError::NoOrder`] for a table with no `Order` column, the error
+/// of [`table_body`] for the lines under the header, and the errors of
+/// [`stream_of`] for one row of it.
+fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>, PlanError> {
+    let order_at = column_of(header, Key::Order).ok_or(PlanError::NoOrder)?;
+    let stream_at = column_of(header, Key::Stream);
+    let rows = rows_of(&table_body(text, body, header)?, order_at);
+    rows.iter()
+        .enumerate()
+        .map(|(place, row)| {
+            let named = stream_at.and_then(|at| row.get(at)).map(String::as_str);
+            stream_of(named, place, row.get(order_at).map(String::as_str))
+        })
+        .collect()
+}
+
+/// One line of the body of a table.
+///
+/// The rules stay, rather than being stepped over: a rule that stands between
+/// two row lines is where one row ends and the next one starts, and it is the
+/// only mark a table carries that says so for certain. A cell says nothing
+/// about the row it belongs to.
+enum BodyLine<'a> {
+    /// A line a reader draws between two rows, or around the table.
+    Rule,
+    /// The cells of one line of a row.
+    Cells(Vec<&'a str>),
+}
+
+/// The lines the body of a table holds, from `body` to the end of the table.
+///
 /// The table ends at the first line that is no row of it, because a report of
 /// parallel work holds more than the stream table. A Housekeeping table and a
 /// table of the work already in flight stand under it, and neither one is more
@@ -463,20 +496,22 @@ fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
 /// of those tables as work, and a row whose cell under the `Order` column
 /// holds a word rather than a number took the whole plan down with it.
 ///
-/// The empty row and every rule of the table are rows of it, so they are
-/// stepped over rather than taken as the end of it.
+/// A row of nothing but empty cells is dropped, and it ends the table no more
+/// than a rule does.
 ///
 /// # Errors
 ///
-/// Gives [`PlanError::NoOrder`] for a table with no `Order` column,
-/// [`PlanError::RowWidth`] for a row whose cell count the header does not
-/// have, and the errors of [`stream_of`] for one row of it.
-fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>, PlanError> {
-    let order_at = column_of(header, Key::Order).ok_or(PlanError::NoOrder)?;
-    let stream_at = column_of(header, Key::Stream);
-    let mut rows: Vec<Vec<String>> = Vec::new();
+/// Gives [`PlanError::RowWidth`] for a row whose cell count `header` does not
+/// have.
+fn table_body<'a>(
+    text: &'a str,
+    body: usize,
+    header: &[&str],
+) -> Result<Vec<BodyLine<'a>>, PlanError> {
+    let mut lines: Vec<BodyLine<'a>> = Vec::new();
     for line in text.lines().skip(body) {
         if is_rule(line) {
+            lines.push(BodyLine::Rule);
             continue;
         }
         let Some(cells) = table_cells(line) else {
@@ -496,34 +531,85 @@ fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>
                 line: Snippet::new(line),
             });
         }
-        if continues_a_row(&cells, order_at) {
+        lines.push(BodyLine::Cells(cells));
+    }
+    Ok(lines)
+}
+
+/// The rows `lines` writes, each one the cells of every line it wraps onto.
+///
+/// A row opens under a rule and takes every line after it, up to the next
+/// rule. That reading needs nothing of the cells themselves, so it holds a row
+/// together whatever its wrap falls in the middle of. A table whose rules do
+/// not divide its rows carries no such mark, and each line is then asked for
+/// itself with [`continues_a_row`].
+fn rows_of(lines: &[BodyLine], order_at: usize) -> Vec<Vec<String>> {
+    let ruled = rules_divide_the_rows(lines);
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut row_is_open = false;
+    for line in lines {
+        let cells = match line {
+            BodyLine::Rule => {
+                row_is_open = false;
+                continue;
+            }
+            BodyLine::Cells(cells) => cells,
+        };
+        let continues = if ruled {
+            row_is_open
+        } else {
+            continues_a_row(cells, order_at)
+        };
+        if continues {
             // A continuation with no row above it continues nothing. The plan
             // then holds one row fewer, and a plan of no rows at all is the
             // error [`parse`] gives for a header with nothing under it.
             if let Some(row) = rows.last_mut() {
-                join_row(row, &cells);
+                join_row(row, cells);
             }
-            continue;
+        } else {
+            rows.push(cells.iter().copied().map(str::to_string).collect());
         }
-        rows.push(cells.into_iter().map(str::to_string).collect());
+        row_is_open = true;
     }
-    rows.iter()
-        .enumerate()
-        .map(|(place, row)| {
-            let named = stream_at.and_then(|at| row.get(at)).map(String::as_str);
-            stream_of(named, place, row.get(order_at).map(String::as_str))
-        })
-        .collect()
+    rows
+}
+
+/// Do the rules of `lines` say where each row of the table ends?
+///
+/// A rule with a row line above it and a row line under it stands between two
+/// rows, and a renderer that draws one draws them between every pair. So one
+/// such rule answers for the whole table.
+///
+/// The two other written forms answer `false` here. A Markdown table carries
+/// one rule and it stands over the first row. A box table drawn with its outer
+/// border alone carries two, and the one under the rows closes the table.
+fn rules_divide_the_rows(lines: &[BodyLine]) -> bool {
+    let is_row = |line: &BodyLine| matches!(line, BodyLine::Cells(_));
+    let first = lines.iter().position(is_row);
+    let last = lines.iter().rposition(is_row);
+    match (first, last) {
+        (Some(first), Some(last)) => lines[first..last]
+            .iter()
+            .any(|line| matches!(line, BodyLine::Rule)),
+        _ => false,
+    }
 }
 
 /// Does `cells` continue the row above it, rather than open one?
 ///
-/// A table wraps a row onto a second line, and the `Order` cell is what says
-/// so: a step of a chain never opens with an arrow, and a row that carries no
-/// step carries no chain. "The first cell is empty" reads the same way and is
-/// wrong, because a label wraps as readily as a chain does — the row of stream
-/// B of a real report carries the word `engine` in its first cell and nothing
-/// in its `Order` cell.
+/// The reading for a table whose rules do not divide its rows, where the cells
+/// are all a reader has. The `Order` cell is the one that answers: a step of a
+/// chain never opens with an arrow, and a row that carries no step carries no
+/// chain. "The first cell is empty" reads the same way and is wrong, because a
+/// label wraps as readily as a chain does — the row of stream B of a real
+/// report carries the word `engine` in its first cell and nothing in its
+/// `Order` cell.
+///
+/// It answers for one line, so it cannot hold a row together through a wrap
+/// that falls in the middle of a chain. `(#329)` opens no step and `#330`
+/// opens one, and a table with rules between its rows is what says that both
+/// of them continue the row above. [`rules_divide_the_rows`] finds that table.
 fn continues_a_row(cells: &[&str], order_at: usize) -> bool {
     cells.get(order_at).is_some_and(|order| {
         order.is_empty()
@@ -986,8 +1072,7 @@ Notes: Independent of everything above.";
     /// row: the second one opens with the annotation `(#329)`, and the third
     /// one opens with the step `#330`. The `├─┼─┤` rules are what say where
     /// each row of this table ends.
-    const NARROW_BOX_TABLE: &str =
-        include_str!("../fixtures/plan-parallel-work-narrow-order.txt");
+    const NARROW_BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work-narrow-order.txt");
 
     /// The numbers of one step: the work, and the issue the work closes.
     type StepNumbers = (u64, Option<u64>);
@@ -1248,9 +1333,9 @@ Notes: Independent of everything above.";
 
     #[test]
     fn a_box_table_with_no_interior_rules_gives_the_same_streams() {
-        // A row continues by its `Order` cell and never by the rule above it,
-        // so a renderer that draws its outer border alone gives four streams
-        // as well.
+        // A table with no rule between two of its rows is read by its cells
+        // instead, so a renderer that draws its outer border alone gives four
+        // streams as well. Every wrap of this one says so in its `Order` cell.
         let no_rules: String = BOX_TABLE
             .lines()
             .filter(|line| !line.starts_with('├'))
