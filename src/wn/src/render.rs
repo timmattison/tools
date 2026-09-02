@@ -5,6 +5,12 @@
 //! against the plan GitHub holds. Under the rows stands the answer, and the
 //! answer names the command that starts the work.
 //!
+//! # The command comes in as an argument
+//!
+//! Every function here takes what it needs, the start command included. This
+//! module reads nothing from the environment, so a test of it calls
+//! [`render`] and depends on no process-global state.
+//!
 //! # One row never wraps
 //!
 //! A title is the one piece of a row with no bound on its length, and a row
@@ -19,10 +25,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::chain::IssueNumber;
 use crate::report::{Entry, Report, Status};
-
-/// The command that starts work on an issue. The answer names it, because the
-/// answer is only useful if the next thing to type is on the screen.
-const START_COMMAND: &str = "si";
+use crate::StartCommand;
 
 /// The mark of an issue whose work is done.
 const MARK_DONE: char = '✓';
@@ -49,9 +52,10 @@ const MISSING_TITLE: &str = "(no such issue)";
 ///
 /// `repo` names the repository the states came from, and appears only in the
 /// note about a number that repository does not have. `width` is the columns
-/// the block has to fit in.
+/// the block has to fit in. `start` is the command the answer names, because
+/// the answer is only useful if the next thing to type is on the screen.
 #[must_use]
-pub fn render(report: &Report, repo: &str, width: usize) -> String {
+pub fn render(report: &Report, repo: &str, width: usize, start: &StartCommand) -> String {
     let entries = report.entries();
     if entries.is_empty() {
         return String::new();
@@ -71,7 +75,7 @@ pub fn render(report: &Report, repo: &str, width: usize) -> String {
 
     lines.push(String::new());
     lines.extend(notes(report, repo));
-    lines.push(answer(report));
+    lines.push(answer(report, start));
     lines.join("\n")
 }
 
@@ -176,7 +180,7 @@ fn notes(report: &Report, repo: &str) -> Vec<String> {
 }
 
 /// The answer: the issue to start and the command that starts it.
-fn answer(report: &Report) -> String {
+fn answer(report: &Report, start: &StartCommand) -> String {
     let Some(entry) = report.next_entry() else {
         return if report
             .entries()
@@ -196,7 +200,7 @@ fn answer(report: &Report) -> String {
     format!(
         "Start {} next with '{}'",
         entry.number.to_string().bold(),
-        format!("{START_COMMAND} {}", entry.number.get())
+        format!("{} {}", start.as_str(), entry.number.get())
             .cyan()
             .bold()
     )
@@ -235,7 +239,14 @@ mod tests {
     /// would thus pass under a redirected run and fail under a hand-typed
     /// `git commit`. So every test here forces the codes on and strips them.
     fn glyphs(report: &Report, width: usize) -> String {
-        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| render(report, REPO, width)))
+        glyphs_with_start(report, width, &StartCommand::new(None))
+    }
+
+    /// The same, with the start command the caller names.
+    fn glyphs_with_start(report: &Report, width: usize, start: &StartCommand) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            render(report, REPO, width, start)
+        }))
     }
 
     fn a_chain() -> Report {
@@ -257,6 +268,16 @@ mod tests {
                 "\n",
                 "Start #278 next with 'si 278'",
             )
+        );
+    }
+
+    #[test]
+    fn the_answer_names_the_command_it_was_given() {
+        let start = StartCommand::new(Some("gh issue develop"));
+        assert!(
+            glyphs_with_start(&a_chain(), 80, &start)
+                .ends_with("Start #278 next with 'gh issue develop 278'"),
+            "the answer names the command the caller gave"
         );
     }
 
@@ -424,7 +445,8 @@ mod tests {
 
     #[test]
     fn the_rows_carry_color_and_strip_back_to_the_glyphs() {
-        let painted = testcolor::with_forced_ansi(|| render(&a_chain(), REPO, 80));
+        let painted =
+            testcolor::with_forced_ansi(|| render(&a_chain(), REPO, 80, &StartCommand::new(None)));
         assert!(
             painted.contains('\u{1b}'),
             "the block is painted, in {painted:?}"

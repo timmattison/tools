@@ -61,7 +61,7 @@ impl IssueNumber {
     }
 
     /// The bare number, without the `#`. This is what a command line wants:
-    /// `si 278` takes the number and not the mark.
+    /// the command that starts the work takes the number and not the mark.
     #[must_use]
     pub fn get(self) -> u64 {
         self.0

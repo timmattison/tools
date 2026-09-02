@@ -1028,6 +1028,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     — and names the first one that is still open. Prints one row for each issue in the chain,
     in order, with its state and its one-line title, then the command that starts the next one:
     `Start #278 next with 'si 278'`.
+  - `si` is a shell function you supply — this repository ships none — and it is the default
+    because it is the name the plans here are written with. Set `WN_START_COMMAND` to name a
+    different one, and it goes in as it is written, whole command lines included:
+    `export WN_START_COMMAND='gh issue develop'` makes the answer read
+    `Start #278 next with 'gh issue develop 278'`. An empty value falls back to `si`.
   - Every separator means the same thing: the issue on the left comes before the issue on the
     right. `→`, `->`, `∥`, `||`, a comma, and a semicolon all read as "then", so a chain
     pasted out of a plan works whichever way it was typed. The double bar is read as an arrow on
@@ -1045,7 +1050,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     closed after the next one is reported as done out of order, because the plan in your head is
     then wrong and nothing else would say so.
   - Usage: `wn "#277 → #278 ∥ #279"`, `wn "#230 → #315"`, `wn -R timmattison/tools "#1 → #2"`,
-    `pbpaste | wn`
+    `pbpaste | wn`, `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 
 ## dirhash

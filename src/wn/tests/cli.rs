@@ -41,6 +41,10 @@ const THREE_ISSUES: &str = r#"{"data":{"repository":{
 "i279":{"__typename":"Issue","number":279,"title":"Third thing","state":"OPEN","stateReason":null}
 }}}"#;
 
+/// The chain the start-command tests walk. Two of the three issues, so the
+/// answer names #278 whichever command it prints.
+const ONE_OPEN_CHAIN: &str = "#277 → #278";
+
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
     dir: tempfile::TempDir,
@@ -151,9 +155,6 @@ fn walks_the_chain_and_names_the_issue_to_start() {
     );
 }
 
-/// The chain the start-command tests walk, and the number they expect.
-const ONE_OPEN_CHAIN: &str = "#277 → #278";
-
 #[test]
 fn names_si_when_the_environment_names_no_start_command() {
     // This repository ships no `si`, so the default is a name the reader
@@ -212,7 +213,13 @@ fn an_empty_start_command_falls_back_to_the_default() {
     // An exported but empty variable is a common accident, and an answer that
     // reads `Start #278 next with ' 278'` names no command at all.
     let gh = FakeGh::new(THREE_ISSUES);
-    let output = run_with_start(&gh, &["--repo", REPO, ONE_OPEN_CHAIN], "80", false, Some(""));
+    let output = run_with_start(
+        &gh,
+        &["--repo", REPO, ONE_OPEN_CHAIN],
+        "80",
+        false,
+        Some(""),
+    );
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(
         stdout(&output).ends_with("Start #278 next with 'si 278'\n"),
