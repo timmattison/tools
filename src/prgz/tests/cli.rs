@@ -23,10 +23,15 @@ use std::process::Command;
 use flate2::read::GzDecoder;
 use tempfile::TempDir;
 
-/// The value of `LANG` that a test gives the child. American English groups
-/// the digits with a comma, thus a report of that locale reads the same on
-/// every machine.
+/// The value of `LANG` that every test gives the child, except the test that
+/// states what the locale does. American English groups the digits with a
+/// comma, thus a report of that locale reads the same on every machine.
 const AMERICAN_ENGLISH: &str = "en_US.UTF-8";
+
+/// The value of `LANG` of the second run of the test of the locale. German
+/// groups the digits with a point, thus it is the opposite of
+/// [`AMERICAN_ENGLISH`] in both separators.
+const GERMAN: &str = "de_DE.UTF-8";
 
 /// The name of the environment variable that carries the locale.
 const LANG_VARIABLE: &str = "LANG";
@@ -43,6 +48,13 @@ const COMPRESSIBLE_LINE: &[u8] = b"the quick brown fox\n";
 /// product is 8000 bytes, thus the report of the run carries a number with a
 /// group separator in it.
 const COMPRESSIBLE_REPEATS: usize = 400;
+
+/// The size of the compressible fixture, as an American English reader of the
+/// report reads it.
+const SIZE_IN_AMERICAN_ENGLISH: &str = "8,000 bytes";
+
+/// The same size, as a German reader of the report reads it.
+const SIZE_IN_GERMAN: &str = "8.000 bytes";
 
 /// The count of bytes of the fixture that gzip cannot make smaller.
 const INCOMPRESSIBLE_BYTES: usize = 4_096;
@@ -286,4 +298,33 @@ fn a_run_over_bytes_that_gzip_cannot_compress_warns_and_shows_a_negative_change(
     let change = line_with(&answer.stdout, "Size change:");
     assert!(change.contains('-'), "the line is {change:?}");
     assert!(change.contains('%'), "the line is {change:?}");
+}
+
+#[test]
+fn a_report_follows_the_locale_of_the_environment() {
+    let (_directory, input) = fixture("data.txt", &compressible());
+
+    let american = run(prgz()
+        .env(LANG_VARIABLE, AMERICAN_ENGLISH)
+        .arg("--input")
+        .arg(&input));
+    let german = run(prgz().env(LANG_VARIABLE, GERMAN).arg("--input").arg(&input));
+
+    assert!(
+        american.ok,
+        "the American run failed with {}",
+        american.stderr
+    );
+    assert!(german.ok, "the German run failed with {}", german.stderr);
+    assert!(
+        american.stdout.contains(SIZE_IN_AMERICAN_ENGLISH),
+        "the American report is {}",
+        american.stdout
+    );
+    assert!(
+        german.stdout.contains(SIZE_IN_GERMAN),
+        "the German report is {}",
+        german.stdout
+    );
+    assert_ne!(american.stdout, german.stdout);
 }
