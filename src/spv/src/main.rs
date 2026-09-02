@@ -1410,6 +1410,17 @@ fn main() -> Result<()> {
         print_table(&processes, sections.cwd);
     }
 
+    // A section reads state the kernel guards, so say up front whose process
+    // this is. A plain listing comes from sysctl and needs no permission.
+    let wants_a_section = sections.files || sections.env || sections.net;
+    if wants_a_section {
+        if let Some(warning) =
+            permission_warning(&processes, &current_username(), running_as_root())
+        {
+            eprintln!("\n{warning}");
+        }
+    }
+
     // Print open files if requested
     if sections.files {
         print_open_files(&processes);
