@@ -586,7 +586,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - To install: `cargo install --git https://github.com/timmattison/tools install-bin`. Because it's
     a single binary with no runtime dependency, it can also install itself:
     `cargo build --release -p install-bin && ./target/release/install-bin ./target/release/install-bin`.
-- grist
+- grist (git ranks its squash trials)
   - Ranks the orders you could squash-merge a set of branches in, cheapest conflicts first. Squash
     merging destroys commit identity, so whichever branch lands second replays work that already
     landed and collides — and the bill is not symmetric. `grist` replays every ordering against a
