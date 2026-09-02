@@ -558,6 +558,20 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
     }
 
     #[test]
+    fn a_plan_from_the_clipboard_is_not_called_a_chain() {
+        // A plan is read by the plan reader and it is not a chain, so a
+        // message that calls it one tells the reader the wrong thing about
+        // what `wn` refused. The input is what the message knows, and the
+        // input is the clipboard either way.
+        let plan = "Stream: S1 ic\nOrder: #277 an #278";
+        let err = crate::plan::parse(plan).expect_err("the word is not an issue number");
+        assert_eq!(
+            clipboard_chain(plan).blame(err).to_string(),
+            "wn cannot read the clipboard: stream \"S1 ic\": \"an\" is not an issue number"
+        );
+    }
+
+    #[test]
     fn a_word_in_an_argument_is_blamed_on_no_input_at_all() {
         let argument = arguments(&["#277 an #278"]);
         let chain = Sources {
