@@ -6022,11 +6022,15 @@ dependencies = [
 name = "prgz"
 version = "0.1.0"
 dependencies = [
+ "buildinfo",
  "clap",
  "colored",
  "flate2",
+ "indicatif",
  "num-format",
+ "signal-hook 0.3.18",
  "tempfile",
+ "termbar",
  "testcolor",
  "thiserror 2.0.20",
 ]

@@ -4,10 +4,14 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+buildinfo.workspace = true
 clap.workspace = true
 colored.workspace = true
 flate2.workspace = true
+indicatif.workspace = true
 num-format.workspace = true
+signal-hook.workspace = true
+termbar.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
