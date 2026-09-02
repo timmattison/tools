@@ -26,9 +26,11 @@ pub type DescribeEndpointSdkError =
 pub enum EndpointError {
     /// The call to `DescribeEndpoint` did not complete.
     ///
-    /// The tool did not reach AWS, or AWS refused the call. The box keeps this
-    /// variant small: the SDK error holds the whole HTTP answer.
-    #[error("the call to DescribeEndpoint failed: {}", describe_failure(.0))]
+    /// The tool did not reach AWS, or AWS refused the call. The SDK error
+    /// stays as the source of this failure, because it names the error code
+    /// and the message AWS sent, and a reader of the chain gets both. The box
+    /// keeps the variant small: the SDK error holds the whole HTTP answer.
+    #[error("the call to DescribeEndpoint failed")]
     Call(#[source] Box<DescribeEndpointSdkError>),
 
     /// The call completed, and the answer named no endpoint address.
@@ -38,36 +40,6 @@ pub enum EndpointError {
     /// is a failure and not an empty string.
     #[error("DescribeEndpoint gave an answer that names no endpoint address")]
     NoAddress,
-}
-
-/// Gives one line of text for a failed `DescribeEndpoint` call.
-///
-/// The `Display` of an SDK error gives two words, such as `service error`, and
-/// keeps the useful part in the metadata of the answer. This function reads the
-/// HTTP status, the error code and the message, so one line tells the user what
-/// AWS said.
-fn describe_failure(error: &DescribeEndpointSdkError) -> String {
-    use aws_sdk_iot::error::ProvideErrorMetadata;
-
-    let mut parts = Vec::new();
-
-    if let Some(response) = error.raw_response() {
-        parts.push(format!("HTTP {}", response.status().as_u16()));
-    }
-
-    if let Some(code) = error.code() {
-        parts.push(code.to_string());
-    }
-
-    if let Some(message) = error.message() {
-        parts.push(message.to_string());
-    }
-
-    if parts.is_empty() {
-        error.to_string()
-    } else {
-        parts.join(": ")
-    }
 }
 
 /// Asks an AWS IoT client for the data endpoint of the account.
@@ -84,7 +56,17 @@ fn describe_failure(error: &DescribeEndpointSdkError) -> String {
 pub async fn describe_data_endpoint_with(
     client: &aws_sdk_iot::Client,
 ) -> Result<String, EndpointError> {
-    unimplemented!()
+    let answer = client
+        .describe_endpoint()
+        .endpoint_type(DATA_ENDPOINT_TYPE)
+        .send()
+        .await
+        .map_err(|error| EndpointError::Call(Box::new(error)))?;
+
+    answer
+        .endpoint_address
+        .filter(|address| !address.is_empty())
+        .ok_or(EndpointError::NoAddress)
 }
 
 /// Builds a client from the ambient AWS configuration and asks it.
@@ -100,7 +82,7 @@ pub async fn describe_data_endpoint_with(
 pub async fn describe_data_endpoint(
     config: &aws_config::SdkConfig,
 ) -> Result<String, EndpointError> {
-    unimplemented!()
+    describe_data_endpoint_with(&aws_sdk_iot::Client::new(config)).await
 }
 
 #[cfg(test)]
@@ -284,9 +266,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", DESCRIBE_ENDPOINT_PATH)
-            .match_query(mockito::Matcher::Exact(
-                DESCRIBE_ENDPOINT_QUERY.to_string(),
-            ))
+            .match_query(mockito::Matcher::Exact(DESCRIBE_ENDPOINT_QUERY.to_string()))
             .with_status(200)
             .with_header("content-type", JSON_MEDIA_TYPE)
             .with_body(ANSWER_WITH_ADDRESS)
