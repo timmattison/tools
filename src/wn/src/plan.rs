@@ -1103,6 +1103,18 @@ Notes: Independent of everything above.";
     }
 
     #[test]
+    fn refuses_a_group_that_never_closes() {
+        // Where an open group ends is a guess, and a guess about a chain is
+        // worse than a refusal. The message names the stream and repeats the
+        // group back from its parenthesis.
+        let message = parse("Stream: S1 ic\nOrder: #4 (in flight")
+            .expect_err("a group that never closes is not a chain")
+            .to_string();
+        assert!(message.contains("S1 ic"), "{message}");
+        assert!(message.contains("\"(in flight\""), "{message}");
+    }
+
+    #[test]
     fn refuses_a_second_group_on_one_step() {
         assert_eq!(
             parse("Stream: S1 ic\nOrder: PR#344 (#341) (#329)"),
