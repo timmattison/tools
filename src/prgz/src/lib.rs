@@ -14,6 +14,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use colored::Colorize;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use num_format::ToFormattedString;
@@ -423,13 +424,115 @@ pub fn default_output_path(input: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The first line of a report of a run that made the file smaller.
+const SHRANK_HEADER: &str = "Compression complete";
+
+/// The first line of a report of a run that did not make the file smaller. The
+/// Go tool that this crate replaces logs the same sense at the warning level,
+/// thus the line carries the word `Warning` and the report paints it yellow.
+const GREW_HEADER: &str = "Warning: compression complete, but the file size increased";
+
+/// The label of the count of bytes that the run read.
+const ORIGINAL_SIZE_LABEL: &str = "Original size:";
+
+/// The label of the count of bytes that the run wrote.
+const NEW_SIZE_LABEL: &str = "New size:";
+
+/// The label of the change in size.
+const SIZE_CHANGE_LABEL: &str = "Size change:";
+
+/// The label of the time that the run took.
+const DURATION_LABEL: &str = "Duration:";
+
+/// The label of the rate at which the run read the input.
+const BYTES_READ_LABEL: &str = "Bytes read per second:";
+
+/// The label of the rate at which the run wrote the output.
+const BYTES_WRITTEN_LABEL: &str = "Bytes written per second:";
+
+/// The count of columns that holds every label. It is the length of
+/// [`BYTES_WRITTEN_LABEL`], which is the longest of the six labels, thus every
+/// value starts in the same column and a reader can read the values down the
+/// page.
+const LABEL_WIDTH: usize = BYTES_WRITTEN_LABEL.len();
+
+/// The text that starts each value line. The indent puts the values under the
+/// header.
+const VALUE_INDENT: &str = "  ";
+
+/// The text that takes the place of the size change when the input holds no
+/// bytes. No percentage of zero exists, thus the report gives the reason in
+/// place of a number.
+const NO_SIZE_CHANGE: &str = "not available (the input holds no bytes)";
+
+/// The sign that marks the size change as a percentage.
+const PERCENT_SIGN: &str = "%";
+
+/// The unit that follows a count of bytes.
+const BYTES_UNIT: &str = " bytes";
+
 /// Render the report that closes a run.
 ///
-/// The first line names the result of the run. The lines under it hold the six
-/// values that the report carries, one value on each line.
+/// The first line names the result of the run: `Compression complete` for a run
+/// that made the file smaller, and a warning line for a run that did not. That
+/// line, and only that line, carries color — green for the first case and
+/// yellow for the second. Six lines follow it, one for each value that the Go
+/// tool logs: the original size, the new size, the size change, the duration,
+/// and the two rates.
+///
+/// Every number goes through [`format_int`], [`format_float`], or
+/// [`format_duration`], thus the whole report follows one locale.
+///
+/// The size change is positive when the file became smaller and negative when
+/// it became larger. An input of no bytes has no size change, because no
+/// percentage of zero exists. Such a report shows the words
+/// `not available (the input holds no bytes)` in place of the number.
+///
+/// The string does not end with a newline. The caller adds one.
 pub fn format_report(stats: &Stats, locale: &Locale) -> String {
-    let _ = (stats, locale);
-    String::new()
+    let header = if stats.grew() {
+        GREW_HEADER.yellow()
+    } else {
+        SHRANK_HEADER.green()
+    };
+    let size_change = stats.size_change_percent().map_or_else(
+        || NO_SIZE_CHANGE.to_string(),
+        |percent| {
+            let number = format_float(percent, locale);
+            format!("{number}{PERCENT_SIGN}")
+        },
+    );
+    [
+        header.to_string(),
+        value_line(
+            ORIGINAL_SIZE_LABEL,
+            &format_size(stats.original_size, locale),
+        ),
+        value_line(NEW_SIZE_LABEL, &format_size(stats.new_size, locale)),
+        value_line(SIZE_CHANGE_LABEL, &size_change),
+        value_line(DURATION_LABEL, &format_duration(stats.duration, locale)),
+        value_line(
+            BYTES_READ_LABEL,
+            &format_float(stats.bytes_read_per_second(), locale),
+        ),
+        value_line(
+            BYTES_WRITTEN_LABEL,
+            &format_float(stats.bytes_written_per_second(), locale),
+        ),
+    ]
+    .join("\n")
+}
+
+/// Render one line of the report: the indent, the label in a column of the
+/// width of the longest label, and the value.
+fn value_line(label: &str, value: &str) -> String {
+    format!("{VALUE_INDENT}{label:<LABEL_WIDTH$} {value}")
+}
+
+/// Render a count of bytes with the separator of the locale and the unit.
+fn format_size(size: u64, locale: &Locale) -> String {
+    let count = format_int(size, locale);
+    format!("{count}{BYTES_UNIT}")
 }
 
 #[cfg(test)]
@@ -438,6 +541,7 @@ mod tests {
 
     use super::{
         format_duration, format_float, format_int, format_report, locale_from_lang, Locale, Stats,
+        GREW_HEADER, SHRANK_HEADER,
     };
 
     #[test]
@@ -558,16 +662,145 @@ mod tests {
         "  Bytes written per second: 349,525.33",
     );
 
-    #[test]
-    fn a_report_of_a_run_that_made_the_file_smaller_holds_the_six_values() {
-        let stats = Stats {
+    /// The same report in German. The two locales use the opposite pair of
+    /// separators, thus every number in this report differs from the number in
+    /// [`SHRANK_REPORT`].
+    const SHRANK_REPORT_IN_GERMAN: &str = concat!(
+        "Compression complete\n",
+        "  Original size:            1.048.576 bytes\n",
+        "  New size:                 524.288 bytes\n",
+        "  Size change:              50,00%\n",
+        "  Duration:                 1,50s\n",
+        "  Bytes read per second:    699.050,67\n",
+        "  Bytes written per second: 349.525,33",
+    );
+
+    /// The report of a run that made the file larger, in English, with the
+    /// escape codes taken out.
+    const GREW_REPORT: &str = concat!(
+        "Warning: compression complete, but the file size increased\n",
+        "  Original size:            1,000 bytes\n",
+        "  New size:                 1,200 bytes\n",
+        "  Size change:              -20.00%\n",
+        "  Duration:                 2.00s\n",
+        "  Bytes read per second:    500.00\n",
+        "  Bytes written per second: 600.00",
+    );
+
+    /// The report of a run over an input of no bytes, in English, with the
+    /// escape codes taken out.
+    const EMPTY_INPUT_REPORT: &str = concat!(
+        "Warning: compression complete, but the file size increased\n",
+        "  Original size:            0 bytes\n",
+        "  New size:                 20 bytes\n",
+        "  Size change:              not available (the input holds no bytes)\n",
+        "  Duration:                 1.50s\n",
+        "  Bytes read per second:    0.00\n",
+        "  Bytes written per second: 13.33",
+    );
+
+    /// The escape sequence that starts green text.
+    const GREEN_START: &str = "\u{1b}[32m";
+
+    /// The escape sequence that starts yellow text.
+    const YELLOW_START: &str = "\u{1b}[33m";
+
+    /// The character that starts every escape sequence.
+    const ESCAPE: char = '\u{1b}';
+
+    /// A run that made the file smaller.
+    fn shrank() -> Stats {
+        Stats {
             original_size: 1_048_576,
             new_size: 524_288,
             duration: Duration::from_millis(1_500),
-        };
-        let glyphs = testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
-            format_report(&stats, &Locale::en)
-        }));
-        assert_eq!(glyphs, SHRANK_REPORT);
+        }
+    }
+
+    /// A run that made the file larger.
+    fn grew() -> Stats {
+        Stats {
+            original_size: 1_000,
+            new_size: 1_200,
+            duration: Duration::from_secs(2),
+        }
+    }
+
+    /// A run over an input of no bytes.
+    fn empty_input() -> Stats {
+        Stats {
+            original_size: 0,
+            new_size: 20,
+            duration: Duration::from_millis(1_500),
+        }
+    }
+
+    /// Render the report with the escape codes forced on and then taken out,
+    /// so the assertion reads the glyphs that a user reads.
+    fn glyphs_of(stats: &Stats, locale: &Locale) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            format_report(stats, locale)
+        }))
+    }
+
+    /// Render the report with the escape codes forced on and left in place.
+    fn painted(stats: &Stats) -> String {
+        testcolor::with_forced_ansi(|| format_report(stats, &Locale::en))
+    }
+
+    /// Give the first line of a report and the lines under it.
+    fn split_header(report: &str) -> (&str, Vec<&str>) {
+        let mut lines = report.lines();
+        let header = lines.next().unwrap_or_default();
+        (header, lines.collect())
+    }
+
+    #[test]
+    fn a_report_of_a_run_that_made_the_file_smaller_holds_the_six_values() {
+        assert_eq!(glyphs_of(&shrank(), &Locale::en), SHRANK_REPORT);
+    }
+
+    #[test]
+    fn a_report_of_a_run_that_made_the_file_larger_warns_and_shows_a_negative_change() {
+        let report = glyphs_of(&grew(), &Locale::en);
+        assert_eq!(report, GREW_REPORT);
+        assert!(report.contains("-20.00%"), "the report is {report}");
+    }
+
+    #[test]
+    fn a_report_of_an_input_of_no_bytes_names_the_reason_for_the_missing_change() {
+        assert_eq!(glyphs_of(&empty_input(), &Locale::en), EMPTY_INPUT_REPORT);
+    }
+
+    #[test]
+    fn a_report_follows_the_locale_that_it_gets() {
+        let stats = shrank();
+        let english = glyphs_of(&stats, &Locale::en);
+        let german = glyphs_of(&stats, &Locale::de);
+        assert_eq!(english, SHRANK_REPORT);
+        assert_eq!(german, SHRANK_REPORT_IN_GERMAN);
+        assert_ne!(english, german);
+    }
+
+    #[test]
+    fn the_header_of_a_run_that_made_the_file_smaller_is_green() {
+        let report = painted(&shrank());
+        let (header, values) = split_header(&report);
+        assert!(header.starts_with(GREEN_START), "the header is {header:?}");
+        assert!(header.contains(SHRANK_HEADER), "the header is {header:?}");
+        for line in values {
+            assert!(!line.contains(ESCAPE), "the line is {line:?}");
+        }
+    }
+
+    #[test]
+    fn the_header_of_a_run_that_made_the_file_larger_is_yellow() {
+        let report = painted(&grew());
+        let (header, values) = split_header(&report);
+        assert!(header.starts_with(YELLOW_START), "the header is {header:?}");
+        assert!(header.contains(GREW_HEADER), "the header is {header:?}");
+        for line in values {
+            assert!(!line.contains(ESCAPE), "the line is {line:?}");
+        }
     }
 }
