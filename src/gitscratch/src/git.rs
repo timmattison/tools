@@ -942,6 +942,86 @@ mod tests {
         assert_scratch_identity();
     }
 
+    /// Re-execute this test binary on one test, under an environment
+    /// `configure` sets, and report what the child wrote when the run failed.
+    ///
+    /// Two tests here need an environment of their own, and an environment is
+    /// process-wide: `std::env::set_var` in either one reaches every sibling
+    /// test in the binary and every concurrent run of the suite. So each of
+    /// them re-executes this binary with `marker` set, and its own child branch
+    /// recognises the marker and does the asserting.
+    ///
+    /// The two parents differ in nothing but the environment they set, so one
+    /// helper decides what counts as a run rather than two copies of the same
+    /// `Command` construction deciding it apart from each other. The
+    /// environment arrives as a closure because the two spell their values
+    /// differently: the hook test holds `&str` and the redirected test holds
+    /// `PathBuf`.
+    fn run_child_half(
+        marker: &str,
+        filter: &str,
+        configure: impl FnOnce(&mut std::process::Command),
+    ) -> Result<(), String> {
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("path of the running test binary"),
+        );
+        child
+            .args([filter, "--exact", "--nocapture"])
+            .env(marker, "1");
+        configure(&mut child);
+
+        let output = child.output().expect("re-run this test binary");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        Err(format!("{stdout}{stderr}"))
+    }
+
+    /// Marks the child of
+    /// [`a_child_half_that_matched_no_test_is_a_failure_not_a_pass`]. Nothing
+    /// ever reads it: the filter that child runs under matches no test, so no
+    /// child branch runs to look for it.
+    const UNMATCHED_CHILD_MARKER: &str = "GITSCRATCH_UNMATCHED_FILTER_CHILD";
+
+    /// A libtest filter naming a test this file does not define, which is what
+    /// a renamed test looks like from the parent's side.
+    const UNMATCHED_TEST_PATH: &str = "git::tests::no_test_in_this_file_carries_this_name";
+
+    /// A filter is a string, and nothing ties a string to the test it names.
+    /// Rename the test, the `tests` module or the `git` module and the filter
+    /// stays as it was, so the child matches nothing — and libtest exits 0 when
+    /// a filter matches nothing. A parent that reads the exit status alone
+    /// therefore calls the rename a pass, and the two guards below check
+    /// nothing from that commit on, in silence.
+    ///
+    /// So [`run_child_half`] has to refuse a child that ran no test, and this
+    /// pins that it does. The rename that breaks a filter is the rename that
+    /// hides the breakage, which is why the refusal cannot live in the filter
+    /// constants themselves.
+    #[test]
+    fn a_child_half_that_matched_no_test_is_a_failure_not_a_pass() {
+        let outcome = run_child_half(UNMATCHED_CHILD_MARKER, UNMATCHED_TEST_PATH, |_| {});
+
+        let report = outcome.expect_err(
+            "a child that matched no test must be a failure: libtest exits 0 on an empty filter, \
+             so accepting that exit means a renamed test reports a pass while nothing runs",
+        );
+        assert!(
+            report.contains(UNMATCHED_TEST_PATH),
+            "the refusal has to name the filter that matched nothing, because the filter is the \
+             thing that went stale: {report}"
+        );
+        assert!(
+            report.contains("matched no test"),
+            "the refusal has to say what went wrong - a child that ran nothing, not a child that \
+             failed - or a reader repairs the wrong half: {report}"
+        );
+    }
+
     /// Marks the re-executed child half of
     /// [`the_pinned_identity_survives_a_hook_environment`].
     const CHILD_MARKER: &str = "GITSCRATCH_HOOK_ENVIRONMENT_CHILD";
@@ -975,24 +1055,15 @@ mod tests {
             return;
         }
 
-        let mut child = std::process::Command::new(
-            std::env::current_exe().expect("path of the running test binary"),
-        );
-        child
-            .args([HOOK_TEST_PATH, "--exact", "--nocapture"])
-            .env(CHILD_MARKER, "1");
-        for (name, value) in HOOK_ENVIRONMENT {
-            child.env(name, value);
+        let outcome = run_child_half(CHILD_MARKER, HOOK_TEST_PATH, |child| {
+            for (name, value) in HOOK_ENVIRONMENT {
+                child.env(name, value);
+            }
+        });
+
+        if let Err(report) = outcome {
+            panic!("the pinned identity did not survive a hook environment:\n{report}");
         }
-
-        let output = child.output().expect("re-run this test binary");
-
-        assert!(
-            output.status.success(),
-            "the pinned identity did not survive a hook environment:\n{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 
     /// Every pin in [`Git::safety_config`] is only as good as the environment it
@@ -1027,28 +1098,20 @@ mod tests {
         // parent, and outlives the child because the parent blocks on it.
         let elsewhere = TempDir::new().expect("create the stand-in for a real repository");
 
-        let mut child = std::process::Command::new(
-            std::env::current_exe().expect("path of the running test binary"),
-        );
-        child
-            .args([REDIRECTED_TEST_PATH, "--exact", "--nocapture"])
-            .env(REDIRECTED_CHILD_MARKER, "1")
-            .env("GIT_AUTHOR_NAME", "A Developer")
-            .env("GIT_AUTHOR_EMAIL", "developer@example.com")
-            .env("GIT_COMMITTER_NAME", "A Developer")
-            .env("GIT_COMMITTER_EMAIL", "developer@example.com")
-            .env("GIT_DIR", elsewhere.path().join("their-repo.git"))
-            .env("GIT_WORK_TREE", elsewhere.path())
-            .env("GIT_INDEX_FILE", elsewhere.path().join(THEIR_INDEX));
+        let outcome = run_child_half(REDIRECTED_CHILD_MARKER, REDIRECTED_TEST_PATH, |child| {
+            child
+                .env("GIT_AUTHOR_NAME", "A Developer")
+                .env("GIT_AUTHOR_EMAIL", "developer@example.com")
+                .env("GIT_COMMITTER_NAME", "A Developer")
+                .env("GIT_COMMITTER_EMAIL", "developer@example.com")
+                .env("GIT_DIR", elsewhere.path().join("their-repo.git"))
+                .env("GIT_WORK_TREE", elsewhere.path())
+                .env("GIT_INDEX_FILE", elsewhere.path().join(THEIR_INDEX));
+        });
 
-        let output = child.output().expect("re-run this test binary");
-
-        assert!(
-            output.status.success(),
-            "an inherited git environment reached the runner:\n{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        if let Err(report) = outcome {
+            panic!("an inherited git environment reached the runner:\n{report}");
+        }
     }
 
     /// Marks the re-executed child half of
