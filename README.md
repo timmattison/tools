@@ -174,14 +174,19 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - To install: `cargo install --git https://github.com/timmattison/tools gitrdun`
 - spv (smart process viewer)
     - Smart process viewer with enhanced filtering and display. Find processes by PID (single or comma-separated),
-      name pattern (case-insensitive substring), or regex. Add `--case-sensitive` to respect case, and `--full` to
-      search the whole command line the way `pgrep -f` does. Displays process info in a formatted table or raw output.
-      Optionally shows working directories (`--cwd`), open files (`--lsof`), environment variables (`--env`), and
-      network connections (`--net`). `--all` turns on every section. A value whose name reads like a credential is
-      hidden, and `--show-secrets` prints it in full. A section that cannot be read says why, and a run that touches a
-      process belonging to another user says that sudo is needed. Examples: `spv 77763`, `spv node`,
-      `spv --regex 'node.*'`, `spv --cwd --lsof zsh`, `spv --all --full deploy.sh`.
-    - This tool replaces `procinfo`, which was removed. `procinfo` did not work on macOS.
+      name pattern (case-insensitive substring), or regex. Add `--case-sensitive` to make the substring search
+      respect case, and `--full` to search the whole command line the way `pgrep -f` does. Displays process info in
+      a formatted table or raw output. Optionally shows working directories (`--cwd`), open files (`--lsof`),
+      environment variables (`--env`), and network connections (`--net`). `--all` turns on every section. A value
+      whose name reads like a credential is hidden, and `--show-secrets` prints it in full. A section that cannot be
+      read says why, and a run that touches a process belonging to another user says that sudo is needed. Examples:
+      `spv 77763`, `spv node`, `spv --regex 'node.*'`, `spv --cwd --lsof zsh`, `spv --all --full deploy.sh`.
+    - This tool replaces `procinfo`, which was removed. `procinfo` did not work on macOS. A `procinfo` user meets
+      three changes:
+        - A search that matches nothing exits 1. `procinfo` exited 0.
+        - The open files and network sections need `--lsof`, `--net`, or `--all`. `procinfo` printed both by default.
+        - A name search reads the executable name. `procinfo` read the whole command line, and `--full` gives that
+          reach back.
     - To install: `cargo install --git https://github.com/timmattison/tools spv`
 - pk (process killer)
     - Process killer with dry-run mode and detailed feedback. Uses macOS's libproc API (same as Activity Monitor)
