@@ -41,6 +41,13 @@ const MAX_PACKET_SIZE: usize = 10 * 1024;
 /// that hangs blocks every commit of this repository.
 const STEP_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// The longest time a whole test waits for the session and the broker.
+///
+/// This limit is longer than [`STEP_TIMEOUT`], so a step that waits for
+/// something that never arrives fails with its own message and this one stays
+/// as the last guard against a test that never ends.
+const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The header that names the subprotocol of a WebSocket.
 const SUBPROTOCOL_HEADER: &str = "Sec-WebSocket-Protocol";
 
@@ -306,11 +313,47 @@ impl Broker {
         )))
         .await;
     }
+
+    /// Waits until the client closes the connection.
+    ///
+    /// The broker holds its end open, so the connection ends only when the run
+    /// of the session ends. A client that sends another packet first fails the
+    /// test, because a run that stopped sends nothing.
+    async fn read_nothing_more(&mut self) {
+        loop {
+            let message = tokio::time::timeout(STEP_TIMEOUT, self.socket.next())
+                .await
+                .expect("the client held the connection open, and the run had to stop");
+
+            match message {
+                // The client closed the connection, in one way or the other.
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => (),
+                Some(Ok(other)) => panic!("the client sent {other:?} after the run had to stop"),
+            }
+        }
+    }
 }
 
 /// A shutdown that never answers, for a test that ends the run another way.
 fn never() -> impl std::future::Future<Output = std::io::Result<()>> {
     std::future::pending()
+}
+
+/// Runs a session and the script of its broker together, and gives the answer
+/// of the session.
+///
+/// Neither of the two finishes without the other, so the limit covers both. A
+/// test that waits forever blocks every commit of this repository.
+async fn together(
+    session: impl std::future::Future<Output = Result<(), SessionError>>,
+    script: impl std::future::Future<Output = ()>,
+) -> Result<(), SessionError> {
+    let (result, ()) = tokio::time::timeout(RUN_TIMEOUT, async { tokio::join!(session, script) })
+        .await
+        .expect("the session and the script of the broker did not both finish");
+
+    result
 }
 
 #[tokio::test]
@@ -355,7 +398,7 @@ async fn a_suback_names_the_topic_of_its_own_packet_identifier() {
         drop(broker);
     };
 
-    let (result, ()) = tokio::join!(session, script);
+    let result = together(session, script).await;
 
     assert!(
         matches!(result, Err(SessionError::Connection(_))),
@@ -402,12 +445,58 @@ async fn a_refused_subscription_says_so_and_the_run_goes_on() {
         drop(broker);
     };
 
-    let (result, ()) = tokio::join!(session, script);
+    let result = together(session, script).await;
 
     // One topic of the two works, so the run goes on until the connection
     // ends. A run that stopped at the refusal gives another failure here.
     assert!(
         matches!(result, Err(SessionError::Connection(_))),
         "a refusal of one topic of two does not end the run: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_whose_every_subscription_is_refused_stops() {
+    let (listener, port) = listening().await;
+    let topics = vec!["denied/one".to_string(), "denied/two".to_string()];
+    let (mut output, mut printed) = recording();
+
+    let session = run_until(
+        options_for(port),
+        &topics,
+        QoS::AtMostOnce,
+        false,
+        &mut output,
+        never(),
+    );
+
+    let script = async {
+        let mut broker = Broker::accept(listener).await;
+        broker.accept_connection().await;
+
+        let first = broker.read_subscribe().await;
+        let second = broker.read_subscribe().await;
+
+        broker.refuse(first.pkid).await;
+        broker.refuse(second.pkid).await;
+
+        assert_eq!(
+            printed.lines(2).await,
+            [
+                "Subscription refused: denied/one",
+                "Subscription refused: denied/two"
+            ]
+        );
+
+        // The broker holds the connection open. A session that subscribed to
+        // nothing must stop on its own, because it can never print a message.
+        broker.read_nothing_more().await;
+    };
+
+    let result = together(session, script).await;
+
+    assert!(
+        matches!(result, Err(SessionError::AllSubscriptionsRefused)),
+        "a run that subscribed to nothing stops and says so: {result:?}"
     );
 }
