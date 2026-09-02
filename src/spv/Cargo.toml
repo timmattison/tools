@@ -18,6 +18,7 @@ buildinfo.workspace = true
 which.workspace = true
 libc.workspace = true
 regex.workspace = true
+unicode-width.workspace = true
 
 [lints]
 workspace = true

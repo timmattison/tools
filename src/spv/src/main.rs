@@ -15,6 +15,7 @@ use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use human_bytes::human_bytes;
 use regex::Regex;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
+use unicode_width::UnicodeWidthStr;
 
 /// Cached result of lsof availability check.
 ///
@@ -1274,99 +1275,256 @@ fn print_raw(processes: &[ProcessInfo], include_cwd: bool) {
     }
 }
 
-/// Prints open files for processes in table format.
+/// The two forms a section prints in.
 ///
-/// # Arguments
-///
-/// * `processes` - The processes to show files for
-/// * `viewer` - The user who runs this tool, and the reach that user has
-fn print_open_files(processes: &[ProcessInfo], viewer: &Viewer) {
-    for proc in processes {
-        println!("\nOpen files for {} (PID {}):", proc.name, proc.pid);
-        match get_open_files(proc.pid) {
-            Err(reason) => println!("  unavailable: {reason}"),
-            Ok(files) if files.is_empty() => println!("  {}", viewer.empty_lsof_line(proc)),
-            Ok(files) => {
-                let mut table = Table::new();
-                table
-                    .load_preset(UTF8_FULL)
-                    .set_content_arrangement(ContentArrangement::Dynamic)
-                    .set_header(vec!["FD", "TYPE", "NAME"]);
+/// `--raw` promises output without table formatting, and it must reach every
+/// section. So the choice stands here, in one place, and each section hands its
+/// rows to the same printer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SectionFormat {
+    /// A table with borders, for a reader at a terminal.
+    Table,
+    /// Padded columns, for a script.
+    Raw,
+}
 
-                for file in files {
-                    table.add_row(vec![file.fd, file.file_type, file.name]);
-                }
-                println!("{table}");
-            }
+impl SectionFormat {
+    /// Chooses the form that the `--raw` flag asks for.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The value of the `--raw` flag
+    ///
+    /// # Returns
+    ///
+    /// The raw form when the flag is set, otherwise the table form.
+    fn from_raw_flag(raw: bool) -> Self {
+        if raw {
+            Self::Raw
+        } else {
+            Self::Table
         }
     }
 }
 
-/// Prints the network connections of each process.
+/// The gap between two columns of the raw form.
+///
+/// One space is enough, because the padding brings every column but the last to
+/// the width of its widest cell.
+const RAW_COLUMN_GAP: char = ' ';
+
+/// The text that stands in front of a line that carries no row.
+const SECTION_NOTE_INDENT: &str = "  ";
+
+/// Lays a header and its rows out as padded columns.
+///
+/// The padding brings every column but the last to the width of its widest
+/// cell. The last column takes no padding, so no line ends in a space. No value
+/// is made shorter, because the raw form exists for scripts and a shortened path
+/// is of no use to one.
 ///
 /// # Arguments
 ///
-/// * `processes` - The processes to show the connections of
-/// * `viewer` - The user who runs this tool, and the reach that user has
-fn print_net_connections(processes: &[ProcessInfo], viewer: &Viewer) {
-    for proc in processes {
-        println!(
-            "\nNetwork connections for {} (PID {}):",
-            proc.name, proc.pid
-        );
-        match get_net_connections(proc.pid) {
-            Err(reason) => println!("  unavailable: {reason}"),
-            Ok(connections) if connections.is_empty() => {
-                println!("  {}", viewer.empty_lsof_line(proc));
-            }
-            Ok(connections) => {
+/// * `headers` - The column labels
+/// * `rows` - The rows, each of which holds one cell for each column
+///
+/// # Returns
+///
+/// The header line, and then one line for each row.
+///
+/// # Width Note
+///
+/// The padding counts terminal columns, through `unicode_width`. `str::len`
+/// counts bytes and `chars().count()` counts characters, and a terminal shows
+/// neither: it gives a Japanese character two columns and an ASCII letter one.
+/// A count of bytes or of characters thus starts the next column of one line in
+/// a different place from the next column of the line above it.
+fn raw_grid_lines(headers: &[&str], rows: &[Vec<String>]) -> Vec<String> {
+    let mut grid: Vec<Vec<&str>> = Vec::with_capacity(rows.len() + 1);
+    grid.push(headers.to_vec());
+    for row in rows {
+        grid.push(row.iter().map(String::as_str).collect());
+    }
+
+    let column_count = grid.iter().map(Vec::len).max().unwrap_or_default();
+    let mut widths = vec![0_usize; column_count];
+    for line in &grid {
+        for (column, cell) in line.iter().enumerate() {
+            widths[column] = widths[column].max(cell.width());
+        }
+    }
+
+    grid.iter().map(|line| pad_cells(line, &widths)).collect()
+}
+
+/// Joins the cells of one line, and pads every cell but the last.
+///
+/// # Arguments
+///
+/// * `cells` - The cells of one line
+/// * `widths` - The terminal columns that each column of the grid takes
+///
+/// # Returns
+///
+/// The line, without a line break and without a space at the end.
+fn pad_cells(cells: &[&str], widths: &[usize]) -> String {
+    let mut line = String::new();
+    for (column, cell) in cells.iter().enumerate() {
+        line.push_str(cell);
+        if column + 1 == cells.len() {
+            break;
+        }
+        let width = widths.get(column).copied().unwrap_or_default();
+        // A space takes one terminal column, so the count of spaces is the
+        // difference between the two widths.
+        for _ in cell.width()..width {
+            line.push(RAW_COLUMN_GAP);
+        }
+        line.push(RAW_COLUMN_GAP);
+    }
+    line
+}
+
+/// Prints the sections that go under the process listing.
+///
+/// The three sections do the same work. Each one names itself, each one says
+/// why it holds nothing, and each one otherwise lays rows out under a header.
+/// This type owns that work, so the choice between the two forms is made in one
+/// place. A section keeps only its heading, its column labels, and the way it
+/// turns one item into a row.
+struct SectionPrinter {
+    /// The user who runs this tool, and the reach that user has.
+    viewer: Viewer,
+    /// The form that every section prints in.
+    format: SectionFormat,
+    /// Whether to print credential-looking environment values in full.
+    show_secrets: bool,
+}
+
+impl SectionPrinter {
+    /// Prints one section of one process.
+    ///
+    /// # Arguments
+    ///
+    /// * `heading` - The line that names the section and the process
+    /// * `headers` - The column labels
+    /// * `rows` - The rows, or the reason why there are none
+    /// * `empty_line` - The line that a section with no rows prints
+    fn print_section(
+        &self,
+        heading: &str,
+        headers: &[&str],
+        rows: Result<Vec<Vec<String>>, String>,
+        empty_line: &str,
+    ) {
+        println!("\n{heading}");
+        match rows {
+            Err(reason) => println!("{SECTION_NOTE_INDENT}unavailable: {reason}"),
+            Ok(rows) if rows.is_empty() => println!("{SECTION_NOTE_INDENT}{empty_line}"),
+            Ok(rows) => self.print_rows(headers, rows),
+        }
+    }
+
+    /// Prints the rows of a section in the form that this run asked for.
+    ///
+    /// # Arguments
+    ///
+    /// * `headers` - The column labels
+    /// * `rows` - The rows, each of which holds one cell for each column
+    fn print_rows(&self, headers: &[&str], rows: Vec<Vec<String>>) {
+        match self.format {
+            SectionFormat::Table => {
                 let mut table = Table::new();
                 table
                     .load_preset(UTF8_FULL)
                     .set_content_arrangement(ContentArrangement::Dynamic)
-                    .set_header(vec!["FD", "TYPE", "PROTO", "NAME"]);
-
-                for connection in connections {
-                    table.add_row(vec![
-                        connection.fd,
-                        connection.family,
-                        connection.protocol,
-                        connection.name,
-                    ]);
+                    .set_header(headers.to_vec());
+                for row in rows {
+                    table.add_row(row);
                 }
                 println!("{table}");
+            }
+            SectionFormat::Raw => {
+                for line in raw_grid_lines(headers, &rows) {
+                    println!("{line}");
+                }
             }
         }
     }
-}
 
-/// Prints the environment of each process.
-///
-/// A section that cannot be read says why, because a section that comes back
-/// empty teaches the reader that the process holds nothing.
-///
-/// # Arguments
-///
-/// * `processes` - The processes to show the environment of
-/// * `show_secrets` - Whether to print credential-looking values in full
-fn print_environments(processes: &[ProcessInfo], show_secrets: bool) {
-    for proc in processes {
-        println!("\nEnvironment for {} (PID {}):", proc.name, proc.pid);
-        match read_process_env(proc.pid) {
-            Err(reason) => println!("  unavailable: {reason}"),
-            Ok(variables) if variables.is_empty() => println!("  none found"),
-            Ok(variables) => {
-                let mut table = Table::new();
-                table
-                    .load_preset(UTF8_FULL)
-                    .set_content_arrangement(ContentArrangement::Dynamic)
-                    .set_header(vec!["NAME", "VALUE"]);
-                for (name, value) in variables {
-                    let shown = redact_env_value(&name, &value, show_secrets);
-                    table.add_row(vec![name, shown]);
-                }
-                println!("{table}");
-            }
+    /// Prints the open files of each process.
+    ///
+    /// # Arguments
+    ///
+    /// * `processes` - The processes to show the files of
+    fn print_open_files(&self, processes: &[ProcessInfo]) {
+        for proc in processes {
+            self.print_section(
+                &format!("Open files for {} (PID {}):", proc.name, proc.pid),
+                &["FD", "TYPE", "NAME"],
+                get_open_files(proc.pid).map(|files| {
+                    files
+                        .into_iter()
+                        .map(|file| vec![file.fd, file.file_type, file.name])
+                        .collect()
+                }),
+                &self.viewer.empty_lsof_line(proc),
+            );
+        }
+    }
+
+    /// Prints the network connections of each process.
+    ///
+    /// # Arguments
+    ///
+    /// * `processes` - The processes to show the connections of
+    fn print_net_connections(&self, processes: &[ProcessInfo]) {
+        for proc in processes {
+            self.print_section(
+                &format!("Network connections for {} (PID {}):", proc.name, proc.pid),
+                &["FD", "TYPE", "PROTO", "NAME"],
+                get_net_connections(proc.pid).map(|connections| {
+                    connections
+                        .into_iter()
+                        .map(|connection| {
+                            vec![
+                                connection.fd,
+                                connection.family,
+                                connection.protocol,
+                                connection.name,
+                            ]
+                        })
+                        .collect()
+                }),
+                &self.viewer.empty_lsof_line(proc),
+            );
+        }
+    }
+
+    /// Prints the environment of each process.
+    ///
+    /// A section that cannot be read says why, because a section that comes
+    /// back empty teaches the reader that the process holds nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `processes` - The processes to show the environment of
+    fn print_environments(&self, processes: &[ProcessInfo]) {
+        for proc in processes {
+            self.print_section(
+                &format!("Environment for {} (PID {}):", proc.name, proc.pid),
+                &["NAME", "VALUE"],
+                read_process_env(proc.pid).map(|variables| {
+                    variables
+                        .into_iter()
+                        .map(|(name, value)| {
+                            let shown = redact_env_value(&name, &value, self.show_secrets);
+                            vec![name, shown]
+                        })
+                        .collect()
+                }),
+                "none found",
+            );
         }
     }
 }
@@ -1503,27 +1661,31 @@ fn main() -> Result<()> {
 
     // A section reads state the kernel guards, so say up front whose process
     // this is. A plain listing comes from sysctl and needs no permission.
-    let viewer = Viewer::current();
+    let printer = SectionPrinter {
+        viewer: Viewer::current(),
+        format: SectionFormat::from_raw_flag(args.raw),
+        show_secrets: args.show_secrets,
+    };
     let wants_a_section = sections.files || sections.env || sections.net;
     if wants_a_section {
-        if let Some(warning) = permission_warning(&processes, &viewer) {
+        if let Some(warning) = permission_warning(&processes, &printer.viewer) {
             eprintln!("\n{warning}");
         }
     }
 
     // Print open files if requested
     if sections.files {
-        print_open_files(&processes, &viewer);
+        printer.print_open_files(&processes);
     }
 
     // Print the environment if requested
     if sections.env {
-        print_environments(&processes, args.show_secrets);
+        printer.print_environments(&processes);
     }
 
     // Print network connections if requested
     if sections.net {
-        print_net_connections(&processes, &viewer);
+        printer.print_net_connections(&processes);
     }
 
     Ok(())
@@ -1938,6 +2100,90 @@ mod tests {
     #[test]
     fn a_line_with_too_few_fields_is_not_a_connection() {
         assert!(parse_lsof_net_line("nginx 512 root 6u IPv4").is_none());
+    }
+
+    /// Builds the rows of a grid out of borrowed text.
+    fn grid_rows(rows: &[&[&str]]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|row| row.iter().map(|cell| (*cell).to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn the_raw_flag_chooses_the_form_of_every_section() {
+        assert_eq!(SectionFormat::from_raw_flag(true), SectionFormat::Raw);
+        assert_eq!(SectionFormat::from_raw_flag(false), SectionFormat::Table);
+    }
+
+    #[test]
+    fn a_raw_grid_pads_every_column_but_the_last() {
+        let rows = grid_rows(&[&["cwd", "DIR", "/tmp"], &["0r", "CHR", "/dev/null"]]);
+        assert_eq!(
+            raw_grid_lines(&["FD", "TYPE", "NAME"], &rows),
+            vec![
+                "FD  TYPE NAME".to_string(),
+                "cwd DIR  /tmp".to_string(),
+                "0r  CHR  /dev/null".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_raw_grid_line_ends_without_a_space() {
+        let rows = grid_rows(&[&["3r", "REG", "a"]]);
+        for line in raw_grid_lines(&["FD", "TYPE", "NAME"], &rows) {
+            assert!(!line.ends_with(' '), "a line ends with no space: {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_raw_grid_counts_a_wide_character_as_two_terminal_columns() {
+        // The two names take four terminal columns each, so neither one takes
+        // padding. A count of characters gives the Japanese name two, and it
+        // then pads that name into the wrong place.
+        let rows = grid_rows(&[&["日本", "REG"], &["abcd", "DIR"]]);
+        assert_eq!(
+            raw_grid_lines(&["NAME", "TYPE"], &rows),
+            vec![
+                "NAME TYPE".to_string(),
+                "日本 REG".to_string(),
+                "abcd DIR".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_raw_grid_carries_an_emoji_through() {
+        // An emoji takes two terminal columns, as a Japanese character does.
+        let rows = grid_rows(&[&["EMOJI", "🎉"], &["GREETING", "こんにちは"]]);
+        assert_eq!(
+            raw_grid_lines(&["NAME", "VALUE"], &rows),
+            vec![
+                "NAME     VALUE".to_string(),
+                "EMOJI    🎉".to_string(),
+                "GREETING こんにちは".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_raw_grid_never_makes_a_value_shorter() {
+        let path = "/Volumes/SamsungSSDs/code/tools/src/spv/a-name-a-script-needs-in-full.txt";
+        let rows = grid_rows(&[&["3r", "REG", path]]);
+        let lines = raw_grid_lines(&["FD", "TYPE", "NAME"], &rows);
+        assert!(
+            lines[1].ends_with(path),
+            "the raw form keeps the whole path: {}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn a_raw_grid_of_no_rows_is_the_header_alone() {
+        assert_eq!(
+            raw_grid_lines(&["FD", "TYPE", "NAME"], &[]),
+            vec!["FD TYPE NAME".to_string()]
+        );
     }
 
     /// Builds a process whose only interesting field is its owner.

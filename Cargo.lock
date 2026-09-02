@@ -7332,6 +7332,7 @@ dependencies = [
  "libc",
  "regex",
  "sysinfo",
+ "unicode-width",
  "which",
 ]
 
