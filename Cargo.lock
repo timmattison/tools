@@ -7837,6 +7837,7 @@ name = "termsize"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "libc",
  "terminal_size",
 ]
 
