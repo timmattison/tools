@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 percent-encoding.workspace = true
 thiserror.workspace = true
+tiny_http.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

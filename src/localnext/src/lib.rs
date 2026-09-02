@@ -6,6 +6,8 @@
 //! locating that export root.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
 /// The directory a Next.js static export builds into.
 pub const ROOT_DIRECTORY: &str = "out";
@@ -234,6 +236,65 @@ pub fn resolve_request(root: &Path, target: &str) -> Resolution {
     }
 
     Resolution::Fallback(fallback)
+}
+
+/// Returns the HTTP `Content-Type` for a file, based on its extension.
+///
+/// The lookup is case-insensitive (`.CSS`, `.Png`, and `.JSON` resolve the same
+/// as their lowercase forms). A file with no extension, a non-UTF-8 extension,
+/// or an unrecognized extension falls back to `application/octet-stream`.
+/// Textual types carry a `; charset=utf-8` parameter; binary types do not.
+///
+/// The Go tool this ports got content types for free: it handed every hit to
+/// `http.ServeFile`, which sniffs the extension and sets the header itself.
+/// `tiny_http` does no such thing — it sends whatever header the response
+/// carries and nothing more — so this table is load-bearing. Without it a `.css`
+/// file goes out as `text/plain`, the browser refuses to apply it, and the page
+/// renders unstyled with no error anywhere.
+///
+/// The table covers what a Next.js static export emits: markup, stylesheets, the
+/// JavaScript chunks and their `.map` source maps, the web manifest, fonts,
+/// images (including `.avif`), and the media and archive types a project may
+/// place in `public/`.
+///
+/// This function never panics, and never indexes a string by bytes, so a
+/// multi-byte extension is handled like any other.
+#[must_use]
+pub fn content_type_for(path: &Path) -> &'static str {
+    // Behavior missing: every file is reported as an opaque byte stream.
+    let _ = path;
+    OCTET_STREAM
+}
+
+/// The content type of a file whose extension names nothing recognizable.
+const OCTET_STREAM: &str = "application/octet-stream";
+
+/// Spawns a fixed pool of `workers` threads serving `root` on `server`.
+///
+/// Each worker loops on `server.recv()`; the pool shuts down when the server is
+/// unblocked (`server.unblock()` once per worker), at which point `recv()` errors
+/// and the workers exit. Returns the worker handles so the caller can join them.
+/// At least one worker is always spawned even when `workers` is `0`.
+#[must_use]
+pub fn serve(
+    server: Arc<tiny_http::Server>,
+    root: Arc<PathBuf>,
+    workers: usize,
+) -> Vec<JoinHandle<()>> {
+    (0..workers.max(1))
+        .map(|_| {
+            let server = Arc::clone(&server);
+            let root = Arc::clone(&root);
+            std::thread::spawn(move || {
+                // `recv()` errors when the server is unblocked, ending the loop.
+                while let Ok(request) = server.recv() {
+                    // Behavior missing: nothing is resolved and nothing is served.
+                    let _ = root.as_path();
+                    let _ = request.respond(tiny_http::Response::empty(500));
+                }
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -491,5 +552,104 @@ mod tests {
             resolve_request(&root, "/escape.html"),
             Resolution::Forbidden
         );
+    }
+
+    use super::content_type_for;
+
+    /// Reads the Content-Type of a filename, for readability at the call sites.
+    fn ct(filename: &str) -> &'static str {
+        content_type_for(Path::new(filename))
+    }
+
+    #[test]
+    fn html_is_html() {
+        assert_eq!(ct("index.html"), "text/html; charset=utf-8");
+        assert_eq!(ct("index.htm"), "text/html; charset=utf-8");
+    }
+
+    #[test]
+    fn css_is_css() {
+        assert_eq!(ct("app.css"), "text/css; charset=utf-8");
+    }
+
+    #[test]
+    fn javascript_is_javascript() {
+        assert_eq!(ct("chunk.js"), "text/javascript; charset=utf-8");
+        assert_eq!(ct("chunk.mjs"), "text/javascript; charset=utf-8");
+    }
+
+    #[test]
+    fn json_and_source_maps_are_json_without_a_charset() {
+        assert_eq!(ct("build-manifest.json"), "application/json");
+        assert_eq!(ct("chunk.js.map"), "application/json");
+    }
+
+    #[test]
+    fn a_web_manifest_is_a_manifest() {
+        assert_eq!(ct("site.webmanifest"), "application/manifest+json");
+    }
+
+    #[test]
+    fn text_types_carry_a_charset() {
+        assert_eq!(ct("robots.txt"), "text/plain; charset=utf-8");
+        assert_eq!(ct("sitemap.xml"), "text/xml; charset=utf-8");
+    }
+
+    #[test]
+    fn svg_is_svg() {
+        assert_eq!(ct("logo.svg"), "image/svg+xml");
+    }
+
+    #[test]
+    fn image_types() {
+        assert_eq!(ct("logo.png"), "image/png");
+        assert_eq!(ct("hero.jpg"), "image/jpeg");
+        assert_eq!(ct("hero.jpeg"), "image/jpeg");
+        assert_eq!(ct("spin.gif"), "image/gif");
+        assert_eq!(ct("hero.webp"), "image/webp");
+        assert_eq!(ct("hero.avif"), "image/avif");
+        assert_eq!(ct("favicon.ico"), "image/x-icon");
+    }
+
+    #[test]
+    fn font_types() {
+        assert_eq!(ct("inter.woff"), "font/woff");
+        assert_eq!(ct("inter.woff2"), "font/woff2");
+        assert_eq!(ct("inter.ttf"), "font/ttf");
+    }
+
+    #[test]
+    fn binary_and_media_types() {
+        assert_eq!(ct("module.wasm"), "application/wasm");
+        assert_eq!(ct("paper.pdf"), "application/pdf");
+        assert_eq!(ct("clip.mp4"), "video/mp4");
+        assert_eq!(ct("theme.mp3"), "audio/mpeg");
+        assert_eq!(ct("beep.wav"), "audio/wav");
+        assert_eq!(ct("bundle.zip"), "application/zip");
+        assert_eq!(ct("bundle.gz"), "application/gzip");
+    }
+
+    #[test]
+    fn the_extension_match_is_case_insensitive() {
+        assert_eq!(ct("APP.CSS"), "text/css; charset=utf-8");
+        assert_eq!(ct("Index.HTML"), "text/html; charset=utf-8");
+        assert_eq!(ct("LOGO.PnG"), "image/png");
+    }
+
+    #[test]
+    fn a_file_with_no_extension_is_an_opaque_byte_stream() {
+        assert_eq!(ct("LICENSE"), "application/octet-stream");
+        assert_eq!(ct(".gitignore"), "application/octet-stream");
+    }
+
+    #[test]
+    fn an_unknown_extension_is_an_opaque_byte_stream() {
+        assert_eq!(ct("archive.tar"), "application/octet-stream");
+    }
+
+    #[test]
+    fn a_multi_byte_extension_never_panics() {
+        assert_eq!(ct("notes.日本語"), "application/octet-stream");
+        assert_eq!(ct("café.html"), "text/html; charset=utf-8");
     }
 }
