@@ -46,11 +46,17 @@ const HASH: char = '#';
 /// The character that stands between the key of a field and its text.
 const FIELD_COLON: char = ':';
 
-/// The character that stands between two cells of a table.
-const TABLE_BAR: char = '|';
-
-/// The characters a table draws the rule under its header with.
-const DELIMITER_CHARS: &[char] = &['-', ':', ' '];
+/// The characters that stand between two cells of a table.
+///
+/// The ASCII bar, and the two the box-drawing block writes. A row is split on
+/// these and never on a column position: a split by position needs the display
+/// width of every character in front of the column, and an em dash or a
+/// Japanese character inside one cell would then shift every cell after it.
+const TABLE_BARS: &[char] = &[
+    '|',        // the ASCII spelling
+    '\u{2502}', // │ BOX DRAWINGS LIGHT VERTICAL
+    '\u{2503}', // ┃ BOX DRAWINGS HEAVY VERTICAL
+];
 
 /// The character that opens the group of a pair.
 const GROUP_OPEN: char = '(';
@@ -391,7 +397,13 @@ fn key_of(line: &str) -> Option<(Key, &str)> {
     Some((key, rest))
 }
 
-/// Is `line` a rule a reader draws between two streams?
+/// Is `line` a rule a reader draws between two streams or two rows?
+///
+/// One rule for both forms, and one rule for every drawing of a table. It
+/// deletes `┌─┬─┐`, `├─┼─┤`, and `└─┴─┘`, the `+---+` of an ASCII table, the
+/// `| --- |` divider of a Markdown table, and the `|:--- | ---:|` divider that
+/// carries an alignment colon. A divider that stayed would be a stream whose
+/// `Order` field is `---:`.
 ///
 /// A rule carries no field and no prose. Three characters at the least,
 /// because `--` is the tail of an arrow and a rule is a line.
@@ -402,23 +414,28 @@ fn is_rule(line: &str) -> bool {
 
 /// Is `c` a character a reader draws a rule with?
 ///
-/// The box-drawing block holds every line and every corner, and the four marks
-/// beside it are the ones a keyboard writes: the hyphen, the equals sign, the
-/// underscore, and the two dashes a word processor writes for a hyphen.
+/// The box-drawing block holds every line and every corner. Beside it stand
+/// the marks a keyboard writes: the hyphen, the equals sign, the underscore,
+/// the two dashes a word processor writes for a hyphen, the `+` of an ASCII
+/// table, the `:` of an alignment, and the bar of a cell.
 fn is_rule_char(c: char) -> bool {
     matches!(
         c,
-        '\u{2500}'..='\u{257f}' | '-' | '=' | '_' | '\u{2013}' | '\u{2014}'
-    )
+        '\u{2500}'..='\u{257f}' | '-' | '=' | '_' | '+' | ':' | '\u{2013}' | '\u{2014}'
+    ) || TABLE_BARS.contains(&c)
 }
 
 /// The row of `text` that names the columns of a table.
 ///
 /// Gives the line the body of the table starts on, and the cells of the header
 /// itself. A row that names a `Stream` column or an `Order` column is the
-/// header, because those are the two columns this module reads.
+/// header, because those are the two columns this module reads. The `┌─┬─┐` a
+/// box table opens with is a rule and never a header.
 fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
     text.lines().enumerate().find_map(|(place, line)| {
+        if is_rule(line) {
+            return None;
+        }
         let cells = table_cells(line)?;
         let names_a_column = cells
             .iter()
@@ -436,8 +453,8 @@ fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
 /// of those tables as work, and a row whose cell under the `Order` column
 /// holds a word rather than a number took the whole plan down with it.
 ///
-/// The empty row and the rule under the header are rows of this table, so they
-/// are stepped over rather than taken as the end of it.
+/// The empty row and every rule of the table are rows of it, so they are
+/// stepped over rather than taken as the end of it.
 ///
 /// # Errors
 ///
@@ -446,19 +463,69 @@ fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
 fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>, PlanError> {
     let order_at = column_of(header, Key::Order).ok_or(PlanError::NoOrder)?;
     let stream_at = column_of(header, Key::Stream);
-    let mut streams: Vec<Stream> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
     for line in text.lines().skip(body) {
+        if is_rule(line) {
+            continue;
+        }
         let Some(cells) = table_cells(line) else {
             break;
         };
-        if cells.iter().all(|cell| cell.is_empty()) || is_delimiter(&cells) {
+        if cells.iter().all(|cell| cell.is_empty()) {
             continue;
         }
-        let named = stream_at.and_then(|at| cells.get(at)).copied();
-        let stream = stream_of(named, streams.len(), cells.get(order_at).copied())?;
-        streams.push(stream);
+        if continues_a_row(&cells, order_at) {
+            // A continuation with no row above it continues nothing. The plan
+            // then holds one row fewer, and a plan of no rows at all is the
+            // error [`parse`] gives for a header with nothing under it.
+            if let Some(row) = rows.last_mut() {
+                join_row(row, &cells);
+            }
+            continue;
+        }
+        rows.push(cells.into_iter().map(str::to_string).collect());
     }
-    Ok(streams)
+    rows.iter()
+        .enumerate()
+        .map(|(place, row)| {
+            let named = stream_at.and_then(|at| row.get(at)).map(String::as_str);
+            stream_of(named, place, row.get(order_at).map(String::as_str))
+        })
+        .collect()
+}
+
+/// Does `cells` continue the row above it, rather than open one?
+///
+/// A table wraps a row onto a second line, and the `Order` cell is what says
+/// so: a step of a chain never opens with an arrow, and a row that carries no
+/// step carries no chain. "The first cell is empty" reads the same way and is
+/// wrong, because a label wraps as readily as a chain does — the row of stream
+/// B of a real report carries the word `engine` in its first cell and nothing
+/// in its `Order` cell.
+fn continues_a_row(cells: &[&str], order_at: usize) -> bool {
+    cells.get(order_at).is_some_and(|order| {
+        order.is_empty()
+            || order
+                .chars()
+                .next()
+                .is_some_and(|c| SEPARATORS.contains(&c))
+    })
+}
+
+/// Join each cell of `cells` to the cell of `row` above it, with one space.
+///
+/// An empty cell adds nothing and takes nothing, so the label of a row that
+/// wraps in its `Order` cell alone keeps the space it was written with.
+fn join_row(row: &mut [String], cells: &[&str]) {
+    for (held, cell) in row.iter_mut().zip(cells) {
+        if cell.is_empty() {
+            continue;
+        }
+        if !held.is_empty() {
+            held.push(' ');
+        }
+        held.push_str(cell);
+    }
 }
 
 /// The cells of `line`, or `None` when `line` is no row of a table.
@@ -467,10 +534,10 @@ fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>
 /// cells and never by its shape: `#1 || #2` holds two bars and names no
 /// column, and it is a chain.
 fn table_cells(line: &str) -> Option<Vec<&str>> {
-    if !line.contains(TABLE_BAR) {
+    if !line.contains(TABLE_BARS) {
         return None;
     }
-    let mut cells: Vec<&str> = line.split(TABLE_BAR).map(str::trim).collect();
+    let mut cells: Vec<&str> = line.split(TABLE_BARS).map(str::trim).collect();
     // The bar at each end of a row gives an empty cell that is no cell. The
     // two bars are optional, so each end is dropped only when it is empty.
     if cells.first().is_some_and(|cell| cell.is_empty()) {
@@ -480,13 +547,6 @@ fn table_cells(line: &str) -> Option<Vec<&str>> {
         cells.truncate(cells.len().saturating_sub(1));
     }
     Some(cells)
-}
-
-/// Is this row the rule a table draws under its header?
-fn is_delimiter(cells: &[&str]) -> bool {
-    cells
-        .iter()
-        .all(|cell| !cell.is_empty() && cell.chars().all(|c| DELIMITER_CHARS.contains(&c)))
 }
 
 /// Does `cell` name the column `key` names?
@@ -1157,9 +1217,13 @@ Notes: Independent of everything above.";
             "the fixture is a wide cell, and it is {} columns",
             UnicodeWidthStr::width(notes.as_str())
         );
-        let table =
-            format!("| Stream | Order | Notes |\n| --- | --- | --- |\n| S1 | #350 → #187 | {notes} |");
-        assert_eq!(steps_at(&plan_of(&table), 0), vec![(350, None), (187, None)]);
+        let table = format!(
+            "| Stream | Order | Notes |\n| --- | --- | --- |\n| S1 | #350 → #187 | {notes} |"
+        );
+        assert_eq!(
+            steps_at(&plan_of(&table), 0),
+            vec![(350, None), (187, None)]
+        );
     }
 
     #[test]
