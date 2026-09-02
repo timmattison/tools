@@ -4,7 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+buildinfo.workspace = true
+clap = { workspace = true }
 percent-encoding.workspace = true
+portplz-core.workspace = true
 thiserror.workspace = true
 tiny_http.workspace = true
 

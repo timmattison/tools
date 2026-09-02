@@ -5,6 +5,7 @@
 //! binary so they can be exercised directly by unit tests. It starts with
 //! locating that export root.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -302,6 +303,22 @@ pub fn content_type_for(path: &Path) -> &'static str {
 
 /// The content type of a file whose extension names nothing recognizable.
 const OCTET_STREAM: &str = "application/octet-stream";
+
+/// Renders the two-line startup banner.
+///
+/// The first line names the binary and the buildinfo version string; the second
+/// names the export root being served and the URL it is served on. `addr` is the
+/// address the server actually bound, which is not always the address that was
+/// asked for: `--port 0` lets the operating system assign one, and a banner that
+/// echoed the request would then name a port nothing is listening on.
+///
+/// The returned string carries no trailing newline, so a caller prints it with
+/// `println!`.
+#[must_use]
+pub fn banner(version: &str, root: &Path, addr: SocketAddr) -> String {
+    let _ = (version, root, addr);
+    String::new()
+}
 
 /// Spawns a fixed pool of `workers` threads serving `root` on `server`.
 ///
@@ -749,5 +766,36 @@ mod tests {
     fn a_multi_byte_extension_never_panics() {
         assert_eq!(ct("notes.日本語"), "application/octet-stream");
         assert_eq!(ct("café.html"), "text/html; charset=utf-8");
+    }
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::banner;
+    use std::net::SocketAddr;
+    use std::path::Path;
+
+    /// A fixed buildinfo-shaped version string, so the assertion below reads as
+    /// the line a user actually sees.
+    const VERSION: &str = "0.1.0 (abc1234, clean)";
+
+    #[test]
+    fn the_banner_names_the_version_the_root_and_the_bound_address() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+
+        assert_eq!(
+            banner(VERSION, Path::new("/projects/site/out"), addr),
+            "localnext 0.1.0 (abc1234, clean)\nServing /projects/site/out on http://127.0.0.1:8080"
+        );
+    }
+
+    #[test]
+    fn an_ipv6_address_renders_in_its_bracketed_form() {
+        let addr: SocketAddr = "[::1]:4173".parse().expect("parse ipv6 address");
+
+        assert_eq!(
+            banner(VERSION, Path::new("/projects/site/out"), addr),
+            "localnext 0.1.0 (abc1234, clean)\nServing /projects/site/out on http://[::1]:4173"
+        );
     }
 }
