@@ -638,7 +638,11 @@ fn get_net_connections(pid: u32) -> Result<Vec<NetConnection>, String> {
     // -n skips the reverse DNS lookup and -P skips the port name lookup, which
     // keeps the run fast and the addresses numeric.
     let stdout = run_lsof(&["-nP", "-i", "-a", "-p", &pid.to_string()])?;
-    Ok(stdout.lines().skip(1).filter_map(parse_lsof_net_line).collect())
+    Ok(stdout
+        .lines()
+        .skip(1)
+        .filter_map(parse_lsof_net_line)
+        .collect())
 }
 
 // lsof output field indices (0-indexed).
@@ -782,7 +786,9 @@ fn read_env_block(pid: u32) -> Result<Vec<u8>, String> {
 #[cfg(target_os = "macos")]
 fn read_env_block(pid: u32) -> Result<Vec<u8>, String> {
     let Ok(kernel_pid) = i32::try_from(pid) else {
-        return Err(format!("the process id {pid} does not fit a macOS process id"));
+        return Err(format!(
+            "the process id {pid} does not fit a macOS process id"
+        ));
     };
 
     let buffer = procargs2_buffer(kernel_pid).map_err(|errno| match errno {
@@ -797,8 +803,9 @@ fn read_env_block(pid: u32) -> Result<Vec<u8>, String> {
         other => format!("sysctl(KERN_PROCARGS2) failed with errno {other}"),
     })?;
 
-    let block = env_block_from_procargs2(&buffer)
-        .ok_or_else(|| "the kernel returned an argument buffer this tool cannot read".to_string())?;
+    let block = env_block_from_procargs2(&buffer).ok_or_else(|| {
+        "the kernel returned an argument buffer this tool cannot read".to_string()
+    })?;
 
     // macOS truncates the buffer after the arguments unless the caller is root
     // or the caller is the process itself. The environment then looks empty,
@@ -1236,7 +1243,10 @@ fn print_open_files(processes: &[ProcessInfo]) {
 /// * `processes` - The processes to show the connections of
 fn print_net_connections(processes: &[ProcessInfo]) {
     for proc in processes {
-        println!("\nNetwork connections for {} (PID {}):", proc.name, proc.pid);
+        println!(
+            "\nNetwork connections for {} (PID {}):",
+            proc.name, proc.pid
+        );
         match get_net_connections(proc.pid) {
             Err(reason) => println!("  unavailable: {reason}"),
             Ok(connections) if connections.is_empty() => println!("  none found"),
@@ -1887,9 +1897,18 @@ mod tests {
         let processes = [process_owned_by(1, "root"), process_owned_by(2, "tim")];
         let warning =
             permission_warning(&processes, "tim", false).expect("root is not tim, so warn");
-        assert!(warning.contains("root"), "the warning names the owner: {warning}");
-        assert!(warning.contains("tim"), "the warning names the caller: {warning}");
-        assert!(warning.contains("sudo"), "the warning names the remedy: {warning}");
+        assert!(
+            warning.contains("root"),
+            "the warning names the owner: {warning}"
+        );
+        assert!(
+            warning.contains("tim"),
+            "the warning names the caller: {warning}"
+        );
+        assert!(
+            warning.contains("sudo"),
+            "the warning names the remedy: {warning}"
+        );
     }
 
     #[test]
@@ -1916,17 +1935,32 @@ mod tests {
     #[test]
     fn a_substring_search_ignores_case_by_default() {
         assert!(matches_name_pattern(
-            "NODE", None, "node", "node app.js", false, false
+            "NODE",
+            None,
+            "node",
+            "node app.js",
+            false,
+            false
         ));
     }
 
     #[test]
     fn case_sensitive_makes_a_substring_search_exact() {
         assert!(!matches_name_pattern(
-            "NODE", None, "node", "node app.js", false, true
+            "NODE",
+            None,
+            "node",
+            "node app.js",
+            false,
+            true
         ));
         assert!(matches_name_pattern(
-            "node", None, "node", "node app.js", false, true
+            "node",
+            None,
+            "node",
+            "node app.js",
+            false,
+            true
         ));
     }
 

@@ -6,8 +6,30 @@
 //! concurrent runs of the same test stay apart.
 
 use std::net::TcpListener;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Keeps a socket of this test process out of the children this file starts.
+///
+/// macOS has no `SOCK_CLOEXEC`, so the standard library creates a socket and
+/// then marks it close-on-exec in a second call. A `spawn` on another thread
+/// between the two calls hands the socket to the child, and `lsof` then reports
+/// a listening port for a process that never opened one. That is what a run of
+/// this file did: the sleeping shell held file descriptor 46, the loopback
+/// listener of the test below it.
+///
+/// Every start of a child and every bind of a socket takes this lock, so the
+/// two never overlap.
+static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+/// Takes the lock, and takes it again after a test that panicked poisoned it.
+fn spawn_lock() -> MutexGuard<'static, ()> {
+    SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Invoke the freshly-built `spv` binary.
 fn spv() -> Command {
@@ -32,6 +54,14 @@ fn run(output: Output) -> (bool, String, String) {
     )
 }
 
+/// How long a child waits before it stops on its own.
+///
+/// `Drop` kills the child when the test ends, so this bound only matters when a
+/// run is killed outright. It must still outlast the slowest run of this file:
+/// a bound of 30 seconds lost its children under load, and three tests then
+/// reported that the process they had just started did not exist.
+const SLEEPER_SECONDS: u32 = 300;
+
 /// A child process that the test starts, inspects, and kills.
 ///
 /// The shell holds the marker in its own command line, because `sleep` is not
@@ -51,45 +81,44 @@ impl Sleeper {
         let mut command = Command::new("/bin/sh");
         command
             .arg("-c")
-            .arg(format!("sleep 30; : {marker}"))
+            .arg(format!("sleep {SLEEPER_SECONDS}; : {marker}"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            // The shell forks `sleep`, so killing the shell alone leaves the
+            // grandchild behind, reparented to process 1. A group of its own
+            // lets `Drop` kill both with one call.
+            .process_group(0);
         for (name, value) in env {
             command.env(name, value);
         }
-        let child = command.spawn().expect("/bin/sh starts");
-        let sleeper = Self { child };
-        sleeper.wait_until_visible();
-        sleeper
+        // `spawn` returns after the child has replaced itself with /bin/sh: a
+        // failed exec comes back as an error here. So the command line of the
+        // child already stands, and no test needs to wait for it.
+        let child = {
+            let _guard = spawn_lock();
+            command.spawn().expect("/bin/sh starts")
+        };
+        Self { child }
     }
 
     /// The process id of the child.
     fn pid(&self) -> u32 {
         self.child.id()
     }
-
-    /// Waits until `spv` can see the child, so a test never races the kernel.
-    fn wait_until_visible(&self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            let found = spv()
-                .arg(self.pid().to_string())
-                .output()
-                .expect("spv runs")
-                .status
-                .success();
-            if found {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        panic!("spv never saw the child process {}", self.pid());
-    }
 }
 
 impl Drop for Sleeper {
     fn drop(&mut self) {
+        if let Ok(group) = i32::try_from(self.child.id()) {
+            // SAFETY: kill is a POSIX call that takes no pointer. A negative
+            // argument names the process group of that number, which
+            // `process_group(0)` made equal to the process id of the shell. So
+            // this reaches the shell and the `sleep` it forked.
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -136,7 +165,10 @@ fn no_argument_prints_the_usage_text_and_fails() {
 #[test]
 fn a_process_id_that_is_gone_gives_a_message_and_not_a_panic() {
     let pid = reaped_pid();
-    let (ok, _stdout, stderr) = run(spv().args(["--all", &pid.to_string()]).output().expect("spv runs"));
+    let (ok, _stdout, stderr) = run(spv()
+        .args(["--all", &pid.to_string()])
+        .output()
+        .expect("spv runs"));
 
     assert!(!ok, "a process that is gone is not found");
     assert!(
@@ -183,7 +215,10 @@ fn the_two_searches_disagree_on_a_name_whose_case_differs() {
         .expect("spv runs")
         .status
         .success();
-    assert!(found_exactly, "--case-sensitive finds the exact name {mixed}");
+    assert!(
+        found_exactly,
+        "--case-sensitive finds the exact name {mixed}"
+    );
 }
 
 #[test]
@@ -207,16 +242,22 @@ fn a_command_line_of_multi_byte_characters_is_found_and_shown() {
 /// environment, and macOS gives the environment of another process to root
 /// only, so this is the one way a test without root reads a real environment.
 ///
+/// The environment starts empty. `--show-secrets` prints every value in full,
+/// and the environment of the test runner holds the real credentials of whoever
+/// runs the suite. An inherited environment would put them in the output of the
+/// tool, and a failure message would then carry them into the log.
+///
 /// # Arguments
 ///
 /// * `flags` - The flags to pass to `spv`, before the process id
-/// * `env` - Extra environment variables for `spv`
+/// * `env` - The whole environment for `spv`
 fn spv_on_itself(flags: &[&str], env: &[(&str, &str)]) -> Output {
     let mut command = Command::new("/bin/sh");
     command
         .arg("-c")
         .arg(format!("exec \"$0\" {} $$", flags.join(" ")))
-        .arg(env!("CARGO_BIN_EXE_spv"));
+        .arg(env!("CARGO_BIN_EXE_spv"))
+        .env_clear();
     for (name, value) in env {
         command.env(name, value);
     }
@@ -268,28 +309,27 @@ fn show_secrets_prints_the_credential_in_full() {
     ));
 
     assert!(ok, "spv should succeed; stderr: {stderr}");
-    assert!(
-        stdout.contains("s3cret"),
-        "--show-secrets prints the value; stdout: {stdout}"
-    );
+    // The failure message names no output. This run prints every value in full,
+    // so the output is the one place in this file that must not reach a log.
+    assert!(stdout.contains("s3cret"), "--show-secrets prints the value");
 }
 
 #[test]
 fn the_network_section_shows_a_socket_this_test_opened() {
     // Port 0 asks the operating system for a free port, so two concurrent runs
-    // of this test never claim the same one.
+    // of this test never claim the same one. The lock keeps this socket out of
+    // any child that another test starts while it is open.
+    let _guard = spawn_lock();
     let listener = TcpListener::bind("127.0.0.1:0").expect("the loopback interface accepts a bind");
     let port = listener
         .local_addr()
         .expect("a bound listener carries an address")
         .port();
 
-    let (ok, stdout, stderr) = run(
-        spv()
-            .args(["--net", &std::process::id().to_string()])
-            .output()
-            .expect("spv runs"),
-    );
+    let (ok, stdout, stderr) = run(spv()
+        .args(["--net", &std::process::id().to_string()])
+        .output()
+        .expect("spv runs"));
 
     assert!(ok, "spv should succeed; stderr: {stderr}");
     assert!(
@@ -306,12 +346,10 @@ fn the_network_section_shows_a_socket_this_test_opened() {
 fn the_network_section_says_it_found_nothing() {
     let child = Sleeper::spawn("quiet", &[]);
 
-    let (ok, stdout, stderr) = run(
-        spv()
-            .args(["--net", &child.pid().to_string()])
-            .output()
-            .expect("spv runs"),
-    );
+    let (ok, stdout, stderr) = run(spv()
+        .args(["--net", &child.pid().to_string()])
+        .output()
+        .expect("spv runs"));
 
     assert!(ok, "spv should succeed; stderr: {stderr}");
     assert!(
@@ -374,12 +412,10 @@ fn the_environment_of_another_process_is_refused_with_a_reason() {
     }
     let child = Sleeper::spawn("plain", &[("SPV_PLAIN", "hello")]);
 
-    let (ok, stdout, stderr) = run(
-        spv()
-            .args(["--env", &child.pid().to_string()])
-            .output()
-            .expect("spv runs"),
-    );
+    let (ok, stdout, stderr) = run(spv()
+        .args(["--env", &child.pid().to_string()])
+        .output()
+        .expect("spv runs"));
 
     assert!(ok, "spv should succeed; stderr: {stderr}");
     assert!(
