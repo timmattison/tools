@@ -571,20 +571,62 @@ fn collect_processes(
 
 /// Checks if lsof is available on the system (cached).
 ///
-/// This function caches the result to avoid repeated filesystem lookups
-/// and to ensure the warning message is only printed once.
-///
 /// # Returns
 ///
 /// `true` if lsof is available, `false` otherwise.
 fn is_lsof_available() -> bool {
-    *LSOF_AVAILABLE.get_or_init(|| {
-        let available = which::which("lsof").is_ok();
-        if !available {
-            eprintln!("Warning: lsof not found, skipping open files display");
-        }
-        available
-    })
+    *LSOF_AVAILABLE.get_or_init(|| which::which("lsof").is_ok())
+}
+
+/// Runs lsof and hands back its standard output.
+///
+/// # Arguments
+///
+/// * `args` - The arguments for lsof
+///
+/// # Returns
+///
+/// The output, or a sentence that says why lsof gave none.
+///
+/// # Note
+///
+/// lsof exits 1 both when it matches nothing and when the kernel refuses it,
+/// and it writes nothing on either path. So a failing exit status with a silent
+/// standard error is not an error here. The permission warning that
+/// `permission_warning` builds is what tells the reader about the second case.
+fn run_lsof(args: &[&str]) -> Result<String, String> {
+    if !is_lsof_available() {
+        return Err("lsof is not on PATH, and this section reads its output".to_string());
+    }
+
+    let output = Command::new("lsof")
+        .args(args)
+        .output()
+        .map_err(|error| format!("cannot run lsof: {error}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let complaint = stderr.trim();
+    if !output.status.success() && !complaint.is_empty() {
+        return Err(format!("lsof failed: {complaint}"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Gets the network connections of a process using lsof.
+///
+/// # Arguments
+///
+/// * `pid` - The process ID to query
+///
+/// # Returns
+///
+/// The connections, or a sentence that says why lsof gave none.
+fn get_net_connections(pid: u32) -> Result<Vec<NetConnection>, String> {
+    // -n skips the reverse DNS lookup and -P skips the port name lookup, which
+    // keeps the run fast and the addresses numeric.
+    let stdout = run_lsof(&["-nP", "-i", "-a", "-p", &pid.to_string()])?;
+    Ok(stdout.lines().skip(1).filter_map(parse_lsof_net_line).collect())
 }
 
 // lsof output field indices (0-indexed).
@@ -611,27 +653,10 @@ const LSOF_MIN_FIELDS: usize = 9;
 ///
 /// # Design Note
 ///
-/// This function intentionally returns `Option` rather than `Result` because both
-/// failure cases (lsof not installed, lsof failed for specific PID) should result
-/// in silently skipping the open files display. The `is_lsof_available()` function
-/// already warns users once when lsof is not found. Per-PID failures (e.g., process
-/// exited between listing and lsof call, or permission denied) are expected in
-/// normal operation and don't warrant additional error messages.
-fn get_open_files(pid: u32) -> Option<Vec<OpenFile>> {
-    if !is_lsof_available() {
-        return None;
-    }
-
-    let output = Command::new("lsof")
-        .args(["-p", &pid.to_string()])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+/// A failure names itself. An open-files section that comes back silent teaches
+/// the reader that the process holds no files, which is worse than an error.
+fn get_open_files(pid: u32) -> Result<Vec<OpenFile>, String> {
+    let stdout = run_lsof(&["-p", &pid.to_string()])?;
     let mut files = Vec::new();
 
     // Skip the header line and parse each subsequent line
@@ -647,7 +672,7 @@ fn get_open_files(pid: u32) -> Option<Vec<OpenFile>> {
         }
     }
 
-    Some(files)
+    Ok(files)
 }
 
 /// Substrings that mark a credential wherever they appear in an uppercased name.
@@ -1172,18 +1197,54 @@ fn print_raw(processes: &[ProcessInfo], include_cwd: bool) {
 /// * `processes` - The processes to show files for
 fn print_open_files(processes: &[ProcessInfo]) {
     for proc in processes {
-        if let Some(files) = get_open_files(proc.pid) {
-            println!("\nOpen files for {} (PID {}):", proc.name, proc.pid);
-            let mut table = Table::new();
-            table
-                .load_preset(UTF8_FULL)
-                .set_content_arrangement(ContentArrangement::Dynamic)
-                .set_header(vec!["FD", "TYPE", "NAME"]);
+        println!("\nOpen files for {} (PID {}):", proc.name, proc.pid);
+        match get_open_files(proc.pid) {
+            Err(reason) => println!("  unavailable: {reason}"),
+            Ok(files) if files.is_empty() => println!("  none found"),
+            Ok(files) => {
+                let mut table = Table::new();
+                table
+                    .load_preset(UTF8_FULL)
+                    .set_content_arrangement(ContentArrangement::Dynamic)
+                    .set_header(vec!["FD", "TYPE", "NAME"]);
 
-            for file in files {
-                table.add_row(vec![file.fd, file.file_type, file.name]);
+                for file in files {
+                    table.add_row(vec![file.fd, file.file_type, file.name]);
+                }
+                println!("{table}");
             }
-            println!("{table}");
+        }
+    }
+}
+
+/// Prints the network connections of each process.
+///
+/// # Arguments
+///
+/// * `processes` - The processes to show the connections of
+fn print_net_connections(processes: &[ProcessInfo]) {
+    for proc in processes {
+        println!("\nNetwork connections for {} (PID {}):", proc.name, proc.pid);
+        match get_net_connections(proc.pid) {
+            Err(reason) => println!("  unavailable: {reason}"),
+            Ok(connections) if connections.is_empty() => println!("  none found"),
+            Ok(connections) => {
+                let mut table = Table::new();
+                table
+                    .load_preset(UTF8_FULL)
+                    .set_content_arrangement(ContentArrangement::Dynamic)
+                    .set_header(vec!["FD", "TYPE", "PROTO", "NAME"]);
+
+                for connection in connections {
+                    table.add_row(vec![
+                        connection.fd,
+                        connection.family,
+                        connection.protocol,
+                        connection.name,
+                    ]);
+                }
+                println!("{table}");
+            }
         }
     }
 }
@@ -1357,6 +1418,11 @@ fn main() -> Result<()> {
     // Print the environment if requested
     if sections.env {
         print_environments(&processes, args.show_secrets);
+    }
+
+    // Print network connections if requested
+    if sections.net {
+        print_net_connections(&processes);
     }
 
     Ok(())
