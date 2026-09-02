@@ -794,6 +794,8 @@ fn without_pull_request_prefix(token: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use unicode_width::UnicodeWidthStr;
+
     use super::*;
 
     /// The plan of issue #413, as a record for each stream.
@@ -883,6 +885,30 @@ Notes: Independent of everything above.";
 | Issue | Action |
 | #330 | close |";
 
+    /// The report of the `plan-parallel-work` skill, as it arrives on the
+    /// clipboard.
+    ///
+    /// The paste of issue #416, character for character. Every rule this form
+    /// needs stands in it: the `│` bar, the `┌─┬─┐` rules, a row that wraps
+    /// onto a second line in its `Order` cell, a row that wraps in its
+    /// `Stream` cell alone, and an `Order` field that annotates a step in
+    /// parentheses.
+    const BOX_TABLE: &str = "\
+┌─────────────────┬─────────────────────────┬────────────────────────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│     Stream      │          Order          │                          Zone                          │                                                       Notes                                                       │
+├─────────────────┼─────────────────────────┼────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ A — visualizers │ #4 (in flight, PR #15)  │ video-generator/src/visualization/                     │ #7 starts with a human keep-or-delete decision on 17 visualizers. It also waits for #4. Both edit the             │
+│                 │ → #7                    │                                                        │ create_visualizer_by_type match.                                                                                  │
+├─────────────────┼─────────────────────────┼────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ B — audio       │ #11 → #5 → #13          │ video-generator/src/audio/, then                       │ Serial. #11 builds the oscillator, the phase rule and the Scaled mapping that #5 names. Both rewrite the same     │
+│ engine          │                         │ sort-algorithm/src/main.rs                             │ 40-line file.                                                                                                     │
+├─────────────────┼─────────────────────────┼────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ C — MIDI array  │ #9 → #10 → #12 (human)  │ midi-notes/src/lib.rs, MIDI flags in main.rs           │ Serial. #12 is a listening task. It joins this stream with #11 from stream B.                                     │
+├─────────────────┼─────────────────────────┼────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ D — manifest    │ #6                      │ sort-algorithm/src/main.rs, tests/cli.rs               │ The widest main.rs change. Its schema refuses an unknown field, so a flag that lands later needs a schema         │
+│                 │                         │                                                        │ follow-up.                                                                                                        │
+└─────────────────┴─────────────────────────┴────────────────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘";
+
     /// The numbers of one step: the work, and the issue the work closes.
     type StepNumbers = (u64, Option<u64>);
 
@@ -913,6 +939,24 @@ Notes: Independent of everything above.";
                 .get(index)
                 .expect("the plan holds this stream"),
         )
+    }
+
+    /// [`BOX_TABLE`], drawn with `+---+` and `|`.
+    ///
+    /// Built out of the box form rather than typed a second time, so the two
+    /// hold one plan and a test that reads them apart is reading the drawing
+    /// and not the plan. The em dash of a label and the arrow of an `Order`
+    /// cell are not drawing, so they stay.
+    fn ascii_table() -> String {
+        BOX_TABLE
+            .chars()
+            .map(|c| match c {
+                '│' => '|',
+                '─' => '-',
+                '┌' | '┬' | '┐' | '├' | '┼' | '┤' | '└' | '┴' | '┘' => '+',
+                other => other,
+            })
+            .collect()
     }
 
     /// The plan `text` writes.
@@ -1023,6 +1067,99 @@ Notes: Independent of everything above.";
             unnamed.streams().iter().map(steps_of).collect::<Vec<_>>(),
             named.streams().iter().map(steps_of).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn reads_the_box_drawn_form_of_a_plan() {
+        // The third written form, and the one a reader actually holds: the
+        // report of the skill, copied out of a terminal.
+        assert_eq!(
+            shape(&plan_of(BOX_TABLE)),
+            vec![
+                ("A — visualizers", vec![(15, Some(4)), (7, None)]),
+                ("B — audio engine", vec![(11, None), (5, None), (13, None)]),
+                ("C — MIDI array", vec![(9, None), (10, None), (12, None)]),
+                ("D — manifest", vec![(6, None)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_order_cell_joins_over_the_lines_its_row_wraps_onto() {
+        // The `Order` cell of stream A is `#4 (in flight, PR #15)` on one line
+        // and `→ #7` on the next. A reader that takes the second line for a
+        // row of its own gives stream A one step and the plan a fifth stream.
+        assert_eq!(
+            steps_at(&plan_of(BOX_TABLE), 0),
+            vec![(15, Some(4)), (7, None)]
+        );
+    }
+
+    #[test]
+    fn a_label_joins_over_the_lines_its_row_wraps_onto() {
+        // The label of stream B wraps, so the second line of that row carries
+        // `engine` in its first cell and nothing in its `Order` cell. A reader
+        // that calls a line with a non-empty first cell a new row loses the
+        // word and gains a stream with no chain.
+        assert_eq!(
+            plan_of(BOX_TABLE)
+                .streams()
+                .iter()
+                .map(Stream::label)
+                .collect::<Vec<_>>(),
+            vec![
+                "A — visualizers",
+                "B — audio engine",
+                "C — MIDI array",
+                "D — manifest",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_box_table_with_no_interior_rules_gives_the_same_streams() {
+        // A row continues by its `Order` cell and never by the rule above it,
+        // so a renderer that draws its outer border alone gives four streams
+        // as well.
+        let no_rules: String = BOX_TABLE
+            .lines()
+            .filter(|line| !line.starts_with('├'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(plan_of(&no_rules), plan_of(BOX_TABLE));
+    }
+
+    #[test]
+    fn an_ascii_table_gives_the_streams_of_the_box_table() {
+        // Not a fourth shape to write code for: `+---+` is a rule line and `|`
+        // is a bar, so the two rules that read the box form already read this
+        // one.
+        assert_eq!(plan_of(&ascii_table()), plan_of(BOX_TABLE));
+    }
+
+    #[test]
+    fn a_divider_row_that_carries_an_alignment_colon_contributes_no_stream() {
+        // A divider is a rule line, colons and all. A reader that takes it for
+        // a row gives the plan a stream whose `Order` field is `---:`.
+        let plan = plan_of("| Stream | Order |\n|:--- | ---:|\n| S1 | #350 → #187 |");
+        assert_eq!(shape(&plan), vec![("S1", vec![(350, None), (187, None)])]);
+    }
+
+    #[test]
+    fn a_wide_cell_does_not_shift_the_cell_beside_it() {
+        // A reader that cuts a row at a column position needs the display
+        // width of every character in front of that column, and an em dash is
+        // not one column in every font the width tables know. A split on the
+        // bar needs no width at all, so this row reads whatever stands in it.
+        let notes = format!("{} — {} 日本語", "a".repeat(110), "b".repeat(105));
+        assert!(
+            UnicodeWidthStr::width(notes.as_str()) >= 220,
+            "the fixture is a wide cell, and it is {} columns",
+            UnicodeWidthStr::width(notes.as_str())
+        );
+        let table =
+            format!("| Stream | Order | Notes |\n| --- | --- | --- |\n| S1 | #350 → #187 | {notes} |");
+        assert_eq!(steps_at(&plan_of(&table), 0), vec![(350, None), (187, None)]);
     }
 
     #[test]
