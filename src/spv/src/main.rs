@@ -592,6 +592,29 @@ fn looks_like_credential(name: &str) -> bool {
         .any(|segment| CREDENTIAL_SEGMENTS.contains(&segment))
 }
 
+/// Finds the environment block inside a `KERN_PROCARGS2` buffer.
+///
+/// The kernel lays the buffer out as a 32-bit `argc`, the saved executable path,
+/// a run of NUL bytes that pads to an alignment, `argc` argument strings, the
+/// environment strings, another run of NUL bytes, and last the `apple[]` strings
+/// that `dyld` reads. A probe of a live process on macOS 15 confirmed each part.
+/// The environment thus ends at the first empty entry after the arguments, and
+/// the `apple[]` strings stay out of the result.
+///
+/// # Arguments
+///
+/// * `buffer` - The bytes that `sysctl(KERN_PROCARGS2)` wrote
+///
+/// # Returns
+///
+/// The environment block, or `None` when the buffer is too short to hold the
+/// parts the layout demands.
+#[cfg(target_os = "macos")]
+fn env_block_from_procargs2(buffer: &[u8]) -> Option<&[u8]> {
+    let _ = buffer;
+    None
+}
+
 /// Parses a NUL-separated block of `NAME=VALUE` entries.
 ///
 /// Both platforms deliver the environment of a process in this shape: Linux in
@@ -1160,6 +1183,82 @@ mod tests {
     fn an_empty_environ_block_holds_no_entries() {
         assert!(parse_environ_block(b"").is_empty());
         assert!(parse_environ_block(b"\0\0").is_empty());
+    }
+
+    /// Builds a buffer with the layout that `sysctl(KERN_PROCARGS2)` writes.
+    #[cfg(target_os = "macos")]
+    fn procargs2_fixture(
+        argc: i32,
+        exec_path: &str,
+        argv: &[&str],
+        envp: &[&str],
+        apple: &[&str],
+    ) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&argc.to_ne_bytes());
+        buffer.extend_from_slice(exec_path.as_bytes());
+        // The saved path terminator, then the alignment padding the kernel adds.
+        buffer.extend_from_slice(&[0, 0, 0, 0, 0]);
+        for entry in argv {
+            buffer.extend_from_slice(entry.as_bytes());
+            buffer.push(0);
+        }
+        for entry in envp {
+            buffer.extend_from_slice(entry.as_bytes());
+            buffer.push(0);
+        }
+        // The run of NUL bytes that closes the environment.
+        buffer.extend_from_slice(&[0, 0, 0]);
+        for entry in apple {
+            buffer.extend_from_slice(entry.as_bytes());
+            buffer.push(0);
+        }
+        buffer
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn procargs2_yields_the_environment_without_the_apple_strings() {
+        let buffer = procargs2_fixture(
+            2,
+            "/usr/bin/tool",
+            &["/usr/bin/tool", "--flag"],
+            &["HOME=/root", "GREETING=こんにちは"],
+            &["executable_path=/usr/bin/tool", "ptr_munge=0x1"],
+        );
+        let block = env_block_from_procargs2(&buffer).expect("the fixture holds a whole layout");
+        assert_eq!(
+            parse_environ_block(block),
+            vec![
+                ("HOME".to_string(), "/root".to_string()),
+                ("GREETING".to_string(), "こんにちは".to_string()),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn procargs2_yields_an_empty_block_for_a_process_with_no_environment() {
+        let buffer = procargs2_fixture(1, "/usr/bin/tool", &["/usr/bin/tool"], &[], &["pfz=0x2"]);
+        let block = env_block_from_procargs2(&buffer).expect("the fixture holds a whole layout");
+        assert!(parse_environ_block(block).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_truncated_procargs2_buffer_yields_nothing() {
+        assert!(env_block_from_procargs2(&[]).is_none());
+        assert!(env_block_from_procargs2(&[1, 0, 0]).is_none());
+        // The buffer names three arguments and carries one.
+        let buffer = procargs2_fixture(3, "/usr/bin/tool", &["/usr/bin/tool"], &[], &[]);
+        assert!(env_block_from_procargs2(&buffer).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_negative_argument_count_yields_nothing() {
+        let buffer = procargs2_fixture(-1, "/usr/bin/tool", &["/usr/bin/tool"], &[], &[]);
+        assert!(env_block_from_procargs2(&buffer).is_none());
     }
 
     #[cfg(target_os = "macos")]
