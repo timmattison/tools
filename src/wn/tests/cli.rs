@@ -350,7 +350,7 @@ fn takes_the_chain_from_standard_input() {
 }
 
 #[test]
-fn refuses_a_run_that_no_input_gives_a_chain() {
+fn refuses_a_run_that_holds_no_chain_in_any_input() {
     // The helper turns the clipboard off, so this is a machine with no
     // clipboard to fall back on. The message is the message the tool printed
     // before the clipboard was an input at all, because a run with the switch
