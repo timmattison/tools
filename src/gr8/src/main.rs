@@ -330,6 +330,38 @@ fn remaining_color(rate_limit: &RateLimit) -> Color {
     }
 }
 
+/// Splits the rate limits of a response into the available ones and the
+/// exhausted ones, and sorts each list so that graphql is last.
+///
+/// Stops when gr8 can show no rate limit at all. An empty report reads the same
+/// as a report of a healthy account, so gr8 says why it has nothing to show
+/// instead of showing nothing.
+fn partition_rate_limits(
+    resources: &Resources,
+) -> Result<(Vec<NamedRateLimit<'_>>, Vec<NamedRateLimit<'_>>)> {
+    let all_limits = collect_rate_limits(resources);
+
+    if all_limits.is_empty() {
+        if resources.unreadable.is_empty() {
+            anyhow::bail!("The rate limit response held no resources");
+        }
+        anyhow::bail!(
+            "The rate limit response held no resource that gr8 can read. It could not read: {}",
+            resources.unreadable.join(", ")
+        );
+    }
+
+    let (mut available, mut exhausted): (Vec<_>, Vec<_>) = all_limits
+        .into_iter()
+        .partition(|named| named.rate_limit.remaining > 0);
+
+    // Sort each list so graphql appears last for visibility (most commonly monitored)
+    sort_graphql_last(&mut available);
+    sort_graphql_last(&mut exhausted);
+
+    Ok((available, exhausted))
+}
+
 /// Builds a table row for a single rate limit resource
 fn build_rate_limit_row(named: &NamedRateLimit) -> Vec<Cell> {
     let rate_limit = named.rate_limit;
@@ -407,19 +439,13 @@ fn main() -> Result<()> {
     let response: RateLimitResponse =
         serde_json::from_str(&json_data).context("Failed to parse JSON response")?;
 
+    // Split the rate limits before the header, so a response that gr8 can show
+    // nothing from gives an error and not a header above an empty report.
+    let (available, exhausted) = partition_rate_limits(&response.resources)?;
+
     // Print header
     let now = Local::now().format("%Y-%m-%d %H:%M:%S");
     println!("\nGitHub API Rate Limits (as of {})\n", now);
-
-    // Collect and partition rate limits into available (remaining > 0) and exhausted (remaining == 0)
-    let all_limits = collect_rate_limits(&response.resources);
-    let (mut available, mut exhausted): (Vec<_>, Vec<_>) = all_limits
-        .into_iter()
-        .partition(|named| named.rate_limit.remaining > 0);
-
-    // Sort each list so graphql appears last for visibility (most commonly monitored)
-    sort_graphql_last(&mut available);
-    sort_graphql_last(&mut exhausted);
 
     // Print available rate limits first (easier to scroll past)
     print_rate_limit_table("Available Rate Limits", &available);
@@ -507,11 +533,8 @@ mod tests {
     fn test_partition_separates_exhausted_from_available() {
         // core exhausted (0), graphql available (100), others available (100)
         let resources = make_resources_with_specific_exhausted(0, 100);
-        let all_limits = collect_rate_limits(&resources);
-
-        let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
-            .into_iter()
-            .partition(|named| named.rate_limit.remaining > 0);
+        let (available, exhausted) =
+            partition_rate_limits(&resources).expect("the sample response holds resources");
 
         // Core should be in exhausted
         assert!(
@@ -537,11 +560,8 @@ mod tests {
     fn test_partition_all_exhausted() {
         // All resources exhausted (remaining=0)
         let resources = make_all_resources_with_remaining(0);
-
-        let all_limits = collect_rate_limits(&resources);
-        let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
-            .into_iter()
-            .partition(|named| named.rate_limit.remaining > 0);
+        let (available, exhausted) =
+            partition_rate_limits(&resources).expect("the sample response holds resources");
 
         assert!(
             available.is_empty(),
@@ -558,11 +578,8 @@ mod tests {
     fn test_partition_none_exhausted() {
         // All resources available (remaining > 0)
         let resources = make_all_resources_with_remaining(100);
-        let all_limits = collect_rate_limits(&resources);
-
-        let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
-            .into_iter()
-            .partition(|named| named.rate_limit.remaining > 0);
+        let (available, exhausted) =
+            partition_rate_limits(&resources).expect("the sample response holds resources");
 
         assert!(exhausted.is_empty(), "No resources are exhausted");
         assert_eq!(
@@ -633,13 +650,9 @@ mod tests {
     fn test_graphql_sorted_last_in_available() {
         // All resources available
         let resources = make_all_resources_with_remaining(100);
-        let all_limits = collect_rate_limits(&resources);
-        let (mut available, _): (Vec<_>, Vec<_>) = all_limits
-            .into_iter()
-            .partition(|named| named.rate_limit.remaining > 0);
-
         // Use the same function as main() to ensure consistency
-        sort_graphql_last(&mut available);
+        let (available, _) =
+            partition_rate_limits(&resources).expect("the sample response holds resources");
 
         assert_eq!(
             available.last().map(|n| n.name),
@@ -652,13 +665,9 @@ mod tests {
     fn test_graphql_sorted_last_in_exhausted() {
         // All resources exhausted
         let resources = make_all_resources_with_remaining(0);
-        let all_limits = collect_rate_limits(&resources);
-        let (_, mut exhausted): (Vec<_>, Vec<_>) = all_limits
-            .into_iter()
-            .partition(|named| named.rate_limit.remaining > 0);
-
         // Use the same function as main() to ensure consistency
-        sort_graphql_last(&mut exhausted);
+        let (_, exhausted) =
+            partition_rate_limits(&resources).expect("the sample response holds resources");
 
         assert_eq!(
             exhausted.last().map(|n| n.name),
