@@ -261,9 +261,43 @@ pub fn resolve_request(root: &Path, target: &str) -> Resolution {
 /// multi-byte extension is handled like any other.
 #[must_use]
 pub fn content_type_for(path: &Path) -> &'static str {
-    // Behavior missing: every file is reported as an opaque byte stream.
-    let _ = path;
-    OCTET_STREAM
+    // A missing or non-UTF-8 extension falls through to the binary fallback.
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return OCTET_STREAM;
+    };
+
+    // Lowercase a whole `str` rather than slicing bytes, so a multi-byte
+    // extension is folded correctly instead of panicking.
+    let ext = ext.to_ascii_lowercase();
+    match ext.as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        // `application/json` is conventionally served without a charset
+        // parameter, and a `.map` source map is JSON.
+        "json" | "map" => "application/json",
+        "webmanifest" => "application/manifest+json",
+        "txt" => "text/plain; charset=utf-8",
+        "xml" => "text/xml; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "wasm" => "application/wasm",
+        "pdf" => "application/pdf",
+        "mp4" => "video/mp4",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        _ => OCTET_STREAM,
+    }
 }
 
 /// The content type of a file whose extension names nothing recognizable.
@@ -288,13 +322,77 @@ pub fn serve(
             std::thread::spawn(move || {
                 // `recv()` errors when the server is unblocked, ending the loop.
                 while let Ok(request) = server.recv() {
-                    // Behavior missing: nothing is resolved and nothing is served.
-                    let _ = root.as_path();
-                    let _ = request.respond(tiny_http::Response::empty(500));
+                    // A request or mid-response IO error (a client that hung up,
+                    // say) is swallowed so a single bad request can never panic
+                    // a worker and poison the pool.
+                    let _ = respond(&root, request);
                 }
             })
         })
         .collect()
+}
+
+/// Handles one request: resolves its target under `root` and answers it.
+///
+/// The raw request target goes straight to [`resolve_request`], which strips the
+/// query and percent-decodes it internally, so this dispatcher cannot bypass the
+/// traversal defense by forgetting a step. The four resolutions answer as:
+///
+/// - [`Resolution::File`] — stream the file with `200`.
+/// - [`Resolution::Fallback`] — warn on STDERR (the Go tool logs `Couldn't find
+///   file` here), then stream `<root>/index.html` the same way. That path is the
+///   one path NOT canonicalized before it is served, because an export need not
+///   carry an index; a missing one yields `404` through [`serve_file`].
+/// - [`Resolution::NotFound`] — `404` with an empty body.
+/// - [`Resolution::Forbidden`] — `403` with an empty body.
+///
+/// The warning goes to STDERR so STDOUT stays free for the startup banner.
+fn respond(root: &Path, request: tiny_http::Request) -> std::io::Result<()> {
+    // Own the target: `request` is moved into the handlers below, and the
+    // fallback warning still needs to name what was asked for.
+    let target = request.url().to_string();
+
+    match resolve_request(root, &target) {
+        Resolution::File(path) => serve_file(&path, request),
+        Resolution::Fallback(path) => {
+            eprintln!("Couldn't find file for {target}, falling back to {INDEX_FILE}");
+            serve_file(&path, request)
+        }
+        Resolution::NotFound => request.respond(tiny_http::Response::empty(404)),
+        Resolution::Forbidden => request.respond(tiny_http::Response::empty(403)),
+    }
+}
+
+/// Opens `path` only if it is a regular file, returning `None` otherwise.
+///
+/// A directory, a missing path, or any other non-regular entry yields `None`.
+/// This guards the streaming path: a directory opens successfully on Unix, and
+/// advertising its metadata length and then failing to produce bytes would hang
+/// the client forever waiting for a body that never arrives.
+fn open_regular_file(path: &Path) -> Option<std::fs::File> {
+    let file = std::fs::File::open(path).ok()?;
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
+/// Streams `path` to `request`, or responds `404` if it is not a regular file.
+///
+/// `path` is opened through [`open_regular_file`], so a missing path, a
+/// directory, or any other non-regular entry yields `404` — never a hung stream.
+/// A regular file (even an empty one) streams as a `200` with a `Content-Type`
+/// from [`content_type_for`] and a `Content-Length` that `tiny_http` sets from
+/// the file size.
+fn serve_file(path: &Path, request: tiny_http::Request) -> std::io::Result<()> {
+    let Some(file) = open_regular_file(path) else {
+        return request.respond(tiny_http::Response::empty(404));
+    };
+
+    // The header name and value are compile-time-known-valid, so the only
+    // `expect` on the request path can never fire.
+    let content_type =
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type_for(path).as_bytes())
+            .expect("static Content-Type header is always valid");
+
+    request.respond(tiny_http::Response::from_file(file).with_header(content_type))
 }
 
 #[cfg(test)]

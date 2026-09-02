@@ -224,8 +224,7 @@ fn a_fallback_with_no_index_html_is_not_found_and_does_not_hang() {
     let (_dir, root) = empty_export();
     let (addr, server, handles) = start(root);
 
-    let (status, _headers, body) =
-        http_get_with_timeout(addr, "/nothing/here", HANG_TIMEOUT);
+    let (status, _headers, body) = http_get_with_timeout(addr, "/nothing/here", HANG_TIMEOUT);
 
     assert_eq!(status, 404);
     assert!(body.is_empty(), "404 carries no body, got {body:?}");

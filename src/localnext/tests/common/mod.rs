@@ -85,9 +85,7 @@ fn connect_and_send(
     timeout: Option<std::time::Duration>,
 ) -> TcpStream {
     let mut stream = TcpStream::connect(addr).expect("connect to server");
-    stream
-        .set_read_timeout(timeout)
-        .expect("set read timeout");
+    stream.set_read_timeout(timeout).expect("set read timeout");
     let request = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).expect("write request");
     stream.flush().expect("flush request");
