@@ -23,10 +23,6 @@
 //! two numbers: `PR#344 (#341)` is a pull request that closes an issue. The
 //! step holds both, because the state of the work is the state of the pull
 //! request and the reader still wants to see which issue it finishes.
-#![allow(
-    dead_code,
-    reason = "the parser lands before the run that reads a plan calls it; take this attribute out with the call"
-)]
 
 use thiserror::Error;
 
@@ -526,10 +522,9 @@ fn read_order(order: &str, label: &str) -> Result<Vec<Step>, PlanError> {
                     stream: Snippet::new(label),
                     token: Snippet::new(&token),
                 })?;
-                steps.push(Step {
-                    number,
-                    closes: None,
-                });
+                // Through the constructor, so one place builds a step. A
+                // group that follows attaches to it below.
+                steps.push(Step::new(number, None));
             }
             Piece::Group(token) => {
                 // The group is repeated back with its parentheses, because

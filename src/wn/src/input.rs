@@ -36,8 +36,6 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::chain::ChainError;
-
 /// The variable that turns the clipboard fallback off. Any value with a
 /// character in it turns it off.
 pub const NO_CLIPBOARD_ENV: &str = "WN_NO_CLIPBOARD";
@@ -129,14 +127,19 @@ impl Chain {
         &self.text
     }
 
-    /// The reason the text is not a chain, with an invisible input named.
+    /// The reason the text could not be read, with an invisible input named.
     ///
-    /// A chain that came from an argument or from a pipe is text the reader can
-    /// see, so the reason stands on its own. A chain that came from the
+    /// Text that came from an argument or from a pipe is text the reader can
+    /// see, so the reason stands on its own. Text that came from the
     /// clipboard is not, and a reader who typed no argument and reads
     /// `"an" is not an issue number` has no way to know where the word came
     /// from. The clipboard was read on the initiative of the tool, so the
     /// message names it.
+    ///
+    /// `err` is the reason of whichever reader took the text: one chain that
+    /// holds a word, and a plan whose `Order` field holds one, both arrive
+    /// here. The input is what this function knows and the reader is what it
+    /// does not, so it takes any error rather than one kind of error.
     ///
     /// The message names the clipboard and it writes nothing out of it. The
     /// clipboard is the one input the reader did not choose, and it holds a
@@ -146,7 +149,10 @@ impl Chain {
     /// names as much of the text as the argument and the pipe already name,
     /// and no more.
     #[must_use]
-    pub fn blame(&self, err: ChainError) -> anyhow::Error {
+    pub fn blame<E>(&self, err: E) -> anyhow::Error
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
         match self.source {
             Source::Argument | Source::Stdin => anyhow::Error::new(err),
             Source::Clipboard => anyhow::anyhow!("the clipboard is not a chain: {err}"),

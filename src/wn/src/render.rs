@@ -25,10 +25,6 @@
 //! block for each of them. A block carries no answer of its own: the summary
 //! under the last block names the issue to start in every stream, so the
 //! reader reads the answers together and picks the stream they want.
-#![allow(
-    dead_code,
-    reason = "the paint of a plan lands before the run that reads a plan calls it; take this attribute out with the call"
-)]
 
 use colored::{ColoredString, Colorize};
 use textfit::{pad_right, truncate_to_budget};

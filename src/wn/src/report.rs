@@ -27,10 +27,6 @@
 //! A plan also names one number in two streams. [`States`] holds the answer
 //! of GitHub for each number once, so one query answers the whole plan and
 //! every stream that names a number reads the same state for it.
-#![allow(
-    dead_code,
-    reason = "the report of a stream lands before the run that reads a plan calls it; take this attribute out with the call"
-)]
 
 use std::collections::HashMap;
 

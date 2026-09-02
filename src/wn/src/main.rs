@@ -8,6 +8,11 @@
 //! `wn` puts the two together. It reads the chain, asks GitHub about every
 //! number in it with one query, prints one row for each with its state and its
 //! title, and names the first one that is still open.
+//!
+//! A plan of parallel work is a second shape of input. It holds several chains
+//! side by side, one for each stream, and `wn` answers the whole page with one
+//! query as well. The shape of the text says which reader takes it, so no flag
+//! and no subcommand stands between the reader and the answer.
 
 mod chain;
 mod github;
@@ -34,9 +39,10 @@ use crate::report::Report;
 /// its rows, so it removes none.
 const WIDTH_OFFSET: usize = 0;
 
-/// The exit status for a chain that names a number the repository does not
-/// have. The rows still print, and the answer under them can still be right,
-/// but the chain the reader typed does not match the repository.
+/// The exit status for a chain, or for a stream of a plan, that names a number
+/// the repository does not have. The rows still print, and the answer under
+/// them can still be right, but the text the reader typed does not match the
+/// repository.
 const EXIT_MISSING_ISSUE: u8 = 1;
 
 /// The exit status for a run that could not answer at all.
@@ -92,6 +98,11 @@ impl StartCommand {
 GitHub about every number in it, and names the first one that is still open.\n\n\
 Every separator means the same thing: the issue on the left comes before the issue on the right. \
 A double bar is read as an arrow, because the chain is a plan to walk in order.\n\n\
+A plan of parallel work is a second shape of input. `wn` reads the plan the plan-parallel-work \
+skill writes — the records it prints and the Markdown table it names alike — and names the issue \
+to start in every stream of it. Only the Order field of a plan is read as a chain, because the \
+Notes field is prose about code and prose about code is full of numbers. A pull request and the \
+issue it closes, written PR#344 (#341), are one step of a stream and not two.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
@@ -103,8 +114,9 @@ shell function you supply. Set WN_START_COMMAND to name a different one, for exa
 `export WN_START_COMMAND='gh issue develop'`."
 )]
 struct Cli {
-    /// The chain, for example "#277 → #278 ∥ #279". Read from standard input
-    /// when it is not given, and from the clipboard when neither gives one.
+    /// The chain, for example "#277 → #278 ∥ #279", or a whole plan of
+    /// parallel work. Read from standard input when it is not given, and from
+    /// the clipboard when neither gives one.
     #[arg(value_name = "CHAIN")]
     chain: Vec<String>,
 
@@ -159,11 +171,20 @@ fn main() -> ExitCode {
     }
 }
 
-/// Read the chain, ask GitHub, print the answer.
+/// Read the text, ask GitHub, print the answer.
 ///
 /// `clipboard_off` is what [`input::clipboard_is_off`] said about the
 /// environment, which `main` reads. The order of the inputs, and the rule that
 /// only the input that answers is read, both live in [`input::Sources`].
+///
+/// The shape of the text says which reader takes it. A page that names a
+/// `Stream` field or an `Order` field is a plan of parallel work, and every
+/// other text is one chain. So a reader pipes or pastes what they have, and no
+/// flag stands between them and the answer.
+///
+/// The repository is resolved after the text is read, in both paths. A text
+/// nobody can read is a mistake the reader made, and reporting it costs no
+/// call to `gh`.
 fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Result<ExitCode> {
     // Each input is a function rather than its text, so an input that a nearer
     // input already answered for is never touched. This matters for the
@@ -182,12 +203,15 @@ fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Re
         clipboard: (!clipboard_off).then_some(copied),
     }
     .chain()?;
-    let numbers = parse_chain(chain.text()).map_err(|err| chain.blame(err))?;
 
-    let repo = match &cli.repo {
-        Some(spec) => Repo::parse(spec)?,
-        None => github::current_repo()?,
-    };
+    if plan::looks_like_a_plan(chain.text()) {
+        let plan = plan::parse(chain.text()).map_err(|err| chain.blame(err))?;
+        let repo = repo_of(cli)?;
+        return answer_plan(&plan, &repo, width, start);
+    }
+
+    let numbers = parse_chain(chain.text()).map_err(|err| chain.blame(err))?;
+    let repo = repo_of(cli)?;
 
     let entries = github::fetch(&repo, &numbers)?;
     let report = Report::build(entries);
@@ -196,11 +220,75 @@ fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Re
         render::render(&report, &repo.to_string(), width, start)
     );
 
-    Ok(if report.missing().is_empty() {
+    Ok(exit_status(report.missing().is_empty()))
+}
+
+/// The repository the command line names, or the repository of the current
+/// directory.
+///
+/// # Errors
+///
+/// Fails when the argument is not `owner/name`, and when `gh` can name no
+/// repository for the current directory.
+fn repo_of(cli: &Cli) -> Result<Repo> {
+    match &cli.repo {
+        Some(spec) => Repo::parse(spec),
+        None => github::current_repo(),
+    }
+}
+
+/// Ask GitHub about the whole plan, print one block for each stream, and give
+/// the status the run exits with.
+///
+/// One query answers the plan. [`plan::Plan::numbers`] gives every number of
+/// every stream once, so a number that stands in two streams costs one alias
+/// of the query and is reported in both streams. A query for each stream would
+/// spend one round trip and one unit of the rate limit for each of them, and
+/// could give two answers for one number.
+///
+/// # Errors
+///
+/// Fails for the reasons [`github::fetch`] fails: `gh` is not installed, the
+/// repository cannot be read, or GitHub could not answer for one number.
+fn answer_plan(
+    plan: &plan::Plan,
+    repo: &Repo,
+    width: usize,
+    start: &StartCommand,
+) -> Result<ExitCode> {
+    let states = report::States::of(github::fetch(repo, &plan.numbers())?);
+    let streams: Vec<render::StreamReport> = plan
+        .streams()
+        .iter()
+        .map(|stream| render::StreamReport {
+            label: stream.label().to_string(),
+            report: Report::of_steps(stream.steps(), &states),
+        })
+        .collect();
+    println!(
+        "{}",
+        render::render_plan(&streams, &repo.to_string(), width, start)
+    );
+
+    Ok(exit_status(
+        streams
+            .iter()
+            .all(|stream| stream.report.missing().is_empty()),
+    ))
+}
+
+/// The status a run that printed an answer exits with.
+///
+/// One rule for both shapes of input: a number the repository does not have is
+/// text that does not match the repository, whether the reader wrote one chain
+/// or a plan of many. The rows still print, and the answer under them can still
+/// be right, so the status is what carries the fault to a script.
+fn exit_status(every_number_is_known: bool) -> ExitCode {
+    if every_number_is_known {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(EXIT_MISSING_ISSUE)
-    })
+    }
 }
 
 #[cfg(test)]
