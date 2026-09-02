@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn truncate_middle_keeps_both_ends_and_fits_the_budget() {
         assert_eq!(truncate_middle("feature/topic", 20), "feature/topic");
-        // 18 columns cut to 13: head gets 7, tail gets 5, `…` gets 1.
+        // 18 columns cut to 13: head gets 6, tail gets 6, `…` gets 1.
         assert_eq!(truncate_middle("feature/some-topic", 13), "featur…-topic");
         // One column less: head keeps 6, tail keeps 5.
         assert_eq!(truncate_middle("feature/some-topic", 12), "featur…topic");
@@ -222,13 +222,17 @@ mod tests {
 
     #[test]
     fn truncate_middle_counts_columns_not_characters() {
-        // Every one of these characters is two columns wide.
-        let name = "日本語のブランチ名";
-        for budget in 1..=UnicodeWidthStr::width(name) {
+        // Each of these CJK characters is one character and two columns. A
+        // function that counts characters gives back double the budget it got,
+        // and a function that cuts the string by byte panics in the middle of
+        // a character.
+        let name = "日本語のとても長い名前";
+        for budget in 0..=UnicodeWidthStr::width(name) + 2 {
             let cut = truncate_middle(name, budget);
             assert!(
                 UnicodeWidthStr::width(cut.as_str()) <= budget,
-                "budget {budget} overflowed by {cut:?}"
+                "budget {budget} produced {cut:?} ({} columns)",
+                UnicodeWidthStr::width(cut.as_str()),
             );
         }
     }
