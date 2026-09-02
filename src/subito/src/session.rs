@@ -137,14 +137,25 @@ pub async fn run_until(
 
     let subscriptions = Subscriptions::new(topics);
 
-    drive(&mut eventloop, subscriptions, pretty_json, output, shutdown).await
+    drive(
+        &client,
+        &mut eventloop,
+        subscriptions,
+        pretty_json,
+        output,
+        shutdown,
+    )
+    .await
 }
 
 /// Drives the event loop until the run stops.
 ///
 /// The shutdown and the event loop wait together, so an interrupt that arrives
-/// while nothing is on the wire still ends the run.
+/// while nothing is on the wire still ends the run. An interrupt then goes
+/// through [`say_goodbye`], and every other end of the run gives its own
+/// failure.
 async fn drive(
+    client: &AsyncClient,
     eventloop: &mut rumqttc::EventLoop,
     mut subscriptions: Subscriptions,
     pretty_json: bool,
@@ -157,7 +168,7 @@ async fn drive(
         let event = tokio::select! {
             signal = shutdown.as_mut() => {
                 signal.map_err(SessionError::Signal)?;
-                return Ok(());
+                return say_goodbye(client, eventloop).await;
             }
             event = eventloop.poll() => {
                 event.map_err(|error| SessionError::Connection(Box::new(error)))?
@@ -177,6 +188,37 @@ async fn drive(
                 print_message(&publish, pretty_json, output)?;
             }
             _ => (),
+        }
+    }
+}
+
+/// Closes the MQTT session and waits until the DISCONNECT is on the wire.
+///
+/// The Go tool this one replaces ended with `select {}`, so an interrupt
+/// killed the process with the session open, and the broker learned of the end
+/// only when the connection timed out. This function sends the DISCONNECT the
+/// protocol states, and it waits, because a process that exits before the
+/// packet leaves the machine sends nothing.
+///
+/// The event loop writes the packet and flushes it before it gives the
+/// `Outgoing::Disconnect` event, so that event says the broker holds the
+/// packet. A connection that ends first carries the same meaning: nothing more
+/// can go out, and there is nothing left to wait for.
+///
+/// # Errors
+///
+/// Gives [`SessionError::Request`] when the event loop stops before it takes
+/// the disconnection.
+async fn say_goodbye(
+    client: &AsyncClient,
+    eventloop: &mut rumqttc::EventLoop,
+) -> Result<(), SessionError> {
+    client.disconnect().await.map_err(SessionError::Request)?;
+
+    loop {
+        match eventloop.poll().await {
+            Ok(Event::Outgoing(Outgoing::Disconnect)) | Err(_) => return Ok(()),
+            Ok(_) => (),
         }
     }
 }
