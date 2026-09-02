@@ -607,8 +607,17 @@ fn looks_like_credential(name: &str) -> bool {
 /// that is not valid UTF-8 is converted lossily, because a terminal cannot print
 /// the raw bytes anyway. An entry that holds no `=` gets an empty value.
 fn parse_environ_block(block: &[u8]) -> Vec<(String, String)> {
-    let _ = block;
-    Vec::new()
+    block
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let text = String::from_utf8_lossy(entry);
+            match text.split_once('=') {
+                Some((name, value)) => (name.to_string(), value.to_string()),
+                None => (text.into_owned(), String::new()),
+            }
+        })
+        .collect()
 }
 
 /// Hides the value of a credential-looking environment variable.
