@@ -48,6 +48,35 @@ const RESPONSE_WITH_A_RESOURCE_OF_A_NEW_SHAPE: &str = r#"
 }
 "#;
 
+/// A response whose resource map is empty.
+///
+/// It stands for a response that gr8 cannot use at all, whatever the reason.
+const RESPONSE_WITH_NO_RESOURCES: &str = r#"
+{
+    "resources": {},
+    "rate": {
+        "limit": 5000,
+        "used": 0,
+        "remaining": 5000,
+        "reset": 1788313546
+    }
+}
+"#;
+
+/// A response whose every resource holds a set of fields that gr8 does not
+/// know, so gr8 can read no rate limit from it.
+const RESPONSE_WITH_ONLY_A_RESOURCE_OF_A_NEW_SHAPE: &str = r#"
+{
+    "resources": {
+        "brand_new": {
+            "limit": 100,
+            "remaining": 100,
+            "reset": 1788313546
+        }
+    }
+}
+"#;
+
 /// Runs gr8 against a stub `gh` that prints the given response.
 ///
 /// The stub is the only program on the `PATH` of the run, and the run gets no
@@ -102,5 +131,41 @@ fn names_the_resource_whose_numbers_it_could_not_read() {
     assert!(
         stdout.contains("Skipped 1 resource that gr8 could not read: brand_new"),
         "gr8 must name the resource that it skipped: {stdout}"
+    );
+}
+
+#[test]
+fn stops_when_the_response_holds_no_resource() {
+    let output = run_gr8_against(RESPONSE_WITH_NO_RESOURCES);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "a response that holds no resource must not be a success: {stdout}"
+    );
+    assert!(
+        stderr.contains("held no resources"),
+        "gr8 must say that the response held no resources: {stderr}"
+    );
+}
+
+#[test]
+fn stops_when_it_can_read_no_resource_of_the_response() {
+    let output = run_gr8_against(RESPONSE_WITH_ONLY_A_RESOURCE_OF_A_NEW_SHAPE);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "a response with no readable resource must not be a success: {stdout}"
+    );
+    assert!(
+        stderr.contains("no resource that gr8 can read"),
+        "gr8 must say that it could read no resource: {stderr}"
+    );
+    assert!(
+        stderr.contains("brand_new"),
+        "gr8 must name the resource that it could not read: {stderr}"
     );
 }
