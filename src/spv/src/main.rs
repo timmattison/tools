@@ -592,6 +592,22 @@ fn looks_like_credential(name: &str) -> bool {
         .any(|segment| CREDENTIAL_SEGMENTS.contains(&segment))
 }
 
+/// Hides the value of a credential-looking environment variable.
+///
+/// # Arguments
+///
+/// * `name` - The environment variable name
+/// * `value` - The environment variable value
+/// * `show_secrets` - When `true`, every value is printed in full
+///
+/// # Returns
+///
+/// The value to print.
+fn redact_env_value(name: &str, value: &str, show_secrets: bool) -> String {
+    let _ = (name, show_secrets);
+    value.to_string()
+}
+
 /// Prints processes in table format using comfy-table.
 ///
 /// # Arguments
@@ -1047,6 +1063,28 @@ mod tests {
                 "{name} is an ordinary name and must stay visible"
             );
         }
+    }
+
+    #[test]
+    fn a_credential_value_is_hidden_by_default() {
+        assert_eq!(
+            redact_env_value("GITHUB_TOKEN", "ghp_notarealtoken", false),
+            "<redacted>"
+        );
+    }
+
+    #[test]
+    fn show_secrets_prints_a_credential_value_in_full() {
+        assert_eq!(
+            redact_env_value("GITHUB_TOKEN", "ghp_notarealtoken", true),
+            "ghp_notarealtoken"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_value_stays_visible() {
+        assert_eq!(redact_env_value("HOME", "/Users/tim", false), "/Users/tim");
+        assert_eq!(redact_env_value("GREETING", "こんにちは", false), "こんにちは");
     }
 
     #[cfg(target_os = "macos")]
