@@ -21,7 +21,7 @@ use rumqttc::mqttbytes::v4::{
 };
 use rumqttc::{MqttOptions, QoS, Transport};
 use std::time::{Duration, SystemTime};
-use subito::session::{run_until, SessionError};
+use subito::session::{run_forever_with, run_until, Backoff, SessionError};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
@@ -196,11 +196,14 @@ struct Broker {
 
 impl Broker {
     /// Accepts one connection and completes the WebSocket handshake.
+    ///
+    /// The listener stays with the caller, so a test that watches a session
+    /// reconnect accepts a second connection on the same port.
     #[allow(
         clippy::result_large_err,
         reason = "the `Callback` trait of `tungstenite` states the answer of a handshake callback, and its `Err` variant is a whole HTTP response. This callback never builds one: it adds the subprotocol header and gives the response back"
     )]
-    async fn accept(listener: TcpListener) -> Self {
+    async fn accept(listener: &TcpListener) -> Self {
         let (stream, _) = tokio::time::timeout(STEP_TIMEOUT, listener.accept())
             .await
             .expect("the session never opened a connection to the broker")
@@ -392,7 +395,7 @@ async fn a_suback_names_the_topic_of_its_own_packet_identifier() {
     );
 
     let script = async {
-        let mut broker = Broker::accept(listener).await;
+        let mut broker = Broker::accept(&listener).await;
         broker.accept_connection().await;
 
         let first = broker.read_subscribe().await;
@@ -442,7 +445,7 @@ async fn a_refused_subscription_says_so_and_the_run_goes_on() {
     );
 
     let script = async {
-        let mut broker = Broker::accept(listener).await;
+        let mut broker = Broker::accept(&listener).await;
         broker.accept_connection().await;
 
         let allowed = broker.read_subscribe().await;
@@ -491,7 +494,7 @@ async fn a_run_whose_every_subscription_is_refused_stops() {
     );
 
     let script = async {
-        let mut broker = Broker::accept(listener).await;
+        let mut broker = Broker::accept(&listener).await;
         broker.accept_connection().await;
 
         let first = broker.read_subscribe().await;
@@ -544,7 +547,7 @@ async fn a_publish_prints_its_topic_and_its_payload() {
     );
 
     let script = async {
-        let mut broker = Broker::accept(listener).await;
+        let mut broker = Broker::accept(&listener).await;
         broker.accept_connection().await;
 
         let filter = broker.read_subscribe().await;
@@ -603,7 +606,7 @@ async fn the_interrupt_sends_a_disconnect_and_ends_the_run() {
     );
 
     let script = async {
-        let mut broker = Broker::accept(listener).await;
+        let mut broker = Broker::accept(&listener).await;
         broker.accept_connection().await;
 
         let filter = broker.read_subscribe().await;
@@ -653,7 +656,7 @@ async fn every_topic_of_a_list_longer_than_the_inflight_limit_keeps_its_own_line
     );
 
     let script = async {
-        let mut broker = Broker::accept(listener).await;
+        let mut broker = Broker::accept(&listener).await;
         broker.accept_connection().await;
 
         let mut asked = Vec::with_capacity(MANY_TOPICS);
@@ -697,5 +700,119 @@ async fn every_topic_of_a_list_longer_than_the_inflight_limit_keeps_its_own_line
     assert!(
         matches!(result, Err(SessionError::Connection(_))),
         "a connection that ends is a failure of the connection: {result:?}"
+    );
+}
+
+/// The wait a test asks the supervisor for between two attempts.
+///
+/// The policy the tool ships starts at one second, which is a second this test
+/// would spend waiting. The wait is a parameter of `run_forever_with` for that
+/// reason.
+const TEST_WAIT: Duration = Duration::from_millis(50);
+
+/// Gives a backoff that always waits [`TEST_WAIT`].
+fn quick_backoff() -> Backoff {
+    Backoff::new(TEST_WAIT, TEST_WAIT)
+}
+
+/// Counts the attempts a supervisor made to build connection options.
+#[derive(Clone)]
+struct Attempts(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Attempts {
+    fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+    }
+
+    fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn add_one(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn a_connection_that_drops_comes_back_and_subscribes_again() {
+    let (listener, port) = listening().await;
+    let topics = vec!["sensors/#".to_string()];
+    let (mut output, mut printed) = recording();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let attempts = Attempts::new();
+
+    let connect = {
+        let attempts = attempts.clone();
+
+        move || {
+            let attempts = attempts.clone();
+
+            async move {
+                attempts.add_one();
+
+                // Each attempt builds the options again. An AWS IoT URL holds
+                // the signature of one handshake, so a second attempt with the
+                // options of the first presents a stale signature.
+                Ok(options_for(port))
+            }
+        }
+    };
+
+    let session = run_forever_with(
+        connect,
+        &topics,
+        QoS::AtLeastOnce,
+        false,
+        &mut output,
+        async move {
+            stopped.await.ok();
+            Ok(())
+        },
+        quick_backoff(),
+    );
+
+    let script = async {
+        let mut broker = Broker::accept(&listener).await;
+        broker.accept_connection().await;
+        let first = broker.read_subscribe().await;
+        broker.grant(first.pkid, QoS::AtMostOnce).await;
+
+        assert_eq!(printed.lines(1).await, ["Subscribed: sensors/# (QoS 0)"]);
+
+        // The network drops the connection.
+        drop(broker);
+
+        let told = printed.lines(2).await;
+        assert!(
+            told[1].ends_with(&format!("Trying again in {TEST_WAIT:?}.")),
+            "the supervisor says what failed and how long it waits: {:?}",
+            told[1]
+        );
+
+        // The session comes back on the same port, and it subscribes again,
+        // because a new MQTT session carries no subscription of the old one.
+        let mut broker = Broker::accept(&listener).await;
+        broker.accept_connection().await;
+        let second = broker.read_subscribe().await;
+        assert_eq!(second.topic, "sensors/#");
+        broker.grant(second.pkid, QoS::AtLeastOnce).await;
+
+        assert_eq!(
+            printed.lines(3).await[2],
+            "Subscribed: sensors/# (QoS 1)",
+            "the second connection subscribes again"
+        );
+        assert_eq!(attempts.count(), 2, "each attempt builds its own options");
+
+        stop.send(())
+            .expect("the supervisor stopped before the interrupt arrived");
+        broker.read_disconnect().await;
+    };
+
+    let result = together(session, script).await;
+
+    assert!(
+        result.is_ok(),
+        "a clean shutdown is the end of a run and not a failure: {result:?}"
     );
 }

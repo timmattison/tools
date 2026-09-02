@@ -19,6 +19,7 @@ use rumqttc::{
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::Write;
+use std::time::Duration;
 
 /// The count of requests the channel holds above the count of the topics.
 ///
@@ -28,6 +29,12 @@ use std::io::Write;
 /// DISCONNECT while nothing polls the event loop, so the one spare place is
 /// what keeps that path from a deadlock.
 const SPARE_CAPACITY: usize = 1;
+
+/// The wait after the first failure of a connection.
+const FIRST_WAIT: Duration = Duration::from_secs(1);
+
+/// The longest wait between one attempt to connect and the next.
+const LONGEST_WAIT: Duration = Duration::from_secs(30);
 
 /// The quality of service "at most once", as a number.
 const QOS_AT_MOST_ONCE: u8 = 0;
@@ -72,6 +79,102 @@ pub enum SessionError {
     /// The process could not wait for the interrupt signal.
     #[error("the process could not wait for the interrupt signal")]
     Signal(#[source] std::io::Error),
+}
+
+/// The wait between one attempt to run a session and the next.
+///
+/// The wait starts at `first`, doubles after each failure, and stops at
+/// `longest`. A connection that subscribes takes the wait back to `first`.
+///
+/// The type is a parameter of [`run_forever_with`] because a test cannot wait
+/// a second for each attempt. [`run_forever`] takes [`Backoff::default`],
+/// which is the policy the tool ships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Backoff {
+    /// The wait after the first failure.
+    first: Duration,
+
+    /// The longest wait this policy ever asks for.
+    longest: Duration,
+}
+
+impl Backoff {
+    /// Builds a policy that starts at `first` and doubles up to `longest`.
+    #[must_use]
+    pub const fn new(first: Duration, longest: Duration) -> Self {
+        Self { first, longest }
+    }
+}
+
+impl Default for Backoff {
+    /// Gives the policy the tool ships: one second, doubling, up to thirty.
+    fn default() -> Self {
+        Self::new(FIRST_WAIT, LONGEST_WAIT)
+    }
+}
+
+/// Runs a session again after every failure a new connection can repair.
+///
+/// AWS IoT Core signs the WebSocket URL of a connection, and the signature
+/// covers the handshake alone. A second attempt with the same URL therefore
+/// presents a stale signature, so `connect` builds the options again for each
+/// attempt, from credentials it reads again.
+///
+/// The Go tool this one replaces runs until the user stops it, because the
+/// MQTT client under it reconnects on its own. This function keeps that.
+///
+/// # Errors
+///
+/// Gives [`SessionError::AllSubscriptionsRefused`] when the broker refuses
+/// every topic, because a policy that denies every topic denies it again, and
+/// [`SessionError::Signal`] when the process cannot wait for the interrupt.
+/// Every other failure starts another attempt.
+pub async fn run_forever<F, Fut>(
+    connect: F,
+    topics: &[String],
+    qos: QoS,
+    pretty_json: bool,
+    output: &mut impl Write,
+    shutdown: impl Future<Output = std::io::Result<()>>,
+) -> Result<(), SessionError>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<MqttOptions, SessionError>>,
+{
+    run_forever_with(
+        connect,
+        topics,
+        qos,
+        pretty_json,
+        output,
+        shutdown,
+        Backoff::default(),
+    )
+    .await
+}
+
+/// Runs a session again after every failure, and waits as `backoff` states.
+///
+/// `backoff` is a parameter, and not the policy the tool ships, so a test does
+/// not wait a second for each attempt.
+///
+/// # Errors
+///
+/// Gives the failures of [`run_forever`].
+pub async fn run_forever_with<F, Fut>(
+    connect: F,
+    topics: &[String],
+    qos: QoS,
+    pretty_json: bool,
+    output: &mut impl Write,
+    shutdown: impl Future<Output = std::io::Result<()>>,
+    backoff: Backoff,
+) -> Result<(), SessionError>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<MqttOptions, SessionError>>,
+{
+    unimplemented!("the supervisor does not run yet")
 }
 
 /// Connects, subscribes, and prints every message until an interrupt arrives.
