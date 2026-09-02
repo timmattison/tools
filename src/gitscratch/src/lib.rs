@@ -24,7 +24,6 @@
 //! to whichever tool is driving the run. The rule is the `GIT_` prefix and
 //! never a list of names, because a list strips nothing new the day git adds a
 //! variable and reports the same clean answer either way.
-//! whichever tool is driving the run.
 //!
 //! Every one of those guarantees is a guard that a second implementation would
 //! silently be missing. So this crate owns them, and it owns them behind a
