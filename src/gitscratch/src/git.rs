@@ -454,7 +454,7 @@ mod tests {
     /// at a wrapped `#329`, and a fenced `# comment` and a setext heading are
     /// two more spellings a `#` matcher reads wrong. A parse settles all four
     /// at once, and the tests below hold one fixture for each of them.
-    fn inventory_section<'a>(document: &'a str, heading: &str) -> &'a str {
+    fn section_under<'a>(document: &'a str, heading: &str) -> &'a str {
         // The line a source offset opens, `\n` included, so summing it with the
         // offset lands on the character after the heading.
         let line_at = |offset: usize| -> &'a str {
@@ -479,33 +479,33 @@ mod tests {
             .position(|&offset| line_at(offset).trim_end() == heading)
             .unwrap_or_else(|| {
                 panic!(
-                    "the README has no `{heading}` section, so there is no inventory left to \
-                     check the guards against; a renamed or deleted heading has to fail here \
-                     rather than let this test pass by finding nothing"
+                    "the README has no `{heading}` section, so there is nothing left for this \
+                     check to read; a renamed or deleted heading has to fail here rather than \
+                     let this test pass by finding nothing"
                 )
             });
         let opened_at = headings[opens];
         let closed_at = *headings.get(opens + 1).unwrap_or_else(|| {
             panic!(
                 "the `{heading}` section runs to the end of the document with no heading after \
-                 it, so nothing bounds the inventory and its scope would silently become the \
-                 whole rest of the file; a check that is supposed to be asking about one table \
+                 it, so nothing bounds it and its scope would silently become the whole rest of \
+                 the file; a check that is supposed to be asking about the `{heading}` section \
                  cannot be handed everything below it"
             )
         });
 
-        // The heading's own line is left out, so an inventory of nothing but a
+        // The heading's own line is left out, so a section of nothing but a
         // heading still reads as empty below.
-        let inventory = document
+        let section = document
             .get(opened_at + line_at(opened_at).len()..closed_at)
             .expect("both ends are character boundaries the parser reported");
         assert!(
-            !inventory.trim().is_empty(),
+            !section.trim().is_empty(),
             "the `{heading}` section is empty, which would make every check below succeed \
              against nothing"
         );
 
-        inventory
+        section
     }
 
     /// The README's `What it guarantees` table is written as an exhaustive
@@ -545,7 +545,7 @@ mod tests {
         /// binary and never in anything a consumer ships.
         const README: &str = include_str!("../README.md");
 
-        let inventory = inventory_section(README, INVENTORY_HEADING);
+        let inventory = section_under(README, INVENTORY_HEADING);
 
         // The hooks path is deliberately empty: this runner exists only to be
         // asked what it would pin, and an empty value is what makes the
@@ -601,7 +601,7 @@ mod tests {
     /// failure that costs the most to notice: an over-wide scope never says a
     /// word.
     ///
-    /// [`inventory_section`] gets this for free, since every level is a heading
+    /// [`section_under`] gets this for free, since every level is a heading
     /// to a CommonMark parser, and what is pinned here is that it is *asked*
     /// about every level rather than filtered back down to one. So each level
     /// gets its own fixture rather than the one that prompted this, and each
@@ -633,7 +633,7 @@ mod tests {
                  ## Used by\n\ngrist.\n"
             );
 
-            let inventory = inventory_section(&document, INVENTORY_HEADING);
+            let inventory = section_under(&document, INVENTORY_HEADING);
 
             assert!(
                 !inventory.contains(STRAY_GUARD),
@@ -668,7 +668,7 @@ mod tests {
              The suite pins the --literal-pathspecs guard by mutation.\n"
         );
 
-        inventory_section(&document, INVENTORY_HEADING);
+        section_under(&document, INVENTORY_HEADING);
     }
 
     /// A `#` is not a heading, and the cut has to know the difference.
@@ -715,7 +715,7 @@ mod tests {
             ("a wrapped `#329`", &wrapped),
             ("a `#` comment inside a fenced block", &fenced),
         ] {
-            let inventory = inventory_section(document, INVENTORY_HEADING);
+            let inventory = section_under(document, INVENTORY_HEADING);
 
             assert!(
                 inventory.contains(KEPT),
@@ -735,7 +735,7 @@ mod tests {
              | `{KEPT}` | A gc could collect a loose simulated commit. |\n"
         );
 
-        let refusal = std::panic::catch_unwind(|| inventory_section(&unclosed, INVENTORY_HEADING))
+        let refusal = std::panic::catch_unwind(|| section_under(&unclosed, INVENTORY_HEADING))
             .expect_err(
                 "nothing closes this section, so it has to be refused; a `#` that opens no \
                  heading must not be allowed to pass for the boundary that is missing, or the \
@@ -860,7 +860,7 @@ mod tests {
         const KNOWN_TEST: &str =
             "every_guard_the_safety_config_pins_is_named_in_the_readme_inventory";
 
-        let section = inventory_section(README, TESTING_HEADING);
+        let section = section_under(README, TESTING_HEADING);
         let names = unit_test_names(SOURCE);
 
         assert!(
