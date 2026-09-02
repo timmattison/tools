@@ -23,6 +23,10 @@
 //! two numbers: `PR#344 (#341)` is a pull request that closes an issue. The
 //! step holds both, because the state of the work is the state of the pull
 //! request and the reader still wants to see which issue it finishes.
+#![allow(
+    dead_code,
+    reason = "the parser lands before the run that reads a plan calls it; take this attribute out with the call"
+)]
 
 use thiserror::Error;
 
@@ -34,6 +38,15 @@ use crate::chain::{read_number, IssueNumber, Snippet, SEPARATORS};
 /// because a step ends where the next `#` starts, so `#1#2` is two steps
 /// written with no separator at all.
 const HASH: char = '#';
+
+/// The character that stands between the key of a field and its text.
+const FIELD_COLON: char = ':';
+
+/// The character that stands between two cells of a table.
+const TABLE_BAR: char = '|';
+
+/// The characters a table draws the rule under its header with.
+const DELIMITER_CHARS: &[char] = &['-', ':', ' '];
 
 /// The character that opens the group of a pair.
 const GROUP_OPEN: char = '(';
@@ -139,7 +152,15 @@ impl Plan {
     /// GitHub answers the whole plan.
     #[must_use]
     pub fn numbers(&self) -> Vec<IssueNumber> {
-        Vec::new()
+        let mut numbers: Vec<IssueNumber> = Vec::new();
+        for step in self.streams.iter().flat_map(Stream::steps) {
+            for number in [Some(step.number), step.closes].into_iter().flatten() {
+                if !numbers.contains(&number) {
+                    numbers.push(number);
+                }
+            }
+        }
+        numbers
     }
 }
 
@@ -221,8 +242,11 @@ impl Key {
 /// which tells the reader nothing about what to write instead.
 #[must_use]
 pub fn looks_like_a_plan(text: &str) -> bool {
-    let _ = text;
-    false
+    if find_header(text).is_some() {
+        return true;
+    }
+    text.lines()
+        .any(|line| matches!(key_of(line), Some((Key::Stream | Key::Order, _))))
 }
 
 /// Read the streams of `text`, in the order it writes them.
@@ -230,16 +254,382 @@ pub fn looks_like_a_plan(text: &str) -> bool {
 /// # Errors
 ///
 /// Gives [`PlanError::NoOrder`] for a text where no stream names a chain,
-/// [`PlanError::StreamWithoutOrder`] for one stream of such a text,
+/// [`PlanError::StreamWithoutOrder`] for one stream that names none while
+/// another one does,
 /// [`PlanError::NoIssues`] for an `Order` field with no number in it,
 /// [`PlanError::NotAnIssue`] for a token of an `Order` field that names no
 /// issue, and [`PlanError::UnattachedPair`] or [`PlanError::SecondPair`] for a
 /// group that attaches to no step or to a step that already holds one.
 pub fn parse(text: &str) -> Result<Plan, PlanError> {
-    let _ = text;
-    Ok(Plan {
-        streams: Vec::new(),
+    let streams = match find_header(text) {
+        Some((body, header)) => table_streams(text, body, &header)?,
+        None => record_streams(text)?,
+    };
+    // A text that names a column or a key and then names no chain at all is a
+    // plan of nothing. The reader wrote a header and stopped, and an empty
+    // answer would print nothing and say why nowhere.
+    if streams.is_empty() {
+        return Err(PlanError::NoOrder);
+    }
+    Ok(Plan { streams })
+}
+
+/// One stream of a plan, as the record form writes it.
+///
+/// The two fields this module reads. `Zone` and `Notes` open a field and close
+/// the field before it, and the text of them goes nowhere.
+#[derive(Default)]
+struct Record {
+    /// The text of the `Stream` field, when the record holds one.
+    label: Option<String>,
+    /// The text of the `Order` field, when the record holds one.
+    order: Option<String>,
+}
+
+/// The streams the record form of `text` writes.
+///
+/// # Errors
+///
+/// Gives [`PlanError::NoOrder`] when no record names a chain. That question is
+/// asked of every record first, because a text where each record is missing
+/// the same field is a text written in a form this module does not read, and
+/// a complaint about the first record alone points the reader at one line of
+/// it. Gives the errors of [`stream_of`] for one record that names a chain
+/// this module cannot read.
+fn record_streams(text: &str) -> Result<Vec<Stream>, PlanError> {
+    let records = records_of(text);
+    if records.iter().all(|record| record.order.is_none()) {
+        return Err(PlanError::NoOrder);
+    }
+    records
+        .iter()
+        .enumerate()
+        .map(|(place, record)| stream_of(record.label.as_deref(), place, record.order.as_deref()))
+        .collect()
+}
+
+/// Cut `text` into one record for each stream.
+///
+/// A `Stream` field starts a record, and so does an `Order` field that has no
+/// record to go into or that meets a record which already holds one. A plan
+/// written with no `Stream` field at all is therefore still a plan of several
+/// streams.
+fn records_of(text: &str) -> Vec<Record> {
+    let mut records: Vec<Record> = Vec::new();
+    let mut open: Option<Record> = None;
+    let mut field: Option<(Key, String)> = None;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            close_field(&mut field, &mut open);
+            continue;
+        }
+        if is_rule(line) {
+            continue;
+        }
+        let Some((key, value)) = key_of(line) else {
+            // A line that opens no field continues the one that is open. The
+            // notes of a stream run over three lines as readily as one.
+            if let Some((_, text)) = field.as_mut() {
+                text.push(' ');
+                text.push_str(line.trim());
+            }
+            continue;
+        };
+        close_field(&mut field, &mut open);
+        let starts_a_record = match key {
+            Key::Stream => true,
+            Key::Order => open.as_ref().is_none_or(|record| record.order.is_some()),
+            Key::Zone | Key::Notes => false,
+        };
+        if starts_a_record {
+            records.extend(open.take());
+            open = Some(Record::default());
+        }
+        field = Some((key, value.trim().to_string()));
+    }
+    close_field(&mut field, &mut open);
+    records.extend(open);
+    records
+}
+
+/// Put the field that is open into the record that is open, and close it.
+fn close_field(field: &mut Option<(Key, String)>, open: &mut Option<Record>) {
+    let Some((key, text)) = field.take() else {
+        return;
+    };
+    match key {
+        Key::Stream => open.get_or_insert_with(Record::default).label = Some(text),
+        Key::Order => open.get_or_insert_with(Record::default).order = Some(text),
+        Key::Zone | Key::Notes => {}
+    }
+}
+
+/// The field `line` opens, and the text after the colon of it.
+///
+/// A key stands first or it is not a key: `Finish-what-we-started:` opens no
+/// field, because the word before its first colon is none of the four. This is
+/// what keeps a sentence of the notes out of the parser, and a sentence of the
+/// notes is where the numbers that are not issues live.
+fn key_of(line: &str) -> Option<(Key, &str)> {
+    let (head, rest) = line.trim_start().split_once(FIELD_COLON)?;
+    let key = Key::ALL
+        .into_iter()
+        .find(|key| head.eq_ignore_ascii_case(key.word()))?;
+    Some((key, rest))
+}
+
+/// Is `line` a rule a reader draws between two streams?
+///
+/// A rule carries no field and no prose. Three characters at the least,
+/// because `--` is the tail of an arrow and a rule is a line.
+fn is_rule(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.chars().count() >= RULE_CHARS && trimmed.chars().all(is_rule_char)
+}
+
+/// Is `c` a character a reader draws a rule with?
+///
+/// The box-drawing block holds every line and every corner, and the four marks
+/// beside it are the ones a keyboard writes: the hyphen, the equals sign, the
+/// underscore, and the two dashes a word processor writes for a hyphen.
+fn is_rule_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2500}'..='\u{257f}' | '-' | '=' | '_' | '\u{2013}' | '\u{2014}'
+    )
+}
+
+/// The row of `text` that names the columns of a table.
+///
+/// Gives the line the body of the table starts on, and the cells of the header
+/// itself. A row that names a `Stream` column or an `Order` column is the
+/// header, because those are the two columns this module reads.
+fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
+    text.lines().enumerate().find_map(|(place, line)| {
+        let cells = table_cells(line)?;
+        let names_a_column = cells
+            .iter()
+            .any(|cell| is_key_cell(cell, Key::Stream) || is_key_cell(cell, Key::Order));
+        names_a_column.then_some((place + 1, cells))
     })
+}
+
+/// The streams the body of a table writes.
+///
+/// # Errors
+///
+/// Gives [`PlanError::NoOrder`] for a table with no `Order` column, and the
+/// errors of [`stream_of`] for one row of it.
+fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>, PlanError> {
+    let order_at = column_of(header, Key::Order).ok_or(PlanError::NoOrder)?;
+    let stream_at = column_of(header, Key::Stream);
+    let mut streams: Vec<Stream> = Vec::new();
+    for line in text.lines().skip(body) {
+        let Some(cells) = table_cells(line) else {
+            continue;
+        };
+        if cells.iter().all(|cell| cell.is_empty()) || is_delimiter(&cells) {
+            continue;
+        }
+        let named = stream_at.and_then(|at| cells.get(at)).copied();
+        let stream = stream_of(named, streams.len(), cells.get(order_at).copied())?;
+        streams.push(stream);
+    }
+    Ok(streams)
+}
+
+/// The cells of `line`, or `None` when `line` is no row of a table.
+///
+/// The bar of a table is the bar of a chain as well, so a row is read by its
+/// cells and never by its shape: `#1 || #2` holds two bars and names no
+/// column, and it is a chain.
+fn table_cells(line: &str) -> Option<Vec<&str>> {
+    if !line.contains(TABLE_BAR) {
+        return None;
+    }
+    let mut cells: Vec<&str> = line.split(TABLE_BAR).map(str::trim).collect();
+    // The bar at each end of a row gives an empty cell that is no cell. The
+    // two bars are optional, so each end is dropped only when it is empty.
+    if cells.first().is_some_and(|cell| cell.is_empty()) {
+        cells.remove(0);
+    }
+    if cells.last().is_some_and(|cell| cell.is_empty()) {
+        cells.truncate(cells.len().saturating_sub(1));
+    }
+    Some(cells)
+}
+
+/// Is this row the rule a table draws under its header?
+fn is_delimiter(cells: &[&str]) -> bool {
+    cells
+        .iter()
+        .all(|cell| !cell.is_empty() && cell.chars().all(|c| DELIMITER_CHARS.contains(&c)))
+}
+
+/// Does `cell` name the column `key` names?
+fn is_key_cell(cell: &str, key: Key) -> bool {
+    cell.eq_ignore_ascii_case(key.word())
+}
+
+/// The place of the column `key` names among `header`.
+fn column_of(header: &[&str], key: Key) -> Option<usize> {
+    header.iter().position(|cell| is_key_cell(cell, key))
+}
+
+/// The stream one record or one row writes.
+///
+/// `named` is the text of the `Stream` field or cell, `place` is the place of
+/// the stream in the plan, and `order` is the text of the `Order` field or
+/// cell.
+///
+/// # Errors
+///
+/// Gives [`PlanError::StreamWithoutOrder`] when the stream names no `Order`
+/// field at all, and the errors of [`read_order`] for the chain in one.
+fn stream_of(named: Option<&str>, place: usize, order: Option<&str>) -> Result<Stream, PlanError> {
+    let label = label_of(named, place);
+    let order = order.ok_or_else(|| PlanError::StreamWithoutOrder(Snippet::new(&label)))?;
+    let steps = read_order(order, &label)?;
+    Ok(Stream { label, steps })
+}
+
+/// The name of the stream at `place`.
+///
+/// A stream the plan does not name takes its place as a name, counted from
+/// one. Every message about a stream names it, so a stream with no name of its
+/// own still gets a message the reader can follow back to a line of the plan.
+fn label_of(named: Option<&str>, place: usize) -> String {
+    match named.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => name.to_string(),
+        None => format!("{UNNAMED_LABEL} {}", place + 1),
+    }
+}
+
+/// Read the chain of one `Order` field into the steps of a stream.
+///
+/// `label` names the stream every message of this function repeats back,
+/// because a plan holds several chains and a message about one of them says
+/// nothing until it says which.
+///
+/// # Errors
+///
+/// Gives [`PlanError::NotAnIssue`] for a token that names no issue,
+/// [`PlanError::UnattachedPair`] for a group that stands before every step,
+/// [`PlanError::SecondPair`] for a second group on one step, and
+/// [`PlanError::NoIssues`] for a field with no number in it.
+fn read_order(order: &str, label: &str) -> Result<Vec<Step>, PlanError> {
+    let mut steps: Vec<Step> = Vec::new();
+    for piece in pieces(order) {
+        match piece {
+            Piece::Step(token) => {
+                let number = step_number(&token).ok_or_else(|| PlanError::NotAnIssue {
+                    stream: Snippet::new(label),
+                    token: Snippet::new(&token),
+                })?;
+                steps.push(Step {
+                    number,
+                    closes: None,
+                });
+            }
+            Piece::Group(token) => {
+                // The group is repeated back with its parentheses, because
+                // that is how the reader wrote it and how they find it again.
+                let written = format!("{GROUP_OPEN}{token}{GROUP_CLOSE}");
+                let number = step_number(&token).ok_or_else(|| PlanError::NotAnIssue {
+                    stream: Snippet::new(label),
+                    token: Snippet::new(&written),
+                })?;
+                let step = steps.last_mut().ok_or_else(|| PlanError::UnattachedPair {
+                    stream: Snippet::new(label),
+                    token: Snippet::new(&written),
+                })?;
+                if step.closes.is_some() {
+                    return Err(PlanError::SecondPair {
+                        stream: Snippet::new(label),
+                        token: Snippet::new(&written),
+                    });
+                }
+                step.closes = Some(number);
+            }
+        }
+    }
+    if steps.is_empty() {
+        return Err(PlanError::NoIssues(Snippet::new(label)));
+    }
+    Ok(steps)
+}
+
+/// One piece of an `Order` field.
+enum Piece {
+    /// A step of the stream, as the field writes it.
+    Step(String),
+    /// A group: the issue the step before it closes.
+    Group(String),
+}
+
+/// Cut `order` into its steps and its groups.
+///
+/// Whitespace, a separator of a chain, and a parenthesis each end a token. So
+/// does a `#` that arrives while a token is open, which is what makes `#1#2`
+/// two steps written with no separator at all. A `#` that arrives on the `PR`
+/// of a pull request ends nothing, because `PR#344` is one number written the
+/// way a plan writes it.
+fn pieces(order: &str) -> Vec<Piece> {
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut token = String::new();
+    let mut in_group = false;
+    for c in order.chars() {
+        if c == GROUP_OPEN || c == GROUP_CLOSE {
+            end_token(&mut token, in_group, &mut pieces);
+            in_group = c == GROUP_OPEN;
+            continue;
+        }
+        if c.is_whitespace() || SEPARATORS.contains(&c) {
+            end_token(&mut token, in_group, &mut pieces);
+            continue;
+        }
+        if c == HASH && !token.is_empty() && !token.eq_ignore_ascii_case(PULL_REQUEST_PREFIX) {
+            end_token(&mut token, in_group, &mut pieces);
+        }
+        token.push(c);
+    }
+    end_token(&mut token, in_group, &mut pieces);
+    pieces
+}
+
+/// Put the token that is open into `pieces`, and open a new one.
+fn end_token(token: &mut String, in_group: bool, pieces: &mut Vec<Piece>) {
+    if token.is_empty() {
+        return;
+    }
+    let text = std::mem::take(token);
+    pieces.push(if in_group {
+        Piece::Group(text)
+    } else {
+        Piece::Step(text)
+    });
+}
+
+/// The issue number `token` names, or `None` when it names none.
+fn step_number(token: &str) -> Option<IssueNumber> {
+    read_number(without_pull_request_prefix(token))
+}
+
+/// `token` with its `PR` dropped, or `token` when it carries none.
+///
+/// Cut by characters and never by bytes: a plan arrives from a paste, and a
+/// paste holds whatever the reader copied.
+fn without_pull_request_prefix(token: &str) -> &str {
+    let mut characters = token.chars();
+    let head: String = characters
+        .by_ref()
+        .take(PULL_REQUEST_PREFIX.chars().count())
+        .collect();
+    if head.eq_ignore_ascii_case(PULL_REQUEST_PREFIX) {
+        characters.as_str()
+    } else {
+        token
+    }
 }
 
 #[cfg(test)]
@@ -304,8 +694,14 @@ Notes: Independent of everything above.";
 | S6 vpn-tunnel | #191 → #192 | src/vpn-tunnel | Both edits land within a 30-line window of compose.rs. |
 | S7 dwt | #196 | src/dwt | Independent of everything above. |";
 
+    /// The numbers of one step: the work, and the issue the work closes.
+    type StepNumbers = (u64, Option<u64>);
+
+    /// The label of one stream, and the numbers of every step of it.
+    type StreamShape<'a> = (&'a str, Vec<StepNumbers>);
+
     /// The label of every stream of `plan`, and the numbers of every step.
-    fn shape(plan: &Plan) -> Vec<(&str, Vec<(u64, Option<u64>)>)> {
+    fn shape(plan: &Plan) -> Vec<StreamShape<'_>> {
         plan.streams()
             .iter()
             .map(|stream| (stream.label(), steps_of(stream)))
@@ -313,7 +709,7 @@ Notes: Independent of everything above.";
     }
 
     /// The numbers of every step of `stream`, the pair second.
-    fn steps_of(stream: &Stream) -> Vec<(u64, Option<u64>)> {
+    fn steps_of(stream: &Stream) -> Vec<StepNumbers> {
         stream
             .steps()
             .iter()
@@ -322,7 +718,7 @@ Notes: Independent of everything above.";
     }
 
     /// The numbers of every step of the stream at `index`.
-    fn steps_at(plan: &Plan, index: usize) -> Vec<(u64, Option<u64>)> {
+    fn steps_at(plan: &Plan, index: usize) -> Vec<StepNumbers> {
         steps_of(
             plan.streams()
                 .get(index)
