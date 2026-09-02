@@ -174,7 +174,97 @@ where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<MqttOptions, SessionError>>,
 {
-    unimplemented!("the supervisor does not run yet")
+    let mut shutdown = std::pin::pin!(shutdown);
+    let mut waits = Waits::new(backoff);
+
+    loop {
+        let failure = match connect().await {
+            Ok(options) => {
+                let ended =
+                    attempt(options, topics, qos, pretty_json, output, shutdown.as_mut()).await;
+
+                // The connection worked far enough to pass the policy of the
+                // broker, so the next failure starts from the first wait.
+                if ended.granted {
+                    waits.reset();
+                }
+
+                match ended.result {
+                    Ok(()) => return Ok(()),
+                    Err(failure) => failure,
+                }
+            }
+            Err(failure) => failure,
+        };
+
+        let wait = waits.take();
+        report_retry(&failure, wait, output)?;
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// The wait of the next attempt, as one [`Backoff`] states it.
+struct Waits {
+    /// The policy this state follows.
+    policy: Backoff,
+
+    /// The wait the next failure takes.
+    next: Duration,
+}
+
+impl Waits {
+    /// Starts a policy at its first wait.
+    fn new(policy: Backoff) -> Self {
+        Self {
+            policy,
+            next: policy.first,
+        }
+    }
+
+    /// Gives the wait of this failure, and doubles the wait of the next one.
+    fn take(&mut self) -> Duration {
+        let wait = self.next;
+        self.next = wait.saturating_mul(2).min(self.policy.longest);
+
+        wait
+    }
+
+    /// Takes the wait back to the first one.
+    fn reset(&mut self) {
+        self.next = self.policy.first;
+    }
+}
+
+/// Prints what failed and how long the tool waits before the next attempt.
+///
+/// # Errors
+///
+/// Gives [`SessionError::Output`] when the output refuses the line.
+fn report_retry(
+    failure: &SessionError,
+    wait: Duration,
+    output: &mut impl Write,
+) -> Result<(), SessionError> {
+    writeln!(output, "{}. Trying again in {wait:?}.", describe(failure))
+        .map_err(SessionError::Output)
+}
+
+/// Gives the message of a failure, and of every failure under it.
+///
+/// The message of [`SessionError`] alone names the part that failed and not
+/// the reason, because the reason belongs to the error under it. A user who
+/// reads one line of a reconnect needs both.
+fn describe(failure: &SessionError) -> String {
+    let mut text = failure.to_string();
+    let mut under = std::error::Error::source(failure);
+
+    while let Some(error) = under {
+        text.push_str(": ");
+        text.push_str(&error.to_string());
+        under = error.source();
+    }
+
+    text
 }
 
 /// Connects, subscribes, and prints every message until an interrupt arrives.
@@ -222,13 +312,43 @@ pub async fn run(
 /// every topic, [`SessionError::Output`] when the output refuses a line, and
 /// [`SessionError::Signal`] when the process cannot wait for the interrupt.
 pub async fn run_until(
-    mut options: MqttOptions,
+    options: MqttOptions,
     topics: &[String],
     qos: QoS,
     pretty_json: bool,
     output: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
 ) -> Result<(), SessionError> {
+    attempt(options, topics, qos, pretty_json, output, shutdown)
+        .await
+        .result
+}
+
+/// What one attempt to run a session did.
+struct Attempt {
+    /// The end of the attempt.
+    result: Result<(), SessionError>,
+
+    /// Whether the broker accepted one subscription of this attempt.
+    ///
+    /// An attempt that got this far reached the broker and passed its policy,
+    /// so the supervisor takes its wait back to the first one.
+    granted: bool,
+}
+
+/// Runs one session, from the connection to the end.
+///
+/// [`run_until`] gives the answer of this function, and the supervisor reads
+/// the whole answer, because a failure alone does not say whether the attempt
+/// ever worked.
+async fn attempt(
+    mut options: MqttOptions,
+    topics: &[String],
+    qos: QoS,
+    pretty_json: bool,
+    output: &mut impl Write,
+    shutdown: impl Future<Output = std::io::Result<()>>,
+) -> Attempt {
     // `rumqttc` rolls `last_pkid` back to zero at `max_inflight`, so a run
     // with more topics than that limit reuses a packet identifier before the
     // first SUBACK arrives, and the answer then names the wrong topic.
@@ -237,23 +357,30 @@ pub async fn run_until(
     let (client, mut eventloop) = AsyncClient::new(options, topics.len() + SPARE_CAPACITY);
 
     for topic in topics {
-        client
-            .subscribe(topic.clone(), qos)
-            .await
-            .map_err(SessionError::Request)?;
+        if let Err(error) = client.subscribe(topic.clone(), qos).await {
+            return Attempt {
+                result: Err(SessionError::Request(error)),
+                granted: false,
+            };
+        }
     }
 
-    let subscriptions = Subscriptions::new(topics);
+    let mut subscriptions = Subscriptions::new(topics);
 
-    drive(
+    let result = drive(
         &client,
         &mut eventloop,
-        subscriptions,
+        &mut subscriptions,
         pretty_json,
         output,
         shutdown,
     )
-    .await
+    .await;
+
+    Attempt {
+        result,
+        granted: subscriptions.any_granted(),
+    }
 }
 
 /// Gives `options` one packet identifier for each topic of the run.
@@ -282,7 +409,7 @@ fn raise_inflight_limit(options: &mut MqttOptions, topics: usize) {
 async fn drive(
     client: &AsyncClient,
     eventloop: &mut rumqttc::EventLoop,
-    mut subscriptions: Subscriptions,
+    subscriptions: &mut Subscriptions,
     pretty_json: bool,
     output: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
@@ -433,6 +560,13 @@ impl Subscriptions {
             self.by_pkid.insert(pkid, self.next);
             self.next += 1;
         }
+    }
+
+    /// Says whether the broker accepted one topic of the run.
+    fn any_granted(&self) -> bool {
+        self.topics
+            .iter()
+            .any(|topic| topic.answer == Some(Answer::Granted))
     }
 
     /// Says whether the broker refused every topic of the run.
