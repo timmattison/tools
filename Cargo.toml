@@ -165,6 +165,10 @@ tree-sitter-zig = "1.1"
 tempfile = "3"
 mockito = "1.7"
 tokio-tungstenite = "0.30"
+# The MQTT packet reader and writer of `rumqttc` take a `bytes::BytesMut`, and
+# `rumqttc` re-exports neither the type nor the crate. A test that speaks MQTT
+# to the code under test therefore names `bytes` itself.
+bytes = "1"
 
 # Platform-specific
 procfs = "0.17"

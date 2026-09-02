@@ -6,7 +6,9 @@
 //! prints, [`presign`] builds the signed WebSocket URL that AWS IoT Core
 //! accepts for an MQTT connection, and [`endpoint`] asks AWS for the name of
 //! the data endpoint of the account, because a user knows the region and does
-//! not know that name.
+//! not know that name. [`session`] then connects with those parts, subscribes
+//! to each topic, prints every message that arrives, and sends a DISCONNECT
+//! when an interrupt ends the run.
 //!
 //! [`payload::format_payload`] is the part that keeps a terminal safe. An MQTT
 //! payload is a byte string of any content, and a byte string that holds an
@@ -21,3 +23,4 @@ pub mod cli;
 pub mod endpoint;
 pub mod payload;
 pub mod presign;
+pub mod session;
