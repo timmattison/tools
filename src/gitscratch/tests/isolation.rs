@@ -36,14 +36,32 @@ const CHILD_TEST: &str = "fixtures_and_replays_stay_inside_their_own_temporary_d
 /// What libtest prints when exactly one test ran and passed.
 const ONE_TEST_PASSED: &str = "1 passed";
 
+/// The subject of the control commit the child makes through
+/// [`TestRepo::try_git`], so the fixture's own log can be asked whether that
+/// commit landed *here*.
+const CONTROL_MESSAGE: &str = "try_git control";
+
+/// An author name the control commit carries on its own command line.
+///
+/// `GIT_AUTHOR_NAME` wears the `GIT_` prefix the scrub sweeps on, so it is also
+/// the assertion that a caller's variables are applied *after* the sweep rather
+/// than before it — applied first, this one would be swept away and the commit
+/// would be stamped with the fixture's configured name instead.
+const CONTROL_AUTHOR: &str = "the control's own author";
+
+/// The only file [`conflicting_repo`] commits, and therefore the whole of the
+/// tree a commit made in that fixture must be built from.
+const FIXTURE_FILE: &str = "shared.txt";
+
 /// Everything this crate spawns git for, exercised in whatever environment the
 /// process happens to have.
 ///
 /// Run directly by `cargo test` like any other test — where it simply proves
 /// the fixtures build — and re-executed by the tests below with a leaked git
-/// environment, where it is the assertion. All three spawn sites are covered in
-/// one pass because a leak reaches all three at once: [`TestRepo`]'s builder,
-/// the [`not_a_repository`] probe, and the crate's own `Git` — which
+/// environment, where it is the assertion. All four spawn sites are covered in
+/// one pass because a leak reaches all four at once: [`TestRepo`]'s builder,
+/// the [`not_a_repository`] probe, [`TestRepo::try_git`] — the spawn a control
+/// run needs, because it is allowed to fail — and the crate's own `Git`, which
 /// `TestRepo::scratch` reaches twice over, first through `Repo::open`'s
 /// pre-flight and then through the `Scratch` it hands back.
 #[test]
@@ -79,6 +97,52 @@ fn fixtures_and_replays_stay_inside_their_own_temporary_directories() {
     assert!(
         elsewhere.path().is_dir(),
         "the probe must hand back a directory that exists"
+    );
+
+    // The fourth spawn site. A control run needs a git command that is allowed
+    // to fail — failing is what proves the hazard is armed — which
+    // `TestRepo::git` cannot give it, because it panics on a non-zero exit. A
+    // control that reached around the fixture for a raw `Command` would get
+    // that permission and lose this scrub with it, and `.current_dir()` does
+    // not settle which repository git uses: `GIT_DIR` outranks it. So the
+    // control commit below is made the way `try_git` makes one, and the two
+    // questions asked of it afterwards are *where* it landed and *what tree* it
+    // was built from — the damage a leaked location and a leaked index each do.
+    let control = repo.try_git(
+        &["commit", "--allow-empty", "-q", "-m", CONTROL_MESSAGE],
+        &[
+            ("GIT_AUTHOR_NAME", CONTROL_AUTHOR),
+            // Set for the reason the real controls set it: a control that is
+            // expected to fail has to fail rather than stop on a prompt.
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ],
+    );
+    assert!(
+        control.status.success(),
+        "the control commit should have landed in the fixture:\n{}\n{}",
+        String::from_utf8_lossy(&control.stdout),
+        String::from_utf8_lossy(&control.stderr),
+    );
+    // Read back through `repo.git`, which is scrubbed, so the answers are the
+    // fixture's own however the environment is pointed.
+    assert_eq!(
+        repo.git(&["log", "-1", "--format=%s"]),
+        CONTROL_MESSAGE,
+        "the control commit went to whichever repository the environment named \
+         rather than to the fixture it was aimed at"
+    );
+    assert_eq!(
+        repo.git(&["ls-tree", "--name-only", "-r", "HEAD"]),
+        FIXTURE_FILE,
+        "the control commit was built from an index the environment named \
+         rather than from the fixture's own"
+    );
+    assert_eq!(
+        repo.git(&["log", "-1", "--format=%an"]),
+        CONTROL_AUTHOR,
+        "a variable the caller set on the command must survive the scrub, which \
+         sweeps on the `GIT_` prefix and would take this one with it if it ran \
+         second"
     );
 }
 

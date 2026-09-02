@@ -1212,6 +1212,33 @@ mod tests {
         );
     }
 
+    /// [`TestRepo::git`] raises a failed git command as a panic, which is the
+    /// right answer while a fixture is being built and the wrong one for a
+    /// control — a command run to demonstrate that some hazard is armed, and
+    /// which therefore has to be *allowed* to fail so that its failure can be
+    /// read. [`TestRepo::try_git`] is that spawn, so the permission a control
+    /// needs is available without reaching around the fixture for a raw
+    /// `Command` and losing the environment scrub with it.
+    ///
+    /// A repository with no commits, because an unborn `HEAD` is a failure git
+    /// produces identically everywhere and with nothing else set up.
+    #[test]
+    fn try_git_hands_back_a_failure_instead_of_raising_it() {
+        let repo = TestRepo::init();
+
+        let refused = repo.try_git(&["rev-parse", "--verify", "HEAD"], &[]);
+
+        assert!(
+            !refused.status.success(),
+            "an unborn HEAD does not resolve, so this command had to fail:\n{}",
+            String::from_utf8_lossy(&refused.stdout)
+        );
+        assert!(
+            !refused.stderr.is_empty(),
+            "the caller must get git's own account of the failure back"
+        );
+    }
+
     /// A consuming tool invoked from a git hook inherits `GIT_AUTHOR_NAME` and
     /// its five siblings, and those variables outrank the `user.name` this
     /// module's fixture builder configures. `.husky/pre-commit` in this
