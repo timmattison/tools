@@ -297,6 +297,15 @@ impl Broker {
         )))
         .await;
     }
+
+    /// Answers one subscription with a refusal.
+    async fn refuse(&mut self, pkid: u16) {
+        self.write_packet(&Packet::SubAck(SubAck::new(
+            pkid,
+            vec![SubscribeReasonCode::Failure],
+        )))
+        .await;
+    }
 }
 
 /// A shutdown that never answers, for a test that ends the run another way.
@@ -351,5 +360,54 @@ async fn a_suback_names_the_topic_of_its_own_packet_identifier() {
     assert!(
         matches!(result, Err(SessionError::Connection(_))),
         "a connection that ends is a failure of the connection: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_subscription_says_so_and_the_run_goes_on() {
+    let (listener, port) = listening().await;
+    let topics = vec!["allowed/#".to_string(), "denied/#".to_string()];
+    let (mut output, mut printed) = recording();
+
+    let session = run_until(
+        options_for(port),
+        &topics,
+        QoS::AtLeastOnce,
+        false,
+        &mut output,
+        never(),
+    );
+
+    let script = async {
+        let mut broker = Broker::accept(listener).await;
+        broker.accept_connection().await;
+
+        let allowed = broker.read_subscribe().await;
+        let denied = broker.read_subscribe().await;
+
+        broker.grant(allowed.pkid, QoS::AtLeastOnce).await;
+        broker.refuse(denied.pkid).await;
+
+        // The Go tool this one replaces printed `Subscribed` before the broker
+        // answered, so a topic the policy denies looked the same as a topic
+        // that works.
+        assert_eq!(
+            printed.lines(2).await,
+            [
+                "Subscribed: allowed/# (QoS 1)",
+                "Subscription refused: denied/#"
+            ]
+        );
+
+        drop(broker);
+    };
+
+    let (result, ()) = tokio::join!(session, script);
+
+    // One topic of the two works, so the run goes on until the connection
+    // ends. A run that stopped at the refusal gives another failure here.
+    assert!(
+        matches!(result, Err(SessionError::Connection(_))),
+        "a refusal of one topic of two does not end the run: {result:?}"
     );
 }
