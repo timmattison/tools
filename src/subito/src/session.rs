@@ -165,10 +165,35 @@ async fn drive(
 
         match event {
             Event::Outgoing(Outgoing::Subscribe(pkid)) => subscriptions.record(pkid),
-            Event::Incoming(Packet::SubAck(ack)) => subscriptions.answer(&ack, output)?,
+            Event::Incoming(Packet::SubAck(ack)) => {
+                subscriptions.answer(&ack, output)?;
+
+                if subscriptions.every_subscription_refused() {
+                    return Err(SessionError::AllSubscriptionsRefused);
+                }
+            }
             _ => (),
         }
     }
+}
+
+/// What the broker answered about one topic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    /// The broker accepted the subscription.
+    Granted,
+
+    /// The broker refused the subscription.
+    Refused,
+}
+
+/// One topic of a run, and what the broker answered about it.
+struct Topic {
+    /// The topic filter, as the caller gave it.
+    name: String,
+
+    /// What the broker answered, or nothing while no answer arrived.
+    answer: Option<Answer>,
 }
 
 /// The topics of one run, and the packet identifier each one carries.
@@ -179,9 +204,9 @@ async fn drive(
 /// does: the identifier the client chose for each topic.
 struct Subscriptions {
     /// The topics, in the order the caller gave them.
-    names: Vec<String>,
+    topics: Vec<Topic>,
 
-    /// The topic each packet identifier belongs to, as an index into `names`.
+    /// The topic each packet identifier belongs to, as an index into `topics`.
     by_pkid: HashMap<u16, usize>,
 
     /// The index of the topic that takes the next packet identifier.
@@ -195,7 +220,13 @@ impl Subscriptions {
     /// Takes the topics of one run, in the order the caller gave them.
     fn new(topics: &[String]) -> Self {
         Self {
-            names: topics.to_vec(),
+            topics: topics
+                .iter()
+                .map(|name| Topic {
+                    name: name.clone(),
+                    answer: None,
+                })
+                .collect(),
             by_pkid: HashMap::new(),
             next: 0,
         }
@@ -203,10 +234,23 @@ impl Subscriptions {
 
     /// Pairs one packet identifier with the topic it belongs to.
     fn record(&mut self, pkid: u16) {
-        if self.next < self.names.len() {
+        if self.next < self.topics.len() {
             self.by_pkid.insert(pkid, self.next);
             self.next += 1;
         }
+    }
+
+    /// Says whether the broker refused every topic of the run.
+    ///
+    /// A run of no topics is not a run the broker refused, and the answer of a
+    /// topic that no answer arrived for is not a refusal. So this gives true
+    /// only after every topic has an answer and every answer is a refusal.
+    fn every_subscription_refused(&self) -> bool {
+        !self.topics.is_empty()
+            && self
+                .topics
+                .iter()
+                .all(|topic| topic.answer == Some(Answer::Refused))
     }
 
     /// Prints what the broker answered about one subscription.
@@ -222,23 +266,28 @@ impl Subscriptions {
     ///
     /// Gives [`SessionError::Output`] when the output refuses a line.
     fn answer(&mut self, ack: &SubAck, output: &mut impl Write) -> Result<(), SessionError> {
-        let Some(name) = self
+        let Some(topic) = self
             .by_pkid
             .get(&ack.pkid)
-            .and_then(|index| self.names.get(*index))
+            .copied()
+            .and_then(|index| self.topics.get_mut(index))
         else {
             return Ok(());
         };
+
+        let name = &topic.name;
 
         for code in &ack.return_codes {
             match code {
                 SubscribeReasonCode::Success(granted) => {
                     writeln!(output, "Subscribed: {name} (QoS {})", qos_number(*granted))
                         .map_err(SessionError::Output)?;
+                    topic.answer = Some(Answer::Granted);
                 }
                 SubscribeReasonCode::Failure => {
                     writeln!(output, "Subscription refused: {name}")
                         .map_err(SessionError::Output)?;
+                    topic.answer = Some(Answer::Refused);
                 }
             }
         }
