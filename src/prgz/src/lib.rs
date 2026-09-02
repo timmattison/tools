@@ -423,11 +423,22 @@ pub fn default_output_path(input: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Render the report that closes a run.
+///
+/// The first line names the result of the run. The lines under it hold the six
+/// values that the report carries, one value on each line.
+pub fn format_report(stats: &Stats, locale: &Locale) -> String {
+    let _ = (stats, locale);
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::{format_duration, format_float, format_int, locale_from_lang, Locale};
+    use super::{
+        format_duration, format_float, format_int, format_report, locale_from_lang, Locale, Stats,
+    };
 
     #[test]
     fn a_lang_with_a_codeset_gives_the_language_of_the_lang() {
@@ -533,5 +544,30 @@ mod tests {
             "0.50\u{b5}s"
         );
         assert_eq!(format_duration(Duration::ZERO, &Locale::de), "0,00\u{b5}s");
+    }
+
+    /// The report of a run that made the file smaller, in English, with the
+    /// escape codes taken out.
+    const SHRANK_REPORT: &str = concat!(
+        "Compression complete\n",
+        "  Original size:            1,048,576 bytes\n",
+        "  New size:                 524,288 bytes\n",
+        "  Size change:              50.00%\n",
+        "  Duration:                 1.50s\n",
+        "  Bytes read per second:    699,050.67\n",
+        "  Bytes written per second: 349,525.33",
+    );
+
+    #[test]
+    fn a_report_of_a_run_that_made_the_file_smaller_holds_the_six_values() {
+        let stats = Stats {
+            original_size: 1_048_576,
+            new_size: 524_288,
+            duration: Duration::from_millis(1_500),
+        };
+        let glyphs = testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            format_report(&stats, &Locale::en)
+        }));
+        assert_eq!(glyphs, SHRANK_REPORT);
     }
 }

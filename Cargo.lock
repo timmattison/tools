@@ -6025,6 +6025,7 @@ dependencies = [
  "flate2",
  "num-format",
  "tempfile",
+ "testcolor",
  "thiserror 2.0.20",
 ]
 
