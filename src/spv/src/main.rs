@@ -708,8 +708,25 @@ fn permission_warning(
     current_user: &str,
     is_root: bool,
 ) -> Option<String> {
-    let _ = (processes, current_user, is_root);
-    None
+    if is_root {
+        return None;
+    }
+    let mut owners: Vec<&str> = processes
+        .iter()
+        .map(|process| process.user.as_str())
+        .filter(|user| *user != current_user)
+        .collect();
+    owners.sort_unstable();
+    owners.dedup();
+    if owners.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Warning: some matched processes belong to {}, and you are {current_user}. \
+         A section below can come back empty or refused. \
+         Run spv again with sudo to see all of it.",
+        owners.join(", ")
+    ))
 }
 
 /// A network connection reported by `lsof -i`.
