@@ -21,6 +21,31 @@ const CODESET_MARKS: [char; 2] = ['.', '@'];
 /// The characters that separate the language from the region.
 const REGION_MARKS: [char; 2] = ['_', '-'];
 
+/// The count of fraction digits that a formatted number shows. The Go tool
+/// shows the same count through `%.2f`.
+const FRACTION_DIGITS: usize = 2;
+
+/// The count of seconds in one second. A duration of this length or more reads
+/// in seconds.
+const SECONDS_PER_SECOND: f64 = 1.0;
+
+/// The count of seconds in one millisecond. A shorter duration of this length
+/// or more reads in milliseconds.
+const SECONDS_PER_MILLISECOND: f64 = 0.001;
+
+/// The count of seconds in one microsecond. A still shorter duration reads in
+/// microseconds.
+const SECONDS_PER_MICROSECOND: f64 = 0.000_001;
+
+/// The suffix that marks a duration in seconds.
+const SECOND_SUFFIX: &str = "s";
+
+/// The suffix that marks a duration in milliseconds.
+const MILLISECOND_SUFFIX: &str = "ms";
+
+/// The suffix that marks a duration in microseconds.
+const MICROSECOND_SUFFIX: &str = "\u{b5}s";
+
 /// Resolve the number formatting locale from a `$LANG` value.
 ///
 /// The function first removes the codeset and the modifier from the value, so
@@ -58,9 +83,43 @@ pub fn format_int(value: u64, locale: &Locale) -> String {
 /// A value that is not finite has no digits to group. Such a value gets the
 /// word of the locale instead: `nan` for a value that is not a number, and
 /// `infinity` after the sign for an infinite value.
+///
+/// A finite value with an integer part of more than 39 digits is too large to
+/// group. Such a value keeps its two fraction digits, but shows the digits of
+/// the integer part without a separator.
 pub fn format_float(value: f64, locale: &Locale) -> String {
-    let _ = (value, locale);
-    String::new()
+    if !value.is_finite() {
+        return format_not_finite(value, locale);
+    }
+    let sign = sign_of(value, locale);
+    let digits = format!("{:.*}", FRACTION_DIGITS, value.abs());
+    let (integer, fraction) = digits.split_once('.').unwrap_or((digits.as_str(), ""));
+    let grouped = match integer.parse::<u128>() {
+        Ok(number) => number.to_formatted_string(locale),
+        Err(_) => integer.to_string(),
+    };
+    let decimal = locale.decimal();
+    format!("{sign}{grouped}{decimal}{fraction}")
+}
+
+/// Give the word of the locale for a value that is not finite.
+fn format_not_finite(value: f64, locale: &Locale) -> String {
+    if value.is_nan() {
+        return locale.nan().to_string();
+    }
+    let sign = sign_of(value, locale);
+    let infinity = locale.infinity();
+    format!("{sign}{infinity}")
+}
+
+/// Give the minus sign of the locale for a negative value, and nothing for a
+/// value that is not negative.
+fn sign_of(value: f64, locale: &Locale) -> &'static str {
+    if value.is_sign_negative() {
+        locale.minus_sign()
+    } else {
+        ""
+    }
 }
 
 /// Format a duration the way the closing report shows it.
@@ -71,8 +130,16 @@ pub fn format_float(value: f64, locale: &Locale) -> String {
 /// three goes through [`format_float`], thus each one shows two fraction
 /// digits in the separators of the locale.
 pub fn format_duration(duration: Duration, locale: &Locale) -> String {
-    let _ = (duration, locale);
-    String::new()
+    let seconds = duration.as_secs_f64();
+    let (value, suffix) = if seconds >= SECONDS_PER_SECOND {
+        (seconds, SECOND_SUFFIX)
+    } else if seconds >= SECONDS_PER_MILLISECOND {
+        (seconds / SECONDS_PER_MILLISECOND, MILLISECOND_SUFFIX)
+    } else {
+        (seconds / SECONDS_PER_MICROSECOND, MICROSECOND_SUFFIX)
+    };
+    let number = format_float(value, locale);
+    format!("{number}{suffix}")
 }
 
 #[cfg(test)]
