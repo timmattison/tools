@@ -197,10 +197,30 @@ where
             Err(failure) => failure,
         };
 
+        if is_terminal(&failure) {
+            return Err(failure);
+        }
+
         let wait = waits.take();
         report_retry(&failure, wait, output)?;
         tokio::time::sleep(wait).await;
     }
+}
+
+/// Says whether a failure ends the run instead of starting another attempt.
+///
+/// A broker that refuses every topic refuses them again, so another attempt
+/// only reads the same answer, and a tool that keeps trying prints the same
+/// two lines for as long as it runs.
+///
+/// A failure of the interrupt ends the run for a different reason: the
+/// shutdown gave its one answer already, and a supervisor that waited on it
+/// again would wait on a future that has no second answer.
+fn is_terminal(failure: &SessionError) -> bool {
+    matches!(
+        failure,
+        SessionError::AllSubscriptionsRefused | SessionError::Signal(_)
+    )
 }
 
 /// The wait of the next attempt, as one [`Backoff`] states it.
