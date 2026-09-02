@@ -604,7 +604,9 @@ fn looks_like_credential(name: &str) -> bool {
 ///
 /// The value to print.
 fn redact_env_value(name: &str, value: &str, show_secrets: bool) -> String {
-    let _ = (name, show_secrets);
+    if !show_secrets && looks_like_credential(name) {
+        return REDACTED_PLACEHOLDER.to_string();
+    }
     value.to_string()
 }
 
