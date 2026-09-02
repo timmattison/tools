@@ -512,3 +512,40 @@ fn the_network_section_names_the_missing_lsof() {
         "the section names the tool it cannot find: {note}"
     );
 }
+
+/// `lsof` gives the same answer when it finds nothing and when the kernel
+/// refuses it. So an empty section of another user's process must say on
+/// standard output why it can be empty. A reader who keeps only standard
+/// output otherwise keeps the false half and drops the true half.
+#[test]
+fn a_section_the_kernel_can_refuse_says_so_on_standard_output() {
+    // SAFETY: geteuid is a POSIX call that reads an integer out of the process
+    // credentials. It takes no pointer, it cannot fail, and it changes nothing.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        // As root the kernel refuses nothing, so there is nothing to say.
+        return;
+    }
+
+    // PID 1 belongs to root on every Unix.
+    for (flag, heading) in [
+        ("--lsof", "Open files for"),
+        ("--net", "Network connections for"),
+    ] {
+        let (ok, stdout, stderr) = run(spv().args([flag, "1"]).output().expect("spv runs"));
+
+        assert!(ok, "{flag} should succeed; stderr: {stderr}");
+        assert!(
+            stdout.contains(heading),
+            "the section names itself; stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("sudo"),
+            "{flag} names the remedy on standard output; stdout: {stdout}"
+        );
+        assert!(
+            !stdout.contains("none found"),
+            "{flag} never reads as a process that holds nothing; stdout: {stdout}"
+        );
+    }
+}
