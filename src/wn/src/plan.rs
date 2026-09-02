@@ -1353,10 +1353,51 @@ Notes: Independent of everything above.";
     }
 
     #[test]
+    fn every_drawing_of_a_rule_is_a_rule() {
+        // `is_rule` is asked here, and not a plan that carries the line. A
+        // plan hides the answer: a divider that stays reaches the row reader,
+        // and the row reader takes a divider for a continuation of the row
+        // above it whenever the `Order` cell opens with a hyphen. The test
+        // then stays green while the rule it names is broken.
+        //
+        // A Markdown divider is a rule with spaces in it, and a row of empty
+        // cells is a rule with cells in it. The two stand side by side here
+        // because one character of drawing is all that parts them.
+        let lines: &[(&str, &str, bool)] = &[
+            ("a box table opens", "┌─────┬─────┐", true),
+            ("a box table divides", "├─────┼─────┤", true),
+            ("a box table closes", "└─────┴─────┘", true),
+            ("an ascii table", "+-----+-----+", true),
+            (
+                "a record separator",
+                "────────────────────────────────────────",
+                true,
+            ),
+            ("a markdown divider, tight", "|---|---|", true),
+            ("a markdown divider, spaced", "| --- | --- |", true),
+            ("an alignment colon, tight", "|:---|---:|", true),
+            ("an alignment colon, spaced", "|:--- | ---:|", true),
+            ("an alignment on both sides", "| :---: | :---: |", true),
+            ("an alignment to the left", "| :--- | :--- |", true),
+            ("the tail of an ascii arrow", "--", false),
+            ("a row of the table", "| S1 | #350 |", false),
+            ("a row of empty cells", "|   |   |", false),
+        ];
+        for (name, line, expected) in lines {
+            assert_eq!(
+                is_rule(line),
+                *expected,
+                "{name} is {}a rule, and the line is `{line}`",
+                if *expected { "" } else { "no " }
+            );
+        }
+    }
+
+    #[test]
     fn a_divider_row_that_carries_an_alignment_colon_contributes_no_stream() {
         // A divider is a rule line, colons and all. A reader that takes it for
-        // a row gives the plan a stream whose `Order` field is `---:`.
-        let plan = plan_of("| Stream | Order |\n|:--- | ---:|\n| S1 | #350 → #187 |");
+        // a row gives the plan a stream whose `Order` field is `:---:`.
+        let plan = plan_of("| Stream | Order |\n| :---: | :---: |\n| S1 | #350 → #187 |");
         assert_eq!(shape(&plan), vec![("S1", vec![(350, None), (187, None)])]);
     }
 
