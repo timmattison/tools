@@ -326,6 +326,14 @@ impl Broker {
         .await;
     }
 
+    /// Reads the DISCONNECT of a clean shutdown.
+    async fn read_disconnect(&mut self) {
+        match self.read_packet().await {
+            Packet::Disconnect => (),
+            other => panic!("the client sent {other:?} where a DISCONNECT belongs"),
+        }
+    }
+
     /// Waits until the client closes the connection.
     ///
     /// The broker holds its end open, so the connection ends only when the run
@@ -572,5 +580,52 @@ async fn a_publish_prints_its_topic_and_its_payload() {
     assert!(
         matches!(result, Err(SessionError::Connection(_))),
         "a connection that ends is a failure of the connection: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_interrupt_sends_a_disconnect_and_ends_the_run() {
+    let (listener, port) = listening().await;
+    let topics = vec!["sensors/#".to_string()];
+    let (mut output, mut printed) = recording();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+
+    let session = run_until(
+        options_for(port),
+        &topics,
+        QoS::AtMostOnce,
+        false,
+        &mut output,
+        async move {
+            stopped.await.ok();
+            Ok(())
+        },
+    );
+
+    let script = async {
+        let mut broker = Broker::accept(listener).await;
+        broker.accept_connection().await;
+
+        let filter = broker.read_subscribe().await;
+        broker.grant(filter.pkid, QoS::AtMostOnce).await;
+
+        assert_eq!(printed.lines(1).await, ["Subscribed: sensors/# (QoS 0)"]);
+
+        // A real signal would end the whole test run, so the interrupt of this
+        // test arrives through the channel that `run_until` waits on.
+        stop.send(())
+            .expect("the session stopped before the interrupt arrived");
+
+        // The Go tool this one replaces ended with `select {}`, so an
+        // interrupt killed the process with the MQTT session open. This tool
+        // says goodbye first.
+        broker.read_disconnect().await;
+    };
+
+    let result = together(session, script).await;
+
+    assert!(
+        result.is_ok(),
+        "a clean shutdown is the end of a run and not a failure: {result:?}"
     );
 }
