@@ -2,7 +2,6 @@
 //! the properties that make that acceptable.
 
 use std::path::Path;
-use std::process::Command;
 
 use gitscratch::testing::conflicting_repo;
 use gitscratch::{Conflicts, Files, Hunks, Repo, Scratch};
@@ -362,8 +361,12 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
     // would. `merge` rather than `rebase` because it reaches the conflict in one
     // command and unwinds in one more.
     //
-    // Not `repo.git`, which panics on a non-zero exit - conflicting is the whole
-    // point of this merge, so its failure has to be inspected rather than raised.
+    // `repo.try_git` rather than `repo.git`: the latter panics on a non-zero
+    // exit, and conflicting is the whole point of this merge, so its failure has
+    // to be inspected rather than raised. Still the fixture's own spawn, so the
+    // inherited git environment is shed here as everywhere else - a raw
+    // `Command` would buy the permission and lose the scrub, and `current_dir`
+    // does not settle the question, because `GIT_DIR` outranks it.
     //
     // `--no-ff` for the same reason the sibling control pins its rebase backend:
     // a control has to ask for the merge it means to demonstrate rather than
@@ -371,11 +374,7 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
     // branches diverge, so the merge git performs is the same one either way -
     // the flag only settles whether git agrees to perform it.
     repo.checkout("right");
-    let control = Command::new("git")
-        .args(["merge", "--no-ff", "left"])
-        .current_dir(repo.path())
-        .output()
-        .expect("run the control merge in the fixture");
+    let control = repo.try_git(&["merge", "--no-ff", "left"], &[]);
     assert!(
         !control.status.success(),
         "the control merge was supposed to conflict, and rerere only ever records \
@@ -1104,7 +1103,10 @@ fn replays_without_hanging_or_failing_when_commit_signing_is_enabled() {
     // git rather than through `gitscratch`, so nothing under test is involved -
     // it is the developer's repository behaving the way it normally would. It
     // is `--allow-empty` so that failing, which is what it is here to do, leaves
-    // the fixture exactly as it found it.
+    // the fixture exactly as it found it. `repo.try_git` for the reason the
+    // sibling control uses it: `repo.git` would raise the failure this control
+    // is here to read, and a raw `Command` would buy that permission by
+    // shedding the environment scrub with it.
     //
     // The locale is pinned because the assertion below matches git's own words.
     // "gpg failed to sign the data" is wrapped in gettext, so a git built with
@@ -1112,15 +1114,14 @@ fn replays_without_hanging_or_failing_when_commit_signing_is_enabled() {
     // "gpg konnte die Daten nicht signieren", and this control then fails for a
     // reason that has nothing to do with signing. `LC_ALL` is the one that
     // decides; `LANG` is set alongside it because it costs nothing and spares
-    // the next reader from having to remember the precedence.
-    let control = Command::new("git")
-        .args(["commit", "--allow-empty", "-q", "-m", "control"])
-        .current_dir(repo.path())
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C")
-        .env("LANG", "C")
-        .output()
-        .expect("run the control commit in the fixture");
+    // the next reader from having to remember the precedence. All three go on
+    // through `try_git`'s own `env`, which applies them after the scrub -
+    // `GIT_TERMINAL_PROMPT` wears the `GIT_` prefix that scrub sweeps on, so
+    // setting it any earlier would be setting it only to have it removed.
+    let control = repo.try_git(
+        &["commit", "--allow-empty", "-q", "-m", "control"],
+        &[("GIT_TERMINAL_PROMPT", "0"), ("LC_ALL", "C"), ("LANG", "C")],
+    );
     let control_stderr = String::from_utf8_lossy(&control.stderr);
     assert!(
         !control.status.success(),

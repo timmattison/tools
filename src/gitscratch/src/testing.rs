@@ -19,7 +19,7 @@
 //! of names.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
@@ -98,6 +98,54 @@ impl TestRepo {
         );
 
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Run a git command in the repo and hand its outcome back whatever that
+    /// outcome is, with `env` applied on top.
+    ///
+    /// The spawn [`TestRepo::git`] cannot be. That one raises a non-zero exit
+    /// as a panic, which is right while a fixture is being built and wrong for
+    /// a *control* — a command run to demonstrate that some hazard really is
+    /// armed, whose failure is the demonstration and therefore has to come back
+    /// to be read rather than be raised.
+    ///
+    /// It exists so that permission need not be bought by reaching around the
+    /// fixture for a raw [`Command`], which is where the scrub gets lost:
+    /// `current_dir` does not settle which repository git uses, because
+    /// `GIT_DIR` outranks the working directory, so an unscrubbed control run
+    /// from a `pre-push` gate, `git bisect run`, `rebase --exec` or a git hook
+    /// merges, or commits, in the developer's own repository instead of in the
+    /// fixture. This spawn sheds the inherited git environment exactly as
+    /// [`TestRepo::git`] does; only the assertion is gone.
+    ///
+    /// `env` is applied **after** that sweep, and the order is load-bearing: the
+    /// rule the sweep applies is the `GIT_` prefix, so a `GIT_TERMINAL_PROMPT`
+    /// set beforehand would be taken straight back off by the very call meant to
+    /// leave it standing. Anything a control's own assertions depend on goes
+    /// here — `GIT_TERMINAL_PROMPT=0` so a command expected to fail fails
+    /// instead of stopping on a prompt, `LC_ALL`/`LANG` pinned for a control
+    /// that matches git's own words rather than their translation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `git` cannot be spawned at all — most likely because it is not
+    /// installed. A non-zero exit is not a panic; it is the answer.
+    pub fn try_git(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let mut command = Command::new("git");
+        command
+            .args(args)
+            .current_dir(self.dir.path())
+            .without_inherited_git_environment();
+
+        // After the sweep, never before it - see the note above on why the
+        // order decides whether a caller's `GIT_`-prefixed variable survives.
+        for (name, value) in env {
+            command.env(name, value);
+        }
+
+        command
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"))
     }
 
     /// Write `contents` to `name` and leave it there uncommitted.

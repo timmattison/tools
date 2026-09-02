@@ -558,6 +558,21 @@ with known conflict shapes, shared by every crate built on the harness so the
 fixtures exist once rather than once per test binary. Every fixture lives in its
 own `TempDir`, so concurrent `cargo test` runs never share a path.
 
+A fixture runs git two ways. `TestRepo::git` raises a failed command as a panic,
+which is what building a fixture wants. `TestRepo::try_git` hands the `Output`
+back instead, which is what a **control** wants — the command a test runs to
+prove the hazard it is guarding against is really armed, whose failure *is* the
+demonstration and so has to be read rather than raised. Both shed the inherited
+git environment; only the assertion differs. That is the point of the second
+one: without it a control buys its permission by reaching around the fixture for
+a raw `Command`, and loses the scrub in the same move — and `current_dir` does
+not settle which repository git uses, because `GIT_DIR` outranks it, so the
+control then merges or commits in the developer's own repository. `try_git`
+applies a caller's own variables *after* the sweep, which is what lets a control
+pin `GIT_TERMINAL_PROMPT=0`, or the `LC_ALL` it needs to read git's words rather
+than their translation, without the `GIT_` prefix rule taking them straight back
+off.
+
 It also gates `Conflicts::from_files`, the hand-built-breakdown constructor
 `Report`'s tests are built on. Every call site is a fixture, and a released
 binary has no business minting a verdict that nothing measured, so the
