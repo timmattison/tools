@@ -3,19 +3,34 @@
 use clap::Parser;
 use rumqttc::QoS;
 
+/// The lowest quality of service MQTT states, "at most once".
+const QOS_AT_MOST_ONCE: u8 = 0;
+
+/// The middle quality of service MQTT states, "at least once".
+const QOS_AT_LEAST_ONCE: u8 = 1;
+
+/// The highest quality of service MQTT states, "exactly once".
+const QOS_EXACTLY_ONCE: u8 = 2;
+
 /// Subscribe to AWS IoT Core topics and print every message that arrives.
 #[derive(Parser, Debug)]
 #[command(name = "subito", version = buildinfo::version_string!())]
 pub struct Cli {
     /// The topics to subscribe to. An MQTT wildcard is allowed.
+    #[arg(value_name = "TOPIC")]
     pub topics: Vec<String>,
 
     /// The quality of service of each subscription.
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "QOS",
+        default_value_t = QOS_AT_MOST_ONCE,
+        value_parser = clap::value_parser!(u8).range(i64::from(QOS_AT_MOST_ONCE)..=i64::from(QOS_EXACTLY_ONCE)),
+    )]
     pub qos: u8,
 
     /// The AWS IoT data endpoint. This skips the call to `DescribeEndpoint`.
-    #[arg(long)]
+    #[arg(long, value_name = "HOST")]
     pub endpoint: Option<String>,
 
     /// Print a payload that holds JSON with indentation.
@@ -25,9 +40,17 @@ pub struct Cli {
 
 impl Cli {
     /// Gives the quality of service as the MQTT client states it.
+    ///
+    /// The command line accepts 0, 1 and 2 only, so the last arm answers a
+    /// number no command line makes. It gives the lowest quality of service,
+    /// which is the default of the command line.
     #[must_use]
     pub fn mqtt_qos(&self) -> QoS {
-        unimplemented!("the quality of service map")
+        match self.qos {
+            QOS_AT_LEAST_ONCE => QoS::AtLeastOnce,
+            QOS_EXACTLY_ONCE => QoS::ExactlyOnce,
+            _ => QoS::AtMostOnce,
+        }
     }
 }
 
