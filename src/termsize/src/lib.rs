@@ -140,9 +140,15 @@ impl Window {
     /// `None` when either one of the two pixel numbers is zero.
     #[must_use]
     pub fn measured(columns: u16, rows: u16, pixels: Option<(u16, u16)>) -> Option<Self> {
-        // The rule is not here yet.
-        let _ = (columns, rows, pixels);
-        None
+        if columns == 0 || rows == 0 {
+            return None;
+        }
+
+        Some(Self {
+            columns,
+            rows,
+            pixels: pixels.filter(|&(wide, tall)| wide > 0 && tall > 0),
+        })
     }
 
     /// The size of the window in character cells: columns, then rows.
@@ -182,10 +188,7 @@ impl Window {
 /// cannot ask for.
 fn measured(size: (u16, u16)) -> Option<(u16, u16)> {
     let (columns, rows) = size;
-    if columns == 0 || rows == 0 {
-        return None;
-    }
-    Some(size)
+    Window::measured(columns, rows, None).map(Window::cells)
 }
 
 /// The size of the controlling terminal, in columns and then rows.
@@ -266,11 +269,8 @@ mod unix {
 
     /// The three standard file descriptors, in the order that [`drawing_window`]
     /// reads them.
-    const STANDARD_DESCRIPTORS: [RawFd; 3] = [
-        libc::STDOUT_FILENO,
-        libc::STDERR_FILENO,
-        libc::STDIN_FILENO,
-    ];
+    const STANDARD_DESCRIPTORS: [RawFd; 3] =
+        [libc::STDOUT_FILENO, libc::STDERR_FILENO, libc::STDIN_FILENO];
 
     /// The window that one file descriptor reports.
     ///
@@ -286,9 +286,29 @@ mod unix {
     /// The window, or `None` when the descriptor names no terminal and when the
     /// terminal it names reports no window.
     pub(super) fn window_of(fd: RawFd) -> Option<Window> {
-        // The probe is not here yet.
-        let _ = fd;
-        None
+        let mut window = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+
+        // SAFETY: `TIOCGWINSZ` reads the size of the window of a terminal, and
+        // it writes that size into the `winsize` that the third argument points
+        // at. The pointer names a live local variable of exactly that type, and
+        // the call touches no other memory of this process. The call changes
+        // nothing about the terminal. A descriptor that names no terminal, and a
+        // descriptor that no file is open on, both give an error.
+        let answer = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut window) };
+        if answer != 0 {
+            return None;
+        }
+
+        Window::measured(
+            window.ws_col,
+            window.ws_row,
+            Some((window.ws_xpixel, window.ws_ypixel)),
+        )
     }
 
     /// The window of the first descriptor that reports one, and the window of
@@ -320,10 +340,14 @@ mod unix {
         standard: &[RawFd],
         controlling: impl FnOnce() -> Option<OwnedFd>,
     ) -> Option<Window> {
-        // The search is not here yet.
-        let _ = standard;
-        let _ = controlling;
-        None
+        for fd in standard {
+            if let Some(window) = window_of(*fd) {
+                return Some(window);
+            }
+        }
+
+        let terminal = controlling()?;
+        window_of(terminal.as_raw_fd())
     }
 
     /// The open of the controlling terminal of this process.
@@ -546,9 +570,7 @@ mod tests {
             let mut master: RawFd = -1;
             let mut slave: RawFd = -1;
             let mut size = size;
-            let size_pointer = size
-                .as_mut()
-                .map_or_else(ptr::null_mut, |window| ptr::from_mut(window));
+            let size_pointer = size.as_mut().map_or_else(ptr::null_mut, ptr::from_mut);
 
             // SAFETY: `openpty` writes one file descriptor to each of the first
             // two pointers, and both point at a live local variable. The two
