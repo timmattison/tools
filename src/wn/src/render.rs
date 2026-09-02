@@ -19,6 +19,10 @@
 //! [`textfit::truncate_to_budget`], which gives an empty title rather than a
 //! marker that is itself one column too wide.
 //!
+//! A summary line of a plan is the one line that may wrap, and only in a
+//! window too narrow to hold the shortest label of a stream beside the answer.
+//! See [`summary`].
+//!
 //! # A plan is one block for each stream
 //!
 //! A plan of parallel work holds many streams, and [`render_plan`] paints one
@@ -62,6 +66,12 @@ const PLAN_INDENT: usize = 2;
 
 /// The line that opens the summary of a plan.
 const SUMMARY_HEADING: &str = "Take one from each stream:";
+
+/// The columns the label of a summary line keeps, however narrow the window
+/// is. This is the width of `Stream 1`, the name `plan::label_of` gives a
+/// stream the plan does not name, and thus the shortest label the tool itself
+/// ever writes.
+const MIN_LABEL_WIDTH: usize = 8;
 
 /// The answer of a stream where every step is finished.
 const EVERY_ISSUE_CLOSED: &str = "every issue is closed";
@@ -392,8 +402,8 @@ impl Tail {
     }
 
     /// The columns the whole tail occupies, once `→ #344` is padded to
-    /// `mark_width`. This is what the label of a summary line has to give way
-    /// to.
+    /// `mark_width`. This is what the label of a summary line gives way to,
+    /// as far as [`MIN_LABEL_WIDTH`].
     fn width(&self, mark_width: usize, start: &StartCommand) -> usize {
         match self {
             Self::Next(number) => {
@@ -438,7 +448,10 @@ fn command(start: &StartCommand, number: IssueNumber) -> String {
 ///
 /// The tail is what the reader came for, so it takes its columns first and the
 /// label is cut to what is left. A label that pushed the command off the window
-/// would take the answer away.
+/// would take the answer away. The cut stops at [`MIN_LABEL_WIDTH`]: a window
+/// too narrow for both lets the line run past the edge and wrap, because a
+/// wrapped line that names its stream is worth more than a line that names
+/// none.
 fn summary(streams: &[StreamReport], width: usize, start: &StartCommand) -> Vec<String> {
     let tails: Vec<Tail> = streams
         .iter()
@@ -451,7 +464,9 @@ fn summary(streams: &[StreamReport], width: usize, start: &StartCommand) -> Vec<
         .max()
         .unwrap_or(0);
 
-    let budget = width.saturating_sub(PLAN_INDENT + COLUMN_GAP + tail_width);
+    let budget = width
+        .saturating_sub(PLAN_INDENT + COLUMN_GAP + tail_width)
+        .max(MIN_LABEL_WIDTH);
     let labels: Vec<String> = streams
         .iter()
         .map(|stream| truncate_to_budget(&stream.label, budget))
