@@ -288,6 +288,78 @@ fn running_as_root() -> bool {
     false
 }
 
+/// The user who runs this tool, and the reach that user has.
+///
+/// Every section reads state the kernel guards, and the kernel answers by the
+/// credentials of the caller. Both facts thus belong together, and `main` reads
+/// them once and hands them down.
+struct Viewer {
+    /// The name of the user who runs this tool.
+    username: String,
+    /// Whether this tool runs as root, which can read every process.
+    is_root: bool,
+}
+
+impl Viewer {
+    /// Reads the credentials of this run.
+    ///
+    /// # Returns
+    ///
+    /// The name of the caller, and whether the caller is root.
+    fn current() -> Self {
+        Self {
+            username: current_username(),
+            is_root: running_as_root(),
+        }
+    }
+
+    /// Decides whether the kernel can refuse a section of a process.
+    ///
+    /// Root reads every process. Every other user reads the processes of that
+    /// user alone. This is the one place that makes the decision, because the
+    /// warning and the sections must agree about it.
+    ///
+    /// # Arguments
+    ///
+    /// * `process` - The process a section reads
+    ///
+    /// # Returns
+    ///
+    /// `true` when the kernel can refuse this caller.
+    fn can_refuse(&self, process: &ProcessInfo) -> bool {
+        !self.is_root && process.user != self.username
+    }
+
+    /// Builds the line that an empty `lsof` section prints.
+    ///
+    /// `lsof` exits 1 and writes nothing on two paths: the path where it finds
+    /// nothing, and the path where the kernel refuses it. A section that says
+    /// "none found" on the second path teaches the reader that the process
+    /// holds nothing, which is worse than a refusal. So a section of another
+    /// user's process says that both paths are possible, and it names the
+    /// remedy. The line goes to standard output, because that is where the
+    /// false statement went.
+    ///
+    /// # Arguments
+    ///
+    /// * `process` - The process the section reads
+    ///
+    /// # Returns
+    ///
+    /// The line, without the indent that the printer adds.
+    fn empty_lsof_line(&self, process: &ProcessInfo) -> String {
+        if !self.can_refuse(process) {
+            return "none found".to_string();
+        }
+        format!(
+            "none reported. lsof gives the same answer when it finds nothing and when the \
+             kernel refuses it. This process belongs to {}, and you are {}. Run spv again with \
+             sudo to see all of it.",
+            process.user, self.username
+        )
+    }
+}
+
 /// Process information from sysctl on macOS.
 ///
 /// The sysinfo crate uses proc_pidinfo() which requires elevated privileges to
@@ -1057,24 +1129,16 @@ fn matches_name_pattern(
 /// # Arguments
 ///
 /// * `processes` - The processes that matched
-/// * `current_user` - The name of the user who runs this tool
-/// * `is_root` - Whether this tool runs as root, which can read every process
+/// * `viewer` - The user who runs this tool, and the reach that user has
 ///
 /// # Returns
 ///
 /// The warning, or `None` when every matched process is readable.
-fn permission_warning(
-    processes: &[ProcessInfo],
-    current_user: &str,
-    is_root: bool,
-) -> Option<String> {
-    if is_root {
-        return None;
-    }
+fn permission_warning(processes: &[ProcessInfo], viewer: &Viewer) -> Option<String> {
     let mut owners: Vec<&str> = processes
         .iter()
+        .filter(|process| viewer.can_refuse(process))
         .map(|process| process.user.as_str())
-        .filter(|user| *user != current_user)
         .collect();
     owners.sort_unstable();
     owners.dedup();
@@ -1082,10 +1146,11 @@ fn permission_warning(
         return None;
     }
     Some(format!(
-        "Warning: some matched processes belong to {}, and you are {current_user}. \
+        "Warning: some matched processes belong to {}, and you are {}. \
          A section below can come back empty or refused. \
          Run spv again with sudo to see all of it.",
-        owners.join(", ")
+        owners.join(", "),
+        viewer.username
     ))
 }
 
@@ -1214,12 +1279,13 @@ fn print_raw(processes: &[ProcessInfo], include_cwd: bool) {
 /// # Arguments
 ///
 /// * `processes` - The processes to show files for
-fn print_open_files(processes: &[ProcessInfo]) {
+/// * `viewer` - The user who runs this tool, and the reach that user has
+fn print_open_files(processes: &[ProcessInfo], viewer: &Viewer) {
     for proc in processes {
         println!("\nOpen files for {} (PID {}):", proc.name, proc.pid);
         match get_open_files(proc.pid) {
             Err(reason) => println!("  unavailable: {reason}"),
-            Ok(files) if files.is_empty() => println!("  none found"),
+            Ok(files) if files.is_empty() => println!("  {}", viewer.empty_lsof_line(proc)),
             Ok(files) => {
                 let mut table = Table::new();
                 table
@@ -1241,7 +1307,8 @@ fn print_open_files(processes: &[ProcessInfo]) {
 /// # Arguments
 ///
 /// * `processes` - The processes to show the connections of
-fn print_net_connections(processes: &[ProcessInfo]) {
+/// * `viewer` - The user who runs this tool, and the reach that user has
+fn print_net_connections(processes: &[ProcessInfo], viewer: &Viewer) {
     for proc in processes {
         println!(
             "\nNetwork connections for {} (PID {}):",
@@ -1249,7 +1316,9 @@ fn print_net_connections(processes: &[ProcessInfo]) {
         );
         match get_net_connections(proc.pid) {
             Err(reason) => println!("  unavailable: {reason}"),
-            Ok(connections) if connections.is_empty() => println!("  none found"),
+            Ok(connections) if connections.is_empty() => {
+                println!("  {}", viewer.empty_lsof_line(proc));
+            }
             Ok(connections) => {
                 let mut table = Table::new();
                 table
@@ -1434,18 +1503,17 @@ fn main() -> Result<()> {
 
     // A section reads state the kernel guards, so say up front whose process
     // this is. A plain listing comes from sysctl and needs no permission.
+    let viewer = Viewer::current();
     let wants_a_section = sections.files || sections.env || sections.net;
     if wants_a_section {
-        if let Some(warning) =
-            permission_warning(&processes, &current_username(), running_as_root())
-        {
+        if let Some(warning) = permission_warning(&processes, &viewer) {
             eprintln!("\n{warning}");
         }
     }
 
     // Print open files if requested
     if sections.files {
-        print_open_files(&processes);
+        print_open_files(&processes, &viewer);
     }
 
     // Print the environment if requested
@@ -1455,7 +1523,7 @@ fn main() -> Result<()> {
 
     // Print network connections if requested
     if sections.net {
-        print_net_connections(&processes);
+        print_net_connections(&processes, &viewer);
     }
 
     Ok(())
@@ -1886,17 +1954,72 @@ mod tests {
         }
     }
 
+    /// Builds a caller with a name and a reach.
+    fn viewer_named(username: &str, is_root: bool) -> Viewer {
+        Viewer {
+            username: username.to_string(),
+            is_root,
+        }
+    }
+
+    #[test]
+    fn the_kernel_refuses_no_section_of_your_own_process() {
+        assert!(!viewer_named("tim", false).can_refuse(&process_owned_by(1, "tim")));
+    }
+
+    #[test]
+    fn the_kernel_can_refuse_a_section_of_another_users_process() {
+        assert!(viewer_named("tim", false).can_refuse(&process_owned_by(1, "root")));
+    }
+
+    #[test]
+    fn the_kernel_refuses_no_section_to_root() {
+        assert!(!viewer_named("root", true).can_refuse(&process_owned_by(1, "nobody")));
+    }
+
+    #[test]
+    fn an_empty_section_of_your_own_process_says_it_found_nothing() {
+        assert_eq!(
+            viewer_named("tim", false).empty_lsof_line(&process_owned_by(1, "tim")),
+            "none found"
+        );
+    }
+
+    #[test]
+    fn an_empty_section_says_it_found_nothing_to_root() {
+        assert_eq!(
+            viewer_named("root", true).empty_lsof_line(&process_owned_by(1, "nobody")),
+            "none found"
+        );
+    }
+
+    #[test]
+    fn an_empty_section_of_another_users_process_says_the_kernel_can_have_refused_it() {
+        let line = viewer_named("tim", false).empty_lsof_line(&process_owned_by(1, "root"));
+        assert!(
+            !line.contains("none found"),
+            "a refusal never reads as a process that holds nothing: {line}"
+        );
+        assert!(
+            line.contains("lsof"),
+            "the line names the tool whose answer is ambiguous: {line}"
+        );
+        assert!(line.contains("root"), "the line names the owner: {line}");
+        assert!(line.contains("tim"), "the line names the caller: {line}");
+        assert!(line.contains("sudo"), "the line names the remedy: {line}");
+    }
+
     #[test]
     fn your_own_processes_raise_no_warning() {
         let processes = [process_owned_by(1, "tim"), process_owned_by(2, "tim")];
-        assert!(permission_warning(&processes, "tim", false).is_none());
+        assert!(permission_warning(&processes, &viewer_named("tim", false)).is_none());
     }
 
     #[test]
     fn another_users_process_raises_a_warning_that_names_both_users() {
         let processes = [process_owned_by(1, "root"), process_owned_by(2, "tim")];
-        let warning =
-            permission_warning(&processes, "tim", false).expect("root is not tim, so warn");
+        let warning = permission_warning(&processes, &viewer_named("tim", false))
+            .expect("root is not tim, so warn");
         assert!(
             warning.contains("root"),
             "the warning names the owner: {warning}"
@@ -1914,7 +2037,7 @@ mod tests {
     #[test]
     fn root_reads_every_process_and_raises_no_warning() {
         let processes = [process_owned_by(1, "root"), process_owned_by(2, "nobody")];
-        assert!(permission_warning(&processes, "root", true).is_none());
+        assert!(permission_warning(&processes, &viewer_named("root", true)).is_none());
     }
 
     #[test]
@@ -1925,7 +2048,8 @@ mod tests {
             process_owned_by(3, "root"),
             process_owned_by(4, "tim"),
         ];
-        let warning = permission_warning(&processes, "tim", false).expect("two owners differ");
+        let warning =
+            permission_warning(&processes, &viewer_named("tim", false)).expect("two owners differ");
         assert!(
             warning.contains("nobody, root"),
             "the owners come once each and in order: {warning}"
