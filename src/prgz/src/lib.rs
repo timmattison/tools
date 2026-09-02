@@ -143,6 +143,18 @@ pub fn format_duration(duration: Duration, locale: &Locale) -> String {
     format!("{number}{suffix}")
 }
 
+/// The suffix that marks a gzip file. A run that gets no output name adds
+/// this suffix to the input name.
+const GZIP_SUFFIX: &str = ".gz";
+
+/// The count of percent in the whole. A fraction becomes a percentage when it
+/// is multiplied by this number.
+const PERCENT_SCALE: f64 = 100.0;
+
+/// The rate that a run of no length gets. A rate needs a length of time, thus
+/// a run that took no time has no measured rate.
+const NO_RATE: f64 = 0.0;
+
 /// What one compression run produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
@@ -156,9 +168,13 @@ pub struct Stats {
 
 impl Stats {
     /// Answers whether the output is not smaller than the input.
+    ///
+    /// An output of the same size as the input counts as larger, because the
+    /// run gave no reduction. An empty input always gives a larger output,
+    /// because a gzip stream of no bytes still carries a header.
     #[must_use]
     pub fn grew(&self) -> bool {
-        false
+        self.new_size >= self.original_size
     }
 
     /// The change in size, as a percentage of the original size.
@@ -168,26 +184,52 @@ impl Stats {
     /// size is zero, because no percentage of zero exists.
     #[must_use]
     pub fn size_change_percent(&self) -> Option<f64> {
-        None
+        if self.original_size == 0 {
+            return None;
+        }
+        let original = self.original_size as f64;
+        let new = self.new_size as f64;
+        Some((1.0 - new / original) * PERCENT_SCALE)
     }
 
     /// The count of input bytes that the run read in one second.
+    ///
+    /// A run of no length answers a rate of zero, because a rate needs a
+    /// length of time.
     #[must_use]
     pub fn bytes_read_per_second(&self) -> f64 {
-        f64::NAN
+        rate(self.original_size, self.duration)
     }
 
     /// The count of output bytes that the run wrote in one second.
+    ///
+    /// A run of no length answers a rate of zero, because a rate needs a
+    /// length of time.
     #[must_use]
     pub fn bytes_written_per_second(&self) -> f64 {
-        f64::NAN
+        rate(self.new_size, self.duration)
     }
 }
 
+/// Divides a count of bytes by the seconds of a duration.
+fn rate(bytes: u64, duration: Duration) -> f64 {
+    let seconds = duration.as_secs_f64();
+    if seconds <= 0.0 {
+        return NO_RATE;
+    }
+    bytes as f64 / seconds
+}
+
 /// The output path a run takes when the user names none: `<input>.gz`.
+///
+/// The function adds the suffix to the whole name, thus `notes.tar` gives
+/// `notes.tar.gz`. It works on the bytes of the name, thus a name that is not
+/// valid UTF-8 keeps every byte.
 #[must_use]
 pub fn default_output_path(input: &Path) -> PathBuf {
-    input.to_path_buf()
+    let mut name = input.as_os_str().to_os_string();
+    name.push(GZIP_SUFFIX);
+    PathBuf::from(name)
 }
 
 #[cfg(test)]
