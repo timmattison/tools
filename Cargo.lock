@@ -6021,6 +6021,9 @@ dependencies = [
 [[package]]
 name = "prgz"
 version = "0.1.0"
+dependencies = [
+ "num-format",
+]
 
 [[package]]
 name = "prhash"
