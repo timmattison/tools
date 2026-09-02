@@ -12,8 +12,9 @@
 //! stops when the broker refuses every topic, and it sends a DISCONNECT before
 //! it gives control back.
 
+use crate::payload::format_payload;
 use rumqttc::{
-    AsyncClient, Event, MqttOptions, Outgoing, Packet, QoS, SubAck, SubscribeReasonCode,
+    AsyncClient, Event, MqttOptions, Outgoing, Packet, Publish, QoS, SubAck, SubscribeReasonCode,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -146,7 +147,7 @@ pub async fn run_until(
 async fn drive(
     eventloop: &mut rumqttc::EventLoop,
     mut subscriptions: Subscriptions,
-    _pretty_json: bool,
+    pretty_json: bool,
     output: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
 ) -> Result<(), SessionError> {
@@ -172,9 +173,36 @@ async fn drive(
                     return Err(SessionError::AllSubscriptionsRefused);
                 }
             }
+            Event::Incoming(Packet::Publish(publish)) => {
+                print_message(&publish, pretty_json, output)?;
+            }
             _ => (),
         }
     }
+}
+
+/// Prints one message: its topic, its payload, and a blank line.
+///
+/// The payload goes through [`format_payload`], so a payload that holds an
+/// escape sequence arrives as a hex dump and does not change the terminal of
+/// the user.
+///
+/// # Errors
+///
+/// Gives [`SessionError::Output`] when the output refuses a line.
+fn print_message(
+    publish: &Publish,
+    pretty_json: bool,
+    output: &mut impl Write,
+) -> Result<(), SessionError> {
+    let topic = &publish.topic;
+    let message = format_payload(&publish.payload, pretty_json);
+
+    writeln!(output, "Topic: {topic}").map_err(SessionError::Output)?;
+    writeln!(output, "Message: {message}").map_err(SessionError::Output)?;
+    writeln!(output).map_err(SessionError::Output)?;
+
+    Ok(())
 }
 
 /// What the broker answered about one topic.
