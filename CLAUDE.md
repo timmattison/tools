@@ -310,7 +310,6 @@ All Go tools use internal/version:
 - `dirc` - Directory Clipboard
 - `localnext` - Local Next.js Server
 - `prgz` - Progress Gzip
-- `procinfo` - Process Info
 - `subito` - AWS IoT Subscriber
 - `symfix` - Symlink Fix
 

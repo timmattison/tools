@@ -37,7 +37,7 @@ LDFLAGS="${LDFLAGS} -X github.com/timmattison/tools/internal/version.Version=${V
 mkdir -p bin
 
 # List of all Go tools
-ALL_TOOLS="dirc localnext prgz procinfo subito symfix"
+ALL_TOOLS="dirc localnext prgz subito symfix"
 
 # Determine which tools to build
 if [ $# -eq 0 ]; then
