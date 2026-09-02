@@ -3645,6 +3645,7 @@ dependencies = [
  "notify",
  "tempfile",
  "termsize",
+ "termwindow",
  "testcolor",
  "textfit",
  "unicode-width",
@@ -7597,6 +7598,10 @@ dependencies = [
  "crossterm",
  "terminal_size",
 ]
+
+[[package]]
+name = "termwindow"
+version = "0.1.0"
 
 [[package]]
 name = "termwiz"
