@@ -611,8 +611,34 @@ fn looks_like_credential(name: &str) -> bool {
 /// parts the layout demands.
 #[cfg(target_os = "macos")]
 fn env_block_from_procargs2(buffer: &[u8]) -> Option<&[u8]> {
-    let _ = buffer;
-    None
+    let argc_bytes: [u8; 4] = buffer.get(0..4)?.try_into().ok()?;
+    let argc = i32::from_ne_bytes(argc_bytes);
+    let argc = usize::try_from(argc).ok()?;
+
+    let mut cursor = 4;
+    // Step over the saved executable path.
+    cursor += buffer.get(cursor..)?.iter().position(|byte| *byte == 0)? + 1;
+    // Step over the alignment padding that follows it.
+    cursor += buffer
+        .get(cursor..)?
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(0);
+
+    for _ in 0..argc {
+        cursor += buffer.get(cursor..)?.iter().position(|byte| *byte == 0)? + 1;
+    }
+
+    let start = cursor;
+    // The environment ends at the first empty entry, which is where the
+    // `apple[]` strings begin.
+    while let Some(byte) = buffer.get(cursor) {
+        if *byte == 0 {
+            break;
+        }
+        cursor += buffer.get(cursor..)?.iter().position(|b| *b == 0)? + 1;
+    }
+    buffer.get(start..cursor)
 }
 
 /// Parses a NUL-separated block of `NAME=VALUE` entries.
@@ -1137,7 +1163,10 @@ mod tests {
     #[test]
     fn an_ordinary_value_stays_visible() {
         assert_eq!(redact_env_value("HOME", "/Users/tim", false), "/Users/tim");
-        assert_eq!(redact_env_value("GREETING", "こんにちは", false), "こんにちは");
+        assert_eq!(
+            redact_env_value("GREETING", "こんにちは", false),
+            "こんにちは"
+        );
     }
 
     #[test]
@@ -1249,8 +1278,20 @@ mod tests {
     fn a_truncated_procargs2_buffer_yields_nothing() {
         assert!(env_block_from_procargs2(&[]).is_none());
         assert!(env_block_from_procargs2(&[1, 0, 0]).is_none());
-        // The buffer names three arguments and carries one.
-        let buffer = procargs2_fixture(3, "/usr/bin/tool", &["/usr/bin/tool"], &[], &[]);
+
+        // A buffer that stops in the middle of the saved executable path. An
+        // argument count that disagrees with the entries present is NOT a case
+        // this function can catch: trailing NUL bytes read exactly like the
+        // empty arguments that `prog "" ""` really produces.
+        let mut buffer =
+            procargs2_fixture(2, "/usr/bin/tool", &["/usr/bin/tool", "--flag"], &[], &[]);
+        buffer.truncate(9);
+        assert!(env_block_from_procargs2(&buffer).is_none());
+
+        // A buffer that stops in the middle of an argument.
+        let mut buffer =
+            procargs2_fixture(2, "/usr/bin/tool", &["/usr/bin/tool", "--flag"], &[], &[]);
+        buffer.truncate(26);
         assert!(env_block_from_procargs2(&buffer).is_none());
     }
 
