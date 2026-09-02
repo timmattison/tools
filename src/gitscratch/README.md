@@ -41,6 +41,46 @@ again, which is faithful to reality, since a human resolution also leaves later
 commits conflicting against the resolved state. Treat a `Conflicts` as a cost
 index measured under identical rules, not as an exact prediction.
 
+## Three ways a rebase halts, and why the third one matters
+
+A halted rebase with **no unmerged paths** is a classification point, not a
+single known case. Git stops there for a commit that adds nothing to the new
+base — free to drop — and it stops there for a commit it could not *write*,
+where dropping it throws the work away and answers with a cost for a branch
+that was never replayed. Signing, hooks, a full or read-only object database, an
+unusable editor all land in that same state, and git exits non-zero for the
+harmless case too, so nothing about the invocation separates them.
+
+| Halt | What it means | What the replay does |
+| --- | --- | --- |
+| Unmerged paths | A human would hand-merge these | Count them, stage the markers, continue |
+| Nothing unmerged, commit adds nothing | The work is already in the new base | `rebase --skip`, costs nothing |
+| Nothing unmerged, commit could not be written | git refused to create the commit | **Fail**, naming the commit and quoting git |
+
+The third row is separated from the second by two probes, both of them
+repository state rather than a match on git's wording, since wording changes and
+state does not:
+
+1. **Anything left uncommitted.** A commit that truly became empty leaves the
+   index matching `HEAD` and the worktree matching the index. Content left
+   behind is content that failed to be committed.
+2. **Whether the stopped commit's work is already in the new base.** A failed
+   commit write on a *clean* pick leaves nothing behind at all — git rolls the
+   index back and reschedules the pick — so probe 1 has nothing to see. What
+   still separates the two is the commit itself: for every path `REBASE_HEAD`
+   touches, does `HEAD` already hold exactly that content? If so the commit is
+   genuinely empty, and airtight rather than heuristic — applying `C` onto
+   `HEAD` is a three-way merge (base `C^`, ours `HEAD`, theirs `C`), and on a
+   path where both sides already agree the merge changes nothing, while a path
+   `C` never touched cannot change either.
+
+A refused `git rebase --skip` fails the replay immediately, carrying git's own
+message, rather than being re-issued until the round limit runs out.
+
+Both probes err toward the loud answer, which is the safe direction: a dry run
+may say "this is expensive" or "I cannot answer", but never "this is cheap"
+because it quietly discarded the work.
+
 ## What it guarantees
 
 | Guard | Why |
@@ -54,6 +94,8 @@ index measured under identical rules, not as an exact prediction.
 | `gpg.format=openpgp` | Belt to `commit.gpgsign`'s braces. `gpg.format = ssh` is a different signing backend entirely, with its own key and helper program; pinning the format back to git's default means that configuration is never consulted, so signing cannot be attempted through it. |
 | `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. |
 | `rebase.autoStash=false`, `rebase.autosquash=false` | The replay must be the operation as written, not a rewritten variant of it. |
+| `-z` on the way out, `--literal-pathspecs` on the way in | A path read out of one invocation goes straight back into the next as a pathspec, and a pathspec is not a path: a leading `:` is magic, `*`, `?` and `[` are wildcards, and git C-quotes a non-ASCII name on the way out while dequoting nothing on the way back in. `-z` turns the escaping off; `--literal-pathspecs` turns the magic off. A pathspec that matches *nothing* is the mild half — it can only add to the paths a probe finds missing, and that only ever buys a refusal nobody needed. The half worth the guard is one that matches the *wrong* file: `:/foo.txt` read as magic means from the top of the working tree, so it silently answers about the root `foo.txt`, and if that one is unchanged the diff comes back empty. An empty diff reads as a commit that adds nothing to the new base, which is a `rebase --skip`, which is the work gone and a cost of zero reported for a branch that was never replayed. |
+| The inherited git environment, shed | Configuration is only as strong as the environment it runs in, because git reads the environment *first*. A tool built on this crate can be invoked from inside a git hook, and git hands its hooks the commit it is making: `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_AUTHOR_DATE` naming the developer, and `GIT_INDEX_FILE` — often the *relative* `.git/index`, which silently re-anchors on whichever directory each command runs in. `GIT_DIR` and `GIT_WORK_TREE` travel the same way. Every one is stripped, so a replay cannot be re-attributed or aimed at the repository the developer was committing to. `shed_inherited_git_environment` is public: the danger is not this crate's alone, and the list belongs in one place. |
 | `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
@@ -100,9 +142,117 @@ the backend its halted rebase is inspected under, and each gets a bullet:
   cannot resolve. The replay runs under a timeout, so the test catches a hang on
   a passphrase prompt and not only an outright failure.
 
-A tenth guarantee — **the `user.name`/`user.email` identity**, the last row
-above — is pinned by a unit test in `src/git.rs` instead, which reads back
-`git var GIT_AUTHOR_IDENT` rather than building a repository to commit into.
+The unit tests in `src/git.rs` pin what needs no repository built around it.
+Some are about the code itself. **The `user.name`/`user.email` identity**, the
+last row above, is read back through `git var GIT_AUTHOR_IDENT` rather than by
+committing into a fixture, by
+`commits_under_the_crate_s_own_identity_not_a_consuming_tool_s`, which reads it
+in an environment carrying nothing of its own — the way the suite runs from a
+shell. `the_pinned_identity_survives_a_hook_environment` reads it again under
+the environment a git hook hands down, where `GIT_AUTHOR_NAME` and its siblings
+outrank every `-c` the harness pins. **The inherited git environment, shed** is
+asserted by
+`ignores_an_inherited_git_environment_naming_another_identity_or_repository`,
+which adds another repository's `GIT_DIR` and `GIT_INDEX_FILE` to that
+environment and watches neither reach git. Both of those last two run in a
+re-executed child of the test binary rather than in it: the environment is
+process-wide, and mutating it in place would reach every sibling test and every
+concurrent run of the suite. Each of them names the child by a libtest filter,
+which is a string the compiler never checks against the test it names, so a
+child that ran counts only when it *says* it ran — one sentinel line, printed
+at the end of the child's body and required in its output alongside a
+successful exit. The exit status alone cannot carry that, because libtest
+exits 0 when a filter matches no test at all, so a renamed test and a passing
+one look the same from the parent's side.
+`a_child_half_that_matched_no_test_is_a_failure_not_a_pass` pins the refusal:
+it hands the shared child runner a filter naming no test in this file and
+requires a failure that says so. The rename that breaks a filter is the rename
+that hides the breakage, which is why the two guards cannot be left to police
+their own filters. **The UTF-8
+refusal in `Git::paths`** —
+`refuses_a_path_that_is_not_valid_utf_8_rather_than_replacing_the_byte` — covers
+the one loss the `-z` round trip cannot undo: a byte that is not UTF-8 has no
+`String` to come back *as*, and repairing it into U+FFFD would hand back a name
+no file has, which is a pathspec matching nothing, which is how a commit gets
+called empty and skipped. macOS will not let a working tree hold such a name at
+all, so the commit is built directly in the object database and the guard is
+pinned here rather than end-to-end.
+
+The rest are about this document rather than about the code.
+`every_guard_the_safety_config_pins_is_named_in_the_readme_inventory` asks
+`safety_config` what it pins and requires the **What it guarantees** section
+above to name every one of them — the whole `key=value` for a settled value, the
+key alone for a per-run computed one like `core.hooksPath`, the option verbatim
+for a main option like `--literal-pathspecs`. So the inventory is checked, not
+merely maintained: a guard added to the configuration and forgotten here fails
+the build instead of leaving a reader with a table they will reasonably take for
+the complete list. `--literal-pathspecs` is why the test exists — it was
+load-bearing in `safety_config` for a while before it was ever a row.
+
+More of them pin the *scope* those checks read, since a check pointed at the
+wrong span of the file reports clean without ever having seen the table.
+`the_inventory_section_stops_at_the_next_heading_of_any_level` ends a section at
+the next heading whatever its level: demoting the heading below the inventory —
+one character — would otherwise widen it to swallow the prose here, which names
+`--literal-pathspecs` and `core.hooksPath`, the exact two guards matched by bare
+name, so both would be satisfiable with no row for either. Its last fixture ends
+the section at a setext heading — `Testing` over a rule of dashes — the one
+heading spelling that carries no `#`, so a lexical cut cannot pass this test.
+`an_inventory_section_that_nothing_closes_is_refused_rather_than_run_to_the_end`
+shuts the same gap from the other side: a section with no heading after it is
+refused outright rather than read to the end of the file.
+`a_hash_that_is_not_a_heading_does_not_end_a_section` shuts the third, the one
+this very section fell down. A `#` is not a heading: the `#329` below is the
+wrapped tail of an `Issue`, and a `#` opening a line inside a fenced shell block
+is a comment. A cut that stopped at either ended this section well short of its
+own end — so a test named down there read as named nowhere — and, worse, handed
+the refusal above a boundary to be satisfied by, leaving an unbounded scope
+reporting clean. The bounds come from a CommonMark parse for that reason: it is
+the only thing that answers "is this line a heading?" instead of answering some
+particular spelling of the question.
+
+One more turns that treatment on this section.
+`every_unit_test_in_this_file_is_named_in_the_readme_testing_section` reads
+`src/git.rs` back as text, collects every test defined in it, and requires the
+paragraphs above to name each one. Two of this README's lists have drifted out
+from under it — the guard table, and this walkthrough, which went on describing
+four tests through the commits that added two more — so this one is checked
+rather than trusted too.
+
+`tests/halts.rs` covers the other half of telling the truth: not that the
+harness leaves the repository alone, but that it does not report a cheap number
+for work it dropped. It puts a replay in each halt state *for real* — a resolved
+conflict whose commit cannot be written, a clean pick whose commit cannot be
+written, a commit that genuinely became empty, and a `--skip` git refuses — by
+making the object database unwritable, which is the only cause of a failed
+commit write still reachable through the harness once signing, hooks and the
+editor are pinned off. It is Unix-only for that reason.
+
+Two of those clean picks are there for the path round trip specifically, one per
+direction, and both assert the *classification* rather than merely that
+something failed — the commit must never be called empty.
+`refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_committed`
+is the way out: a commit touching nothing but a `café.txt` and a name with a
+leading space, the two spellings a line-oriented read mangles, with no
+plainly-spelled file alongside to carry the refusal on its own.
+`refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not_be_committed`
+is the way back in: a `foo.txt` inside a directory literally named `:`, with an
+untouched `foo.txt` at the root for the magic spelling to answer about instead,
+so the probe's diff comes back empty — a true answer to a question nobody asked.
+
+`tests/hook_environment.rs` runs a whole replay under the environment `git
+commit` actually exports to a pre-commit hook — the everyday way a consumer is
+invoked, since a pre-commit hook running a test suite runs whatever that suite
+drives. It is a test binary of its own because the environment is process-wide,
+and cargo gives every integration test file its own process.
+
+The genuinely-empty halt is driven explicitly rather than assumed: on git 2.55 a
+patch already upstream is dropped without halting, a resolution that empties a
+commit is dropped silently by `rebase --continue`, and the `rebase.empty` config
+key is ignored on this path — only `--empty=stop` on git's command line reaches
+that stop. The test starts that rebase itself and asserts the halt happened, so
+a git that stops halting fails the test instead of quietly passing without
+exercising anything.
 
 The remaining rows of the table above are established by construction rather
 than by a test of their own, in two different places. `gpg.format`, `gc.auto`,

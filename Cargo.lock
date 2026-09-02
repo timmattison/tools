@@ -2631,6 +2631,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gitscratch",
+ "pulldown-cmark",
  "tempfile",
 ]
 
@@ -5386,6 +5387,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "dirs",
+ "gitscratch",
  "names",
  "repowalker",
  "serde",

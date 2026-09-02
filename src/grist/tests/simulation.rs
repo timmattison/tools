@@ -174,6 +174,84 @@ fn refuses_an_empty_branch_list_rather_than_ranking_nothing() {
     );
 }
 
+/// A dry run has exactly two honest answers when it cannot replay: "expensive"
+/// or "I cannot answer". "Cheap" is never one of them, and neither entry point
+/// may quietly turn a failed replay into one.
+///
+/// This repository is the input where that matters most. Two branches that touch
+/// nothing in common cost zero in either order, so unsealed it ranks every
+/// ordering as a tie at zero — exactly the number a replay that threw its work
+/// away also produces. A failure folded into a score here would be
+/// indistinguishable from the truth.
+///
+/// Sealing the object database is what forces the failure, and it is the replay
+/// that it lands on: `main` has moved ahead of both branches, so replaying
+/// either has to *write* a commit, while `git worktree add` writes no objects
+/// and still succeeds. So the scratch worktree is built, the first branch is
+/// checked out, and the rebase is the first thing that cannot proceed.
+///
+/// Both entry points propagate the replay's `Result` today, so this passes on
+/// arrival. It exists so a later `unwrap_or_default`, a swallowed branch, or a
+/// per-ordering `continue` cannot make grist confident about work it never did.
+#[cfg(unix)]
+#[test]
+fn refuses_to_score_an_ordering_whose_replay_could_not_be_carried_out() {
+    use gitscratch::testing::branches_behind_main_repo;
+
+    let repo = branches_behind_main_repo();
+    // Read the abbreviation from the same object database the replay will
+    // abbreviate against, so `%h` here and `%h` there agree.
+    let dropped_sha = repo.git(&["log", "-1", "--format=%h", "alpha"]);
+    let dropped_subject = repo.git(&["log", "-1", "--format=%s", "alpha"]);
+
+    let simulator = Simulator::new(repo.path(), "main");
+    let branches = order(&["alpha", "beta"]);
+
+    // Sealed only around the calls themselves: building the repository and
+    // reading it back needs a writable store, and so does tearing the temporary
+    // directory down.
+    let sealed = repo.seal_object_store();
+    let evaluated = simulator.evaluate(&branches);
+    let scored = simulator.score(&branches);
+    // Released before a single assertion runs, so a failing one cannot leave a
+    // read-only directory behind for the temporary directory to trip over.
+    drop(sealed);
+
+    // Both public entry points, held to the same standard. `evaluate` is what
+    // the binary calls and `score` is what a library caller reaches for, and a
+    // guard on one is no guard at all.
+    for (entry_point, result) in [
+        ("evaluate", evaluated.map(|scores| format!("{scores:?}"))),
+        ("score", scored.map(|score| format!("{score:?}"))),
+    ] {
+        let error = match result {
+            Ok(reported) => panic!(
+                "`{entry_point}` reported a cost for a replay that never happened: {reported}\n\
+                 every ordering here ties at zero, so a swallowed failure is indistinguishable \
+                 from 'they all cost nothing, pick whichever you prefer'"
+            ),
+            Err(error) => format!("{error:#}"),
+        };
+
+        // Erroring is not enough on its own, and not academically so: swallow
+        // the replay's result and this input still fails, just later and
+        // elsewhere - the squash's own `commit-tree` cannot write against a
+        // sealed store either. So `is_err()` alone stays green while the replay
+        // silently reports zero. These two are what pin the failure to the
+        // replay: which branch was being landed, and which commit git could not
+        // write.
+        assert!(
+            error.contains("could not replay 'alpha'"),
+            "`{entry_point}` should say whose replay failed, not just that something did: {error}"
+        );
+        assert!(
+            error.contains(&dropped_sha) && error.contains(&dropped_subject),
+            "`{entry_point}` should name the commit git could not write ({dropped_sha} \
+             {dropped_subject}): {error}"
+        );
+    }
+}
+
 /// Replaying dozens of commits takes real time, so the caller needs to be told
 /// what is happening rather than staring at a silent terminal.
 #[test]

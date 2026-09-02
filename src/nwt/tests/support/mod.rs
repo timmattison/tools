@@ -22,13 +22,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
 
 /// Runs a git command in `dir` with stdin/stdout/stderr nulled, returning
 /// whether it succeeded. Output is nulled so concurrent test runs (a background
 /// `bacon` loop alongside the pre-commit hook's own run) don't interleave noise.
 pub fn run_git(dir: &Path, args: &[&str]) -> bool {
-    Command::new("git")
+    let mut command = Command::new("git");
+    shed_inherited_git_environment(&mut command);
+
+    command
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
@@ -99,6 +103,14 @@ pub fn init_repo() -> (TempDir, PathBuf) {
 /// those `.env(...)` calls run after the scrub here, they win for that child.
 pub fn nwt_command(repo: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
+    // The suite can be run from inside a git hook - the pre-commit hook runs it
+    // on every commit - and git hands a hook an environment describing the
+    // commit being made, including a *relative* `GIT_INDEX_FILE`. `nwt` adds a
+    // worktree, and a worktree's `.git` is a file, so an inherited index path
+    // resolves inside it and git refuses with "not a directory" before nwt gets
+    // to do anything. Shed it, from the one list that knows which variables
+    // these are.
+    shed_inherited_git_environment(&mut cmd);
     cmd.current_dir(repo)
         .stdin(Stdio::null())
         // Issue #283: strip the terminal-multiplexer env so a suite launched
