@@ -517,6 +517,19 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
     }
 
     #[test]
+    fn the_blame_writes_nothing_out_of_the_clipboard() {
+        // A clipboard holds a password, a token, or a recovery code as
+        // readily as it holds a chain, and the reader of a run with no
+        // argument never asked for the clipboard to be read. So the message
+        // names the input and writes nothing out of it.
+        let secret = "correct-horse-battery-staple";
+        let err = parse_chain(secret).expect_err("the words are not a chain");
+        let message = clipboard_chain(secret).blame(err).to_string();
+        assert!(message.contains("clipboard"), "{message}");
+        assert!(!message.contains(secret), "{message}");
+    }
+
+    #[test]
     fn prose_from_the_clipboard_is_blamed_on_the_clipboard() {
         let prose = "let me know what you think";
         let err = parse_chain(prose).expect_err("prose is not a chain");
