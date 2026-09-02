@@ -9351,6 +9351,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "termsize",
+ "termwindow",
  "testcolor",
  "textfit",
  "thiserror 2.0.20",

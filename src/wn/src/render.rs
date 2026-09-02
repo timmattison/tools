@@ -116,7 +116,7 @@ fn style(status: Status, is_next: bool) -> Style {
     }
 }
 
-/// One row: the mark, the number, and as much of the title as the window
+/// One row: the mark, the number, and as much of the title as the width
 /// holds.
 ///
 /// A row that has no columns left for a title ends at the number, rather than
@@ -375,6 +375,10 @@ mod tests {
 
     #[test]
     fn a_long_title_is_cut_to_the_width() {
+        // The width is what the caller asks for, and the row fills it. The
+        // window of the terminal is one column wider than the width `main`
+        // asks for, because `termwindow` keeps the last column of the window
+        // empty. That margin belongs to `main`, not to this function.
         let report = Report::build(vec![entry(
             277,
             Status::Open,
@@ -383,7 +387,11 @@ mod tests {
         let block = glyphs(&report, 20);
         let row = block.lines().next().expect("the block holds a row");
         assert_eq!(row, "→ #277  A title tha…");
-        assert_eq!(UnicodeWidthStr::width(row), 20, "the row fills the width");
+        assert_eq!(
+            UnicodeWidthStr::width(row),
+            20,
+            "the row fills the width it was given"
+        );
     }
 
     #[test]
@@ -409,7 +417,7 @@ mod tests {
             .to_string();
         assert!(
             UnicodeWidthStr::width(row.as_str()) <= 14,
-            "the row fits the window, in {row:?}"
+            "the row fits the width, in {row:?}"
         );
         assert_eq!(row, "→ #277  日本…");
     }

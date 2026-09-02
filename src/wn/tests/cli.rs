@@ -305,9 +305,11 @@ fn cuts_a_long_title_to_the_window() {
     let gh = FakeGh::new(body);
     let output = run(&gh, &["--repo", REPO, "#1"], "20", false);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
+    // The window is 20 columns and the last one stays empty, so the title is
+    // cut to the 19 columns the row has.
     assert_eq!(
         stdout(&output).lines().next().unwrap(),
-        "→ #1  A title that …"
+        "→ #1  A title that…"
     );
 }
 

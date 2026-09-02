@@ -21,14 +21,16 @@ use anyhow::{bail, Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
+use termwindow::{effective_terminal_width, should_force_colors};
 
 use crate::chain::parse_chain;
 use crate::github::Repo;
 use crate::report::Report;
 
-/// The columns to lay the output out in when nothing says how wide the window
-/// is. The classic terminal, and the same fallback `gsw` takes.
-const DEFAULT_WIDTH: usize = 80;
+/// The columns `wn` removes from the window on top of the one column
+/// [`effective_terminal_width`] always keeps empty. `wn` draws nothing beside
+/// its rows, so it removes none.
+const WIDTH_OFFSET: usize = 0;
 
 /// The exit status for a chain that names a number the repository does not
 /// have. The rows still print, and the answer under them can still be right,
@@ -86,10 +88,11 @@ fn main() -> ExitCode {
         colored::control::set_override(true);
     }
 
-    let width = effective_width(
+    let width = effective_terminal_width(
         termsize::stdout_columns().map(usize::from),
         columns_env,
         stdout_is_tty,
+        WIDTH_OFFSET,
     );
 
     match run(&cli, width) {
@@ -147,35 +150,6 @@ fn read_stdin() -> Result<String> {
     Ok(text)
 }
 
-/// The columns to lay the output out in.
-///
-/// A run whose output is a pipe has no window to measure, so a wrapper that
-/// draws the output inside its own terminal says how wide that terminal is
-/// through `COLUMNS`. A run that writes to a terminal measures the terminal
-/// and ignores a stale `COLUMNS` left in the environment. `gsw` resolves the
-/// same three inputs the same way.
-fn effective_width(
-    tty_width: Option<usize>,
-    columns_env: Option<usize>,
-    stdout_is_tty: bool,
-) -> usize {
-    match (stdout_is_tty, columns_env) {
-        (false, Some(columns)) => columns,
-        _ => tty_width.unwrap_or(DEFAULT_WIDTH),
-    }
-}
-
-/// Must the color be forced on?
-///
-/// The `colored` crate writes no escape codes when standard output is not a
-/// terminal, which is right for a pipe into a file and wrong for a wrapper
-/// that paints the bytes into its own terminal. A wrapper says it is there by
-/// exporting `COLUMNS`. `NO_COLOR` outranks all of it. This is `gsw`'s rule,
-/// and the two tools are read side by side under the same wrapper.
-fn should_force_colors(stdout_is_tty: bool, columns_env_present: bool, no_color_env: bool) -> bool {
-    !stdout_is_tty && columns_env_present && !no_color_env
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,38 +160,5 @@ mod tests {
         assert_eq!(chain_text(&args), "#277 → #278");
         assert_eq!(chain_text(&["#277 → #278".to_string()]), "#277 → #278");
         assert_eq!(chain_text(&[]), "");
-    }
-
-    #[test]
-    fn a_terminal_is_measured_and_a_stale_columns_is_ignored() {
-        assert_eq!(effective_width(Some(120), Some(40), true), 120);
-    }
-
-    #[test]
-    fn a_wrapper_that_exports_columns_is_believed_through_a_pipe() {
-        assert_eq!(effective_width(None, Some(40), false), 40);
-    }
-
-    #[test]
-    fn no_signal_at_all_falls_back_to_the_classic_terminal() {
-        assert_eq!(effective_width(None, None, false), DEFAULT_WIDTH);
-        assert_eq!(effective_width(None, None, true), DEFAULT_WIDTH);
-    }
-
-    #[test]
-    fn color_is_forced_only_for_a_wrapper_that_did_not_ask_for_none() {
-        assert!(should_force_colors(false, true, false));
-        assert!(
-            !should_force_colors(true, true, false),
-            "a terminal needs no forcing"
-        );
-        assert!(
-            !should_force_colors(false, false, false),
-            "a plain pipe keeps its plain text"
-        );
-        assert!(
-            !should_force_colors(false, true, true),
-            "NO_COLOR outranks the wrapper"
-        );
     }
 }
