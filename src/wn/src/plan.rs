@@ -76,9 +76,11 @@ const PULL_REQUEST_PREFIX: &str = "pr";
 /// label. The second half is the place of the stream in the plan.
 const UNNAMED_LABEL: &str = "Stream";
 
-/// The lowest number of characters a line of rule holds.
+/// The lowest number of marks a line of rule holds.
 ///
-/// Two characters are an arrow (`--`) or the start of a word. Three are a rule.
+/// Two marks are an arrow (`--`) or the start of a word. Three are a rule. The
+/// bar of a cell and the space around it are no marks, so they add nothing to
+/// this count.
 const RULE_CHARS: usize = 3;
 
 /// One piece of work of a stream.
@@ -415,24 +417,40 @@ fn key_of(line: &str) -> Option<(Key, &str)> {
 /// carries an alignment colon. A divider that stayed would be a stream whose
 /// `Order` field is `---:`.
 ///
-/// A rule carries no field and no prose. Three characters at the least,
+/// A rule carries no field and no prose: every character of it is a bar, a
+/// space, or a mark of [`is_rule_mark`]. It carries three marks at the least,
 /// because `--` is the tail of an arrow and a rule is a line.
+///
+/// The count leaves the bar and the space out, and that is what parts a rule
+/// from the empty row `|   |   |`. An empty row carries no mark, so it is no
+/// rule. [`table_body`] drops it, and a rule there would end the row above it
+/// and cut a row that wraps in two.
 fn is_rule(line: &str) -> bool {
     let trimmed = line.trim();
-    trimmed.chars().count() >= RULE_CHARS && trimmed.chars().all(is_rule_char)
+    trimmed.chars().all(is_rule_char)
+        && trimmed.chars().filter(|&c| is_rule_mark(c)).count() >= RULE_CHARS
 }
 
-/// Is `c` a character a reader draws a rule with?
+/// Is `c` a character a line of rule carries?
+///
+/// A mark, the bar of a cell, or a space of any kind — the space a Markdown
+/// divider writes around its cells. The bar and the space draw nothing, so a
+/// line of nothing but those two is no rule.
+fn is_rule_char(c: char) -> bool {
+    is_rule_mark(c) || c.is_whitespace() || TABLE_BARS.contains(&c)
+}
+
+/// Is `c` a mark a reader draws a rule with?
 ///
 /// The box-drawing block holds every line and every corner. Beside it stand
 /// the marks a keyboard writes: the hyphen, the equals sign, the underscore,
 /// the two dashes a word processor writes for a hyphen, the `+` of an ASCII
-/// table, the `:` of an alignment, and the bar of a cell.
-fn is_rule_char(c: char) -> bool {
+/// table, and the `:` of an alignment.
+fn is_rule_mark(c: char) -> bool {
     matches!(
         c,
         '\u{2500}'..='\u{257f}' | '-' | '=' | '_' | '+' | ':' | '\u{2013}' | '\u{2014}'
-    ) || TABLE_BARS.contains(&c)
+    )
 }
 
 /// The row of `text` that names the columns of a table.
