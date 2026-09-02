@@ -1023,6 +1023,35 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Usage: `cdva`, `cdva src --by-file --top 20`, `cdva --json`, `cdva --tests-only`,
     `cdva --explain src/gsw/src/age.rs`, `cdva --test-glob 'harness/**'`, `cdva --no-tree`
   - To install: `cargo install --git https://github.com/timmattison/tools cdva`
+- wn (what's next)
+  - Walks a chain of GitHub issues in the order it is written — `wn "#277 → #278 ∥ #279 → #280"`
+    — and names the first one that is still open. Prints one row for each issue in the chain,
+    in order, with its state and its one-line title, then the command that starts the next one:
+    `Start #278 next with 'si 278'`.
+  - `si` is a shell function you supply — this repository ships none — and it is the default
+    because it is the name the plans here are written with. Set `WN_START_COMMAND` to name a
+    different one, and it goes in as it is written, whole command lines included:
+    `export WN_START_COMMAND='gh issue develop'` makes the answer read
+    `Start #278 next with 'gh issue develop 278'`. An empty value falls back to `si`.
+  - Every separator means the same thing: the issue on the left comes before the issue on the
+    right. `→`, `->`, `∥`, `||`, a comma, and a semicolon all read as "then", so a chain
+    pasted out of a plan works whichever way it was typed. The double bar is read as an arrow on
+    purpose, because a chain handed to `wn` is a chain somebody decided to walk in order. Quote
+    the chain: a shell reads an unquoted `#` as the start of a comment. With no argument, the
+    chain is read from standard input.
+  - The whole chain is one GraphQL query through `gh`, so a chain of six issues costs one round
+    trip and one unit of the rate limit, and the credential is the one `gh` already holds. Pull
+    request numbers work too: merged counts as done, and closed without a merge counts as
+    dropped. An issue closed as not planned or as a duplicate is marked `⊘` rather than `✓`,
+    because the chain walked past it rather than through it.
+  - Two things earn a note under the answer. A number the repository does not have is reported
+    and never named as the next issue, and the run exits `1` — a typo in a chain of six is
+    otherwise invisible, because the other five still name an issue to start. An issue that is
+    closed after the next one is reported as done out of order, because the plan in your head is
+    then wrong and nothing else would say so.
+  - Usage: `wn "#277 → #278 ∥ #279"`, `wn "#230 → #315"`, `wn -R timmattison/tools "#1 → #2"`,
+    `pbpaste | wn`, `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`
+  - To install: `cargo install --git https://github.com/timmattison/tools wn`
 
 ## dirhash
 

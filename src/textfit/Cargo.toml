@@ -1,0 +1,12 @@
+[package]
+name = "textfit"
+version = "0.1.0"
+edition.workspace = true
+description = "The one entrance that fits a string into a given number of terminal columns"
+license = "MIT"
+
+[dependencies]
+unicode-width.workspace = true
+
+[lints]
+workspace = true

@@ -13,6 +13,7 @@ use crate::render::{
     plan_section_caps, render, render_with_offset, LogEntry, RefreshStatus, RenderOptions, Snapshot,
 };
 use crate::snapshot::build_snapshot;
+use termwindow::should_force_colors;
 
 mod age;
 mod bar;
@@ -143,88 +144,6 @@ const MAX_REFRESH_SECS: u64 = 365 * 24 * 60 * 60;
 /// scheduled walk there is no countdown to print.
 fn refresh_interval(secs: u64) -> Option<Duration> {
     (secs > 0).then(|| Duration::from_secs(secs))
-}
-
-/// Decide the effective terminal width gsw should render for.
-///
-/// Always leaves one cell of margin against the detected column count:
-/// - Direct TTY: rendering a row exactly `cols` cells wide collides with
-///   DECAWM auto-wrap quirks and right-edge chrome (scrollbars, padding)
-///   on many terminals, pushing the last glyph onto the next line. The
-///   margin keeps the rightmost cell empty.
-/// - Watch-like wrapper (stdout not a TTY but `COLUMNS` set, e.g. viddy):
-///   `COLUMNS` reports the full terminal width but the wrapper renders
-///   into a content area one column narrower (its scroll indicator).
-/// - Fallback (no signal): treat the implicit 80-column default the same
-///   way for consistency.
-///
-/// `width_offset` always stacks on top, and the result is at least 1.
-pub(crate) fn effective_terminal_width(
-    tty_width: Option<usize>,
-    columns_env: Option<usize>,
-    stdout_is_tty: bool,
-    width_offset: usize,
-) -> usize {
-    let detected = match (stdout_is_tty, columns_env) {
-        (false, Some(cols)) => cols,
-        _ => tty_width.unwrap_or(DEFAULT_TERMINAL_WIDTH),
-    };
-    detected
-        .saturating_sub(1)
-        .saturating_sub(width_offset)
-        .max(1)
-}
-
-/// Rows a watch-like wrapper paints for its own chrome (header, status/help
-/// bar, surrounding padding) before and after our output. The wrapper exports
-/// the *full* terminal height via `LINES` but only hands the command a smaller
-/// content area, so we reserve these rows or the bottom of our frame — the
-/// file list — gets clipped below the fold.
-///
-/// Measured empirically for viddy 1.3.0 (gsw's primary wrapper, per Cargo.toml):
-/// a 30-row terminal shows exactly 26 lines of command output, i.e. 4 rows of
-/// chrome, and this holds constant across terminal heights (20→16, 40→36).
-/// `watch(1)` uses fewer (~2); reserving the larger value only leaves a couple
-/// of harmless blank rows there, whereas reserving too few clips real content.
-pub(crate) const WRAPPER_CHROME_ROWS: usize = 4;
-
-/// Width assumed when no terminal-size signal is available at all (stdout is
-/// piped and the wrapper didn't export `COLUMNS`). The classic 80-column
-/// default; the one-cell DECAWM safety margin still applies on top.
-pub(crate) const DEFAULT_TERMINAL_WIDTH: usize = 80;
-
-/// Height assumed when no terminal-size signal is available at all (stdout is
-/// piped and the wrapper didn't export `LINES`). Matches the classic VT100
-/// default and the width fallback's spirit.
-pub(crate) const DEFAULT_TERMINAL_HEIGHT: usize = 24;
-
-/// Decide how many terminal rows gsw should fit its output within.
-///
-/// Mirrors [`effective_terminal_width`]: when stdout is captured by a
-/// watch-like wrapper (not a TTY) that exports `LINES`, trust that height —
-/// minus [`WRAPPER_CHROME_ROWS`] for the wrapper's own header — because
-/// `termsize::stdout_size` can't see through the pipe. With a direct TTY, use the
-/// queried height. With no signal at all, fall back to
-/// [`DEFAULT_TERMINAL_HEIGHT`].
-pub(crate) fn effective_terminal_height(
-    tty_height: Option<usize>,
-    lines_env: Option<usize>,
-    stdout_is_tty: bool,
-) -> usize {
-    match (stdout_is_tty, lines_env) {
-        (false, Some(lines)) => lines.saturating_sub(WRAPPER_CHROME_ROWS).max(1),
-        _ => tty_height.unwrap_or(DEFAULT_TERMINAL_HEIGHT),
-    }
-}
-
-/// Should `colored::control::set_override(true)` be called?
-///
-/// True only when output is captured by a watch-like wrapper (stdout is not
-/// a TTY *and* `COLUMNS` is set in env), and the user has not asked to
-/// suppress colors via `NO_COLOR`. The wrapper renders the captured bytes
-/// inside its own TTY-backed UI, so colors should pass through.
-fn should_force_colors(stdout_is_tty: bool, columns_env_present: bool, no_color_env: bool) -> bool {
-    !stdout_is_tty && columns_env_present && !no_color_env
 }
 
 /// Does the active terminal advertise 24-bit color support?
@@ -1051,118 +970,6 @@ mod tests {
         // of the flag — this keeps `gsw | …` and stale `viddy gsw` working.
         assert_eq!(decide_mode(false, false), watch::Mode::OneShot);
         assert_eq!(decide_mode(true, false), watch::Mode::OneShot);
-    }
-
-    #[test]
-    fn width_uses_columns_minus_one_when_stdout_not_tty() {
-        // viddy case: pipes captured, COLUMNS exported.
-        assert_eq!(effective_terminal_width(None, Some(120), false, 0), 119);
-    }
-
-    #[test]
-    fn height_uses_lines_env_minus_wrapper_chrome_when_stdout_not_tty() {
-        // viddy/watch case: stdout piped, LINES exported. We budget to the
-        // wrapper's height minus its title chrome so the bottom file list
-        // isn't clipped below the wrapper's header.
-        assert_eq!(
-            effective_terminal_height(None, Some(40), false),
-            40 - WRAPPER_CHROME_ROWS,
-        );
-    }
-
-    #[test]
-    fn height_uses_tty_height_when_stdout_is_tty() {
-        // Interactive: trust the ioctl-reported height and ignore any stale
-        // inherited LINES value.
-        assert_eq!(effective_terminal_height(Some(50), Some(9999), true), 50);
-    }
-
-    #[test]
-    fn height_falls_back_to_default_when_no_signal() {
-        // Piped with no LINES exported: nothing to go on, so assume the
-        // classic 24-row terminal.
-        assert_eq!(
-            effective_terminal_height(None, None, false),
-            DEFAULT_TERMINAL_HEIGHT,
-        );
-    }
-
-    #[test]
-    fn height_never_collapses_to_zero_under_tiny_wrapper() {
-        // A pathologically short wrapper height must still leave at least one
-        // row rather than underflowing to zero.
-        assert_eq!(effective_terminal_height(None, Some(1), false), 1);
-    }
-
-    #[test]
-    fn width_leaves_safety_margin_when_stdout_is_tty() {
-        // Direct TTY: terminal_size reports the full column count, but if
-        // gsw renders a row exactly that many cells wide, terminals with
-        // auto-wrap (DECAWM) or right-edge chrome (scrollbars, padding)
-        // push the rightmost glyph onto the next line — the user sees the
-        // last character of the age column wrap. Leave one cell of margin,
-        // matching the viddy path so direct and viddy renderings agree.
-        assert_eq!(effective_terminal_width(Some(200), None, true, 0), 199);
-    }
-
-    #[test]
-    fn width_uses_tty_width_when_stdout_is_tty() {
-        // Interactive: trust the ioctl-reported width, not the env — but
-        // still subtract the one-cell safety margin.
-        assert_eq!(effective_terminal_width(Some(200), None, true, 0), 199);
-    }
-
-    #[test]
-    fn width_ignores_columns_when_stdout_is_tty() {
-        // If a shell leaked COLUMNS into our env but we have a real TTY,
-        // the TTY measurement wins.
-        assert_eq!(effective_terminal_width(Some(200), Some(120), true, 0), 199);
-    }
-
-    #[test]
-    fn width_falls_back_to_eighty_minus_margin_when_no_signal() {
-        // Piped to a plain file with no COLUMNS in env: nothing to go on,
-        // so fall back to the 80-column default. The safety margin still
-        // applies so the fallback matches the detected paths.
-        assert_eq!(effective_terminal_width(None, None, false, 0), 79);
-    }
-
-    #[test]
-    fn width_offset_stacks_on_top_of_detection() {
-        // 200 (TTY) - 1 (safety margin) - 3 (offset) = 196
-        assert_eq!(effective_terminal_width(Some(200), None, true, 3), 196);
-        // 120 (COLUMNS) - 1 (safety margin) - 2 (offset) = 117
-        assert_eq!(effective_terminal_width(None, Some(120), false, 2), 117);
-    }
-
-    #[test]
-    fn width_never_drops_below_one() {
-        // A pathologically large offset should clamp to 1, not underflow.
-        assert_eq!(effective_terminal_width(Some(10), None, true, 999), 1);
-    }
-
-    #[test]
-    fn force_colors_when_piped_to_wrapper_with_columns_env() {
-        assert!(should_force_colors(false, true, false));
-    }
-
-    #[test]
-    fn no_force_colors_when_interactive() {
-        // TTY → let colored auto-detect (it will say yes anyway).
-        assert!(!should_force_colors(true, true, false));
-        assert!(!should_force_colors(true, false, false));
-    }
-
-    #[test]
-    fn no_force_colors_when_piped_without_columns_env() {
-        // Plain pipe to file: respect the colored crate's default (off).
-        assert!(!should_force_colors(false, false, false));
-    }
-
-    #[test]
-    fn no_force_colors_when_no_color_env_set() {
-        // Honor https://no-color.org even when under viddy.
-        assert!(!should_force_colors(false, true, true));
     }
 
     #[test]

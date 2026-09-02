@@ -181,7 +181,9 @@ shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }
 termgfx = { path = "src/termgfx" }
 termsize = { path = "src/termsize" }
+termwindow = { path = "src/termwindow" }
 testcolor = { path = "src/testcolor" }
+textfit = { path = "src/textfit" }
 
 [workspace.lints.rust]
 # Require explicit handling of must-use values

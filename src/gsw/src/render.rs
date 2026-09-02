@@ -3,7 +3,11 @@
 use std::time::Duration;
 
 use colored::{ColoredString, Colorize};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
+
+use textfit::{
+    center, pad_right, truncate_left, truncate_middle, truncate_right, truncate_to_budget,
+};
 
 use crate::age::{
     age_dim_level, age_fade_factor, fade_rgb, format_age_detailed, AgeDim, AGE_WIDTH,
@@ -982,149 +986,6 @@ fn colorize_log_age(text: &str, age: Option<Duration>, truecolor: bool) -> Color
     }
 }
 
-/// Pad `s` on the right with spaces until its display width reaches `width`.
-fn pad_right(s: &str, width: usize) -> String {
-    let current = UnicodeWidthStr::width(s);
-    if current >= width {
-        s.to_string()
-    } else {
-        let mut result = String::with_capacity(s.len() + (width - current));
-        result.push_str(s);
-        for _ in 0..(width - current) {
-            result.push(' ');
-        }
-        result
-    }
-}
-
-/// Truncate `s` from the right to fit within `max_width` display columns,
-/// suffixing with `…` when truncation happens. UTF-8 safe.
-pub(crate) fn truncate_right(s: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_string();
-    }
-    let ellipsis_width = 1_usize;
-    let target = max_width.saturating_sub(ellipsis_width);
-    let mut acc = 0_usize;
-    let mut result = String::new();
-    for c in s.chars() {
-        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-        if acc + cw > target {
-            break;
-        }
-        acc += cw;
-        result.push(c);
-    }
-    result.push('…');
-    result
-}
-
-/// Truncate `s` from the left to fit within `max_width` display columns,
-/// prefixing with `…` when truncation happens. UTF-8 safe.
-fn truncate_left(s: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_string();
-    }
-    let ellipsis_width = 1_usize;
-    let target = max_width.saturating_sub(ellipsis_width);
-    let chars: Vec<char> = s.chars().collect();
-    let mut acc = 0_usize;
-    let mut start = chars.len();
-    for (i, c) in chars.iter().enumerate().rev() {
-        let cw = UnicodeWidthChar::width(*c).unwrap_or(0);
-        if acc + cw > target {
-            break;
-        }
-        acc += cw;
-        start = i;
-    }
-    let mut result = String::from("…");
-    for c in &chars[start..] {
-        result.push(*c);
-    }
-    result
-}
-
-/// Truncate `s` to `max_width` display columns by dropping from the middle,
-/// joining the head and tail that survive with `…`. Branch names share long
-/// prefixes (`feature/…`, `origin/…`) and carry the part that identifies them
-/// at the end, so keeping both ends beats keeping either one alone. UTF-8
-/// safe: budgets are spent in display columns, never bytes.
-fn truncate_middle(s: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_string();
-    }
-    let ellipsis_width = 1_usize;
-    let Some(keep) = max_width.checked_sub(ellipsis_width) else {
-        // Not even room for the marker.
-        return String::new();
-    };
-    // The odd column, if there is one, goes to the head: `feature/` prefixes
-    // are what the eye lands on first.
-    let head_budget = keep.div_ceil(2);
-    let tail_budget = keep - head_budget;
-
-    let mut head = String::new();
-    let mut spent = 0_usize;
-    for c in s.chars() {
-        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-        if spent + cw > head_budget {
-            break;
-        }
-        spent += cw;
-        head.push(c);
-    }
-    let chars: Vec<char> = s.chars().collect();
-    let mut tail_start = chars.len();
-    let mut spent = 0_usize;
-    for (i, c) in chars.iter().enumerate().rev() {
-        let cw = UnicodeWidthChar::width(*c).unwrap_or(0);
-        if spent + cw > tail_budget {
-            break;
-        }
-        spent += cw;
-        tail_start = i;
-    }
-    // Zero-width characters cost nothing, so both walks can run past each
-    // other and duplicate the middle. Keep the halves disjoint.
-    let tail_start = tail_start.max(head.chars().count());
-
-    let mut result = head;
-    result.push('…');
-    result.extend(&chars[tail_start..]);
-    result
-}
-
-/// [`truncate_right`], but a zero budget yields nothing rather than a lone
-/// `…` — which would itself be one column too wide.
-fn truncate_to_budget(s: &str, budget: usize) -> String {
-    if budget == 0 {
-        String::new()
-    } else {
-        truncate_right(s, budget)
-    }
-}
-
-/// Center `text` within `width` display columns, padding with spaces.
-fn center(text: &str, width: usize) -> String {
-    let text_w = UnicodeWidthStr::width(text);
-    if text_w >= width {
-        return text.to_string();
-    }
-    let total_pad = width - text_w;
-    let left = total_pad / 2;
-    let right = total_pad - left;
-    let mut result = String::with_capacity(width);
-    for _ in 0..left {
-        result.push(' ');
-    }
-    result.push_str(text);
-    for _ in 0..right {
-        result.push(' ');
-    }
-    result
-}
-
 /// Minimum rows the recent-commit section gets when it has content and
 /// the file list is also non-empty. Without this floor, a branch with
 /// hundreds of changed files would proportionally squeeze the log down
@@ -1924,39 +1785,6 @@ mod tests {
         );
         let stripped = strip_ansi(&out);
         assert!(stripped.contains(".rs"));
-    }
-
-    #[test]
-    fn truncate_middle_keeps_both_ends_and_fits_the_budget() {
-        assert_eq!(truncate_middle("feature/topic", 20), "feature/topic");
-        // 13 columns: the marker plus six to either side.
-        assert_eq!(truncate_middle("feature/some-topic", 13), "featur…-topic");
-        // 12 leaves an odd eleven to split, and the extra goes to the head.
-        assert_eq!(truncate_middle("feature/some-topic", 12), "featur…topic");
-    }
-
-    #[test]
-    fn truncate_middle_counts_columns_not_characters() {
-        // Each CJK glyph is one char but two columns. A routine that counted
-        // chars would hand back double the requested width, and one that
-        // sliced bytes would panic mid-codepoint.
-        let name = "日本語のとても長い名前";
-        for budget in 0..=UnicodeWidthStr::width(name) + 2 {
-            let cut = truncate_middle(name, budget);
-            assert!(
-                UnicodeWidthStr::width(cut.as_str()) <= budget,
-                "budget {budget} produced {cut:?} ({} columns)",
-                UnicodeWidthStr::width(cut.as_str()),
-            );
-        }
-    }
-
-    #[test]
-    fn truncate_middle_degrades_to_nothing_before_overflowing() {
-        // One column has room for the marker alone; zero has room for
-        // nothing, and must not emit a marker that would itself overflow.
-        assert_eq!(truncate_middle("feature/topic", 1), "…");
-        assert_eq!(truncate_middle("feature/topic", 0), "");
     }
 
     #[test]
