@@ -139,7 +139,10 @@ impl Chain {
     /// `err` is the reason of whichever reader took the text: one chain that
     /// holds a word, and a plan whose `Order` field holds one, both arrive
     /// here. The input is what this function knows and the reader is what it
-    /// does not, so it takes any error rather than one kind of error.
+    /// does not, so it takes any error rather than one kind of error, and the
+    /// message names the input alone. A message that called the text a chain
+    /// would tell the reader of a plan the wrong thing about what `wn`
+    /// refused.
     ///
     /// The message names the clipboard and it writes nothing out of it. The
     /// clipboard is the one input the reader did not choose, and it holds a
@@ -155,7 +158,7 @@ impl Chain {
     {
         match self.source {
             Source::Argument | Source::Stdin => anyhow::Error::new(err),
-            Source::Clipboard => anyhow::anyhow!("the clipboard is not a chain: {err}"),
+            Source::Clipboard => anyhow::anyhow!("wn cannot read the clipboard: {err}"),
         }
     }
 }
@@ -543,7 +546,7 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
         let err = parse_chain(prose).expect_err("prose is not a chain");
         assert_eq!(
             clipboard_chain(prose).blame(err).to_string(),
-            "the clipboard is not a chain: \"let\" is not an issue number"
+            "wn cannot read the clipboard: \"let\" is not an issue number"
         );
     }
 
@@ -553,7 +556,7 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
         let err = parse_chain(arrows).expect_err("arrows alone are not a chain");
         assert_eq!(
             clipboard_chain(arrows).blame(err).to_string(),
-            "the clipboard is not a chain: no issue number found in \"→ → →\""
+            "wn cannot read the clipboard: no issue number found in \"→ → →\""
         );
     }
 
