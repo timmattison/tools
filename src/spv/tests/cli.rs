@@ -549,3 +549,108 @@ fn a_section_the_kernel_can_refuse_says_so_on_standard_output() {
         );
     }
 }
+
+/// The characters that the `UTF8_FULL` preset of `comfy-table` draws with.
+///
+/// `--raw` promises output without table formatting, so a raw run prints none
+/// of these anywhere.
+const TABLE_BORDER_CHARACTERS: &[char] = &[
+    '┌', '┬', '┐', '├', '┼', '┤', '└', '┴', '┘', '─', '│', '┆', '╞', '╪', '╡', '═',
+];
+
+/// Finds the first table border character in the output of a run.
+///
+/// # Arguments
+///
+/// * `stdout` - The whole standard output of a run
+///
+/// # Returns
+///
+/// The character, or `None` when the run drew no table.
+fn table_border_character(stdout: &str) -> Option<char> {
+    stdout
+        .chars()
+        .find(|character| TABLE_BORDER_CHARACTERS.contains(character))
+}
+
+#[test]
+fn raw_prints_the_open_files_section_without_a_table() {
+    // The marker holds no path, because the command column prints the marker
+    // back into the same output.
+    let child = Sleeper::spawn(&unique_token("spv_raw_files_"), &[]);
+
+    let (ok, stdout, stderr) = run(spv()
+        .args(["--raw", "--lsof", &child.pid().to_string()])
+        .output()
+        .expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stdout.contains("Open files for"),
+        "the section names itself; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("/dev/null"),
+        "the section shows the null device the child holds; stdout: {stdout}"
+    );
+    assert!(
+        table_border_character(&stdout).is_none(),
+        "--raw draws no table; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn raw_prints_the_environment_section_without_a_table() {
+    let name = unique_token("SPV_RAW_ENV_");
+    let value = unique_token("value_");
+    let (ok, stdout, stderr) = run(spv_on_itself(
+        &["--raw", "--env"],
+        &[(name.as_str(), value.as_str())],
+    ));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stdout.contains(&name),
+        "the section names the variable; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(&value),
+        "the section shows the value; stdout: {stdout}"
+    );
+    assert!(
+        table_border_character(&stdout).is_none(),
+        "--raw draws no table; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn raw_prints_the_network_section_without_a_table() {
+    // Port 0 asks the operating system for a free port, so two concurrent runs
+    // of this test never claim the same one. The lock keeps this socket out of
+    // any child that another test starts while it is open.
+    let _guard = spawn_lock();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("the loopback interface accepts a bind");
+    let port = listener
+        .local_addr()
+        .expect("a bound listener carries an address")
+        .port();
+
+    let (ok, stdout, stderr) = run(spv()
+        .args(["--raw", "--net", &std::process::id().to_string()])
+        .output()
+        .expect("spv runs"));
+
+    assert!(ok, "spv should succeed; stderr: {stderr}");
+    assert!(
+        stdout.contains("Network connections for"),
+        "the section names itself; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(&port.to_string()),
+        "the section shows the port this test opened ({port}); stdout: {stdout}"
+    );
+    assert!(
+        table_border_character(&stdout).is_none(),
+        "--raw draws no table; stdout: {stdout}"
+    );
+}
