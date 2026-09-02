@@ -1056,8 +1056,32 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     otherwise invisible, because the other five still name an issue to start. An issue that is
     closed after the next one is reported as done out of order, because the plan in your head is
     then wrong and nothing else would say so.
+  - A plan of parallel work is a second shape of input, and it is not a change to the first one.
+    The `plan-parallel-work` skill writes a plan as a set of streams, each with an `Order` field,
+    and the streams run at the same time. `wn` reads the whole plan and names the issue to start
+    in every stream, under one summary that carries all of them. Both written forms work: the
+    records a terminal prints, and the Markdown table a file holds. No flag says which shape the
+    text is, because the shape of the text already does, so `pbpaste | wn` answers a plan the same
+    way it answers a chain. A table ends at the first line that is not a row of it, so a whole
+    report pastes in cleanly: the Housekeeping table under the streams is not more work to start.
+  - Only the `Order` field is a chain. `Stream`, `Zone`, and `Notes` are never read for numbers,
+    and that rule is what makes the feature work: `Notes` is prose about code, and prose about
+    code is full of numbers. `main.rs:1566-1650` is not `#1566` and `#1650`, and `265 lines apart
+    in a 5113-line file` is not `#265` — though `#265` is a real issue of this repository, and in
+    one plan it is the first step of another stream of that same plan. The digits alone cannot
+    part a count of lines from the number of an issue. Only the field they stand in can.
+  - A pull request and the issue it closes are one step, not two. `PR#344 (#341)` gets one row,
+    `#344 (#341)`, and the state of that row is the state of the pull request, because the pull
+    request is the work. `wn` asks GitHub about both numbers, and a pair whose two states disagree
+    earns a note — a merged pull request whose issue is still open is a real condition, and
+    nothing else reports it.
+  - The whole plan is one GraphQL query, as one chain is. A plan of seven streams and eighteen
+    numbers costs one round trip and one unit of the rate limit, and a number that stands in two
+    streams is asked about once and reported in both. A stream that names a number the repository
+    does not have keeps its row and its note, the other streams still answer, and the run exits
+    `1`.
   - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard), `wn "#230 → #315"`,
-    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn`,
+    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain or a whole plan),
     `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 

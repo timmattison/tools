@@ -26,6 +26,11 @@
 //! asserts only which path the run took, so it takes nothing away from the
 //! person at the keyboard.
 //!
+//! A plan of parallel work is many lines, and `Command::output` hands the
+//! child a standard input that holds nothing. So the tests that walk a plan go
+//! through `run_with_stdin`, which opens a pipe and builds the same
+//! environment every other child of this file gets.
+//!
 //! Each test builds its own temporary directory, so concurrent test runs stay
 //! isolated (see the parallel-safety note in the project guidelines).
 
@@ -36,9 +41,10 @@
     reason = "every unwrap in this file is an assertion, not an unhandled error: on the temporary directory and the fixture files the test just created, on spawning the freshly built binary (a spawn failure is a broken harness, not behavior under test), and on reading back a file the fake gh wrote. The error paths of the tool itself are never unwrapped — they are asserted through the exit status and the text on standard error"
 )]
 
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use unicode_width::UnicodeWidthStr;
 
@@ -75,6 +81,68 @@ const THREE_ISSUES: &str = r#"{"data":{"repository":{
 /// The chain the start-command tests walk. Two of the three issues, so the
 /// answer names #278 whichever command it prints.
 const ONE_OPEN_CHAIN: &str = "#277 → #278";
+
+/// A plan of three streams, as a record for each stream.
+///
+/// The notes carry real prose, because real prose is the trap the plan reader
+/// exists for: they name 265, 5113, and 1566-1650, and none of those is an
+/// issue of the repository. A run that read them would print a row for each
+/// and would exit `1`.
+const PLAN: &str = "\
+Stream: S1 gitscratch
+Order: #344 → #330
+Zone: src/gitscratch
+Notes: The two hunks sit 265 lines apart in a 5113-line file, so the rebase is cheap.
+
+Stream: S2 ic
+Order: #350 → #187
+Zone: src/ic
+Notes: Both land inside display_image (main.rs:1566-1650).
+
+Stream: S3 wn
+Order: #411
+Zone: src/wn
+Notes: One issue, no neighbors.
+";
+
+/// The same three streams, as one Markdown table.
+const PLAN_TABLE: &str = "\
+| Stream | Order | Zone | Notes |
+| --- | --- | --- | --- |
+| S1 gitscratch | #344 → #330 | src/gitscratch | The two hunks sit 265 lines apart in a 5113-line file. |
+| S2 ic | #350 → #187 | src/ic | Both land inside display_image (main.rs:1566-1650). |
+| S3 wn | #411 | src/wn | One issue, no neighbors. |
+";
+
+/// What GitHub says about every number of [`PLAN`]: one closed issue and four
+/// open ones.
+const PLAN_ISSUES: &str = r#"{"data":{"repository":{
+"i344":{"__typename":"Issue","number":344,"title":"First thing","state":"CLOSED","stateReason":"COMPLETED"},
+"i330":{"__typename":"Issue","number":330,"title":"Second thing","state":"OPEN","stateReason":null},
+"i350":{"__typename":"Issue","number":350,"title":"Third thing","state":"OPEN","stateReason":null},
+"i187":{"__typename":"Issue","number":187,"title":"Fourth thing","state":"OPEN","stateReason":null},
+"i411":{"__typename":"Issue","number":411,"title":"Fifth thing","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`PLAN`] earns: one block for each stream, and one summary that
+/// carries all three.
+const PLAN_ANSWER: &str = concat!(
+    "S1 gitscratch\n",
+    "  ✓ #344  First thing\n",
+    "  → #330  Second thing\n",
+    "\n",
+    "S2 ic\n",
+    "  → #350  Third thing\n",
+    "  · #187  Fourth thing\n",
+    "\n",
+    "S3 wn\n",
+    "  → #411  Fifth thing\n",
+    "\n",
+    "Take one from each stream:\n",
+    "  S1 gitscratch  → #330  si 330\n",
+    "  S2 ic          → #350  si 350\n",
+    "  S3 wn          → #411  si 411\n",
+);
 
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
@@ -146,14 +214,51 @@ fn run_with_start(
     color: bool,
     start: Option<&str>,
 ) -> Output {
+    wn(gh, args, columns, color, start).output().unwrap()
+}
+
+/// Run `wn` with `text` on standard input.
+///
+/// `Command::output` hands the child a standard input that holds nothing,
+/// which is what every other test of this file wants. A plan is many lines,
+/// and a plan reaches the tool through a pipe as readily as through the
+/// command line, so this helper opens a pipe, writes the text, closes it, and
+/// waits.
+///
+/// The environment is the environment [`wn`] builds, [`NO_CLIPBOARD_ENV`]
+/// included, so a child of this helper touches the clipboard of the machine no
+/// more than any other child of this file does.
+fn run_with_stdin(gh: &FakeGh, args: &[&str], columns: &str, text: &str) -> Output {
+    let mut child = wn(gh, args, columns, false, None)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The pipe closes when it goes out of scope here, and the tool reads
+    // standard input to the end. A pipe that stayed open would hold the run.
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The command line of one child: the binary that was built, an environment
+/// built from nothing, and the arguments.
+///
+/// The one place that builds the environment of a child, so the clipboard step
+/// is off for every test that goes through it and no test has to remember the
+/// rule.
+fn wn(gh: &FakeGh, args: &[&str], columns: &str, color: bool, start: Option<&str>) -> Command {
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
     let mut command = Command::new(env!("CARGO_BIN_EXE_wn"));
     command
         .env_clear()
         .env("PATH", path)
         .env("COLUMNS", columns)
-        // The one place that builds the environment of the helper, so the
-        // clipboard step is off for every test that goes through it.
         .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD);
     if !color {
         command.env("NO_COLOR", "1");
@@ -161,7 +266,8 @@ fn run_with_start(
     if let Some(start) = start {
         command.env(START_COMMAND_ENV, start);
     }
-    command.args(args).output().unwrap()
+    command.args(args);
+    command
 }
 
 fn stdout(output: &Output) -> String {
@@ -606,5 +712,188 @@ fn a_row_stops_one_column_short_of_the_window() {
         UnicodeWidthStr::width(row.as_str()),
         19,
         "the row stops one column short of the 20-column window, in {row:?}"
+    );
+}
+
+#[test]
+fn answers_a_whole_plan_of_parallel_work_from_a_pipe() {
+    // The headline of the feature: a plan pasted into a pipe gives one block
+    // for each stream and one summary that names the issue to start in each of
+    // them. No flag says the text is a plan — the shape of the text does.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PLAN_ANSWER);
+}
+
+#[test]
+fn a_plan_in_one_quoted_argument_answers_the_same_way() {
+    // A shell hands a quoted argument over whole, its newlines included, and
+    // the arguments join back into one line. So a plan works on the command
+    // line exactly as it works in a pipe.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run(&gh, &["--repo", REPO, PLAN], "80", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PLAN_ANSWER);
+}
+
+#[test]
+fn the_table_form_of_a_plan_gives_the_streams_of_the_record_form() {
+    // One plan is written two ways: the records a terminal prints, and the
+    // table a file holds. Both name the same streams, so both give one answer.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PLAN_TABLE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PLAN_ANSWER);
+}
+
+#[test]
+fn a_stream_that_names_a_number_the_repository_does_not_have_still_answers() {
+    // The number keeps its row and earns its note, the other stream answers as
+    // it always did, and the run exits 1. One typo takes down one row of one
+    // block, and never the whole plan.
+    let body = r#"{"data":{"repository":{
+"i344":{"__typename":"Issue","number":344,"title":"First thing","state":"CLOSED","stateReason":"COMPLETED"},
+"i999":null,
+"i330":{"__typename":"Issue","number":330,"title":"Second thing","state":"OPEN","stateReason":null},
+"i350":{"__typename":"Issue","number":350,"title":"Third thing","state":"OPEN","stateReason":null}
+}},"errors":[{"type":"NOT_FOUND","path":["repository","i999"],"message":"Could not resolve to an issue or pull request with the number of 999."}]}"#;
+    let gh = FakeGh::with_status(body, 1);
+    let plan = "Stream: S1 gitscratch\nOrder: #344 → #999 → #330\nStream: S2 ic\nOrder: #350\n";
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", plan);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a number the repository does not have is a failed run, stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "S1 gitscratch\n",
+            "  ✓ #344  First thing\n",
+            "  ? #999  (no such issue)\n",
+            "  → #330  Second thing\n",
+            "\n",
+            "  #999 is not in timmattison/tools.\n",
+            "\n",
+            "S2 ic\n",
+            "  → #350  Third thing\n",
+            "\n",
+            "Take one from each stream:\n",
+            "  S1 gitscratch  → #330  si 330\n",
+            "  S2 ic          → #350  si 350\n",
+        )
+    );
+}
+
+#[test]
+fn refuses_a_plan_whose_order_field_holds_a_word() {
+    // A plan holds several chains, so the message names the stream as well as
+    // the token. A message about the token alone leaves the reader to search
+    // the whole page for it.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "Stream: S2 ic\nOrder: #350 an #187\n",
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("stream \"S2 ic\": \"an\" is not an issue number"),
+        "the error names the stream and the token, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn refuses_a_plan_that_names_no_order_field() {
+    // A text that names streams and no chain reaches the plan reader, which
+    // says which field is missing. The chain reader would complain about the
+    // token "Stream:", which tells the reader nothing about what to write.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "Stream: S1 gitscratch\nZone: src/gitscratch\nStream: S2 ic\nZone: src/ic\n",
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("no Order field"),
+        "the error names the field that is missing, in {}",
+        stderr(&output)
+    );
+    assert!(
+        !stderr(&output).contains("\"Stream:\""),
+        "the chain reader never saw the text, in {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_number_that_stands_in_two_streams_is_asked_about_once() {
+    // The whole plan is one query, as one chain is. #330 stands in both
+    // streams, and it costs one alias and is reported in both.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "Stream: S1 gitscratch\nOrder: #344 → #330\nStream: S2 ic\nOrder: #330 → #350\n",
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+
+    let args = gh.recorded_args();
+    for number in [344, 330, 350] {
+        assert!(
+            args.contains(&format!("i{number}: issueOrPullRequest(number: {number})")),
+            "the query asks about {number}, in {args}"
+        );
+    }
+    assert_eq!(
+        args.matches("issueOrPullRequest").count(),
+        3,
+        "one query asked about all three, and #330 once, in {args}"
+    );
+    assert!(
+        stdout(&output).contains("  → #330  Second thing\n"),
+        "the number stands in both blocks, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_pull_request_and_the_issue_it_closes_are_one_row() {
+    // `PR#344 (#341)` is one step and not two. The state of the row is the
+    // state of the pull request, so a merged 344 is walked past although 341
+    // is still open — and the two states that disagree earn a note.
+    let body = r#"{"data":{"repository":{
+"i344":{"__typename":"PullRequest","number":344,"title":"First thing","state":"MERGED"},
+"i341":{"__typename":"Issue","number":341,"title":"The bug","state":"OPEN","stateReason":null},
+"i330":{"__typename":"Issue","number":330,"title":"Second thing","state":"OPEN","stateReason":null}
+}}}"#;
+    let gh = FakeGh::new(body);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "Stream: S1 gitscratch\nOrder: PR#344 (#341) → #330\n",
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "S1 gitscratch\n",
+            "  ✓ #344 (#341)  First thing\n",
+            "  → #330         Second thing\n",
+            "\n",
+            "  #344 is closed and #341 is open.\n",
+            "\n",
+            "Take one from each stream:\n",
+            "  S1 gitscratch  → #330  si 330\n",
+        )
     );
 }

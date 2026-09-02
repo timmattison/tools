@@ -36,8 +36,6 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::chain::ChainError;
-
 /// The variable that turns the clipboard fallback off. Any value with a
 /// character in it turns it off.
 pub const NO_CLIPBOARD_ENV: &str = "WN_NO_CLIPBOARD";
@@ -129,14 +127,22 @@ impl Chain {
         &self.text
     }
 
-    /// The reason the text is not a chain, with an invisible input named.
+    /// The reason the text could not be read, with an invisible input named.
     ///
-    /// A chain that came from an argument or from a pipe is text the reader can
-    /// see, so the reason stands on its own. A chain that came from the
+    /// Text that came from an argument or from a pipe is text the reader can
+    /// see, so the reason stands on its own. Text that came from the
     /// clipboard is not, and a reader who typed no argument and reads
     /// `"an" is not an issue number` has no way to know where the word came
     /// from. The clipboard was read on the initiative of the tool, so the
     /// message names it.
+    ///
+    /// `err` is the reason of whichever reader took the text: one chain that
+    /// holds a word, and a plan whose `Order` field holds one, both arrive
+    /// here. The input is what this function knows and the reader is what it
+    /// does not, so it takes any error rather than one kind of error, and the
+    /// message names the input alone. A message that called the text a chain
+    /// would tell the reader of a plan the wrong thing about what `wn`
+    /// refused.
     ///
     /// The message names the clipboard and it writes nothing out of it. The
     /// clipboard is the one input the reader did not choose, and it holds a
@@ -146,10 +152,13 @@ impl Chain {
     /// names as much of the text as the argument and the pipe already name,
     /// and no more.
     #[must_use]
-    pub fn blame(&self, err: ChainError) -> anyhow::Error {
+    pub fn blame<E>(&self, err: E) -> anyhow::Error
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
         match self.source {
             Source::Argument | Source::Stdin => anyhow::Error::new(err),
-            Source::Clipboard => anyhow::anyhow!("the clipboard is not a chain: {err}"),
+            Source::Clipboard => anyhow::anyhow!("wn cannot read the clipboard: {err}"),
         }
     }
 }
@@ -537,7 +546,7 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
         let err = parse_chain(prose).expect_err("prose is not a chain");
         assert_eq!(
             clipboard_chain(prose).blame(err).to_string(),
-            "the clipboard is not a chain: \"let\" is not an issue number"
+            "wn cannot read the clipboard: \"let\" is not an issue number"
         );
     }
 
@@ -547,7 +556,21 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
         let err = parse_chain(arrows).expect_err("arrows alone are not a chain");
         assert_eq!(
             clipboard_chain(arrows).blame(err).to_string(),
-            "the clipboard is not a chain: no issue number found in \"→ → →\""
+            "wn cannot read the clipboard: no issue number found in \"→ → →\""
+        );
+    }
+
+    #[test]
+    fn a_plan_from_the_clipboard_is_not_called_a_chain() {
+        // A plan is read by the plan reader and it is not a chain, so a
+        // message that calls it one tells the reader the wrong thing about
+        // what `wn` refused. The input is what the message knows, and the
+        // input is the clipboard either way.
+        let plan = "Stream: S1 ic\nOrder: #277 an #278";
+        let err = crate::plan::parse(plan).expect_err("the word is not an issue number");
+        assert_eq!(
+            clipboard_chain(plan).blame(err).to_string(),
+            "wn cannot read the clipboard: stream \"S1 ic\": \"an\" is not an issue number"
         );
     }
 
