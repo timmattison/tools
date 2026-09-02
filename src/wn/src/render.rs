@@ -13,11 +13,12 @@
 //! [`textfit::truncate_to_budget`], which gives an empty title rather than a
 //! marker that is itself one column too wide.
 
-use colored::Colorize;
+use colored::{ColoredString, Colorize};
 use textfit::{pad_right, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
-use crate::report::{Report, Status};
+use crate::chain::IssueNumber;
+use crate::report::{Entry, Report, Status};
 
 /// The command that starts work on an issue. The answer names it, because the
 /// answer is only useful if the next thing to type is on the screen.
@@ -37,6 +38,10 @@ const MARK_MISSING: char = '?';
 /// The columns between the number and the title.
 const COLUMN_GAP: usize = 2;
 
+/// The columns the mark of a row occupies. Every mark this module writes is
+/// one column wide.
+const MARK_WIDTH: usize = 1;
+
 /// The title of a row whose number names no issue.
 const MISSING_TITLE: &str = "(no such issue)";
 
@@ -47,15 +52,169 @@ const MISSING_TITLE: &str = "(no such issue)";
 /// the block has to fit in.
 #[must_use]
 pub fn render(report: &Report, repo: &str, width: usize) -> String {
-    let _ = (report, repo, width);
-    String::new()
+    let entries = report.entries();
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    let number_width = entries
+        .iter()
+        .map(|entry| UnicodeWidthStr::width(entry.number.to_string().as_str()))
+        .max()
+        .unwrap_or(0);
+
+    let mut lines: Vec<String> = entries
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| row(entry, report.next() == Some(position), number_width, width))
+        .collect();
+
+    lines.push(String::new());
+    lines.extend(notes(report, repo));
+    lines.push(answer(report));
+    lines.join("\n")
+}
+
+/// How one row is marked and painted, which is what its state decides.
+struct Style {
+    mark: char,
+    /// The color of the mark.
+    paint_mark: fn(&str) -> ColoredString,
+    /// The color of the number and of the title.
+    paint_text: fn(&str) -> ColoredString,
+}
+
+/// The style of one row. `is_next` is what parts the issue to start from the
+/// open issues that stand behind it.
+fn style(status: Status, is_next: bool) -> Style {
+    match status {
+        Status::Done => Style {
+            mark: MARK_DONE,
+            paint_mark: |s| s.green(),
+            paint_text: |s| s.dimmed(),
+        },
+        Status::Dropped => Style {
+            mark: MARK_DROPPED,
+            paint_mark: |s| s.yellow(),
+            paint_text: |s| s.dimmed(),
+        },
+        Status::Missing => Style {
+            mark: MARK_MISSING,
+            paint_mark: |s| s.red().bold(),
+            paint_text: |s| s.red(),
+        },
+        Status::Open if is_next => Style {
+            mark: MARK_NEXT,
+            paint_mark: |s| s.yellow().bold(),
+            paint_text: |s| s.bold(),
+        },
+        Status::Open => Style {
+            mark: MARK_LATER,
+            paint_mark: |s| s.dimmed(),
+            paint_text: |s| s.normal(),
+        },
+    }
+}
+
+/// One row: the mark, the number, and as much of the title as the window
+/// holds.
+///
+/// A row that has no columns left for a title ends at the number, rather than
+/// in the spaces that would have stood before one.
+fn row(entry: &Entry, is_next: bool, number_width: usize, width: usize) -> String {
+    let style = style(entry.status, is_next);
+    let number = entry.number.to_string();
+    let mark = style.mark.to_string();
+
+    let spent = MARK_WIDTH + 1 + number_width + COLUMN_GAP;
+    let title = if entry.status == Status::Missing {
+        MISSING_TITLE
+    } else {
+        entry.title.as_str()
+    };
+    let title = truncate_to_budget(title, width.saturating_sub(spent));
+
+    let mark = (style.paint_mark)(&mark);
+    if title.is_empty() {
+        return format!("{mark} {}", (style.paint_text)(&number));
+    }
+    let number = pad_right(&number, number_width);
+    format!(
+        "{mark} {}{}{}",
+        (style.paint_text)(&number),
+        " ".repeat(COLUMN_GAP),
+        (style.paint_text)(&title)
+    )
+}
+
+/// The lines between the rows and the answer: what the chain says that the
+/// answer alone does not.
+fn notes(report: &Report, repo: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+
+    let missing = report.missing();
+    if !missing.is_empty() {
+        let verb = if missing.len() == 1 { "is" } else { "are" };
+        notes.push(
+            format!("{} {verb} not in {repo}.", list(&missing))
+                .red()
+                .to_string(),
+        );
+    }
+
+    let early = report.finished_out_of_order();
+    if !early.is_empty() {
+        let verb = if early.len() == 1 { "is" } else { "are" };
+        notes.push(
+            format!("{} {verb} already closed, out of order.", list(&early))
+                .yellow()
+                .to_string(),
+        );
+    }
+
+    notes
+}
+
+/// The answer: the issue to start and the command that starts it.
+fn answer(report: &Report) -> String {
+    let Some(entry) = report.next_entry() else {
+        return if report
+            .entries()
+            .iter()
+            .all(|entry| entry.status.is_finished())
+        {
+            "Every issue in the chain is closed. Nothing to start."
+                .dimmed()
+                .to_string()
+        } else {
+            // Nothing is open and something is not an issue at all, so the
+            // chain is not finished. Saying it is would be a guess about the
+            // number nobody could read.
+            "No issue in the chain is open.".dimmed().to_string()
+        };
+    };
+    format!(
+        "Start {} next with '{}'",
+        entry.number.to_string().bold(),
+        format!("{START_COMMAND} {}", entry.number.get())
+            .cyan()
+            .bold()
+    )
+}
+
+/// Write a list of numbers the way a sentence reads one.
+fn list(numbers: &[IssueNumber]) -> String {
+    let written: Vec<String> = numbers.iter().map(ToString::to_string).collect();
+    match written.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::IssueNumber;
-    use crate::report::Entry;
 
     /// The repository the test states come from.
     const REPO: &str = "timmattison/tools";
@@ -76,9 +235,7 @@ mod tests {
     /// would thus pass under a redirected run and fail under a hand-typed
     /// `git commit`. So every test here forces the codes on and strips them.
     fn glyphs(report: &Report, width: usize) -> String {
-        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
-            render(report, REPO, width)
-        }))
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| render(report, REPO, width)))
     }
 
     fn a_chain() -> Report {

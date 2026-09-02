@@ -38,8 +38,7 @@ const SEPARATORS: &[char] = &[
     '|',        // the ASCII spelling of the bar, doubled or not
     '>',        // the head of the ASCII arrow `->`
     '-',        // the tail of the ASCII arrow `->`
-    ',',
-    ';',
+    ',', ';',
 ];
 
 /// The character that marks a number as an issue number.
@@ -97,8 +96,53 @@ pub enum ChainError {
 /// Gives [`ChainError::NotAnIssue`] for a token that is not `#` followed by
 /// digits, and [`ChainError::NoIssues`] for text that holds no token at all.
 pub fn parse_chain(input: &str) -> Result<Vec<IssueNumber>, ChainError> {
-    let _ = input;
-    Ok(Vec::new())
+    let mut numbers: Vec<IssueNumber> = Vec::new();
+    for token in tokens(input) {
+        let number = read_number(&token).ok_or(ChainError::NotAnIssue(token))?;
+        if !numbers.contains(&number) {
+            numbers.push(number);
+        }
+    }
+    if numbers.is_empty() {
+        return Err(ChainError::NoIssues(input.to_string()));
+    }
+    Ok(numbers)
+}
+
+/// Cut `input` into the pieces that each name one issue.
+///
+/// A separator ends a token, and so does a `#` that arrives while a token is
+/// already open: `#1#2` is a chain of two written with no separator at all.
+/// Every other character stays in the token it arrived in, which is what makes
+/// `v2` a token the caller refuses rather than a `2` it silently reads.
+fn tokens(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for c in input.chars() {
+        if c.is_whitespace() || SEPARATORS.contains(&c) {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else {
+            if c == HASH && !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// The issue number `token` names, or `None` when it names none.
+fn read_number(token: &str) -> Option<IssueNumber> {
+    let digits = token.strip_prefix(HASH).unwrap_or(token);
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    IssueNumber::new(digits.parse().ok()?)
 }
 
 #[cfg(test)]
@@ -119,7 +163,10 @@ mod tests {
             numbers(" #277 → #278 ∥ #279 → #280 → #281 → #282"),
             vec![277, 278, 279, 280, 281, 282]
         );
-        assert_eq!(numbers("#230 → #315 → #316 → #317"), vec![230, 315, 316, 317]);
+        assert_eq!(
+            numbers("#230 → #315 → #316 → #317"),
+            vec![230, 315, 316, 317]
+        );
     }
 
     #[test]

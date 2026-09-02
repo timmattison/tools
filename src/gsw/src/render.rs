@@ -5,7 +5,9 @@ use std::time::Duration;
 use colored::{ColoredString, Colorize};
 use unicode_width::UnicodeWidthStr;
 
-use textfit::{center, pad_right, truncate_left, truncate_middle, truncate_right, truncate_to_budget};
+use textfit::{
+    center, pad_right, truncate_left, truncate_middle, truncate_right, truncate_to_budget,
+};
 
 use crate::age::{
     age_dim_level, age_fade_factor, fade_rgb, format_age_detailed, AgeDim, AGE_WIDTH,
@@ -1784,7 +1786,6 @@ mod tests {
         let stripped = strip_ansi(&out);
         assert!(stripped.contains(".rs"));
     }
-
 
     #[test]
     fn shave_names_takes_from_the_longer_name_first() {

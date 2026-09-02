@@ -73,10 +73,8 @@ impl Report {
     /// Read the answer out of the states of the chain.
     #[must_use]
     pub fn build(entries: Vec<Entry>) -> Self {
-        Self {
-            entries,
-            next: None,
-        }
+        let next = entries.iter().position(|entry| entry.status.is_open());
+        Self { entries, next }
     }
 
     /// The chain, in the order it was written.
@@ -107,7 +105,7 @@ impl Report {
         };
         self.entries
             .iter()
-            .skip(next)
+            .skip(next + 1)
             .filter(|entry| entry.status.is_finished())
             .map(|entry| entry.number)
             .collect()
@@ -171,19 +169,13 @@ mod tests {
     fn a_dropped_issue_is_walked_past() {
         // An issue closed as not planned is not work to start, and the chain
         // moves on to the one after it.
-        let report = Report::build(vec![
-            entry(277, Status::Dropped),
-            entry(278, Status::Open),
-        ]);
+        let report = Report::build(vec![entry(277, Status::Dropped), entry(278, Status::Open)]);
         assert_eq!(report.next_entry().map(|e| e.number.get()), Some(278_u64));
     }
 
     #[test]
     fn a_missing_issue_is_never_the_one_to_start() {
-        let report = Report::build(vec![
-            entry(277, Status::Missing),
-            entry(278, Status::Open),
-        ]);
+        let report = Report::build(vec![entry(277, Status::Missing), entry(278, Status::Open)]);
         assert_eq!(report.next_entry().map(|e| e.number.get()), Some(278_u64));
         assert_eq!(numbers(&report.missing()), vec![277]);
     }

@@ -22,9 +22,9 @@
 //! GraphQL answers a number the repository does not have with `null` for that
 //! alias and an entry in a top-level `errors` list. `gh` reads that list and
 //! exits non-zero. The body on standard output still carries every other
-//! answer, so this module reads the body first and reads the exit status only
-//! when the body holds nothing to use. One typo in a chain of six thus costs
-//! one row of the output rather than the whole run.
+//! answer, so this module reads the body whenever there is one and reads the
+//! exit status only for a run that printed nothing at all. One typo in a chain
+//! of six thus costs one row of the output rather than the whole run.
 
 use std::fmt;
 use std::process::Command;
@@ -52,8 +52,17 @@ impl Repo {
     ///
     /// Fails when the argument is not two non-empty parts divided by one `/`.
     pub fn parse(spec: &str) -> Result<Self> {
-        let _ = spec;
-        bail!("not implemented")
+        let mut parts = spec.split('/');
+        let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+            bail!("{spec:?} is not a repository. Write it as owner/name");
+        };
+        if owner.is_empty() || name.is_empty() {
+            bail!("{spec:?} is not a repository. Write it as owner/name");
+        }
+        Ok(Self {
+            owner: owner.to_string(),
+            name: name.to_string(),
+        })
     }
 
     /// The account or the organization that owns the repository.
@@ -84,7 +93,14 @@ impl fmt::Display for Repo {
 /// `owner/name`.
 pub fn current_repo() -> Result<Repo> {
     let output = Command::new(GH)
-        .args(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+        .args([
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner",
+            "-q",
+            ".nameWithOwner",
+        ])
         .output()
         .with_context(|| format!("could not run `{GH}`. Is the GitHub CLI installed?"))?;
     if !output.status.success() {
@@ -109,8 +125,23 @@ fn alias(number: IssueNumber) -> String {
 /// Build the one query that asks about every number of the chain.
 #[must_use]
 pub fn build_query(numbers: &[IssueNumber]) -> String {
-    let _ = numbers;
-    String::new()
+    let fields: String = numbers
+        .iter()
+        .map(|number| {
+            format!(
+                "    {}: issueOrPullRequest(number: {}) {{\n      \
+                 __typename\n      \
+                 ... on Issue {{ number title state stateReason }}\n      \
+                 ... on PullRequest {{ number title state }}\n    }}\n",
+                alias(*number),
+                number.get()
+            )
+        })
+        .collect();
+    format!(
+        "query($owner: String!, $name: String!) {{\n  \
+         repository(owner: $owner, name: $name) {{\n{fields}  }}\n}}\n"
+    )
 }
 
 /// Read the answer of the query back into one entry for each number, in the
@@ -122,8 +153,85 @@ pub fn build_query(numbers: &[IssueNumber]) -> String {
 /// nobody can read, or a credential that cannot see it), or when GitHub gives
 /// a state this tool does not know.
 pub fn parse_response(body: &str, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
-    let _ = (body, numbers);
-    Ok(Vec::new())
+    let answer: Value = serde_json::from_str(body)
+        .with_context(|| format!("GitHub answered with no JSON: {}", body.trim()))?;
+
+    let Some(repository) = answer.pointer("/data/repository").filter(|v| !v.is_null()) else {
+        bail!(
+            "{}",
+            errors_of(&answer).unwrap_or_else(|| "GitHub named no repository".to_string())
+        );
+    };
+
+    numbers
+        .iter()
+        .map(|number| entry_of(repository, *number))
+        .collect()
+}
+
+/// Read one number out of the answer.
+fn entry_of(repository: &Value, number: IssueNumber) -> Result<Entry> {
+    // An alias GitHub could not resolve is null, and one it never carried is
+    // absent. Both say the same thing: the repository has no such number.
+    let Some(node) = repository.get(alias(number)).filter(|v| !v.is_null()) else {
+        return Ok(Entry {
+            number,
+            title: String::new(),
+            status: Status::Missing,
+        });
+    };
+
+    let state = node
+        .get("state")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("GitHub gave {number} no state"))?;
+    let kind = node.get("__typename").and_then(Value::as_str).unwrap_or("");
+    let reason = node.get("stateReason").and_then(Value::as_str);
+
+    Ok(Entry {
+        number,
+        title: node
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        status: status_of(state, kind, reason).ok_or_else(|| {
+            anyhow!("GitHub gave {number} the state {state}, which wn cannot read")
+        })?,
+    })
+}
+
+/// The `__typename` of a pull request, which is the one kind whose closed
+/// state does not say the work was done.
+const PULL_REQUEST: &str = "PullRequest";
+
+/// What one state of GitHub means for a chain, or `None` for a state this
+/// tool has never been taught.
+///
+/// A closed issue counts as done unless GitHub says the work was not done. A
+/// closed pull request is the mirror: it counts as dropped unless it was
+/// merged, and a merged one carries the state `MERGED` rather than `CLOSED`.
+fn status_of(state: &str, kind: &str, reason: Option<&str>) -> Option<Status> {
+    match state {
+        "OPEN" => Some(Status::Open),
+        "MERGED" => Some(Status::Done),
+        "CLOSED" if kind == PULL_REQUEST => Some(Status::Dropped),
+        "CLOSED" => Some(match reason {
+            Some("NOT_PLANNED" | "DUPLICATE") => Status::Dropped,
+            _ => Status::Done,
+        }),
+        _ => None,
+    }
+}
+
+/// What GitHub said went wrong, as one line.
+fn errors_of(answer: &Value) -> Option<String> {
+    let errors = answer.get("errors")?.as_array()?;
+    let messages: Vec<&str> = errors
+        .iter()
+        .filter_map(|error| error.get("message").and_then(Value::as_str))
+        .collect();
+    (!messages.is_empty()).then(|| messages.join(" "))
 }
 
 /// Ask GitHub about every number of the chain.
@@ -147,18 +255,16 @@ pub fn fetch(repo: &Repo, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
         .output()
         .with_context(|| format!("could not run `{GH}`. Is the GitHub CLI installed?"))?;
 
-    let body = String::from_utf8_lossy(&output.stdout);
     // The body carries every answer even when `gh` exits non-zero, which it
-    // does for a number the repository does not have. So the body is read
-    // first, and the exit status is only read when the body is unusable.
-    parse_response(&body, numbers).map_err(|err| {
-        if output.status.success() {
-            err
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow!("`{GH} api graphql` failed: {}", stderr.trim())
-        }
-    })
+    // does for a number the repository does not have. So the answer is the
+    // body whenever there is one, and the exit status speaks only for a run
+    // that printed nothing at all.
+    let body = String::from_utf8_lossy(&output.stdout);
+    if body.trim().is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("`{GH} api graphql` answered nothing: {}", stderr.trim());
+    }
+    parse_response(&body, numbers)
 }
 
 #[cfg(test)]
@@ -328,7 +434,8 @@ mod tests {
         let body = r#"{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a Repository with the name 'timmattison/nope'."}]}"#;
         let err = parse_response(body, &chain(&[1])).expect_err("no repository is an error");
         assert!(
-            err.to_string().contains("Could not resolve to a Repository"),
+            err.to_string()
+                .contains("Could not resolve to a Repository"),
             "the error carries what GitHub said, in {err:#}"
         );
     }

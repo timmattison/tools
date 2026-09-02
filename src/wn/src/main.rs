@@ -132,8 +132,7 @@ fn run(cli: &Cli, width: usize) -> Result<ExitCode> {
 /// splits a quoted one into a single argument. Joining with a space gives the
 /// same line either way, because the parser reads whitespace as a separator.
 fn chain_text(args: &[String]) -> String {
-    let _ = args;
-    String::new()
+    args.join(" ")
 }
 
 /// Read the chain from standard input, for a run that was given none.
@@ -160,8 +159,10 @@ fn effective_width(
     columns_env: Option<usize>,
     stdout_is_tty: bool,
 ) -> usize {
-    let _ = (tty_width, columns_env, stdout_is_tty);
-    DEFAULT_WIDTH
+    match (stdout_is_tty, columns_env) {
+        (false, Some(columns)) => columns,
+        _ => tty_width.unwrap_or(DEFAULT_WIDTH),
+    }
 }
 
 /// Must the color be forced on?

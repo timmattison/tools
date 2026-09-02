@@ -265,7 +265,10 @@ mod tests {
 
     #[test]
     fn truncate_left_keeps_the_tail() {
-        assert_eq!(truncate_left("src/wn/src/main.rs", 30), "src/wn/src/main.rs");
+        assert_eq!(
+            truncate_left("src/wn/src/main.rs", 30),
+            "src/wn/src/main.rs"
+        );
         assert_eq!(truncate_left("src/wn/src/main.rs", 10), "…c/main.rs");
     }
 

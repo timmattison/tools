@@ -93,7 +93,10 @@ exit {status}
 fn run(gh: &FakeGh, args: &[&str], columns: &str, color: bool) -> Output {
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
     let mut command = Command::new(env!("CARGO_BIN_EXE_wn"));
-    command.env_clear().env("PATH", path).env("COLUMNS", columns);
+    command
+        .env_clear()
+        .env("PATH", path)
+        .env("COLUMNS", columns);
     if !color {
         command.env("NO_COLOR", "1");
     }
@@ -111,12 +114,7 @@ fn stderr(output: &Output) -> String {
 #[test]
 fn walks_the_chain_and_names_the_issue_to_start() {
     let gh = FakeGh::new(THREE_ISSUES);
-    let output = run(
-        &gh,
-        &["--repo", REPO, "#277 → #278 ∥ #279"],
-        "80",
-        false,
-    );
+    let output = run(&gh, &["--repo", REPO, "#277 → #278 ∥ #279"], "80", false);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(
         stdout(&output),
@@ -141,12 +139,7 @@ fn an_unquoted_chain_arrives_as_one_line_again() {
         "80",
         false,
     );
-    let quoted = run(
-        &gh,
-        &["--repo", REPO, "#277 → #278 ∥ #279"],
-        "80",
-        false,
-    );
+    let quoted = run(&gh, &["--repo", REPO, "#277 → #278 ∥ #279"], "80", false);
     assert!(split.status.success(), "stderr: {}", stderr(&split));
     assert_eq!(stdout(&split), stdout(&quoted));
 }
