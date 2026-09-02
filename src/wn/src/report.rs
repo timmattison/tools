@@ -476,6 +476,23 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_number_is_named_once_however_often_a_plan_writes_it() {
+        // GitHub answered for 344 and 330 alone. So 341 is missing, and the
+        // stream names it twice: once as the issue the first step closes, and
+        // once as a step of its own.
+        let states = States::of(vec![entry(344, Status::Done), entry(330, Status::Open)]);
+        let report = Report::of_steps(
+            &[step(344, Some(341)), step(341, None), step(330, None)],
+            &states,
+        );
+        assert_eq!(
+            numbers(&report.missing()),
+            vec![341],
+            "one number the repository does not have is one number to name, at its first place"
+        );
+    }
+
+    #[test]
     fn a_pair_whose_two_states_differ_is_reported() {
         // 344 is merged and 341 is open, so 344 closed nothing. 342 is closed
         // without the work being done and 328 is open, which differs as well.
