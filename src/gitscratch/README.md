@@ -252,7 +252,7 @@ in `src/git.rs`, for a reason worth stating: it used to be pinned from the other
 direction, by `tests/conflicts.rs` asserting the *answer* a non-ASCII path
 produces. That stopped testing this setting the moment `nul_separated_paths`
 became the only path reader: `-z` output is unquoted whatever `quotePath` says
-— remove the pin today and all eighteen integration tests stay green, verified.
+— remove the pin today and every integration test stays green, verified.
 The unit test asserts it against `Git::run` instead, the surface it still
 covers.
 
@@ -265,7 +265,7 @@ together, because they break together — the name and the count. `tests/repo.rs
 covers the other call site's one wrinkle: `status --porcelain -z` spends two
 fields on a rename, and a rename is one uncommitted file.
 
-**The removed location variables**, the last row above, are pinned by
+**The removed location variables**, the `GIT_DIR` row above, are pinned by
 `tests/isolation.rs`, which has to reach for a mechanism the rest of the suite
 does not. `std::env::set_var` is process-global and `unsafe`, and Rust runs a
 binary's tests as threads of one process, so poisoning the environment there
