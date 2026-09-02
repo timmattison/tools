@@ -1039,6 +1039,32 @@ mod tests {
     }
 
     #[test]
+    fn a_summary_line_names_its_stream_at_any_width() {
+        // The tail of the closed stream is wider than this window on its own,
+        // so cutting the label to what the tail leaves cuts it to nothing. A
+        // line that names no stream answers for no stream, and the heading
+        // over these lines promises one answer for each. So the label keeps
+        // its floor and the line runs past the edge instead.
+        let streams = vec![
+            stream("Stream 1", vec![entry(330, Status::Open, "Second thing")]),
+            stream("Stream 2", vec![entry(344, Status::Done, "First thing")]),
+        ];
+        let block = plan_glyphs(&streams, 20);
+        let summary: Vec<&str> = block
+            .lines()
+            .skip_while(|line| *line != SUMMARY_HEADING)
+            .skip(1)
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                "  Stream 1  → #330  si 330",
+                "  Stream 2  every issue is closed",
+            ]
+        );
+    }
+
+    #[test]
     fn a_row_of_a_plan_is_cut_to_the_columns_the_indent_leaves() {
         let streams = vec![stream(
             "S1",
