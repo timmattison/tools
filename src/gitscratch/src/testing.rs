@@ -234,14 +234,14 @@ impl TestRepo {
         use std::io::Write as _;
 
         let mut command = Command::new("git");
-        // The same immunity `git_in` takes, for the same reason: a fixture that
-        // inherits a redirected `GIT_DIR` or `GIT_INDEX_FILE` writes its
-        // objects into the developer's real repository instead of this one.
-        crate::git::shed_inherited_git_environment(&mut command);
-
         let mut child = command
             .args(args)
             .current_dir(self.dir.path())
+            // The same immunity `git_in` takes, in the same words and for the
+            // same reason: a fixture that inherits a redirected `GIT_DIR` or
+            // `GIT_INDEX_FILE` writes its objects into the developer's real
+            // repository instead of this one.
+            .without_inherited_git_environment()
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
