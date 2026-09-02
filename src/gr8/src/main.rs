@@ -52,8 +52,18 @@ struct NamedRateLimit<'a> {
 /// this type names no resource. It keeps what the response holds, which makes
 /// a new resource appear on its own, and makes a resource that goes away a
 /// non-event.
+///
+/// A resource that GitHub adds can also hold a set of fields that gr8 does not
+/// know. Such a resource costs its own row and nothing more. gr8 keeps the name
+/// of it and reads the other resources as usual.
 #[derive(Debug)]
-struct Resources(Vec<(String, RateLimit)>);
+struct Resources {
+    /// The resources whose numbers gr8 read, in the order of the response.
+    readable: Vec<(String, RateLimit)>,
+    /// The names of the resources whose numbers gr8 could not read, in the
+    /// order of the response.
+    unreadable: Vec<String>,
+}
 
 impl<'de> Deserialize<'de> for Resources {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -74,11 +84,22 @@ impl<'de> Deserialize<'de> for Resources {
             where
                 M: MapAccess<'de>,
             {
-                let mut limits = Vec::with_capacity(map.size_hint().unwrap_or(0));
-                while let Some(entry) = map.next_entry::<String, RateLimit>()? {
-                    limits.push(entry);
+                let mut readable = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                let mut unreadable = Vec::new();
+                // Each value becomes a JSON value first, and then a RateLimit.
+                // Thus a resource whose set of fields gr8 does not know costs
+                // its own row, and it does not stop gr8 from reading the other
+                // resources of the response.
+                while let Some((name, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    match serde_json::from_value::<RateLimit>(value) {
+                        Ok(rate_limit) => readable.push((name, rate_limit)),
+                        Err(_) => unreadable.push(name),
+                    }
                 }
-                Ok(Resources(limits))
+                Ok(Resources {
+                    readable,
+                    unreadable,
+                })
             }
         }
 
@@ -90,10 +111,25 @@ impl<'de> Deserialize<'de> for Resources {
 /// The returned vector keeps the order of the response.
 fn collect_rate_limits(resources: &Resources) -> Vec<NamedRateLimit<'_>> {
     resources
-        .0
+        .readable
         .iter()
         .map(|(name, rate_limit)| NamedRateLimit { name, rate_limit })
         .collect()
+}
+
+/// Formats the note that names the resources whose numbers gr8 could not read.
+/// Returns None when gr8 read every resource that the response holds.
+fn format_unreadable_note(resources: &Resources) -> Option<String> {
+    let count = resources.unreadable.len();
+    if count == 0 {
+        return None;
+    }
+
+    let noun = if count == 1 { "resource" } else { "resources" };
+    Some(format!(
+        "Skipped {count} {noun} that gr8 could not read: {}",
+        resources.unreadable.join(", ")
+    ))
 }
 
 /// Top-level response structure from GitHub API rate_limit endpoint.
@@ -391,6 +427,11 @@ fn main() -> Result<()> {
     // Print exhausted rate limits last (easier to find at bottom of terminal)
     print_rate_limit_table("Exhausted Rate Limits", &exhausted);
 
+    // Name the resources that gr8 skipped, so a skip is never silent.
+    if let Some(note) = format_unreadable_note(&response.resources) {
+        println!("{note}\n");
+    }
+
     Ok(())
 }
 
@@ -407,19 +448,20 @@ mod tests {
 
     /// Creates a Resources where every sample resource has the given remaining count.
     fn make_all_resources_with_remaining(remaining: u32) -> Resources {
-        Resources(
-            SAMPLE_RESOURCES
+        Resources {
+            readable: SAMPLE_RESOURCES
                 .iter()
                 .map(|name| ((*name).to_string(), make_rate_limit(remaining)))
                 .collect(),
-        )
+            unreadable: Vec::new(),
+        }
     }
 
     /// Replaces the rate limit of one resource.
     /// Panics if the response holds no resource of that name.
     fn set_remaining(resources: &mut Resources, name: &str, remaining: u32) {
         let entry = resources
-            .0
+            .readable
             .iter_mut()
             .find(|(resource_name, _)| resource_name == name)
             .unwrap_or_else(|| panic!("{name} is not one of the sample resources"));
