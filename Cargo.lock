@@ -6022,6 +6022,7 @@ dependencies = [
 name = "prgz"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "colored",
  "flate2",
  "num-format",
