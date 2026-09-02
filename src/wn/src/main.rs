@@ -11,13 +11,14 @@
 
 mod chain;
 mod github;
+mod input;
 mod render;
 mod report;
 
 use std::io::{IsTerminal, Read};
 use std::process::ExitCode;
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
@@ -91,13 +92,18 @@ GitHub about every number in it, and names the first one that is still open.\n\n
 Every separator means the same thing: the issue on the left comes before the issue on the right. \
 A double bar is read as an arrow, because the chain is a plan to walk in order.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
+The chain comes out of the first input that holds one: the argument, then standard input, then \
+the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
+because a pipe is explicit. Set WN_NO_CLIPBOARD to any value with a character in it to turn the \
+clipboard off, which gives back the error a run with no chain printed before. An empty value \
+leaves the clipboard on, because an exported but empty variable is a common accident.\n\n\
 The answer names the command that starts the work: `si 278`. This tool ships no `si` — it is a \
 shell function you supply. Set WN_START_COMMAND to name a different one, for example \
 `export WN_START_COMMAND='gh issue develop'`."
 )]
 struct Cli {
     /// The chain, for example "#277 → #278 ∥ #279". Read from standard input
-    /// when it is not given.
+    /// when it is not given, and from the clipboard when neither gives one.
     #[arg(value_name = "CHAIN")]
     chain: Vec<String>,
 
@@ -140,8 +146,10 @@ fn main() -> ExitCode {
     );
 
     let start = StartCommand::new(std::env::var(START_COMMAND_ENV).ok().as_deref());
+    let clipboard_off =
+        input::clipboard_is_off(std::env::var(input::NO_CLIPBOARD_ENV).ok().as_deref());
 
-    match run(&cli, width, &start) {
+    match run(&cli, width, &start, clipboard_off) {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{} {err:#}", "wn:".red().bold());
@@ -151,13 +159,29 @@ fn main() -> ExitCode {
 }
 
 /// Read the chain, ask GitHub, print the answer.
-fn run(cli: &Cli, width: usize, start: &StartCommand) -> Result<ExitCode> {
-    let text = if cli.chain.is_empty() {
-        read_stdin()?
-    } else {
-        chain_text(&cli.chain)
+///
+/// `clipboard_off` is what [`input::clipboard_is_off`] said about the
+/// environment, which `main` reads. The order of the inputs, and the rule that
+/// only the input that answers is read, both live in [`input::Sources`].
+fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Result<ExitCode> {
+    // Each input is a function rather than its text, so an input that a nearer
+    // input already answered for is never touched. This matters for the
+    // clipboard, which is one shared resource of the whole machine.
+    let piped: &dyn Fn() -> std::io::Result<String> = &|| {
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text)?;
+        Ok(text)
     };
-    let numbers = parse_chain(&text)?;
+    let copied: &dyn Fn() -> input::ClipboardRead = &input::system_clipboard;
+
+    let chain = input::Sources {
+        argument: &cli.chain,
+        // A terminal on standard input is a run with nothing piped into it.
+        stdin: (!std::io::stdin().is_terminal()).then_some(piped),
+        clipboard: (!clipboard_off).then_some(copied),
+    }
+    .chain()?;
+    let numbers = parse_chain(chain.text()).map_err(|err| chain.blame(err))?;
 
     let repo = match &cli.repo {
         Some(spec) => Repo::parse(spec)?,
@@ -178,38 +202,9 @@ fn run(cli: &Cli, width: usize, start: &StartCommand) -> Result<ExitCode> {
     })
 }
 
-/// The chain as one line of text.
-///
-/// A shell splits an unquoted chain into one argument for each word, and it
-/// splits a quoted one into a single argument. Joining with a space gives the
-/// same line either way, because the parser reads whitespace as a separator.
-fn chain_text(args: &[String]) -> String {
-    args.join(" ")
-}
-
-/// Read the chain from standard input, for a run that was given none.
-fn read_stdin() -> Result<String> {
-    if std::io::stdin().is_terminal() {
-        bail!("no chain given. Pass it as an argument, in quotes: wn \"#277 → #278\"");
-    }
-    let mut text = String::new();
-    std::io::stdin()
-        .read_to_string(&mut text)
-        .context("could not read the chain from standard input")?;
-    Ok(text)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_arguments_of_an_unquoted_chain_join_back_into_one_line() {
-        let args = ["#277".to_string(), "→".to_string(), "#278".to_string()];
-        assert_eq!(chain_text(&args), "#277 → #278");
-        assert_eq!(chain_text(&["#277 → #278".to_string()]), "#277 → #278");
-        assert_eq!(chain_text(&[]), "");
-    }
 
     #[test]
     fn an_environment_that_names_no_command_gives_the_default() {

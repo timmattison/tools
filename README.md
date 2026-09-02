@@ -1037,8 +1037,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     right. `→`, `->`, `∥`, `||`, a comma, and a semicolon all read as "then", so a chain
     pasted out of a plan works whichever way it was typed. The double bar is read as an arrow on
     purpose, because a chain handed to `wn` is a chain somebody decided to walk in order. Quote
-    the chain: a shell reads an unquoted `#` as the start of a comment. With no argument, the
-    chain is read from standard input.
+    the chain: a shell reads an unquoted `#` as the start of a comment.
+  - The chain comes out of the first input that holds one: the argument, then standard input,
+    then the system clipboard. A chain almost always starts as text somebody copied out of a
+    plan, an issue, or a comment, so `wn` alone answers the chain you just copied. A pipe still
+    outranks the clipboard, because a pipe is explicit, and an empty pipe walks on to the
+    clipboard — a run whose parent handed it `/dev/null` did not ask for an empty chain. Set
+    `WN_NO_CLIPBOARD` to any value with a character in it to turn the clipboard off, which gives
+    back the error a run with no chain printed before. An empty value leaves the clipboard on,
+    because an exported but empty variable is a common accident.
   - The whole chain is one GraphQL query through `gh`, so a chain of six issues costs one round
     trip and one unit of the rate limit, and the credential is the one `gh` already holds. Pull
     request numbers work too: merged counts as done, and closed without a merge counts as
@@ -1049,8 +1056,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     otherwise invisible, because the other five still name an issue to start. An issue that is
     closed after the next one is reported as done out of order, because the plan in your head is
     then wrong and nothing else would say so.
-  - Usage: `wn "#277 → #278 ∥ #279"`, `wn "#230 → #315"`, `wn -R timmattison/tools "#1 → #2"`,
-    `pbpaste | wn`, `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`
+  - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard), `wn "#230 → #315"`,
+    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn`,
+    `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 
 ## dirhash

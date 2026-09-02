@@ -12,6 +12,20 @@
 //! that started `cargo test` happened to export, and `COLUMNS` and `NO_COLOR`
 //! both change what the tool prints.
 //!
+//! That environment names [`NO_CLIPBOARD_ENV`] in every test but one. A child
+//! of a test reads `/dev/null` on standard input, which is not a terminal and
+//! holds no text, so a run with no chain argument walks on to the clipboard.
+//! The clipboard is one shared resource of the whole machine: a test that reads
+//! it races the person at the keyboard. The variable turns that last step off
+//! for the other children of this file, which is a mechanism rather than a rule
+//! each test must remember.
+//!
+//! The one exception is `the_run_with_no_argument_reads_the_clipboard`, which
+//! leaves the variable out because it is the test that holds the clipboard in
+//! the run at all. It reads the clipboard, it writes nothing to it, and it
+//! asserts only which path the run took, so it takes nothing away from the
+//! person at the keyboard.
+//!
 //! Each test builds its own temporary directory, so concurrent test runs stay
 //! isolated (see the parallel-safety note in the project guidelines).
 
@@ -33,6 +47,23 @@ const REPO: &str = "timmattison/tools";
 
 /// The variable that names the command the answer prints.
 const START_COMMAND_ENV: &str = "WN_START_COMMAND";
+
+/// The variable that turns the clipboard fallback off.
+///
+/// Every child of this file gets it, because no test of a command line may
+/// touch the clipboard of the machine that runs it.
+const NO_CLIPBOARD_ENV: &str = "WN_NO_CLIPBOARD";
+
+/// The value [`NO_CLIPBOARD_ENV`] carries. Any value with a character in it
+/// turns the fallback off; this one says why it is there.
+const NO_CLIPBOARD: &str = "1";
+
+/// The error of a run that no input gave a chain, and that had no clipboard to
+/// fall back on.
+///
+/// It is the one message a run reaches only when the clipboard was not one of
+/// the inputs, so its absence is what holds the clipboard in the run.
+const NO_CHAIN: &str = "no chain given";
 
 /// A chain of three issues: one closed, two open.
 const THREE_ISSUES: &str = r#"{"data":{"repository":{
@@ -120,7 +151,10 @@ fn run_with_start(
     command
         .env_clear()
         .env("PATH", path)
-        .env("COLUMNS", columns);
+        .env("COLUMNS", columns)
+        // The one place that builds the environment of the helper, so the
+        // clipboard step is off for every test that goes through it.
+        .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD);
     if !color {
         command.env("NO_COLOR", "1");
     }
@@ -295,6 +329,9 @@ fn takes_the_chain_from_standard_input() {
         .env("PATH", path)
         .env("COLUMNS", "80")
         .env("NO_COLOR", "1")
+        // This test builds its own environment, so it states the switch as
+        // well: a pipe that holds a chain must answer without a clipboard.
+        .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD)
         .env("WN", env!("CARGO_BIN_EXE_wn"))
         .arg("-c")
         .arg("printf '%s' '#277 → #278 ∥ #279' | \"$WN\" --repo timmattison/tools")
@@ -309,6 +346,96 @@ fn takes_the_chain_from_standard_input() {
         stdout(&output).ends_with("Start #278 next with 'si 278'\n"),
         "the answer came out of a piped chain, in {}",
         stdout(&output)
+    );
+}
+
+#[test]
+fn refuses_a_run_that_holds_no_chain_in_any_input() {
+    // The helper turns the clipboard off, so this is a machine with no
+    // clipboard to fall back on. The message is the message the tool printed
+    // before the clipboard was an input at all, because a run with the switch
+    // on asks for exactly that behavior.
+    let gh = FakeGh::new(THREE_ISSUES);
+    let output = run(&gh, &["--repo", REPO], "80", false);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+    assert!(
+        stderr(&output).contains(NO_CHAIN),
+        "the error says no chain was given, in {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn an_empty_pipe_reaches_the_clipboard_step() {
+    // A pipe that holds nothing is not a chain of nothing. The run walks on to
+    // the clipboard, which the switch turned off, so it stops with the same
+    // message a run with no pipe at all stops with. A run that stopped at
+    // standard input would report a chain error about empty text instead.
+    let gh = FakeGh::new(THREE_ISSUES);
+    let path = format!("{}:/usr/bin:/bin", gh.path().display());
+    let output = Command::new("sh")
+        .env_clear()
+        .env("PATH", path)
+        .env("COLUMNS", "80")
+        .env("NO_COLOR", "1")
+        .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD)
+        .env("WN", env!("CARGO_BIN_EXE_wn"))
+        .arg("-c")
+        .arg("printf '' | \"$WN\" --repo timmattison/tools")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains(NO_CHAIN),
+        "the empty pipe fell through to the clipboard step, in {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn the_run_with_no_argument_reads_the_clipboard() {
+    // The one test of this file that leaves the switch out, and the one test
+    // that holds the headline behavior: `wn` alone answers the chain the reader
+    // just copied. Every other test here turns the clipboard off, and every
+    // unit test gives `Sources` a reader of its own, so the line in `run` that
+    // names the real clipboard could read `None` and the whole suite stays
+    // green.
+    //
+    // The assertion reads which path the run took. It never reads what the
+    // clipboard holds. `no chain given` is the error of a run whose inputs left
+    // the clipboard out, and it is the only error that says so: an empty
+    // clipboard, a clipboard that does not open, a clipboard of prose, and a
+    // clipboard that holds a real chain each take a path of its own. The run is
+    // therefore deterministic although it reads a resource of the whole machine
+    // that this test does not own, and the assertion fails if and only if the
+    // run stops wiring the clipboard in.
+    //
+    // `env_clear` takes `DISPLAY` and `WAYLAND_DISPLAY` out as well. On Linux
+    // `arboard` then opens nothing, and the run reports `the clipboard could not
+    // be read (…)`. That is still not the `no chain given` path, so the
+    // assertion holds on a machine with no display exactly as it holds on a
+    // desktop.
+    //
+    // The run reads the clipboard and writes nothing to it, so it keeps what
+    // the person at the keyboard copied.
+    let gh = FakeGh::new(THREE_ISSUES);
+    let path = format!("{}:/usr/bin:/bin", gh.path().display());
+    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
+        .env_clear()
+        .env("PATH", path)
+        .env("COLUMNS", "80")
+        .env("NO_COLOR", "1")
+        // NO_CLIPBOARD_ENV stays out of this environment on purpose. A child of
+        // `output` reads `/dev/null` on standard input, so the run walks past
+        // the argument and past the pipe and arrives at the clipboard.
+        .args(["--repo", REPO])
+        .output()
+        .unwrap();
+    assert!(
+        !stderr(&output).contains(NO_CHAIN),
+        "the clipboard is one of the inputs of the run, in {}",
+        stderr(&output)
     );
 }
 
@@ -428,6 +555,9 @@ fn says_so_when_the_github_cli_is_not_installed() {
         .env("PATH", dir.path())
         .env("COLUMNS", "80")
         .env("NO_COLOR", "1")
+        // This test builds its own environment, so it states the switch as
+        // well: no child of this file reads the clipboard of the machine.
+        .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD)
         .args(["--repo", REPO, "#277"])
         .output()
         .unwrap();
