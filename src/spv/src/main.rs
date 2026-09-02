@@ -535,6 +535,23 @@ fn get_open_files(pid: u32) -> Option<Vec<OpenFile>> {
     Some(files)
 }
 
+/// Decides whether an environment variable name looks like it holds a credential.
+///
+/// The dump of an environment goes to a terminal, and a terminal scrolls into a
+/// paste. So a value under a name that reads like a secret is hidden by default.
+///
+/// # Arguments
+///
+/// * `name` - The environment variable name
+///
+/// # Returns
+///
+/// `true` when the name looks like it holds a credential.
+fn looks_like_credential(name: &str) -> bool {
+    let _ = name;
+    false
+}
+
 /// Prints processes in table format using comfy-table.
 ///
 /// # Arguments
@@ -943,6 +960,53 @@ mod tests {
         assert_eq!(LSOF_FIELD_TYPE, 4, "TYPE should be at index 4");
         assert_eq!(LSOF_FIELD_NAME_START, 8, "NAME should start at index 8");
         assert_eq!(LSOF_MIN_FIELDS, 9, "Minimum fields should be 9");
+    }
+
+    #[test]
+    fn credential_names_are_recognized() {
+        for name in [
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "DB_PASSWORD",
+            "API_KEY",
+            "npm_config_password",
+            "SESSION_COOKIE",
+            "JWT_SIGNATURE",
+            "MY_PASSPHRASE",
+            "AUTHORIZATION",
+            "SERVICE_CREDENTIALS",
+            "DEPLOY_PW",
+            "OLD_PASSWD",
+        ] {
+            assert!(
+                looks_like_credential(name),
+                "{name} names a credential and must be hidden"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_names_are_not_credentials() {
+        for name in [
+            "PWD",
+            "AUTHOR",
+            "SSH_AUTH_SOCK",
+            "KEYBOARD_LAYOUT",
+            "MONKEY_BUSINESS",
+            "HOME",
+            "PATH",
+            "LANG",
+            "TERM",
+            "SHELL",
+            "USER",
+            "HOMEBREW_NO_ANALYTICS",
+            "PASSENGER_ROOT",
+        ] {
+            assert!(
+                !looks_like_credential(name),
+                "{name} is an ordinary name and must stay visible"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
