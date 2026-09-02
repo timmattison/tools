@@ -1071,6 +1071,27 @@ Notes: Independent of everything above.";
 | Issue | Action |
 | #330 | close |";
 
+    /// A Markdown table whose first row names no chain.
+    ///
+    /// The `Order` cell of stream A is empty. A Markdown table writes one row
+    /// on one line, so that cell is a stream with nothing to start, and never
+    /// a line that continues the row above it.
+    const MARKDOWN_WITH_AN_EMPTY_FIRST_ORDER: &str = "\
+| Stream | Order | Zone | Notes |
+| --- | --- | --- | --- |
+| A |  | src/a | nothing yet |
+| B | #1 | src/b | go |";
+
+    /// The same two rows, the other way round.
+    ///
+    /// The empty `Order` cell now stands under a row that holds a chain, which
+    /// is where a reader of wraps joins the two and names the pair `A B`.
+    const MARKDOWN_WITH_AN_EMPTY_SECOND_ORDER: &str = "\
+| Stream | Order | Zone | Notes |
+| --- | --- | --- | --- |
+| A | #1 | src/a | go |
+| B |  | src/b | nothing yet |";
+
     /// The report of the `plan-parallel-work` skill, as it arrives on the
     /// clipboard.
     ///
@@ -1483,6 +1504,29 @@ Notes: Independent of everything above.";
         assert_eq!(
             shape(&plan_of(TABLE_AND_A_TABLE_OF_PROSE)),
             vec![("S1", vec![(344, None)])]
+        );
+    }
+
+    #[test]
+    fn refuses_the_first_markdown_row_whose_order_cell_is_empty() {
+        // A Markdown table writes one row on one line, so no line of it
+        // continues another and an empty `Order` cell names no chain. A reader
+        // that takes the line for a wrap drops stream A and answers stream B
+        // alone, which is a plan short of one stream and no message anywhere.
+        assert_eq!(
+            parse(MARKDOWN_WITH_AN_EMPTY_FIRST_ORDER),
+            Err(PlanError::NoIssues(Snippet::new("A")))
+        );
+    }
+
+    #[test]
+    fn refuses_a_later_markdown_row_whose_order_cell_is_empty() {
+        // The same row under a row that holds a chain. A reader that takes it
+        // for a wrap joins the two and answers one stream named `A B`, which
+        // is a label no line of the table writes.
+        assert_eq!(
+            parse(MARKDOWN_WITH_AN_EMPTY_SECOND_ORDER),
+            Err(PlanError::NoIssues(Snippet::new("B")))
         );
     }
 
