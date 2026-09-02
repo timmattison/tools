@@ -629,3 +629,73 @@ async fn the_interrupt_sends_a_disconnect_and_ends_the_run() {
         "a clean shutdown is the end of a run and not a failure: {result:?}"
     );
 }
+
+/// A count of topics above the in-flight limit `rumqttc` takes by default.
+///
+/// `rumqttc` rolls its packet identifier back to zero at the in-flight limit,
+/// which is 100 unless a caller raises it. A run of more topics than that
+/// therefore reuses an identifier before the first SUBACK arrives.
+const MANY_TOPICS: usize = 120;
+
+#[tokio::test]
+async fn every_topic_of_a_list_longer_than_the_inflight_limit_keeps_its_own_line() {
+    let (listener, port) = listening().await;
+    let topics: Vec<String> = (0..MANY_TOPICS).map(|n| format!("sensors/{n}")).collect();
+    let (mut output, mut printed) = recording();
+
+    let session = run_until(
+        options_for(port),
+        &topics,
+        QoS::AtMostOnce,
+        false,
+        &mut output,
+        never(),
+    );
+
+    let script = async {
+        let mut broker = Broker::accept(listener).await;
+        broker.accept_connection().await;
+
+        let mut asked = Vec::with_capacity(MANY_TOPICS);
+        for _ in 0..MANY_TOPICS {
+            asked.push(broker.read_subscribe().await);
+        }
+
+        // The broker answers from the last subscription to the first, so an
+        // identifier that two topics share names the wrong topic on one of the
+        // two answers.
+        for subscription in asked.iter().rev() {
+            broker.grant(subscription.pkid, QoS::AtMostOnce).await;
+        }
+
+        let printed = printed.lines(MANY_TOPICS).await;
+        let expected: Vec<String> = topics
+            .iter()
+            .rev()
+            .map(|topic| format!("Subscribed: {topic} (QoS 0)"))
+            .collect();
+
+        let wrong: Vec<String> = expected
+            .iter()
+            .zip(&printed)
+            .enumerate()
+            .filter(|(_, (want, got))| want != got)
+            .map(|(place, (want, got))| format!("line {place}: wanted {want:?}, printed {got:?}"))
+            .collect();
+
+        assert!(
+            wrong.is_empty(),
+            "{} of {MANY_TOPICS} lines name the wrong topic: {wrong:#?}",
+            wrong.len()
+        );
+
+        drop(broker);
+    };
+
+    let result = together(session, script).await;
+
+    assert!(
+        matches!(result, Err(SessionError::Connection(_))),
+        "a connection that ends is a failure of the connection: {result:?}"
+    );
+}
