@@ -2404,6 +2404,23 @@ Notes: Disjoint.";
     }
 
     #[test]
+    fn two_streams_that_wait_for_each_other_are_a_cycle() {
+        // Two streams that wait for each other have no work to start between
+        // them, and an answer of "nothing is ready" hides the reason. So the
+        // message names the numbers that wait for each other, exactly as it
+        // does for a picture whose wires return to a step.
+        let plan = table_of(&[("S1", "#91", "#96"), ("S2", "#96", "#91")]);
+        assert_eq!(
+            plan_refusal(&plan),
+            GraphError::Cycle(numbers_of(&[91, 96]))
+        );
+        assert_eq!(
+            plan_refusal(&plan).to_string(),
+            "the wires return to #91 and #96, so this picture names no step to start first"
+        );
+    }
+
+    #[test]
     fn a_blocker_that_stands_in_no_order_field_is_a_node_of_its_own() {
         // A blocker the repository does not have must reach the rows and turn
         // the run red, and a row of the answer is the only place that says so.
