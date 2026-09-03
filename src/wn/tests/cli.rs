@@ -231,6 +231,14 @@ const PICTURE_ANSWER: &str = concat!(
     "Start #246 next with 'si 246'\n",
 );
 
+/// The line that opens the summary of a plan, and thus the mark of an answer
+/// the plan reader wrote.
+const SUMMARY_HEADING: &str = "Take one from each stream:";
+
+/// The words that open the last column of a row of a picture, and thus the
+/// mark of an answer the picture reader wrote.
+const WAITS_FOR: &str = "waits for ";
+
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
     dir: tempfile::TempDir,
@@ -1272,5 +1280,26 @@ fn a_chain_of_two_issues_on_one_line_is_still_a_chain() {
             "\n",
             "Start #278 next with 'si 278'\n",
         )
+    );
+}
+
+#[test]
+fn the_box_drawn_table_of_a_plan_is_still_a_plan() {
+    // The border of that table is one net that touches every cell of it, and
+    // the table stands on many lines. The plan reader is tried first, so the
+    // table keeps its own reader: the answer is one block for each stream
+    // under one summary, and no row of it names work it waits for.
+    let gh = FakeGh::new(BOX_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", BOX_TABLE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains(SUMMARY_HEADING),
+        "the plan reader answered, in {}",
+        stdout(&output)
+    );
+    assert!(
+        !stdout(&output).contains(WAITS_FOR),
+        "no block of a plan carries the column of a picture, in {}",
+        stdout(&output)
     );
 }
