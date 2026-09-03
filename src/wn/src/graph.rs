@@ -1584,6 +1584,25 @@ A ──→ #4 ──┐
     }
 
     #[test]
+    fn a_slash_in_the_prose_of_a_port_draws_no_wire() {
+        // The text of a port is prose, and prose holds a path, an escape, a
+        // date, and two words a slash parts. A stroke inside such a text
+        // stands beside no wire, so it draws nothing and each of these
+        // pictures is the picture of the paste.
+        for label in [
+            "#249  (src/gallery)",
+            "#249  (a\\b)",
+            "#249  (2026/09/03)",
+            "#249  (this and/or that)",
+        ] {
+            let picture = PASTE.replace("#249  (gallery)", label);
+            let graph = graph_of(&picture);
+            assert_eq!(nodes(&graph), nodes(&graph_of(PASTE)), "the label {label:?}");
+            assert_eq!(edges(&graph), edges(&graph_of(PASTE)), "the label {label:?}");
+        }
+    }
+
+    #[test]
     fn a_line_with_no_wire_is_never_asked_about_a_head_or_a_stroke() {
         // A sentence over the picture holds a slash inside a path and an arrow
         // inside a phrase. A line with no wire on it draws nothing, so neither
