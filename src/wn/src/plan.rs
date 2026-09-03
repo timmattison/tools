@@ -140,6 +140,13 @@ pub struct Stream {
     label: String,
     /// The steps of the stream, in the order the plan writes them.
     steps: Vec<Step>,
+    /// The steps of other streams that come before the first step of this
+    /// one, in the order the plan writes them.
+    ///
+    /// A set and not a chain. The plan names the work that finishes first, and
+    /// the order it names that work in says nothing: a stream that waits for
+    /// two pieces of work waits for both of them.
+    waits_for: Vec<Step>,
 }
 
 impl Stream {
@@ -153,6 +160,18 @@ impl Stream {
     #[must_use]
     pub fn steps(&self) -> &[Step] {
         &self.steps
+    }
+
+    /// The steps that come before the first step of the stream, in the order
+    /// the plan writes them.
+    #[must_use]
+    #[expect(
+        dead_code,
+        reason = "the graph reads this, and the graph is the half of issue #436 that lands next. \
+                  The expectation itself warns on the day the graph calls this, so it goes then."
+    )]
+    pub fn waits_for(&self) -> &[Step] {
+        &self.waits_for
     }
 }
 
@@ -779,7 +798,11 @@ fn stream_of(named: Option<&str>, place: usize, order: Option<&str>) -> Result<S
     let label = label_of(named, place);
     let order = order.ok_or_else(|| PlanError::StreamWithoutOrder(Snippet::new(&label)))?;
     let steps = read_order(order, &label)?;
-    Ok(Stream { label, steps })
+    Ok(Stream {
+        label,
+        steps,
+        waits_for: Vec::new(),
+    })
 }
 
 /// The name of the stream at `place`.
@@ -1250,6 +1273,43 @@ Notes: Independent of everything above.";
     /// each row of this table ends.
     const NARROW_BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work-narrow-order.txt");
 
+    /// A plan of four streams, three of which name what they wait for.
+    ///
+    /// The `Waits for` cell of S1 holds one step and the cell of S2 holds two,
+    /// written with the comma a reader types. S0 and S3 wait for nothing, and
+    /// an empty cell is how a plan writes that.
+    const WAITS_TABLE: &str = "\
+| Stream | Order | Waits for | Zone | Notes |
+|--------|-------|-----------|------|-------|
+| S0 — daemon leak | #96 | | crates/tsm (serve.rs) | Do first, solo. |
+| S1 — lifecycle | #91 | #96 | crates/tsm (kill.rs) | |
+| S2 — install | #89 → #94 | #96, #91 | crates/tsm (shell-init) | Same hotspot as S1. |
+| S3 — keymap | #86 | | packages/web | Disjoint. |";
+
+    /// The same four streams, drawn as a box table.
+    ///
+    /// The form a reader copies out of a terminal. The `Waits for` cells of S0
+    /// and S3 are a run of spaces here, because a drawn cell is padded to the
+    /// width of its column.
+    const WAITS_BOX_TABLE: &str = "\
+┌──────────────────┬───────────┬───────────┬─────────────────────────┬─────────────────────┐
+│ Stream           │ Order     │ Waits for │ Zone                    │ Notes               │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S0 — daemon leak │ #96       │           │ crates/tsm (serve.rs)   │ Do first, solo.     │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S1 — lifecycle   │ #91       │ #96       │ crates/tsm (kill.rs)    │                     │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S2 — install     │ #89 → #94 │ #96, #91  │ crates/tsm (shell-init) │ Same hotspot as S1. │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S3 — keymap      │ #86       │           │ packages/web            │ Disjoint.           │
+└──────────────────┴───────────┴───────────┴─────────────────────────┴─────────────────────┘";
+
+    /// The label of the one stream of [`table_that_waits_for`].
+    ///
+    /// Every message about that stream repeats it back, so the tests that read
+    /// a message name the stream from here.
+    const ONE_STREAM_LABEL: &str = "S1";
+
     /// The numbers of one step: the work, and the issue the work closes.
     type StepNumbers = (u64, Option<u64>);
 
@@ -1279,6 +1339,37 @@ Notes: Independent of everything above.";
             plan.streams()
                 .get(index)
                 .expect("the plan holds this stream"),
+        )
+    }
+
+    /// The numbers of every step `stream` waits for, the pair second.
+    fn waits_of(stream: &Stream) -> Vec<StepNumbers> {
+        stream
+            .waits_for()
+            .iter()
+            .map(|step| (step.number().get(), step.closes().map(IssueNumber::get)))
+            .collect()
+    }
+
+    /// The numbers of every step the stream at `index` waits for.
+    fn waits_at(plan: &Plan, index: usize) -> Vec<StepNumbers> {
+        waits_of(
+            plan.streams()
+                .get(index)
+                .expect("the plan holds this stream"),
+        )
+    }
+
+    /// A table of one stream, whose `Waits for` cell holds `waits`.
+    ///
+    /// One row of three columns, so a test about that one cell writes the cell
+    /// and nothing else. The stream is named [`ONE_STREAM_LABEL`], because a
+    /// message about the cell repeats the name of the stream back.
+    fn table_that_waits_for(waits: &str) -> String {
+        format!(
+            "| Stream | Order | Waits for |\n\
+             | --- | --- | --- |\n\
+             | {ONE_STREAM_LABEL} | #1 | {waits} |"
         )
     }
 
@@ -2030,5 +2121,92 @@ Notes: Independent of everything above.";
         let cut: String = label.chars().take(crate::chain::SNIPPET_CHARS).collect();
         assert!(!message.contains(&label), "{message}");
         assert!(message.contains(&format!("\"{cut}…\"")), "{message}");
+    }
+
+    #[test]
+    fn a_waits_for_column_gives_the_steps_each_stream_waits_for() {
+        // The fifth column of a plan. S1 waits for the stream that stands
+        // alone, and S2 waits for both of the streams above it.
+        let plan = plan_of(WAITS_TABLE);
+        assert_eq!(
+            shape(&plan),
+            vec![
+                ("S0 — daemon leak", vec![(96, None)]),
+                ("S1 — lifecycle", vec![(91, None)]),
+                ("S2 — install", vec![(89, None), (94, None)]),
+                ("S3 — keymap", vec![(86, None)]),
+            ]
+        );
+        assert_eq!(waits_at(&plan, 1), vec![(96, None)]);
+        assert_eq!(waits_at(&plan, 2), vec![(96, None), (91, None)]);
+    }
+
+    #[test]
+    fn a_box_drawn_waits_for_column_gives_the_same_waits() {
+        // How a table is drawn says nothing about the plan in it, so the box
+        // form of these four streams is the Markdown form of them.
+        assert_eq!(plan_of(WAITS_BOX_TABLE), plan_of(WAITS_TABLE));
+        assert_eq!(
+            waits_at(&plan_of(WAITS_BOX_TABLE), 2),
+            vec![(96, None), (91, None)]
+        );
+    }
+
+    #[test]
+    fn an_arrow_in_a_waits_for_cell_writes_a_set_and_not_a_chain() {
+        // `Order` is a chain and `Waits for` is a set. So an arrow between two
+        // blockers names no order between them: the stream waits for both, and
+        // it starts when both are finished.
+        assert_eq!(
+            waits_at(&plan_of(&table_that_waits_for("#96 → #91")), 0),
+            vec![(96, None), (91, None)]
+        );
+        assert_eq!(
+            plan_of(&table_that_waits_for("#96 → #91")),
+            plan_of(&table_that_waits_for("#96, #91")),
+            "the two separators write the same set of blockers"
+        );
+    }
+
+    #[test]
+    fn a_pair_in_a_waits_for_cell_is_one_step() {
+        // A stream waits for a piece of work, and one piece of work is
+        // sometimes a pull request and the issue that pull request closes.
+        // Both spellings of the pair read here as they read in an `Order`
+        // cell, because one function reads both cells.
+        assert_eq!(
+            waits_at(&plan_of(&table_that_waits_for("PR#344 (#341)")), 0),
+            vec![(344, Some(341))]
+        );
+        assert_eq!(
+            waits_at(&plan_of(&table_that_waits_for("#4 (in flight, PR #15)")), 0),
+            vec![(15, Some(4))]
+        );
+    }
+
+    #[test]
+    fn an_empty_waits_for_cell_gives_a_stream_that_waits_for_nothing() {
+        // The common case, and no error. A plan of parallel work is a plan of
+        // streams that stand apart, and most of them wait for nothing at all.
+        assert!(waits_at(&plan_of(&table_that_waits_for("")), 0).is_empty());
+        assert!(
+            waits_at(&plan_of(&table_that_waits_for("   ")), 0).is_empty(),
+            "a drawn cell is padded to the width of its column"
+        );
+    }
+
+    #[test]
+    fn refuses_a_waits_for_cell_that_names_no_issue() {
+        // The reason a stream waits is prose, and the prose of a stream
+        // belongs in `Notes`. So a cell of prose here names no work to wait
+        // for, and it earns the message a bad `Order` cell earns: the stream,
+        // and the word.
+        assert_eq!(
+            parse(&table_that_waits_for("after the leak lands")),
+            Err(PlanError::NotAnIssue {
+                stream: Snippet::new(ONE_STREAM_LABEL),
+                token: Snippet::new("after"),
+            })
+        );
     }
 }
