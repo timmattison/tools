@@ -102,7 +102,7 @@ pub fn render(report: &Report, repo: &str, width: usize, start: &StartCommand) -
     let mut lines: Vec<String> = entries
         .iter()
         .enumerate()
-        .map(|(position, entry)| row(entry, report.next() == Some(position), number_width, width))
+        .map(|(position, entry)| row(entry, report.is_ready(position), number_width, width))
         .collect();
 
     lines.push(String::new());
@@ -343,7 +343,7 @@ fn block(report: &Report, repo: &str, width: usize) -> Vec<String> {
         .map(|(position, entry)| {
             indent(&row(
                 entry,
-                report.next() == Some(position),
+                report.is_ready(position),
                 number_width,
                 row_width,
             ))

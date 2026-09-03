@@ -27,11 +27,39 @@
 //! A plan also names one number in two streams. [`States`] holds the answer
 //! of GitHub for each number once, so one query answers the whole plan and
 //! every stream that names a number reads the same state for it.
+//!
+//! # One report answers a chain, a stream, and a graph
+//!
+//! [`Report`] carries the answer of all three shapes of input, and it carries
+//! it in one shape. A chain and a stream stand in one line, so each of them
+//! names one issue to start. A picture holds two streams that join, so it
+//! names a set of them and it says what each blocked step waits for.
+//!
+//! The three must not part company. A stream is a graph whose nodes stand in
+//! one line, so every question a reader asks of a chain is a question a reader
+//! asks of a picture: which work is missing, which pair disagrees, and which
+//! work somebody closed out of order. Two modules that answer one question
+//! drift apart, and the reader then reads two answers to it.
+//!
+//! So the fields below hold the answer of a graph, and a chain and a stream
+//! fill the same fields with the answer they always gave: `ready` holds one
+//! position for a chain and a set for a picture, and `waits` is empty at every
+//! position of a chain.
 
 use std::collections::HashMap;
 
 use crate::chain::IssueNumber;
 use crate::plan::Step;
+
+/// The list a position outside the report gives.
+///
+/// A named constant, because [`Report::waits_for`] gives a slice and an empty
+/// `Vec` of its own would live no longer than the call.
+#[allow(
+    dead_code,
+    reason = "the render of a graph reads waits_for in the slice that draws it"
+)]
+const NO_NUMBERS: &[IssueNumber] = &[];
 
 /// What GitHub says about one issue of the chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,19 +184,53 @@ impl States {
     }
 }
 
-/// The chain, in order, and the answer it gives.
+/// The steps of the input, in order, and the answer they give.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
+    /// The steps, in the order the reader wrote them. A picture writes them in
+    /// a topological order, so every step stands after the steps it waits for
+    /// in this list as well.
     entries: Vec<Entry>,
-    next: Option<usize>,
+    /// The positions of the entries somebody can start now.
+    ///
+    /// A chain and a stream hold one position here, because one line of work
+    /// has one issue to start. A picture holds one position for each stream
+    /// that is ready, because two streams that join are two people who work at
+    /// the same time.
+    ready: Vec<usize>,
+    /// The positions that are finished with unfinished work before them.
+    out_of_order: Vec<usize>,
+    /// What each entry waits for, at the position of that entry. Empty at
+    /// every position of a chain and of a stream, because a reader of one line
+    /// of work reads the line above the row and needs no list.
+    waits: Vec<Vec<IssueNumber>>,
 }
 
 impl Report {
     /// Read the answer out of the states of the chain.
+    ///
+    /// One line of work has one issue to start: the first open one. Every
+    /// finished step after it is work somebody closed out of order, because
+    /// each of them stands after a step that is not finished.
     #[must_use]
     pub fn build(entries: Vec<Entry>) -> Self {
         let next = entries.iter().position(|entry| entry.status.is_open());
-        Self { entries, next }
+        let out_of_order = next.map_or_else(Vec::new, |next| {
+            entries
+                .iter()
+                .enumerate()
+                .skip(next + 1)
+                .filter(|(_, entry)| entry.status.is_finished())
+                .map(|(position, _)| position)
+                .collect()
+        });
+        let waits = vec![Vec::new(); entries.len()];
+        Self {
+            entries,
+            ready: next.into_iter().collect(),
+            out_of_order,
+            waits,
+        }
     }
 
     /// The report of one stream of a plan.
@@ -182,18 +244,7 @@ impl Report {
     /// two together.
     #[must_use]
     pub fn of_steps(steps: &[Step], states: &States) -> Self {
-        let entries = steps
-            .iter()
-            .map(|step| {
-                let mut entry = states.entry(step.number());
-                entry.closes = step.closes().map(|number| Closes {
-                    number,
-                    status: states.entry(number).status,
-                });
-                entry
-            })
-            .collect();
-        Self::build(entries)
+        Self::build(entries_of(steps, states))
     }
 
     /// The chain, in the order it was written.
@@ -202,31 +253,56 @@ impl Report {
         &self.entries
     }
 
-    /// The position in [`entries`](Self::entries) of the issue to start, or
-    /// `None` when no issue of the chain is open.
+    /// The first position in [`entries`](Self::entries) somebody can start, or
+    /// `None` when nothing is ready.
+    ///
+    /// A chain and a stream have one such position, so this is their whole
+    /// answer. A picture has one for each ready stream, and a caller that
+    /// names every one of them reads [`is_ready`](Self::is_ready) instead.
     #[must_use]
     pub fn next(&self) -> Option<usize> {
-        self.next
+        self.ready.first().copied()
     }
 
-    /// The issue to start, or `None` when no issue of the chain is open.
+    /// The first issue somebody can start, or `None` when nothing is ready.
     #[must_use]
     pub fn next_entry(&self) -> Option<&Entry> {
-        self.next.map(|i| &self.entries[i])
+        self.next().map(|position| &self.entries[position])
     }
 
-    /// The issues that are finished and stand after the one to start, in
+    /// Can somebody start the entry at `position` now?
+    ///
+    /// A row asks this of each entry, because a picture marks one row for each
+    /// stream that is ready. A position outside the report gives `false`,
+    /// because a position nobody has is work nobody starts.
+    #[must_use]
+    pub fn is_ready(&self, position: usize) -> bool {
+        self.ready.contains(&position)
+    }
+
+    /// The numbers the entry at `position` waits for, in the order the input
+    /// holds them.
+    ///
+    /// Empty for every entry of a chain and of a stream, and empty for an
+    /// entry of a picture that is ready or finished. A position outside the
+    /// report gives an empty list for the same reason
+    /// [`is_ready`](Self::is_ready) gives `false`.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "the render of a graph writes this column in the slice that draws it"
+    )]
+    pub fn waits_for(&self, position: usize) -> &[IssueNumber] {
+        self.waits.get(position).map_or(NO_NUMBERS, Vec::as_slice)
+    }
+
+    /// The issues that are finished with work before them that is not, in
     /// order. These are the ones somebody did out of order.
     #[must_use]
     pub fn finished_out_of_order(&self) -> Vec<IssueNumber> {
-        let Some(next) = self.next else {
-            return Vec::new();
-        };
-        self.entries
+        self.out_of_order
             .iter()
-            .skip(next + 1)
-            .filter(|entry| entry.status.is_finished())
-            .map(|entry| entry.number)
+            .map(|&position| self.entries[position].number)
             .collect()
     }
 
@@ -280,6 +356,29 @@ impl Report {
             })
             .collect()
     }
+}
+
+/// One entry for each step, with what GitHub says about the step and about
+/// the issue the step closes.
+///
+/// The state of a step is the state of the number the step names, because the
+/// pull request of a pair is the work. The state of the issue travels beside
+/// it, so the reader sees the two together.
+///
+/// A stream and a picture read a step the same way, so both of them read it
+/// here. A second reader of a step is a second answer to one question.
+fn entries_of(steps: &[Step], states: &States) -> Vec<Entry> {
+    steps
+        .iter()
+        .map(|step| {
+            let mut entry = states.entry(step.number());
+            entry.closes = step.closes().map(|number| Closes {
+                number,
+                status: states.entry(number).status,
+            });
+            entry
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -543,6 +642,54 @@ mod tests {
             entry(279, Status::Missing),
         ]);
         assert!(report.pairs_that_disagree().is_empty());
+    }
+
+    /// Is `is_ready` true at the answer of the report and nowhere else?
+    ///
+    /// One line of work has one issue to start, so a reader of a chain and a
+    /// reader of a stream must read the same mark on the same row they always
+    /// read it on.
+    fn ready_only_at_next(report: &Report) -> bool {
+        (0..report.entries().len())
+            .all(|position| report.is_ready(position) == (report.next() == Some(position)))
+    }
+
+    #[test]
+    fn a_chain_and_a_stream_wait_for_nothing_and_are_ready_at_their_answer() {
+        // One report answers a chain, a stream, and a graph. The list of what
+        // a row waits for is what a picture needs, and a chain reads the line
+        // above the row instead. So the list is empty everywhere in one line
+        // of work, and the mark of a ready row stands where it always stood.
+        let chain = Report::build(vec![
+            entry(277, Status::Done),
+            entry(278, Status::Open),
+            entry(279, Status::Open),
+        ]);
+        assert!(ready_only_at_next(&chain));
+        assert!(
+            (0..chain.entries().len()).all(|position| chain.waits_for(position).is_empty()),
+            "a chain names no step to wait for"
+        );
+
+        let states = States::of(vec![
+            entry(344, Status::Done),
+            entry(341, Status::Open),
+            entry(330, Status::Open),
+        ]);
+        let stream = Report::of_steps(&[step(344, Some(341)), step(330, None)], &states);
+        assert_eq!(stream.next(), Some(1));
+        assert!(ready_only_at_next(&stream));
+        assert!(
+            (0..stream.entries().len()).all(|position| stream.waits_for(position).is_empty()),
+            "a stream names no step to wait for"
+        );
+
+        let finished = Report::build(vec![entry(277, Status::Done)]);
+        assert_eq!(finished.next(), None);
+        assert!(
+            ready_only_at_next(&finished),
+            "a report with no issue to start marks no row ready"
+        );
     }
 
     #[test]
