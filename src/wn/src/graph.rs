@@ -1310,6 +1310,42 @@ mod tests {
 | A | #1 → #2 | src/a | The two hunks sit 265 lines apart in a 5113-line file. |
 | B | #3 | src/b | One issue, no neighbors. |";
 
+    /// Two streams that never join.
+    ///
+    /// Two rows of work, each one a wire between two steps, and no bus
+    /// anywhere. The picture says that two people start at the same moment, as
+    /// much as the paste does, and no net of it stands on more than one line.
+    const TWO_STREAMS: &str = "\
+#242 ──→ #247
+#246 ──→ #248";
+
+    /// A chain somebody broke over two lines.
+    ///
+    /// The `──→` at the end of the first line reaches `#2` on its left and the
+    /// end of the line on its right, so the order runs on. That net is what
+    /// parts a wrapped chain from two streams that never join.
+    const WRAPPED_CHAIN: &str = "\
+#1 ──→ #2 ──→
+#3 ──→ #4";
+
+    /// A page of prose that names four issues on two lines.
+    ///
+    /// Two arrows and two lines, and a page all the same. The text beside each
+    /// arrow is a sentence, so no port of it names a step.
+    const PROSE_PAGE: &str = "\
+This depends on #1 → #2.
+Also see #3 → #4.";
+
+    /// The same two lines, with a bare step on each side of each arrow.
+    ///
+    /// Every port of this text names a step, and the two nets stand on two
+    /// lines, so the box-drawing character is the one test it fails. `→`
+    /// stands in a sentence as often as in a picture, and `─` stands in a
+    /// picture alone.
+    const BARE_ARROWS: &str = "\
+#1 → #2
+#3 → #4";
+
     /// A node whose text holds wide characters, and the bus under it.
     ///
     /// `日本語` takes three characters and six display columns. The corner of
@@ -1577,6 +1613,57 @@ A ──→ #4 ──┐
         // the text, which is what it does today.
         assert!(read("#1 ──→ #2").is_none());
         assert!(read("#1 --> #2").is_none());
+
+        // A longer chain holds two nets that each join two steps, and both of
+        // them stand on the one line the reader wrote. The lines are what part
+        // this text from two streams that never join.
+        assert!(read("#1 ──→ #2 ──→ #3").is_none());
+        assert!(read("#1 --> #2 --> #3").is_none());
+    }
+
+    #[test]
+    fn two_streams_that_never_join_are_two_streams() {
+        // Two rows of work with no bus between them say the same thing the
+        // paste says: two people start now. Every net of this text stands on
+        // one line, so the rule that reads a bus reads nothing here, and a
+        // chain reader answers the whole page as one line of work.
+        let graph = graph_of(TWO_STREAMS);
+        assert_eq!(nodes(&graph), vec![242, 246, 247, 248]);
+        assert_eq!(edges(&graph), vec![(242, 247), (246, 248)]);
+    }
+
+    #[test]
+    fn a_chain_wrapped_over_two_lines_is_a_chain() {
+        // The `──→` at the end of the first line reaches `#2` on its left and
+        // nothing on its right, so the order runs on and the two lines are one
+        // chain. A reader of pictures that claimed this text would answer half
+        // an order, and the chain reader answers the whole of it.
+        assert!(read(WRAPPED_CHAIN).is_none());
+    }
+
+    #[test]
+    fn a_page_with_no_box_drawn_wire_is_no_picture() {
+        // A page of prose names issues on line after line, and it draws
+        // nothing. No word holds a character of the box-drawing block, so a
+        // character of that block is the mark that somebody drew something.
+        assert!(read(PROSE_PAGE).is_none());
+        // The same two lines with a bare step on each side of each arrow. Both
+        // of its nets join two steps and the two stand on two lines, so this
+        // text fails the one test the page over it fails as well.
+        assert!(read(BARE_ARROWS).is_none());
+    }
+
+    #[test]
+    fn the_texts_this_reader_claimed_before_are_claimed_still() {
+        // The second rule adds a shape and takes none away. The paste is the
+        // picture this module was written for, and the two tables keep their
+        // own readers.
+        assert_eq!(
+            edges(&graph_of(PASTE)),
+            vec![(242, 247), (246, 248), (247, 249), (248, 249)]
+        );
+        assert!(read(BOX_TABLE).is_none());
+        assert!(read(MARKDOWN_TABLE).is_none());
     }
 
     #[test]
