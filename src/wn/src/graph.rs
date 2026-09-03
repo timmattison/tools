@@ -219,20 +219,55 @@ struct Place {
 /// because that rule reads the grid and this table does not.
 fn sides_of(c: char) -> Option<Sides> {
     let sides = match c {
-        // The light set: the two strokes, the four corners, the four tees,
-        // and the cross. The heavy set and the double set join them in the
-        // slice that reads them.
-        '\u{2500}' => Sides::HORIZONTAL, // ─
-        '\u{2502}' => Sides::VERTICAL,   // │
-        '\u{250c}' => Sides::of(Side::Right).with(Sides::of(Side::Down)), // ┌
-        '\u{2510}' => Sides::of(Side::Left).with(Sides::of(Side::Down)), // ┐
-        '\u{2514}' => Sides::of(Side::Up).with(Sides::of(Side::Right)), // └
-        '\u{2518}' => Sides::of(Side::Up).with(Sides::of(Side::Left)), // ┘
-        '\u{251c}' => Sides::VERTICAL.with(Sides::of(Side::Right)), // ├
-        '\u{2524}' => Sides::VERTICAL.with(Sides::of(Side::Left)), // ┤
-        '\u{252c}' => Sides::HORIZONTAL.with(Sides::of(Side::Down)), // ┬
-        '\u{2534}' => Sides::HORIZONTAL.with(Sides::of(Side::Up)), // ┴
-        '\u{253c}' => Sides::ALL,        // ┼
+        // The whole box-drawing block, minus the three diagonals. Every
+        // weight of one shape stands in one arm, because the light stroke and
+        // the heavy stroke join the same neighbors, and so do the solid one,
+        // the dashed ones, and the double one.
+        //
+        // The strokes.
+        '\u{2500}' | '\u{2501}' | '\u{2504}' | '\u{2505}' | '\u{2508}' | '\u{2509}'
+        | '\u{254c}' | '\u{254d}' | '\u{2550}' | '\u{257c}' | '\u{257e}' => Sides::HORIZONTAL, // ─ ━ ═
+        '\u{2502}' | '\u{2503}' | '\u{2506}' | '\u{2507}' | '\u{250a}' | '\u{250b}'
+        | '\u{254e}' | '\u{254f}' | '\u{2551}' | '\u{257d}' | '\u{257f}' => Sides::VERTICAL, // │ ┃ ║
+        // The corners. The rounded corner of the light set stands beside the
+        // square one it draws.
+        '\u{250c}'..='\u{250f}' | '\u{2552}'..='\u{2554}' | '\u{256d}' => {
+            Sides::of(Side::Right).with(Sides::of(Side::Down)) // ┌ ┏ ╔ ╭
+        }
+        '\u{2510}'..='\u{2513}' | '\u{2555}'..='\u{2557}' | '\u{256e}' => {
+            Sides::of(Side::Left).with(Sides::of(Side::Down)) // ┐ ┓ ╗ ╮
+        }
+        '\u{2514}'..='\u{2517}' | '\u{2558}'..='\u{255a}' | '\u{2570}' => {
+            Sides::of(Side::Up).with(Sides::of(Side::Right)) // └ ┗ ╚ ╰
+        }
+        '\u{2518}'..='\u{251b}' | '\u{255b}'..='\u{255d}' | '\u{256f}' => {
+            Sides::of(Side::Up).with(Sides::of(Side::Left)) // ┘ ┛ ╝ ╯
+        }
+        // The tees.
+        '\u{251c}'..='\u{2523}' | '\u{255e}'..='\u{2560}' => {
+            Sides::VERTICAL.with(Sides::of(Side::Right)) // ├ ┣ ╠
+        }
+        '\u{2524}'..='\u{252b}' | '\u{2561}'..='\u{2563}' => {
+            Sides::VERTICAL.with(Sides::of(Side::Left)) // ┤ ┫ ╣
+        }
+        '\u{252c}'..='\u{2533}' | '\u{2564}'..='\u{2566}' => {
+            Sides::HORIZONTAL.with(Sides::of(Side::Down)) // ┬ ┳ ╦
+        }
+        '\u{2534}'..='\u{253b}' | '\u{2567}'..='\u{2569}' => {
+            Sides::HORIZONTAL.with(Sides::of(Side::Up)) // ┴ ┻ ╩
+        }
+        // The crosses. A cross joins, so a picture that needs one wire to
+        // cross another without a join cannot be drawn in this form.
+        '\u{253c}'..='\u{254b}' | '\u{256a}'..='\u{256c}' => Sides::ALL, // ┼ ╋ ╬
+        // The half lines, which draw the end of a stroke.
+        '\u{2574}' | '\u{2578}' => Sides::of(Side::Left), // ╴ ╸
+        '\u{2575}' | '\u{2579}' => Sides::of(Side::Up),   // ╵ ╹
+        '\u{2576}' | '\u{257a}' => Sides::of(Side::Right), // ╶ ╺
+        '\u{2577}' | '\u{257b}' => Sides::of(Side::Down), // ╷ ╻
+        // U+2571 to U+2573 are the diagonals, and they draw no wire. A
+        // diagonal has no side to face, so rule 2 cannot read it. The slice
+        // that refuses a picture refuses one that holds a diagonal beside a
+        // wire.
         head if RIGHTWARD_HEADS.contains(&head) => Sides::HORIZONTAL,
         // The ASCII spellings. Each of them is a wire only when a neighbor
         // says so, and [`Grid::sides_at`] holds that rule.
