@@ -101,61 +101,6 @@ pub enum Resolution {
     Forbidden,
 }
 
-/// The result of confining one relative request path under a directory.
-enum Confined {
-    /// The path exists and its canonical form lives under the directory.
-    Allowed(PathBuf),
-    /// The path tried to leave the directory.
-    Forbidden,
-    /// The path does not exist.
-    Missing,
-}
-
-/// Confines the relative request path `relative` under `root`.
-///
-/// `root` MUST already be canonical, because the containment check compares
-/// canonical paths.
-///
-/// The path is rebuilt from only its normal components: a `.` (current dir) and
-/// a leading `/` (root) are skipped, while a `..` (parent) or a Windows prefix
-/// component returns [`Confined::Forbidden`] outright. The candidate is then
-/// canonicalized — which resolves symlinks — and confirmed to still live under
-/// `root`, so a symlink that sits inside the root but points outside it is
-/// rejected as well. The textual component check alone cannot see that link;
-/// the canonical containment check alone would accept a `..` that lands back
-/// inside the root. Both are needed.
-///
-/// Rejecting every `..` outright is stricter than the Go tool this ports, which
-/// hands `a/../b` to `filepath.Join` and resolves it back inside the root. The
-/// stricter rule is deliberate and matches [`sirn`](https://github.com/timmattison/tools):
-/// no legitimate request from a static export carries a `..`, and a rule with no
-/// exceptions is a rule with no gaps.
-fn confine(root: &Path, relative: &str) -> Confined {
-    use std::path::Component;
-
-    let mut sanitized = PathBuf::new();
-    for component in Path::new(relative).components() {
-        match component {
-            Component::Normal(name) => sanitized.push(name),
-            Component::CurDir | Component::RootDir => {}
-            Component::ParentDir | Component::Prefix(_) => return Confined::Forbidden,
-        }
-    }
-
-    // A path that does not exist has no canonical form, so this is also the
-    // "missing" test.
-    let Ok(canonical) = root.join(&sanitized).canonicalize() else {
-        return Confined::Missing;
-    };
-
-    // A symlink that pointed outside the root now canonicalizes outside it.
-    if !canonical.starts_with(root) {
-        return Confined::Forbidden;
-    }
-
-    Confined::Allowed(canonical)
-}
-
 /// Resolves an HTTP request target against the export root.
 ///
 /// `root` MUST already be canonical — [`find_root`] guarantees that, and the
@@ -199,10 +144,12 @@ pub fn resolve_request(root: &Path, target: &str) -> Resolution {
     let decoded = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
 
     if let Some(asset) = decoded.strip_prefix(STATIC_PREFIX) {
-        return match confine(&root.join(STATIC_DIRECTORY), asset) {
-            Confined::Forbidden => Resolution::Forbidden,
-            Confined::Allowed(path) if path.is_file() => Resolution::File(path),
-            Confined::Allowed(_) | Confined::Missing => Resolution::NotFound,
+        return match httpfile::resolve_under_root(&root.join(STATIC_DIRECTORY), asset) {
+            httpfile::PathResolution::Forbidden => Resolution::Forbidden,
+            httpfile::PathResolution::Allowed(path) if path.is_file() => Resolution::File(path),
+            httpfile::PathResolution::Allowed(_) | httpfile::PathResolution::Missing => {
+                Resolution::NotFound
+            }
         };
     }
 
@@ -213,9 +160,9 @@ pub fn resolve_request(root: &Path, target: &str) -> Resolution {
         return Resolution::File(fallback);
     }
 
-    match confine(root, trimmed) {
-        Confined::Forbidden => return Resolution::Forbidden,
-        Confined::Allowed(path) => {
+    match httpfile::resolve_under_root(root, trimmed) {
+        httpfile::PathResolution::Forbidden => return Resolution::Forbidden,
+        httpfile::PathResolution::Allowed(path) => {
             if path.is_file() {
                 return Resolution::File(path);
             }
@@ -226,11 +173,11 @@ pub fn resolve_request(root: &Path, target: &str) -> Resolution {
                 return Resolution::File(index);
             }
         }
-        Confined::Missing => {}
+        httpfile::PathResolution::Missing => {}
     }
 
     let html = format!("{trimmed}{HTML_SUFFIX}");
-    if let Confined::Allowed(path) = confine(root, &html) {
+    if let httpfile::PathResolution::Allowed(path) = httpfile::resolve_under_root(root, &html) {
         if path.is_file() {
             return Resolution::File(path);
         }
@@ -238,71 +185,6 @@ pub fn resolve_request(root: &Path, target: &str) -> Resolution {
 
     Resolution::Fallback(fallback)
 }
-
-/// Returns the HTTP `Content-Type` for a file, based on its extension.
-///
-/// The lookup is case-insensitive (`.CSS`, `.Png`, and `.JSON` resolve the same
-/// as their lowercase forms). A file with no extension, a non-UTF-8 extension,
-/// or an unrecognized extension falls back to `application/octet-stream`.
-/// Textual types carry a `; charset=utf-8` parameter; binary types do not.
-///
-/// The Go tool this ports got content types for free: it handed every hit to
-/// `http.ServeFile`, which sniffs the extension and sets the header itself.
-/// `tiny_http` does no such thing — it sends whatever header the response
-/// carries and nothing more — so this table is load-bearing. Without it a `.css`
-/// file goes out as `text/plain`, the browser refuses to apply it, and the page
-/// renders unstyled with no error anywhere.
-///
-/// The table covers what a Next.js static export emits: markup, stylesheets, the
-/// JavaScript chunks and their `.map` source maps, the web manifest, fonts,
-/// images (including `.avif`), and the media and archive types a project may
-/// place in `public/`.
-///
-/// This function never panics, and never indexes a string by bytes, so a
-/// multi-byte extension is handled like any other.
-#[must_use]
-pub fn content_type_for(path: &Path) -> &'static str {
-    // A missing or non-UTF-8 extension falls through to the binary fallback.
-    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-        return OCTET_STREAM;
-    };
-
-    // Lowercase a whole `str` rather than slicing bytes, so a multi-byte
-    // extension is folded correctly instead of panicking.
-    let ext = ext.to_ascii_lowercase();
-    match ext.as_str() {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "js" | "mjs" => "text/javascript; charset=utf-8",
-        // `application/json` is conventionally served without a charset
-        // parameter, and a `.map` source map is JSON.
-        "json" | "map" => "application/json",
-        "webmanifest" => "application/manifest+json",
-        "txt" => "text/plain; charset=utf-8",
-        "xml" => "text/xml; charset=utf-8",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "avif" => "image/avif",
-        "ico" => "image/x-icon",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "ttf" => "font/ttf",
-        "wasm" => "application/wasm",
-        "pdf" => "application/pdf",
-        "mp4" => "video/mp4",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "zip" => "application/zip",
-        "gz" => "application/gzip",
-        _ => OCTET_STREAM,
-    }
-}
-
-/// The content type of a file whose extension names nothing recognizable.
-const OCTET_STREAM: &str = "application/octet-stream";
 
 /// Renders the two-line startup banner.
 ///
@@ -361,7 +243,7 @@ pub fn serve(
 /// - [`Resolution::Fallback`] — warn on STDERR (the Go tool logs `Couldn't find
 ///   file` here), then stream `<root>/index.html` the same way. That path is the
 ///   one path NOT canonicalized before it is served, because an export need not
-///   carry an index; a missing one yields `404` through [`serve_file`].
+///   carry an index; a missing one yields `404` through [`httpfile::serve_file`].
 /// - [`Resolution::NotFound`] — `404` with an empty body.
 /// - [`Resolution::Forbidden`] — `403` with an empty body.
 ///
@@ -372,46 +254,14 @@ fn respond(root: &Path, request: tiny_http::Request) -> std::io::Result<()> {
     let target = request.url().to_string();
 
     match resolve_request(root, &target) {
-        Resolution::File(path) => serve_file(&path, request),
+        Resolution::File(path) => httpfile::serve_file(&path, request),
         Resolution::Fallback(path) => {
             eprintln!("Couldn't find file for {target}, falling back to {INDEX_FILE}");
-            serve_file(&path, request)
+            httpfile::serve_file(&path, request)
         }
         Resolution::NotFound => request.respond(tiny_http::Response::empty(404)),
         Resolution::Forbidden => request.respond(tiny_http::Response::empty(403)),
     }
-}
-
-/// Opens `path` only if it is a regular file, returning `None` otherwise.
-///
-/// A directory, a missing path, or any other non-regular entry yields `None`.
-/// This guards the streaming path: a directory opens successfully on Unix, and
-/// advertising its metadata length and then failing to produce bytes would hang
-/// the client forever waiting for a body that never arrives.
-fn open_regular_file(path: &Path) -> Option<std::fs::File> {
-    let file = std::fs::File::open(path).ok()?;
-    file.metadata().ok()?.is_file().then_some(file)
-}
-
-/// Streams `path` to `request`, or responds `404` if it is not a regular file.
-///
-/// `path` is opened through [`open_regular_file`], so a missing path, a
-/// directory, or any other non-regular entry yields `404` — never a hung stream.
-/// A regular file (even an empty one) streams as a `200` with a `Content-Type`
-/// from [`content_type_for`] and a `Content-Length` that `tiny_http` sets from
-/// the file size.
-fn serve_file(path: &Path, request: tiny_http::Request) -> std::io::Result<()> {
-    let Some(file) = open_regular_file(path) else {
-        return request.respond(tiny_http::Response::empty(404));
-    };
-
-    // The header name and value are compile-time-known-valid, so the only
-    // `expect` on the request path can never fire.
-    let content_type =
-        tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type_for(path).as_bytes())
-            .expect("static Content-Type header is always valid");
-
-    request.respond(tiny_http::Response::from_file(file).with_header(content_type))
 }
 
 #[cfg(test)]
@@ -669,115 +519,6 @@ mod tests {
             resolve_request(&root, "/escape.html"),
             Resolution::Forbidden
         );
-    }
-
-    use super::content_type_for;
-
-    /// Reads the Content-Type of a filename, for readability at the call sites.
-    fn ct(filename: &str) -> &'static str {
-        content_type_for(Path::new(filename))
-    }
-
-    #[test]
-    fn html_is_html() {
-        assert_eq!(ct("index.html"), "text/html; charset=utf-8");
-        assert_eq!(ct("index.htm"), "text/html; charset=utf-8");
-    }
-
-    #[test]
-    fn css_is_css() {
-        assert_eq!(ct("app.css"), "text/css; charset=utf-8");
-    }
-
-    #[test]
-    fn javascript_is_javascript() {
-        assert_eq!(ct("chunk.js"), "text/javascript; charset=utf-8");
-        assert_eq!(ct("chunk.mjs"), "text/javascript; charset=utf-8");
-    }
-
-    #[test]
-    fn json_and_source_maps_are_json_without_a_charset() {
-        assert_eq!(ct("build-manifest.json"), "application/json");
-        assert_eq!(ct("chunk.js.map"), "application/json");
-    }
-
-    #[test]
-    fn a_web_manifest_is_a_manifest() {
-        assert_eq!(ct("site.webmanifest"), "application/manifest+json");
-    }
-
-    #[test]
-    fn text_types_carry_a_charset() {
-        assert_eq!(ct("robots.txt"), "text/plain; charset=utf-8");
-        assert_eq!(ct("sitemap.xml"), "text/xml; charset=utf-8");
-    }
-
-    #[test]
-    fn svg_is_svg() {
-        assert_eq!(ct("logo.svg"), "image/svg+xml");
-    }
-
-    #[test]
-    fn image_types() {
-        assert_eq!(ct("logo.png"), "image/png");
-        assert_eq!(ct("hero.jpg"), "image/jpeg");
-        assert_eq!(ct("hero.jpeg"), "image/jpeg");
-        assert_eq!(ct("spin.gif"), "image/gif");
-        assert_eq!(ct("hero.webp"), "image/webp");
-        assert_eq!(ct("hero.avif"), "image/avif");
-        assert_eq!(ct("favicon.ico"), "image/x-icon");
-    }
-
-    #[test]
-    fn font_types() {
-        assert_eq!(ct("inter.woff"), "font/woff");
-        assert_eq!(ct("inter.woff2"), "font/woff2");
-        assert_eq!(ct("inter.ttf"), "font/ttf");
-    }
-
-    #[test]
-    fn binary_and_media_types() {
-        assert_eq!(ct("module.wasm"), "application/wasm");
-        assert_eq!(ct("paper.pdf"), "application/pdf");
-        assert_eq!(ct("clip.mp4"), "video/mp4");
-        assert_eq!(ct("theme.mp3"), "audio/mpeg");
-        assert_eq!(ct("beep.wav"), "audio/wav");
-        assert_eq!(ct("bundle.zip"), "application/zip");
-        assert_eq!(ct("bundle.gz"), "application/gzip");
-    }
-
-    #[test]
-    fn the_extension_match_is_case_insensitive() {
-        assert_eq!(ct("APP.CSS"), "text/css; charset=utf-8");
-        assert_eq!(ct("Index.HTML"), "text/html; charset=utf-8");
-        assert_eq!(ct("LOGO.PnG"), "image/png");
-    }
-
-    #[test]
-    fn a_file_with_no_extension_is_an_opaque_byte_stream() {
-        assert_eq!(ct("LICENSE"), "application/octet-stream");
-        assert_eq!(ct(".gitignore"), "application/octet-stream");
-    }
-
-    #[test]
-    fn an_unknown_extension_is_an_opaque_byte_stream() {
-        assert_eq!(ct("archive.tar"), "application/octet-stream");
-    }
-
-    #[test]
-    fn a_multi_byte_extension_never_panics() {
-        assert_eq!(ct("notes.日本語"), "application/octet-stream");
-        assert_eq!(ct("café.html"), "text/html; charset=utf-8");
-    }
-
-    // The content-type table should be the UNION of localnext's and sirn's
-    // tables (issue #421): each table currently carries extensions the other
-    // lacks. `.md` and `.csv` are sirn's; this crate's table does not have
-    // them yet, so this fails until the two tables are unified.
-    #[test]
-    fn the_table_carries_sirns_document_extensions_too() {
-        assert_eq!(ct("README.md"), "text/markdown; charset=utf-8");
-        assert_eq!(ct("rows.csv"), "text/csv; charset=utf-8");
     }
 }
 

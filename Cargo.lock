@@ -3913,6 +3913,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
+name = "httpfile"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tiny_http",
+]
+
+[[package]]
 name = "human_bytes"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4811,6 +4819,7 @@ version = "0.1.0"
 dependencies = [
  "buildinfo",
  "clap",
+ "httpfile",
  "percent-encoding",
  "portplz-core",
  "tempfile",
@@ -7312,6 +7321,7 @@ version = "0.1.0"
 dependencies = [
  "buildinfo",
  "clap",
+ "httpfile",
  "percent-encoding",
  "portplz-core",
  "tempfile",

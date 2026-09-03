@@ -178,6 +178,7 @@ op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
 gitscratch = { path = "src/gitscratch" }
+httpfile = { path = "src/httpfile" }
 portplz-core = { path = "src/portplz-core" }
 repowalker = { path = "src/repowalker" }
 shellsetup = { path = "src/shellsetup" }
