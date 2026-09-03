@@ -59,7 +59,7 @@ use std::collections::{BTreeMap, VecDeque};
 use thiserror::Error;
 use unicode_width::UnicodeWidthChar;
 
-use crate::chain::{IssueNumber, Snippet};
+use crate::chain::{list, IssueNumber, Snippet};
 use crate::plan::{one_step, Step};
 
 /// The list a position outside the graph gives.
@@ -766,6 +766,14 @@ pub enum GraphError {
     /// the wire, because a dropped wire is an order the answer loses.
     #[error("{0:?} holds a diagonal wire, and a diagonal touches no side of a cell")]
     Diagonal(Snippet),
+    /// The wires of the picture return to a step that comes before them.
+    ///
+    /// The numbers are the steps of one real cycle, in the order a walk of the
+    /// wires meets them. A cycle has no step to start, and an answer of
+    /// "nothing is ready" hides the reason, so the message names the steps that
+    /// wait for each other.
+    #[error("the wires return to {}, so this picture names no step to start first", list(.0))]
+    Cycle(Vec<IssueNumber>),
 }
 
 /// The graph `text` draws, or `None` when `text` draws none.
@@ -1046,6 +1054,39 @@ A ──→ #4 ──┐
         format!("{CLAIMING_FAN}\n{line}")
     }
 
+    /// A picture whose wires return to the step they left.
+    ///
+    /// A wire runs from left to right, always, so a cycle is drawn by a number
+    /// that stands twice: `#1` comes before `#2` on the first line, and `#2`
+    /// comes before `#1` on the third. The bus hangs `#4` under both of them,
+    /// so the picture holds a node the cycle does not.
+    const CYCLE_OF_TWO: &str = "\
+#1 ──→ #2 ──┐
+            ├──→ #4
+#2 ──→ #1 ──┘";
+
+    /// The same shape, with a third step inside the cycle.
+    const CYCLE_OF_THREE: &str = "\
+#1 ──→ #2 ──→ #3 ──┐
+                   ├──→ #5
+#3 ──→ #1 ─────────┘";
+
+    /// A step the picture joins to itself.
+    ///
+    /// The shortest cycle there is. The bus makes the text a picture, so the
+    /// wire between the two `#1` reaches the reader of a graph.
+    const SELF_EDGE: &str = "\
+#1 ──→ #1 ──┐
+            └──→ #3";
+
+    /// The issue numbers `values` names.
+    fn numbers_of(values: &[u64]) -> Vec<IssueNumber> {
+        values
+            .iter()
+            .map(|&value| IssueNumber::new(value).expect("a test number is an issue number"))
+            .collect()
+    }
+
     /// The graph `text` draws.
     fn graph_of(text: &str) -> Graph {
         read(text)
@@ -1310,6 +1351,30 @@ A ──→ #4 ──┐
         // of them belongs to the picture and the paste under it still reads.
         let page = format!("see docs/plan.md \u{2190} here\n\n{PASTE}");
         assert_eq!(edges(&graph_of(&page)), edges(&graph_of(PASTE)));
+    }
+
+    #[test]
+    fn a_cycle_is_refused_and_the_message_names_the_steps_of_it() {
+        // The steps of the cycle alone. Every node the cycle reaches is
+        // blocked as well, and a message that names all of them tells a reader
+        // to read five rows to find the two that hold the knot. The order is
+        // the order a walk of the wires meets them, so the message reads as
+        // the walk that found it.
+        assert_eq!(
+            refusal(CYCLE_OF_TWO),
+            GraphError::Cycle(numbers_of(&[1, 2]))
+        );
+        assert_eq!(
+            refusal(CYCLE_OF_THREE),
+            GraphError::Cycle(numbers_of(&[1, 2, 3]))
+        );
+    }
+
+    #[test]
+    fn a_step_joined_to_itself_is_a_cycle_of_one() {
+        // The shortest cycle there is. It waits for itself, so it never
+        // starts, and the reader must hear which step holds the knot.
+        assert_eq!(refusal(SELF_EDGE), GraphError::Cycle(numbers_of(&[1])));
     }
 
     #[test]
