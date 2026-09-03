@@ -8,6 +8,7 @@ use std::thread;
 
 use buildinfo::version_string;
 use clap::Parser;
+use gitscratch::shed_inherited_git_environment;
 use names::Generator;
 use repowalker::find_repo_context;
 use serde::Deserialize;
@@ -52,6 +53,18 @@ const SKIP_DIRECTORIES: &[&str] = &[
 /// explicitly at creation time instead.
 #[cfg(unix)]
 const ENV_FILE_MODE: u32 = 0o600;
+
+/// The git configuration key with which a repository states where its worktrees
+/// belong.
+///
+/// The default answer, `{repo-name}-worktrees` beside the main worktree, is
+/// right for a normal repository and for a repository whose git directory is
+/// detached from its work tree. It is not right for every layout, and a
+/// repository with an unusual one says so here. The key lives in git
+/// configuration rather than in `~/.nwt.toml` because the answer belongs to one
+/// repository, and because `yadm` already tracks the repository's own
+/// configuration file.
+const WORKTREES_DIR_KEY: &str = "nwt.worktreesDir";
 
 /// Shell code to be installed by --shell-setup.
 ///
@@ -1277,6 +1290,96 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> E
     summary
 }
 
+/// The directory that holds every worktree of the repository at `repo_root`.
+///
+/// The repository states the answer with the [`WORKTREES_DIR_KEY`]
+/// configuration key. The default stands when the key says nothing: the name of
+/// the main worktree plus `-worktrees`, beside the main worktree.
+///
+/// # Exits
+///
+/// Exits the process when the answer cannot be built. The default needs a
+/// repository name that is valid UTF-8 ([`exit_codes::INVALID_PATH_ENCODING`])
+/// and survives sanitizing ([`exit_codes::INVALID_REPO_NAME`]), and it needs a
+/// parent directory to sit in ([`exit_codes::NO_PARENT_DIR`]).
+fn worktrees_dir(repo_root: &Path, quiet: bool) -> PathBuf {
+    if let Some(stated) = stated_worktrees_dir(repo_root) {
+        return PathBuf::from(stated);
+    }
+
+    // Get repo name from path with sanitization (fail-fast on non-UTF8)
+    let repo_name = match repo_root.file_name() {
+        Some(name) => {
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => {
+                    error!(
+                        quiet,
+                        "Error: Repository name contains invalid UTF-8 characters"
+                    );
+                    exit(exit_codes::INVALID_PATH_ENCODING);
+                }
+            };
+            match sanitize_repo_name(name_str) {
+                Some(sanitized) => sanitized,
+                None => {
+                    error!(quiet, "Error: Invalid repository name");
+                    exit(exit_codes::INVALID_REPO_NAME);
+                }
+            }
+        }
+        None => {
+            error!(quiet, "Error: Could not determine repository name");
+            exit(exit_codes::INVALID_REPO_NAME);
+        }
+    };
+
+    // Build worktrees directory path
+    let parent = match repo_root.parent() {
+        Some(p) => p,
+        None => {
+            error!(quiet, "Error: Repository has no parent directory");
+            exit(exit_codes::NO_PARENT_DIR);
+        }
+    };
+    parent.join(format!("{}-worktrees", repo_name))
+}
+
+/// The value of [`WORKTREES_DIR_KEY`], or `None` when the repository at
+/// `repo_root` sets the key nowhere.
+///
+/// `git config --get` reads every scope, so the answer can come from the
+/// repository's own configuration, from `~/.gitconfig`, or from the system
+/// configuration.
+///
+/// The command sheds the whole inherited `GIT_*` family through
+/// [`gitscratch::shed_inherited_git_environment`]. An inherited `GIT_DIR` aims
+/// git at another repository, and the answer would then be that repository's
+/// setting. The rule is the `GIT_` prefix and never a list of names: see that
+/// function for which variable walked through the last list.
+fn stated_worktrees_dir(repo_root: &Path) -> Option<String> {
+    let mut command = Command::new("git");
+    shed_inherited_git_environment(&mut command);
+
+    let output = command
+        .args(["config", "--get", WORKTREES_DIR_KEY])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    // Git ends the value with a line break, and the line break is no part of
+    // the path.
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches(['\n', '\r'])
+            .to_string(),
+    )
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -1355,42 +1458,10 @@ fn main() {
         }
     };
 
-    // Get repo name from path with sanitization (fail-fast on non-UTF8)
-    let repo_name = match repo_root.file_name() {
-        Some(name) => {
-            let name_str = match name.to_str() {
-                Some(s) => s,
-                None => {
-                    error!(
-                        config.quiet,
-                        "Error: Repository name contains invalid UTF-8 characters"
-                    );
-                    exit(exit_codes::INVALID_PATH_ENCODING);
-                }
-            };
-            match sanitize_repo_name(name_str) {
-                Some(sanitized) => sanitized,
-                None => {
-                    error!(config.quiet, "Error: Invalid repository name");
-                    exit(exit_codes::INVALID_REPO_NAME);
-                }
-            }
-        }
-        None => {
-            error!(config.quiet, "Error: Could not determine repository name");
-            exit(exit_codes::INVALID_REPO_NAME);
-        }
-    };
-
-    // Build worktrees directory path
-    let parent = match repo_root.parent() {
-        Some(p) => p,
-        None => {
-            error!(config.quiet, "Error: Repository has no parent directory");
-            exit(exit_codes::NO_PARENT_DIR);
-        }
-    };
-    let worktrees_dir = parent.join(format!("{}-worktrees", repo_name));
+    // Ask where this repository keeps its worktrees. The repository states the
+    // answer with `nwt.worktreesDir`, and the default stands when it says
+    // nothing.
+    let worktrees_dir = worktrees_dir(&repo_root, config.quiet);
 
     // Create worktrees directory if needed
     if let Err(e) = fs::create_dir_all(&worktrees_dir) {

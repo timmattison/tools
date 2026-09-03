@@ -11,6 +11,11 @@ path = "src/main.rs"
 buildinfo.workspace = true
 clap.workspace = true
 dirs.workspace = true
+# For `shed_inherited_git_environment`: nwt asks git where this repository keeps
+# its worktrees, and an inherited GIT_DIR would aim that question at another
+# repository. Which variables to shed is knowledge that lives in gitscratch
+# rather than being copied here to drift.
+gitscratch.workspace = true
 names.workspace = true
 repowalker.workspace = true
 serde.workspace = true
