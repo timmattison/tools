@@ -444,6 +444,17 @@ mod tests {
     }
 
     #[test]
+    fn the_current_directory_answers_the_same_as_a_directory_named_by_hand() {
+        let here = env::current_dir().expect("read the current directory");
+        let named = find_repo_context_at(&here).expect("the tests run inside a git repository");
+
+        let current = find_repo_context().expect("the tests run inside a git repository");
+
+        assert_eq!(current.checkout(), named.checkout());
+        assert_eq!(current.main_worktree(), named.main_worktree());
+    }
+
+    #[test]
     fn a_directory_that_is_no_repository_has_no_context() {
         let dir = tempfile::TempDir::new().expect("create temp dir");
 
