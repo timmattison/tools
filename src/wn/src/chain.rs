@@ -265,6 +265,17 @@ mod tests {
     }
 
     #[test]
+    fn a_chain_drawn_with_the_stroke_of_a_picture_is_a_chain() {
+        // A picture of one line is a chain, and a reader who draws one draws
+        // it with the stroke the picture reader accepts. The tail of that
+        // arrow is a run of one character, so a reader that did not know the
+        // character read the whole run as one token and refused it.
+        assert_eq!(numbers("#1 \u{2500}\u{2500}\u{2192} #2"), vec![1, 2]);
+        assert_eq!(numbers("#1 \u{2501}\u{2501}\u{2192} #2"), vec![1, 2]);
+        assert_eq!(numbers("#1 \u{2550}\u{2550}\u{21d2} #2"), vec![1, 2]);
+    }
+
+    #[test]
     fn keeps_a_repeated_issue_at_its_first_place() {
         assert_eq!(numbers("#5 → #6 → #5 → #7"), vec![5, 6, 7]);
     }
