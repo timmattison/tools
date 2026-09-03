@@ -854,4 +854,24 @@ mod tests {
         assert_eq!(nodes(&graph), vec![1, 2, 249]);
         assert_eq!(edges(&graph), vec![(1, 249), (2, 249)]);
     }
+
+    #[test]
+    fn a_node_holds_the_pull_request_and_the_issue_it_closes() {
+        // One piece of work is sometimes two numbers. The reader of a step
+        // reads the pair, so a picture holds it exactly as a table holds it:
+        // the pull request is the work, and the issue is what the work closes.
+        let graph = graph_of(
+            "\
+#1 ──┐
+     ├──→ #4 (in flight, PR #15)
+#2 ──┘",
+        );
+        assert_eq!(nodes(&graph), vec![1, 2, 15]);
+        let work = graph
+            .steps()
+            .iter()
+            .find(|step| step.number().get() == 15)
+            .expect("the picture names the pull request");
+        assert_eq!(work.closes().map(IssueNumber::get), Some(4));
+    }
 }
