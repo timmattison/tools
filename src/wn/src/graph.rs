@@ -730,6 +730,13 @@ pub enum GraphError {
     /// answer that names the last issue first sends somebody to the wrong work.
     #[error("{0:?} holds a leftward arrowhead, and this reader follows a wire from left to right")]
     Leftward(Snippet),
+    /// A line of the picture holds a wire that runs corner to corner.
+    ///
+    /// A diagonal touches no side of a cell, so the rule that makes two wires
+    /// one net cannot read it. The reader refuses the line rather than dropping
+    /// the wire, because a dropped wire is an order the answer loses.
+    #[error("{0:?} holds a diagonal wire, and a diagonal touches no side of a cell")]
+    Diagonal(Snippet),
 }
 
 /// The graph `text` draws, or `None` when `text` draws none.
@@ -1248,6 +1255,21 @@ A ──→ #4 ──┐
                 refusal(&under_a_picture(&line)),
                 GraphError::Leftward(Snippet::new(&line)),
                 "the head {head:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_diagonal_wire_is_refused_and_the_message_names_the_line() {
+        // The two ASCII spellings and the three box-drawing ones. A diagonal
+        // touches no side of a cell, so the picture says an order this reader
+        // cannot follow, whichever character draws it.
+        for stroke in ['/', '\\', '\u{2571}', '\u{2572}', '\u{2573}'] {
+            let line = format!("#5 ──{stroke} #6");
+            assert_eq!(
+                refusal(&under_a_picture(&line)),
+                GraphError::Diagonal(Snippet::new(&line)),
+                "the stroke {stroke:?}"
             );
         }
     }
