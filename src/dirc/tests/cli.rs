@@ -124,6 +124,47 @@ const SHELL_SCRIPT_FLAG: &str = "-c";
 /// arguments, so a script that reads `$1` has to name it.
 const SHELL_NAME: &str = "sh";
 
+/// What the script says after the idiom of the help, so the test reads where
+/// the shell landed.
+const REPORT_WHERE: &str = "; pwd";
+
+/// The word the help spells the tool with.
+const TOOL_WORD: &str = "dirc";
+
+/// What the test writes in place of that word.
+///
+/// The path of the built binary goes to the shell as an argument, and the
+/// script names it here. This reference carries quotes of its own, so a build
+/// directory whose path holds a space stays one word. What is left for the test
+/// to read is the quoting the help teaches around the substitution.
+const BINARY_REFERENCE: &str = "\"$1\"";
+
+/// The label the help puts in front of the line for Bash and Zsh.
+const BASH_LABEL: &str = "Bash/Zsh:";
+
+/// The label the help puts in front of the line for fish.
+const FISH_LABEL: &str = "Fish:";
+
+/// The word that opens an alias. It tells the line of the TIP paragraph from
+/// the line of the NOTE paragraph, because both carry the same label.
+const ALIAS: &str = "alias ";
+
+/// The name the alias of the help takes.
+const ALIAS_NAME: &str = "dirp=";
+
+/// What a fish substitution needs, to stay one word.
+const COLLECT: &str = "string collect";
+
+/// A directory name that holds a tab.
+///
+/// A tab is one of the three characters the field separator of a shell holds.
+/// An unquoted substitution is thus split at this tab, and the pieces come back
+/// together with a space between them.
+const TAB_NAME: &str = "holds\ta tab";
+
+/// The file that documents every tool of this workspace.
+const README: &str = "README.md";
+
 /// The temporary directory of one test, and the clipboard file inside it.
 struct Scratch {
     /// The directory. It removes itself and everything in it when the test
@@ -245,6 +286,78 @@ fn quoteless(path: &Path) -> &str {
     written
 }
 
+/// The help page of the built tool.
+///
+/// The page comes out of a run of the binary and never out of the source, so
+/// every test below reads what a user reads. The run goes through [`run`], so
+/// it names a clipboard file of its own like every other child of this file.
+fn help_page() -> String {
+    let scratch = Scratch::new();
+    let output = run(&scratch, &[HELP]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    stdout(&output)
+}
+
+/// The two invocations `help` gives under `label`: the idiom, then the alias.
+///
+/// The page names each shell two times. The NOTE paragraph gives the idiom
+/// itself, and the TIP paragraph gives the alias that holds it. Both lines
+/// carry the same label, so [`ALIAS`] is what tells them apart.
+///
+/// The count of each is asserted. A page that lost one of the two lines would
+/// otherwise leave a test with nothing to read, and a test that reads nothing
+/// reports clean for the wrong reason.
+fn invocations(help: &str, label: &str) -> (String, String) {
+    let mut idioms = Vec::new();
+    let mut aliases = Vec::new();
+
+    for line in help.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix(label) else {
+            continue;
+        };
+        let given = rest.trim().to_string();
+        if given.starts_with(ALIAS) {
+            aliases.push(given);
+        } else {
+            idioms.push(given);
+        }
+    }
+
+    assert_eq!(idioms.len(), 1, "one {label} idiom is in the help: {help}");
+    assert_eq!(aliases.len(), 1, "one {label} alias is in the help: {help}");
+    (idioms.remove(0), aliases.remove(0))
+}
+
+/// `idiom` with a reference to the built binary in place of the word the help
+/// spells the tool with.
+///
+/// The path itself never enters the text. It goes to the shell as an argument,
+/// and [`BINARY_REFERENCE`] names it, so the characters of the build directory
+/// change nothing. The quoting the help teaches is then the only quoting the
+/// shell reads.
+fn with_built_binary(idiom: &str) -> String {
+    assert_eq!(
+        idiom.matches(TOOL_WORD).count(),
+        1,
+        "the idiom names the tool one time: {idiom}"
+    );
+    idiom.replace(TOOL_WORD, BINARY_REFERENCE)
+}
+
+/// The text of the README of this repository.
+///
+/// `CARGO_MANIFEST_DIR` names `src/dirc`, so the root of the repository is two
+/// directories above it. A read that fails stops the test, because a test that
+/// found no file must not report that the file agrees with the help.
+fn readme() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(README);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|failure| panic!("{README} is read from {path:?}: {failure}"))
+}
+
 /// Asserts that paste mode refused the clipboard of `scratch` and said
 /// `message`.
 ///
@@ -358,6 +471,109 @@ fn the_shell_runs_the_cd_line_of_a_name_that_holds_a_quote() {
         resolved(&child),
         "the shell landed in {there:?}"
     );
+}
+
+#[test]
+fn the_shell_runs_the_idiom_the_help_teaches_into_a_name_that_holds_a_tab() {
+    // The command this test runs comes out of the help page. The page and the
+    // test thus cannot drift apart: a page that teaches a command which does
+    // not work is a test that fails.
+    //
+    // The name of the directory holds a tab, which is one of the three
+    // characters the field separator of a shell holds. A substitution the line
+    // leaves unquoted is split at that tab, and `eval` puts the pieces back
+    // together with a space between them, so `cd` gets a name that is not
+    // there. The shell then stays in the temporary directory, and `pwd` says
+    // so.
+    let scratch = Scratch::new();
+    let child = scratch.directory(TAB_NAME);
+    scratch.write_clipboard(text(&child));
+
+    let (idiom, _alias) = invocations(&help_page(), BASH_LABEL);
+    let script = format!("{}{REPORT_WHERE}", with_built_binary(&idiom));
+
+    let landed = Command::new(SHELL)
+        .env_clear()
+        // The children of this shell read the clipboard of this test. No child
+        // of this file reaches the clipboard of the machine.
+        .env(CLIPBOARD_FILE_ENV, scratch.clipboard())
+        .current_dir(scratch.path())
+        .args([
+            SHELL_SCRIPT_FLAG,
+            script.as_str(),
+            SHELL_NAME,
+            env!("CARGO_BIN_EXE_dirc"),
+        ])
+        .output()
+        .expect("the shell starts");
+
+    let said = stdout(&landed);
+    let there = Path::new(said.trim_end());
+    // Both paths are resolved before they are compared, because `pwd` gives
+    // back the path `cd` was given and macOS puts a temporary directory under
+    // a symlink.
+    assert_eq!(
+        resolved(there),
+        resolved(&child),
+        "the shell ran {script:?}, landed in {there:?}, and said {:?}",
+        stderr(&landed)
+    );
+}
+
+#[test]
+fn the_alias_of_the_help_holds_the_idiom_of_the_help() {
+    // A reader installs the alias of the TIP paragraph and runs the idiom of
+    // the NOTE paragraph. The test above runs the idiom, so the alias has to
+    // hold that same idiom. Two paragraphs that drifted apart would teach two
+    // commands, and only one of them would be under test.
+    let help = help_page();
+
+    for label in [BASH_LABEL, FISH_LABEL] {
+        let (idiom, alias) = invocations(&help, label);
+        assert!(
+            alias.contains(&idiom),
+            "the {label} alias is {alias:?} and the {label} idiom is {idiom:?}"
+        );
+    }
+}
+
+#[test]
+fn the_readme_gives_the_alias_the_help_gives() {
+    // The repository documents this tool two times, and a reader takes the
+    // alias out of whichever one is in front of them. The README leaves the
+    // `alias` word out, because the sentence around it already says the line is
+    // an alias, so the test reads the rest of the line.
+    let (_idiom, alias) = invocations(&help_page(), BASH_LABEL);
+    let body = alias
+        .strip_prefix(ALIAS)
+        .expect("the alias line opens with the alias word");
+
+    let readme = readme();
+    let named: Vec<&str> = readme
+        .lines()
+        .filter(|line| line.contains(ALIAS_NAME))
+        .collect();
+
+    // A README that names the alias no times, or more than one time, stops the
+    // test. The assertion below would otherwise pass over a line that is gone.
+    assert_eq!(named.len(), 1, "{README} names {ALIAS_NAME} one time");
+    assert!(named[0].contains(body), "{README} says {:?}", named[0]);
+}
+
+#[test]
+fn the_fish_lines_collect_the_substitution() {
+    // Fish splits a substitution at every newline, and a directory name can
+    // hold one. `string collect` makes the whole output one word again.
+    //
+    // The text is all this test reads, because fish is not on the machine that
+    // runs these tests. The shell at SHELL is the only shell any test here
+    // starts.
+    let help = help_page();
+    let (idiom, alias) = invocations(&help, FISH_LABEL);
+
+    for line in [&idiom, &alias] {
+        assert!(line.contains(COLLECT), "the fish line is {line:?}");
+    }
 }
 
 #[test]
