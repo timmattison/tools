@@ -324,12 +324,19 @@ fn answer(report: &Report, start: &StartCommand) -> String {
             "No issue in the chain is open.".dimmed().to_string()
         };
     };
+    start_line(entry.number, start)
+}
+
+/// The sentence that names one issue to start, and the command that starts it.
+///
+/// A chain names one such issue, and a picture names one for each stream that
+/// is ready. Both write this sentence, so a reader who learned it on a chain
+/// reads the answer of a picture without learning a second one.
+fn start_line(number: IssueNumber, start: &StartCommand) -> String {
     format!(
         "Start {} next with '{}'",
-        entry.number.to_string().bold(),
-        format!("{} {}", start.as_str(), entry.number.get())
-            .cyan()
-            .bold()
+        number.to_string().bold(),
+        command(start, number).cyan().bold()
     )
 }
 
@@ -337,13 +344,60 @@ fn answer(report: &Report, start: &StartCommand) -> String {
 /// answer.
 ///
 /// `repo`, `width`, and `start` mean what they mean in [`render`].
+///
+/// A picture names at least two steps, because a net that joins fewer of them
+/// claims no text. So this function paints no empty block, and the rows always
+/// stand over the answer.
 #[must_use]
 #[allow(
     dead_code,
     reason = "the run of a picture calls this in the slice that answers a graph"
 )]
 pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartCommand) -> String {
-    render(report, repo, width, start)
+    let entries = report.entries();
+    let number_width = entries
+        .iter()
+        .map(|entry| UnicodeWidthStr::width(entry.label().as_str()))
+        .max()
+        .unwrap_or(0);
+
+    let mut lines: Vec<String> = entries
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| {
+            row(
+                entry,
+                report.is_ready(position),
+                number_width,
+                width,
+                NO_WAITS,
+                NO_TITLE_WIDTH,
+            )
+        })
+        .collect();
+
+    lines.push(String::new());
+    lines.extend(notes(report, repo));
+    lines.extend(graph_answer(report, start));
+    lines.join("\n")
+}
+
+/// The answer of a picture: one line for each step somebody can start now.
+///
+/// The lines stand in the order of the rows, so a reader who read the rows
+/// reads the answers in the same order and finds the row of each of them.
+fn graph_answer(report: &Report, start: &StartCommand) -> Vec<String> {
+    let ready: Vec<String> = report
+        .entries()
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| report.is_ready(*position))
+        .map(|(_, entry)| start_line(entry.number, start))
+        .collect();
+    if ready.is_empty() {
+        return vec![answer(report, start)];
+    }
+    ready
 }
 
 /// One stream of a plan, painted as one block.
