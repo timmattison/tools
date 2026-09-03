@@ -56,10 +56,6 @@ use crate::plan::Step;
 ///
 /// A named constant, because [`Report::waits_for`] gives a slice and an empty
 /// `Vec` of its own would live no longer than the call.
-#[allow(
-    dead_code,
-    reason = "the render of a graph reads waits_for in the slice that draws it"
-)]
 const NO_NUMBERS: &[IssueNumber] = &[];
 
 /// What GitHub says about one issue of the chain.
@@ -354,10 +350,6 @@ impl Report {
     /// report gives an empty list for the same reason
     /// [`is_ready`](Self::is_ready) gives `false`.
     #[must_use]
-    #[allow(
-        dead_code,
-        reason = "the render of a graph writes this column in the slice that draws it"
-    )]
     pub fn waits_for(&self, position: usize) -> &[IssueNumber] {
         self.waits.get(position).map_or(NO_NUMBERS, Vec::as_slice)
     }

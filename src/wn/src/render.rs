@@ -29,6 +29,13 @@
 //! block for each of them. A block carries no answer of its own: the summary
 //! under the last block names the issue to start in every stream, so the
 //! reader reads the answers together and picks the stream they want.
+//!
+//! # A picture is one block with one column more
+//!
+//! A picture joins two streams, so the row over a row is not the work that row
+//! waits for. [`render_graph`] paints one block with a last column that names
+//! that work, and the answer under it names one command for each step somebody
+//! can start now.
 
 use colored::{ColoredString, Colorize};
 use textfit::{pad_right, truncate_to_budget};
@@ -51,6 +58,15 @@ const MARK_MISSING: char = '?';
 
 /// The columns between the number and the title.
 const COLUMN_GAP: usize = 2;
+
+/// The words that open the last column of a row of a picture.
+const WAITS_FOR: &str = "waits for ";
+
+/// What stands between two numbers of that column.
+///
+/// A comma, and not the `and` of [`list`], because the column is a list and a
+/// sentence stands in a note.
+const NUMBER_SEPARATOR: &str = ", ";
 
 /// The last column of a row of one line of work.
 ///
@@ -361,6 +377,10 @@ pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartComm
         .max()
         .unwrap_or(0);
 
+    let waits: Vec<String> = (0..entries.len())
+        .map(|position| waits_text(report.waits_for(position)))
+        .collect();
+
     let mut lines: Vec<String> = entries
         .iter()
         .enumerate()
@@ -370,7 +390,7 @@ pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartComm
                 report.is_ready(position),
                 number_width,
                 width,
-                NO_WAITS,
+                &waits[position],
                 NO_TITLE_WIDTH,
             )
         })
@@ -380,6 +400,20 @@ pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartComm
     lines.extend(notes(report, repo));
     lines.extend(graph_answer(report, start));
     lines.join("\n")
+}
+
+/// The last column of one row: the numbers the step waits for.
+///
+/// A step that waits for nothing gives an empty text, and the row then ends at
+/// its title. Every other step gives `waits for #247, #248`, which is the
+/// question a reader of a blocked row asks and the only place the answer of a
+/// picture holds it.
+fn waits_text(numbers: &[IssueNumber]) -> String {
+    if numbers.is_empty() {
+        return String::new();
+    }
+    let written: Vec<String> = numbers.iter().map(ToString::to_string).collect();
+    format!("{WAITS_FOR}{}", written.join(NUMBER_SEPARATOR))
 }
 
 /// The answer of a picture: one line for each step somebody can start now.
