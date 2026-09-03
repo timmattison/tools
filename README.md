@@ -1147,9 +1147,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - The light set, the heavy set, and the double set all draw wires — `─ ━ ═`, `│ ┃ ║`, and every
     corner, tee, and cross beside them — and so do the ASCII spellings `-`, `|`, `+`, and `>`. An
     ASCII `-`, `|`, `+`, or `>` is a wire only when a neighbor on a side it touches draws a wire
-    as well. Prose holds all four of those characters, and `a 30-line window` holds no wire: a
-    digit and a letter stand beside that hyphen, so the hyphen draws nothing. A box-drawing
-    character never stands inside a word, so it needs no such test.
+    as well, and it draws no wire when the run it stands in ends at a letter. Prose holds all four
+    of those characters, and a neighbor alone is too little: the two hyphens of `--hidden` stand
+    beside each other, so a label such as `#249  (pass --hidden)` would run a wire through the
+    prose of a port. `wn` reads the run and never the one character, so `a 30-line window` holds
+    no wire, `(pass --hidden)` holds none, and `#1-->#2` holds one, because a digit and a `#` are
+    no letters. A box-drawing character never stands inside a word, so it needs no such test.
   - The readers are tried in one order: the record form and the table form of a plan first, the
     picture second, and the chain last. A picture claims the text when one of its nets joins two
     steps that stand on different lines. That rule is what keeps `#1 ──→ #2` a chain, because both

@@ -38,14 +38,24 @@
 //! two columns further right for each one. The grid counts display columns for
 //! that reason, and it never counts characters.
 //!
-//! # An ASCII wire needs a neighbor
+//! # An ASCII wire needs a neighbor, and a word ends it
 //!
 //! A reader draws the same picture with `-`, `|`, `+`, and `>`, and prose
 //! holds all four of those characters. So an ASCII spelling is a wire only
 //! when a neighbor on a side it touches is a connector character as well. `a
 //! 30-line window` holds no wire, because a digit and a letter stand beside
-//! its hyphen. A box-drawing character never stands inside a word, so it needs
-//! no such test.
+//! its hyphen.
+//!
+//! A neighbor alone is too little, because one character of prose stands
+//! beside another: the two hyphens of `--hidden` answer for each other, and
+//! every plan names a flag. So this reader reads the run and never the one
+//! character. It walks the wire characters to each end of the run, and the run
+//! draws no wire when a letter stands at that end. `(pass --hidden)` is a flag
+//! and `well-known` is a word, and neither of them holds a wire. `#1-->#2`
+//! holds one, because a digit and a `#` are no letters.
+//!
+//! A box-drawing character never stands inside a word, so it reads neither
+//! test.
 //!
 //! A stroke that runs corner to corner needs a neighbor as well, and for the
 //! same reason. A line of the picture carries prose in the text of its ports,
@@ -154,9 +164,12 @@ const DIAGONALS: &[char] = &[
 ///
 /// Prose holds all four of them: a hyphen inside a word, a bar between two
 /// words, a plus in a sum, and the `>` of a quotation. So each of them is a
-/// wire only when a neighbor on a side it touches draws a wire as well. `>`
-/// stands here and in [`RIGHTWARD_HEADS`], because it is the head of the
-/// ASCII arrow and it is one character of prose.
+/// wire only when a neighbor on a side it touches draws a wire as well, and it
+/// draws no wire when the run it stands in ends at a letter: the two hyphens
+/// of `--hidden` stand beside each other, and a flag is no wire.
+/// [`Grid::sides_at`] holds both rules. `>` stands here and in
+/// [`RIGHTWARD_HEADS`], because it is the head of the ASCII arrow and it is
+/// one character of prose.
 const ASCII_SPELLINGS: &[char] = &['-', '|', '+', '>'];
 
 /// One of the four sides of a cell.
@@ -276,9 +289,10 @@ struct Place {
 
 /// The sides `c` touches, or `None` when `c` draws no wire.
 ///
-/// This is the whole table, and it is read for the character alone. The rule
-/// that an ASCII spelling needs a neighbor stands in [`Grid::sides_at`],
-/// because that rule reads the grid and this table does not.
+/// This is the whole table, and it is read for the character alone. The rules
+/// that an ASCII spelling needs a neighbor and ends at no letter stand in
+/// [`Grid::sides_at`], because those rules read the grid and this table does
+/// not.
 fn sides_of(c: char) -> Option<Sides> {
     let sides = match c {
         // The whole box-drawing block, minus the three diagonals. Every
@@ -332,7 +346,8 @@ fn sides_of(c: char) -> Option<Sides> {
         // wire.
         head if RIGHTWARD_HEADS.contains(&head) => Sides::HORIZONTAL,
         // The ASCII spellings. Each of them is a wire only when a neighbor
-        // says so, and [`Grid::sides_at`] holds that rule.
+        // says so and no letter ends its run, and [`Grid::sides_at`] holds
+        // both rules.
         '-' => Sides::HORIZONTAL,
         '|' => Sides::VERTICAL,
         '+' => Sides::ALL,
@@ -411,28 +426,57 @@ impl Grid {
         self.cells.get(at.row)?.get(at.column).copied()
     }
 
-    /// The sides the cell at `at` touches, with the rule for an ASCII
+    /// The sides the cell at `at` touches, with the rules for an ASCII
     /// spelling applied.
     ///
     /// An ASCII spelling is a wire only when a neighbor on a side it touches
-    /// draws a wire as well. The test reads the neighbor out of the table
-    /// alone, so it never asks the same question of the neighbor and never
-    /// recurses.
+    /// draws a wire as well, and it draws no wire at all when the run it
+    /// stands in ends at a letter. The neighbor alone is too little, because a
+    /// hyphen stands beside a hyphen inside `--hidden` as much as inside
+    /// `-->`. The run is what parts the two.
+    ///
+    /// The first test reads the neighbor out of the table alone, and the
+    /// second walks that same table, so neither of them asks this question of
+    /// another cell and neither recurses.
     fn sides_at(cells: &[Row], at: Place) -> Option<Sides> {
         let glyph = Self::glyph(cells, at)?;
         let sides = sides_of(glyph)?;
         if !ASCII_SPELLINGS.contains(&glyph) {
             return Some(sides);
         }
-        Side::ALL
-            .into_iter()
-            .filter(|&side| sides.touches(side))
-            .any(|side| {
-                side.from(at)
-                    .and_then(|next| Self::glyph(cells, next))
-                    .is_some_and(|neighbor| sides_of(neighbor).is_some())
-            })
-            .then_some(sides)
+        let touched_sides = || Side::ALL.into_iter().filter(|&side| sides.touches(side));
+        let beside_a_wire = touched_sides().any(|side| {
+            side.from(at)
+                .and_then(|next| Self::glyph(cells, next))
+                .is_some_and(|neighbor| sides_of(neighbor).is_some())
+        });
+        let inside_a_word = touched_sides().any(|side| Self::run_ends_at_a_letter(cells, at, side));
+        (beside_a_wire && !inside_a_word).then_some(sides)
+    }
+
+    /// Does the run of `at` along `side` end at a letter?
+    ///
+    /// A run of ASCII wire characters that touches a word is a word: `--hidden`
+    /// is a flag and `30-line` is a width. So the walk steps over every cell
+    /// the table of [`sides_of`] draws a wire for, and it reads the first cell
+    /// that draws none. A box-drawing character never stands inside a word, so
+    /// a run that holds one still ends where the wire ends.
+    ///
+    /// The edge of the grid holds no letter, and neither does the second
+    /// column of a wide character. A run that ends at either of them is the
+    /// wire a reader drew.
+    fn run_ends_at_a_letter(cells: &[Row], at: Place, side: Side) -> bool {
+        let mut place = at;
+        while let Some(next) = side.from(place) {
+            let Some(glyph) = Self::glyph(cells, next) else {
+                return false;
+            };
+            if sides_of(glyph).is_none() {
+                return glyph.is_alphabetic();
+            }
+            place = next;
+        }
+        false
     }
 
     /// The sides the cell at `at` touches, or `None` for a cell that draws no
@@ -1567,9 +1611,8 @@ A ──→ #4 ──┐
     #[test]
     fn a_sentence_over_the_picture_changes_nothing() {
         // Prose holds a slash and a hyphen inside a word. A slash draws no
-        // wire at all, and a hyphen draws one only when a neighbor draws one
-        // as well, so a digit and a letter beside it keep it out of the
-        // picture.
+        // wire at all, and the hyphen of `30-line` draws none either: no
+        // neighbor of it draws a wire, and a letter ends its run.
         const PROSE: &str = "See docs/plan.md. Each edit lands in a 30-line window.";
         assert!(read(PROSE).is_none());
 
