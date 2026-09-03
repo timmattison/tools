@@ -2460,6 +2460,22 @@ Notes: Disjoint.";
     }
 
     #[test]
+    fn the_steps_of_a_plan_stand_in_a_topological_order() {
+        // A plan names the work that comes first wherever the reader put it,
+        // so the rows of the answer are no order of the plan. S1 waits for the
+        // one step of S2, and the row a reader reads first is the row of the
+        // work to do first.
+        //
+        // The rows carry the answer as well as the order: the report walks
+        // them once and reads what stands before each step out of the rows
+        // over it.
+        let graph = graph_of_plan(&table_of(&[("S1", "#10", "#20"), ("S2", "#20", "")]));
+        assert_eq!(order(&graph), vec![20, 10]);
+        assert!(graph.before(0).is_empty());
+        assert_eq!(graph.before(1), [0]);
+    }
+
+    #[test]
     fn a_blocker_that_stands_in_no_order_field_is_a_node_of_its_own() {
         // A blocker the repository does not have must reach the rows and turn
         // the run red, and a row of the answer is the only place that says so.
