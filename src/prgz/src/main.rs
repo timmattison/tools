@@ -31,11 +31,15 @@ use thiserror::Error;
 /// The name of the tool. It starts every line that reports a failure.
 const PROGRAM_NAME: &str = "prgz";
 
-/// The name of the environment variable that carries the locale of the user.
-/// The locale sets the separators of every number of the report. A process
-/// that carries no such variable gets the locale of an empty value, which is
+/// The names of the environment variables that carry the locale of the user,
+/// in the order of POSIX precedence. `LC_ALL` sets the locale of the whole
+/// session. `LC_NUMERIC` sets the locale of numbers alone. `LANG` sets the
+/// locale of last resort. The report of this tool holds only numbers as
+/// locale-dependent text, thus `LC_NUMERIC` is the right variable for this
+/// tool, second after `LC_ALL` and before `LANG`. A process that carries none
+/// of the three variables gets the locale of an empty value, which is
 /// American English.
-const LANG_VARIABLE: &str = "LANG";
+const LOCALE_VARIABLES: [&str; 3] = ["LC_ALL", "LC_NUMERIC", "LANG"];
 
 /// The text that joins an error to the cause under it.
 const CAUSE_SEPARATOR: &str = ": ";
@@ -81,7 +85,7 @@ fn main() -> ExitCode {
     let output = cli
         .output
         .unwrap_or_else(|| default_output_path(input.as_path()));
-    let locale = locale_from_lang(&std::env::var(LANG_VARIABLE).unwrap_or_default());
+    let locale = locale_from_lang(&locale_value());
     match compress_with_progress(input.as_path(), output.as_path()) {
         Ok(stats) => {
             println!("{}", format_report(&stats, &locale));
@@ -92,6 +96,21 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Read the locale value of the environment.
+///
+/// The function checks [`LOCALE_VARIABLES`] in order and answers the value of
+/// the first variable that is set and not empty. A variable that the
+/// environment carries with an empty value does not count as set, thus the
+/// function moves on to the next name of the list. The function answers an
+/// empty string when the environment carries none of the three variables,
+/// which gives the caller the locale of American English.
+fn locale_value() -> String {
+    LOCALE_VARIABLES
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .unwrap_or_default()
 }
 
 /// Compress the input into the output and draw a progress bar while the run

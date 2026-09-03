@@ -71,7 +71,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - prgz
     - Similar to `prcp` but instead of copying a file it gzip compresses it. It draws the same one-line progress
       bar that `prcp` draws, and it closes with the sizes, the duration, and the rates, with the thousands
-      separators of your `$LANG`. Ctrl-C stops the run and removes the part of the file it wrote.
+      separators of your locale (`LC_ALL`, then `LC_NUMERIC`, then `LANG`). Ctrl-C stops the run and removes the part of the file it wrote.
     - To install: `cargo install --git https://github.com/timmattison/tools prgz`
 - update-aws-credentials
     - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to

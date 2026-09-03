@@ -22,8 +22,8 @@ use thiserror::Error;
 
 pub use num_format::Locale;
 
-/// The characters that end the locale name inside a `$LANG` value. A full
-/// `$LANG` value has the shape `language_REGION.codeset@modifier`.
+/// The characters that end the locale name inside a POSIX locale value. A
+/// full locale value has the shape `language_REGION.codeset@modifier`.
 const CODESET_MARKS: [char; 2] = ['.', '@'];
 
 /// The characters that separate the language from the region.
@@ -54,7 +54,8 @@ const MILLISECOND_SUFFIX: &str = "ms";
 /// The suffix that marks a duration in microseconds.
 const MICROSECOND_SUFFIX: &str = "\u{b5}s";
 
-/// Resolve the number formatting locale from a `$LANG` value.
+/// Resolve the number formatting locale from a POSIX locale value, such as
+/// the value of `LANG`, `LC_ALL`, or `LC_NUMERIC`.
 ///
 /// The function first removes the codeset and the modifier from the value, so
 /// `de_DE.UTF-8@euro` becomes `de_DE`. It then looks for the remainder in the
