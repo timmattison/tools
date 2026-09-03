@@ -671,6 +671,13 @@ pub enum GraphError {
     /// reader names the text rather than dropping the wire that reaches it.
     #[error("{0:?} stands beside a wire and is not a step, and a picture joins steps only")]
     NotAStep(Snippet),
+    /// A net reaches a step on one side and nothing on the other.
+    ///
+    /// The message names the step the net has, because that step is the half
+    /// of the order the reader wrote and the other half is what nobody can
+    /// guess.
+    #[error("{0:?} stands beside a wire that reaches no second step, and a wire joins two steps")]
+    HalfNet(Snippet),
 }
 
 /// The graph `text` draws, or `None` when `text` draws none.
@@ -914,6 +921,16 @@ mod tests {
 A ──→ #4 ──┐
 #5 ────────┴──→ #6";
 
+    /// A picture whose last wire reaches nothing on its right.
+    ///
+    /// The fan-out of the first two lines claims the text. The wire of the
+    /// third line reaches `#5` on its left and the end of the line on its
+    /// right, so it says that `#5` comes before nothing.
+    const HALF_NET: &str = "\
+#1 ──┬──→ #3
+     └──→ #4
+#5 ──→";
+
     /// The graph `text` draws.
     fn graph_of(text: &str) -> Graph {
         read(text)
@@ -1132,6 +1149,14 @@ A ──→ #4 ──┐
         // that reaches it: a reader who wrote `A` meant something by it, and a
         // graph that quietly loses one edge answers with the wrong issue.
         assert_eq!(refusal(LABEL_PORT), GraphError::NotAStep(Snippet::new("A")));
+    }
+
+    #[test]
+    fn a_wire_that_reaches_one_step_alone_is_refused() {
+        // A wire with a step on one side and nothing on the other says half of
+        // an order. A reader who drew it meant a second step, and the reader
+        // cannot guess which one, so the message names the step it has.
+        assert_eq!(refusal(HALF_NET), GraphError::HalfNet(Snippet::new("#5")));
     }
 
     #[test]
