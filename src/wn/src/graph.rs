@@ -88,6 +88,15 @@ const RIGHTWARD_HEADS: &[char] = &[
     '>',        // the head of the ASCII arrow `-->`
 ];
 
+/// The characters that draw a wire and stand inside prose as well.
+///
+/// Prose holds all four of them: a hyphen inside a word, a bar between two
+/// words, a plus in a sum, and the `>` of a quotation. So each of them is a
+/// wire only when a neighbor on a side it touches draws a wire as well. `>`
+/// stands here and in [`RIGHTWARD_HEADS`], because it is the head of the
+/// ASCII arrow and it is one character of prose.
+const ASCII_SPELLINGS: &[char] = &['-', '|', '+', '>'];
+
 /// One of the four sides of a cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
@@ -225,6 +234,11 @@ fn sides_of(c: char) -> Option<Sides> {
         '\u{2534}' => Sides::HORIZONTAL.with(Sides::of(Side::Up)), // ┴
         '\u{253c}' => Sides::ALL,        // ┼
         head if RIGHTWARD_HEADS.contains(&head) => Sides::HORIZONTAL,
+        // The ASCII spellings. Each of them is a wire only when a neighbor
+        // says so, and [`Grid::sides_at`] holds that rule.
+        '-' => Sides::HORIZONTAL,
+        '|' => Sides::VERTICAL,
+        '+' => Sides::ALL,
         _ => return None,
     };
     Some(sides)
@@ -271,7 +285,19 @@ impl Grid {
     /// recurses.
     fn sides_at(cells: &[Row], at: Place) -> Option<Sides> {
         let glyph = Self::glyph(cells, at)?;
-        sides_of(glyph)
+        let sides = sides_of(glyph)?;
+        if !ASCII_SPELLINGS.contains(&glyph) {
+            return Some(sides);
+        }
+        Side::ALL
+            .into_iter()
+            .filter(|&side| sides.touches(side))
+            .any(|side| {
+                side.from(at)
+                    .and_then(|next| Self::glyph(cells, next))
+                    .is_some_and(|neighbor| sides_of(neighbor).is_some())
+            })
+            .then_some(sides)
     }
 
     /// The sides the cell at `at` touches, or `None` for a cell that draws no
