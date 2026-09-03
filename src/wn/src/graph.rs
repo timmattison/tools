@@ -732,6 +732,13 @@ fn refuse_ports(wirings: &[Wiring]) -> Result<(), GraphError> {
         {
             return Err(GraphError::NotAStep(Snippet::new(&port.text)));
         }
+        // A net with no port at all never reaches this function, so the first
+        // port of a net that is short on one side is the port it has.
+        if wiring.before.is_empty() || wiring.after.is_empty() {
+            if let Some(port) = wiring.ports().min_by_key(|port| port.place) {
+                return Err(GraphError::HalfNet(Snippet::new(&port.text)));
+            }
+        }
     }
     Ok(())
 }
