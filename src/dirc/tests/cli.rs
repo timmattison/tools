@@ -35,6 +35,8 @@
 #![cfg(unix)]
 
 use dirc::clipboard::CLIPBOARD_FILE_ENV;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -44,6 +46,21 @@ use std::process::{Command, Output};
 /// The file sits in the temporary directory of the one test that made it, so
 /// the name itself does not have to be unique.
 const CLIPBOARD_FILE: &str = "clipboard.txt";
+
+/// A byte that begins no UTF-8 sequence.
+///
+/// A path that holds it is a path a Unix kernel accepts and a Rust string
+/// cannot hold. One test names its clipboard file that way.
+const NOT_TEXT: u8 = 0xff;
+
+/// The name of a plain file one test makes.
+///
+/// No directory sits under a plain file, so the kernel answers a read of any
+/// path under this one with "Not a directory".
+const PLAIN_FILE: &str = "plain-file";
+
+/// The refusal of a clipboard the tool could not open or read.
+const UNREACHABLE: &str = "Failed to reach the clipboard: ";
 
 /// The flag that asks for paste mode.
 const PASTE: &str = "--paste";
@@ -174,6 +191,14 @@ struct Scratch {
     /// The directory. It removes itself and everything in it when the test
     /// drops it.
     dir: tempfile::TempDir,
+
+    /// The name of the clipboard file in that directory.
+    ///
+    /// `OsString` and not `String`, because a Unix kernel accepts a file name
+    /// that no Rust string holds. The value goes to the child through the
+    /// environment, so a test names such a file and reads what the tool does
+    /// with the value.
+    clipboard_name: OsString,
 }
 
 impl Scratch {
@@ -183,8 +208,14 @@ impl Scratch {
     /// which is what keeps two runs of these tests at the same time out of each
     /// other's way.
     fn new() -> Self {
+        Self::with_clipboard_name(CLIPBOARD_FILE)
+    }
+
+    /// The same, with `name` for the clipboard file.
+    fn with_clipboard_name(name: impl Into<OsString>) -> Self {
         Self {
             dir: tempfile::tempdir().expect("a temporary directory"),
+            clipboard_name: name.into(),
         }
     }
 
@@ -196,7 +227,7 @@ impl Scratch {
     /// The file the children of this test read and write in place of the
     /// clipboard of the machine.
     fn clipboard(&self) -> PathBuf {
-        self.dir.path().join(CLIPBOARD_FILE)
+        self.dir.path().join(&self.clipboard_name)
     }
 
     /// Puts `copied` on the clipboard of this test.
@@ -371,8 +402,9 @@ fn readme() -> String {
 /// what the person at the keyboard reads.
 ///
 /// The assertion on the message is `starts_with`, because two of the four
-/// refusals name the path and what the operating system said after it.
-fn assert_paste_refuses(scratch: &Scratch, message: &str) {
+/// refusals name the path and what the operating system said after it. The
+/// whole message comes back, so a caller that wants more of it reads the rest.
+fn assert_paste_refuses(scratch: &Scratch, message: &str) -> String {
     let output = run(scratch, &[PASTE]);
     assert_eq!(
         output.status.code(),
@@ -383,6 +415,7 @@ fn assert_paste_refuses(scratch: &Scratch, message: &str) {
     assert_eq!(stdout(&output), "", "eval would run this");
     let said = stderr(&output);
     assert!(said.starts_with(message), "{said}");
+    said
 }
 
 #[test]
@@ -437,6 +470,37 @@ fn paste_mode_writes_the_cd_line_for_the_directory_the_clipboard_names() {
     // the reader sees and the shell does not, so a quiet run is part of the
     // contract of the good path.
     assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn a_clipboard_file_whose_name_is_not_text_is_the_file_the_tool_opens() {
+    // A Unix kernel takes a path that no Rust string holds, and `std::env::var`
+    // gives nothing back for such a value. A tool that drops the value opens
+    // the clipboard of the machine, which is the one outcome this variable
+    // exists to prevent: the caller names a file, and the shared clipboard gets
+    // the work.
+    //
+    // The mode is paste, because paste mode only reads. A run that falls back
+    // here reads the clipboard of the machine and changes nothing on it, where
+    // a copy that falls back destroys what the person at the keyboard put
+    // there.
+    //
+    // The clipboard file is never made. APFS refuses every file name that is
+    // not text, so no test makes one on macOS. The file sits under a plain file
+    // instead, and the kernel answers a read of that path with "Not a
+    // directory". The refusal then names the path the tool opened, byte for
+    // byte, where a run that fell back to the clipboard of the machine names no
+    // path at all.
+    let named = PathBuf::from(PLAIN_FILE).join(OsString::from_vec(vec![NOT_TEXT]));
+    let scratch = Scratch::with_clipboard_name(named);
+    std::fs::write(scratch.path().join(PLAIN_FILE), b"").expect("the file is made");
+
+    let said = assert_paste_refuses(&scratch, UNREACHABLE);
+
+    // `Debug` writes the path, so the byte that is not text arrives as an
+    // escape. A tool that made the value text again writes a replacement
+    // character in place of that escape.
+    assert!(said.contains(&format!("{:?}", scratch.clipboard())), "{said}");
 }
 
 #[test]
