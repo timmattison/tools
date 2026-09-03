@@ -14,7 +14,7 @@ use std::process::exit;
 
 use buildinfo::version_string;
 use clap::Parser;
-use repowalker::find_git_repo;
+use repowalker::find_repo_context;
 use shellsetup::ShellIntegration;
 
 mod ascent;
@@ -269,15 +269,19 @@ fn main() {
         }
     }
 
-    // Find git repo root
-    let Some(repo_root) = find_git_repo() else {
+    // Find the checkout the user stands in. Git answers this, rather than a
+    // walk up the file system for a `.git` entry, because a repository whose
+    // git directory is detached from its work tree has no such entry anywhere.
+    // `cwt` navigates and never deletes, so git's answer is the right one here.
+    let Some(context) = find_repo_context() else {
         error!(cli.quiet, "Error: Not in a git repository");
         exit(exit_codes::NOT_IN_REPO);
     };
+    let repo_root = context.checkout();
 
     // Collect the family: this repository, and any repository beside it
     let scan_children = !cli.no_family && !no_family_in_env();
-    let family = match Family::discover(&repo_root, scan_children) {
+    let family = match Family::discover(repo_root, scan_children) {
         Ok(family) => family,
         Err(e) => {
             error!(cli.quiet, "Error getting worktrees: {}", e);
