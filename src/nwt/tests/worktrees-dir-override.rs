@@ -271,3 +271,17 @@ fn an_empty_value_is_refused() {
 fn a_value_of_only_whitespace_is_refused() {
     assert_refuses_the_value("   ", "whitespace");
 }
+
+#[test]
+fn a_value_git_cannot_expand_is_refused() {
+    // The home directory of a user who does not exist. Git refuses to expand
+    // it, and the process id and the clock keep the name away from every real
+    // user of the machine.
+    let stranger = format!(
+        "~nwt-no-such-user-{}-{}/worktrees",
+        std::process::id(),
+        nanos()
+    );
+
+    assert_refuses_the_value(&stranger, "unknown-user");
+}
