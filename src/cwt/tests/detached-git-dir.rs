@@ -273,6 +273,23 @@ fn a_name_selects_the_worktree_that_carries_it() {
 }
 
 #[test]
+fn a_worktree_inside_the_git_directory_is_listed_once() {
+    // The git directory is the main worktree, so a linked worktree placed
+    // inside it is also a child directory of the family anchor. The scan for
+    // children finds it and reads it, and it reports the same repository. A
+    // family that took that answer would list every worktree twice.
+    let repo = DetachedGitDirRepo::nested();
+    let inside = repo.add_worktree(&repo.git_dir().join("wt-inside"), "wt-inside-branch");
+    let dotfiles = Dotfiles {
+        linked: vec![inside],
+        repo,
+    };
+
+    assert_lists_every_worktree(&dotfiles, dotfiles.git_dir());
+    assert_lists_every_worktree(&dotfiles, dotfiles.linked(0));
+}
+
+#[test]
 fn the_help_says_which_path_the_main_entry_names() {
     // A user who lands in `~/.local/share/yadm/repo.git` has to be able to
     // learn from `cwt` itself why the shortcut took them to a directory whose
