@@ -485,8 +485,9 @@ mod exit_codes {
     pub const INVALID_REPO_NAME: i32 = 2;
     /// Repository has no parent directory
     pub const NO_PARENT_DIR: i32 = 3;
-    /// Failed to create worktrees directory
-    pub const DIR_CREATE_FAILED: i32 = 4;
+    // Note: Exit code 4 is reserved (previously DIR_CREATE_FAILED, now
+    // unreachable because `git worktree add` makes the worktrees directory
+    // itself)
     /// Could not find available directory name after max attempts
     pub const NAME_COLLISION: i32 = 5;
     /// Git command failed to execute
@@ -680,7 +681,6 @@ EXIT CODES:
     1  Not in a git repository
     2  Invalid repository name
     3  Repository has no parent directory
-    4  Failed to create worktrees directory
     5  Could not find available directory name
     6  Git command failed to execute
     7  Git worktree creation failed
@@ -1575,18 +1575,14 @@ fn main() {
     // Ask where this repository keeps its worktrees. The repository states the
     // answer with `nwt.worktreesDir`, and the default stands when it says
     // nothing.
+    //
+    // Nothing makes that directory here. `git worktree add` makes every
+    // directory that leads to the new worktree, and it makes none of them when
+    // it refuses the request. A run that made the directory first left it
+    // behind on every failure after that point, and nothing ever removed it —
+    // issue #439, where the stray directory was
+    // `~/.local/share/yadm-worktrees`.
     let worktrees_dir = worktrees_dir(&repo_root, config.quiet);
-
-    // Create worktrees directory if needed
-    if let Err(e) = fs::create_dir_all(&worktrees_dir) {
-        error!(
-            config.quiet,
-            "Error: Could not create worktrees directory '{}': {}",
-            worktrees_dir.display(),
-            e
-        );
-        exit(exit_codes::DIR_CREATE_FAILED);
-    }
 
     // Determine directory naming strategy:
     // - If branch is specified and --random-directory is not used, use the branch name
@@ -2831,7 +2827,6 @@ mod tests {
             exit_codes::NOT_IN_REPO,
             exit_codes::INVALID_REPO_NAME,
             exit_codes::NO_PARENT_DIR,
-            exit_codes::DIR_CREATE_FAILED,
             exit_codes::NAME_COLLISION,
             exit_codes::GIT_COMMAND_ERROR,
             exit_codes::WORKTREE_FAILED,
@@ -3667,7 +3662,6 @@ mod tests {
                 exit_codes::NOT_IN_REPO,
                 exit_codes::INVALID_REPO_NAME,
                 exit_codes::NO_PARENT_DIR,
-                exit_codes::DIR_CREATE_FAILED,
                 exit_codes::NAME_COLLISION,
                 exit_codes::GIT_COMMAND_ERROR,
                 exit_codes::WORKTREE_FAILED,
