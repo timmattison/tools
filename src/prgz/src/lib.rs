@@ -188,6 +188,12 @@ pub enum CompressError {
     /// The user stopped the run before it was complete.
     #[error("the user stopped the run")]
     Cancelled,
+    /// The output file is the input file, thus a run would destroy the input.
+    #[error("the output file {} is the input file", path.display())]
+    SameFile {
+        /// The path of the output file.
+        path: PathBuf,
+    },
 }
 
 /// The count of bytes in the buffer that holds one block of the input. A
@@ -281,6 +287,45 @@ impl<W: Write> Write for CountingWriter<'_, W> {
     }
 }
 
+/// Answers whether `output` names the file that the open handle `source`
+/// already holds.
+///
+/// On unix the function compares the device and the inode of the open handle
+/// against a stat of `output`. It reads the handle rather than the input
+/// path, thus it also catches a hard link to the input under a different
+/// name, which a comparison of the two paths would miss. On every other
+/// platform the function canonicalizes `input` and `output` and compares the
+/// results, because this crate has no portable way to read the identity of
+/// an open handle. On both platforms an `output` that does not yet exist
+/// cannot be the input, thus the function then answers false: `fs::metadata`
+/// and [`fs::canonicalize`] both fail on a path with nothing there, and
+/// either failure answers false.
+#[cfg(unix)]
+fn output_is_input(source: &File, _input: &Path, output: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(source_metadata) = source.metadata() else {
+        return false;
+    };
+    let Ok(output_metadata) = fs::metadata(output) else {
+        return false;
+    };
+    source_metadata.dev() == output_metadata.dev() && source_metadata.ino() == output_metadata.ino()
+}
+
+/// Answers whether `output` names the file at `input`. See the unix version
+/// of this function for the full rustdoc; the two share one call site.
+#[cfg(not(unix))]
+fn output_is_input(_source: &File, input: &Path, output: &Path) -> bool {
+    let Ok(input_path) = fs::canonicalize(input) else {
+        return false;
+    };
+    let Ok(output_path) = fs::canonicalize(output) else {
+        return false;
+    };
+    input_path == output_path
+}
+
 /// Compress the file at `input` into a gzip file at `output`.
 ///
 /// The function makes the output file and writes the gzip stream into it. It
@@ -288,16 +333,26 @@ impl<W: Write> Write for CountingWriter<'_, W> {
 /// size of the output is the count of the bytes of the stream, thus it holds
 /// the last bytes of the stream as well.
 ///
+/// The function refuses to run when `output` names the file at `input`,
+/// checked before the function makes the output file. [`File::create`]
+/// truncates its target, thus a run that skipped this check would truncate
+/// the input file while the open input handle still read it, and it would
+/// write a small gzip stream of nothing over the bytes that the user meant
+/// to keep.
+///
 /// The function removes a part of an output file when the run fails, and also
 /// when the user stops the run. A part of a gzip stream looks like a complete
 /// one, thus a run that leaves such a file gives a broken file to the user.
+/// The refusal above returns before the function makes any output file, thus
+/// no removal follows it and the input file stays whole.
 ///
 /// # Errors
 ///
-/// Answers [`CompressError::OpenInput`] when the input file does not open, and
-/// [`CompressError::CreateOutput`] when the output file does not open. Answers
-/// [`CompressError::ReadInput`], [`CompressError::WriteOutput`], or
-/// [`CompressError::Cancelled`] when the stream stops short.
+/// Answers [`CompressError::OpenInput`] when the input file does not open.
+/// Answers [`CompressError::SameFile`] when the output path names the input
+/// file. Answers [`CompressError::CreateOutput`] when the output file does
+/// not open. Answers [`CompressError::ReadInput`], [`CompressError::WriteOutput`],
+/// or [`CompressError::Cancelled`] when the stream stops short.
 pub fn compress_file(
     input: &Path,
     output: &Path,
@@ -308,6 +363,11 @@ pub fn compress_file(
         path: input.to_path_buf(),
         source,
     })?;
+    if output_is_input(&source, input, output) {
+        return Err(CompressError::SameFile {
+            path: output.to_path_buf(),
+        });
+    }
     let target = File::create(output).map_err(|source| CompressError::CreateOutput {
         path: output.to_path_buf(),
         source,

@@ -305,7 +305,11 @@ fn a_run_where_the_output_names_the_input_leaves_the_file_untouched_and_fails() 
     let bytes = compressible();
     let (_directory, input) = fixture("notes.txt", &bytes);
 
-    let answer = run(prgz().arg("--input").arg(&input).arg("--output").arg(&input));
+    let answer = run(prgz()
+        .arg("--input")
+        .arg(&input)
+        .arg("--output")
+        .arg(&input));
 
     assert!(!answer.ok, "the run answered a success");
     assert!(
@@ -321,8 +325,7 @@ fn a_run_where_the_output_names_the_input_leaves_the_file_untouched_and_fails() 
 }
 
 #[test]
-fn a_run_where_a_different_spelling_of_the_output_path_still_names_the_input_leaves_it_untouched()
-{
+fn a_run_where_a_different_spelling_of_the_output_path_still_names_the_input_leaves_it_untouched() {
     let bytes = compressible();
     let (directory, input) = fixture("notes.txt", &bytes);
     let output = directory.path().join(".").join("notes.txt");
