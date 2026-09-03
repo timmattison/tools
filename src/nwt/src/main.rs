@@ -1360,6 +1360,11 @@ fn worktrees_dir(repo_root: &Path, quiet: bool) -> PathBuf {
 /// repository's own configuration, from `~/.gitconfig`, or from the system
 /// configuration.
 ///
+/// `--type=path` makes git expand a leading `~` or `~user` into a home
+/// directory. A git configuration value gets no shell expansion, and git owns
+/// the rule for what a leading tilde means. A second copy of that rule here
+/// would drift from git's.
+///
 /// The command sheds the whole inherited `GIT_*` family through
 /// [`gitscratch::shed_inherited_git_environment`]. An inherited `GIT_DIR` aims
 /// git at another repository, and the answer would then be that repository's
@@ -1370,7 +1375,7 @@ fn stated_worktrees_dir(repo_root: &Path) -> Option<String> {
     shed_inherited_git_environment(&mut command);
 
     let output = command
-        .args(["config", "--get", WORKTREES_DIR_KEY])
+        .args(["config", "--type=path", "--get", WORKTREES_DIR_KEY])
         .current_dir(repo_root)
         .output()
         .ok()?;
