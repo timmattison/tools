@@ -316,7 +316,22 @@ fn run_with_start(
 /// included, so a child of this helper touches the clipboard of the machine no
 /// more than any other child of this file does.
 fn run_with_stdin(gh: &FakeGh, args: &[&str], columns: &str, text: &str) -> Output {
-    let mut child = wn(gh, args, columns, false, None)
+    run_with_stdin_and_start(gh, args, columns, text, None)
+}
+
+/// The same, with [`START_COMMAND_ENV`] set to `start`.
+///
+/// `None` leaves the variable out of the environment, which is the state of a
+/// machine that never set it. One helper opens the pipe for both, so the two
+/// can never build a different environment.
+fn run_with_stdin_and_start(
+    gh: &FakeGh,
+    args: &[&str],
+    columns: &str,
+    text: &str,
+    start: Option<&str>,
+) -> Output {
+    let mut child = wn(gh, args, columns, false, start)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1220,4 +1235,22 @@ A ──→ #4
         stderr(&output)
     );
     assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn the_environment_names_the_command_of_every_start_line_of_a_picture() {
+    // A picture names one issue for each stream that is ready, and the reader
+    // who set the variable set it for every one of them. A run that named the
+    // command of the first line alone would leave the second line unusable.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin_and_start(&gh, &["--repo", REPO], "80", PICTURE, Some("start"));
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with(concat!(
+            "Start #242 next with 'start 242'\n",
+            "Start #246 next with 'start 246'\n",
+        )),
+        "the answer names the command of the environment in every line, in {}",
+        stdout(&output)
+    );
 }
