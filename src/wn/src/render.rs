@@ -1280,6 +1280,37 @@ mod tests {
         }))
     }
 
+    /// The row of the step `number` in a painted block.
+    ///
+    /// A row writes its own number after the mark, and the numbers it waits
+    /// for at the end. So the search reads the head of the line, and it never
+    /// finds a row that names the number in its last column.
+    fn row_of(block: &str, number: u64) -> String {
+        let number = format!("#{number}");
+        block
+            .lines()
+            .find(|line| line.split_whitespace().nth(1) == Some(number.as_str()))
+            .expect("the block holds a row for the number")
+            .to_string()
+    }
+
+    #[test]
+    fn a_blocked_row_names_every_step_it_waits_for() {
+        // Both steps before `#249` are open. A row that named the first of
+        // them would send somebody to `#247` and hide `#248`, so the row names
+        // both, in the order the picture holds them.
+        let block = graph_glyphs(&picture(PASTE, ALL_OPEN), 80);
+        let row = row_of(&block, 249);
+        assert!(
+            row.ends_with("waits for #247, #248"),
+            "the row names each step it waits for, in {row:?}"
+        );
+        assert!(
+            row.contains("Paint the gallery"),
+            "the row keeps its title beside the work it waits for, in {row:?}"
+        );
+    }
+
     #[test]
     fn the_answer_of_a_picture_names_a_command_for_every_step_that_is_ready() {
         // Two streams that join are two people who work at the same time, and
