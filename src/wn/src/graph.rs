@@ -933,4 +933,18 @@ mod tests {
         assert!(read(MARKDOWN_TABLE).is_none());
         assert!(read(&ascii(BOX_TABLE)).is_none());
     }
+
+    #[test]
+    fn an_indented_picture_and_a_fenced_one_draw_the_same_graph() {
+        // A paste out of a Markdown list arrives indented, and a paste out of
+        // a document arrives inside a fence with prose over it. An indent
+        // moves every cell of the picture by the same number of columns, so
+        // the geometry is the geometry. A line with no wire and no step is
+        // ignored, so the fence and the sentence cost nothing.
+        let indented: String = PASTE.lines().map(|line| format!("    {line}\n")).collect();
+        assert_eq!(edges(&graph_of(&indented)), edges(&graph_of(PASTE)));
+
+        let fenced = format!("The plan of the week:\n\n```text\n{PASTE}\n```\n");
+        assert_eq!(edges(&graph_of(&fenced)), edges(&graph_of(PASTE)));
+    }
 }
