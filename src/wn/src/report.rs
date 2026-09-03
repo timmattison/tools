@@ -254,13 +254,37 @@ impl Report {
     /// topological order with a tie going to the text. Each of them is read
     /// the way a step of a stream is read, because a step is one step
     /// whichever shape wrote it.
+    ///
+    /// A step is ready when it is open and every step before it is finished.
+    /// A picture names one such step for each stream that is ready, and every
+    /// one of them is an answer: two streams that join are two people who work
+    /// at the same time.
     #[must_use]
     #[allow(
         dead_code,
         reason = "the run of a picture calls this in the slice that answers a graph"
     )]
     pub fn of_graph(graph: &Graph, states: &States) -> Self {
-        Self::of_steps(graph.steps(), states)
+        let entries = entries_of(graph.steps(), states);
+        let ready = entries
+            .iter()
+            .enumerate()
+            .filter(|(position, entry)| {
+                entry.status.is_open()
+                    && graph
+                        .before(*position)
+                        .iter()
+                        .all(|&earlier| entries[earlier].status.is_finished())
+            })
+            .map(|(position, _)| position)
+            .collect();
+        let waits = vec![Vec::new(); entries.len()];
+        Self {
+            entries,
+            ready,
+            out_of_order: Vec::new(),
+            waits,
+        }
     }
 
     /// The chain, in the order it was written.
@@ -469,20 +493,6 @@ mod tests {
             .filter(|(position, _)| report.is_ready(*position))
             .map(|(_, entry)| entry.number.get())
             .collect()
-    }
-
-    /// The position of the row of `number`.
-    fn row_of(report: &Report, number: u64) -> usize {
-        report
-            .entries()
-            .iter()
-            .position(|entry| entry.number.get() == number)
-            .expect("the report holds a row for the number")
-    }
-
-    /// The numbers the row of `number` waits for.
-    fn waits_of(report: &Report, number: u64) -> Vec<u64> {
-        numbers(report.waits_for(row_of(report, number)))
     }
 
     #[test]
