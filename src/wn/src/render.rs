@@ -1432,6 +1432,33 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_with_an_open_step_and_nothing_ready_says_why() {
+        // GitHub answered for neither of the two steps that start the streams,
+        // so nothing is known about them and neither of them is finished. The
+        // three steps that are open each wait for one of them. A silent
+        // "nothing to start" reads as "the plan is done", which is the
+        // opposite of the truth.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (247, Status::Open, "Answer the picture"),
+                    (248, Status::Open, "Answer the table"),
+                    (249, Status::Open, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        assert!(
+            block.ends_with(concat!(
+                "No issue in the graph is ready. ",
+                "Every open issue waits for work that is not finished.",
+            )),
+            "the answer says why nobody starts anything, in {block:?}"
+        );
+    }
+
+    #[test]
     fn the_work_each_row_waits_for_stands_in_one_column() {
         // The titles of a block are of different lengths, and a column that
         // opened after each title would step left and right down the block.
