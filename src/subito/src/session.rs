@@ -167,6 +167,7 @@ pub async fn run_forever<F, Fut>(
     qos: QoS,
     pretty_json: bool,
     output: &mut impl Write,
+    reports: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
 ) -> Result<(), SessionError>
 where
@@ -179,6 +180,7 @@ where
         qos,
         pretty_json,
         output,
+        reports,
         shutdown,
         Backoff::default(),
     )
@@ -199,6 +201,7 @@ pub async fn run_forever_with<F, Fut>(
     qos: QoS,
     pretty_json: bool,
     output: &mut impl Write,
+    _reports: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
     backoff: Backoff,
 ) -> Result<(), SessionError>
@@ -356,6 +359,7 @@ pub async fn run(
     qos: QoS,
     pretty_json: bool,
     output: &mut impl Write,
+    reports: &mut impl Write,
 ) -> Result<(), SessionError> {
     run_until(
         options,
@@ -363,6 +367,7 @@ pub async fn run(
         qos,
         pretty_json,
         output,
+        reports,
         tokio::signal::ctrl_c(),
     )
     .await
@@ -391,6 +396,7 @@ pub async fn run_until(
     qos: QoS,
     pretty_json: bool,
     output: &mut impl Write,
+    _reports: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
 ) -> Result<(), SessionError> {
     attempt(options, topics, qos, pretty_json, output, shutdown)
@@ -736,7 +742,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_failure_to_prepare_a_connection_names_only_itself() {
-        let mut output: Vec<u8> = Vec::new();
+        let mut messages: Vec<u8> = Vec::new();
+        let mut reports: Vec<u8> = Vec::new();
         let topics = ["sensors/temperature".to_string()];
 
         let run = run_forever_with(
@@ -744,7 +751,8 @@ mod tests {
             &topics,
             QoS::AtMostOnce,
             false,
-            &mut output,
+            &mut messages,
+            &mut reports,
             async {
                 tokio::time::sleep(BEFORE_INTERRUPT).await;
                 Ok(())
@@ -758,10 +766,10 @@ mod tests {
 
         assert!(ended.is_ok(), "the interrupt ends the run: {ended:?}");
 
-        let printed = String::from_utf8(output).expect("the tool prints text");
+        let reported = String::from_utf8(reports).expect("the tool prints text");
 
         assert_eq!(
-            printed,
+            reported,
             format!(
                 "the tool could not open a connection to the broker: {NO_CREDENTIALS}. \
 Trying again in 30s.\n"
@@ -769,11 +777,20 @@ Trying again in 30s.\n"
             "a failure that never reached a broker must not read as a failure of the \
 connection, and must not name its cause twice"
         );
+
+        let printed = String::from_utf8(messages).expect("the tool prints text");
+
+        assert_eq!(
+            printed, "",
+            "a report of a retry belongs to the reports, so a reader of the messages sees \
+only the messages"
+        );
     }
 
     #[tokio::test]
     async fn an_interrupt_ends_a_connection_that_never_answers() {
-        let mut output: Vec<u8> = Vec::new();
+        let mut messages: Vec<u8> = Vec::new();
+        let mut reports: Vec<u8> = Vec::new();
         let topics = ["sensors/temperature".to_string()];
 
         let run = run_forever_with(
@@ -781,7 +798,8 @@ connection, and must not name its cause twice"
             &topics,
             QoS::AtMostOnce,
             false,
-            &mut output,
+            &mut messages,
+            &mut reports,
             async {
                 tokio::time::sleep(BEFORE_INTERRUPT).await;
                 Ok(())
@@ -795,10 +813,15 @@ connection, and must not name its cause twice"
 
         assert!(ended.is_ok(), "the interrupt ends the run: {ended:?}");
 
-        let printed = String::from_utf8(output).expect("the tool prints text");
+        let printed = String::from_utf8(messages).expect("the tool prints text");
+        let reported = String::from_utf8(reports).expect("the tool prints text");
 
         assert_eq!(
             printed, "",
+            "a run that reached no broker and started no wait has nothing to report"
+        );
+        assert_eq!(
+            reported, "",
             "a run that reached no broker and started no wait has nothing to report"
         );
     }

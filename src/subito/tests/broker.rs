@@ -159,6 +159,25 @@ impl Printed {
 
         self.text.lines().take(count).map(str::to_string).collect()
     }
+
+    /// Gives every byte this sink took up to this moment.
+    ///
+    /// The call takes what arrived already and waits for nothing, so a test
+    /// that asserts one sink took nothing must first wait for a line on the
+    /// other sink. The session writes the lines of one event before it reads
+    /// the next event, so a line that arrived on the other sink says this sink
+    /// took every byte the events up to that line give it. A call that waited
+    /// for a line that never arrives could only end in the timeout of a step,
+    /// which is no assertion at all.
+    fn so_far(&mut self) -> String {
+        while let Ok(chunk) = self.receiver.try_recv() {
+            self.text.push_str(
+                &String::from_utf8(chunk).expect("the session printed bytes that are not UTF-8"),
+            );
+        }
+
+        self.text.clone()
+    }
 }
 
 /// Builds an output for the session and the reader of that output.
@@ -383,14 +402,16 @@ async fn together(
 async fn a_suback_names_the_topic_of_its_own_packet_identifier() {
     let (listener, port) = listening().await;
     let topics = vec!["sensors/one".to_string(), "sensors/two".to_string()];
-    let (mut output, mut printed) = recording();
+    let (mut messages, _printed) = recording();
+    let (mut reports, mut reported) = recording();
 
     let session = run_until(
         options_for(port),
         &topics,
         QoS::AtMostOnce,
         false,
-        &mut output,
+        &mut messages,
+        &mut reports,
         never(),
     );
 
@@ -410,7 +431,7 @@ async fn a_suback_names_the_topic_of_its_own_packet_identifier() {
         broker.grant(first.pkid, QoS::AtMostOnce).await;
 
         assert_eq!(
-            printed.lines(2).await,
+            reported.lines(2).await,
             [
                 "Subscribed: sensors/two (QoS 0)",
                 "Subscribed: sensors/one (QoS 0)"
@@ -433,14 +454,16 @@ async fn a_suback_names_the_topic_of_its_own_packet_identifier() {
 async fn a_refused_subscription_says_so_and_the_run_goes_on() {
     let (listener, port) = listening().await;
     let topics = vec!["allowed/#".to_string(), "denied/#".to_string()];
-    let (mut output, mut printed) = recording();
+    let (mut messages, _printed) = recording();
+    let (mut reports, mut reported) = recording();
 
     let session = run_until(
         options_for(port),
         &topics,
         QoS::AtLeastOnce,
         false,
-        &mut output,
+        &mut messages,
+        &mut reports,
         never(),
     );
 
@@ -458,7 +481,7 @@ async fn a_refused_subscription_says_so_and_the_run_goes_on() {
         // answered, so a topic the policy denies looked the same as a topic
         // that works.
         assert_eq!(
-            printed.lines(2).await,
+            reported.lines(2).await,
             [
                 "Subscribed: allowed/# (QoS 1)",
                 "Subscription refused: denied/#"
@@ -482,14 +505,16 @@ async fn a_refused_subscription_says_so_and_the_run_goes_on() {
 async fn a_run_whose_every_subscription_is_refused_stops() {
     let (listener, port) = listening().await;
     let topics = vec!["denied/one".to_string(), "denied/two".to_string()];
-    let (mut output, mut printed) = recording();
+    let (mut messages, _printed) = recording();
+    let (mut reports, mut reported) = recording();
 
     let session = run_until(
         options_for(port),
         &topics,
         QoS::AtMostOnce,
         false,
-        &mut output,
+        &mut messages,
+        &mut reports,
         never(),
     );
 
@@ -504,7 +529,7 @@ async fn a_run_whose_every_subscription_is_refused_stops() {
         broker.refuse(second.pkid).await;
 
         assert_eq!(
-            printed.lines(2).await,
+            reported.lines(2).await,
             [
                 "Subscription refused: denied/one",
                 "Subscription refused: denied/two"
@@ -535,14 +560,16 @@ const UNPRINTABLE_PAYLOAD: &[u8] = b"binary\x00\x1b[31m\xff\xfe\xfd\xfc";
 async fn a_publish_prints_its_topic_and_its_payload() {
     let (listener, port) = listening().await;
     let topics = vec!["sensors/#".to_string()];
-    let (mut output, mut printed) = recording();
+    let (mut messages, mut printed) = recording();
+    let (mut reports, mut reported) = recording();
 
     let session = run_until(
         options_for(port),
         &topics,
         QoS::AtMostOnce,
         false,
-        &mut output,
+        &mut messages,
+        &mut reports,
         never(),
     );
 
@@ -553,15 +580,16 @@ async fn a_publish_prints_its_topic_and_its_payload() {
         let filter = broker.read_subscribe().await;
         broker.grant(filter.pkid, QoS::AtMostOnce).await;
 
+        assert_eq!(reported.lines(1).await, ["Subscribed: sensors/# (QoS 0)"]);
+
         broker
             .publish("sensors/kitchen", br#"{"temperature":21}"#)
             .await;
         broker.publish("sensors/hallway", UNPRINTABLE_PAYLOAD).await;
 
         assert_eq!(
-            printed.lines(7).await,
+            printed.lines(6).await,
             [
-                "Subscribed: sensors/# (QoS 0)",
                 // The topic of the message, and not the filter of the
                 // subscription.
                 "Topic: sensors/kitchen",
@@ -573,6 +601,72 @@ async fn a_publish_prints_its_topic_and_its_payload() {
                 "Message: 00000000  62 69 6e 61 72 79 00 1b  5b 33 31 6d ff fe fd fc  |binary..[31m....|",
                 "",
             ]
+        );
+
+        drop(broker);
+    };
+
+    let result = together(session, script).await;
+
+    assert!(
+        matches!(result, Err(SessionError::Connection(_))),
+        "a connection that ends is a failure of the connection: {result:?}"
+    );
+}
+
+/// The topic of the one message the test of the two sinks reads.
+const SPLIT_TOPIC: &str = "sensors/kitchen";
+
+/// The payload of the one message the test of the two sinks reads.
+const SPLIT_PAYLOAD: &[u8] = b"21";
+
+#[tokio::test]
+async fn a_report_and_a_message_go_to_two_sinks() {
+    let (listener, port) = listening().await;
+    let topics = vec!["sensors/#".to_string()];
+    let (mut messages, mut printed) = recording();
+    let (mut reports, mut reported) = recording();
+
+    let session = run_until(
+        options_for(port),
+        &topics,
+        QoS::AtMostOnce,
+        false,
+        &mut messages,
+        &mut reports,
+        never(),
+    );
+
+    let script = async {
+        let mut broker = Broker::accept(&listener).await;
+        broker.accept_connection().await;
+
+        let filter = broker.read_subscribe().await;
+        broker.grant(filter.pkid, QoS::AtMostOnce).await;
+
+        // The answer of the broker is a report, so a user who reads the
+        // messages of a run through a pipe never sees this line.
+        assert_eq!(reported.lines(1).await, ["Subscribed: sensors/# (QoS 0)"]);
+
+        broker.publish(SPLIT_TOPIC, SPLIT_PAYLOAD).await;
+
+        assert_eq!(
+            printed.lines(3).await,
+            ["Topic: sensors/kitchen", "Message: 21", ""]
+        );
+
+        // The session wrote the report before it read the message, and the
+        // message is here already, so neither sink waits for a byte that is
+        // still on the way.
+        assert_eq!(
+            reported.so_far(),
+            "Subscribed: sensors/# (QoS 0)\n",
+            "the reports hold the answer of the broker and no message"
+        );
+        assert_eq!(
+            printed.so_far(),
+            "Topic: sensors/kitchen\nMessage: 21\n\n",
+            "the messages hold the message and no report"
         );
 
         drop(broker);
@@ -598,14 +692,16 @@ const UNPRINTABLE_TOPIC: &str = "sensors/\u{1b}";
 async fn a_publish_prints_a_topic_that_no_terminal_can_print_as_a_hex_dump() {
     let (listener, port) = listening().await;
     let topics = vec!["sensors/#".to_string()];
-    let (mut output, mut printed) = recording();
+    let (mut messages, mut printed) = recording();
+    let (mut reports, mut reported) = recording();
 
     let session = run_until(
         options_for(port),
         &topics,
         QoS::AtMostOnce,
         false,
-        &mut output,
+        &mut messages,
+        &mut reports,
         never(),
     );
 
@@ -616,12 +712,13 @@ async fn a_publish_prints_a_topic_that_no_terminal_can_print_as_a_hex_dump() {
         let filter = broker.read_subscribe().await;
         broker.grant(filter.pkid, QoS::AtMostOnce).await;
 
+        assert_eq!(reported.lines(1).await, ["Subscribed: sensors/# (QoS 0)"]);
+
         broker.publish(UNPRINTABLE_TOPIC, b"hello").await;
 
         assert_eq!(
-            printed.lines(4).await,
+            printed.lines(3).await,
             [
-                "Subscribed: sensors/# (QoS 0)",
                 // The topic printer is on this path, so a topic that no
                 // terminal can print arrives as a hex dump, and the escape
                 // byte of the publisher reaches no terminal.
@@ -646,7 +743,8 @@ async fn a_publish_prints_a_topic_that_no_terminal_can_print_as_a_hex_dump() {
 async fn the_interrupt_sends_a_disconnect_and_ends_the_run() {
     let (listener, port) = listening().await;
     let topics = vec!["sensors/#".to_string()];
-    let (mut output, mut printed) = recording();
+    let (mut messages, _printed) = recording();
+    let (mut reports, mut reported) = recording();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 
     let session = run_until(
@@ -654,7 +752,8 @@ async fn the_interrupt_sends_a_disconnect_and_ends_the_run() {
         &topics,
         QoS::AtMostOnce,
         false,
-        &mut output,
+        &mut messages,
+        &mut reports,
         async move {
             stopped.await.ok();
             Ok(())
@@ -668,7 +767,7 @@ async fn the_interrupt_sends_a_disconnect_and_ends_the_run() {
         let filter = broker.read_subscribe().await;
         broker.grant(filter.pkid, QoS::AtMostOnce).await;
 
-        assert_eq!(printed.lines(1).await, ["Subscribed: sensors/# (QoS 0)"]);
+        assert_eq!(reported.lines(1).await, ["Subscribed: sensors/# (QoS 0)"]);
 
         // A real signal would end the whole test run, so the interrupt of this
         // test arrives through the channel that `run_until` waits on.
@@ -700,14 +799,16 @@ const MANY_TOPICS: usize = 120;
 async fn every_topic_of_a_list_longer_than_the_inflight_limit_keeps_its_own_line() {
     let (listener, port) = listening().await;
     let topics: Vec<String> = (0..MANY_TOPICS).map(|n| format!("sensors/{n}")).collect();
-    let (mut output, mut printed) = recording();
+    let (mut messages, _printed) = recording();
+    let (mut reports, mut reported) = recording();
 
     let session = run_until(
         options_for(port),
         &topics,
         QoS::AtMostOnce,
         false,
-        &mut output,
+        &mut messages,
+        &mut reports,
         never(),
     );
 
@@ -727,7 +828,7 @@ async fn every_topic_of_a_list_longer_than_the_inflight_limit_keeps_its_own_line
             broker.grant(subscription.pkid, QoS::AtMostOnce).await;
         }
 
-        let printed = printed.lines(MANY_TOPICS).await;
+        let printed = reported.lines(MANY_TOPICS).await;
         let expected: Vec<String> = topics
             .iter()
             .rev()
@@ -832,7 +933,8 @@ impl Attempts {
 async fn a_connection_that_drops_comes_back_and_subscribes_again() {
     let (listener, port) = listening().await;
     let topics = vec!["sensors/#".to_string()];
-    let (mut output, mut printed) = recording();
+    let (mut messages, _printed) = recording();
+    let (mut reports, mut reported) = recording();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let attempts = Attempts::new();
 
@@ -858,7 +960,8 @@ async fn a_connection_that_drops_comes_back_and_subscribes_again() {
         &topics,
         QoS::AtLeastOnce,
         false,
-        &mut output,
+        &mut messages,
+        &mut reports,
         async move {
             stopped.await.ok();
             Ok(())
@@ -872,12 +975,12 @@ async fn a_connection_that_drops_comes_back_and_subscribes_again() {
         let first = broker.read_subscribe().await;
         broker.grant(first.pkid, QoS::AtMostOnce).await;
 
-        assert_eq!(printed.lines(1).await, ["Subscribed: sensors/# (QoS 0)"]);
+        assert_eq!(reported.lines(1).await, ["Subscribed: sensors/# (QoS 0)"]);
 
         // The network drops the connection.
         drop(broker);
 
-        let told = printed.lines(2).await;
+        let told = reported.lines(2).await;
         assert!(
             told[1].ends_with(&format!("Trying again in {TEST_WAIT:?}.")),
             "the supervisor says what failed and how long it waits: {:?}",
@@ -893,7 +996,7 @@ async fn a_connection_that_drops_comes_back_and_subscribes_again() {
         broker.grant(second.pkid, QoS::AtLeastOnce).await;
 
         assert_eq!(
-            printed.lines(3).await[2],
+            reported.lines(3).await[2],
             "Subscribed: sensors/# (QoS 1)",
             "the second connection subscribes again"
         );
@@ -916,7 +1019,8 @@ async fn a_connection_that_drops_comes_back_and_subscribes_again() {
 async fn a_policy_that_denies_every_topic_is_never_tried_again() {
     let (listener, port) = listening().await;
     let topics = vec!["denied/one".to_string(), "denied/two".to_string()];
-    let (mut output, mut printed) = recording();
+    let (mut messages, _printed) = recording();
+    let (mut reports, mut reported) = recording();
     let attempts = Attempts::new();
 
     let connect = {
@@ -937,7 +1041,8 @@ async fn a_policy_that_denies_every_topic_is_never_tried_again() {
         &topics,
         QoS::AtMostOnce,
         false,
-        &mut output,
+        &mut messages,
+        &mut reports,
         never(),
         quick_backoff(),
     );
@@ -952,7 +1057,7 @@ async fn a_policy_that_denies_every_topic_is_never_tried_again() {
         broker.refuse(second.pkid).await;
 
         assert_eq!(
-            printed.lines(2).await,
+            reported.lines(2).await,
             [
                 "Subscription refused: denied/one",
                 "Subscription refused: denied/two"
@@ -979,7 +1084,8 @@ async fn a_policy_that_denies_every_topic_is_never_tried_again() {
 async fn an_interrupt_ends_the_wait_between_two_attempts() {
     let (listener, port) = listening().await;
     let topics = vec!["sensors/#".to_string()];
-    let (mut output, mut printed) = recording();
+    let (mut messages, _printed) = recording();
+    let (mut reports, mut reported) = recording();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let (done, ended) = tokio::sync::oneshot::channel::<()>();
 
@@ -989,7 +1095,8 @@ async fn an_interrupt_ends_the_wait_between_two_attempts() {
             &topics,
             QoS::AtMostOnce,
             false,
-            &mut output,
+            &mut messages,
+            &mut reports,
             async move {
                 stopped.await.ok();
                 Ok(())
@@ -1007,7 +1114,7 @@ async fn an_interrupt_ends_the_wait_between_two_attempts() {
         // The first attempt fails, so the supervisor starts its wait.
         drop_one_connection(&listener).await;
 
-        let told = printed.lines(1).await;
+        let told = reported.lines(1).await;
         assert!(
             told[0].ends_with(&format!("Trying again in {SLOW_WAIT:?}.")),
             "the supervisor says how long it waits: {:?}",

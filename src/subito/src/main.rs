@@ -160,6 +160,7 @@ async fn subscribe(cli: &Cli) -> Result<()> {
         cli.mqtt_qos(),
         cli.json,
         &mut std::io::stdout(),
+        &mut std::io::stderr(),
         tokio::signal::ctrl_c(),
     )
     .await
