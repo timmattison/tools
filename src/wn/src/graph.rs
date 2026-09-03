@@ -212,6 +212,7 @@ fn sides_of(c: char) -> Option<Sides> {
         // with. The heavy set and the double set join them in the slice that
         // reads them.
         '\u{2500}' => Sides::HORIZONTAL, // ─
+        '\u{2502}' => Sides::VERTICAL,   // │
         '\u{2510}' => Sides::of(Side::Left).with(Sides::of(Side::Down)), // ┐
         '\u{251c}' => Sides::VERTICAL.with(Sides::of(Side::Right)), // ├
         '\u{2518}' => Sides::of(Side::Up).with(Sides::of(Side::Left)), // ┘
