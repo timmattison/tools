@@ -1,7 +1,8 @@
 //! The payload printer of `subito`.
 //!
 //! An MQTT payload is a byte string of any content. This module turns one such
-//! byte string into text that a terminal can print without damage.
+//! byte string into text that a terminal can print without damage and in the
+//! order of the bytes.
 
 /// The text an empty payload gives.
 const EMPTY_PAYLOAD: &str = "(empty)";
@@ -21,6 +22,22 @@ const LAST_PRINTABLE: u8 = 0x7e;
 /// The character the ASCII gutter prints for every other byte.
 const UNPRINTABLE: char = '.';
 
+/// The first character that embeds or overrides the direction of the text,
+/// which is LEFT-TO-RIGHT EMBEDDING.
+const FIRST_DIRECTION_OVERRIDE: char = '\u{202a}';
+
+/// The last character that embeds or overrides the direction of the text,
+/// which is RIGHT-TO-LEFT OVERRIDE.
+const LAST_DIRECTION_OVERRIDE: char = '\u{202e}';
+
+/// The first character that isolates the direction of the text, which is
+/// LEFT-TO-RIGHT ISOLATE.
+const FIRST_DIRECTION_ISOLATE: char = '\u{2066}';
+
+/// The last character that isolates the direction of the text, which is
+/// POP DIRECTIONAL ISOLATE.
+const LAST_DIRECTION_ISOLATE: char = '\u{2069}';
+
 /// Turns the bytes of one MQTT message into the text the tool prints.
 ///
 /// The rules apply in this order:
@@ -28,15 +45,18 @@ const UNPRINTABLE: char = '.';
 /// 1. An empty payload gives `(empty)`.
 /// 2. `pretty_json` is true and the payload holds JSON: the JSON with
 ///    indentation.
-/// 3. The payload is valid UTF-8 and holds no control character other than
-///    the tab, the line feed and the carriage return: the text unchanged.
+/// 3. The payload is valid UTF-8, holds no control character other than the
+///    tab, the line feed and the carriage return, and holds no character that
+///    changes the direction of the text: the text unchanged.
 /// 4. Every other payload: a hex dump.
 ///
-/// Rule 3 is stricter than "valid UTF-8 is text". A null byte and an escape
-/// byte are both valid UTF-8, and an escape byte starts a terminal escape
-/// sequence. A terminal that prints such a sequence changes its colors, moves
-/// its cursor, or clears itself. The hex dump of rule 4 stops that, because a
-/// hex dump holds hex digits and printable ASCII only.
+/// Rule 3 is stricter than "valid UTF-8 is text". A null byte, an escape byte
+/// and a direction override are all valid UTF-8. An escape byte starts a
+/// terminal escape sequence, and a terminal that prints such a sequence
+/// changes its colors, moves its cursor, or clears itself. A direction
+/// override makes the terminal print the characters of the line in an order
+/// the bytes do not have. The hex dump of rule 4 stops both, because a hex
+/// dump holds hex digits and printable ASCII only.
 #[must_use]
 pub fn format_payload(payload: &[u8], pretty_json: bool) -> String {
     if payload.is_empty() {
@@ -60,13 +80,26 @@ pub fn format_payload(payload: &[u8], pretty_json: bool) -> String {
     hex_dump(payload)
 }
 
-/// Says whether a terminal can print one character without damage.
+/// Says whether a terminal can print one character without damage and in the
+/// order of the bytes.
 ///
 /// A control character other than the tab, the line feed and the carriage
 /// return is not safe. The escape character is the one that matters most,
 /// because it starts a terminal escape sequence.
+///
+/// A character that changes the direction of the text is also not safe. Two
+/// ranges hold such characters: the embeddings and the overrides, and the
+/// isolates. [`char::is_control`] answers for the Unicode category Cc alone,
+/// and these characters are in the category Cf. A terminal that prints one of
+/// them puts the characters of the line in an order the bytes do not have.
 fn is_safe_to_print(character: char) -> bool {
-    !character.is_control() || matches!(character, '\t' | '\n' | '\r')
+    if matches!(character, '\t' | '\n' | '\r') {
+        return true;
+    }
+
+    !character.is_control()
+        && !(FIRST_DIRECTION_OVERRIDE..=LAST_DIRECTION_OVERRIDE).contains(&character)
+        && !(FIRST_DIRECTION_ISOLATE..=LAST_DIRECTION_ISOLATE).contains(&character)
 }
 
 /// Gives the hex dump of a payload.

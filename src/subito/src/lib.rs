@@ -12,10 +12,11 @@
 //! a new connection repairs.
 //!
 //! [`payload::format_payload`] is the part that keeps a terminal safe. An MQTT
-//! payload is a byte string of any content, and a byte string that holds an
-//! escape sequence changes the terminal that prints it. The function gives
-//! text only for a payload that is text, and a hex dump for every other
-//! payload.
+//! payload is a byte string of any content. A byte string that holds an escape
+//! sequence changes the terminal that prints it, and a byte string that holds
+//! a character that changes the direction of the text makes the terminal print
+//! a line in an order the bytes do not have. The function gives text only for
+//! a payload that is text, and a hex dump for every other payload.
 
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 #![cfg_attr(not(test), warn(clippy::expect_used))]
