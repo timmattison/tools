@@ -2,14 +2,16 @@
 //!
 //! These spawn the real binary via `CARGO_BIN_EXE_localnext`. They are
 //! parallel-safe: every fixture is a unique `tempfile::TempDir`, no port is
-//! hardcoded (the bind-failure test asks the operating system for one and the
-//! banner tests pass `--port 0`), and the working directory is set per child
-//! through `Command::current_dir` rather than by `std::env::set_current_dir`,
-//! which is process-global and would race the other tests in this binary.
+//! hardcoded (the bind-failure test asks the operating system for one, the
+//! banner tests pass `--port 0`, and the no-flag test computes the port
+//! `portplz_core::derive` will produce for its own fixture and asserts only
+//! against that), and the working directory is set per child through
+//! `Command::current_dir` rather than by `std::env::set_current_dir`, which is
+//! process-global and would race the other tests in this binary.
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -143,6 +145,104 @@ fn serving_root(cwd: &Path) -> String {
                 assert!(
                     Instant::now() < deadline,
                     "localnext stayed alive and silent for {BANNER_TIMEOUT:?} without a banner"
+                );
+            }
+        }
+    }
+}
+
+/// One line of the child's output, tagged by which stream it came from.
+enum ChildLine {
+    Stdout(String),
+    Stderr(String),
+}
+
+/// What running `localnext` with no `--port` did.
+enum DerivedPortOutcome {
+    /// The bind succeeded: the banner line, as printed on stdout.
+    Banner(String),
+    /// The bind failed: the exit status and everything written to stderr.
+    Failure { status: ExitStatus, stderr: String },
+}
+
+/// Starts `localnext` with NO `--port` flag, working directory at `cwd`, and
+/// waits for one of the two outcomes the port derivation allows: a banner on
+/// stdout, or a non-zero exit. Both are correct — which one occurs depends on
+/// whether the derived port happens to be free on the machine running the
+/// test, which this function does not control and the caller must not assume.
+///
+/// Mirrors [`serving_root`]'s bounded wait — a `recv_timeout` loop plus a
+/// liveness check — widened to drain stderr as well as stdout and to treat a
+/// non-zero exit as a real outcome rather than a fault.
+fn run_with_derived_port(cwd: &Path) -> DerivedPortOutcome {
+    warm_the_binary();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_localnext"))
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawning localnext should succeed");
+
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    // The guard owns the child from here on, so every exit from this
+    // function kills a server left running on the banner branch.
+    let mut guard = ChildGuard(child);
+
+    let (sender, receiver) = mpsc::channel();
+    let stdout_sender = sender.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if stdout_sender.send(ChildLine::Stdout(line)).is_err() {
+                break;
+            }
+        }
+    });
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if sender.send(ChildLine::Stderr(line)).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut collected_stderr = String::new();
+    let deadline = Instant::now() + BANNER_TIMEOUT;
+    loop {
+        match receiver.recv_timeout(LIVENESS_POLL) {
+            Ok(ChildLine::Stdout(line)) => {
+                if line.starts_with(SERVING_PREFIX) {
+                    return DerivedPortOutcome::Banner(line);
+                }
+            }
+            Ok(ChildLine::Stderr(line)) => {
+                collected_stderr.push_str(&line);
+                collected_stderr.push('\n');
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // Both reader threads have exited, which only happens once the
+                // child has closed stdout and stderr — i.e. it is gone or
+                // going. `wait` reaps it and hands back the status.
+                let status = guard.0.wait().expect("wait on an already-exited child");
+                return DerivedPortOutcome::Failure {
+                    status,
+                    stderr: collected_stderr,
+                };
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Ok(Some(status)) = guard.0.try_wait() {
+                    return DerivedPortOutcome::Failure {
+                        status,
+                        stderr: collected_stderr,
+                    };
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "localnext stayed alive and silent for {BANNER_TIMEOUT:?} \
+                     without a banner or an exit"
                 );
             }
         }
@@ -288,4 +388,55 @@ fn both_working_directories_serve_the_same_canonical_root() {
         from_out, from_project,
         "running from inside out should serve the same root as running from the project directory"
     );
+}
+
+/// With no `--port` flag, `localnext` derives its port through
+/// `portplz_core::derive` exactly as `run()` does, and either outcome the
+/// derivation allows names that same port: a banner on stdout, or a non-zero
+/// exit with the port in stderr. Whether the derived port happens to be free
+/// on the machine running the test decides which branch fires, so the test
+/// accepts both rather than depending on that.
+///
+/// Every other test in this file passes an explicit `--port`
+/// (`serving_root` always passes `--port 0`), so before this test nothing ran
+/// `run()`'s default-port path — the call to `UserSalt::current()`,
+/// `port_basis`, and `portplz_core::derive` — end to end; it was covered only
+/// by `main.rs`'s two unit tests of `port_basis` in isolation.
+#[test]
+fn a_missing_port_flag_uses_the_derived_port() {
+    let dir = export_fixture();
+    let out = dir.path().join(localnext::ROOT_DIRECTORY);
+    let root = out.canonicalize().expect("canonicalize the export root");
+    // Mirrors main.rs's `port_basis` doc: the basis is the export root's
+    // PARENT (the project directory, i.e. the TempDir itself) — never `out`.
+    let basis = root
+        .parent()
+        .expect("a canonicalized temp-dir path has a parent");
+    let user = portplz_core::UserSalt::current().expect("read the current user salt");
+    let derivation = portplz_core::derive(basis, false, &user).expect("derive the expected port");
+    let expected_port = derivation.port.get();
+
+    match run_with_derived_port(dir.path()) {
+        DerivedPortOutcome::Banner(line) => {
+            assert!(
+                line.contains(&format!(":{expected_port}")),
+                "acceptable outcomes are a banner naming the derived port {expected_port}, or a \
+                 non-zero exit whose stderr names it; got a banner that named a different port: \
+                 {line}"
+            );
+        }
+        DerivedPortOutcome::Failure { status, stderr } => {
+            assert!(
+                !status.success(),
+                "acceptable outcomes are a banner naming the derived port {expected_port}, or a \
+                 non-zero exit whose stderr names it; got exit {status:?} with stderr: {stderr}"
+            );
+            assert!(
+                stderr.contains(&expected_port.to_string()),
+                "acceptable outcomes are a banner naming the derived port {expected_port}, or a \
+                 non-zero exit whose stderr names it; got exit {status:?} but its stderr did not \
+                 name that port: {stderr}"
+            );
+        }
+    }
 }
