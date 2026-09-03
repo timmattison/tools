@@ -1035,9 +1035,9 @@ pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
 /// reaches a label somewhere else in it draws an edge the graph loses, and a
 /// reader who wrote that label meant work by it.
 ///
-/// The nets arrive in the order of their first cell, and the ports of one net
-/// in the order of their text, so the message names the first such text of the
-/// picture.
+/// The nets arrive in the order of their first cell, and each net names the
+/// earliest port it holds. So one picture earns the same message every time,
+/// and the message names a text near the top of it.
 fn refuse_ports(wirings: &[Wiring]) -> Result<(), GraphError> {
     for wiring in wirings {
         if let Some(port) = wiring
@@ -1110,8 +1110,9 @@ fn build(wirings: &[Wiring], lone: &[Port]) -> Graph {
             }
         }
     }
-    // A step that reaches itself stays, so the slice that refuses a cycle
-    // finds it here rather than in a picture this reader already flattened.
+    // A step that reaches itself stays, so [`Graph::cycle`] finds it. A build
+    // that dropped it would hand back a picture with the knot taken out of it,
+    // and the answer would then name a step nobody can start.
     for positions in &mut before {
         positions.sort_unstable();
     }
