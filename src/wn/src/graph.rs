@@ -678,6 +678,13 @@ pub enum GraphError {
     /// guess.
     #[error("{0:?} stands beside a wire that reaches no second step, and a wire joins two steps")]
     HalfNet(Snippet),
+    /// A line of the picture holds an arrowhead that points left.
+    ///
+    /// A picture drawn from right to left is rare, and a guess at it is worse
+    /// than a refusal: the reader who drew it means the opposite order, and an
+    /// answer that names the last issue first sends somebody to the wrong work.
+    #[error("{0:?} holds a leftward arrowhead, and this reader follows a wire from left to right")]
+    Leftward(Snippet),
 }
 
 /// The graph `text` draws, or `None` when `text` draws none.
@@ -938,6 +945,20 @@ A ──→ #4 ──┐
      └──→ #4
 #5 ──→";
 
+    /// A fan-out that claims the text, to stand over a line under test.
+    ///
+    /// Two of its three ports name a step and its cells stand on two lines, so
+    /// this net alone makes the text a picture. The line under it is then read
+    /// as a line of that picture.
+    const CLAIMING_FAN: &str = "\
+#1 ──┬──→ #3
+     └──→ #4";
+
+    /// [`CLAIMING_FAN`], with `line` under it.
+    fn under_a_picture(line: &str) -> String {
+        format!("{CLAIMING_FAN}\n{line}")
+    }
+
     /// The graph `text` draws.
     fn graph_of(text: &str) -> Graph {
         read(text)
@@ -1164,6 +1185,20 @@ A ──→ #4 ──┐
         // an order. A reader who drew it meant a second step, and the reader
         // cannot guess which one, so the message names the step it has.
         assert_eq!(refusal(HALF_NET), GraphError::HalfNet(Snippet::new("#5")));
+    }
+
+    #[test]
+    fn a_leftward_arrowhead_is_refused_and_the_message_names_the_line() {
+        // Each of the four spellings of the head, because a reader picks the
+        // one their font draws best and the plan is the same plan.
+        for head in ['\u{2190}', '\u{27f5}', '\u{21d0}', '\u{25c0}'] {
+            let line = format!("#5 {head}── #6");
+            assert_eq!(
+                refusal(&under_a_picture(&line)),
+                GraphError::Leftward(Snippet::new(&line)),
+                "the head {head:?}"
+            );
+        }
     }
 
     #[test]
