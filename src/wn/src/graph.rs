@@ -1714,4 +1714,20 @@ A ──→ #4 ──┐
             .expect("the list names the issue the pull request closes");
         assert!(work < closed, "{numbers:?}");
     }
+
+    #[test]
+    fn the_message_of_a_cycle_reads_the_numbers_as_a_sentence() {
+        // The one function that writes a list of numbers writes this one, so
+        // the message of a cycle reads the way the note of a report reads. A
+        // message that wrote the list the way a `Vec` writes itself would name
+        // the type and not the plan.
+        assert_eq!(
+            refusal(CYCLE_OF_TWO).to_string(),
+            "the wires return to #1 and #2, so this picture names no step to start first"
+        );
+        assert_eq!(
+            refusal(CYCLE_OF_THREE).to_string(),
+            "the wires return to #1, #2 and #3, so this picture names no step to start first"
+        );
+    }
 }
