@@ -1254,3 +1254,23 @@ fn the_environment_names_the_command_of_every_start_line_of_a_picture() {
         stdout(&output)
     );
 }
+
+#[test]
+fn a_chain_of_two_issues_on_one_line_is_still_a_chain() {
+    // `→` is a wire of a picture, and the net it draws reaches `#277` on its
+    // left and `#278` on its right. Both steps stand on one line, so the
+    // picture claims nothing and the chain reader answers as it always did.
+    // A reader who types a chain must never meet the block of a picture.
+    let gh = FakeGh::new(THREE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", ONE_OPEN_CHAIN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "✓ #277  First thing\n",
+            "→ #278  Second thing\n",
+            "\n",
+            "Start #278 next with 'si 278'\n",
+        )
+    );
+}
