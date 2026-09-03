@@ -53,6 +53,17 @@
 //! on more than one line. `#1 ──→ #2` on one line is a chain, and the chain
 //! reader still answers it. The border of a box-drawn table touches no step at
 //! all, so that table keeps its own reader.
+//!
+//! # A step with no wire beside it
+//!
+//! A line that holds no wire, and whose whole text reads as exactly one step,
+//! is a node with no edge. `#6` alone is a stream of one step, and the answer
+//! names it. Every other line with no wire is prose: `See #123 for the details`
+//! writes no step, because `See` is no number.
+//!
+//! Such a node never claims the text. It is read after a net claims it, so a
+//! number in the prose of a page that draws no picture still reaches the chain
+//! reader.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -460,6 +471,34 @@ impl Grid {
             }
         }
         Ok(())
+    }
+
+    /// Every step that stands on a line with no wire on it.
+    ///
+    /// A line that holds no wire draws nothing, so it joins no step to any
+    /// other. It is a node all the same when the whole of it reads as one
+    /// step, because a stream of one step is a plan and the reader who wrote
+    /// it wants to hear about it. Every other such line is prose, and prose
+    /// names no node.
+    fn lone_steps(&self) -> Vec<Port> {
+        let mut ports: Vec<Port> = Vec::new();
+        for row in (0..self.cells.len()).filter(|&row| !self.is_drawn(row)) {
+            let Some(last) = self.cells.get(row).map_or(0, Vec::len).checked_sub(1) else {
+                continue;
+            };
+            let Some((text, place)) = self.read_text(row, 0, last) else {
+                continue;
+            };
+            let Some(step) = one_step(&text) else {
+                continue;
+            };
+            ports.push(Port {
+                place,
+                text,
+                step: Some(step),
+            });
+        }
+        ports
     }
 
     /// Every net of the picture, each one the places of its cells.
@@ -883,9 +922,9 @@ pub enum GraphError {
 /// chain reader takes such a text next: a chain broken over two lines must
 /// reach that reader and not a refusal of this one.
 ///
-/// Every node of the graph comes out of a net. A step that stands with no wire
-/// beside it names no port, so the slice that answers a graph decides whether
-/// such a step is a node of one.
+/// Most nodes of the graph come out of a net. A step that stands on a line with
+/// no wire is a node with no edge, and it is read after a net claims the text,
+/// so it never claims the text on its own.
 ///
 /// # Errors
 ///
@@ -912,7 +951,7 @@ pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
     Some(
         grid.refuse_drawing()
             .and_then(|()| refuse_ports(&wirings))
-            .and_then(|()| build(&wirings).refuse_cycle()),
+            .and_then(|()| build(&wirings, &grid.lone_steps()).refuse_cycle()),
     )
 }
 
@@ -958,10 +997,15 @@ fn refuse_ports(wirings: &[Wiring]) -> Result<(), GraphError> {
 /// two rows of a bus reach comes before the step on the other side of that bus
 /// one time, and a list that names it twice would tell a reader to wait for it
 /// twice.
-fn build(wirings: &[Wiring]) -> Graph {
+///
+/// `lone` holds the steps that stand on a line with no wire. Each of them is a
+/// node with no edge, and a number that stands in the picture as well is the
+/// same one node.
+fn build(wirings: &[Wiring], lone: &[Port]) -> Graph {
     let mut ports: Vec<(&Port, Step)> = wirings
         .iter()
         .flat_map(Wiring::ports)
+        .chain(lone)
         .filter_map(|port| port.step.map(|step| (port, step)))
         .collect();
     ports.sort_by_key(|(port, _)| port.place);
