@@ -1348,6 +1348,34 @@ Notes: Independent of everything above.";
 | S2 — install | #89 → #94 | #96, #91 | crates/tsm (shell-init) | Same hotspot as S1. |
 | S3 — keymap | #86 | | packages/web | Disjoint. |";
 
+    /// The same four streams, as a record for each one.
+    ///
+    /// S0 writes an empty `Waits for` field and S3 writes none at all, because
+    /// a stream that waits for nothing is written both ways and the two say
+    /// the same thing.
+    const WAITS_RECORDS: &str = "\
+Stream: S0 — daemon leak
+Order: #96
+Waits for:
+Zone: crates/tsm (serve.rs)
+Notes: Do first, solo.
+────────────────────────────────────────
+Stream: S1 — lifecycle
+Order: #91
+Waits for: #96
+Zone: crates/tsm (kill.rs)
+────────────────────────────────────────
+Stream: S2 — install
+Order: #89 → #94
+Waits for: #96, #91
+Zone: crates/tsm (shell-init)
+Notes: Same hotspot as S1.
+────────────────────────────────────────
+Stream: S3 — keymap
+Order: #86
+Zone: packages/web
+Notes: Disjoint.";
+
     /// The same four streams, drawn as a box table.
     ///
     /// The form a reader copies out of a terminal. The `Waits for` cells of S0
@@ -1433,6 +1461,16 @@ Notes: Independent of everything above.";
              | --- | --- | --- |\n\
              | {ONE_STREAM_LABEL} | #1 | {waits} |"
         )
+    }
+
+    /// A record for one stream, whose `Waits for` field is written with `key`
+    /// and holds `waits`.
+    ///
+    /// The key is an argument because a reader writes it in whatever case they
+    /// type, and one record read twice is what says the two spellings are one
+    /// field.
+    fn record_that_waits_for(key: &str, waits: &str) -> String {
+        format!("Stream: {ONE_STREAM_LABEL}\nOrder: #1\n{key}: {waits}")
     }
 
     /// [`BOX_TABLE`], drawn with `+---+` and `|`.
@@ -2255,6 +2293,37 @@ Notes: Independent of everything above.";
             waits_at(&plan_of(&table_that_waits_for("   ")), 0).is_empty(),
             "a drawn cell is padded to the width of its column"
         );
+    }
+
+    #[test]
+    fn the_record_form_gives_the_waits_of_the_table_form() {
+        // The record form writes the column as a field, and the two forms give
+        // one plan. A `Waits for` field opens no stream of its own, the way a
+        // `Zone` field opens none: the record it stands in already has a name
+        // and a chain.
+        let plan = plan_of(WAITS_RECORDS);
+        assert_eq!(plan.streams().len(), 4);
+        assert_eq!(waits_at(&plan, 1), vec![(96, None)]);
+        assert_eq!(waits_at(&plan, 2), vec![(96, None), (91, None)]);
+        assert_eq!(plan, plan_of(WAITS_TABLE));
+    }
+
+    #[test]
+    fn a_record_with_no_waits_for_field_waits_for_nothing() {
+        // An absent field and an empty one say the same thing, the way an
+        // absent column and an empty cell do.
+        assert!(waits_at(&plan_of("Stream: S1\nOrder: #1"), 0).is_empty());
+        assert!(waits_at(&plan_of(&record_that_waits_for("Waits for", "")), 0).is_empty());
+    }
+
+    #[test]
+    fn a_waits_for_key_is_read_whatever_its_case() {
+        // The four keys of a record are read with the case ignored, and the
+        // fifth one is read the same way.
+        let plan = plan_of(&record_that_waits_for("Waits for", "#96"));
+        assert_eq!(waits_at(&plan, 0), vec![(96, None)]);
+        assert_eq!(plan, plan_of(&record_that_waits_for("waits for", "#96")));
+        assert_eq!(plan, plan_of(&record_that_waits_for("WAITS FOR", "#96")));
     }
 
     #[test]
