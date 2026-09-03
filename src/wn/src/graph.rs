@@ -608,6 +608,18 @@ mod tests {
                 ├──→ #249  (gallery)
 #246 ──→ #248 ──┘";
 
+    /// The same picture, with the bus drawn taller.
+    ///
+    /// A `│` stands between the corner and the tee, and between the tee and
+    /// the corner under it. The plan is the same plan, so the graph is the
+    /// same graph.
+    const TALL_PASTE: &str = "\
+#242 ──→ #247 ──┐
+                │
+                ├──→ #249  (gallery)
+                │
+#246 ──→ #248 ──┘";
+
     /// The graph `text` draws.
     fn graph_of(text: &str) -> Graph {
         read(text)
@@ -653,5 +665,11 @@ mod tests {
             edges(&graph),
             vec![(242, 247), (246, 248), (247, 249), (248, 249)]
         );
+    }
+
+    #[test]
+    fn a_taller_bus_is_the_same_bus() {
+        assert_eq!(nodes(&graph_of(TALL_PASTE)), nodes(&graph_of(PASTE)));
+        assert_eq!(edges(&graph_of(TALL_PASTE)), edges(&graph_of(PASTE)));
     }
 }
