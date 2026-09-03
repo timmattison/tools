@@ -65,7 +65,8 @@
 //! number in the prose of a page that draws no picture still reaches the chain
 //! reader.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 
 use thiserror::Error;
 use unicode_width::UnicodeWidthChar;
@@ -743,17 +744,22 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// The steps of the picture, in the order they stand in the text.
+    /// The steps of the picture, in a topological order.
     ///
-    /// The slice that answers a graph puts them in a topological order, with a
-    /// tie going to the step that stands first in the text. A caller of this
-    /// slice reads the order of the text.
+    /// Every step stands after each step it waits for, and a tie goes to the
+    /// step that stands first in the text. So the rows of an answer keep each
+    /// stream of the picture together, and a reader reads the streams the way
+    /// they wrote them.
     #[must_use]
     pub fn steps(&self) -> &[Step] {
         &self.steps
     }
 
     /// The positions of the steps that come before the step at `position`.
+    ///
+    /// The positions count in [`steps`](Self::steps), and they stand in
+    /// ascending order. Every one of them is smaller than `position`, because
+    /// the steps stand in a topological order.
     ///
     /// A position outside the graph gives an empty list, because a caller that
     /// walks the steps of another graph asks a question about nothing.
@@ -790,6 +796,56 @@ impl Graph {
             Some(cycle) => Err(GraphError::Cycle(cycle)),
             None => Ok(self),
         }
+    }
+
+    /// This graph, with its steps in a topological order.
+    ///
+    /// Kahn's algorithm over a queue that always takes the ready step with the
+    /// earliest place in the text. A step is ready when every step before it
+    /// stands in the order already, so a tie between two streams goes to the
+    /// stream the reader wrote first and each stream stays together.
+    ///
+    /// The positions of the steps before each step are read against the new
+    /// numbering, because a caller reads them as places of
+    /// [`steps`](Self::steps).
+    ///
+    /// It runs after [`refuse_cycle`](Self::refuse_cycle), so every step
+    /// reaches the queue: a step that never becomes ready is a step of a cycle,
+    /// and a picture with a cycle never reaches this function.
+    fn in_topological_order(self) -> Self {
+        let after = self.after();
+        let mut waiting: Vec<usize> = self.before.iter().map(Vec::len).collect();
+        let mut ready: BinaryHeap<Reverse<usize>> = (0..self.steps.len())
+            .filter(|position| waiting[*position] == 0)
+            .map(Reverse)
+            .collect();
+        let mut order: Vec<usize> = Vec::with_capacity(self.steps.len());
+        while let Some(Reverse(position)) = ready.pop() {
+            order.push(position);
+            for &next in &after[position] {
+                waiting[next] -= 1;
+                if waiting[next] == 0 {
+                    ready.push(Reverse(next));
+                }
+            }
+        }
+        let mut rank: Vec<usize> = vec![0; self.steps.len()];
+        for (place, &position) in order.iter().enumerate() {
+            rank[position] = place;
+        }
+        let steps: Vec<Step> = order.iter().map(|&position| self.steps[position]).collect();
+        let before: Vec<Vec<usize>> = order
+            .iter()
+            .map(|&position| {
+                let mut earlier: Vec<usize> = self.before[position]
+                    .iter()
+                    .map(|&earlier| rank[earlier])
+                    .collect();
+                earlier.sort_unstable();
+                earlier
+            })
+            .collect();
+        Self { steps, before }
     }
 
     /// The numbers of one cycle of the picture, or `None` when the picture
@@ -951,7 +1007,8 @@ pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
     Some(
         grid.refuse_drawing()
             .and_then(|()| refuse_ports(&wirings))
-            .and_then(|()| build(&wirings, &grid.lone_steps()).refuse_cycle()),
+            .and_then(|()| build(&wirings, &grid.lone_steps()).refuse_cycle())
+            .map(Graph::in_topological_order),
     )
 }
 
