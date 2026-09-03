@@ -127,7 +127,10 @@ pub enum Resolution {
 /// tool's `strings.Trim(path, "/")` — and then tried in order: the path itself,
 /// then that path as a directory holding an `index.html`, then the path with
 /// `.html` appended, then the fallback. A path that is empty once trimmed (`/`,
-/// or nothing at all) is the export's own index.
+/// or nothing at all) targets the export's own index directly, tested for
+/// existence the same way every other branch tests its candidate:
+/// [`Resolution::File`] when `<root>/index.html` exists, [`Resolution::Fallback`]
+/// — logged like any other miss — when it does not.
 ///
 /// Two notes on the directory step, which the issue's summary of the Go tool
 /// omits:
@@ -159,7 +162,11 @@ pub fn resolve_request(root: &Path, target: &str) -> Resolution {
 
     let trimmed = decoded.trim_matches('/');
     if trimmed.is_empty() {
-        return Resolution::File(fallback);
+        return if fallback.is_file() {
+            Resolution::File(fallback)
+        } else {
+            Resolution::Fallback(fallback)
+        };
     }
 
     match httpfile::resolve_under_root(root, trimmed) {
