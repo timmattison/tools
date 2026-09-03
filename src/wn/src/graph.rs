@@ -897,4 +897,13 @@ mod tests {
         assert_eq!(nodes(&graph), vec![1, 2, 3, 4]);
         assert_eq!(edges(&graph), vec![(1, 2), (2, 4), (3, 2)]);
     }
+
+    #[test]
+    fn a_chain_on_one_line_is_a_chain() {
+        // The net of this text names two steps, and every cell of it stands on
+        // one line. So this reader claims nothing and the chain reader answers
+        // the text, which is what it does today.
+        assert!(read("#1 ──→ #2").is_none());
+        assert!(read("#1 --> #2").is_none());
+    }
 }
