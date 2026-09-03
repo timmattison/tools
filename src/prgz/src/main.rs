@@ -4,10 +4,17 @@
 //! own: the command line, the progress bar, and the answer to a stop signal.
 //! The library beside it holds the compression and the closing report.
 //!
-//! A run that the user stops leaves no output file behind. The Go tool that
-//! this binary replaces sent Ctrl-C to the quit path of its terminal library,
-//! thus it left a part of a gzip stream on the disk. A part of a gzip stream
-//! looks like a whole one, thus the user got a broken file.
+//! A run that the user stops once leaves no output file behind. The Go tool
+//! that this binary replaces sent Ctrl-C to the quit path of its terminal
+//! library, thus it left a part of a gzip stream on the disk. A part of a
+//! gzip stream looks like a whole one, thus the user got a broken file.
+//!
+//! A run that the user stops twice ends at once, on the second signal, and
+//! it leaves the part of the output file that it had written. The second
+//! signal exists for the run whose read never returns, thus the run never
+//! reads the stop flag a second time and the graceful stop above never
+//! happens. A user who meets that run gets the process back, at the cost of
+//! the part file that the graceful stop would have removed.
 
 #![warn(clippy::unwrap_used)]
 #![warn(clippy::expect_used)]
@@ -174,16 +181,33 @@ fn chain(error: &dyn std::error::Error) -> String {
 ///
 /// SIGINT is the Ctrl-C of the terminal, and SIGTERM is the polite kill.
 /// SIGKILL is the one signal that no program handles, and this tool does not
-/// pretend otherwise.
+/// pretend otherwise. A second signal off this list, of either kind, ends the
+/// run at once; see [`stop_flag`].
 #[cfg(unix)]
 const TERMINATION_SIGNALS: [std::os::raw::c_int; 2] =
     [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM];
 
+/// The number that a shell adds to a signal number to report a process that
+/// the signal ended. A second stop signal ends this process with the status
+/// that the shell reports for the signal itself.
+#[cfg(unix)]
+const SIGNAL_EXIT_BASE: std::os::raw::c_int = 128;
+
 /// A flag that a termination signal sets.
 ///
-/// The compression reads the flag before each block of the input. A run that
-/// the user stops therefore ends between two blocks, and the library then
-/// removes the part of the output file that the run wrote.
+/// The compression reads the flag before each block of the input, thus a run
+/// that the user stops once ends between two blocks and the library removes
+/// the part of the output file that the run wrote.
+///
+/// A run that blocks inside the read of one block, such as a read from a
+/// stalled network mount, never reaches that check again, thus the first
+/// stop signal goes unanswered for as long as the read blocks. A second stop
+/// signal, of either kind that [`TERMINATION_SIGNALS`] lists, then ends the
+/// process at once. No cleanup runs on that path, thus the part of the
+/// output file that the run had written stays on the disk. The order of
+/// registration makes this so: the function registers the immediate stop
+/// before the flag-setting one, for each signal, thus the first signal only
+/// sets the flag and the second one finds it already set.
 ///
 /// # Errors
 ///
@@ -192,6 +216,16 @@ const TERMINATION_SIGNALS: [std::os::raw::c_int; 2] =
 fn stop_flag() -> io::Result<Arc<AtomicBool>> {
     let flag = Arc::new(AtomicBool::new(false));
     for signal in TERMINATION_SIGNALS {
+        // The immediate stop must register before the flag-setting one. On
+        // the first signal the flag still reads false, thus this action does
+        // nothing and the second action below sets the flag. On a second
+        // signal the flag already reads true, thus this action ends the
+        // process before the second action runs at all.
+        signal_hook::flag::register_conditional_shutdown(
+            signal,
+            SIGNAL_EXIT_BASE + signal,
+            Arc::clone(&flag),
+        )?;
         signal_hook::flag::register(signal, Arc::clone(&flag))?;
     }
     Ok(flag)

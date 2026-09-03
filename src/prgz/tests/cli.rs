@@ -521,6 +521,25 @@ const ENDS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 /// test, forever.
 const WRITER_OPEN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The time that the test gives the run to make its output file. The run
+/// makes that file right before it starts the read loop, thus the file
+/// answers whether the run passed every step before that loop: the open of
+/// the stalled input, the check that the output does not name the input, and
+/// the make of the output file itself.
+const OUTPUT_APPEARS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The time that the test waits, once the output file answers that the run
+/// passed every step before the read loop, before it sends the first SIGINT.
+///
+/// The steps of the loop still ahead of the run at that point touch no file
+/// and ask the system for nothing: it makes the gzip encoder, it makes the
+/// buffer of the read, and it reads the stop flag once before the read that
+/// never returns. A run gets a CPU slice to cross that little ground long
+/// before a wait of this length passes, thus the wait settles the run into
+/// the read before the first signal, without a guess at the whole distance
+/// from the start of the run to that read.
+const SETTLE_BEFORE_FIRST_SIGNAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Ends a child process, and reaps it, when the guard drops.
 ///
 /// A test of this section spawns a run that a read keeps alive on purpose. A
@@ -566,6 +585,20 @@ fn open_fifo_writer(path: &Path) -> File {
         .recv_timeout(WRITER_OPEN_DEADLINE)
         .expect("the write end of the FIFO did not open within the deadline")
         .expect("the write end of the FIFO did not open")
+}
+
+/// Poll for `path` to exist, up to [`OUTPUT_APPEARS_DEADLINE`], and answer
+/// whether it appeared within that time.
+#[cfg(unix)]
+fn wait_for_file(path: &Path) -> bool {
+    let deadline = std::time::Instant::now() + OUTPUT_APPEARS_DEADLINE;
+    while std::time::Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    false
 }
 
 /// Poll `child` for [`STAYS_ALIVE_WINDOW`] and answer whether it was still
@@ -632,6 +665,13 @@ fn a_first_stop_signal_that_cannot_land_leaves_the_process_alive_and_a_second_on
     // returns.
     let writer = open_fifo_writer(&input);
 
+    assert!(
+        wait_for_file(&output),
+        "the run never made its output file, thus the test could not tell \
+         that the run passed every step before the read that never returns"
+    );
+    std::thread::sleep(SETTLE_BEFORE_FIRST_SIGNAL);
+
     send_sigint(pid);
     assert!(
         stays_alive(&mut guard.0),
@@ -654,7 +694,7 @@ fn a_first_stop_signal_that_cannot_land_leaves_the_process_alive_and_a_second_on
     );
     assert!(
         output.exists(),
-        "the second SIGINT should leave the part-written output file on \
-         the disk, because no cleanup runs on that path"
+        "the second SIGINT left no output file on the disk, though no \
+         cleanup runs on that path"
     );
 }
