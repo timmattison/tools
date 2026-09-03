@@ -301,6 +301,69 @@ fn a_run_over_bytes_that_gzip_cannot_compress_warns_and_shows_a_negative_change(
 }
 
 #[test]
+fn a_run_where_the_output_names_the_input_leaves_the_file_untouched_and_fails() {
+    let bytes = compressible();
+    let (_directory, input) = fixture("notes.txt", &bytes);
+
+    let answer = run(prgz().arg("--input").arg(&input).arg("--output").arg(&input));
+
+    assert!(!answer.ok, "the run answered a success");
+    assert!(
+        answer.stderr.contains(&input.display().to_string()),
+        "the message does not name the file: {}",
+        answer.stderr
+    );
+    assert_eq!(
+        std::fs::read(&input).unwrap(),
+        bytes,
+        "the run changed the bytes of the input file"
+    );
+}
+
+#[test]
+fn a_run_where_a_different_spelling_of_the_output_path_still_names_the_input_leaves_it_untouched()
+{
+    let bytes = compressible();
+    let (directory, input) = fixture("notes.txt", &bytes);
+    let output = directory.path().join(".").join("notes.txt");
+
+    let answer = run(prgz()
+        .arg("--input")
+        .arg(&input)
+        .arg("--output")
+        .arg(&output));
+
+    assert!(!answer.ok, "the run answered a success");
+    assert_eq!(
+        std::fs::read(&input).unwrap(),
+        bytes,
+        "the run changed the bytes of the input file"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_run_where_the_output_is_a_hard_link_to_the_input_leaves_it_untouched() {
+    let bytes = compressible();
+    let (directory, input) = fixture("a.txt", &bytes);
+    let output = directory.path().join("b.txt");
+    std::fs::hard_link(&input, &output).unwrap();
+
+    let answer = run(prgz()
+        .arg("--input")
+        .arg(&input)
+        .arg("--output")
+        .arg(&output));
+
+    assert!(!answer.ok, "the run answered a success");
+    assert_eq!(
+        std::fs::read(&input).unwrap(),
+        bytes,
+        "the run changed the bytes of the input file"
+    );
+}
+
+#[test]
 fn a_report_follows_the_locale_of_the_environment() {
     let (_directory, input) = fixture("data.txt", &compressible());
 

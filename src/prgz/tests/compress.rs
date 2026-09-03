@@ -411,6 +411,23 @@ fn a_read_that_fails_leaves_no_output_file() {
 }
 
 #[test]
+fn compress_file_over_the_same_path_for_input_and_output_leaves_the_file_untouched() {
+    let dir = temp_dir();
+    let input = dir.path().join("notes.txt");
+    let bytes = b"the bytes that a refusal must not lose".to_vec();
+    fs::write(&input, &bytes).unwrap();
+
+    let error = compress_file(&input, &input, &|| false, &mut |_| {});
+
+    assert!(error.is_err(), "the run answered a success");
+    assert_eq!(
+        fs::read(&input).unwrap(),
+        bytes,
+        "the run changed the bytes of the input file"
+    );
+}
+
+#[test]
 fn a_run_that_the_user_stops_leaves_no_output_file() {
     let dir = temp_dir();
     let input = dir.path().join("many.bin");
