@@ -34,7 +34,7 @@ use colored::{ColoredString, Colorize};
 use textfit::{pad_right, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
-use crate::chain::IssueNumber;
+use crate::chain::{list, IssueNumber};
 use crate::report::{Entry, Report, Status};
 use crate::StartCommand;
 
@@ -490,16 +490,6 @@ fn summary(streams: &[StreamReport], width: usize, start: &StartCommand) -> Vec<
             )
         })
         .collect()
-}
-
-/// Write a list of numbers the way a sentence reads one.
-fn list(numbers: &[IssueNumber]) -> String {
-    let written: Vec<String> = numbers.iter().map(ToString::to_string).collect();
-    match written.split_last() {
-        None => String::new(),
-        Some((last, [])) => last.clone(),
-        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-    }
 }
 
 #[cfg(test)]

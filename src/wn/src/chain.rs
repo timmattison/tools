@@ -136,6 +136,22 @@ impl fmt::Display for IssueNumber {
     }
 }
 
+/// Write a list of numbers the way a sentence reads one.
+///
+/// It stands beside [`IssueNumber`], because a list of numbers is the plural of
+/// the one number the type writes with its `#`. Two callers write such a list:
+/// the note of a report that names the issues somebody closed early, and the
+/// message that names the steps of a cycle. One function keeps the two
+/// sentences in one voice.
+pub(crate) fn list(numbers: &[IssueNumber]) -> String {
+    let written: Vec<String> = numbers.iter().map(ToString::to_string).collect();
+    match written.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// Why a line of text is not a chain.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ChainError {
