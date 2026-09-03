@@ -113,6 +113,13 @@ const EVERY_ISSUE_CLOSED: &str = "every issue is closed";
 /// read.
 const NO_ISSUE_OPEN: &str = "no issue is open";
 
+/// The answer of a picture where every step is finished.
+const GRAPH_CLOSED: &str = "Every issue in the graph is closed. Nothing to start.";
+
+/// The answer of a picture where nothing is open and something could not be
+/// read.
+const GRAPH_NOT_OPEN: &str = "No issue in the graph is open.";
+
 /// Paint the chain, the notes it earns, and the answer.
 ///
 /// `repo` names the repository the states came from, and appears only in the
@@ -464,9 +471,26 @@ fn graph_answer(report: &Report, start: &StartCommand) -> Vec<String> {
         .map(|(_, entry)| start_line(entry.number, start))
         .collect();
     if ready.is_empty() {
-        return vec![answer(report, start)];
+        return vec![nothing_to_start(report)];
     }
     ready
+}
+
+/// What the answer of a picture says when no step of it is ready.
+///
+/// A picture with every step finished is a plan somebody finished, and the
+/// answer says so. A picture with nothing open and a step nobody could read is
+/// not finished, and saying it is would be a guess about the number nobody
+/// could read.
+fn nothing_to_start(report: &Report) -> String {
+    if report
+        .entries()
+        .iter()
+        .all(|entry| entry.status.is_finished())
+    {
+        return GRAPH_CLOSED.dimmed().to_string();
+    }
+    GRAPH_NOT_OPEN.dimmed().to_string()
 }
 
 /// One stream of a plan, painted as one block.
