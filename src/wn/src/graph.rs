@@ -1449,6 +1449,12 @@ fn chains_of(plan: &Plan) -> Vec<(IssueNumber, IssueNumber)> {
 /// `Order` field gives them, so the second step waits for the first one and
 /// never for the whole cell.
 ///
+/// A blocker whose number is the number of a step of that same stream draws no
+/// edge. The `Order` field says already how those two steps stand, and a plan
+/// that says a true thing twice is no plan with a mistake in it. The edge would
+/// run back into the chain of the stream, and the reader would then refuse the
+/// plan as a cycle.
+///
 /// A stream with no step at all draws nothing here, because there is no first
 /// step to reach. [`crate::plan::parse`] refuses such a stream, so this arm is
 /// the one a reader never meets.
@@ -1459,7 +1465,13 @@ fn crossings_of(plan: &Plan) -> Vec<(IssueNumber, IssueNumber)> {
             continue;
         };
         for blocker in stream.waits_for() {
-            edges.push((blocker.number(), first.number()));
+            let its_own = stream
+                .steps()
+                .iter()
+                .any(|step| step.number() == blocker.number());
+            if !its_own {
+                edges.push((blocker.number(), first.number()));
+            }
         }
     }
     edges
