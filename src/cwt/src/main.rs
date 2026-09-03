@@ -136,6 +136,11 @@ struct Cli {
     /// instead. It goes to the main worktree of the repository that holds yours, and it
     /// repeats that climb for each level above. A repository on the way with no main
     /// worktree is stepped over.
+    ///
+    /// In a repository whose git directory is detached from its work tree — a `yadm`
+    /// repository of dotfiles — git names the git directory itself as the main worktree.
+    /// That path ends in `.git`, and it is the path this flag takes you to and the path
+    /// the listing shows. Every `cwt` command works there.
     #[arg(short = 'm', long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "target", "shell_setup"])]
     main: bool,
 

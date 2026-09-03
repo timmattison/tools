@@ -2024,6 +2024,13 @@ the main worktree.
 If your repository has neither branch checked out, `cwt -m` lists the worktrees and exits
 with code 3.
 
+In a repository whose git directory is detached from its work tree — a `yadm` repository of
+dotfiles, whose git directory is `~/.local/share/yadm/repo.git` and whose work tree is your
+home directory — git names the git directory itself as the main worktree. Git builds that
+name from the git directory with a trailing `/.git` removed, and this layout has no such
+suffix. So the path `cwt -m` takes you to ends in `.git`, and that is also the path the
+listing shows. Every `cwt` command works from there.
+
 #### Pressing it again climbs out
 
 When the directory you are in **is** the main worktree, you have asked to go up. So the
