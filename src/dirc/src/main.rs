@@ -8,6 +8,14 @@
 //! tool ends each of its failures with `logger.Fatal`, which exits 1 as well,
 //! so a shell that reads the status of `dirc` gets the same answer from both.
 //!
+//! `clap` writes a help page and a version the user asked for to standard
+//! output. The Go tool wrote its usage to standard error, because every
+//! `fmt.Fprintf` in its `flag.Usage` named `os.Stderr`. This port keeps what
+//! `clap` does, and the change is deliberate. A page the user asked for is the
+//! output of the run, and every other Rust tool of this workspace answers
+//! `--help` on standard output. A refusal of the command line still goes to
+//! standard error, so `eval` runs nothing.
+//!
 //! Each mode writes to a writer the caller gives it, and never with `println!`.
 //! A test then reads what a mode wrote without starting a process, and standard
 //! output is locked one time for the whole run rather than one time for each

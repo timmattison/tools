@@ -754,6 +754,30 @@ fn the_help_names_the_flag_that_runs_and_names_no_flag_that_does_not() {
 }
 
 #[test]
+fn the_help_goes_to_standard_output_and_leaves_standard_error_empty() {
+    // The Go tool wrote its usage to standard error, because every
+    // `fmt.Fprintf` in its `flag.Usage` named `os.Stderr`. This port writes the
+    // page to standard output, which is what `clap` does and what every other
+    // Rust tool of this workspace does. The deviation from the Go tool is
+    // deliberate, so a test holds the stream in place.
+    let scratch = Scratch::new();
+
+    let output = run(&scratch, &[HELP]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    // The first word comes from the options, and the second from the text under
+    // them, so the whole page reaches standard output and not a part of it.
+    let page = stdout(&output);
+    assert!(page.contains(PASTE), "{page}");
+    assert!(page.contains(BASH_LABEL), "{page}");
+    assert_eq!(
+        stderr(&output),
+        "",
+        "a page the user asked for is not a failure"
+    );
+}
+
+#[test]
 fn the_single_dash_spelling_writes_nothing_to_standard_output() {
     // A person whose shell alias still says `eval $(dirc -paste)` gets the
     // refusal of `clap`. That refusal goes to standard error, and standard
