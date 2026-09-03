@@ -16,6 +16,11 @@
 
 mod chain;
 mod github;
+#[allow(
+    dead_code,
+    reason = "the reader of a picture reaches run() in the slice that answers a graph"
+)]
+mod graph;
 mod input;
 mod plan;
 mod render;
