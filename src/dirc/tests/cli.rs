@@ -113,8 +113,12 @@ const BUILD_STATES: [&str; 3] = ["clean", "dirty", UNKNOWN];
 /// The shell that runs the `cd` line. Every Unix holds one at this path.
 const SHELL: &str = "/bin/sh";
 
-/// The script that shell runs. It evaluates the line the tool printed, which is
-/// what `eval $(dirc --paste)` does, and then says where it landed.
+/// The script that shell runs. It evaluates the line the tool printed as one
+/// argument, and then says where it landed.
+///
+/// This is the quoted substitution of `eval "$(dirc --paste)"` and not the
+/// idiom itself. The idiom comes out of the help page, in
+/// `the_shell_runs_the_idiom_the_help_teaches_into_a_name_that_holds_a_tab`.
 const EVAL_AND_REPORT: &str = r#"eval "$1"; pwd"#;
 
 /// The flag that gives `sh` a script on its command line.
@@ -437,10 +441,15 @@ fn paste_mode_writes_the_cd_line_for_the_directory_the_clipboard_names() {
 
 #[test]
 fn the_shell_runs_the_cd_line_of_a_name_that_holds_a_quote() {
-    // This is `eval $(dirc --paste)`, which is how a person runs the tool. A
-    // quote in the name is shell syntax until the line escapes it, so a line
-    // that dropped the escape leaves the shell where it was. Only a shell shows
-    // that, and it is what the escape is worth having for.
+    // The shell gets the printed line as one argument, which is what the
+    // quoted substitution of `eval "$(dirc --paste)"` gives it. A quote in the
+    // name is shell syntax until the line escapes it, so a line that dropped
+    // the escape leaves the shell where it was. Only a shell shows that, and it
+    // is what the escape is worth having for.
+    //
+    // The test below runs the idiom of the help page whole, over a name that
+    // holds a tab, and that is the test which reads the quoting of the
+    // substitution. This one reads the quoting of the path.
     let scratch = Scratch::new();
     let child = scratch.directory("it's here");
     scratch.write_clipboard(text(&child));

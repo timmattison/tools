@@ -7,7 +7,9 @@
 //! A tool cannot change the directory of the shell that started it. The shell
 //! is the parent of the tool, and a child process cannot write the state of its
 //! parent. So `dirc` writes the `cd` line to standard output, and the shell
-//! runs that line: `eval $(dirc --paste)`.
+//! runs that line: `eval "$(dirc --paste)"`. The quotes keep the whole line one
+//! word, because a shell splits an unquoted substitution at every character the
+//! field separator holds.
 //!
 //! The clipboard itself is a trait, [`clipboard::Clipboard`], with the clipboard
 //! of the machine behind it and one file behind it as well. The clipboard is a

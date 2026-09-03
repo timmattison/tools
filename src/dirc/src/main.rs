@@ -51,6 +51,15 @@ A tool that can either:
 /// the Go tool stops working, and a user who kept the old alias reads the
 /// refusal of `clap` through `eval`. The text gives the spelling that works.
 ///
+/// Every substitution here stays one word, and each shell needs a different
+/// thing for that. Bash and Zsh split the output of an unquoted `$(...)` at
+/// every character the field separator holds, so a directory name that holds a
+/// tab or a newline reaches `cd` with that character turned into a space. The
+/// double quotes stop the split. Fish splits a substitution at every newline
+/// alone, and `string collect` puts the output back together. A page that
+/// taught either form without this undoes the quoting
+/// [`dirc::mode::cd_command`] does.
+///
 /// The last paragraph names [`dirc::clipboard::CLIPBOARD_FILE_ENV`]. That
 /// variable is what makes an end-to-end test of this tool hermetic, and a user
 /// who reads the help is told the tool has such a seam.
@@ -58,12 +67,12 @@ const AFTER_HELP: &str = "\
 NOTE: This tool cannot directly change your shell's directory.
 To use it effectively, you need to evaluate its output in your shell:
 
-  Bash/Zsh: eval $(dirc --paste)
-  Fish:     eval (dirc --paste)
+  Bash/Zsh: eval \"$(dirc --paste)\"
+  Fish:     eval (dirc --paste | string collect)
 
 TIP: Add this alias to your shell config:
-  Bash/Zsh: alias dirp='eval $(dirc --paste)'
-  Fish:     alias dirp='eval (dirc --paste)'
+  Bash/Zsh: alias dirp='eval \"$(dirc --paste)\"'
+  Fish:     alias dirp='eval (dirc --paste | string collect)'
 
 DIRC_CLIPBOARD_FILE names a file to read and write in place of the clipboard
 of the machine.";
