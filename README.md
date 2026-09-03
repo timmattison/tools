@@ -1195,8 +1195,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     in two places is asked about once and reported in both. The run exits `0` when the repository
     holds every number of the picture, `1` when the picture names a number the repository does not
     have, and `2` for a picture `wn` could not read and for a cycle. `wn` draws no graph back: the
-    answer is the rows and what each row waits for, because a layout engine is a separate
-    decision. It reads no diagonal wire, and it reads no picture drawn from right to left.
+    answer is the rows and what each row waits for, because a layout engine is a separate decision.
   - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard), `wn "#230 → #315"`,
     `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole plan, or a plan drawn
     as a picture), `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
