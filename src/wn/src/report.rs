@@ -49,6 +49,7 @@
 use std::collections::HashMap;
 
 use crate::chain::IssueNumber;
+use crate::graph::Graph;
 use crate::plan::Step;
 
 /// The list a position outside the report gives.
@@ -247,6 +248,21 @@ impl Report {
         Self::build(entries_of(steps, states))
     }
 
+    /// The report of a plan drawn as a picture.
+    ///
+    /// The entries stand in the order the graph holds them, which is a
+    /// topological order with a tie going to the text. Each of them is read
+    /// the way a step of a stream is read, because a step is one step
+    /// whichever shape wrote it.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "the run of a picture calls this in the slice that answers a graph"
+    )]
+    pub fn of_graph(graph: &Graph, states: &States) -> Self {
+        Self::of_steps(graph.steps(), states)
+    }
+
     /// The chain, in the order it was written.
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
@@ -410,6 +426,63 @@ mod tests {
     /// The numbers of the steps a report gives back.
     fn steps_of(entries: &[&Entry]) -> Vec<u64> {
         entries.iter().map(|entry| entry.number.get()).collect()
+    }
+
+    /// The paste of issue #418: two streams that join.
+    ///
+    /// A picture, and not a list of steps, because the test then says what a
+    /// reader typed. `#242` and `#246` start their streams, `#249` waits for
+    /// both of them, and the graph reads the steps in the order
+    /// 242, 247, 246, 248, 249.
+    const PASTE: &str = "\
+#242 ──→ #247 ──┐
+                ├──→ #249  (gallery)
+#246 ──→ #248 ──┘";
+
+    /// The graph the picture `text` draws.
+    fn graph_of(text: &str) -> Graph {
+        crate::graph::read(text)
+            .expect("the text draws a graph")
+            .expect("the picture reads")
+    }
+
+    /// What GitHub says about each number of `answers`.
+    ///
+    /// A number nobody names here is a number the repository does not have, so
+    /// a test of a missing step names the numbers around it and stops.
+    fn states_of(answers: &[(u64, Status)]) -> States {
+        States::of(
+            answers
+                .iter()
+                .map(|&(number, status)| entry(number, status))
+                .collect(),
+        )
+    }
+
+    /// The numbers of the entries somebody can start now, in the order of the
+    /// rows.
+    fn ready_of(report: &Report) -> Vec<u64> {
+        report
+            .entries()
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| report.is_ready(*position))
+            .map(|(_, entry)| entry.number.get())
+            .collect()
+    }
+
+    /// The position of the row of `number`.
+    fn row_of(report: &Report, number: u64) -> usize {
+        report
+            .entries()
+            .iter()
+            .position(|entry| entry.number.get() == number)
+            .expect("the report holds a row for the number")
+    }
+
+    /// The numbers the row of `number` waits for.
+    fn waits_of(report: &Report, number: u64) -> Vec<u64> {
+        numbers(report.waits_for(row_of(report, number)))
     }
 
     #[test]
@@ -652,6 +725,26 @@ mod tests {
     fn ready_only_at_next(report: &Report) -> bool {
         (0..report.entries().len())
             .all(|position| report.is_ready(position) == (report.next() == Some(position)))
+    }
+
+    #[test]
+    fn a_graph_names_every_step_somebody_can_start_now() {
+        // Two streams that join are two people who work at the same time, and
+        // an answer that names one issue loses that. Nothing of this picture
+        // is finished, so both streams start.
+        let states = states_of(&[
+            (242, Status::Open),
+            (246, Status::Open),
+            (247, Status::Open),
+            (248, Status::Open),
+            (249, Status::Open),
+        ]);
+        let report = Report::of_graph(&graph_of(PASTE), &states);
+        assert_eq!(
+            ready_of(&report),
+            vec![242, 246],
+            "a step with no step before it is ready, and each stream has one"
+        );
     }
 
     #[test]
