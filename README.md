@@ -147,8 +147,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       credentials and the region from the ambient AWS configuration, the same chain the AWS CLI reads, and connects
       over a WebSocket it signs itself. It waits for the broker to answer each subscription, so a topic the policy
       denies says `Subscription refused` instead of staying silent. A payload that is not printable text prints as a
-      hex dump, so a stray escape sequence cannot change your terminal. A connection that drops comes back, with a
-      fresh signature and a wait that doubles up to thirty seconds, and `Ctrl-C` sends a DISCONNECT and exits 0.
+      hex dump, and so does the topic that carried it, so a stray escape sequence cannot change your terminal. A
+      topic also prints as a hex dump when it holds a line feed, because a publisher that sends one would otherwise
+      write a whole message of its own into the output. A connection that drops comes back, with a fresh
+      signature and a wait that doubles up to thirty seconds, and `Ctrl-C` sends a DISCONNECT and exits 0.
         - `--qos <0|1|2>` sets the quality of service of each subscription. The default is 0.
         - `--endpoint <host>` names the AWS IoT data endpoint and skips the `DescribeEndpoint` call.
         - `--json` prints a payload that holds JSON with indentation.

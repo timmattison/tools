@@ -1,8 +1,9 @@
-//! The payload printer of `subito`.
+//! The printer of `subito`.
 //!
-//! An MQTT payload is a byte string of any content. This module turns one such
-//! byte string into text that a terminal can print without damage and in the
-//! order of the bytes.
+//! An MQTT payload is a byte string of any content, and an MQTT topic name
+//! carries every character other than the null character. This module turns
+//! each of the two into text that a terminal can print without damage and in
+//! the order of the bytes.
 
 /// The text an empty payload gives.
 const EMPTY_PAYLOAD: &str = "(empty)";
@@ -96,41 +97,53 @@ pub fn format_payload(payload: &[u8], pretty_json: bool) -> String {
 /// character at all.
 #[must_use]
 pub fn format_topic(topic: &str) -> String {
-    topic.to_string()
+    if topic.chars().all(is_safe_on_one_line) {
+        return topic.to_string();
+    }
+
+    hex_dump(topic.as_bytes())
 }
 
-/// Says whether a terminal can print one character without damage and in the
-/// order of the bytes.
+/// Says whether a terminal can print one character of a payload without damage
+/// and in the order of the bytes.
 ///
-/// A control character other than the tab, the line feed and the carriage
-/// return is not safe. The escape character is the one that matters most,
-/// because it starts a terminal escape sequence.
+/// This rule is the rule of [`is_safe_on_one_line`] with one addition: the
+/// tab, the line feed and the carriage return are safe, because a payload
+/// holds text of more than one line and the tool prints such a payload as the
+/// publisher wrote it.
+fn is_safe_to_print(character: char) -> bool {
+    matches!(character, '\t' | '\n' | '\r') || is_safe_on_one_line(character)
+}
+
+/// Says whether a terminal can print one character on one line without damage
+/// and in the order of the bytes.
+///
+/// A control character is not safe. The escape character is the one that
+/// matters most, because it starts a terminal escape sequence. The line feed
+/// and the carriage return are control characters too, and they end a line
+/// that the tool holds to one line.
 ///
 /// A character that changes the direction of the text is also not safe. Two
 /// ranges hold such characters: the embeddings and the overrides, and the
 /// isolates. [`char::is_control`] answers for the Unicode category Cc alone,
 /// and these characters are in the category Cf. A terminal that prints one of
 /// them puts the characters of the line in an order the bytes do not have.
-fn is_safe_to_print(character: char) -> bool {
-    if matches!(character, '\t' | '\n' | '\r') {
-        return true;
-    }
-
+fn is_safe_on_one_line(character: char) -> bool {
     !character.is_control()
         && !(FIRST_DIRECTION_OVERRIDE..=LAST_DIRECTION_OVERRIDE).contains(&character)
         && !(FIRST_DIRECTION_ISOLATE..=LAST_DIRECTION_ISOLATE).contains(&character)
 }
 
-/// Gives the hex dump of a payload.
+/// Gives the hex dump of a byte string.
 ///
 /// Each line holds the offset, the bytes as hex digits, and the bytes again as
 /// printable ASCII between two `|` characters. A short last line pads with
 /// spaces, so the gutter of every line starts in the same column. The lines
 /// join with a line feed, and the text has no line feed at its end.
-fn hex_dump(payload: &[u8]) -> String {
+fn hex_dump(bytes: &[u8]) -> String {
     let mut dump = String::new();
 
-    for (line, chunk) in payload.chunks(BYTES_PER_LINE).enumerate() {
+    for (line, chunk) in bytes.chunks(BYTES_PER_LINE).enumerate() {
         if line > 0 {
             dump.push('\n');
         }

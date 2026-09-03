@@ -17,7 +17,7 @@
 //! signed AWS IoT URL covers one handshake, so each attempt of the supervisor
 //! builds its options again, from credentials it reads again.
 
-use crate::payload::format_payload;
+use crate::payload::{format_payload, format_topic};
 use rumqttc::{
     AsyncClient, Event, MqttOptions, Outgoing, Packet, Publish, QoS, SubAck, SubscribeReasonCode,
 };
@@ -533,9 +533,13 @@ async fn say_goodbye(
 
 /// Prints one message: its topic, its payload, and a blank line.
 ///
-/// The payload goes through [`format_payload`], so a payload that holds an
-/// escape sequence arrives as a hex dump and does not change the terminal of
-/// the user.
+/// The topic goes through [`format_topic`] and the payload goes through
+/// [`format_payload`], so neither one changes the terminal of the user. A
+/// broker gives the topic the publisher chose, and a run that subscribes with
+/// a wildcard prints that topic, so a topic carries the text of a stranger the
+/// same way a payload does. A topic that holds an escape sequence, or a
+/// character that changes the direction of the text, or a line feed, arrives
+/// as a hex dump.
 ///
 /// # Errors
 ///
@@ -545,7 +549,7 @@ fn print_message(
     pretty_json: bool,
     output: &mut impl Write,
 ) -> Result<(), SessionError> {
-    let topic = &publish.topic;
+    let topic = format_topic(&publish.topic);
     let message = format_payload(&publish.payload, pretty_json);
 
     writeln!(output, "Topic: {topic}").map_err(SessionError::Output)?;
