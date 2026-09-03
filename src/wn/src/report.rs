@@ -833,6 +833,29 @@ mod tests {
     }
 
     #[test]
+    fn a_step_is_ready_when_the_steps_it_waits_for_directly_are_finished() {
+        // `#247` and `#248` are closed while `#242` and `#246` stay open, so
+        // somebody worked ahead of the plan. A step is ready when the steps it
+        // waits for directly are finished, and work somebody did ahead of the
+        // plan does not take that away. So the join is ready beside the two
+        // steps that start the streams, and the answer names all three.
+        let states = states_of(&[
+            (242, Status::Open),
+            (247, Status::Done),
+            (246, Status::Open),
+            (248, Status::Done),
+            (249, Status::Open),
+        ]);
+        let report = Report::of_graph(&graph_of(PASTE), &states);
+        assert_eq!(ready_of(&report), vec![242, 246, 249]);
+        assert_eq!(
+            waits_of(&report, 249),
+            Vec::<u64>::new(),
+            "a step that is ready waits for nothing"
+        );
+    }
+
+    #[test]
     fn a_blocked_step_names_every_step_it_waits_for() {
         // Both steps before `#249` are open, and a row that named the first of
         // them would send somebody to `#247` and hide `#248`. The numbers stand
