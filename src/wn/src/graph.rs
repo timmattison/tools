@@ -839,4 +839,19 @@ mod tests {
             edges(&graph_of(PASTE))
         );
     }
+
+    #[test]
+    fn a_node_carries_prose_beside_its_number() {
+        // The text of a port runs to the wire beside it and never to the first
+        // space, so the prose of a node arrives with the number and the reader
+        // of a step drops it. `gallery` is thus a word and not an error.
+        let graph = graph_of(
+            "\
+#1 ──┐
+     ├──→ #249  (gallery)
+#2 ──┘",
+        );
+        assert_eq!(nodes(&graph), vec![1, 2, 249]);
+        assert_eq!(edges(&graph), vec![(1, 249), (2, 249)]);
+    }
 }
