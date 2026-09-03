@@ -142,7 +142,40 @@ pub fn find_repo_context() -> Option<RepoContext> {
 ///
 /// Returns `None` when `dir` is in no repository, or when git cannot answer.
 pub fn find_repo_context_at(dir: &Path) -> Option<RepoContext> {
-    None
+    let main_worktree = PathBuf::from(
+        git_stdout(dir, &["worktree", "list", "--porcelain"])?
+            .lines()
+            .find_map(|line| line.strip_prefix(WORKTREE_LINE_PREFIX))?,
+    );
+
+    Some(RepoContext {
+        checkout: main_worktree.clone(),
+        main_worktree,
+    })
+}
+
+/// The prefix of the line that names a worktree in `git worktree list
+/// --porcelain`. The first such line names the main worktree.
+const WORKTREE_LINE_PREFIX: &str = "worktree ";
+
+/// Run git in `dir` and hand back its standard output, or `None` when git
+/// cannot be spawned or exits non-zero.
+fn git_stdout(dir: &Path, args: &[&str]) -> Option<String> {
+    let mut command = Command::new("git");
+    // This crate's whole job is to answer which repository a directory belongs
+    // to, and an inherited `GIT_DIR` answers with a different repository. The
+    // tests below prove it, so without this they fail under the pre-commit
+    // hook, which exports `GIT_DIR` and `GIT_INDEX_FILE` to every command it
+    // runs.
+    gitscratch::shed_inherited_git_environment(&mut command);
+
+    let output = command.args(args).current_dir(dir).output().ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8(output.stdout).ok()
 }
 
 pub struct RepoWalker {
@@ -271,7 +304,10 @@ mod tests {
         let context = find_repo_context_at(repo.git_dir()).expect("git knows this repository");
 
         assert_eq!(canonical(context.checkout()), canonical(repo.git_dir()));
-        assert_eq!(canonical(context.main_worktree()), canonical(repo.git_dir()));
+        assert_eq!(
+            canonical(context.main_worktree()),
+            canonical(repo.git_dir())
+        );
     }
 
     #[test]
@@ -281,7 +317,10 @@ mod tests {
         let context = find_repo_context_at(repo.git_dir()).expect("git knows this repository");
 
         assert_eq!(canonical(context.checkout()), canonical(repo.git_dir()));
-        assert_eq!(canonical(context.main_worktree()), canonical(repo.git_dir()));
+        assert_eq!(
+            canonical(context.main_worktree()),
+            canonical(repo.git_dir())
+        );
     }
 
     #[test]
