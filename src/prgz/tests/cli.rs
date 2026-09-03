@@ -4,10 +4,13 @@
 //! file system makes its own temporary directory, thus two copies of this test
 //! binary can run at the same moment.
 //!
-//! Each test also gives the child process the value of `LANG` that it needs.
-//! No test reads the environment of the test process, and no test writes that
-//! environment, thus the result of a test does not follow the shell that
-//! started it.
+//! Each test also sets the locale of the child process itself. It gives the
+//! child the value of `LANG` that the test needs, and it removes `LC_ALL` and
+//! `LC_NUMERIC` from the child. POSIX gives those two variables precedence
+//! over `LANG`, thus a shell that exports either one would else override the
+//! locale that a test sets. No test reads the environment of the test
+//! process, and no test writes that environment, thus the result of a test
+//! does not follow the shell that started it.
 
 #![allow(
     clippy::unwrap_used,
@@ -35,6 +38,16 @@ const GERMAN: &str = "de_DE.UTF-8";
 
 /// The name of the environment variable that carries the locale.
 const LANG_VARIABLE: &str = "LANG";
+
+/// The name of the environment variable that carries the locale of the
+/// user's whole session. POSIX gives this variable precedence over both
+/// [`LC_NUMERIC_VARIABLE`] and [`LANG_VARIABLE`].
+const LC_ALL_VARIABLE: &str = "LC_ALL";
+
+/// The name of the environment variable that carries the locale of numbers
+/// alone. POSIX gives this variable precedence over [`LANG_VARIABLE`], but
+/// [`LC_ALL_VARIABLE`] still wins over it.
+const LC_NUMERIC_VARIABLE: &str = "LC_NUMERIC";
 
 /// The status that the binary answers when a run fails. Every failure path of
 /// the Go tool that this binary replaces exits with this status.
@@ -86,9 +99,16 @@ struct Run {
 }
 
 /// Start the binary that cargo built, with the locale of the test.
+///
+/// The command gets the value of [`AMERICAN_ENGLISH`] in `LANG`, and it loses
+/// `LC_ALL` and `LC_NUMERIC` if the shell that started the test carried
+/// either one. POSIX gives those two variables precedence over `LANG`, thus a
+/// leaked value would silently override the locale that a test sets.
 fn prgz() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_prgz"));
     command.env(LANG_VARIABLE, AMERICAN_ENGLISH);
+    command.env_remove(LC_ALL_VARIABLE);
+    command.env_remove(LC_NUMERIC_VARIABLE);
     command
 }
 
@@ -393,4 +413,76 @@ fn a_report_follows_the_locale_of_the_environment() {
         german.stdout
     );
     assert_ne!(american.stdout, german.stdout);
+}
+
+#[test]
+fn a_report_follows_lc_all_over_lang() {
+    let (_directory, input) = fixture("data.txt", &compressible());
+
+    let answer = run(prgz()
+        .env(LC_ALL_VARIABLE, GERMAN)
+        .env(LANG_VARIABLE, AMERICAN_ENGLISH)
+        .arg("--input")
+        .arg(&input));
+
+    assert!(answer.ok, "the run failed with {}", answer.stderr);
+    assert!(
+        answer.stdout.contains(SIZE_IN_GERMAN),
+        "the report is {}",
+        answer.stdout
+    );
+}
+
+#[test]
+fn a_report_follows_lc_numeric_over_lang() {
+    let (_directory, input) = fixture("data.txt", &compressible());
+
+    let answer = run(prgz()
+        .env(LC_NUMERIC_VARIABLE, GERMAN)
+        .env(LANG_VARIABLE, AMERICAN_ENGLISH)
+        .arg("--input")
+        .arg(&input));
+
+    assert!(answer.ok, "the run failed with {}", answer.stderr);
+    assert!(
+        answer.stdout.contains(SIZE_IN_GERMAN),
+        "the report is {}",
+        answer.stdout
+    );
+}
+
+#[test]
+fn a_report_follows_lc_all_over_lc_numeric() {
+    let (_directory, input) = fixture("data.txt", &compressible());
+
+    let answer = run(prgz()
+        .env(LC_ALL_VARIABLE, AMERICAN_ENGLISH)
+        .env(LC_NUMERIC_VARIABLE, GERMAN)
+        .arg("--input")
+        .arg(&input));
+
+    assert!(answer.ok, "the run failed with {}", answer.stderr);
+    assert!(
+        answer.stdout.contains(SIZE_IN_AMERICAN_ENGLISH),
+        "the report is {}",
+        answer.stdout
+    );
+}
+
+#[test]
+fn a_report_follows_lang_when_lc_all_is_empty() {
+    let (_directory, input) = fixture("data.txt", &compressible());
+
+    let answer = run(prgz()
+        .env(LC_ALL_VARIABLE, "")
+        .env(LANG_VARIABLE, GERMAN)
+        .arg("--input")
+        .arg(&input));
+
+    assert!(answer.ok, "the run failed with {}", answer.stderr);
+    assert!(
+        answer.stdout.contains(SIZE_IN_GERMAN),
+        "the report is {}",
+        answer.stdout
+    );
 }
