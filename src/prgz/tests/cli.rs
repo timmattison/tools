@@ -486,3 +486,175 @@ fn a_report_follows_lang_when_lc_all_is_empty() {
         answer.stdout
     );
 }
+
+/// The exit status that a shell reports for a process that SIGINT ends
+/// outright. POSIX gives SIGINT the number 2, and the shell convention adds
+/// 128 to a signal number to report a process that the signal ended.
+const SECOND_SIGINT_EXIT_STATUS: i32 = 130;
+
+/// The name of the input of the section of the file below. The input is a
+/// named pipe, thus a read of it blocks until a writer gives it bytes.
+const STALLED_INPUT_NAME: &str = "stalled.fifo";
+
+/// The name of the output of the section of the file below. The run never
+/// reads a byte off the stalled input, thus this file gains no bytes that a
+/// test must check, only its own presence on the disk.
+const STALLED_OUTPUT_NAME: &str = "stalled.fifo.gz";
+
+/// The time between polls of the exit state of a child process. A short
+/// interval keeps a passing test quick.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The time that the test gives a run to stay alive after one SIGINT that a
+/// blocked read keeps the run from answering a second time. This machine
+/// runs many cargo jobs at once, thus the window is generous.
+const STAYS_ALIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The time that the test gives a run to end after the SIGINT that follows
+/// the first one. The deadline is generous for the same reason as
+/// [`STAYS_ALIVE_WINDOW`].
+const ENDS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The time that the test gives the write end of the FIFO to open. The open
+/// call blocks until the run opens the read end of the same path, thus a run
+/// that never reaches that open call would else block the open call, and the
+/// test, forever.
+const WRITER_OPEN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Ends a child process, and reaps it, when the guard drops.
+///
+/// A test of this section spawns a run that a read keeps alive on purpose. A
+/// panic that unwinds through such a test must still leave no process behind,
+/// thus every path through the test owns one of these before it sends a
+/// single signal.
+#[cfg(unix)]
+struct KillOnDrop(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Make a named pipe at `path` with the `mkfifo` command of the platform.
+#[cfg(unix)]
+fn mkfifo(path: &Path) {
+    let status = Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("the platform has no mkfifo command");
+    assert!(status.success(), "mkfifo failed for {path:?}");
+}
+
+/// Open the write end of the FIFO at `path` and answer the handle.
+///
+/// The open call blocks until a reader opens the same path, thus the
+/// function runs it on its own thread and gives the caller a bounded wait
+/// through [`WRITER_OPEN_DEADLINE`]. A run that never opens the read end
+/// would else block the open call, and the caller, forever.
+#[cfg(unix)]
+fn open_fifo_writer(path: &Path) -> File {
+    let path = path.to_path_buf();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let file = std::fs::OpenOptions::new().write(true).open(&path);
+        let _ = sender.send(file);
+    });
+    receiver
+        .recv_timeout(WRITER_OPEN_DEADLINE)
+        .expect("the write end of the FIFO did not open within the deadline")
+        .expect("the write end of the FIFO did not open")
+}
+
+/// Poll `child` for [`STAYS_ALIVE_WINDOW`] and answer whether it was still
+/// running at the end of the window.
+#[cfg(unix)]
+fn stays_alive(child: &mut std::process::Child) -> bool {
+    let deadline = std::time::Instant::now() + STAYS_ALIVE_WINDOW;
+    while std::time::Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return false;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    true
+}
+
+/// Poll `child` for [`ENDS_DEADLINE`] and answer its exit status once it
+/// ends, or `None` when the deadline passes first.
+#[cfg(unix)]
+fn wait_for_exit(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + ENDS_DEADLINE;
+    while std::time::Instant::now() < deadline {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    None
+}
+
+/// Send SIGINT to the process named by `pid` with the `kill` command of the
+/// platform.
+#[cfg(unix)]
+fn send_sigint(pid: u32) {
+    let status = Command::new("kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .expect("the platform has no kill command");
+    assert!(status.success(), "kill -INT {pid} failed");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_first_stop_signal_that_cannot_land_leaves_the_process_alive_and_a_second_one_ends_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join(STALLED_INPUT_NAME);
+    let output = directory.path().join(STALLED_OUTPUT_NAME);
+    mkfifo(&input);
+
+    let child = prgz()
+        .arg("--input")
+        .arg(&input)
+        .arg("--output")
+        .arg(&output)
+        .spawn()
+        .expect("the run did not start");
+    let mut guard = KillOnDrop(child);
+    let pid = guard.0.id();
+
+    // The open call of the write end blocks until the run opens the read
+    // end of the same path, thus its return also tells the test that the
+    // run passed its own open and moved on toward the read that never
+    // returns.
+    let writer = open_fifo_writer(&input);
+
+    send_sigint(pid);
+    assert!(
+        stays_alive(&mut guard.0),
+        "the run ended after one SIGINT, though its read of the stalled \
+         input never returns and never gives the run a second look at the \
+         stop flag; a wrong order of registration answers the first signal \
+         instead of the second"
+    );
+
+    send_sigint(pid);
+    let status = wait_for_exit(&mut guard.0)
+        .expect("the run did not end within the deadline after the second SIGINT");
+    drop(writer);
+
+    assert_eq!(
+        status.code(),
+        Some(SECOND_SIGINT_EXIT_STATUS),
+        "the run ended with a status of {status:?}, not the status that a \
+         process ended by SIGINT reports"
+    );
+    assert!(
+        output.exists(),
+        "the second SIGINT should leave the part-written output file on \
+         the disk, because no cleanup runs on that path"
+    );
+}
