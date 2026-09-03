@@ -675,6 +675,7 @@ fn build(wirings: &[Wiring]) -> Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::BOX_TABLE;
 
     /// The paste of issue #418.
     ///
@@ -905,5 +906,14 @@ mod tests {
         // the text, which is what it does today.
         assert!(read("#1 ──→ #2").is_none());
         assert!(read("#1 --> #2").is_none());
+    }
+
+    #[test]
+    fn the_box_drawn_table_of_a_plan_is_a_table() {
+        // The border of a box-drawn table is one net that touches every cell
+        // of it, and it stands on every line of the table. It names no step,
+        // because a bar touches its top and its bottom and never its sides, so
+        // the net has no port at all and the table keeps its own reader.
+        assert!(read(BOX_TABLE).is_none());
     }
 }
