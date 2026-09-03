@@ -2383,6 +2383,20 @@ Notes: Disjoint.";
     }
 
     #[test]
+    fn a_plan_whose_streams_wait_for_nothing_is_no_graph() {
+        // Every plan a reader wrote before this column stood is such a plan.
+        // Its streams stand apart, so the reader of streams answers it, and
+        // the answer for it must not change. `None` is how this reader says
+        // that the caller keeps the reader it has.
+        assert!(of_plan(&plan_of(BOX_TABLE)).is_none());
+        assert!(of_plan(&plan_of(&table_of(&[
+            ("S1", "#1 → #2", ""),
+            ("S2", "#3", ""),
+        ])))
+        .is_none());
+    }
+
+    #[test]
     fn a_blocker_that_stands_in_no_order_field_is_a_node_of_its_own() {
         // A blocker the repository does not have must reach the rows and turn
         // the run red, and a row of the answer is the only place that says so.
