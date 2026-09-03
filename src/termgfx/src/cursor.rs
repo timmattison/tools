@@ -73,9 +73,9 @@ impl CursorContract {
     /// reads no terminal itself. The writer of one image measures one window
     /// and hands the rows of that window to every step of that image, so the
     /// picture and the reservation below it name one terminal. A second read
-    /// here could name a second one, and a picture laid out for one window and
-    /// reserved for another fits neither. That is the mismatch of GitHub issue
-    /// #350.
+    /// here can name a second one: a user who resizes the window between the
+    /// two reads gets a picture laid out for the old window and a reservation
+    /// bounded by the new one, and it fits neither.
     ///
     /// The row count of the image arrives as a closure, because the caller must
     /// convert the pixels of the image with the size of a character cell to
