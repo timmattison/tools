@@ -2302,6 +2302,28 @@ Notes: Disjoint.";
     }
 
     #[test]
+    fn the_numbers_of_a_plan_hold_a_blocker_that_stands_in_no_order_field() {
+        // One query answers the whole plan, so every number of the plan is in
+        // this list. A blocker is sometimes the work of no stream of the plan,
+        // and a reader that walks the chains alone leaves that number out. The
+        // answer then says nothing about the work a stream waits for.
+        assert_eq!(
+            numbers_of(&plan_of(&table_that_waits_for("#96"))),
+            vec![1, 96]
+        );
+        assert_eq!(
+            numbers_of(&plan_of(&table_that_waits_for("PR#344 (#341)"))),
+            vec![1, 344, 341],
+            "the number of a step comes before the number the step closes"
+        );
+        assert_eq!(
+            numbers_of(&plan_of(WAITS_TABLE)),
+            vec![96, 91, 89, 94, 86],
+            "a blocker that is the work of another stream arrives once"
+        );
+    }
+
+    #[test]
     fn the_record_form_gives_the_waits_of_the_table_form() {
         // The record form writes the column as a field, and the two forms give
         // one plan. A `Waits for` field opens no stream of its own, the way a
