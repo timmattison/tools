@@ -432,8 +432,8 @@ impl Grid {
     /// Does the line at `row` hold a wire?
     ///
     /// A line with no wire on it is prose, and prose holds a slash inside a
-    /// path. So the refusals of the drawing read the lines of the picture and
-    /// leave every other line alone.
+    /// path and an arrow inside a phrase. So the refusals of the drawing read
+    /// the lines of the picture and leave every other line alone.
     fn is_drawn(&self, row: usize) -> bool {
         self.wires
             .get(row)
@@ -445,16 +445,17 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// Gives [`GraphError::Leftward`] for a line that holds an arrowhead which
-    /// points left, and [`GraphError::Diagonal`] for a line of the picture that
-    /// holds a stroke from corner to corner.
+    /// Gives [`GraphError::Leftward`] for a line of the picture that holds an
+    /// arrowhead which points left, and [`GraphError::Diagonal`] for one that
+    /// holds a stroke from corner to corner. A line with no wire on it draws
+    /// nothing, so this reads neither question to it.
     fn refuse_drawing(&self) -> Result<(), GraphError> {
-        for row in 0..self.cells.len() {
+        for row in (0..self.cells.len()).filter(|&row| self.is_drawn(row)) {
             let line = self.line(row);
             if line.chars().any(|glyph| LEFTWARD_HEADS.contains(&glyph)) {
                 return Err(GraphError::Leftward(Snippet::new(&line)));
             }
-            if self.is_drawn(row) && line.chars().any(|glyph| DIAGONALS.contains(&glyph)) {
+            if line.chars().any(|glyph| DIAGONALS.contains(&glyph)) {
                 return Err(GraphError::Diagonal(Snippet::new(&line)));
             }
         }
