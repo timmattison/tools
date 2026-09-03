@@ -314,7 +314,7 @@ fn row_of(line: &str) -> Row {
 
 /// The picture, as a grid of cells and the wire each of them draws.
 struct Grid {
-    /// The characters, indexed by line and then by display column.
+    /// The cells, indexed by line and then by display column.
     cells: Vec<Row>,
     /// The sides each cell touches, or `None` where the cell draws no wire.
     wires: Vec<Vec<Option<Sides>>>,
