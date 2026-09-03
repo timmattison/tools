@@ -52,6 +52,18 @@ const MARK_MISSING: char = '?';
 /// The columns between the number and the title.
 const COLUMN_GAP: usize = 2;
 
+/// The last column of a row of one line of work.
+///
+/// A chain and a stream write no such column: the row above a row is the work
+/// it waits for, so the reader reads the line above it and needs no list.
+const NO_WAITS: &str = "";
+
+/// The columns a row of one line of work pads its title to.
+///
+/// Nothing stands after the title of such a row, so the title is padded to
+/// nothing and the row ends where the title ends.
+const NO_TITLE_WIDTH: usize = 0;
+
 /// The columns the mark of a row occupies. Every mark this module writes is
 /// one column wide.
 const MARK_WIDTH: usize = 1;
@@ -102,7 +114,16 @@ pub fn render(report: &Report, repo: &str, width: usize, start: &StartCommand) -
     let mut lines: Vec<String> = entries
         .iter()
         .enumerate()
-        .map(|(position, entry)| row(entry, report.is_ready(position), number_width, width))
+        .map(|(position, entry)| {
+            row(
+                entry,
+                report.is_ready(position),
+                number_width,
+                width,
+                NO_WAITS,
+                NO_TITLE_WIDTH,
+            )
+        })
         .collect();
 
     lines.push(String::new());
@@ -152,8 +173,23 @@ fn style(status: Status, is_next: bool) -> Style {
     }
 }
 
-/// One row: the mark, the number, and as much of the title as the width
-/// holds.
+/// The title a row writes, cut to `budget` columns.
+///
+/// A row whose number names no issue writes [`MISSING_TITLE`], because a row
+/// that carried no title there would say nothing about the number beside it.
+/// The cut lives here and not at each call, so a block that measures its
+/// titles measures the same text its rows write.
+fn fitted_title(entry: &Entry, budget: usize) -> String {
+    let title = if entry.status == Status::Missing {
+        MISSING_TITLE
+    } else {
+        entry.title.as_str()
+    };
+    truncate_to_budget(title, budget)
+}
+
+/// One row: the mark, the number, as much of the title as the width holds, and
+/// what the step waits for.
 ///
 /// A row that has no columns left for a title ends at the number, rather than
 /// in the spaces that would have stood before one.
@@ -161,29 +197,50 @@ fn style(status: Status, is_next: bool) -> Style {
 /// The number a row writes is [`Entry::label`], so a step of a plan that names
 /// a pull request and the issue it closes writes both. The width of the column
 /// comes out of the same call, and the two can never part company.
-fn row(entry: &Entry, is_next: bool, number_width: usize, width: usize) -> String {
+///
+/// `waits` is the text of the last column, and `title_width` is the columns
+/// the title is padded to so that column lines up. One line of work waits for
+/// the row above it, so a chain and a stream pass an empty text and no width,
+/// and the row then ends at its title. Two shapes of input read one function
+/// here, because two functions that paint one row drift apart.
+///
+/// `width` is the columns the mark, the number, and the title have. The caller
+/// takes the columns of the last column out of the window first, so a row that
+/// names what it waits for still fits the window.
+fn row(
+    entry: &Entry,
+    is_next: bool,
+    number_width: usize,
+    width: usize,
+    waits: &str,
+    title_width: usize,
+) -> String {
     let style = style(entry.status, is_next);
     let number = entry.label();
-    let mark = style.mark.to_string();
+    let mark = (style.paint_mark)(&style.mark.to_string());
 
     let spent = MARK_WIDTH + 1 + number_width + COLUMN_GAP;
-    let title = if entry.status == Status::Missing {
-        MISSING_TITLE
-    } else {
-        entry.title.as_str()
-    };
-    let title = truncate_to_budget(title, width.saturating_sub(spent));
+    let title = fitted_title(entry, width.saturating_sub(spent));
 
-    let mark = (style.paint_mark)(&mark);
-    if title.is_empty() {
+    if title.is_empty() && waits.is_empty() {
         return format!("{mark} {}", (style.paint_text)(&number));
     }
-    let number = pad_right(&number, number_width);
+    let number = (style.paint_text)(&pad_right(&number, number_width));
+    let gap = " ".repeat(COLUMN_GAP);
+    if waits.is_empty() {
+        return format!("{mark} {number}{gap}{}", (style.paint_text)(&title));
+    }
+    if title.is_empty() {
+        // The window holds no columns for a title, so the gap after the number
+        // is the one gap of the row and the reader still reads what the step
+        // waits for.
+        return format!("{mark} {number}{gap}{}", waits.dimmed());
+    }
+    let pad = " ".repeat(title_width.saturating_sub(UnicodeWidthStr::width(title.as_str())));
     format!(
-        "{mark} {}{}{}",
-        (style.paint_text)(&number),
-        " ".repeat(COLUMN_GAP),
-        (style.paint_text)(&title)
+        "{mark} {number}{gap}{}{pad}{gap}{}",
+        (style.paint_text)(&title),
+        waits.dimmed()
     )
 }
 
@@ -346,6 +403,8 @@ fn block(report: &Report, repo: &str, width: usize) -> Vec<String> {
                 report.is_ready(position),
                 number_width,
                 row_width,
+                NO_WAITS,
+                NO_TITLE_WIDTH,
             ))
         })
         .collect();
