@@ -486,12 +486,13 @@ impl Grid {
     /// line, and no port when the first cell that is not a space draws a wire:
     /// two nets with nothing but spaces between them name nothing.
     ///
-    /// This reading is lenient, and it must be. Text that names no step is not
-    /// a port here rather than an error, because the claim comes before every
-    /// refusal: a chain broken over two lines reaches this function, and it
-    /// must reach the chain reader after it with no message of its own. The
-    /// slice that refuses a picture names such a text with
-    /// [`GraphError::NotAStep`], after a net of the same text has claimed it.
+    /// This reading is lenient, and it must be. A port carries the text a
+    /// reader wrote and the step that text names, and the step is `None` when
+    /// the text names none. The claim comes before every refusal: a chain
+    /// broken over two lines reaches this function, and it must reach the chain
+    /// reader after it with no message of its own. [`refuse_ports`] names such
+    /// a text with [`GraphError::NotAStep`], after a net of the same text has
+    /// claimed it.
     fn port(&self, at: Place, side: Side) -> Option<Port> {
         let near = self.first_mark(at, side)?;
         if self.sides(near).is_some() {
@@ -503,7 +504,8 @@ impl Grid {
             _ => (near.column, far.column),
         };
         let (text, place) = self.read_text(at.row, from, to)?;
-        one_step(&text).map(|step| Port { place, step })
+        let step = one_step(&text);
+        Some(Port { place, text, step })
     }
 
     /// The first cell beyond `at` on `side` that is not a space, or `None`
@@ -559,38 +561,52 @@ impl Grid {
     }
 }
 
-/// One step a net names, and where the text of it stands.
+/// The text a net reaches beyond one of its free ends.
+///
+/// It carries the text and not the step alone, because a text that names no
+/// step is a refusal and a message names it back to the reader.
 struct Port {
     /// Where the first character of the text stands.
     place: Place,
-    /// The step the text names.
-    step: Step,
+    /// The text, with the space around it dropped.
+    text: String,
+    /// The step the text names, or `None` when it names none.
+    step: Option<Step>,
 }
 
-/// One net of the picture, and the steps it joins.
+/// One net of the picture, and the text it reaches on each of its sides.
 ///
-/// A net that names a step on one side and nothing on the other stands here
-/// with an empty list. It gives no edge, and the slice that refuses a picture
-/// refuses it.
+/// A net that reaches text on one side and nothing on the other stands here
+/// with an empty list. It gives no edge, and [`refuse_ports`] refuses it.
 struct Wiring {
-    /// The steps the net names on its left. Each of them comes before each
+    /// The text the net reaches on its left. Each step of it comes before each
     /// step of `after`.
     before: Vec<Port>,
-    /// The steps the net names on its right.
+    /// The text the net reaches on its right.
     after: Vec<Port>,
     /// The cells of the net stand on more than one line.
     spans_lines: bool,
 }
 
 impl Wiring {
+    /// Every port of the net, the left ones first.
+    fn ports(&self) -> impl Iterator<Item = &Port> {
+        self.before.iter().chain(&self.after)
+    }
+
     /// Does this net claim the text for the reader of pictures?
     ///
     /// It claims the text when it names two steps or more and its cells stand
     /// on more than one line. The second half is what keeps `#1 ──→ #2` a
     /// chain: both of its steps stand on one line, and the chain reader
     /// answers such a text today.
+    ///
+    /// A port whose text names no step counts for nothing here. A picture is
+    /// claimed by the work it joins, so a text this reader claims is a text
+    /// that draws at least one edge.
     fn claims(&self) -> bool {
-        self.spans_lines && self.before.len() + self.after.len() >= CLAIMING_PORTS
+        self.spans_lines
+            && self.ports().filter(|port| port.step.is_some()).count() >= CLAIMING_PORTS
     }
 }
 
@@ -649,13 +665,11 @@ impl Graph {
 /// Why a picture is not a graph.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum GraphError {
-    /// The text of a port names no step.
+    /// The text a wire reaches names no step.
     ///
-    /// The slice that refuses a picture builds this. This slice reads
-    /// leniently, so a port whose text names no step is simply not a port, and
-    /// a text that this reader does not claim reaches the chain reader with no
-    /// message of its own.
-    #[error("{0:?} is not a step")]
+    /// A stream label beside a wire is a plan this form does not carry, so the
+    /// reader names the text rather than dropping the wire that reaches it.
+    #[error("{0:?} stands beside a wire and is not a step, and a picture joins steps only")]
     NotAStep(Snippet),
 }
 
@@ -673,11 +687,8 @@ pub enum GraphError {
 /// # Errors
 ///
 /// Gives the refusals of [`GraphError`] for a picture this reader claims and
-/// cannot read. The slice that refuses a picture builds them here, between the
-/// claim and the graph: a leftward arrowhead, a diagonal wire, a port whose
-/// text is not a step, and a net with a port on one side and nothing on the
-/// other. The slice that puts the steps in a topological order refuses a cycle
-/// in the same place.
+/// cannot read. They stand between the claim and the graph: a port whose text
+/// is not a step, and a net with a port on one side and nothing on the other.
 pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
     let grid = Grid::new(text);
     // A net with no port at all is dropped without a word. The border of a box
@@ -691,7 +702,31 @@ pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
     if !wirings.iter().any(Wiring::claims) {
         return None;
     }
-    Some(Ok(build(&wirings)))
+    Some(refuse_ports(&wirings).map(|()| build(&wirings)))
+}
+
+/// The refusal the nets of a claimed picture earn, or `Ok` when every net joins
+/// steps alone.
+///
+/// It runs over every net of the picture and not over the claiming net alone.
+/// One net claims the text, and the whole text is then a picture: a wire that
+/// reaches a label somewhere else in it draws an edge the graph loses, and a
+/// reader who wrote that label meant work by it.
+///
+/// The nets arrive in the order of their first cell, and the ports of one net
+/// in the order of their text, so the message names the first such text of the
+/// picture.
+fn refuse_ports(wirings: &[Wiring]) -> Result<(), GraphError> {
+    for wiring in wirings {
+        if let Some(port) = wiring
+            .ports()
+            .filter(|port| port.step.is_none())
+            .min_by_key(|port| port.place)
+        {
+            return Err(GraphError::NotAStep(Snippet::new(&port.text)));
+        }
+    }
+    Ok(())
 }
 
 /// The graph the nets of a picture draw.
@@ -706,16 +741,15 @@ pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
 /// one time, and a list that names it twice would tell a reader to wait for it
 /// twice.
 fn build(wirings: &[Wiring]) -> Graph {
-    let mut ports: Vec<&Port> = wirings
+    let mut ports: Vec<(&Port, Step)> = wirings
         .iter()
-        .flat_map(|wiring| wiring.before.iter().chain(&wiring.after))
+        .flat_map(Wiring::ports)
+        .filter_map(|port| port.step.map(|step| (port, step)))
         .collect();
-    ports.sort_by_key(|port| port.place);
+    ports.sort_by_key(|(port, _)| port.place);
     let mut nodes: BTreeMap<IssueNumber, (Place, Step)> = BTreeMap::new();
-    for port in ports {
-        nodes
-            .entry(port.step.number())
-            .or_insert((port.place, port.step));
+    for (port, step) in ports {
+        nodes.entry(step.number()).or_insert((port.place, step));
     }
     let mut order: Vec<(Place, Step)> = nodes.into_values().collect();
     order.sort_by_key(|(place, _)| *place);
@@ -728,12 +762,12 @@ fn build(wirings: &[Wiring]) -> Graph {
 
     let mut before: Vec<Vec<usize>> = vec![Vec::new(); steps.len()];
     for wiring in wirings {
-        for after in &wiring.after {
-            let Some(&to) = positions.get(&after.step.number()) else {
+        for after in wiring.after.iter().filter_map(|port| port.step) {
+            let Some(&to) = positions.get(&after.number()) else {
                 continue;
             };
-            for earlier in &wiring.before {
-                let Some(&from) = positions.get(&earlier.step.number()) else {
+            for earlier in wiring.before.iter().filter_map(|port| port.step) {
+                let Some(&from) = positions.get(&earlier.number()) else {
                     continue;
                 };
                 if !before[to].contains(&from) {
