@@ -8,6 +8,7 @@
 //! content-type table and one traversal guard. A fix to either reaches every
 //! caller instead of having to be repeated per crate.
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// The content type of a file whose extension names nothing recognizable.
@@ -161,35 +162,236 @@ fn open_regular_file(path: &Path) -> Option<std::fs::File> {
     file.metadata().ok()?.is_file().then_some(file)
 }
 
-/// Streams `path` to `request`, or responds `404` if it is not a regular file.
+/// The outcome of parsing a `Range` request header against a file of `len` bytes.
+///
+/// [`serve_file`] answers [`Partial`](RangeOutcome::Partial) with `206`,
+/// [`Unsatisfiable`](RangeOutcome::Unsatisfiable) with `416`, and
+/// [`Ignore`](RangeOutcome::Ignore) with the same whole-file `200` an absent
+/// `Range` header gets.
+#[derive(Debug, PartialEq, Eq)]
+enum RangeOutcome {
+    /// Serve exactly these inclusive byte offsets. Both are already clamped
+    /// to `len` (`last <= len - 1`, and `first < len` since `len == 0` or
+    /// `first >= len` is [`Unsatisfiable`](RangeOutcome::Unsatisfiable)).
+    Partial { first: u64, last: u64 },
+    /// No byte of the file satisfies the request -> `416`. This is every
+    /// range on a zero-length file, `first >= len`, and a zero-length suffix
+    /// (`bytes=-0`).
+    Unsatisfiable,
+    /// The header could not be honored as a single `bytes` range, so
+    /// [`serve_file`] falls back to the whole file with `200` — exactly as if
+    /// no `Range` header had been sent.
+    ///
+    /// This covers a header this parser cannot make sense of, a non-`bytes`
+    /// unit, a syntactically backwards range (`bytes=5-2`), and a request
+    /// naming more than one range (a comma). Answering a multi-range request
+    /// correctly means a `multipart/byteranges` body with per-part
+    /// `Content-Range` headers and a generated boundary — real machinery that
+    /// exists to support a client fetching several disjoint spans in one
+    /// round trip. No browser needs that to seek an HTML5 `<video>` or
+    /// `<audio>` element; every seek is a single-range request. Falling back
+    /// to `200` for the rare multi-range request is a deliberate
+    /// simplification for a preview server, not an oversight.
+    Ignore,
+}
+
+/// Parses one `Range` header value (e.g. `"bytes=0-499"`) against a file of
+/// `len` bytes.
+///
+/// Understands exactly the three single-range forms RFC 9110 §14.1.2 defines:
+/// `first-last` (both bounds given), `first-` (open-ended, through the end of
+/// the file), and `-suffix` (the last `suffix` bytes). Anything else — a
+/// second range after a comma, a unit other than `bytes`, a backwards range
+/// (`last < first`), or text this function otherwise cannot parse — yields
+/// [`RangeOutcome::Ignore`]; see that variant's doc for why that is the right
+/// answer here rather than a `416` or a multipart body.
+///
+/// A `last` past the end of the file is clamped to `len - 1`, per RFC 9110
+/// §14.1.2 ("if the last-pos value is absent, or if the value is greater than
+/// or equal to the current length of the representation data, the byte range
+/// is interpreted as the remainder of the representation"); a suffix longer
+/// than the file is clamped the same way. `first >= len` — which every range
+/// on a zero-length file satisfies, since `first` is always `>= 0` — is
+/// [`RangeOutcome::Unsatisfiable`], per §14.4.
+///
+/// Every arithmetic step here is `checked` or `saturating` — never a bare `+`
+/// or `-` on a value read from the header — so a header naming `u64::MAX`
+/// (`bytes=18446744073709551615-`) cannot overflow, underflow, or panic; it
+/// falls out as `Unsatisfiable` or a clamped `Partial` like any other
+/// past-the-end request. This function also never indexes `header` by byte
+/// offset — only `split_once`, `strip_prefix`, `trim`, and `str::parse` — so a
+/// header carrying a multi-byte character takes the same `Ignore` path as any
+/// other value this parser cannot make sense of, never a panic.
+fn parse_range(header: &str, len: u64) -> RangeOutcome {
+    let Some(spec) = header.trim().strip_prefix("bytes=") else {
+        return RangeOutcome::Ignore;
+    };
+
+    // A comma names a second range; multi-range responses are out of scope
+    // (see `RangeOutcome::Ignore`).
+    if spec.contains(',') {
+        return RangeOutcome::Ignore;
+    }
+
+    let Some((first_str, last_str)) = spec.trim().split_once('-') else {
+        return RangeOutcome::Ignore;
+    };
+    let first_str = first_str.trim();
+    let last_str = last_str.trim();
+
+    // Suffix form (`bytes=-500`): the last `suffix` bytes of the file.
+    if first_str.is_empty() {
+        let Ok(suffix) = last_str.parse::<u64>() else {
+            return RangeOutcome::Ignore;
+        };
+        if suffix == 0 || len == 0 {
+            return RangeOutcome::Unsatisfiable;
+        }
+        let suffix = suffix.min(len);
+        // `suffix <= len` here, so this cannot underflow.
+        let first = len.saturating_sub(suffix);
+        return RangeOutcome::Partial {
+            first,
+            last: len.saturating_sub(1),
+        };
+    }
+
+    let Ok(first) = first_str.parse::<u64>() else {
+        return RangeOutcome::Ignore;
+    };
+
+    let last = if last_str.is_empty() {
+        None
+    } else {
+        match last_str.parse::<u64>() {
+            Ok(last) => Some(last),
+            Err(_) => return RangeOutcome::Ignore,
+        }
+    };
+
+    // A last-pos before first-pos is syntactically invalid (RFC 9110
+    // §14.1.2), so the header is ignored rather than guessed at.
+    if let Some(last) = last {
+        if last < first {
+            return RangeOutcome::Ignore;
+        }
+    }
+
+    if first >= len {
+        return RangeOutcome::Unsatisfiable;
+    }
+
+    // `len > 0` here — `first >= len` above already caught `len == 0` — so
+    // this cannot underflow.
+    let end_of_file = len.saturating_sub(1);
+    let last = last.map_or(end_of_file, |l| l.min(end_of_file));
+    RangeOutcome::Partial { first, last }
+}
+
+/// Streams `path` to `request`, answering `404` if it is not a regular file.
 ///
 /// `path` is opened through [`open_regular_file`], so a missing path, a
 /// directory, or any other non-regular entry yields `404` — never a hung
-/// stream. A regular file (even an empty one) streams as a `200` with a
-/// `Content-Type` from [`content_type_for`] and a `Content-Length` that
-/// `tiny_http` sets from the file size.
+/// stream. A `Content-Type` from [`content_type_for`] and an
+/// `Accept-Ranges: bytes` header are sent with every successful response, so a
+/// client always learns ranges are available even when this particular
+/// request didn't use one.
+///
+/// A regular file (even an empty one) then answers one of three ways,
+/// depending on the request's `Range` header (looked up case-insensitively,
+/// since HTTP header names are):
+///
+/// - **No `Range` header, or one [`parse_range`] resolves to
+///   [`RangeOutcome::Ignore`]** — `200` with the whole file as the body and a
+///   `Content-Length` `tiny_http` sets from the file size. This is
+///   unconditionally the same response `path` got before this function
+///   understood ranges at all.
+/// - **[`RangeOutcome::Partial`]** — `206 Partial Content` with a
+///   `Content-Range: bytes <first>-<last>/<len>` header and a body of exactly
+///   those bytes. The file is seeked to `first` and the reader bounded with
+///   [`Read::take`], so this streams a multi-gigabyte file's tail without
+///   buffering the skipped prefix or the served range in memory.
+/// - **[`RangeOutcome::Unsatisfiable`]** — `416 Range Not Satisfiable` with a
+///   `Content-Range: bytes */<len>` header and an empty body, per RFC 9110
+///   §14.4.
 ///
 /// # Errors
 ///
-/// Returns an error only when writing the HTTP response itself fails (e.g.
-/// the client disconnected mid-response).
+/// Returns an error when reading the file's metadata fails, when seeking
+/// within it fails, or when writing the HTTP response itself fails (e.g. the
+/// client disconnected mid-response).
 ///
 /// # Panics
 ///
-/// Never in practice: the one `expect` on the request path builds a header
-/// from a compile-time-known-valid name and value, so it can never fire.
+/// Never in practice: the `expect`s on the request path build headers from
+/// compile-time-known-valid names and a value that is always a plain integer
+/// or two, so none of them can fire. The one `usize::try_from` converts a
+/// range length already bounded by the file's own `u64` size; it cannot
+/// exceed `usize::MAX` on the 64-bit targets this workspace builds for.
 pub fn serve_file(path: &Path, request: tiny_http::Request) -> std::io::Result<()> {
-    let Some(file) = open_regular_file(path) else {
+    let Some(mut file) = open_regular_file(path) else {
         return request.respond(tiny_http::Response::empty(404));
     };
+
+    let len = file.metadata()?.len();
 
     // The header name and value are compile-time-known-valid, so the only
     // `expect` on the request path can never fire.
     let content_type =
         tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type_for(path).as_bytes())
             .expect("static Content-Type header is always valid");
+    let accept_ranges = tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..])
+        .expect("static Accept-Ranges header is always valid");
 
-    request.respond(tiny_http::Response::from_file(file).with_header(content_type))
+    // HTTP header names are case-insensitive, and a client may send `range:`.
+    // `HeaderField::equiv` compares that way already.
+    let outcome = request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("Range"))
+        .map(|header| parse_range(header.value.as_str(), len));
+
+    match outcome {
+        None | Some(RangeOutcome::Ignore) => request.respond(
+            tiny_http::Response::from_file(file)
+                .with_header(content_type)
+                .with_header(accept_ranges),
+        ),
+        Some(RangeOutcome::Unsatisfiable) => {
+            let content_range = tiny_http::Header::from_bytes(
+                &b"Content-Range"[..],
+                format!("bytes */{len}").as_bytes(),
+            )
+            .expect("Content-Range header built from a plain integer is always valid");
+            request.respond(tiny_http::Response::empty(416).with_header(content_range))
+        }
+        Some(RangeOutcome::Partial { first, last }) => {
+            file.seek(SeekFrom::Start(first))?;
+
+            // `first <= last <= len - 1` is `parse_range`'s invariant, so this
+            // is the inclusive byte count of the selected range and cannot
+            // overflow even at the far edges of `u64`.
+            let length = last.saturating_sub(first).saturating_add(1);
+            let data_length = usize::try_from(length).expect(
+                "a range length bounded by a real file's size fits usize on a 64-bit target",
+            );
+
+            let content_range = tiny_http::Header::from_bytes(
+                &b"Content-Range"[..],
+                format!("bytes {first}-{last}/{len}").as_bytes(),
+            )
+            .expect("Content-Range header built from plain integers is always valid");
+
+            let response = tiny_http::Response::new(
+                tiny_http::StatusCode(206),
+                vec![content_type, accept_ranges, content_range],
+                file.take(length),
+                Some(data_length),
+                None,
+            );
+            request.respond(response)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -655,7 +857,10 @@ mod range_tests {
     #[test]
     fn a_multi_byte_header_never_panics_and_is_ignored() {
         assert_eq!(parse_range("byt\u{e9}s=0-1", 10), RangeOutcome::Ignore);
-        assert_eq!(parse_range("bytes=\u{65e5}\u{672c}\u{8a9e}", 10), RangeOutcome::Ignore);
+        assert_eq!(
+            parse_range("bytes=\u{65e5}\u{672c}\u{8a9e}", 10),
+            RangeOutcome::Ignore
+        );
     }
 
     #[test]

@@ -144,3 +144,191 @@ fn a_range_request_returns_206_and_only_the_bytes_it_asked_for() {
     );
     assert_eq!(body, b"2345");
 }
+
+#[test]
+fn a_plain_request_gets_200_and_advertises_accept_ranges() {
+    let (_dir, file) = ten_byte_fixture();
+    let (addr, server, handle) = start(file);
+
+    let (status, headers, body) = get(addr, None);
+
+    stop(&server, handle);
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        headers.get("accept-ranges").map(String::as_str),
+        Some("bytes"),
+        "a 200 must advertise Accept-Ranges, or a client has no way to know ranges are available"
+    );
+    assert_eq!(body, b"0123456789");
+}
+
+#[test]
+fn a_range_response_also_advertises_accept_ranges() {
+    let (_dir, file) = ten_byte_fixture();
+    let (addr, server, handle) = start(file);
+
+    let (status, headers, _body) = get(addr, Some(("Range", "bytes=0-3")));
+
+    stop(&server, handle);
+
+    assert_eq!(status, 206);
+    assert_eq!(
+        headers.get("accept-ranges").map(String::as_str),
+        Some("bytes")
+    );
+}
+
+#[test]
+fn an_open_ended_range_runs_to_the_end_of_the_file() {
+    let (_dir, file) = ten_byte_fixture();
+    let (addr, server, handle) = start(file);
+
+    let (status, headers, body) = get(addr, Some(("Range", "bytes=7-")));
+
+    stop(&server, handle);
+
+    assert_eq!(status, 206);
+    assert_eq!(
+        headers.get("content-range").map(String::as_str),
+        Some("bytes 7-9/10")
+    );
+    assert_eq!(body, b"789");
+}
+
+#[test]
+fn a_suffix_range_serves_the_last_n_bytes() {
+    let (_dir, file) = ten_byte_fixture();
+    let (addr, server, handle) = start(file);
+
+    let (status, headers, body) = get(addr, Some(("Range", "bytes=-3")));
+
+    stop(&server, handle);
+
+    assert_eq!(status, 206);
+    assert_eq!(
+        headers.get("content-range").map(String::as_str),
+        Some("bytes 7-9/10")
+    );
+    assert_eq!(body, b"789");
+}
+
+#[test]
+fn a_range_past_the_end_is_clamped_to_the_whole_file() {
+    let (_dir, file) = ten_byte_fixture();
+    let (addr, server, handle) = start(file);
+
+    let (status, headers, body) = get(addr, Some(("Range", "bytes=0-999999")));
+
+    stop(&server, handle);
+
+    assert_eq!(status, 206);
+    assert_eq!(
+        headers.get("content-range").map(String::as_str),
+        Some("bytes 0-9/10")
+    );
+    assert_eq!(body, b"0123456789");
+}
+
+#[test]
+fn an_unsatisfiable_range_gets_416_with_a_content_range() {
+    let (_dir, file) = ten_byte_fixture();
+    let (addr, server, handle) = start(file);
+
+    let (status, headers, body) = get(addr, Some(("Range", "bytes=100-200")));
+
+    stop(&server, handle);
+
+    assert_eq!(status, 416);
+    assert_eq!(
+        headers.get("content-range").map(String::as_str),
+        Some("bytes */10")
+    );
+    assert!(body.is_empty());
+}
+
+#[test]
+fn an_empty_file_answers_200_for_a_plain_request() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("empty.bin");
+    std::fs::write(&path, b"").expect("write empty fixture");
+    let (addr, server, handle) = start(path);
+
+    let (status, headers, body) = get(addr, None);
+
+    stop(&server, handle);
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        headers.get("accept-ranges").map(String::as_str),
+        Some("bytes")
+    );
+    assert!(body.is_empty());
+}
+
+#[test]
+fn an_empty_file_is_unsatisfiable_for_any_range() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("empty.bin");
+    std::fs::write(&path, b"").expect("write empty fixture");
+    let (addr, server, handle) = start(path);
+
+    let (status, headers, body) = get(addr, Some(("Range", "bytes=0-0")));
+
+    stop(&server, handle);
+
+    assert_eq!(status, 416);
+    assert_eq!(
+        headers.get("content-range").map(String::as_str),
+        Some("bytes */0")
+    );
+    assert!(body.is_empty());
+}
+
+#[test]
+fn a_multi_range_request_is_ignored_and_serves_the_whole_file() {
+    let (_dir, file) = ten_byte_fixture();
+    let (addr, server, handle) = start(file);
+
+    let (status, headers, body) = get(addr, Some(("Range", "bytes=0-1,4-5")));
+
+    stop(&server, handle);
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        headers.get("accept-ranges").map(String::as_str),
+        Some("bytes")
+    );
+    assert_eq!(body, b"0123456789");
+}
+
+#[test]
+fn an_unparsable_range_header_is_ignored_and_serves_the_whole_file() {
+    let (_dir, file) = ten_byte_fixture();
+    let (addr, server, handle) = start(file);
+
+    let (status, _headers, body) = get(addr, Some(("Range", "not-a-range-at-all")));
+
+    stop(&server, handle);
+
+    assert_eq!(status, 200);
+    assert_eq!(body, b"0123456789");
+}
+
+#[test]
+fn a_lowercase_range_header_name_is_honored() {
+    // HTTP header names are case-insensitive; a client may send `range:`.
+    let (_dir, file) = ten_byte_fixture();
+    let (addr, server, handle) = start(file);
+
+    let (status, headers, body) = get(addr, Some(("range", "bytes=2-5")));
+
+    stop(&server, handle);
+
+    assert_eq!(status, 206);
+    assert_eq!(
+        headers.get("content-range").map(String::as_str),
+        Some("bytes 2-5/10")
+    );
+    assert_eq!(body, b"2345");
+}

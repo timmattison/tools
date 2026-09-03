@@ -127,7 +127,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       routes resolve to their `.html` file, and anything it cannot find falls back to `index.html`. The listening port
       is derived automatically from the project directory, the git branch, and the current user (the same algorithm as
       `portplz`), so a given project always serves on a stable port and two projects never collide; override it with
-      `-p/--port`. Binds `127.0.0.1`.
+      `-p/--port`. Binds `127.0.0.1`. Answers HTTP byte-range requests, so an exported `<video>`/`<audio>` element
+      seeks instead of re-downloading the whole file.
     - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
@@ -156,7 +157,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       `/<basename>`, or `sirn` with no arguments to serve the current directory as a browsable tree. The listening
       port is derived automatically from the git repo root, branch, and current user (the same algorithm as `portplz`),
       so a given project always serves on a stable port and two users on one machine don't collide; override it with
-      `-p/--port`. Binds `127.0.0.1` by default — use `--bind 0.0.0.0` to expose it on the LAN.
+      `-p/--port`. Binds `127.0.0.1` by default — use `--bind 0.0.0.0` to expose it on the LAN. Answers HTTP
+      byte-range requests, so a served `<video>`/`<audio>` file seeks instead of re-downloading from the start.
     - To install: `cargo install --git https://github.com/timmattison/tools sirn`
 - uuidplz
     - Generates UUIDs. With no input it prints a random v4 UUID. Given a string or a file it seeds a name-based

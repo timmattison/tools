@@ -89,7 +89,8 @@ const HTML_SUFFIX: &str = ".html";
 /// What a request resolves to under the export root.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Resolution {
-    /// Serve this existing regular file with `200`.
+    /// Serve this existing regular file (`200`, or `206`/`416` for a `Range`
+    /// request — see [`httpfile::serve_file`]).
     File(PathBuf),
     /// Nothing under the root matched. Serve this path — always
     /// `<root>/index.html` — as the single-page fallback, after the caller logs
@@ -239,7 +240,9 @@ pub fn serve(
 /// query and percent-decodes it internally, so this dispatcher cannot bypass the
 /// traversal defense by forgetting a step. The four resolutions answer as:
 ///
-/// - [`Resolution::File`] — stream the file with `200`.
+/// - [`Resolution::File`] — hand the file to [`httpfile::serve_file`], which
+///   streams it with `200` (or answers a `Range` header with `206`/`416`; see
+///   its doc for the full byte-range contract).
 /// - [`Resolution::Fallback`] — warn on STDERR (the Go tool logs `Couldn't find
 ///   file` here), then stream `<root>/index.html` the same way. That path is the
 ///   one path NOT canonicalized before it is served, because an export need not

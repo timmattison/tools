@@ -422,8 +422,8 @@ fn decode_path(raw: &str) -> String {
 /// percent-decoded (see [`decode_path`]), so a browser-encoded name like
 /// `/my%20file.txt` matches its on-disk basename. An unregistered path, or a
 /// registered path whose target is missing or is a directory, yields `404`; a
-/// registered regular file (even empty) streams as a `200` (see
-/// [`httpfile::serve_file`]).
+/// registered regular file (even empty) streams as a `200`, or answers a
+/// `Range` header with `206`/`416` (see [`httpfile::serve_file`]).
 fn respond_files(
     routes: &BTreeMap<String, PathBuf>,
     request: tiny_http::Request,
@@ -447,8 +447,8 @@ fn respond_files(
 /// decoded `..` (e.g. from `%2e%2e`) is still rejected. An escape attempt (`..`
 /// traversal or a symlink pointing outside the root) yields `403`; an in-root
 /// path that does not exist yields `404`. An in-root directory renders an HTML
-/// listing; an in-root regular file streams as a `200` (see
-/// [`httpfile::serve_file`]).
+/// listing; an in-root regular file streams as a `200`, or answers a `Range`
+/// header with `206`/`416` (see [`httpfile::serve_file`]).
 fn respond_directory(root: &Path, request: tiny_http::Request) -> std::io::Result<()> {
     // Own the decoded path so `request` can be moved into the handler below while
     // it is still needed (the listing renderer needs the request path).
