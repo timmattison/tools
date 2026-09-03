@@ -11,5 +11,15 @@ path = "src/main.rs"
 buildinfo.workspace = true
 repowalker.workspace = true
 
+[dev-dependencies]
+# For `shed_inherited_git_environment`: the suite spawns the real repotidy
+# binary, and a run from inside a git hook inherits an environment aimed at the
+# repository being committed to. Which variables those are is knowledge that
+# lives in gitscratch rather than being copied here to drift.
+#
+# The `testing` feature carries the shared git fixture builders, and
+# `tests/detached-git-dir.rs` builds its repositories with `DetachedGitDirRepo`.
+gitscratch = { workspace = true, features = ["testing"] }
+
 [lints]
 workspace = true

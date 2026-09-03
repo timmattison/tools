@@ -2600,6 +2600,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "colored",
+ "gitscratch",
  "repowalker",
  "tempfile",
 ]
@@ -5166,6 +5167,7 @@ version = "0.1.0"
 dependencies = [
  "buildinfo",
  "clap",
+ "gitscratch",
  "repowalker",
 ]
 
@@ -6630,6 +6632,7 @@ name = "repotidy"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "gitscratch",
  "repowalker",
 ]
 
