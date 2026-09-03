@@ -9,8 +9,8 @@
 //! the same as a topic that works, and the tool then stayed silent forever.
 //! The Go tool also ended with `select {}`, so an interrupt killed the process
 //! with the MQTT session open. This module prints what the broker answered, it
-//! stops when the broker refuses every topic, and it sends a DISCONNECT before
-//! it gives control back.
+//! stops when the broker refuses every topic, and it sends a DISCONNECT for a
+//! session that is open before it gives control back.
 //!
 //! [`run_forever`] holds one more part of the Go tool: the MQTT client under
 //! it reconnects on its own, so the tool runs until the user stops it. A
@@ -150,6 +150,11 @@ impl Default for Backoff {
 /// The Go tool this one replaces runs until the user stops it, because the
 /// MQTT client under it reconnects on its own. This function keeps that.
 ///
+/// `shutdown` ends the run at each step of the supervisor: while `connect`
+/// builds the options of an attempt, while the session runs, and while the
+/// tool waits between two attempts. Only the session step has a connection to
+/// close, and that step sends a DISCONNECT before it gives control back.
+///
 /// # Errors
 ///
 /// Gives [`SessionError::AllSubscriptionsRefused`] when the broker refuses
@@ -205,7 +210,20 @@ where
     let mut waits = Waits::new(backoff);
 
     loop {
-        let failure = match connect().await {
+        // The interrupt ends the work that builds a connection. That work
+        // reads credentials, and a chain that reads them over the network
+        // holds the tool for seconds, so a user who presses Ctrl-C in that
+        // time waits for nothing more. No session is open at this point, so
+        // the end of the run sends no DISCONNECT.
+        let prepared = tokio::select! {
+            signal = shutdown.as_mut() => {
+                signal.map_err(SessionError::Signal)?;
+                return Ok(());
+            }
+            prepared = connect() => prepared,
+        };
+
+        let failure = match prepared {
             Ok(options) => {
                 let ended =
                     attempt(options, topics, qos, pretty_json, output, shutdown.as_mut()).await;
@@ -231,8 +249,8 @@ where
         let wait = waits.take();
         report_retry(&failure, wait, output)?;
 
-        // The interrupt ends the wait as well as the run. A user who presses
-        // Ctrl-C while the tool waits waits for nothing more.
+        // The interrupt ends the wait between two attempts. A user who
+        // presses Ctrl-C while the tool waits waits for nothing more.
         tokio::select! {
             signal = shutdown.as_mut() => {
                 signal.map_err(SessionError::Signal)?;

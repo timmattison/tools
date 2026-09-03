@@ -150,7 +150,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       hex dump, and so does the topic that carried it, so a stray escape sequence cannot change your terminal. A
       topic also prints as a hex dump when it holds a line feed, because a publisher that sends one would otherwise
       write a whole message of its own into the output. A connection that drops comes back, with a fresh
-      signature and a wait that doubles up to thirty seconds, and `Ctrl-C` sends a DISCONNECT and exits 0.
+      signature and a wait that doubles up to thirty seconds. `Ctrl-C` stops the tool at once at every step of that
+      cycle — while it reads credentials and signs a URL, while a session runs, and while it waits before the next
+      attempt — and it sends a DISCONNECT for a session that is open, then exits 0.
         - `--qos <0|1|2>` sets the quality of service of each subscription. The default is 0.
         - `--endpoint <host>` names the AWS IoT data endpoint and skips the `DescribeEndpoint` call.
         - `--json` prints a payload that holds JSON with indentation.

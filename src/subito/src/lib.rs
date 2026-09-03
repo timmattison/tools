@@ -7,9 +7,11 @@
 //! accepts for an MQTT connection, and [`endpoint`] asks AWS for the name of
 //! the data endpoint of the account, because a user knows the region and does
 //! not know that name. [`session`] then connects with those parts, subscribes
-//! to each topic, prints every message that arrives, sends a DISCONNECT when
-//! an interrupt ends the run, and builds the connection again after a failure
-//! a new connection repairs.
+//! to each topic, prints every message that arrives, stops at once when an
+//! interrupt arrives, and builds the connection again after a failure a new
+//! connection repairs. An interrupt that finds a session open sends a
+//! DISCONNECT, and an interrupt that arrives between two sessions has no
+//! connection to close.
 //!
 //! [`payload`] is the part that keeps a terminal safe. An MQTT payload is a
 //! byte string of any content, and an MQTT topic name carries every character
