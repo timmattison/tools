@@ -2311,6 +2311,53 @@ Notes: Disjoint.";
     }
 
     #[test]
+    fn a_plan_with_no_waits_for_column_reads_the_way_it_always_did() {
+        // The fifth column is new, and every plan written before it stands.
+        // The report of the skill names no blocker at all, so it holds the
+        // four streams it always held and each one waits for nothing.
+        let plan = plan_of(BOX_TABLE);
+        assert_eq!(
+            shape(&plan),
+            vec![
+                ("A — visualizers", vec![(15, Some(4)), (7, None)]),
+                ("B — audio engine", vec![(11, None), (5, None), (13, None)]),
+                ("C — MIDI array", vec![(9, None), (10, None), (12, None)]),
+                ("D — manifest", vec![(6, None)]),
+            ]
+        );
+        for form in [BOX_TABLE, TABLE, RECORDS, NARROW_BOX_TABLE] {
+            assert!(
+                plan_of(form)
+                    .streams()
+                    .iter()
+                    .all(|stream| waits_of(stream).is_empty()),
+                "no stream of this plan names a blocker"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_row_that_carries_no_waits_for_cell() {
+        // A header of five columns and a row of four put every cell after the
+        // missing one under the wrong column, so the `Zone` of the row would
+        // be the work it waits for. The width of the row answers first, and it
+        // repeats the row back.
+        let row = "| S1 | #1 | src/a | fine |";
+        assert_eq!(
+            parse(&format!(
+                "| Stream | Order | Waits for | Zone | Notes |\n\
+                 | --- | --- | --- | --- | --- |\n\
+                 {row}"
+            )),
+            Err(PlanError::RowWidth {
+                cells: 4,
+                header: 5,
+                line: Snippet::new(row),
+            })
+        );
+    }
+
+    #[test]
     fn the_numbers_of_a_plan_hold_a_blocker_that_stands_in_no_order_field() {
         // One query answers the whole plan, so every number of the plan is in
         // this list. A blocker is sometimes the work of no stream of the plan,
