@@ -752,4 +752,36 @@ Trying again in 30s.\n"
 connection, and must not name its cause twice"
         );
     }
+
+    #[tokio::test]
+    async fn an_interrupt_ends_a_connection_that_never_answers() {
+        let mut output: Vec<u8> = Vec::new();
+        let topics = ["sensors/temperature".to_string()];
+
+        let run = run_forever_with(
+            || async { std::future::pending::<Result<MqttOptions, SessionError>>().await },
+            &topics,
+            QoS::AtMostOnce,
+            false,
+            &mut output,
+            async {
+                tokio::time::sleep(BEFORE_INTERRUPT).await;
+                Ok(())
+            },
+            Backoff::new(LONG_WAIT, LONG_WAIT),
+        );
+
+        let ended = tokio::time::timeout(TEST_TIMEOUT, run)
+            .await
+            .expect("the supervisor held the connection and did not answer the interrupt");
+
+        assert!(ended.is_ok(), "the interrupt ends the run: {ended:?}");
+
+        let printed = String::from_utf8(output).expect("the tool prints text");
+
+        assert_eq!(
+            printed, "",
+            "a run that reached no broker and started no wait has nothing to report"
+        );
+    }
 }
