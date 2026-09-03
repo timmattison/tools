@@ -1422,17 +1422,6 @@ fn build(wirings: &[Wiring], lone: &[Port]) -> Graph {
 /// draws nothing. A cycle names no step to start, and an answer of "nothing is
 /// ready" hides the reason, so the message names the numbers that wait for
 /// each other.
-// The command line is the caller, and the command line is the half of issue
-// #436 that lands next. The expectation itself fails on the day the run calls
-// this, so it goes then and nobody has to remember it. The tests call it
-// already, which is why the attribute stands outside a test build.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the run that answers a plan is the caller, and it lands next"
-    )
-)]
 pub fn of_plan(plan: &Plan) -> Option<Result<Graph, GraphError>> {
     // The claim and the read share all of their work, as they do for a
     // picture, so one function does both. The edges of the cells are what
