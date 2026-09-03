@@ -1035,4 +1035,32 @@ mod tests {
         assert_eq!(edges(&wide), vec![(1, 3), (2, 3)]);
         assert_eq!(edges(&graph_of(PLAIN_NODE)), edges(&wide));
     }
+
+    #[test]
+    fn the_numbers_of_a_graph_name_each_one_once_and_the_work_first() {
+        // One query answers the whole picture, so this list is what the query
+        // asks about. `#2` stands twice in the picture and is one node, so it
+        // is asked about one time. A pair gives two numbers, the pull request
+        // ahead of the issue it closes, because the pull request is the work.
+        let graph = graph_of(
+            "\
+#1 ──→ #2 ──┐
+            ├──→ #4 (in flight, PR #15)
+#3 ──→ #2 ──┘",
+        );
+        let numbers: Vec<u64> = graph.numbers().iter().map(|number| number.get()).collect();
+        let mut once = numbers.clone();
+        once.sort_unstable();
+        assert_eq!(once, vec![1, 2, 3, 4, 15]);
+
+        let work = numbers
+            .iter()
+            .position(|&number| number == 15)
+            .expect("the list names the pull request");
+        let closed = numbers
+            .iter()
+            .position(|&number| number == 4)
+            .expect("the list names the issue the pull request closes");
+        assert!(work < closed, "{numbers:?}");
+    }
 }
