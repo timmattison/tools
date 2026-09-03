@@ -255,10 +255,17 @@ impl Report {
     /// the way a step of a stream is read, because a step is one step
     /// whichever shape wrote it.
     ///
-    /// A step is ready when it is open and every step before it is finished.
-    /// A picture names one such step for each stream that is ready, and every
-    /// one of them is an answer: two streams that join are two people who work
-    /// at the same time.
+    /// An open step waits for every step before it that is not finished, and
+    /// it is ready when it waits for nothing. The two answers come out of one
+    /// list, so a row that is marked ready can never name work it waits for.
+    ///
+    /// A step the repository does not have is not finished, so a step behind a
+    /// number nobody can read waits for that number. The note about a missing
+    /// number then says why nobody starts the work.
+    ///
+    /// Only an open step waits for anything. A finished step is work nobody
+    /// looks at again, and the note about work closed out of order is what a
+    /// reader needs of it.
     #[must_use]
     #[allow(
         dead_code,
@@ -266,19 +273,23 @@ impl Report {
     )]
     pub fn of_graph(graph: &Graph, states: &States) -> Self {
         let entries = entries_of(graph.steps(), states);
-        let ready = entries
-            .iter()
-            .enumerate()
-            .filter(|(position, entry)| {
-                entry.status.is_open()
-                    && graph
-                        .before(*position)
-                        .iter()
-                        .all(|&earlier| entries[earlier].status.is_finished())
-            })
-            .map(|(position, _)| position)
-            .collect();
-        let waits = vec![Vec::new(); entries.len()];
+        let mut ready: Vec<usize> = Vec::new();
+        let mut waits: Vec<Vec<IssueNumber>> = vec![Vec::new(); entries.len()];
+        for (position, entry) in entries.iter().enumerate() {
+            if !entry.status.is_open() {
+                continue;
+            }
+            let blocking: Vec<IssueNumber> = graph
+                .before(position)
+                .iter()
+                .filter(|&&earlier| !entries[earlier].status.is_finished())
+                .map(|&earlier| entries[earlier].number)
+                .collect();
+            if blocking.is_empty() {
+                ready.push(position);
+            }
+            waits[position] = blocking;
+        }
         Self {
             entries,
             ready,
