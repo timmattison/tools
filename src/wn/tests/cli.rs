@@ -1254,7 +1254,7 @@ fn refuses_a_picture_whose_wires_return_to_a_step_before_them() {
     );
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
     assert!(
-        stderr(&output).contains("the wires return to #1 and #2"),
+        stderr(&output).contains("the order returns to #1 and #2"),
         "the error names the numbers of the cycle, in {}",
         stderr(&output)
     );

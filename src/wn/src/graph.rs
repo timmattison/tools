@@ -1275,13 +1275,19 @@ pub enum GraphError {
     /// nothing and earns no refusal.
     #[error("{0:?} holds a diagonal wire, and a diagonal touches no side of a cell")]
     Diagonal(Snippet),
-    /// The wires of the picture return to a step that comes before them.
+    /// The order returns to a step that comes before it.
     ///
     /// The numbers are the steps of one real cycle, in the order a walk of the
-    /// wires meets them. A cycle has no step to start, and an answer of
+    /// graph meets them. A cycle has no step to start, and an answer of
     /// "nothing is ready" hides the reason, so the message names the steps that
     /// wait for each other.
-    #[error("the wires return to {}, so this picture names no step to start first", list(.0))]
+    ///
+    /// One message answers for both forms of a plan. A picture draws the cycle
+    /// with its wires, and a plan of streams writes it in the `Waits for`
+    /// cells of two of them. So the words name the order and never the
+    /// drawing: the reader of a table drew no picture, and a message about one
+    /// would send that reader looking for a page they never wrote.
+    #[error("the order returns to {}, so this text names no step to start first", list(.0))]
     Cycle(Vec<IssueNumber>),
 }
 
@@ -2392,11 +2398,11 @@ Notes: Disjoint.";
         // the type and not the plan.
         assert_eq!(
             refusal(CYCLE_OF_TWO).to_string(),
-            "the wires return to #1 and #2, so this picture names no step to start first"
+            "the order returns to #1 and #2, so this text names no step to start first"
         );
         assert_eq!(
             refusal(CYCLE_OF_THREE).to_string(),
-            "the wires return to #1, #2 and #3, so this picture names no step to start first"
+            "the order returns to #1, #2 and #3, so this text names no step to start first"
         );
     }
 
@@ -2468,7 +2474,7 @@ Notes: Disjoint.";
         );
         assert_eq!(
             plan_refusal(&plan).to_string(),
-            "the wires return to #91 and #96, so this picture names no step to start first"
+            "the order returns to #91 and #96, so this text names no step to start first"
         );
     }
 
