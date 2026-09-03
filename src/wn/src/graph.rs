@@ -1210,6 +1210,17 @@ mod tests {
             .collect()
     }
 
+    /// Two streams that join, drawn in ASCII with no space around a wire.
+    ///
+    /// Every run of this picture ends at a digit or at a `#`, and neither of
+    /// those is a letter. So the rule that keeps a word out of the picture
+    /// leaves this drawing alone, and a reader who lines a picture up tight
+    /// keeps every edge.
+    const TIGHT_ASCII: &str = "\
+#1-->#2--+
+         +-->#4
+#3-->#5--+";
+
     /// Each light character, and the heavy and the double character that draw
     /// the same corner.
     const SETS: [(char, char, char); 11] = [
@@ -1648,6 +1659,42 @@ A ──→ #4 ──┐
                 "the label {label:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_doubled_hyphen_in_the_prose_of_a_port_draws_no_wire() {
+        // The text of a port is prose, and prose holds a flag, a width, and a
+        // word a hyphen parts. A hyphen stands beside a hyphen inside such a
+        // text, so the neighbor alone says nothing about the picture. The run
+        // of the hyphens says it: a run that ends at a letter is a word, and a
+        // word draws no wire. Each of these pictures is the picture of the
+        // paste.
+        for label in [
+            "#249  (pass --hidden)",
+            "#249  (the gallery--the last one)",
+            "#249  (a 30-line window)",
+            "#249  (the well-known gallery)",
+        ] {
+            let picture = PASTE.replace("#249  (gallery)", label);
+            let graph = graph_of(&picture);
+            assert_eq!(
+                nodes(&graph),
+                nodes(&graph_of(PASTE)),
+                "the label {label:?}"
+            );
+            assert_eq!(
+                edges(&graph),
+                edges(&graph_of(PASTE)),
+                "the label {label:?}"
+            );
+        }
+
+        // The other half of the rule. A run that ends at a digit or at a `#`
+        // is the wire a reader drew, so a picture drawn tight keeps every
+        // edge and the rule takes nothing away from it.
+        let tight = graph_of(TIGHT_ASCII);
+        assert_eq!(nodes(&tight), vec![1, 2, 3, 4, 5]);
+        assert_eq!(edges(&tight), vec![(1, 2), (2, 4), (3, 5), (5, 4)]);
     }
 
     #[test]
