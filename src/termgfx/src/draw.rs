@@ -305,7 +305,8 @@ fn write_kitty<W: Write>(
     let rgb = image.to_rgb8();
     let base64_data = BASE64_STANDARD.encode(rgb.as_raw());
 
-    let contract = cursor_contract(request, cells_of(window).1, || {
+    let (_, term_rows) = cells_of(window);
+    let contract = cursor_contract(request, term_rows, || {
         image_rows_in_cells(
             image.width(),
             image.height(),
@@ -419,7 +420,8 @@ fn write_sixel<W: Write>(
     )
     .map_err(|error| DrawError::Encode(error.to_string()))?;
 
-    let contract = cursor_contract(request, cells_of(window).1, || {
+    let (_, term_rows) = cells_of(window);
+    let contract = cursor_contract(request, term_rows, || {
         image_rows(resized.height(), cell_height_px)
     });
 
@@ -487,7 +489,8 @@ fn write_iterm2<W: Write>(
     pnm_data.extend_from_slice(rgb_data);
     let base64_data = BASE64_STANDARD.encode(&pnm_data);
 
-    let contract = cursor_contract(request, cells_of(window).1, || {
+    let (_, term_rows) = cells_of(window);
+    let contract = cursor_contract(request, term_rows, || {
         image_rows_in_cells(
             image.width(),
             image.height(),
