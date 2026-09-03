@@ -809,6 +809,28 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_step_of_a_picture_with_unfinished_work_before_it_is_out_of_order() {
+        // `#242` is open and every other step is done. So `#247` is closed
+        // over the step before it, and `#249` is closed over a step two hops
+        // back, because `#247` and `#248` are both done. A chain reports every
+        // finished issue that stands after the first open one, so a picture
+        // reports both of these and not the neighbor alone.
+        let states = states_of(&[
+            (242, Status::Open),
+            (247, Status::Done),
+            (246, Status::Done),
+            (248, Status::Done),
+            (249, Status::Done),
+        ]);
+        let report = Report::of_graph(&graph_of(PASTE), &states);
+        assert_eq!(
+            numbers(&report.finished_out_of_order()),
+            vec![247, 249],
+            "the work before a step is every step the wires reach, and not the one beside it"
+        );
+    }
+
+    #[test]
     fn a_chain_and_a_stream_wait_for_nothing_and_are_ready_at_their_answer() {
         // One report answers a chain, a stream, and a graph. The list of what
         // a row waits for is what a picture needs, and a chain reads the line
