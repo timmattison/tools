@@ -2421,6 +2421,33 @@ Notes: Disjoint.";
     }
 
     #[test]
+    fn a_cell_that_names_a_step_of_its_own_stream_draws_no_edge() {
+        // `Order` says already how two steps of one stream stand, and a plan
+        // that says a true thing twice is no plan with a mistake in it. The
+        // edge would run back into the chain of the stream, and the reader
+        // would then refuse the plan as a cycle.
+        //
+        // Both spellings: the cell names the first step of its stream, and the
+        // cell names a later step of it. S2 waits for the work of another
+        // stream, so the plan is a graph either way.
+        for own in ["#1", "#2"] {
+            let graph = graph_of_plan(&table_of(&[("S1", "#1 → #2", own), ("S2", "#3", "#1")]));
+            assert_eq!(nodes(&graph), vec![1, 2, 3], "the cell {own:?}");
+            assert_eq!(edges(&graph), vec![(1, 2), (1, 3)], "the cell {own:?}");
+        }
+
+        // A cell that draws no edge changes nothing at all, and which reader
+        // answers the plan is part of that. A plan whose one cell names its
+        // own chain is a plan of streams that stand apart.
+        for own in ["#1", "#2"] {
+            assert!(
+                of_plan(&plan_of(&table_of(&[("S1", "#1 → #2", own)]))).is_none(),
+                "the cell {own:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_blocker_that_stands_in_no_order_field_is_a_node_of_its_own() {
         // A blocker the repository does not have must reach the rows and turn
         // the run red, and a row of the answer is the only place that says so.
