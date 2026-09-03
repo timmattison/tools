@@ -1136,3 +1136,29 @@ fn a_picture_that_names_a_number_the_repository_does_not_have_still_answers() {
         )
     );
 }
+
+#[test]
+fn refuses_a_picture_whose_wires_return_to_a_step_before_them() {
+    // The wires run from `#1` to `#2` and back to `#1`, so no step of the
+    // picture starts first. The message names the numbers of the cycle,
+    // because an answer of "nothing is ready" would hide the reason, and the
+    // run could not answer at all.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "\
+┌──→ #1 ──→ #2 ──┐
+│                │
+└────────────────┘
+",
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("the wires return to #1 and #2"),
+        "the error names the numbers of the cycle, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
