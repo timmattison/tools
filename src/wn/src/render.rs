@@ -36,6 +36,11 @@
 //! waits for. [`render_graph`] paints one block with a last column that names
 //! that work, and the answer under it names one command for each step somebody
 //! can start now.
+//!
+//! That column takes its columns out of the window before the title does. It
+//! is the one thing a reader of a blocked row came for, and a title is text
+//! the reader can already read in the picture they pasted. So the title is cut
+//! to what the column leaves, and the row still fits the window.
 
 use colored::{ColoredString, Colorize};
 use textfit::{pad_right, truncate_to_budget};
@@ -390,7 +395,21 @@ pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartComm
         .map(|position| waits_text(report.waits_for(position)))
         .collect();
 
-    let budget = width.saturating_sub(title_start(number_width));
+    // The last column takes its columns out of the window first, and the
+    // titles are then cut to what is left. A block whose rows all wait for
+    // nothing keeps the whole window, gap and all.
+    let waits_width = waits
+        .iter()
+        .map(|text| UnicodeWidthStr::width(text.as_str()))
+        .max()
+        .unwrap_or(0);
+    let row_width = if waits_width == 0 {
+        width
+    } else {
+        width.saturating_sub(COLUMN_GAP + waits_width)
+    };
+
+    let budget = row_width.saturating_sub(title_start(number_width));
     let title_width = entries
         .iter()
         .map(|entry| UnicodeWidthStr::width(fitted_title(entry, budget).as_str()))
@@ -405,7 +424,7 @@ pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartComm
                 entry,
                 report.is_ready(position),
                 number_width,
-                width,
+                row_width,
                 &waits[position],
                 title_width,
             )
