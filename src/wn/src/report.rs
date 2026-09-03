@@ -266,6 +266,13 @@ impl Report {
     /// Only an open step waits for anything. A finished step is work nobody
     /// looks at again, and the note about work closed out of order is what a
     /// reader needs of it.
+    ///
+    /// A finished step is out of order when a step the wires reach behind it is
+    /// not finished, at any distance. A chain answers this question the same
+    /// way: it names every finished issue that stands after the first open one,
+    /// and not the one issue beside it. The steps stand in a topological order,
+    /// so one forward pass carries the answer of each step to the steps after
+    /// it.
     #[must_use]
     #[allow(
         dead_code,
@@ -275,25 +282,33 @@ impl Report {
         let entries = entries_of(graph.steps(), states);
         let mut ready: Vec<usize> = Vec::new();
         let mut waits: Vec<Vec<IssueNumber>> = vec![Vec::new(); entries.len()];
+        let mut out_of_order: Vec<usize> = Vec::new();
+        // Is a step the wires reach behind the step at this position not
+        // finished? Every such step stands earlier in the list, because the
+        // steps stand in a topological order.
+        let mut unfinished_behind: Vec<bool> = vec![false; entries.len()];
         for (position, entry) in entries.iter().enumerate() {
-            if !entry.status.is_open() {
-                continue;
-            }
-            let blocking: Vec<IssueNumber> = graph
-                .before(position)
+            let before = graph.before(position);
+            let unfinished: Vec<IssueNumber> = before
                 .iter()
                 .filter(|&&earlier| !entries[earlier].status.is_finished())
                 .map(|&earlier| entries[earlier].number)
                 .collect();
-            if blocking.is_empty() {
-                ready.push(position);
+            unfinished_behind[position] =
+                !unfinished.is_empty() || before.iter().any(|&earlier| unfinished_behind[earlier]);
+            if entry.status.is_open() {
+                if unfinished.is_empty() {
+                    ready.push(position);
+                }
+                waits[position] = unfinished;
+            } else if entry.status.is_finished() && unfinished_behind[position] {
+                out_of_order.push(position);
             }
-            waits[position] = blocking;
         }
         Self {
             entries,
             ready,
-            out_of_order: Vec::new(),
+            out_of_order,
             waits,
         }
     }
