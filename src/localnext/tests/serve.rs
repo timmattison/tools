@@ -73,7 +73,7 @@ fn content_type(headers: &std::collections::HashMap<String, String>) -> Option<&
 #[test]
 fn the_root_request_serves_index_html_as_html() {
     let (_dir, root) = export();
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     let (status, headers, body) = http_get(addr, "/");
 
@@ -81,7 +81,7 @@ fn the_root_request_serves_index_html_as_html() {
     assert_eq!(body, INDEX_HTML);
     assert_eq!(content_type(&headers), Some("text/html; charset=utf-8"));
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
@@ -89,21 +89,21 @@ fn an_exact_file_beats_the_html_file_of_the_same_name() {
     let (_dir, root) = export();
     write_file(&root.join("about"), ABOUT_EXACT);
     write_file(&root.join("about.html"), ABOUT_HTML);
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     let (status, _headers, body) = http_get(addr, "/about");
 
     assert_eq!(status, 200);
     assert_eq!(body, ABOUT_EXACT);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
 fn the_html_file_serves_when_no_exact_file_exists() {
     let (_dir, root) = export();
     write_file(&root.join("about.html"), ABOUT_HTML);
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     let (status, headers, body) = http_get(addr, "/about");
 
@@ -111,13 +111,13 @@ fn the_html_file_serves_when_no_exact_file_exists() {
     assert_eq!(body, ABOUT_HTML);
     assert_eq!(content_type(&headers), Some("text/html; charset=utf-8"));
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
 fn an_unmatched_route_falls_back_to_index_html_with_a_200() {
     let (_dir, root) = export();
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     let (status, headers, body) = http_get(addr, "/about");
 
@@ -125,13 +125,13 @@ fn an_unmatched_route_falls_back_to_index_html_with_a_200() {
     assert_eq!(body, INDEX_HTML);
     assert_eq!(content_type(&headers), Some("text/html; charset=utf-8"));
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
 fn a_static_stylesheet_serves_its_bytes_as_css() {
     let (_dir, root) = export();
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     let (status, headers, body) = http_get(addr, "/static/app.css");
 
@@ -145,51 +145,51 @@ fn a_static_stylesheet_serves_its_bytes_as_css() {
         Some(APP_CSS.len().to_string().as_str())
     );
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
 fn a_missing_static_asset_is_not_found_rather_than_the_fallback() {
     let (_dir, root) = export();
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     let (status, _headers, body) = http_get(addr, "/static/missing.css");
 
     assert_eq!(status, 404);
     assert_ne!(body, INDEX_HTML);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
 fn a_traversal_attempt_is_forbidden_with_an_empty_body() {
     let (_dir, root) = export();
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     let (status, _headers, body) = http_get(addr, "/../../etc/passwd");
 
     assert_eq!(status, 403);
     assert!(body.is_empty(), "403 carries no body, got {body:?}");
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
 fn an_encoded_traversal_attempt_is_forbidden() {
     let (_dir, root) = export();
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     let (status, _headers, _body) = http_get(addr, "/%2e%2e%2fetc/passwd");
 
     assert_eq!(status, 403);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
 fn a_double_encoded_traversal_never_leaves_the_root() {
     let (_dir, root) = export();
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     // Decoded exactly once, `%252e%252e%252f` becomes the literal text
     // `%2e%2e%2f` — an ordinary path component matching no file, never `../`.
@@ -198,13 +198,13 @@ fn a_double_encoded_traversal_never_leaves_the_root() {
     assert_eq!(status, 200);
     assert_eq!(body, INDEX_HTML);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
 fn a_multi_byte_name_is_reachable_through_its_encoded_form() {
     let (_dir, root) = export();
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     let (status, headers, body) = http_get(addr, "/caf%C3%A9");
 
@@ -212,7 +212,7 @@ fn a_multi_byte_name_is_reachable_through_its_encoded_form() {
     assert_eq!(body, CAFE_HTML);
     assert_eq!(content_type(&headers), Some("text/html; charset=utf-8"));
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
@@ -222,25 +222,25 @@ fn a_fallback_with_no_index_html_is_not_found_and_does_not_hang() {
     // 404: advertising a length and then producing no bytes would hang the
     // client forever, so the read timeout below is the actual assertion.
     let (_dir, root) = empty_export();
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     let (status, _headers, body) = http_get_with_timeout(addr, "/nothing/here", HANG_TIMEOUT);
 
     assert_eq!(status, 404);
     assert!(body.is_empty(), "404 carries no body, got {body:?}");
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
 fn a_static_directory_request_is_not_found_rather_than_a_listing() {
     let (_dir, root) = export();
-    let (addr, server, handles) = start(root);
+    let (addr, pool) = start(root);
 
     let (status, _headers, body) = http_get_with_timeout(addr, "/static/", HANG_TIMEOUT);
 
     assert_eq!(status, 404);
     assert!(body.is_empty(), "404 carries no body, got {body:?}");
 
-    stop(&server, handles);
+    stop(pool);
 }

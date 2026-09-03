@@ -93,9 +93,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| format!("bound {address}, but it resolved to no IP address"))?;
     println!("{}", localnext::banner(version_string!(), &root, bound));
 
-    for handle in localnext::serve(server, Arc::new(root), WORKER_THREADS) {
-        let _ = handle.join();
-    }
+    // A dead acceptor (an accept() failure such as EMFILE) now surfaces here
+    // as an `Err` instead of leaving the pool silently hung: `Pool::join`
+    // returns it once every worker has exited, and `?` reports it the same
+    // way every other startup failure in this function already is.
+    localnext::serve(server, Arc::new(root), WORKER_THREADS).join()?;
     Ok(())
 }
 

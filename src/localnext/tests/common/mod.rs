@@ -20,7 +20,6 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::thread::JoinHandle;
 
 /// How many worker threads each test server runs.
 const WORKERS: usize = 2;
@@ -31,26 +30,23 @@ const WORKERS: usize = 2;
 /// `root` must already be canonical — path confinement compares canonical paths,
 /// and on macOS a `TempDir` lives under `/var`, a symlink to `/private/var`.
 ///
-/// Returns the bound address, the server handle (so the caller can `unblock()`
-/// it for shutdown), and the worker-thread join handles.
-pub fn start(root: PathBuf) -> (SocketAddr, Arc<tiny_http::Server>, Vec<JoinHandle<()>>) {
+/// Returns the bound address and the [`localnext::Pool`] serving it; pass the
+/// pool to [`stop`] when the test is done with it.
+pub fn start(root: PathBuf) -> (SocketAddr, localnext::Pool) {
     let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"));
     let addr = server.server_addr().to_ip().expect("ip addr");
-    let handles = localnext::serve(Arc::clone(&server), Arc::new(root), WORKERS);
-    (addr, server, handles)
+    let pool = localnext::serve(server, Arc::new(root), WORKERS);
+    (addr, pool)
 }
 
-/// Unblocks `server` and joins every worker so threads don't linger after a test.
+/// Ends `pool` deliberately and joins every worker, so threads don't linger
+/// after a test.
 ///
-/// `tiny_http::Server::unblock` releases exactly one `recv()`-blocked thread per
-/// call, so it must be invoked once per worker for the whole pool to exit.
-pub fn stop(server: &Arc<tiny_http::Server>, handles: Vec<JoinHandle<()>>) {
-    for _ in &handles {
-        server.unblock();
-    }
-    for handle in handles {
-        handle.join().expect("worker thread joins cleanly");
-    }
+/// Asserts that shutdown reported no error: a broken shutdown path should fail
+/// the test that exercises it, not leak a running server into the rest of the
+/// session.
+pub fn stop(pool: localnext::Pool) {
+    pool.shutdown().expect("worker pool shuts down cleanly");
 }
 
 /// Issues `GET <path> HTTP/1.0` with `Connection: close`, reads to EOF, and
