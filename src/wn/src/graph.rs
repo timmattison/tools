@@ -711,8 +711,8 @@ impl Grid {
                 after.extend(self.port(at, Side::Right));
             }
         }
-        let spans_lines = net.iter().any(|place| place.row != net[0].row);
-        let row = net.iter().map(|place| place.row).min().unwrap_or_default();
+        let row = net.iter().map(|place| place.row).min();
+        let spans_lines = net.iter().any(|place| Some(place.row) != row);
         let box_drawn = net
             .iter()
             .filter_map(|&at| Self::glyph(&self.cells, at))
@@ -844,12 +844,13 @@ struct Wiring {
     after: Vec<Port>,
     /// The cells of the net stand on more than one line.
     spans_lines: bool,
-    /// The first line the cells of the net stand on.
+    /// The first line the cells of the net stand on, or `None` when the net
+    /// holds no cell.
     ///
     /// [`streams_claim`] reads it, and every net it reads stands on one line
     /// alone: a net that joins two steps and spans the lines claims the text
     /// by itself, through [`Wiring::claims`].
-    row: usize,
+    row: Option<usize>,
     /// A cell of the net holds a character of the box-drawing block.
     box_drawn: bool,
 }
