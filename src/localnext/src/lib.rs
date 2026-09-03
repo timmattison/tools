@@ -459,6 +459,17 @@ mod tests {
     }
 
     #[test]
+    fn a_root_request_with_no_index_is_a_logged_fallback() {
+        let (_dir, root) = canonical_root();
+        // No index.html written: an index-less export root.
+
+        assert_eq!(
+            resolve_request(&root, "/"),
+            Resolution::Fallback(root.join(INDEX_FILE))
+        );
+    }
+
+    #[test]
     fn an_exact_file_beats_the_html_file_of_the_same_name() {
         let (_dir, root) = canonical_root();
         let exact = root.join("about");
