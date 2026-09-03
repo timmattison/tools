@@ -89,6 +89,18 @@ const RIGHTWARD_HEADS: &[char] = &[
     '>',        // the head of the ASCII arrow `-->`
 ];
 
+/// The arrowheads that point left.
+///
+/// Not one of them is a wire. A picture drawn from right to left says the
+/// opposite order, and this reader refuses such a picture rather than guessing
+/// which order the reader means.
+const LEFTWARD_HEADS: &[char] = &[
+    '\u{2190}', // ← LEFTWARDS ARROW
+    '\u{27f5}', // ⟵ LONG LEFTWARDS ARROW
+    '\u{21d0}', // ⇐ LEFTWARDS DOUBLE ARROW
+    '\u{25c0}', // ◀ BLACK LEFT-POINTING TRIANGLE
+];
+
 /// The characters that draw a wire and stand inside prose as well.
 ///
 /// Prose holds all four of them: a hyphen inside a word, a bar between two
@@ -386,6 +398,39 @@ impl Grid {
     /// line, and a walk that leaves the line finds no port.
     fn is_space(&self, at: Place) -> bool {
         Self::glyph(&self.cells, at).is_some_and(char::is_whitespace)
+    }
+
+    /// The text of the line at `row`, as the reader wrote it.
+    ///
+    /// Built back out of the cells, because a message about a line names the
+    /// line the grid holds and no other text.
+    fn line(&self, row: usize) -> String {
+        self.cells
+            .get(row)
+            .into_iter()
+            .flatten()
+            .filter_map(|cell| match cell {
+                Cell::Start(glyph) => Some(*glyph),
+                Cell::Tail => None,
+            })
+            .collect()
+    }
+
+    /// The refusal the drawing of the picture earns, or `Ok` when every line of
+    /// it runs from left to right.
+    ///
+    /// # Errors
+    ///
+    /// Gives [`GraphError::Leftward`] for a line that holds an arrowhead which
+    /// points left.
+    fn refuse_drawing(&self) -> Result<(), GraphError> {
+        for row in 0..self.cells.len() {
+            let line = self.line(row);
+            if line.chars().any(|glyph| LEFTWARD_HEADS.contains(&glyph)) {
+                return Err(GraphError::Leftward(Snippet::new(&line)));
+            }
+        }
+        Ok(())
     }
 
     /// Every net of the picture, each one the places of its cells.
@@ -701,8 +746,10 @@ pub enum GraphError {
 /// # Errors
 ///
 /// Gives the refusals of [`GraphError`] for a picture this reader claims and
-/// cannot read. They stand between the claim and the graph: a port whose text
-/// is not a step, and a net with a port on one side and nothing on the other.
+/// cannot read. They stand between the claim and the graph: a leftward
+/// arrowhead, a port whose text is not a step, and a net with a port on one
+/// side and nothing on the other. The drawing is read first, because a head
+/// that points the wrong way is what makes the text beside it read wrong.
 pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
     let grid = Grid::new(text);
     // A net with no port at all is dropped without a word. The border of a box
@@ -716,7 +763,11 @@ pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
     if !wirings.iter().any(Wiring::claims) {
         return None;
     }
-    Some(refuse_ports(&wirings).map(|()| build(&wirings)))
+    Some(
+        grid.refuse_drawing()
+            .and_then(|()| refuse_ports(&wirings))
+            .map(|()| build(&wirings)),
+    )
 }
 
 /// The refusal the nets of a claimed picture earn, or `Ok` when every net joins
