@@ -11,6 +11,12 @@
 //! again, at the time of the attempt. A closure that carried one set of
 //! options would present a stale signature to every attempt after the first,
 //! which is the failure the supervisor exists to repair.
+//!
+//! The session writes to two streams. Standard output takes the messages: the
+//! topic and the payload of each one. Standard error takes every other line:
+//! what the broker answered about each subscription, what the supervisor does
+//! after a failure, and the failure that ends the run. So a user who sends the
+//! messages of a run into another program gets the messages alone.
 
 #![warn(clippy::unwrap_used)]
 #![warn(clippy::expect_used)]

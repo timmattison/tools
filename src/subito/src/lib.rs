@@ -11,7 +11,10 @@
 //! interrupt arrives, and builds the connection again after a failure a new
 //! connection repairs. An interrupt that finds a session open sends a
 //! DISCONNECT, and an interrupt that arrives between two sessions has no
-//! connection to close.
+//! connection to close. [`session`] writes to two sinks: the messages take the
+//! topic and the payload of each message, and the reports take what the broker
+//! answered and what the supervisor does after a failure. The binary gives
+//! standard output for the messages and standard error for the reports.
 //!
 //! [`payload`] is the part that keeps a terminal safe. An MQTT payload is a
 //! byte string of any content, and an MQTT topic name carries every character

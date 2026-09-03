@@ -102,10 +102,14 @@ fn options_for(port: u16) -> MqttOptions {
     options
 }
 
-/// The output the session writes to.
+/// One sink the session writes to.
+///
+/// The session takes two of these: one for the messages and one for the
+/// reports. A test builds one of each, so it reads which of the two streams
+/// of the tool carries each line.
 ///
 /// Each write goes into a channel, so the test reads what the session printed
-/// while the session is still running. A test that could only read the output
+/// while the session is still running. A test that could only read a sink
 /// after the run would have to guess when to end the run, and a guess is a
 /// race.
 struct Recorder {
@@ -117,7 +121,7 @@ impl std::io::Write for Recorder {
         self.sender.send(buffer.to_vec()).map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
-                "the test dropped the reader of the output",
+                "the test dropped the reader of this sink",
             )
         })?;
 
@@ -129,14 +133,14 @@ impl std::io::Write for Recorder {
     }
 }
 
-/// The text the session printed, as the session prints it.
+/// The text one sink took, as the session wrote it.
 struct Printed {
     receiver: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     text: String,
 }
 
 impl Printed {
-    /// Waits until the session printed `count` whole lines, and gives them.
+    /// Waits until this sink took `count` whole lines, and gives them.
     ///
     /// The text stays, so a later call waits for more lines and gives every
     /// line from the first one.
@@ -180,7 +184,9 @@ impl Printed {
     }
 }
 
-/// Builds an output for the session and the reader of that output.
+/// Builds one sink for the session and the reader of that sink.
+///
+/// A test calls this twice: once for the messages and once for the reports.
 fn recording() -> (Recorder, Printed) {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 

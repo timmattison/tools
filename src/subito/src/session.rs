@@ -16,6 +16,13 @@
 //! it reconnects on its own, so the tool runs until the user stops it. A
 //! signed AWS IoT URL covers one handshake, so each attempt of the supervisor
 //! builds its options again, from credentials it reads again.
+//!
+//! Every function that prints takes two sinks. The messages take the topic and
+//! the payload of each message, and nothing else. The reports take what the
+//! broker answered about each subscription, and what the supervisor does after
+//! a failure. The binary gives standard output for the messages and standard
+//! error for the reports, so a user who sends the messages of a run into
+//! another program gets the messages alone.
 
 use crate::payload::{format_payload, format_topic};
 use rumqttc::{
@@ -77,7 +84,13 @@ pub enum SessionError {
     #[error("the broker refused every subscription")]
     AllSubscriptionsRefused,
 
-    /// The output did not take a line the session printed.
+    /// A sink did not take a line the session printed.
+    ///
+    /// The session writes the messages to one sink and the reports to another,
+    /// and this failure covers both. A user reads the one line the tool prints
+    /// at the end of a run, and that line names the step that failed. Which of
+    /// the two sinks refused the line adds nothing to it, because a sink that
+    /// refuses a line refuses every line after it.
     #[error("the session could not print to its output")]
     Output(#[source] std::io::Error),
 
@@ -155,6 +168,10 @@ impl Default for Backoff {
 /// tool waits between two attempts. Only the session step has a connection to
 /// close, and that step sends a DISCONNECT before it gives control back.
 ///
+/// `messages` takes the topic and the payload of each message. `reports` takes
+/// what the broker answered about each subscription, and the line that names a
+/// failure and the wait before the next attempt.
+///
 /// # Errors
 ///
 /// Gives [`SessionError::AllSubscriptionsRefused`] when the broker refuses
@@ -166,7 +183,7 @@ pub async fn run_forever<F, Fut>(
     topics: &[String],
     qos: QoS,
     pretty_json: bool,
-    output: &mut impl Write,
+    messages: &mut impl Write,
     reports: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
 ) -> Result<(), SessionError>
@@ -179,7 +196,7 @@ where
         topics,
         qos,
         pretty_json,
-        output,
+        messages,
         reports,
         shutdown,
         Backoff::default(),
@@ -190,18 +207,23 @@ where
 /// Runs a session again after every failure, and waits as `backoff` states.
 ///
 /// `backoff` is a parameter, and not the policy the tool ships, so a test does
-/// not wait a second for each attempt.
+/// not wait a second for each attempt. `messages` and `reports` are the two
+/// sinks of [`run_forever`].
 ///
 /// # Errors
 ///
 /// Gives the failures of [`run_forever`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the eight arguments are the whole of one supervised run: what to connect to, which topics to ask for, which quality of service, whether a payload of JSON gets indentation, where the messages go, where the reports go, what ends the run, and how long each wait is. A struct that held them would hide nothing, because every caller states every one of them, and it would add a name for each field to the name each argument carries already. `run_forever` is the entrance the binary takes, and it takes seven"
+)]
 pub async fn run_forever_with<F, Fut>(
     connect: F,
     topics: &[String],
     qos: QoS,
     pretty_json: bool,
-    output: &mut impl Write,
-    _reports: &mut impl Write,
+    messages: &mut impl Write,
+    reports: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
     backoff: Backoff,
 ) -> Result<(), SessionError>
@@ -228,8 +250,16 @@ where
 
         let failure = match prepared {
             Ok(options) => {
-                let ended =
-                    attempt(options, topics, qos, pretty_json, output, shutdown.as_mut()).await;
+                let ended = attempt(
+                    options,
+                    topics,
+                    qos,
+                    pretty_json,
+                    messages,
+                    reports,
+                    shutdown.as_mut(),
+                )
+                .await;
 
                 // The connection worked far enough to pass the policy of the
                 // broker, so the next failure starts from the first wait.
@@ -250,7 +280,7 @@ where
         }
 
         let wait = waits.take();
-        report_retry(&failure, wait, output)?;
+        report_retry(&failure, wait, reports)?;
 
         // The interrupt ends the wait between two attempts. A user who
         // presses Ctrl-C while the tool waits waits for nothing more.
@@ -314,15 +344,19 @@ impl Waits {
 
 /// Prints what failed and how long the tool waits before the next attempt.
 ///
+/// The line goes to the reports, because it says what the tool does and not
+/// what a broker sent. A user who reads the messages of a run through a pipe
+/// gets the messages alone.
+///
 /// # Errors
 ///
-/// Gives [`SessionError::Output`] when the output refuses the line.
+/// Gives [`SessionError::Output`] when the reports refuse the line.
 fn report_retry(
     failure: &SessionError,
     wait: Duration,
-    output: &mut impl Write,
+    reports: &mut impl Write,
 ) -> Result<(), SessionError> {
-    writeln!(output, "{}. Trying again in {wait:?}.", describe(failure))
+    writeln!(reports, "{}. Trying again in {wait:?}.", describe(failure))
         .map_err(SessionError::Output)
 }
 
@@ -350,6 +384,8 @@ fn describe(failure: &SessionError) -> String {
 /// [`tokio::signal::ctrl_c`], and it ends the run with a DISCONNECT, so the
 /// broker sees the session close instead of a connection that stops answering.
 ///
+/// `messages` and `reports` are the two sinks of [`run_until`].
+///
 /// # Errors
 ///
 /// Gives the failures of [`run_until`].
@@ -358,7 +394,7 @@ pub async fn run(
     topics: &[String],
     qos: QoS,
     pretty_json: bool,
-    output: &mut impl Write,
+    messages: &mut impl Write,
     reports: &mut impl Write,
 ) -> Result<(), SessionError> {
     run_until(
@@ -366,7 +402,7 @@ pub async fn run(
         topics,
         qos,
         pretty_json,
-        output,
+        messages,
         reports,
         tokio::signal::ctrl_c(),
     )
@@ -380,28 +416,39 @@ pub async fn run(
 /// end the whole test run.
 ///
 /// The run stops for one of four reasons: `shutdown` answered, the broker
-/// refused every subscription, the connection failed, or the output refused a
+/// refused every subscription, the connection failed, or a sink refused a
 /// line.
+///
+/// `messages` takes the topic and the payload of each message. `reports` takes
+/// what the broker answered about each subscription.
 ///
 /// # Errors
 ///
 /// Gives [`SessionError::Request`] when the event loop stops before it takes a
 /// request, [`SessionError::Connection`] when the connection to the broker
 /// fails, [`SessionError::AllSubscriptionsRefused`] when the broker refuses
-/// every topic, [`SessionError::Output`] when the output refuses a line, and
+/// every topic, [`SessionError::Output`] when a sink refuses a line, and
 /// [`SessionError::Signal`] when the process cannot wait for the interrupt.
 pub async fn run_until(
     options: MqttOptions,
     topics: &[String],
     qos: QoS,
     pretty_json: bool,
-    output: &mut impl Write,
-    _reports: &mut impl Write,
+    messages: &mut impl Write,
+    reports: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
 ) -> Result<(), SessionError> {
-    attempt(options, topics, qos, pretty_json, output, shutdown)
-        .await
-        .result
+    attempt(
+        options,
+        topics,
+        qos,
+        pretty_json,
+        messages,
+        reports,
+        shutdown,
+    )
+    .await
+    .result
 }
 
 /// What one attempt to run a session did.
@@ -426,7 +473,8 @@ async fn attempt(
     topics: &[String],
     qos: QoS,
     pretty_json: bool,
-    output: &mut impl Write,
+    messages: &mut impl Write,
+    reports: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
 ) -> Attempt {
     // `rumqttc` rolls `last_pkid` back to zero at `max_inflight`, so a run
@@ -452,7 +500,8 @@ async fn attempt(
         &mut eventloop,
         &mut subscriptions,
         pretty_json,
-        output,
+        messages,
+        reports,
         shutdown,
     )
     .await;
@@ -491,7 +540,8 @@ async fn drive(
     eventloop: &mut rumqttc::EventLoop,
     subscriptions: &mut Subscriptions,
     pretty_json: bool,
-    output: &mut impl Write,
+    messages: &mut impl Write,
+    reports: &mut impl Write,
     shutdown: impl Future<Output = std::io::Result<()>>,
 ) -> Result<(), SessionError> {
     let mut shutdown = std::pin::pin!(shutdown);
@@ -510,14 +560,14 @@ async fn drive(
         match event {
             Event::Outgoing(Outgoing::Subscribe(pkid)) => subscriptions.record(pkid),
             Event::Incoming(Packet::SubAck(ack)) => {
-                subscriptions.answer(&ack, output)?;
+                subscriptions.answer(&ack, reports)?;
 
                 if subscriptions.every_subscription_refused() {
                     return Err(SessionError::AllSubscriptionsRefused);
                 }
             }
             Event::Incoming(Packet::Publish(publish)) => {
-                print_message(&publish, pretty_json, output)?;
+                print_message(&publish, pretty_json, messages)?;
             }
             _ => (),
         }
@@ -565,20 +615,23 @@ async fn say_goodbye(
 /// character that changes the direction of the text, or a line feed, arrives
 /// as a hex dump.
 ///
+/// The three lines go to the messages, which is the one stream a user reads
+/// through a pipe. Every other line the session prints goes to the reports.
+///
 /// # Errors
 ///
-/// Gives [`SessionError::Output`] when the output refuses a line.
+/// Gives [`SessionError::Output`] when the messages refuse a line.
 fn print_message(
     publish: &Publish,
     pretty_json: bool,
-    output: &mut impl Write,
+    messages: &mut impl Write,
 ) -> Result<(), SessionError> {
     let topic = format_topic(&publish.topic);
     let message = format_payload(&publish.payload, pretty_json);
 
-    writeln!(output, "Topic: {topic}").map_err(SessionError::Output)?;
-    writeln!(output, "Message: {message}").map_err(SessionError::Output)?;
-    writeln!(output).map_err(SessionError::Output)?;
+    writeln!(messages, "Topic: {topic}").map_err(SessionError::Output)?;
+    writeln!(messages, "Message: {message}").map_err(SessionError::Output)?;
+    writeln!(messages).map_err(SessionError::Output)?;
 
     Ok(())
 }
@@ -675,10 +728,13 @@ impl Subscriptions {
     /// An answer for an identifier this run never sent names no topic, so the
     /// session prints nothing for it.
     ///
+    /// Both lines go to the reports, because each one says what the broker
+    /// answered and carries no message of a topic.
+    ///
     /// # Errors
     ///
-    /// Gives [`SessionError::Output`] when the output refuses a line.
-    fn answer(&mut self, ack: &SubAck, output: &mut impl Write) -> Result<(), SessionError> {
+    /// Gives [`SessionError::Output`] when the reports refuse a line.
+    fn answer(&mut self, ack: &SubAck, reports: &mut impl Write) -> Result<(), SessionError> {
         let Some(topic) = self
             .by_pkid
             .get(&ack.pkid)
@@ -693,12 +749,12 @@ impl Subscriptions {
         for code in &ack.return_codes {
             match code {
                 SubscribeReasonCode::Success(granted) => {
-                    writeln!(output, "Subscribed: {name} (QoS {})", qos_number(*granted))
+                    writeln!(reports, "Subscribed: {name} (QoS {})", qos_number(*granted))
                         .map_err(SessionError::Output)?;
                     topic.answer = Some(Answer::Granted);
                 }
                 SubscribeReasonCode::Failure => {
-                    writeln!(output, "Subscription refused: {name}")
+                    writeln!(reports, "Subscription refused: {name}")
                         .map_err(SessionError::Output)?;
                     topic.answer = Some(Answer::Refused);
                 }
