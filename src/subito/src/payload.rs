@@ -80,6 +80,25 @@ pub fn format_payload(payload: &[u8], pretty_json: bool) -> String {
     hex_dump(payload)
 }
 
+/// Turns the topic of one MQTT message into the text the tool prints.
+///
+/// A topic that is safe to print comes back unchanged. Every other topic gives
+/// a hex dump of the bytes of the topic.
+///
+/// The rule for a topic is stricter than the rule of [`format_payload`]. A
+/// payload keeps the tab, the line feed and the carriage return, because a
+/// payload holds text of more than one line. A topic does not: the tool prints
+/// the topic on a line of its own, ahead of the line of the message, so a line
+/// feed in a topic writes a second `Topic:` line and a second `Message:` line
+/// that the broker never sent. MQTT forbids the null character in a topic name
+/// and forbids no other control character, so a publisher can put a line feed
+/// in the topic of a message. This function therefore takes no control
+/// character at all.
+#[must_use]
+pub fn format_topic(topic: &str) -> String {
+    topic.to_string()
+}
+
 /// Says whether a terminal can print one character without damage and in the
 /// order of the bytes.
 ///
@@ -260,6 +279,43 @@ mod tests {
         assert_eq!(
             format_payload("ab\u{2069}".as_bytes(), false),
             "00000000  61 62 e2 81 a9                                    |ab...|"
+        );
+    }
+
+    #[test]
+    fn a_plain_topic_comes_back_unchanged() {
+        assert_eq!(format_topic("sensors/kitchen"), "sensors/kitchen");
+    }
+
+    #[test]
+    fn a_topic_of_non_ascii_text_comes_back_unchanged() {
+        assert_eq!(format_topic("sensors/温度"), "sensors/温度");
+    }
+
+    #[test]
+    fn a_topic_that_holds_an_escape_byte_makes_a_hex_dump() {
+        assert_eq!(
+            format_topic("a\u{1b}b"),
+            "00000000  61 1b 62                                          |a.b|"
+        );
+    }
+
+    /// A payload keeps a line feed, and a topic does not. A line feed in a
+    /// topic writes a `Topic:` line and a `Message:` line the broker never
+    /// sent.
+    #[test]
+    fn a_topic_that_holds_a_line_feed_makes_a_hex_dump() {
+        assert_eq!(
+            format_topic("a\nb"),
+            "00000000  61 0a 62                                          |a.b|"
+        );
+    }
+
+    #[test]
+    fn a_topic_that_holds_a_right_to_left_override_makes_a_hex_dump() {
+        assert_eq!(
+            format_topic("ab\u{202e}"),
+            "00000000  61 62 e2 80 ae                                    |ab...|"
         );
     }
 }

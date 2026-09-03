@@ -586,6 +586,62 @@ async fn a_publish_prints_its_topic_and_its_payload() {
     );
 }
 
+/// A topic of nine bytes that no terminal can print without damage.
+///
+/// The last byte is the escape byte, which starts a terminal escape sequence.
+/// MQTT forbids the null character in a topic name and forbids no other
+/// control character, so a publisher can send this topic, and a run that
+/// subscribes with a wildcard reads it.
+const UNPRINTABLE_TOPIC: &str = "sensors/\u{1b}";
+
+#[tokio::test]
+async fn a_publish_prints_a_topic_that_no_terminal_can_print_as_a_hex_dump() {
+    let (listener, port) = listening().await;
+    let topics = vec!["sensors/#".to_string()];
+    let (mut output, mut printed) = recording();
+
+    let session = run_until(
+        options_for(port),
+        &topics,
+        QoS::AtMostOnce,
+        false,
+        &mut output,
+        never(),
+    );
+
+    let script = async {
+        let mut broker = Broker::accept(&listener).await;
+        broker.accept_connection().await;
+
+        let filter = broker.read_subscribe().await;
+        broker.grant(filter.pkid, QoS::AtMostOnce).await;
+
+        broker.publish(UNPRINTABLE_TOPIC, b"hello").await;
+
+        assert_eq!(
+            printed.lines(4).await,
+            [
+                "Subscribed: sensors/# (QoS 0)",
+                // The topic printer is on this path, so a topic that no
+                // terminal can print arrives as a hex dump, and the escape
+                // byte of the publisher reaches no terminal.
+                "Topic: 00000000  73 65 6e 73 6f 72 73 2f  1b                       |sensors/.|",
+                "Message: hello",
+                "",
+            ]
+        );
+
+        drop(broker);
+    };
+
+    let result = together(session, script).await;
+
+    assert!(
+        matches!(result, Err(SessionError::Connection(_))),
+        "a connection that ends is a failure of the connection: {result:?}"
+    );
+}
+
 #[tokio::test]
 async fn the_interrupt_sends_a_disconnect_and_ends_the_run() {
     let (listener, port) = listening().await;
