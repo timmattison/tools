@@ -31,6 +31,11 @@
 //! `PR` in front of one marks that number as the work. Every other word is
 //! prose the reader drops, which is what lets `#12 (human)` and `#4 (30-line
 //! window)` each hold one number.
+//!
+//! The prose of a group holds a parenthesis as readily as a word does, so a
+//! group counts its depth: `#4 (a note (see the docs))` is one group and not
+//! two, and the parenthesis that brings the depth to zero is the one that
+//! closes it.
 
 use thiserror::Error;
 
@@ -224,12 +229,15 @@ pub enum PlanError {
         /// The row itself, as the table writes it.
         line: Snippet,
     },
-    /// A group opens and never closes, so where it ends is a guess.
+    /// A group opens and never closes, so where it ends is a guess. A
+    /// parenthesis of the prose inside it closes the group it opened and no
+    /// other, so `#4 (a (b) c` opens a group that never closes.
     #[error("stream {stream:?}: {token:?} has no closing parenthesis")]
     UnclosedGroup {
         /// The label of the stream that holds the group.
         stream: Snippet,
-        /// The group, from its opening parenthesis to the end of the field.
+        /// The group, from its opening parenthesis to the end of the field,
+        /// with every parenthesis of its prose.
         token: Snippet,
     },
     /// A second group stands on one step, and a step closes one issue.
@@ -901,10 +909,27 @@ enum Piece {
     Group(String),
 }
 
+/// A group of an `Order` field, while it is open.
+///
+/// The depth is what parts the parenthesis that closes the group from a
+/// parenthesis of its prose. A group holds prose, and prose holds parentheses.
+struct OpenGroup {
+    /// The text of the group so far, without the parenthesis that opened it.
+    text: String,
+    /// How many parentheses of the group stand open, the one that opened it
+    /// counted. The parenthesis that brings this to zero closes the group.
+    depth: usize,
+}
+
 /// Cut `order` into its steps and its groups.
 ///
 /// A parenthesis opens and closes a group, and every character between the two
 /// belongs to it. The text outside them is cut into steps by [`tokens_of`].
+///
+/// A group counts its depth, so a parenthesis inside one belongs to it and
+/// only the parenthesis that brings the depth to zero closes it: `#4 (a note
+/// (see the docs))` is one group of prose, and `#4 (in flight (rebasing), PR
+/// #15)` still names the pull request of its step.
 ///
 /// A closing parenthesis with no group open belongs to the token it arrived
 /// in, so `#4)` is one token that names no issue and earns the message that
@@ -913,27 +938,40 @@ enum Piece {
 /// # Errors
 ///
 /// Gives the text of a group that opens and never closes, so the caller can
-/// name the stream it stands in.
+/// name the stream it stands in. A nested parenthesis closes the group it
+/// opened and no other, so `#4 (a (b) c` opens a group that never closes.
 fn pieces(order: &str) -> Result<Vec<Piece>, String> {
     let mut pieces: Vec<Piece> = Vec::new();
     let mut outer = String::new();
-    let mut group: Option<String> = None;
+    let mut group: Option<OpenGroup> = None;
     for c in order.chars() {
         match group.as_mut() {
-            Some(text) if c == GROUP_CLOSE => {
-                pieces.push(Piece::Group(std::mem::take(text)));
+            Some(open) if c == GROUP_CLOSE && open.depth == 1 => {
+                pieces.push(Piece::Group(std::mem::take(&mut open.text)));
                 group = None;
             }
-            Some(text) => text.push(c),
+            Some(open) => {
+                match c {
+                    GROUP_OPEN => open.depth += 1,
+                    // The arm above holds the last parenthesis of the group,
+                    // so the depth here is two at the least.
+                    GROUP_CLOSE => open.depth -= 1,
+                    _ => {}
+                }
+                open.text.push(c);
+            }
             None if c == GROUP_OPEN => {
                 push_steps(&mut outer, &mut pieces);
-                group = Some(String::new());
+                group = Some(OpenGroup {
+                    text: String::new(),
+                    depth: 1,
+                });
             }
             None => outer.push(c),
         }
     }
-    if let Some(text) = group {
-        return Err(text);
+    if let Some(open) = group {
+        return Err(open.text);
     }
     push_steps(&mut outer, &mut pieces);
     Ok(pieces)
@@ -978,7 +1016,9 @@ fn tokens_of(text: &str) -> Vec<String> {
 ///
 /// Only a token that carries the `#` is a number here. Every other word is
 /// prose the reader drops, so an annotation states a count, a width, or who
-/// does the work without any of it reaching the chain.
+/// does the work without any of it reaching the chain. `text` is the whole
+/// group, so the prose it drops holds the parentheses of a nested group as
+/// well: the word `(rebasing)` carries no `#` and it is a word.
 ///
 /// # Errors
 ///
@@ -1903,7 +1943,9 @@ Notes: Independent of everything above.";
                 message.contains("has no closing parenthesis"),
                 "the order is `{order}` and the message is {message}"
             );
-            let group = order.split_once(GROUP_OPEN).expect("the order opens a group");
+            let group = order
+                .split_once(GROUP_OPEN)
+                .expect("the order opens a group");
             assert!(
                 message.contains(&format!("\"{GROUP_OPEN}{}\"", group.1)),
                 "the order is `{order}` and the message is {message}"

@@ -1107,8 +1107,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     left and never opens one. Inside a group, only a word carrying the `#` is a number, and a `PR`
     in front of one marks that number as the work — which is why `#4 (in flight, PR #15)` gives the
     row `#15 (#4)`, the same step `PR#344 (#341)` gives. Every other word is prose that `wn` drops,
-    so `#4 (30-line window)` holds one number: the `30` carries no hash. A group that never closes
-    is refused, because where it ends is a guess.
+    so `#4 (30-line window)` holds one number: the `30` carries no hash. That prose holds a
+    parenthesis as readily as a word, so a group counts its depth and the parenthesis that brings
+    the depth to zero is the one that closes it: `#4 (a note (see the docs)) → #7` is two steps,
+    and `#4 (in flight (rebasing), PR #15)` still gives the row `#15 (#4)`. A group that never
+    closes is refused, because where it ends is a guess — and a nested parenthesis closes the group
+    it opened and no other, so `#4 (a (b) c` is refused as well.
   - The whole plan is one GraphQL query, as one chain is. A plan of seven streams and eighteen
     numbers costs one round trip and one unit of the rate limit, and a number that stands in two
     streams is asked about once and reported in both. A stream that names a number the repository

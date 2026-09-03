@@ -106,7 +106,9 @@ code is full of numbers.\n\n\
 A pull request and the issue it closes are one step of a stream and not two, written PR#344 \
 (#341) or the other way round as #4 (in flight, PR #15). A group in parentheses annotates the \
 step to its left. Inside it, only a word carrying the # is a number, a PR in front of one marks \
-that number as the work, and every other word is prose.\n\n\
+that number as the work, and every other word is prose. The prose of a group holds a parenthesis \
+as well, so #4 (a note (see the docs)) is one group and the parenthesis that closes it is the \
+last one.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
