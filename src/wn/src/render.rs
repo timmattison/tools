@@ -1381,6 +1381,33 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_whose_every_step_is_finished_names_no_command() {
+        // Nothing of this picture is left to do, and the answer says so of the
+        // picture the reader pasted rather than of a chain they did not write.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Done, "Read the picture"),
+                    (247, Status::Done, "Answer the picture"),
+                    (246, Status::Done, "Read the table"),
+                    (248, Status::Dropped, "Answer the table"),
+                    (249, Status::Done, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        assert!(
+            block.ends_with("Every issue in the graph is closed. Nothing to start."),
+            "the answer names the shape the reader pasted, in {block:?}"
+        );
+        assert!(
+            !block.contains("Start #"),
+            "a picture with nothing left to do names no command, in {block:?}"
+        );
+    }
+
+    #[test]
     fn the_work_each_row_waits_for_stands_in_one_column() {
         // The titles of a block are of different lengths, and a column that
         // opened after each title would step left and right down the block.
