@@ -1303,3 +1303,16 @@ fn the_box_drawn_table_of_a_plan_is_still_a_plan() {
         stdout(&output)
     );
 }
+
+#[test]
+fn a_picture_inside_a_fenced_code_block_reads_the_same_way() {
+    // This is how a reader copies a picture out of an issue: the sentence over
+    // it and the fence around it come with it. A line that holds no wire and
+    // writes no step is prose, so the sentence and the two fences cost
+    // nothing and the answer is the answer of the picture alone.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let pasted = format!("The plan of the gallery:\n\n```\n{PICTURE}```\n");
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &pasted);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PICTURE_ANSWER);
+}
