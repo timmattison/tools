@@ -304,7 +304,7 @@ fn a_compressed_file_gives_the_input_bytes_back() {
     let output = default_output_path(&input);
     let bytes = b"one line that repeats many times. ".repeat(500);
     fs::write(&input, &bytes).unwrap();
-    let stats = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap();
+    let stats = compress_file(&input, &output, &|_| true, &|| false, &mut |_| {}).unwrap();
     assert_eq!(stats.original_size, bytes.len() as u64);
     assert_eq!(stats.new_size, fs::metadata(&output).unwrap().len());
     assert!(!stats.grew());
@@ -317,7 +317,7 @@ fn an_empty_input_gives_an_empty_gzip_stream_that_grew() {
     let input = dir.path().join("empty.bin");
     let output = default_output_path(&input);
     fs::write(&input, b"").unwrap();
-    let stats = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap();
+    let stats = compress_file(&input, &output, &|_| true, &|| false, &mut |_| {}).unwrap();
     assert_eq!(stats.original_size, 0);
     assert!(stats.new_size > 0, "the gzip stream holds no bytes");
     assert_eq!(stats.new_size, fs::metadata(&output).unwrap().len());
@@ -333,7 +333,7 @@ fn bytes_that_gzip_cannot_compress_give_a_larger_file() {
     let output = default_output_path(&input);
     let bytes = incompressible_bytes(RANDOM_BYTES);
     fs::write(&input, &bytes).unwrap();
-    let stats = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap();
+    let stats = compress_file(&input, &output, &|_| true, &|| false, &mut |_| {}).unwrap();
     assert!(
         stats.new_size > stats.original_size,
         "the output holds {} bytes and the input holds {} bytes",
@@ -353,7 +353,7 @@ fn a_file_of_many_buffers_reports_the_progress_of_the_read() {
     let output = default_output_path(&input);
     fs::write(&input, vec![b'x'; MANY_BUFFERS]).unwrap();
     let mut counts: Vec<u64> = Vec::new();
-    let stats = compress_file(&input, &output, &|| false, &mut |read| {
+    let stats = compress_file(&input, &output, &|_| true, &|| false, &mut |read| {
         counts.push(read);
     })
     .unwrap();
@@ -371,7 +371,7 @@ fn a_missing_input_file_says_it_could_not_open_the_input() {
     let dir = temp_dir();
     let input = dir.path().join("missing.txt");
     let output = default_output_path(&input);
-    let error = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap_err();
+    let error = compress_file(&input, &output, &|_| true, &|| false, &mut |_| {}).unwrap_err();
     assert!(
         matches!(error, CompressError::OpenInput { .. }),
         "the error is {error}"
@@ -385,7 +385,7 @@ fn an_output_in_a_missing_directory_says_it_could_not_create_the_output() {
     let input = dir.path().join("input.txt");
     fs::write(&input, b"some bytes").unwrap();
     let output = dir.path().join("no-such-directory").join("input.txt.gz");
-    let error = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap_err();
+    let error = compress_file(&input, &output, &|_| true, &|| false, &mut |_| {}).unwrap_err();
     assert!(
         matches!(error, CompressError::CreateOutput { .. }),
         "the error is {error}"
@@ -402,7 +402,7 @@ fn a_read_that_fails_leaves_no_output_file() {
     let input = dir.path().join("a-directory");
     fs::create_dir(&input).unwrap();
     let output = default_output_path(&input);
-    let error = compress_file(&input, &output, &|| false, &mut |_| {}).unwrap_err();
+    let error = compress_file(&input, &output, &|_| true, &|| false, &mut |_| {}).unwrap_err();
     assert!(
         matches!(error, CompressError::ReadInput { .. }),
         "the error is {error}"
@@ -417,7 +417,7 @@ fn compress_file_over_the_same_path_for_input_and_output_leaves_the_file_untouch
     let bytes = b"the bytes that a refusal must not lose".to_vec();
     fs::write(&input, &bytes).unwrap();
 
-    let error = compress_file(&input, &input, &|| false, &mut |_| {});
+    let error = compress_file(&input, &input, &|_| true, &|| false, &mut |_| {});
 
     assert!(error.is_err(), "the run answered a success");
     assert_eq!(
@@ -439,10 +439,122 @@ fn a_run_that_the_user_stops_leaves_no_output_file() {
         calls.set(seen + 1);
         seen > 0
     };
-    let error = compress_file(&input, &output, &stopped, &mut |_| {}).unwrap_err();
+    let error = compress_file(&input, &output, &|_| true, &stopped, &mut |_| {}).unwrap_err();
     assert!(
         matches!(error, CompressError::Cancelled),
         "the error is {error}"
     );
     assert!(!output.exists(), "the run left an output file");
+}
+
+#[test]
+fn compress_file_refuses_to_replace_an_existing_output_when_may_replace_says_no() {
+    let dir = temp_dir();
+    let input = dir.path().join("input.txt");
+    fs::write(&input, b"new bytes that must never reach the output").unwrap();
+    let output = default_output_path(&input);
+    let original = b"the bytes that a refusal must not lose".to_vec();
+    fs::write(&output, &original).unwrap();
+
+    let error = compress_file(&input, &output, &|_| false, &|| false, &mut |_| {}).unwrap_err();
+
+    assert!(
+        matches!(error, CompressError::OutputExists { .. }),
+        "the error is {error}"
+    );
+    assert_eq!(
+        fs::read(&output).unwrap(),
+        original,
+        "the refusal changed the bytes of the output file"
+    );
+}
+
+#[test]
+fn compress_file_replaces_an_existing_output_when_may_replace_says_yes() {
+    let dir = temp_dir();
+    let input = dir.path().join("input.txt");
+    let bytes = b"one line that repeats many times. ".repeat(500);
+    fs::write(&input, &bytes).unwrap();
+    let output = default_output_path(&input);
+    fs::write(&output, b"stale content that the run must lose").unwrap();
+
+    let stats = compress_file(&input, &output, &|_| true, &|| false, &mut |_| {}).unwrap();
+
+    assert_eq!(stats.original_size, bytes.len() as u64);
+    assert_eq!(decompress(&output), bytes);
+}
+
+#[test]
+fn compress_file_asks_may_replace_only_when_the_output_is_already_there() {
+    let dir = temp_dir();
+    let input = dir.path().join("input.txt");
+    fs::write(&input, b"some bytes").unwrap();
+    let output = default_output_path(&input);
+    let asked = Cell::new(false);
+
+    let stats = compress_file(
+        &input,
+        &output,
+        &|_| {
+            asked.set(true);
+            true
+        },
+        &|| false,
+        &mut |_| {},
+    )
+    .unwrap();
+
+    assert!(
+        !asked.get(),
+        "the run asked whether it may replace an output file that was not there"
+    );
+    assert_eq!(stats.original_size, 10);
+}
+
+/// A directory opens as a file, and the first read of that file fails. The run
+/// thus fails after it opened the output, whether that output is new or was
+/// already there.
+#[cfg(unix)]
+#[test]
+fn a_failed_run_removes_an_output_file_that_it_made_itself() {
+    let dir = temp_dir();
+    let input = dir.path().join("a-directory");
+    fs::create_dir(&input).unwrap();
+    let output = default_output_path(&input);
+
+    let error = compress_file(&input, &output, &|_| true, &|| false, &mut |_| {}).unwrap_err();
+
+    assert!(
+        matches!(error, CompressError::ReadInput { .. }),
+        "the error is {error}"
+    );
+    assert!(
+        !output.exists(),
+        "the run left an output file that it made itself"
+    );
+}
+
+/// A directory opens as a file, and the first read of that file fails. The
+/// output file is already there before the run starts, thus the failure must
+/// leave it in place, even though `may_replace` allowed the run to truncate
+/// it on the way in.
+#[cfg(unix)]
+#[test]
+fn a_failed_run_leaves_an_output_file_that_was_already_there() {
+    let dir = temp_dir();
+    let input = dir.path().join("a-directory");
+    fs::create_dir(&input).unwrap();
+    let output = default_output_path(&input);
+    fs::write(&output, b"the file that the run must not delete").unwrap();
+
+    let error = compress_file(&input, &output, &|_| true, &|| false, &mut |_| {}).unwrap_err();
+
+    assert!(
+        matches!(error, CompressError::ReadInput { .. }),
+        "the error is {error}"
+    );
+    assert!(
+        output.exists(),
+        "the run removed an output file that it did not make"
+    );
 }

@@ -19,9 +19,9 @@
 )]
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use flate2::read::GzDecoder;
 use tempfile::TempDir;
@@ -52,6 +52,12 @@ const LC_NUMERIC_VARIABLE: &str = "LC_NUMERIC";
 /// The status that the binary answers when a run fails. Every failure path of
 /// the Go tool that this binary replaces exits with this status.
 const FAILURE_STATUS: i32 = 1;
+
+/// A fragment of the text that a run prints, to standard error, when it asks
+/// whether it may replace an output file that is already there. A test that
+/// must tell whether a run asked the question looks for this fragment,
+/// without depending on the exact wording of the prompt.
+const REPLACE_PROMPT_FRAGMENT: &str = "already exists";
 
 /// The text of the fixture that compresses well. The same short line many
 /// times over gives gzip a great deal to remove.
@@ -115,6 +121,36 @@ fn prgz() -> Command {
 /// Run a command and read the three answers of the process.
 fn run(command: &mut Command) -> Run {
     let output = command.output().unwrap();
+    Run {
+        ok: output.status.success(),
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Start `command` with a piped standard input, write `input` to it, close
+/// that pipe, then wait for the process to end and read the three answers of
+/// the process.
+///
+/// [`run`] goes through [`Command::output`], which gives the caller no
+/// writable handle to the standard input of the child, thus a test that must
+/// answer a prompt on that stream needs this helper instead. The function
+/// takes the standard input handle out of the child and drops it once the
+/// write is done, which closes the write end of the pipe and gives the
+/// child the end of its input, the way a person who types an answer and
+/// presses enter would.
+fn run_with_stdin(command: &mut Command, input: &[u8]) -> Run {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(input).unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
     Run {
         ok: output.status.success(),
         code: output.status.code(),
@@ -383,6 +419,123 @@ fn a_run_where_the_output_is_a_hard_link_to_the_input_leaves_it_untouched() {
         std::fs::read(&input).unwrap(),
         bytes,
         "the run changed the bytes of the input file"
+    );
+}
+
+#[test]
+fn a_run_over_an_output_that_is_already_there_with_no_answer_available_leaves_it_untouched() {
+    let bytes = compressible();
+    let (directory, input) = fixture("data.txt", &bytes);
+    let output = directory.path().join("data.txt.gz");
+    let kept = b"the bytes that the user already had".to_vec();
+    std::fs::write(&output, &kept).unwrap();
+
+    let answer = run(prgz()
+        .arg("--input")
+        .arg(&input)
+        .arg("--output")
+        .arg(&output)
+        .stdin(Stdio::null()));
+
+    assert!(
+        !answer.ok,
+        "the run replaced the output file though it got no answer"
+    );
+    assert_eq!(
+        std::fs::read(&output).unwrap(),
+        kept,
+        "the run changed the bytes of the output file though it got no answer"
+    );
+}
+
+#[test]
+fn the_prompt_to_replace_an_output_that_is_already_there_reaches_standard_error() {
+    let bytes = compressible();
+    let (directory, input) = fixture("data.txt", &bytes);
+    let output = directory.path().join("data.txt.gz");
+    std::fs::write(&output, b"already there").unwrap();
+
+    let answer = run(prgz()
+        .arg("--input")
+        .arg(&input)
+        .arg("--output")
+        .arg(&output)
+        .stdin(Stdio::null()));
+
+    assert!(
+        answer.stderr.contains(REPLACE_PROMPT_FRAGMENT),
+        "the standard error stream does not hold the prompt: {}",
+        answer.stderr
+    );
+    assert!(
+        answer.stderr.contains(&output.display().to_string()),
+        "the standard error stream does not name the output file: {}",
+        answer.stderr
+    );
+}
+
+#[test]
+fn a_y_answer_to_the_prompt_replaces_the_output_that_is_already_there() {
+    let bytes = compressible();
+    let (directory, input) = fixture("data.txt", &bytes);
+    let output = directory.path().join("data.txt.gz");
+    std::fs::write(&output, b"stale content that the run must lose").unwrap();
+
+    let answer = run_with_stdin(
+        prgz()
+            .arg("--input")
+            .arg(&input)
+            .arg("--output")
+            .arg(&output),
+        b"y\n",
+    );
+
+    assert!(answer.ok, "the run failed with {}", answer.stderr);
+    assert_eq!(gunzip(&output), bytes);
+}
+
+#[test]
+fn the_yes_flag_replaces_an_output_that_is_already_there_with_no_prompt() {
+    let bytes = compressible();
+    let (directory, input) = fixture("data.txt", &bytes);
+    let output = directory.path().join("data.txt.gz");
+    std::fs::write(&output, b"stale content that the run must lose").unwrap();
+
+    let answer = run(prgz()
+        .arg("--input")
+        .arg(&input)
+        .arg("--output")
+        .arg(&output)
+        .arg("--yes")
+        .stdin(Stdio::null()));
+
+    assert!(answer.ok, "the run failed with {}", answer.stderr);
+    assert_eq!(gunzip(&output), bytes);
+    assert!(
+        !answer.stderr.contains(REPLACE_PROMPT_FRAGMENT),
+        "the run printed the prompt though --yes answered the question: {}",
+        answer.stderr
+    );
+}
+
+#[test]
+fn a_run_over_an_output_that_is_not_there_asks_nothing() {
+    let bytes = compressible();
+    let (directory, input) = fixture("data.txt", &bytes);
+    let output = directory.path().join("data.txt.gz");
+
+    let answer = run(prgz()
+        .arg("--input")
+        .arg(&input)
+        .arg("--output")
+        .arg(&output)
+        .stdin(Stdio::null()));
+
+    assert!(answer.ok, "the run failed with {}", answer.stderr);
+    assert!(
+        !answer.stderr.contains(REPLACE_PROMPT_FRAGMENT),
+        "the run printed the prompt though the output was not there: {}",
+        answer.stderr
     );
 }
 
