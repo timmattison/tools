@@ -354,14 +354,19 @@ pub fn parse(text: &str) -> Result<Plan, PlanError> {
 
 /// One stream of a plan, as the record form writes it.
 ///
-/// The two fields this module reads. `Zone` and `Notes` open a field and close
-/// the field before it, and the text of them goes nowhere.
+/// The three fields this module reads. `Zone` and `Notes` open a field and
+/// close the field before it, and the text of them goes nowhere.
 #[derive(Default)]
 struct Record {
     /// The text of the `Stream` field, when the record holds one.
     label: Option<String>,
     /// The text of the `Order` field, when the record holds one.
     order: Option<String>,
+    /// The text of the `Waits for` field, when the record holds one.
+    ///
+    /// A record that holds none waits for nothing, which is what a record with
+    /// an empty field says as well.
+    waits: Option<String>,
 }
 
 /// The streams the record form of `text` writes.
@@ -387,7 +392,7 @@ fn record_streams(text: &str) -> Result<Vec<Stream>, PlanError> {
                 record.label.as_deref(),
                 place,
                 record.order.as_deref(),
-                None,
+                record.waits.as_deref(),
             )
         })
         .collect()
@@ -445,7 +450,8 @@ fn close_field(field: &mut Option<(Key, String)>, open: &mut Option<Record>) {
     match key {
         Key::Stream => open.get_or_insert_with(Record::default).label = Some(text),
         Key::Order => open.get_or_insert_with(Record::default).order = Some(text),
-        Key::WaitsFor | Key::Zone | Key::Notes => {}
+        Key::WaitsFor => open.get_or_insert_with(Record::default).waits = Some(text),
+        Key::Zone | Key::Notes => {}
     }
 }
 
