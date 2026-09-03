@@ -14,8 +14,8 @@ use walkdir::{DirEntry, WalkDir};
 /// `gitnuke`, `nodenuke`, `cdknuke`, `repotidy`, `polish`, `rr`, `reposize`,
 /// `goup`, `glo` and `nodeup`. Blindness to a detached git directory is the
 /// safe answer for them. In that layout the work tree is `$HOME`, so a walk
-/// that found the repository would hand them `$HOME` to delete inside. Today
-/// they find no repository and do nothing, which is what they must keep doing.
+/// that finds the repository hands them `$HOME` to delete inside. Today they
+/// find no repository and do nothing, which is what they must keep doing.
 pub fn find_git_repo() -> Option<PathBuf> {
     let mut current_dir = env::current_dir().ok()?;
 
