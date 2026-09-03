@@ -971,6 +971,44 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// The graph `steps` and `edges` draw.
+    ///
+    /// `steps` holds one step for each node, in the order the reader wrote
+    /// them, and each edge names the number of the step before and the number
+    /// of the step after. The two readers of this module each say what the
+    /// edges of their form are, and one function turns those edges into a
+    /// graph, so a picture and a plan can never draw one shape two ways.
+    ///
+    /// One edge stands between two nodes, however many times the input writes
+    /// it. A step that two rows of a bus reach comes before the step on the
+    /// other side of that bus one time, and a list that named it twice would
+    /// tell a reader to wait for it twice.
+    ///
+    /// An edge that names a number no step of `steps` holds joins nothing, and
+    /// it is dropped. A step that reaches itself stays, so [`Self::cycle`]
+    /// finds it: a graph with the knot taken out of it would name a step
+    /// nobody can start.
+    fn of_edges(steps: Vec<Step>, edges: &[(IssueNumber, IssueNumber)]) -> Self {
+        let positions: BTreeMap<IssueNumber, usize> = steps
+            .iter()
+            .enumerate()
+            .map(|(position, step)| (step.number(), position))
+            .collect();
+        let mut before: Vec<Vec<usize>> = vec![Vec::new(); steps.len()];
+        for (earlier, later) in edges {
+            let (Some(&from), Some(&to)) = (positions.get(earlier), positions.get(later)) else {
+                continue;
+            };
+            if !before[to].contains(&from) {
+                before[to].push(from);
+            }
+        }
+        for positions in &mut before {
+            positions.sort_unstable();
+        }
+        Self { steps, before }
+    }
+
     /// The steps of the picture, in a topological order.
     ///
     /// Every step stands after each step it waits for, and a tie goes to the
@@ -1308,38 +1346,35 @@ fn build(wirings: &[Wiring], lone: &[Port]) -> Graph {
     let mut order: Vec<(Place, Step)> = nodes.into_values().collect();
     order.sort_by_key(|(place, _)| *place);
     let steps: Vec<Step> = order.iter().map(|(_, step)| *step).collect();
-    let positions: BTreeMap<IssueNumber, usize> = steps
-        .iter()
-        .enumerate()
-        .map(|(position, step)| (step.number(), position))
-        .collect();
-
-    let mut before: Vec<Vec<usize>> = vec![Vec::new(); steps.len()];
+    let mut edges: Vec<(IssueNumber, IssueNumber)> = Vec::new();
     for wiring in wirings {
-        for after in wiring.after.iter().filter_map(|port| port.step) {
-            let Some(&to) = positions.get(&after.number()) else {
-                continue;
-            };
-            for earlier in wiring.before.iter().filter_map(|port| port.step) {
-                let Some(&from) = positions.get(&earlier.number()) else {
-                    continue;
-                };
-                if !before[to].contains(&from) {
-                    before[to].push(from);
-                }
+        for earlier in wiring.before.iter().filter_map(|port| port.step) {
+            for after in wiring.after.iter().filter_map(|port| port.step) {
+                edges.push((earlier.number(), after.number()));
             }
         }
     }
-    // A step that reaches itself stays, so [`Graph::cycle`] finds it. A build
-    // that dropped it would hand back a picture with the knot taken out of it,
-    // and the answer would then name a step nobody can start.
-    for positions in &mut before {
-        positions.sort_unstable();
-    }
-    Graph { steps, before }
+    Graph::of_edges(steps, &edges)
 }
 
 /// The graph a plan of streams draws, or `None` when it draws none.
+///
+/// A plan whose `Waits for` cells join one stream to another is a graph, and
+/// it is the graph a picture of the same plan draws. So both forms are read
+/// into one model, and one report answers either of them.
+///
+/// `None` says that no cell of the plan draws an edge: every stream waits for
+/// nothing, or each cell names work that stands in the chain of its own stream
+/// already. Such a plan is the plan every reader wrote before this column
+/// stood, and the reader of streams answers it exactly as it always did.
+///
+/// # Errors
+///
+/// Gives [`GraphError::Cycle`] for streams that wait for each other. It is the
+/// one refusal a plan earns: the four others are about a drawing, and a plan
+/// draws nothing. A cycle names no step to start, and an answer of "nothing is
+/// ready" hides the reason, so the message names the numbers that wait for
+/// each other.
 // The command line is the caller, and the command line is the half of issue
 // #436 that lands next. The expectation itself fails on the day the run calls
 // this, so it goes then and nobody has to remember it. The tests call it
@@ -1352,8 +1387,75 @@ fn build(wirings: &[Wiring], lone: &[Port]) -> Graph {
     )
 )]
 pub fn of_plan(plan: &Plan) -> Option<Result<Graph, GraphError>> {
-    let _ = plan;
-    None
+    let mut edges = chains_of(plan);
+    edges.extend(crossings_of(plan));
+    Some(Ok(Graph::of_edges(nodes_of(plan), &edges)))
+}
+
+/// The steps of `plan`, one for each number, in the order the plan writes
+/// them.
+///
+/// The walk takes the streams in the order of the plan, and inside a stream it
+/// takes the chain first and the work the stream waits for after it. A number
+/// that stands in two places is one node, and the step of the first place
+/// stands: a reader who wrote the pair of a step once wrote it where the step
+/// first appears. [`build`] states the same rule for a picture, because a node
+/// is a node whichever form named it.
+///
+/// A step of a `Waits for` cell that stands in no `Order` field is a node all
+/// the same. A blocker the repository does not have must reach the rows and
+/// turn the run red, and a row of the answer is the only place that says so.
+fn nodes_of(plan: &Plan) -> Vec<Step> {
+    let mut steps: Vec<Step> = Vec::new();
+    for &step in plan
+        .streams()
+        .iter()
+        .flat_map(|stream| stream.steps().iter().chain(stream.waits_for()))
+    {
+        if !steps.iter().any(|held| held.number() == step.number()) {
+            steps.push(step);
+        }
+    }
+    steps
+}
+
+/// The edges the `Order` field of each stream draws.
+///
+/// A stream is a chain, so each step of it comes before the step after it.
+fn chains_of(plan: &Plan) -> Vec<(IssueNumber, IssueNumber)> {
+    plan.streams()
+        .iter()
+        .flat_map(|stream| {
+            stream
+                .steps()
+                .iter()
+                .zip(stream.steps().iter().skip(1))
+                .map(|(earlier, later)| (earlier.number(), later.number()))
+        })
+        .collect()
+}
+
+/// The edges the `Waits for` cell of each stream draws.
+///
+/// Every step of the cell comes before the first step of the stream, and
+/// before that step alone. The steps inside the stream keep the chain their
+/// `Order` field gives them, so the second step waits for the first one and
+/// never for the whole cell.
+///
+/// A stream with no step at all draws nothing here, because there is no first
+/// step to reach. [`crate::plan::parse`] refuses such a stream, so this arm is
+/// the one a reader never meets.
+fn crossings_of(plan: &Plan) -> Vec<(IssueNumber, IssueNumber)> {
+    let mut edges: Vec<(IssueNumber, IssueNumber)> = Vec::new();
+    for stream in plan.streams() {
+        let Some(first) = stream.steps().first() else {
+            continue;
+        };
+        for blocker in stream.waits_for() {
+            edges.push((blocker.number(), first.number()));
+        }
+    }
+    edges
 }
 
 #[cfg(test)]

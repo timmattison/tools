@@ -176,18 +176,10 @@ impl Stream {
 
     /// The steps that come before the first step of the stream, in the order
     /// the plan writes them.
-    // The graph is the caller, and the graph is the half of issue #436 that
-    // lands next. The expectation itself fails on the day the graph calls
-    // this, so it goes then and nobody has to remember it. The tests call it
-    // already, which is why the attribute stands outside a test build.
+    ///
+    /// [`crate::graph::of_plan`] reads them, because a plan that names what a
+    /// stream waits for is a graph.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the graph of a plan is the caller, and it lands next"
-        )
-    )]
     pub fn waits_for(&self) -> &[Step] {
         &self.waits_for
     }
