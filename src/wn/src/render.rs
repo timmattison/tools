@@ -333,6 +333,19 @@ fn answer(report: &Report, start: &StartCommand) -> String {
     )
 }
 
+/// Paint a plan drawn as a picture: the rows, the notes they earn, and the
+/// answer.
+///
+/// `repo`, `width`, and `start` mean what they mean in [`render`].
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "the run of a picture calls this in the slice that answers a graph"
+)]
+pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartCommand) -> String {
+    render(report, repo, width, start)
+}
+
 /// One stream of a plan, painted as one block.
 ///
 /// The label and the report arrive together because the block writes both: the
@@ -555,10 +568,29 @@ fn summary(streams: &[StreamReport], width: usize, start: &StartCommand) -> Vec<
 mod tests {
     use super::*;
 
-    use crate::report::Closes;
+    use crate::report::{Closes, States};
 
     /// The repository the test states come from.
     const REPO: &str = "timmattison/tools";
+
+    /// The paste of issue #418: two streams that join.
+    ///
+    /// A picture, and not a list of entries, because the test then says what a
+    /// reader typed. The graph reads the steps in the order 242, 247, 246,
+    /// 248, 249, which keeps each stream of the picture together.
+    const PASTE: &str = "\
+#242 ──→ #247 ──┐
+                ├──→ #249  (gallery)
+#246 ──→ #248 ──┘";
+
+    /// What GitHub says about the paste when every issue of it is open.
+    const ALL_OPEN: &[(u64, Status, &str)] = &[
+        (242, Status::Open, "Read the picture"),
+        (247, Status::Open, "Answer the picture"),
+        (246, Status::Open, "Read the table"),
+        (248, Status::Open, "Answer the table"),
+        (249, Status::Open, "Paint the gallery"),
+    ];
 
     fn entry(number: u64, status: Status, title: &str) -> Entry {
         Entry {
@@ -1165,6 +1197,47 @@ mod tests {
         assert!(
             testcolor::strip_ansi(&painted).starts_with("S1 gitscratch\n  ✓ #344  First thing\n"),
             "the paint comes back out, in {painted:?}"
+        );
+    }
+
+    /// The report of the picture `text`, with what GitHub says about each of
+    /// the numbers `answers` names.
+    ///
+    /// The test builds the report out of a real picture, so it says what a
+    /// reader typed and what GitHub answered. A number `answers` does not name
+    /// is a number the repository does not have.
+    fn picture(text: &str, answers: &[(u64, Status, &str)]) -> Report {
+        let graph = crate::graph::read(text)
+            .expect("the text draws a graph")
+            .expect("the picture reads");
+        let states = States::of(
+            answers
+                .iter()
+                .map(|&(number, status, title)| entry(number, status, title))
+                .collect(),
+        );
+        Report::of_graph(&graph, &states)
+    }
+
+    /// Paint the picture, and take the color back out. See [`glyphs`].
+    fn graph_glyphs(report: &Report, width: usize) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            render_graph(report, REPO, width, &StartCommand::new(None))
+        }))
+    }
+
+    #[test]
+    fn the_answer_of_a_picture_names_a_command_for_every_step_that_is_ready() {
+        // Two streams that join are two people who work at the same time, and
+        // an answer that names one issue loses the reason somebody drew the
+        // picture. Nothing of this paste is finished, so both streams start.
+        let block = graph_glyphs(&picture(PASTE, ALL_OPEN), 80);
+        assert!(
+            block.ends_with(concat!(
+                "Start #242 next with 'si 242'\n",
+                "Start #246 next with 'si 246'",
+            )),
+            "the answer names one command for each stream, in {block:?}"
         );
     }
 }
