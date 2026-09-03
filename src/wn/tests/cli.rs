@@ -1162,3 +1162,36 @@ fn refuses_a_picture_whose_wires_return_to_a_step_before_them() {
     );
     assert_eq!(stdout(&output), "", "nothing was printed as an answer");
 }
+
+#[test]
+fn refuses_a_picture_that_holds_a_leftward_arrowhead() {
+    // A picture drawn from right to left says the opposite order, and a guess
+    // at it sends somebody to the wrong issue. So the run stops and the
+    // message prints the line, which is what the reader must redraw.
+    let line = "#246 ←── #248 ──┘";
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        &format!(
+            "\
+#242 ──→ #247 ──┐
+                ├──→ #249  (gallery)
+{line}
+"
+        ),
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("holds a leftward arrowhead"),
+        "the error says what the picture holds, in {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains(line),
+        "the error prints the line, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
