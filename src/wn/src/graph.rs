@@ -1396,7 +1396,7 @@ pub fn of_plan(plan: &Plan) -> Option<Result<Graph, GraphError>> {
     }
     let mut edges = chains_of(plan);
     edges.extend(crossings);
-    Some(Ok(Graph::of_edges(nodes_of(plan), &edges)))
+    Some(Graph::of_edges(nodes_of(plan), &edges).refuse_cycle())
 }
 
 /// The steps of `plan`, one for each number, in the order the plan writes
