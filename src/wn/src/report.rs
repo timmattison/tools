@@ -824,6 +824,154 @@ mod tests {
     }
 
     #[test]
+    fn the_join_of_two_streams_is_ready_once_both_streams_are_finished() {
+        // The two streams are done, so the step they join to is the one step
+        // to start. A picture that names one answer names it here, and the
+        // answer is the step no stream reaches alone.
+        let states = states_of(&[
+            (242, Status::Done),
+            (247, Status::Done),
+            (246, Status::Done),
+            (248, Status::Done),
+            (249, Status::Open),
+        ]);
+        let report = Report::of_graph(&graph_of(PASTE), &states);
+        assert_eq!(ready_of(&report), vec![249]);
+        assert_eq!(
+            waits_of(&report, 249),
+            Vec::<u64>::new(),
+            "a step that is ready waits for nothing"
+        );
+    }
+
+    #[test]
+    fn a_blocked_step_names_every_step_it_waits_for() {
+        // Both steps before `#249` are open, and a row that named the first of
+        // them would send somebody to `#247` and hide `#248`. The numbers stand
+        // in the order the picture holds them, so the reader reads the top
+        // stream first.
+        let states = states_of(&[
+            (242, Status::Open),
+            (247, Status::Open),
+            (246, Status::Open),
+            (248, Status::Open),
+            (249, Status::Open),
+        ]);
+        let report = Report::of_graph(&graph_of(PASTE), &states);
+        assert_eq!(waits_of(&report, 249), vec![247, 248]);
+    }
+
+    #[test]
+    fn a_step_that_is_ready_waits_for_nothing() {
+        // `#242` starts a stream, so no step stands before it at all.
+        let states = states_of(&[
+            (242, Status::Open),
+            (247, Status::Open),
+            (246, Status::Open),
+            (248, Status::Open),
+            (249, Status::Open),
+        ]);
+        let report = Report::of_graph(&graph_of(PASTE), &states);
+        assert!(report.is_ready(row_of(&report, 242)));
+        assert_eq!(waits_of(&report, 242), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_finished_step_waits_for_nothing_whatever_stands_before_it() {
+        // `#249` is closed over two steps that are open. It is work nobody
+        // looks at again, so it waits for nothing and the note about work
+        // closed out of order is what the reader hears instead.
+        let states = states_of(&[
+            (242, Status::Open),
+            (247, Status::Open),
+            (246, Status::Open),
+            (248, Status::Open),
+            (249, Status::Done),
+        ]);
+        let report = Report::of_graph(&graph_of(PASTE), &states);
+        assert_eq!(waits_of(&report, 249), Vec::<u64>::new());
+        assert_eq!(numbers(&report.finished_out_of_order()), vec![249]);
+    }
+
+    #[test]
+    fn a_step_behind_a_number_the_repository_does_not_have_waits_for_it() {
+        // GitHub answered for every number but `#247`, so `#247` is missing. A
+        // missing step is not finished, because nothing is known about it. So
+        // `#249` waits for it, and the note about the missing number says why
+        // nobody can start the work.
+        let states = states_of(&[
+            (242, Status::Done),
+            (246, Status::Done),
+            (248, Status::Done),
+            (249, Status::Open),
+        ]);
+        let report = Report::of_graph(&graph_of(PASTE), &states);
+        assert_eq!(waits_of(&report, 249), vec![247]);
+        assert!(
+            !report.is_ready(row_of(&report, 249)),
+            "a step behind a number nobody can read is not a step to start"
+        );
+        assert_eq!(numbers(&report.missing()), vec![247]);
+    }
+
+    #[test]
+    fn a_picture_that_is_finished_names_no_step_and_no_work_out_of_order() {
+        let states = states_of(&[
+            (242, Status::Done),
+            (247, Status::Done),
+            (246, Status::Done),
+            (248, Status::Dropped),
+            (249, Status::Done),
+        ]);
+        let report = Report::of_graph(&graph_of(PASTE), &states);
+        assert_eq!(ready_of(&report), Vec::<u64>::new());
+        assert_eq!(report.next(), None);
+        assert!(
+            report.finished_out_of_order().is_empty(),
+            "a picture with no unfinished step holds no work closed out of order"
+        );
+    }
+
+    #[test]
+    fn a_step_of_a_picture_carries_the_state_of_the_issue_it_closes() {
+        // One piece of work is sometimes two numbers, and a picture writes the
+        // pair exactly as a table writes it. The pull request is the work and
+        // the issue is what the work finishes, so a merged pull request over an
+        // open issue is a link nobody wrote. A picture reads that the way a
+        // stream reads it, because one module answers both.
+        let states = states_of(&[
+            (1, Status::Done),
+            (2, Status::Done),
+            (15, Status::Done),
+            (4, Status::Open),
+        ]);
+        let report = Report::of_graph(
+            &graph_of(
+                "\
+#1 ──┐
+     ├──→ #4 (in flight, PR #15)
+#2 ──┘",
+            ),
+            &states,
+        );
+        let work = &report.entries()[row_of(&report, 15)];
+        assert_eq!(
+            work.status,
+            Status::Done,
+            "the state of a step is the state of the pull request"
+        );
+        assert_eq!(
+            work.closes,
+            Some(Closes {
+                number: issue(4),
+                status: Status::Open,
+            }),
+            "the state of the issue stands beside the state of the work"
+        );
+        assert_eq!(steps_of(&report.pairs_that_disagree()), vec![15]);
+    }
+
+    #[test]
     fn a_finished_step_of_a_picture_with_unfinished_work_before_it_is_out_of_order() {
         // `#242` is open and every other step is done. So `#247` is closed
         // over the step before it, and `#249` is closed over a step two hops
