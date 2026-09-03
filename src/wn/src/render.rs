@@ -402,10 +402,6 @@ fn start_line(number: IssueNumber, start: &StartCommand) -> String {
 /// claims no text. So this function paints no empty block, and the rows always
 /// stand over the answer.
 #[must_use]
-#[allow(
-    dead_code,
-    reason = "the run of a picture calls this in the slice that answers a graph"
-)]
 pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartCommand) -> String {
     let entries = report.entries();
     let number_width = entries

@@ -270,10 +270,6 @@ impl Report {
     /// so one forward pass carries the answer of each step to the steps after
     /// it.
     #[must_use]
-    #[allow(
-        dead_code,
-        reason = "the run of a picture calls this in the slice that answers a graph"
-    )]
     pub fn of_graph(graph: &Graph, states: &States) -> Self {
         let entries = entries_of(graph.steps(), states);
         let mut ready: Vec<usize> = Vec::new();
