@@ -1457,6 +1457,29 @@ mod tests {
     }
 
     #[test]
+    fn the_work_a_row_waits_for_is_the_quiet_half_of_that_row() {
+        // The title is what a reader reads down the block, so the last column
+        // is dimmed and the title stays the loud half. Every other test here
+        // strips the paint, and this one reads it.
+        let painted = testcolor::with_forced_ansi(|| {
+            render_graph(
+                &picture(PASTE, ALL_OPEN),
+                REPO,
+                80,
+                &StartCommand::new(None),
+            )
+        });
+        assert!(
+            painted.contains("\u{1b}[2mwaits for #242\u{1b}[0m"),
+            "the last column is dimmed, in {painted:?}"
+        );
+        assert!(
+            testcolor::strip_ansi(&painted).contains("waits for #242"),
+            "the paint comes back out, in {painted:?}"
+        );
+    }
+
+    #[test]
     fn a_row_for_each_step_of_a_picture_and_one_answer_for_each_stream() {
         assert_eq!(
             graph_glyphs(&picture(PASTE, ALL_OPEN), 80),
