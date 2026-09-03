@@ -18,6 +18,19 @@
 //!
 //! A normal repository is here too, from its root and from a linked worktree of
 //! it, because the correction must leave that path exactly as it was.
+//!
+//! `si` is here as well, in the two facts it rests on. `si` is a shell function
+//! in the configuration of the user and not a tool of this repository, so what
+//! this file pins is the ground it stands on: `git rev-parse
+//! --is-inside-work-tree` answers `true` in the git directory, which is the
+//! check `si` makes before it does anything else, and `nwt -b issue-<n>` from
+//! that same directory then gets a worktree.
+//!
+//! That first answer holds in the nested shape alone. Git reports the git
+//! directory of the beside shape as outside the work tree, so `si` refuses
+//! there. The nested shape is the shape `yadm` builds, so `si` works where the
+//! layout comes from, and the difference is recorded below rather than left as
+//! a surprise.
 
 mod support;
 
@@ -37,6 +50,17 @@ const WORKTREE_LINE_PREFIX: &str = "worktree ";
 /// The name each fixture gives its one linked worktree, and the branch that
 /// worktree carries.
 const LINKED_BRANCH: &str = "linked-branch";
+
+/// The question `si` asks git before it does anything else.
+///
+/// `si <n>` runs this and stops when the answer is not [`INSIDE_A_WORK_TREE`].
+const IS_INSIDE_WORK_TREE: [&str; 2] = ["rev-parse", "--is-inside-work-tree"];
+
+/// The answer to [`IS_INSIDE_WORK_TREE`] that lets `si` carry on.
+const INSIDE_A_WORK_TREE: &str = "true";
+
+/// The answer to [`IS_INSIDE_WORK_TREE`] that stops `si`.
+const OUTSIDE_A_WORK_TREE: &str = "false";
 
 /// Resolve a path before an assertion reads it.
 ///
@@ -107,14 +131,28 @@ fn listed_worktrees(main_worktree: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// A branch named the way `si` names one, and unique to this process.
+///
+/// `si <n>` builds `issue-<n>` from the issue number it is handed, so the shape
+/// is `issue-` and then digits. The digits here are the process id and a
+/// nanosecond clock reading, which keeps the shape and keeps two concurrent
+/// copies of this suite off one branch name.
+fn issue_branch() -> String {
+    format!("issue-{}{}", std::process::id(), nanos())
+}
+
 /// Run `nwt -b <branch>` in `from`, then prove the new worktree landed beside
 /// `main_worktree` and that git counts it as a worktree of the repository.
 fn assert_lands_beside_the_main_worktree(main_worktree: &Path, from: &Path, label: &str) {
-    let branch = unique_branch(label);
+    assert_branch_lands_beside_the_main_worktree(main_worktree, from, &unique_branch(label));
+}
 
-    let created = new_worktree(from, &branch);
+/// [`assert_lands_beside_the_main_worktree`] with the branch name given rather
+/// than built, for a test that cares what the branch is called.
+fn assert_branch_lands_beside_the_main_worktree(main_worktree: &Path, from: &Path, branch: &str) {
+    let created = new_worktree(from, branch);
 
-    let expected = expected_worktrees_dir(main_worktree).join(&branch);
+    let expected = expected_worktrees_dir(main_worktree).join(branch);
     assert_eq!(
         canonical(&created),
         canonical(&expected),
@@ -185,4 +223,48 @@ fn a_worktree_of_a_normal_repository_gets_a_worktree_beside_the_repository() {
     );
 
     assert_lands_beside_the_main_worktree(&repo, &linked, "normal-from-linked");
+}
+
+#[test]
+fn a_nested_git_directory_answers_the_check_si_makes() {
+    let repo = DetachedGitDirRepo::nested();
+
+    // `git_stdout` panics on a non-zero exit, so reaching the comparison is the
+    // proof that git answered the question rather than refusing it.
+    let answer = git_stdout(repo.git_dir(), &IS_INSIDE_WORK_TREE);
+
+    assert_eq!(
+        answer.trim(),
+        INSIDE_A_WORK_TREE,
+        "git must call the git directory of the nested shape a place inside the \
+         work tree, because that is what lets si carry on"
+    );
+}
+
+#[test]
+fn a_nested_git_directory_gets_the_worktree_si_asks_nwt_for() {
+    let repo = DetachedGitDirRepo::nested();
+
+    assert_branch_lands_beside_the_main_worktree(repo.git_dir(), repo.git_dir(), &issue_branch());
+}
+
+#[test]
+fn a_git_directory_beside_its_work_tree_answers_the_check_si_makes_the_other_way() {
+    let repo = DetachedGitDirRepo::beside();
+
+    let answer = git_stdout(repo.git_dir(), &IS_INSIDE_WORK_TREE);
+
+    // The known and deliberate difference between the two shapes. `si` stops
+    // here, one step before it would call `nwt` at all, while `nwt` itself
+    // works in this shape either way - see
+    // `a_git_directory_beside_its_work_tree_gets_a_worktree_beside_itself`.
+    // `yadm` builds the nested shape, so the layout this issue is about is the
+    // one `si` serves. Making `si` work here is no part of the issue, and `si`
+    // lives in the configuration of the user rather than in this repository.
+    assert_eq!(
+        answer.trim(),
+        OUTSIDE_A_WORK_TREE,
+        "git must call the git directory of the beside shape a place outside \
+         the work tree"
+    );
 }
