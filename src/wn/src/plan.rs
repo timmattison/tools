@@ -195,10 +195,19 @@ impl Plan {
     /// the pull request is the work and the issue is what the work finishes.
     /// A number that stands in two streams arrives once, so one query to
     /// GitHub answers the whole plan.
+    ///
+    /// The chain of a stream comes first and the work it waits for after it.
+    /// The work a stream waits for is sometimes the work of no stream of the
+    /// plan, and it stands here all the same: a reader who is told to wait is
+    /// owed the state of the work they wait for.
     #[must_use]
     pub fn numbers(&self) -> Vec<IssueNumber> {
         let mut numbers: Vec<IssueNumber> = Vec::new();
-        for step in self.streams.iter().flat_map(Stream::steps) {
+        for step in self
+            .streams
+            .iter()
+            .flat_map(|stream| stream.steps.iter().chain(&stream.waits_for))
+        {
             for number in [Some(step.number), step.closes].into_iter().flatten() {
                 if !numbers.contains(&number) {
                     numbers.push(number);
