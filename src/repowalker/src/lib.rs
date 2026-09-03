@@ -132,7 +132,7 @@ impl RepoContext {
 /// Returns `None` when the directory is in no repository, or when git cannot
 /// answer.
 pub fn find_repo_context() -> Option<RepoContext> {
-    None
+    find_repo_context_at(&env::current_dir().ok()?)
 }
 
 /// Asks git which repository `dir` belongs to.
