@@ -1,8 +1,8 @@
-//! Reading a plan drawn as a picture.
+//! Reading a plan as a graph.
 //!
 //! A chain says one order, and a table of streams says one order for each
-//! stream. A picture says the one thing that neither of them says: two streams
-//! that join.
+//! stream. A plan that joins two streams says the thing neither of them says,
+//! and a reader writes that in two ways. One is a picture:
 //!
 //! ```text
 //! #242 ──→ #247 ──┐
@@ -10,11 +10,30 @@
 //! #246 ──→ #248 ──┘
 //! ```
 //!
-//! The meaning of a picture is its geometry. So this module builds a grid of
-//! the text and it walks the grid. A reader of tokens and a reader of lines
-//! both miss the one thing the picture says, because the corner of the first
-//! line and the corner of the third line reach the same bus and no line holds
-//! both of them.
+//! The other is a `Waits for` column beside the streams of a table:
+//!
+//! ```text
+//! | Stream | Order     | Waits for |
+//! |--------|-----------|-----------|
+//! | S0     | #96       |           |
+//! | S1     | #91       | #96       |
+//! | S2     | #89 → #94 | #96, #91  |
+//! ```
+//!
+//! Both forms say one thing: which work comes before which other work. So both
+//! of them are read into one [`Graph`], and one report answers either of them.
+//! The rows, the marks, the order of the rows, and the work a blocked row
+//! waits for all come out of that one model. Two models of one plan drift
+//! apart, and a reader then reads two answers to one question.
+//!
+//! Most of this module reads the picture, because the meaning of a picture is
+//! its geometry. [`of_plan`] reads the table, and it is short for the same
+//! reason: a `Waits for` cell states an edge in words.
+//!
+//! So this module builds a grid of the text and it walks the grid. A reader of
+//! tokens and a reader of lines both miss the one thing the picture says,
+//! because the corner of the first line and the corner of the third line reach
+//! the same bus and no line holds both of them.
 //!
 //! # The four rules
 //!
@@ -110,6 +129,31 @@
 //! number in the prose of a page that draws no picture still reaches the chain
 //! reader.
 //!
+//! # A plan of streams says the same thing in words
+//!
+//! Each stream of a plan is a chain, so its `Order` field draws an edge from
+//! each step to the step after it. The `Waits for` cell names the work of
+//! other streams that comes before the first step of the stream, and it draws
+//! one edge into that first step for each of them. The steps inside the stream
+//! keep their own chain, so the second step waits for the first one and never
+//! for the whole cell.
+//!
+//! A node is keyed on the number of its step, as it is for a picture, so a
+//! number that stands in two streams is one node. A number a `Waits for` cell
+//! names and no `Order` field holds is a node all the same: a blocker the
+//! repository does not have must reach the rows and turn the run red, and a
+//! row of the answer is the only place that says so.
+//!
+//! A cell that names a step of its own stream draws no edge, because `Order`
+//! relates those two steps already. Such an edge would run back into the chain
+//! of the stream, and a plan that says a true thing twice is no plan with a
+//! mistake in it.
+//!
+//! [`of_plan`] claims a plan that draws one such edge or more, and it claims no
+//! other. A plan whose streams wait for nothing is the plan every reader wrote
+//! before this column stood, and the reader of streams answers it exactly as it
+//! always did.
+//!
 //! # What it refuses
 //!
 //! A claimed picture that this reader cannot follow is a refusal and never a
@@ -124,6 +168,9 @@
 //! Every refusal stands after the claim. A text this reader does not claim
 //! gives `None` and no message, whatever it is drawn with, because the chain
 //! reader answers such a text next.
+//!
+//! A plan earns the cycle and nothing else. The four other refusals are about
+//! a drawing, and a plan draws nothing.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
@@ -1396,7 +1443,11 @@ pub fn of_plan(plan: &Plan) -> Option<Result<Graph, GraphError>> {
     }
     let mut edges = chains_of(plan);
     edges.extend(crossings);
-    Some(Graph::of_edges(nodes_of(plan), &edges).refuse_cycle())
+    Some(
+        Graph::of_edges(nodes_of(plan), &edges)
+            .refuse_cycle()
+            .map(Graph::in_topological_order),
+    )
 }
 
 /// The steps of `plan`, one for each number, in the order the plan writes
