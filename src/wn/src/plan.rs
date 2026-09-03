@@ -1724,6 +1724,30 @@ Notes: Independent of everything above.";
     }
 
     #[test]
+    fn an_annotation_whose_prose_carries_a_parenthesis_is_one_group() {
+        // An annotation holds prose, and prose holds parentheses. A reader
+        // that closes the group on the first `)` leaves the second one outside
+        // it, where a stray parenthesis is a token that names no issue:
+        //
+        //     wn: stream "Stream 1": ")" is not an issue number
+        assert_eq!(
+            steps_at(&plan_of("Order: #4 (a note (see the docs)) → #7"), 0),
+            vec![(4, None), (7, None)]
+        );
+    }
+
+    #[test]
+    fn a_nested_parenthesis_does_not_hide_the_number_of_an_annotation() {
+        // The number of the pair stands after the nested parenthesis, so a
+        // reader that closes the group early reads `PR` and `#15)` as two
+        // steps of the chain and refuses the plan.
+        assert_eq!(
+            steps_at(&plan_of("Order: #4 (in flight (rebasing), PR #15)"), 0),
+            vec![(15, Some(4))]
+        );
+    }
+
+    #[test]
     fn a_key_is_read_whatever_its_case() {
         let plan = plan_of("stream: S1\nORDER: #1 → #2");
         assert_eq!(steps_at(&plan, 0), vec![(1, None), (2, None)]);
@@ -1856,6 +1880,57 @@ Notes: Independent of everything above.";
             .to_string();
         assert!(message.contains("S1 ic"), "{message}");
         assert!(message.contains("\"(in flight\""), "{message}");
+    }
+
+    #[test]
+    fn refuses_a_group_that_never_closes_around_a_nested_one() {
+        // A nested parenthesis closes the group it opened and no other, so a
+        // group whose own parenthesis never arrives is still a group that
+        // never closes. The message repeats it back from the parenthesis that
+        // opened it, the nested pair and all.
+        //
+        // A reader that closes the outer group on the parenthesis of the
+        // nested one answers a different message, about the word that stands
+        // after it:
+        //
+        //     wn: stream "S1 ic": "c" is not an issue number
+        for order in ["#4 (a (b", "#4 (a (b) c"] {
+            let message = parse(&format!("Stream: S1 ic\nOrder: {order}"))
+                .expect_err("a group that never closes is not a chain")
+                .to_string();
+            assert!(message.contains("S1 ic"), "{message}");
+            assert!(
+                message.contains("has no closing parenthesis"),
+                "the order is `{order}` and the message is {message}"
+            );
+            let group = order.split_once(GROUP_OPEN).expect("the order opens a group");
+            assert!(
+                message.contains(&format!("\"{GROUP_OPEN}{}\"", group.1)),
+                "the order is `{order}` and the message is {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closing_parenthesis_with_no_group_open_belongs_to_its_token() {
+        // Counting the depth of a group must not give a stray parenthesis a
+        // group to close. `#4)` is one token, it names no issue, and the
+        // message says so and repeats the whole token back.
+        assert_eq!(
+            parse("Stream: S1 ic\nOrder: #4)"),
+            Err(PlanError::NotAnIssue {
+                stream: Snippet::new("S1 ic"),
+                token: Snippet::new("#4)"),
+            })
+        );
+        assert_eq!(
+            parse("Stream: S1 ic\nOrder: #4 (human) → #7)"),
+            Err(PlanError::NotAnIssue {
+                stream: Snippet::new("S1 ic"),
+                token: Snippet::new("#7)"),
+            }),
+            "the group before it closed, so this parenthesis closes nothing"
+        );
     }
 
     #[test]
