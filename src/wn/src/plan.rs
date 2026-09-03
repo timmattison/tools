@@ -83,6 +83,14 @@ const UNNAMED_LABEL: &str = "Stream";
 /// this count.
 const RULE_CHARS: usize = 3;
 
+/// The marks a Markdown divider is drawn with.
+///
+/// The hyphen draws the line, and the colon names the alignment of a column.
+/// A divider carries these two and no other mark of [`is_rule_mark`], which is
+/// what parts it from the `├─────┼─────┤` of a box table and the `+-----+`
+/// of an ASCII one.
+const MARKDOWN_DIVIDER_MARKS: &[char] = &['-', ':'];
+
 /// One piece of work of a stream.
 ///
 /// A step is one number, and sometimes two: a pull request and the issue that
@@ -498,9 +506,13 @@ fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>
 /// two row lines is where one row ends and the next one starts, and it is the
 /// only mark a table carries that says so for certain. A cell says nothing
 /// about the row it belongs to.
+///
+/// A rule carries the line it was drawn on, because how a rule is drawn says
+/// which table this is. `| --- |` opens a Markdown table and `├─┼─┤` opens a
+/// box one, and [`row_reading`] reads the two apart.
 enum BodyLine<'a> {
     /// A line a reader draws between two rows, or around the table.
-    Rule,
+    Rule(&'a str),
     /// The cells of one line of a row.
     Cells(Vec<&'a str>),
 }
@@ -529,7 +541,7 @@ fn table_body<'a>(
     let mut lines: Vec<BodyLine<'a>> = Vec::new();
     for line in text.lines().skip(body) {
         if is_rule(line) {
-            lines.push(BodyLine::Rule);
+            lines.push(BodyLine::Rule(line));
             continue;
         }
         let Some(cells) = table_cells(line) else {
@@ -556,27 +568,24 @@ fn table_body<'a>(
 
 /// The rows `lines` writes, each one the cells of every line it wraps onto.
 ///
-/// A row opens under a rule and takes every line after it, up to the next
-/// rule. That reading needs nothing of the cells themselves, so it holds a row
-/// together whatever its wrap falls in the middle of. A table whose rules do
-/// not divide its rows carries no such mark, and each line is then asked for
-/// itself with [`continues_a_row`].
+/// [`row_reading`] says which of the three readings tells the rows of this
+/// table apart, and each line of the body is then asked under that one.
 fn rows_of(lines: &[BodyLine], order_at: usize) -> Vec<Vec<String>> {
-    let ruled = rules_divide_the_rows(lines);
+    let reading = row_reading(lines);
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut row_is_open = false;
     for line in lines {
         let cells = match line {
-            BodyLine::Rule => {
+            BodyLine::Rule(_) => {
                 row_is_open = false;
                 continue;
             }
             BodyLine::Cells(cells) => cells,
         };
-        let continues = if ruled {
-            row_is_open
-        } else {
-            continues_a_row(cells, order_at)
+        let continues = match reading {
+            RowReading::Rules => row_is_open,
+            RowReading::Lines => false,
+            RowReading::Cells => continues_a_row(cells, order_at),
         };
         if continues {
             // A continuation with no row above it continues nothing. The plan
@@ -591,6 +600,37 @@ fn rows_of(lines: &[BodyLine], order_at: usize) -> Vec<Vec<String>> {
         row_is_open = true;
     }
     rows
+}
+
+/// Which of the three readings says where one row of a table ends.
+///
+/// A table says so with a mark of its own wherever it can, because a mark
+/// answers for every row and a cell answers for one line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowReading {
+    /// The rules of the table stand between its rows, so a row opens under a
+    /// rule and takes every line up to the next one.
+    Rules,
+    /// The table is a Markdown one, so one line writes one row and no line
+    /// continues another.
+    Lines,
+    /// The table carries neither mark, so each line is asked for itself with
+    /// [`continues_a_row`].
+    Cells,
+}
+
+/// Which reading tells the rows of `lines` apart.
+///
+/// The two marks come first, because each one answers for the whole table.
+/// [`continues_a_row`] answers for one line and it is the last reading asked.
+fn row_reading(lines: &[BodyLine]) -> RowReading {
+    if rules_divide_the_rows(lines) {
+        RowReading::Rules
+    } else if opens_with_a_markdown_divider(lines) {
+        RowReading::Lines
+    } else {
+        RowReading::Cells
+    }
 }
 
 /// Do the rules of `lines` say where each row of the table ends?
@@ -609,25 +649,57 @@ fn rules_divide_the_rows(lines: &[BodyLine]) -> bool {
     match (first, last) {
         (Some(first), Some(last)) => lines[first..last]
             .iter()
-            .any(|line| matches!(line, BodyLine::Rule)),
+            .any(|line| matches!(line, BodyLine::Rule(_))),
         _ => false,
     }
 }
 
+/// Is `lines` the body of a Markdown table?
+///
+/// A Markdown table opens its body with the divider that names the alignment
+/// of each column, so the first line of the body answers.
+fn opens_with_a_markdown_divider(lines: &[BodyLine]) -> bool {
+    matches!(lines.first(), Some(BodyLine::Rule(line)) if is_markdown_divider(line))
+}
+
+/// Is `line` the divider of a Markdown table?
+///
+/// A divider carries a bar and it is drawn with [`MARKDOWN_DIVIDER_MARKS`]
+/// alone: `|---|---|`, `| --- | --- |`, and `| :---: | :---: |`. Every other
+/// mark of [`is_rule_mark`] belongs to another drawing, so `├─────┼─────┤`
+/// and `+-----+-----+` answer `false` and their tables keep the reading they
+/// have.
+///
+/// Ask this of a line [`is_rule`] answers for. A row of prose carries no mark
+/// at all, and a line of no marks is a divider of nothing.
+fn is_markdown_divider(line: &str) -> bool {
+    line.contains(TABLE_BARS)
+        && line
+            .chars()
+            .filter(|&c| is_rule_mark(c))
+            .all(|c| MARKDOWN_DIVIDER_MARKS.contains(&c))
+}
+
 /// Does `cells` continue the row above it, rather than open one?
 ///
-/// The reading for a table whose rules do not divide its rows, where the cells
-/// are all a reader has. The `Order` cell is the one that answers: a step of a
-/// chain never opens with an arrow, and a row that carries no step carries no
-/// chain. "The first cell is empty" reads the same way and is wrong, because a
-/// label wraps as readily as a chain does — the row of stream B of a real
-/// report carries the word `engine` in its first cell and nothing in its
-/// `Order` cell.
+/// The third reading, for a table that carries neither mark of its own and
+/// where the cells are all a reader has. The `Order` cell is the one that
+/// answers: a step of a chain never opens with an arrow, and a row that
+/// carries no step carries no chain. "The first cell is empty" reads the same
+/// way and is wrong, because a label wraps as readily as a chain does — the
+/// row of stream B of a real report carries the word `engine` in its first
+/// cell and nothing in its `Order` cell.
 ///
 /// It answers for one line, so it cannot hold a row together through a wrap
 /// that falls in the middle of a chain. `(#329)` opens no step and `#330`
 /// opens one, and a table with rules between its rows is what says that both
 /// of them continue the row above. [`rules_divide_the_rows`] finds that table.
+///
+/// It reads an empty `Order` cell as a wrap, and a Markdown table writes no
+/// wrap at all: one row of one is one line, by definition. So an empty cell
+/// there is a stream that names no chain, and the message that says which
+/// stream is worth more than a row this reading would drop.
+/// [`opens_with_a_markdown_divider`] finds that table.
 fn continues_a_row(cells: &[&str], order_at: usize) -> bool {
     cells.get(order_at).is_some_and(|order| {
         order.is_empty()
@@ -1381,6 +1453,32 @@ Notes: Independent of everything above.";
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(plan_of(&no_rules), plan_of(BOX_TABLE));
+    }
+
+    #[test]
+    fn a_box_table_with_a_header_rule_alone_gives_the_same_streams() {
+        // A renderer that draws one rule under the header and none between
+        // the rows opens the body of the table with `├─────┼─────┤`. That is
+        // a rule and it is no Markdown divider, so the cells still say where
+        // each row ends and the wrap of stream B still joins the row above it.
+        let mut rules = 0;
+        let header_rule_alone: String = BOX_TABLE
+            .lines()
+            .filter(|line| {
+                if !line.starts_with('├') {
+                    return true;
+                }
+                rules += 1;
+                rules == 1
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            header_rule_alone.matches('├').count(),
+            1,
+            "the table keeps the one rule under its header"
+        );
+        assert_eq!(plan_of(&header_rule_alone), plan_of(BOX_TABLE));
     }
 
     #[test]

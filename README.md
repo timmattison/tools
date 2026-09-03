@@ -1078,14 +1078,18 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     row and never a rule, and a rule in its place would cut a row that wraps in two. A row splits
     on the bar and never on a column position, so an em dash or a Japanese character inside one
     cell shifts no cell after it. A row that wraps onto a second line joins the row above it, and
-    the `├─┼─┤` rules say where each row ends: a row opens under a rule and takes every line up to
-    the next one. That reading asks nothing of the cells, so a wrap that falls in the middle of a
-    chain — between a step and the annotation in parentheses that follows it, or between two steps
-    — stays one row. A table whose rules do not divide its rows is read by its `Order` cell
-    instead: that cell is empty or it opens with an arrow, because a step of a chain never does.
-    Reading the first cell would be simpler and wrong — a label wraps as readily as a chain. The
-    header names the column count, so a row that splits into another one holds a bar nobody
-    escaped, and `wn` prints that row and exits `2` rather than reading its `Notes` as a chain.
+    three readings say which lines wrap. The `├─┼─┤` rules give the first one wherever they stand
+    between two rows: a row opens under a rule and takes every line up to the next one. That
+    reading asks nothing of the cells, so a wrap that falls in the middle of a chain — between a
+    step and the annotation in parentheses that follows it, or between two steps — stays one row.
+    A Markdown table gives the second: a body that opens with `| --- |` writes one row on each
+    line, because one row of a Markdown table is one line. An empty `Order` cell there is a stream
+    that names no chain, and `wn` names that stream rather than dropping it. A table that carries
+    neither mark gives the third and is read by its `Order` cell: that cell is empty or it opens
+    with an arrow, because a step of a chain never does. Reading the first cell would be simpler
+    and wrong — a label wraps as readily as a chain. The header names the column count, so a row
+    that splits into another one holds a bar nobody escaped, and `wn` prints that row and exits
+    `2` rather than reading its `Notes` as a chain.
   - Only the `Order` field is a chain. `Stream`, `Zone`, and `Notes` are never read for numbers,
     and that rule is what makes the feature work: `Notes` is prose about code, and prose about
     code is full of numbers. `main.rs:1566-1650` is not `#1566` and `#1650`, and `265 lines apart
