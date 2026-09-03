@@ -346,6 +346,56 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_worktree_of_a_nested_detached_repository_is_its_own_checkout() {
+        let repo = DetachedGitDirRepo::nested();
+        let worktree = repo.add_worktree(&repo.git_dir().join("wt-a"), "wt-a-branch");
+
+        let context = find_repo_context_at(&worktree).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(&worktree));
+        assert_eq!(canonical(context.main_worktree()), canonical(repo.git_dir()));
+    }
+
+    #[test]
+    fn a_linked_worktree_of_a_beside_detached_repository_is_its_own_checkout() {
+        let repo = DetachedGitDirRepo::beside();
+        let worktree = repo.add_worktree(&repo.git_dir().join("wt-a"), "wt-a-branch");
+
+        let context = find_repo_context_at(&worktree).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(&worktree));
+        assert_eq!(canonical(context.main_worktree()), canonical(repo.git_dir()));
+    }
+
+    #[test]
+    fn a_linked_worktree_of_a_normal_repository_is_its_own_checkout() {
+        let repo = repo_with_one_commit();
+        repo.branch("side");
+        repo.checkout("main");
+        let worktree = repo.add_worktree("side");
+
+        let context = find_repo_context_at(&worktree).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(&worktree));
+        assert_eq!(canonical(context.main_worktree()), canonical(repo.path()));
+    }
+
+    #[test]
+    fn a_subdirectory_of_a_linked_worktree_belongs_to_that_worktree() {
+        let repo = repo_with_one_commit();
+        repo.branch("side");
+        repo.checkout("main");
+        let worktree = repo.add_worktree("side");
+        let deep = worktree.join("sub").join("deeper");
+        fs::create_dir_all(&deep).expect("create the subdirectory");
+
+        let context = find_repo_context_at(&deep).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(&worktree));
+        assert_eq!(canonical(context.main_worktree()), canonical(repo.path()));
+    }
+
+    #[test]
     fn a_directory_that_is_no_repository_has_no_context() {
         let dir = tempfile::TempDir::new().expect("create temp dir");
 
