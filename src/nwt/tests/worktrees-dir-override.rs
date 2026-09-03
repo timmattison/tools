@@ -45,16 +45,29 @@ fn unique_branch(label: &str) -> String {
 /// the repository for `.env` files, and `--no-bootstrap-hooks` stops a package
 /// manager install. Neither one has anything to do with where the worktree
 /// lands.
-fn run_nwt(from: &Path, branch: &str) -> Output {
-    nwt_command(from)
-        .args(["-b", branch, "--no-copy-env", "--no-bootstrap-hooks"])
-        .output()
-        .expect("run the nwt binary")
+///
+/// `home`, when it is there, becomes the home directory of the child. Git
+/// expands a leading `~` in a path value against that directory, so a test of
+/// the expansion names a temporary directory and never writes into the home
+/// directory of whoever runs the suite.
+fn run_nwt(from: &Path, branch: &str, home: Option<&Path>) -> Output {
+    let mut command = nwt_command(from);
+    command.args(["-b", branch, "--no-copy-env", "--no-bootstrap-hooks"]);
+    if let Some(home) = home {
+        command.env("HOME", home);
+    }
+    command.output().expect("run the nwt binary")
 }
 
 /// Run `nwt -b <branch>` in `from`, and hand back the directory it made.
 fn created_worktree(from: &Path, branch: &str) -> PathBuf {
-    let output = run_nwt(from, branch);
+    created_worktree_under_home(from, branch, None)
+}
+
+/// Run `nwt -b <branch>` in `from` under the home directory `home`, and hand
+/// back the directory it made.
+fn created_worktree_under_home(from: &Path, branch: &str, home: Option<&Path>) -> PathBuf {
+    let output = run_nwt(from, branch, home);
 
     assert!(
         output.status.success(),
@@ -163,5 +176,23 @@ fn a_relative_value_resolves_against_the_main_worktree() {
         canonical(&created),
         canonical(&repo).join("stated-worktrees").join(&branch),
         "a relative {WORKTREES_DIR_KEY} must resolve against the main worktree"
+    );
+}
+
+#[test]
+fn a_leading_tilde_expands_to_the_home_directory() {
+    let (_temp, repo) = init_repo();
+    set_override(&repo, "~/stated-worktrees");
+    let home = TempDir::new().expect("create the home directory of the run");
+    let branch = unique_branch("tilde");
+
+    let created = created_worktree_under_home(&repo, &branch, Some(home.path()));
+
+    assert_eq!(
+        canonical(&created),
+        canonical(home.path())
+            .join("stated-worktrees")
+            .join(&branch),
+        "a leading tilde in {WORKTREES_DIR_KEY} must expand to the home directory"
     );
 }
