@@ -871,11 +871,31 @@ mod tests {
               ├──→ #3
 #2 ───────────┘";
 
+    /// A picture that names a stream with a letter.
+    ///
+    /// The bus of the second line joins `#4`, `#5`, and `#6`, so a net of the
+    /// picture claims the text. The wire of the first line reaches `A` on its
+    /// left, and `A` is a label and not a step.
+    const LABEL_PORT: &str = "\
+A ──→ #4 ──┐
+#5 ────────┴──→ #6";
+
     /// The graph `text` draws.
     fn graph_of(text: &str) -> Graph {
         read(text)
             .expect("the text draws a graph")
             .expect("the picture reads")
+    }
+
+    /// The refusal `text` earns.
+    ///
+    /// A [`Graph`] writes no `Debug` of itself, so this reads the error out of
+    /// the answer rather than through `expect_err`.
+    fn refusal(text: &str) -> GraphError {
+        match read(text).expect("the picture claims the text") {
+            Ok(_) => panic!("the picture reads, and this text is a refusal"),
+            Err(error) => error,
+        }
     }
 
     /// The edges of `graph`: the number of the step before, and the number of
@@ -1069,6 +1089,15 @@ mod tests {
         assert_eq!(nodes(&wide), vec![1, 2, 3]);
         assert_eq!(edges(&wide), vec![(1, 3), (2, 3)]);
         assert_eq!(edges(&graph_of(PLAIN_NODE)), edges(&wide));
+    }
+
+    #[test]
+    fn a_label_beside_a_wire_is_not_a_step() {
+        // A stream label beside a wire is a plan this form does not carry. So
+        // the reader refuses it and names it, rather than dropping the wire
+        // that reaches it: a reader who wrote `A` meant something by it, and a
+        // graph that quietly loses one edge answers with the wrong issue.
+        assert_eq!(refusal(LABEL_PORT), GraphError::NotAStep(Snippet::new("A")));
     }
 
     #[test]
