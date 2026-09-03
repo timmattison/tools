@@ -267,3 +267,121 @@ fn a_failed_run_makes_no_stated_worktrees_directory() {
 
     assert_absent(&stated, Failure::RefInUse);
 }
+
+/// The prefix of the line that names a worktree in `git worktree list
+/// --porcelain`.
+const WORKTREE_LINE_PREFIX: &str = "worktree ";
+
+/// Every worktree the repository at `repo` holds, resolved.
+fn listed_worktrees(repo: &Path) -> Vec<PathBuf> {
+    git_stdout(repo, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|line| line.strip_prefix(WORKTREE_LINE_PREFIX))
+        .map(|path| canonical(Path::new(path)))
+        .collect()
+}
+
+/// Run `nwt -b <branch>` in `from`, demand that it works, and hand back the
+/// directory it made.
+fn new_worktree(from: &Path, branch: &str) -> PathBuf {
+    let output = nwt_command(from)
+        .args(["-b", branch, "--no-copy-env", "--no-bootstrap-hooks"])
+        .output()
+        .expect("run the nwt binary");
+
+    assert!(
+        output.status.success(),
+        "nwt -b {branch} failed in {}:\n{}\n{}",
+        from.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let printed = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    assert!(
+        printed.is_dir(),
+        "nwt printed {}, which is no directory",
+        printed.display()
+    );
+
+    printed
+}
+
+/// Point the repository at `worktrees_dir` through the configuration key.
+fn set_override(repo: &Path, worktrees_dir: &Path) {
+    assert!(
+        run_git(
+            repo,
+            &[
+                "config",
+                WORKTREES_DIR_KEY,
+                worktrees_dir.to_str().expect("utf-8 override path"),
+            ],
+        ),
+        "git config {WORKTREES_DIR_KEY} failed in {}",
+        repo.display()
+    );
+}
+
+/// Nobody makes the worktrees directory before `git worktree add`, so git has
+/// to make it. This proves git makes the whole path and not only the last part
+/// of it.
+#[test]
+fn a_run_that_works_gets_the_worktrees_directory_git_makes() {
+    let (temp, repo) = init_repo();
+    let stated = temp.path().join("deep").join("nested").join("worktrees");
+    set_override(&repo, &stated);
+    assert!(
+        !stated.exists(),
+        "the fixture must start with {} absent",
+        stated.display()
+    );
+    let branch = unique_branch("deep");
+
+    let created = new_worktree(&repo, &branch);
+
+    assert_eq!(
+        canonical(&created),
+        canonical(&stated).join(&branch),
+        "git must make every directory that leads to the new worktree"
+    );
+    assert!(
+        listed_worktrees(&repo).contains(&canonical(&created)),
+        "git must count {} as a worktree of the repository",
+        created.display()
+    );
+}
+
+/// A worktrees directory that a run made before is not the failed run's to
+/// remove. This is the guard on the correction: `nwt` removes nothing, so it
+/// can take nothing away from the run that came first.
+#[test]
+fn a_failed_run_keeps_a_worktrees_directory_that_already_holds_a_worktree() {
+    let (_temp, repo) = init_repo();
+    let first = new_worktree(&repo, &unique_branch("first"));
+    let worktrees_dir = default_worktrees_dir(&repo);
+    let second = unique_branch("second");
+    assert!(
+        run_git(&repo, &["branch", &second]),
+        "git branch failed in {}",
+        repo.display()
+    );
+
+    assert_nwt_fails(&repo, &["-b", &second], Failure::BranchExists);
+
+    assert!(
+        worktrees_dir.is_dir(),
+        "the failed run took {} away, and another run made it",
+        worktrees_dir.display()
+    );
+    assert!(
+        first.is_dir(),
+        "the failed run took the worktree at {} away",
+        first.display()
+    );
+    assert!(
+        listed_worktrees(&repo).contains(&canonical(&first)),
+        "git must still count {} as a worktree of the repository",
+        first.display()
+    );
+}
