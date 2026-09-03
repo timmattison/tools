@@ -1346,6 +1346,24 @@ mod tests {
     }
 
     #[test]
+    fn the_work_each_row_waits_for_stands_in_one_column() {
+        // The titles of a block are of different lengths, and a column that
+        // opened after each title would step left and right down the block.
+        // The reader then reads the column as prose and not as a column.
+        let block = graph_glyphs(&picture(PASTE, ALL_OPEN), 80);
+        let columns: Vec<usize> = block
+            .lines()
+            .filter_map(|line| line.split_once(WAITS_FOR))
+            .map(|(head, _)| UnicodeWidthStr::width(head))
+            .collect();
+        assert_eq!(columns.len(), 3, "three rows wait for work, in {block:?}");
+        assert!(
+            columns.iter().all(|column| *column == columns[0]),
+            "the column opens at one place in every row, in {block:?}"
+        );
+    }
+
+    #[test]
     fn the_answer_of_a_picture_names_a_command_for_every_step_that_is_ready() {
         // Two streams that join are two people who work at the same time, and
         // an answer that names one issue loses the reason somebody drew the
