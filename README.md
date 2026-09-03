@@ -1939,6 +1939,28 @@ copy_env = true
 bootstrap_hooks = true
 ```
 
+### Where worktrees go
+
+By default, a new worktree lands in `{repo-name}-worktrees`, beside the main worktree of the repository. A repository at `~/code/tools` therefore gets `~/code/tools-worktrees`.
+
+Some repositories keep the git directory apart from the work tree, which is what `yadm` does with a directory of dotfiles: the git directory is `~/.local/share/yadm/repo.git` and the work tree is `$HOME`. Git names the git directory itself as the main worktree of such a repository, so the default becomes `~/.local/share/yadm/repo.git-worktrees`, beside the git directory.
+
+A repository states a different answer with the `nwt.worktreesDir` git configuration key:
+
+```bash
+git config nwt.worktreesDir '/data/worktrees'   # an absolute path
+git config nwt.worktreesDir '~/worktrees'       # git expands the tilde
+git config nwt.worktreesDir 'worktrees'         # relative to the main worktree
+```
+
+Three rules govern the value:
+
+- Git expands a leading `~` or `~user` into a home directory, because nwt reads the key with `--type=path`. The quotation marks above keep the tilde for git, since a shell expands one that it sees. A git configuration value gets no shell expansion of its own.
+- A **relative** value is relative to the **main worktree** of the repository, never to the directory you run `nwt` in. A repository therefore keeps its worktrees in one place, whichever of its worktrees you start from.
+- An **empty** value names no directory. nwt prints an error naming the key and stops with exit code 12, and it creates nothing. It does not fall back to the default, because a silent fall back hides the mistake.
+
+nwt reads the key with `git config --get`, which reads every scope. The answer can therefore come from the repository's own configuration, from `~/.gitconfig`, or from the system configuration. The repository's own configuration is the place for it: it travels with the repository, and `yadm` already tracks that file.
+
 ### Env File Copying
 
 After creating the worktree, nwt copies untracked `.env` files from the main worktree into the new one, preserving their relative paths, so development settings that aren't committed to git are there immediately. Two patterns are copied: `.env` exactly, and anything starting with `.env.` (`.env.local`, `.env.development`, and so on). Nothing else is — `.envrc` (direnv) and `.environment` don't match the pattern, and any file tracked by git is skipped, since git already puts it in the new worktree.

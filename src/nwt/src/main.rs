@@ -540,6 +540,30 @@ the repository. Generates Docker-style random names (adjective-noun) for both th
 and branch unless overridden. Automatically copies untracked .env files from the main \
 worktree to preserve development settings.
 
+WHERE WORKTREES GO:
+    By default, a new worktree lands in '{repo-name}-worktrees', beside the main
+    worktree of the repository.
+
+    Some repositories keep the git directory apart from the work tree, which is what
+    yadm does with a directory of dotfiles. Git names the git directory itself as the
+    main worktree of such a repository, so the default becomes 'repo.git-worktrees',
+    beside the git directory.
+
+    A repository states a different answer with the 'nwt.worktreesDir' git
+    configuration key:
+
+        git config nwt.worktreesDir '/data/worktrees'
+        git config nwt.worktreesDir '~/worktrees'
+
+    Git expands a leading '~' or '~user' into a home directory. The quotation marks
+    above keep the tilde for git, because a shell expands one that it sees. A
+    relative value is relative to the main worktree of the repository. nwt reads the
+    key from every scope git reads, so the answer can come from the repository, from
+    ~/.gitconfig, or from the system configuration.
+
+    An empty value names no directory. nwt then prints an error and stops with exit
+    code 12, and it makes nothing.
+
 CONFIGURATION:
     Default values can be set in ~/.nwt.toml. CLI arguments override config values.
 
