@@ -21,6 +21,7 @@
 //! can drop. A desktop with a clipboard manager keeps the text, because the
 //! manager takes the selection.
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -178,7 +179,7 @@ impl Clipboard for FileClipboard {
 ///
 /// Gives [`ClipboardError`] when `value` names no file and the clipboard of the
 /// machine cannot be opened.
-pub fn open_named(value: Option<&str>) -> Result<Box<dyn Clipboard>, ClipboardError> {
+pub fn open_named(value: Option<&OsStr>) -> Result<Box<dyn Clipboard>, ClipboardError> {
     match named_file(value) {
         Some(path) => Ok(Box::new(FileClipboard::new(path))),
         None => Ok(Box::new(SystemClipboard::new()?)),
@@ -192,10 +193,12 @@ pub fn open_named(value: Option<&str>) -> Result<Box<dyn Clipboard>, ClipboardEr
 /// Gives [`ClipboardError`] when the environment names no file and the
 /// clipboard of the machine cannot be opened.
 pub fn open() -> Result<Box<dyn Clipboard>, ClipboardError> {
-    // A value that is not text names no file either. Such a value cannot be a
-    // path this tool can open, and the clipboard of the machine is the same
-    // friendlier answer an empty value gets.
-    let named = std::env::var(CLIPBOARD_FILE_ENV).ok();
+    // `var_os` and not `var`. A Unix kernel takes a path that no Rust string
+    // holds, and `var` gives nothing back for such a value. The tool then opens
+    // the clipboard of the machine, which is the one outcome this variable
+    // exists to prevent: the caller names a file, and the shared clipboard gets
+    // the work.
+    let named = std::env::var_os(CLIPBOARD_FILE_ENV);
     open_named(named.as_deref())
 }
 
@@ -208,8 +211,14 @@ pub fn open() -> Result<Box<dyn Clipboard>, ClipboardError> {
 /// The value comes back as it was written, and not trimmed. A file name can end
 /// with a space, so the whitespace is read as an answer to one question only:
 /// did the person name a file at all.
-fn named_file(value: Option<&str>) -> Option<&str> {
-    value.filter(|named| !named.trim().is_empty())
+///
+/// `OsStr` has no `trim`, so the test for whitespace reads the lossy text of
+/// the value. A value that is not text becomes replacement characters there,
+/// and a replacement character is not whitespace, so such a value names a file.
+/// Only the test reads that text. The value itself goes on byte for byte,
+/// because a Unix kernel takes a path that no Rust string holds.
+fn named_file(value: Option<&OsStr>) -> Option<&OsStr> {
+    value.filter(|named| !named.to_string_lossy().trim().is_empty())
 }
 
 /// The read `result` as text.
@@ -305,8 +314,7 @@ mod tests {
     fn a_named_file_is_the_clipboard() {
         let (_base, path) = clipboard_file();
         std::fs::write(&path, COPIED).expect("the file is made");
-        let mut clipboard = open_named(Some(path.to_str().expect("a temporary path is UTF-8")))
-            .expect("a file clipboard opens");
+        let mut clipboard = open_named(Some(path.as_os_str())).expect("a file clipboard opens");
         assert_eq!(clipboard.read().expect("the file is read"), COPIED);
     }
 
@@ -316,16 +324,30 @@ mod tests {
         // Opening the other answer would reach the clipboard of the machine,
         // and no test of this workspace does that.
         assert_eq!(named_file(None), None);
-        assert_eq!(named_file(Some("")), None);
-        assert_eq!(named_file(Some("   ")), None);
-        assert_eq!(named_file(Some(" \t\n ")), None);
+        assert_eq!(named_file(Some(OsStr::new(""))), None);
+        assert_eq!(named_file(Some(OsStr::new("   "))), None);
+        assert_eq!(named_file(Some(OsStr::new(" \t\n "))), None);
     }
 
     #[test]
     fn a_value_with_a_path_in_it_names_that_file() {
         let (_base, path) = clipboard_file();
-        let written = path.to_str().expect("a temporary path is UTF-8");
+        let written = path.as_os_str();
         assert_eq!(named_file(Some(written)), Some(written));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_value_that_is_not_text_names_the_file_it_holds() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        // 0xFF is not a byte of any UTF-8 sequence, so this is a path a Unix
+        // kernel accepts and a Rust string cannot hold. The value names a file
+        // like any other value does, and it comes back byte for byte. A tool
+        // that dropped it here opens the clipboard of the machine instead.
+        let not_text = OsString::from_vec(vec![b'/', 0xff, b'x']);
+        assert_eq!(named_file(Some(&not_text)), Some(not_text.as_os_str()));
     }
 
     #[test]

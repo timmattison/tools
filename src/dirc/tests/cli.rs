@@ -500,7 +500,10 @@ fn a_clipboard_file_whose_name_is_not_text_is_the_file_the_tool_opens() {
     // `Debug` writes the path, so the byte that is not text arrives as an
     // escape. A tool that made the value text again writes a replacement
     // character in place of that escape.
-    assert!(said.contains(&format!("{:?}", scratch.clipboard())), "{said}");
+    assert!(
+        said.contains(&format!("{:?}", scratch.clipboard())),
+        "{said}"
+    );
 }
 
 #[test]
