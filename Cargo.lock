@@ -6636,7 +6636,9 @@ dependencies = [
 name = "repowalker"
 version = "0.1.0"
 dependencies = [
+ "gitscratch",
  "ignore",
+ "tempfile",
  "walkdir",
 ]
 

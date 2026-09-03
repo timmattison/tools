@@ -738,3 +738,205 @@ pub fn conflicting_repo() -> TestRepo {
     repo.checkout("main");
     repo
 }
+
+/// The name the detached-git-directory fixtures give the work tree, one level
+/// under the temporary directory so the "beside" shape has room for a sibling.
+const DETACHED_WORK_TREE: &str = "home";
+
+/// The one tracked file the detached-git-directory fixtures commit, so the
+/// repository has a HEAD and `git worktree add` has a commit to branch from.
+const DETACHED_TRACKED_FILE: &str = "dotfile.txt";
+
+/// A repository whose git directory is detached from its work tree, the way
+/// `yadm` keeps a directory of dotfiles.
+///
+/// `yadm` puts the git directory at `~/.local/share/yadm/repo.git`, names
+/// `$HOME` as the work tree through `core.worktree`, and leaves no `.git` entry
+/// anywhere. A search that walks the file system upward for a `.git` entry
+/// therefore finds no repository at all, in `$HOME` and in the git directory
+/// alike. Only git knows the layout, so only git can answer which repository a
+/// directory belongs to.
+///
+/// The fixture comes in two shapes, because git answers one question
+/// differently between them. [`DetachedGitDirRepo::nested`] puts the git
+/// directory inside the work tree, which is what `yadm` does, and git reports
+/// `--is-inside-work-tree` as true from there.
+/// [`DetachedGitDirRepo::beside`] puts the git directory outside the work tree,
+/// and git reports `--is-inside-work-tree` as false and `--is-inside-git-dir`
+/// as true from the same spot. Code that reads either answer therefore needs
+/// both shapes to prove itself.
+///
+/// Everything lives inside one `TempDir`, which deletes itself when the fixture
+/// drops, so concurrent `cargo test` runs never share a path.
+pub struct DetachedGitDirRepo {
+    dir: TempDir,
+    work_tree: PathBuf,
+    git_dir: PathBuf,
+}
+
+impl DetachedGitDirRepo {
+    /// Build the shape `yadm` builds: the git directory sits inside the work
+    /// tree, at the path `yadm` uses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the temporary directory cannot be created, if `git` is not
+    /// installed, or if any of the setup commands fail.
+    pub fn nested() -> Self {
+        Self::init(".local/share/yadm/repo.git")
+    }
+
+    /// Build the shape that keeps the git directory outside the work tree, so
+    /// the two are siblings and neither one contains the other.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the temporary directory cannot be created, if `git` is not
+    /// installed, or if any of the setup commands fail.
+    pub fn beside() -> Self {
+        Self::init("../data/repo.git")
+    }
+
+    /// The work tree, which stands in for `$HOME`.
+    pub fn work_tree(&self) -> &Path {
+        &self.work_tree
+    }
+
+    /// The git directory, which stands in for `~/.local/share/yadm/repo.git`.
+    ///
+    /// This is also the path git gives as the main worktree of the repository.
+    /// Git names the main worktree by taking the common git directory and
+    /// removing a trailing `/.git`, and a detached git directory carries no
+    /// such suffix.
+    pub fn git_dir(&self) -> &Path {
+        &self.git_dir
+    }
+
+    /// Check a new `branch` out into a linked worktree at `path`, and hand
+    /// `path` back.
+    ///
+    /// Put `path` inside the fixture's own temporary directory. The temporary
+    /// directory deletes everything under it on drop, and a worktree left
+    /// outside it survives the fixture.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` is not valid UTF-8 or if git fails — most likely
+    /// because `branch` already exists.
+    pub fn add_worktree(&self, path: &Path, branch: &str) -> PathBuf {
+        self.git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            path.to_str().expect("utf-8 worktree path"),
+        ]);
+        path.to_path_buf()
+    }
+
+    /// Run a git command against the fixture, with the work tree and the git
+    /// directory named on the command line.
+    ///
+    /// Naming both is the only way in. The work tree holds no `.git` entry, so
+    /// git discovers nothing from the directory it runs in.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `git` cannot be spawned or exits non-zero; the panic message
+    /// carries the command's stdout and stderr.
+    pub fn git(&self, args: &[&str]) -> String {
+        let git_dir = format!("--git-dir={}", self.git_dir.display());
+        let work_tree = format!("--work-tree={}", self.work_tree.display());
+        let mut all = vec![git_dir.as_str(), work_tree.as_str()];
+        all.extend_from_slice(args);
+        self.run(&self.work_tree, &all)
+    }
+
+    /// Build the layout with the git directory at `git_dir`, a path relative to
+    /// the work tree.
+    fn init(git_dir: &str) -> Self {
+        let dir = TempDir::new().expect("create temp dir");
+        let work_tree = dir.path().join(DETACHED_WORK_TREE);
+        // `..` in the "beside" shape climbs back to the temporary directory, so
+        // both shapes are one join from the work tree. Nothing normalises the
+        // result, and nothing needs to: git accepts the path as it is, and the
+        // fixture compares its own paths after canonicalisation.
+        let git_dir = work_tree.join(git_dir);
+
+        std::fs::create_dir_all(&work_tree).expect("create the work tree");
+        // `git init --separate-git-dir` writes the git directory itself, and it
+        // fails when the path that leads there does not exist.
+        std::fs::create_dir_all(git_dir.parent().expect("the git directory has a parent"))
+            .expect("create the path to the git directory");
+
+        let repo = Self {
+            dir,
+            work_tree,
+            git_dir,
+        };
+
+        let separate = format!("--separate-git-dir={}", repo.git_dir.display());
+        let work_tree_path = repo
+            .work_tree
+            .to_str()
+            .expect("utf-8 work tree path")
+            .to_string();
+        repo.run(
+            repo.dir.path(),
+            &["init", "--quiet", "-b", "main", &separate, &work_tree_path],
+        );
+
+        // What makes the layout detached. `git init` leaves a `.git` file in the
+        // work tree that points at the git directory, and `yadm` keeps no such
+        // file. Removing it is what makes an upward walk for a `.git` entry come
+        // back empty.
+        std::fs::remove_file(repo.work_tree.join(".git"))
+            .expect("remove the .git file that git init left in the work tree");
+
+        // The other half of the link. With no `.git` file in the work tree, the
+        // git directory is the only place that records which work tree it
+        // belongs to.
+        repo.git(&["config", "core.worktree", &work_tree_path]);
+        repo.git(&["config", "user.email", "gitscratch@example.com"]);
+        repo.git(&["config", "user.name", "gitscratch test"]);
+        // A commit-signing config in the developer's global gitconfig would
+        // otherwise make every fixture commit prompt or fail.
+        repo.git(&["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(
+            repo.work_tree.join(DETACHED_TRACKED_FILE),
+            "the one tracked dotfile\n",
+        )
+        .expect("write fixture file");
+        repo.git(&["add", DETACHED_TRACKED_FILE]);
+        repo.git(&["commit", "-q", "-m", "base"]);
+
+        repo
+    }
+
+    /// Run git in `cwd`, panicking on failure.
+    fn run(&self, cwd: &Path, args: &[&str]) -> String {
+        let mut command = Command::new("git");
+        // The same immunity `TestRepo::git_in` takes, for the same reason. A
+        // fixture that inherits a redirected `GIT_DIR` or `GIT_INDEX_FILE`
+        // builds its repository somewhere else. This suite runs under a
+        // pre-commit hook that exports both.
+        crate::git::shed_inherited_git_environment(&mut command);
+
+        let output = command
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+
+        assert!(
+            output.status.success(),
+            "git {args:?} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+}
