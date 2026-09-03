@@ -1039,10 +1039,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `export WN_START_COMMAND='gh issue develop'` makes the answer read
     `Start #278 next with 'gh issue develop 278'`. An empty value falls back to `si`.
   - Every separator means the same thing: the issue on the left comes before the issue on the
-    right. `→`, `->`, `∥`, `||`, a comma, and a semicolon all read as "then", so a chain
-    pasted out of a plan works whichever way it was typed. The double bar is read as an arrow on
-    purpose, because a chain handed to `wn` is a chain somebody decided to walk in order. Quote
-    the chain: a shell reads an unquoted `#` as the start of a comment.
+    right. `→`, `->`, `∥`, `||`, `─`, `━`, `═`, a comma, and a semicolon all read as "then", so a
+    chain pasted out of a plan works whichever way it was typed. The double bar is read as an
+    arrow on purpose, because a chain handed to `wn` is a chain somebody decided to walk in order.
+    The three horizontal strokes of the box-drawing block read as "then" because a picture of one
+    line is a chain: a reader who draws `#1 ──→ #2` draws the tail of the arrow with a stroke, and
+    without those strokes the run `──` reaches the chain reader as one token and earns a refusal.
+    Quote the chain: a shell reads an unquoted `#` as the start of a comment.
   - The chain comes out of the first input that holds one: the argument, then standard input,
     then the system clipboard. A chain almost always starts as text somebody copied out of a
     plan, an issue, or a comment, so `wn` alone answers the chain you just copied. A pipe still
@@ -1118,9 +1121,70 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     streams is asked about once and reported in both. A stream that names a number the repository
     does not have keeps its row and its note, the other streams still answer, and the run exits
     `1`.
+  - A plan drawn as a picture is a third shape of input, and it says the one thing that no chain
+    and no table says: two streams that join.
+
+    ```
+    #242 ──→ #247 ──┐
+                    ├──→ #249  (gallery)
+    #246 ──→ #248 ──┘
+    ```
+
+    That picture says four things. Do `#242` before `#247`. Do `#246` before `#248`. Do both
+    `#247` and `#248` before `#249`. Work the top row and the bottom row at the same time, because
+    nothing joins them until `#249`. A picture reads from left to right, always, and an arrowhead
+    confirms that direction rather than sets it: a wire drawn with `──` alone says the same order
+    as one drawn with `──→`.
+  - The meaning of a picture is its geometry, so `wn` builds a grid of the text and walks it under
+    four rules. A connector character is a wire, and it names the sides it touches: `─` touches
+    left and right, `│` touches up and down, and `┐` touches left and down. Two wires that face
+    each other are one net, so one net runs from the first stroke of `──→` to the point of the
+    arrow. A net has ports on its left and ports on its right, and a port is the text that stands
+    beyond a free end of the net. Every left port comes before every right port, so the net that
+    joins the two rows above, with the left ports `#247` and `#248` and the right port `#249`,
+    draws two edges. A port is a step and not a bare number, so `#249  (gallery)` is the step
+    `#249` and `gallery` is prose, as it is in a plan.
+  - The light set, the heavy set, and the double set all draw wires — `─ ━ ═`, `│ ┃ ║`, and every
+    corner, tee, and cross beside them — and so do the ASCII spellings `-`, `|`, `+`, and `>`. An
+    ASCII `-`, `|`, `+`, or `>` is a wire only when a neighbor on a side it touches draws a wire
+    as well. Prose holds all four of those characters, and `a 30-line window` holds no wire: a
+    digit and a letter stand beside that hyphen, so the hyphen draws nothing. A box-drawing
+    character never stands inside a word, so it needs no such test.
+  - The readers are tried in one order: the record form and the table form of a plan first, the
+    picture second, and the chain last. A picture claims the text when one of its nets joins two
+    steps that stand on different lines. That rule is what keeps `#1 ──→ #2` a chain, because both
+    of its steps stand on one line. A line with no wire and no step is ignored, so the fence of a
+    code block costs nothing, and a picture indented out of a Markdown list gives the edges a
+    picture at column zero gives.
+  - The answer names a state for every step. A step is ready when it is open and every step before
+    it is finished, blocked when it is open and one step before it is not, and finished when it is
+    done or dropped. `→` marks every ready step and `·` marks a blocked one, which is what those
+    two marks already mean. Every ready issue gets its own start line — `Start #242 next with 'si
+    242'` and `Start #246 next with 'si 246'` — because two streams that join are two people who
+    work at the same time, and an answer that names one issue loses that. A blocked row names
+    every step it waits for and never the first one alone: `waits for #247, #248`. That column
+    takes its columns out of the window before the title does, because it is what the reader of a
+    blocked row came for. The rows print in a topological order, and a tie goes to the step that
+    stands first in the text, so each stream stays together.
+  - A picture `wn` claims and cannot follow earns a refusal and never a guess, because a guess
+    sends somebody to the wrong issue. A leftward arrowhead is refused, because a picture drawn
+    from right to left says the opposite order. A diagonal wire is refused, because a diagonal
+    touches no side of a cell and the rule that makes two wires one net cannot read it. A port
+    whose text is not a step is refused and named back: `A ──→ #4` reports `A`, because a stream
+    label beside a wire is a plan this form does not carry. A net that reaches a step on one side
+    and nothing on the other is refused as well, because the other half of that order is what
+    nobody can guess. A cycle is refused and its numbers are named, because a cycle has no
+    step to start and an answer of "nothing is ready" hides the reason. A net with no port at all
+    is dropped without a word, which is why the border of a box-drawn table costs nothing.
+  - The whole picture is one GraphQL query, as one chain and one plan are, so a step that stands
+    in two places is asked about once and reported in both. The run exits `0` when the repository
+    holds every number of the picture, `1` when the picture names a number the repository does not
+    have, and `2` for a picture `wn` could not read and for a cycle. `wn` draws no graph back: the
+    answer is the rows and what each row waits for, because a layout engine is a separate
+    decision. It reads no diagonal wire, and it reads no picture drawn from right to left.
   - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard), `wn "#230 → #315"`,
-    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain or a whole plan),
-    `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
+    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole plan, or a plan drawn
+    as a picture), `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 
 ## dirhash
