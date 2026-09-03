@@ -561,8 +561,10 @@ WHERE WORKTREES GO:
     key from every scope git reads, so the answer can come from the repository, from
     ~/.gitconfig, or from the system configuration.
 
-    An empty value names no directory. nwt then prints an error and stops with exit
-    code 12, and it makes nothing.
+    An empty value names no directory, and git refuses a value it cannot read, such
+    as the home directory of a user who does not exist. nwt then prints an error and
+    stops with exit code 12, and it makes nothing. It never falls back to the
+    default, because a silent fall back hides the mistake.
 
 CONFIGURATION:
     Default values can be set in ~/.nwt.toml. CLI arguments override config values.
@@ -1324,41 +1326,59 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> E
 ///
 /// # Exits
 ///
-/// Exits the process when the answer cannot be built. A stated value of nothing
-/// or of only whitespace names no directory ([`exit_codes::CONFIG_ERROR`]). The
-/// default needs a repository name that is valid UTF-8
-/// ([`exit_codes::INVALID_PATH_ENCODING`]) and survives sanitizing
+/// Exits the process when the answer cannot be built. A stated value that names
+/// no directory, and a value git refuses to read, are both configuration errors
+/// ([`exit_codes::CONFIG_ERROR`]). The default needs a repository name that is
+/// valid UTF-8 ([`exit_codes::INVALID_PATH_ENCODING`]) and survives sanitizing
 /// ([`exit_codes::INVALID_REPO_NAME`]), and it needs a parent directory to sit
 /// in ([`exit_codes::NO_PARENT_DIR`]).
 fn worktrees_dir(repo_root: &Path, quiet: bool) -> PathBuf {
-    if let Some(stated) = stated_worktrees_dir(repo_root) {
-        // A value of nothing, and a value of only whitespace, name no
-        // directory. Falling back to the default would hide the mistake, and
-        // taking the value as a path would make a directory named
-        // `-worktrees` at the root of the file system.
-        if stated.trim().is_empty() {
+    match stated_worktrees_dir(repo_root) {
+        StatedWorktreesDir::Value(stated) => {
+            // A value of nothing, and a value of only whitespace, name no
+            // directory. Falling back to the default would hide the mistake,
+            // and taking the value as a path would make a directory named
+            // `-worktrees` at the root of the file system.
+            if stated.trim().is_empty() {
+                error!(
+                    quiet,
+                    "Error: Git configuration '{}' is set to an empty value", WORKTREES_DIR_KEY
+                );
+                error!(
+                    quiet,
+                    "Set it to the directory that holds this repository's worktrees, \
+                     or remove it with 'git config --unset {}'.",
+                    WORKTREES_DIR_KEY
+                );
+                exit(exit_codes::CONFIG_ERROR);
+            }
+
+            // A relative value answers "where, from the main worktree?".
+            // Reading it against the current directory would put the worktrees
+            // of one repository in a different place for every directory nwt
+            // runs in.
+            let stated = PathBuf::from(stated);
+            return if stated.is_absolute() {
+                stated
+            } else {
+                repo_root.join(stated)
+            };
+        }
+        StatedWorktreesDir::Unreadable(complaint) => {
+            // Git read the key and refused it: a home directory that belongs to
+            // nobody, or a configuration file it cannot parse. The default is no
+            // answer here. The user stated a place, and a silent fall back would
+            // put the worktree somewhere else without a word.
             error!(
                 quiet,
-                "Error: Git configuration '{}' is set to an empty value", WORKTREES_DIR_KEY
+                "Error: Could not read git configuration '{}'", WORKTREES_DIR_KEY
             );
-            error!(
-                quiet,
-                "Set it to the directory that holds this repository's worktrees, \
-                 or remove it with 'git config --unset {}'.",
-                WORKTREES_DIR_KEY
-            );
+            for line in complaint.lines() {
+                error!(quiet, "  {}", line);
+            }
             exit(exit_codes::CONFIG_ERROR);
         }
-
-        // A relative value answers "where, from the main worktree?". Reading it
-        // against the current directory would put the worktrees of one
-        // repository in a different place for every directory nwt runs in.
-        let stated = PathBuf::from(stated);
-        return if stated.is_absolute() {
-            stated
-        } else {
-            repo_root.join(stated)
-        };
+        StatedWorktreesDir::Unset => {}
     }
 
     // Get repo name from path with sanitization (fail-fast on non-UTF8)
@@ -1399,8 +1419,23 @@ fn worktrees_dir(repo_root: &Path, quiet: bool) -> PathBuf {
     parent.join(format!("{}-worktrees", repo_name))
 }
 
-/// The value of [`WORKTREES_DIR_KEY`], or `None` when the repository at
-/// `repo_root` sets the key nowhere.
+/// What git says about [`WORKTREES_DIR_KEY`] in the repository nwt runs in.
+enum StatedWorktreesDir {
+    /// The key is set, and this is the value with the home directory expanded.
+    Value(String),
+    /// No scope sets the key, so the default stands.
+    Unset,
+    /// Git read the key and refused it. The text is what git said.
+    Unreadable(String),
+}
+
+/// The exit status `git config --get` gives when no scope sets the key.
+///
+/// Every other failing status carries a complaint on standard error, and means
+/// something other than "the key is not there".
+const GIT_CONFIG_KEY_NOT_FOUND: i32 = 1;
+
+/// Ask git what [`WORKTREES_DIR_KEY`] says in the repository at `repo_root`.
 ///
 /// `git config --get` reads every scope, so the answer can come from the
 /// repository's own configuration, from `~/.gitconfig`, or from the system
@@ -1411,28 +1446,48 @@ fn worktrees_dir(repo_root: &Path, quiet: bool) -> PathBuf {
 /// the rule for what a leading tilde means. A second copy of that rule here
 /// would drift from git's.
 ///
+/// Git answers a key it cannot find with exit status
+/// [`GIT_CONFIG_KEY_NOT_FOUND`] and nothing else. It answers a value it cannot
+/// read — a home directory that belongs to nobody, a configuration file it
+/// cannot parse — with another status and a complaint, which becomes
+/// [`StatedWorktreesDir::Unreadable`]. Reading only the status would turn every
+/// such refusal into "the key is not set", and the run would then go somewhere
+/// the user never named.
+///
+/// A git that cannot be started at all is [`StatedWorktreesDir::Unset`]. That is
+/// no configuration error, and the run stops soon after at the `git worktree
+/// add` that says so plainly.
+///
 /// The command sheds the whole inherited `GIT_*` family through
 /// [`gitscratch::shed_inherited_git_environment`]. An inherited `GIT_DIR` aims
 /// git at another repository, and the answer would then be that repository's
 /// setting. The rule is the `GIT_` prefix and never a list of names: see that
 /// function for which variable walked through the last list.
-fn stated_worktrees_dir(repo_root: &Path) -> Option<String> {
+fn stated_worktrees_dir(repo_root: &Path) -> StatedWorktreesDir {
     let mut command = Command::new("git");
     shed_inherited_git_environment(&mut command);
 
     let output = command
         .args(["config", "--type=path", "--get", WORKTREES_DIR_KEY])
         .current_dir(repo_root)
-        .output()
-        .ok()?;
+        .output();
+
+    let Ok(output) = output else {
+        return StatedWorktreesDir::Unset;
+    };
 
     if !output.status.success() {
-        return None;
+        if output.status.code() == Some(GIT_CONFIG_KEY_NOT_FOUND) {
+            return StatedWorktreesDir::Unset;
+        }
+
+        let complaint = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return StatedWorktreesDir::Unreadable(complaint);
     }
 
     // Git ends the value with a line break, and the line break is no part of
     // the path.
-    Some(
+    StatedWorktreesDir::Value(
         String::from_utf8_lossy(&output.stdout)
             .trim_end_matches(['\n', '\r'])
             .to_string(),

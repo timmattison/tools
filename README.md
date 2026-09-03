@@ -1957,7 +1957,7 @@ Three rules govern the value:
 
 - Git expands a leading `~` or `~user` into a home directory, because nwt reads the key with `--type=path`. The quotation marks above keep the tilde for git, since a shell expands one that it sees. A git configuration value gets no shell expansion of its own.
 - A **relative** value is relative to the **main worktree** of the repository, never to the directory you run `nwt` in. A repository therefore keeps its worktrees in one place, whichever of its worktrees you start from.
-- An **empty** value names no directory. nwt prints an error naming the key and stops with exit code 12, and it creates nothing. It does not fall back to the default, because a silent fall back hides the mistake.
+- An **empty** value names no directory, and git refuses a value it cannot read, such as the home directory of a user who does not exist. nwt prints an error naming the key, stops with exit code 12, and creates nothing. It never falls back to the default, because a silent fall back hides the mistake and puts the worktree somewhere you did not name.
 
 nwt reads the key with `git config --get`, which reads every scope. The answer can therefore come from the repository's own configuration, from `~/.gitconfig`, or from the system configuration. The repository's own configuration is the place for it: it travels with the repository, and `yadm` already tracks that file.
 
