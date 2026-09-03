@@ -500,7 +500,9 @@ mod exit_codes {
     /// Tmux command failed to execute
     pub const TMUX_FAILED: i32 = 10;
     // Note: Exit code 11 is reserved (previously INVALID_WINDOW_NAME, now a debug assertion)
-    /// Config file error (invalid TOML, validation failed, etc.)
+    /// Configuration error: an invalid `~/.nwt.toml` (bad TOML, failed
+    /// validation), or a `nwt.worktreesDir` git configuration key that is set to
+    /// an empty value and therefore names no directory.
     pub const CONFIG_ERROR: i32 = 12;
     /// Tmux option specified but not running inside tmux
     pub const TMUX_NOT_RUNNING: i32 = 13;
@@ -1298,12 +1300,32 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> E
 ///
 /// # Exits
 ///
-/// Exits the process when the answer cannot be built. The default needs a
-/// repository name that is valid UTF-8 ([`exit_codes::INVALID_PATH_ENCODING`])
-/// and survives sanitizing ([`exit_codes::INVALID_REPO_NAME`]), and it needs a
-/// parent directory to sit in ([`exit_codes::NO_PARENT_DIR`]).
+/// Exits the process when the answer cannot be built. A stated value of nothing
+/// or of only whitespace names no directory ([`exit_codes::CONFIG_ERROR`]). The
+/// default needs a repository name that is valid UTF-8
+/// ([`exit_codes::INVALID_PATH_ENCODING`]) and survives sanitizing
+/// ([`exit_codes::INVALID_REPO_NAME`]), and it needs a parent directory to sit
+/// in ([`exit_codes::NO_PARENT_DIR`]).
 fn worktrees_dir(repo_root: &Path, quiet: bool) -> PathBuf {
     if let Some(stated) = stated_worktrees_dir(repo_root) {
+        // A value of nothing, and a value of only whitespace, name no
+        // directory. Falling back to the default would hide the mistake, and
+        // taking the value as a path would make a directory named
+        // `-worktrees` at the root of the file system.
+        if stated.trim().is_empty() {
+            error!(
+                quiet,
+                "Error: Git configuration '{}' is set to an empty value", WORKTREES_DIR_KEY
+            );
+            error!(
+                quiet,
+                "Set it to the directory that holds this repository's worktrees, \
+                 or remove it with 'git config --unset {}'.",
+                WORKTREES_DIR_KEY
+            );
+            exit(exit_codes::CONFIG_ERROR);
+        }
+
         // A relative value answers "where, from the main worktree?". Reading it
         // against the current directory would put the worktrees of one
         // repository in a different place for every directory nwt runs in.
