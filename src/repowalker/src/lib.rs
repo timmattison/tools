@@ -142,14 +142,35 @@ pub fn find_repo_context() -> Option<RepoContext> {
 ///
 /// Returns `None` when `dir` is in no repository, or when git cannot answer.
 pub fn find_repo_context_at(dir: &Path) -> Option<RepoContext> {
+    // Two lines out, and never `--show-toplevel` beside them. A bare repository
+    // has no work tree, so it fails that request and takes the whole command
+    // down with it. This pair answers for a bare repository, and the answer is
+    // that the two directories are the same one.
+    let directories = git_stdout(dir, &["rev-parse", "--git-dir", "--git-common-dir"])?;
+    let mut directories = directories.lines();
+    let git_dir = resolve_against(dir, directories.next()?)?;
+    let common_dir = resolve_against(dir, directories.next()?)?;
+
+    // A linked worktree keeps a git directory of its own, under
+    // `worktrees/<name>` of the common one. Every other directory - the main
+    // worktree, the git directory itself, a bare repository - reports the same
+    // directory twice.
+    let in_a_linked_worktree = git_dir != common_dir;
+
     let main_worktree = PathBuf::from(
         git_stdout(dir, &["worktree", "list", "--porcelain"])?
             .lines()
             .find_map(|line| line.strip_prefix(WORKTREE_LINE_PREFIX))?,
     );
 
+    let checkout = if in_a_linked_worktree {
+        PathBuf::from(git_stdout(dir, &["rev-parse", "--show-toplevel"])?.trim())
+    } else {
+        main_worktree.clone()
+    };
+
     Some(RepoContext {
-        checkout: main_worktree.clone(),
+        checkout,
         main_worktree,
     })
 }
@@ -157,6 +178,27 @@ pub fn find_repo_context_at(dir: &Path) -> Option<RepoContext> {
 /// The prefix of the line that names a worktree in `git worktree list
 /// --porcelain`. The first such line names the main worktree.
 const WORKTREE_LINE_PREFIX: &str = "worktree ";
+
+/// Read one path out of `git rev-parse` as the directory git ran in reads it.
+///
+/// Git mixes the two forms in one answer, and the mixture is the trap. Standing
+/// in a subdirectory of a normal repository, `--git-dir` comes back absolute as
+/// `/repo/.git` while `--git-common-dir` comes back relative as `../../.git`.
+/// The two name one directory and read as two, which turns every subdirectory
+/// of a main worktree into a linked worktree.
+///
+/// So a relative path joins the directory git ran in, and both paths resolve
+/// before anything compares them.
+fn resolve_against(dir: &Path, path: &str) -> Option<PathBuf> {
+    let path = Path::new(path.trim());
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        dir.join(path)
+    };
+
+    fs::canonicalize(path).ok()
+}
 
 /// Run git in `dir` and hand back its standard output, or `None` when git
 /// cannot be spawned or exits non-zero.
@@ -353,7 +395,10 @@ mod tests {
         let context = find_repo_context_at(&worktree).expect("git knows this repository");
 
         assert_eq!(canonical(context.checkout()), canonical(&worktree));
-        assert_eq!(canonical(context.main_worktree()), canonical(repo.git_dir()));
+        assert_eq!(
+            canonical(context.main_worktree()),
+            canonical(repo.git_dir())
+        );
     }
 
     #[test]
@@ -364,7 +409,10 @@ mod tests {
         let context = find_repo_context_at(&worktree).expect("git knows this repository");
 
         assert_eq!(canonical(context.checkout()), canonical(&worktree));
-        assert_eq!(canonical(context.main_worktree()), canonical(repo.git_dir()));
+        assert_eq!(
+            canonical(context.main_worktree()),
+            canonical(repo.git_dir())
+        );
     }
 
     #[test]
