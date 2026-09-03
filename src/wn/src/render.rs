@@ -120,6 +120,16 @@ const GRAPH_CLOSED: &str = "Every issue in the graph is closed. Nothing to start
 /// read.
 const GRAPH_NOT_OPEN: &str = "No issue in the graph is open.";
 
+/// The answer of a picture that holds an open step and no step to start.
+///
+/// Every open step of such a picture waits for work that is missing or
+/// dropped. The sentence says so, because a silent "nothing to start" reads as
+/// "the plan is done", which is the opposite of the truth.
+const GRAPH_NOT_READY: &str = concat!(
+    "No issue in the graph is ready. ",
+    "Every open issue waits for work that is not finished.",
+);
+
 /// Paint the chain, the notes it earns, and the answer.
 ///
 /// `repo` names the repository the states came from, and appears only in the
@@ -479,16 +489,18 @@ fn graph_answer(report: &Report, start: &StartCommand) -> Vec<String> {
 /// What the answer of a picture says when no step of it is ready.
 ///
 /// A picture with every step finished is a plan somebody finished, and the
-/// answer says so. A picture with nothing open and a step nobody could read is
-/// not finished, and saying it is would be a guess about the number nobody
-/// could read.
+/// answer says so. A picture that still holds an open step says why nobody
+/// starts it, because every one of those steps waits for work that is missing
+/// or dropped. A picture with nothing open and a step nobody could read is not
+/// finished, and saying it is would be a guess about the number nobody could
+/// read.
 fn nothing_to_start(report: &Report) -> String {
-    if report
-        .entries()
-        .iter()
-        .all(|entry| entry.status.is_finished())
-    {
+    let entries = report.entries();
+    if entries.iter().all(|entry| entry.status.is_finished()) {
         return GRAPH_CLOSED.dimmed().to_string();
+    }
+    if entries.iter().any(|entry| entry.status.is_open()) {
+        return GRAPH_NOT_READY.dimmed().to_string();
     }
     GRAPH_NOT_OPEN.dimmed().to_string()
 }
