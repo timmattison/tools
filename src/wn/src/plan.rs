@@ -6,16 +6,28 @@
 //! is written as a record for each stream, or as one table row for each stream.
 //! This module reads both, and it gives back the same streams either way.
 //!
-//! # Why only the `Order` field holds a chain
+//! # Why only two fields hold numbers
 //!
 //! A stream carries prose as well as a chain. The prose is about code, and
 //! prose about code is full of numbers: `main.rs:1566-1650` names two lines of
 //! a file, and `265 lines apart in a 5113-line file` names a distance and a
 //! length. None of them is an issue.
 //!
-//! So this module reads the `Order` field and it reads nothing else. `Stream`,
-//! `Zone`, and `Notes` never give a number to a chain. A reader who writes a
-//! note about line 5113 gets the issues of the plan, and not issue 5113.
+//! So this module reads the `Order` field and the `Waits for` field, and it
+//! reads nothing else. `Stream`, `Zone`, and `Notes` never give a number to a
+//! chain. A reader who writes a note about line 5113 gets the issues of the
+//! plan, and not issue 5113.
+//!
+//! The `Waits for` field is as safe to read as the `Order` field, because a
+//! reader writes steps in it and nothing else: it names the work of other
+//! streams that comes before the first step of this one. The reason a stream
+//! waits is prose, and the prose of a stream belongs in `Notes`.
+//!
+//! The two fields are read the same way and they mean different things.
+//! `Order` is a chain, so the order of its steps is the order of the work.
+//! `Waits for` is a set, so `#96 → #91` and `#96, #91` say the same thing:
+//! both pieces of work come first, and the stream starts when both are
+//! finished.
 //!
 //! # The pair
 //!
@@ -164,11 +176,17 @@ impl Stream {
 
     /// The steps that come before the first step of the stream, in the order
     /// the plan writes them.
+    // The graph is the caller, and the graph is the half of issue #436 that
+    // lands next. The expectation itself fails on the day the graph calls
+    // this, so it goes then and nobody has to remember it. The tests call it
+    // already, which is why the attribute stands outside a test build.
     #[must_use]
-    #[expect(
-        dead_code,
-        reason = "the graph reads this, and the graph is the half of issue #436 that lands next. \
-                  The expectation itself warns on the day the graph calls this, so it goes then."
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the graph of a plan is the caller, and it lands next"
+        )
     )]
     pub fn waits_for(&self) -> &[Step] {
         &self.waits_for
