@@ -613,10 +613,25 @@ impl Graph {
             .map_or(NO_POSITIONS, Vec::as_slice)
     }
 
-    /// Every number the picture names, once.
+    /// Every number the picture names, once, in the order of the steps.
+    ///
+    /// The number of a step comes before the number the step closes, because
+    /// the pull request is the work and the issue is what the work finishes.
+    /// A number that stands twice in the picture is one node, so it arrives
+    /// once and one query to GitHub answers the whole picture. This is the
+    /// rule `Plan::numbers` states for a plan, and a graph states it the same
+    /// way so one query answers either shape.
     #[must_use]
     pub fn numbers(&self) -> Vec<IssueNumber> {
-        self.steps.iter().map(Step::number).collect()
+        let mut numbers: Vec<IssueNumber> = Vec::new();
+        for step in &self.steps {
+            for number in [Some(step.number()), step.closes()].into_iter().flatten() {
+                if !numbers.contains(&number) {
+                    numbers.push(number);
+                }
+            }
+        }
+        numbers
     }
 }
 
