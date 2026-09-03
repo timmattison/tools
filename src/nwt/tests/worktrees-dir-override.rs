@@ -16,11 +16,19 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use gitscratch::testing::DetachedGitDirRepo;
-use support::{init_repo, nanos, nwt_command, run_git};
+use support::{git_stdout, init_repo, nanos, nwt_command, run_git};
 use tempfile::TempDir;
 
 /// The git configuration key that names the worktrees directory.
 const WORKTREES_DIR_KEY: &str = "nwt.worktreesDir";
+
+/// The exit code `nwt` gives a configuration error, from its `exit_codes`
+/// module.
+const CONFIG_ERROR: i32 = 12;
+
+/// The prefix of the line that names a worktree in `git worktree list
+/// --porcelain`.
+const WORKTREE_LINE_PREFIX: &str = "worktree ";
 
 /// Resolve a path before an assertion reads it.
 ///
@@ -195,4 +203,71 @@ fn a_leading_tilde_expands_to_the_home_directory() {
             .join(&branch),
         "a leading tilde in {WORKTREES_DIR_KEY} must expand to the home directory"
     );
+}
+
+/// Every worktree the repository at `repo` holds.
+fn listed_worktrees(repo: &Path) -> Vec<String> {
+    git_stdout(repo, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|line| line.strip_prefix(WORKTREE_LINE_PREFIX))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The names of everything directly under `dir`, sorted.
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .expect("read one directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Run `nwt -b <branch>` in `repo` with a `value` that names no directory, and
+/// prove the run stops without making anything.
+fn assert_refuses_the_value(value: &str, label: &str) {
+    let (temp, repo) = init_repo();
+    set_override(&repo, value);
+    let branch = unique_branch(label);
+
+    let output = run_nwt(&repo, &branch, None);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFIG_ERROR),
+        "nwt must refuse a {WORKTREES_DIR_KEY} that names no directory:\n{}\n{stderr}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    assert!(
+        stderr.contains(WORKTREES_DIR_KEY),
+        "the message must name the key the user has to fix, but it reads:\n{stderr}"
+    );
+    assert_eq!(
+        entries(temp.path()),
+        vec!["repo".to_string()],
+        "a refused run must make no directory beside the repository"
+    );
+    assert_eq!(
+        listed_worktrees(&repo).len(),
+        1,
+        "a refused run must add no worktree"
+    );
+}
+
+#[test]
+fn an_empty_value_is_refused() {
+    assert_refuses_the_value("", "empty");
+}
+
+#[test]
+fn a_value_of_only_whitespace_is_refused() {
+    assert_refuses_the_value("   ", "whitespace");
 }
