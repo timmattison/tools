@@ -684,6 +684,17 @@ impl Wiring {
     }
 }
 
+/// How far a walk of the wires has gone with one node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// The walk has not reached the node.
+    New,
+    /// The node stands on the path the walk holds now.
+    OnPath,
+    /// The walk left the node, and every step after it.
+    Done,
+}
+
 /// The steps a picture names, and the steps that come before each of them.
 pub struct Graph {
     /// The steps, one for each node of the picture.
@@ -712,6 +723,95 @@ impl Graph {
         self.before
             .get(position)
             .map_or(NO_POSITIONS, Vec::as_slice)
+    }
+
+    /// The positions of the steps that come after the step at each position.
+    ///
+    /// A [`Graph`] holds the steps before each step, because that is the
+    /// question a row of the answer asks. A walk of the wires asks the other
+    /// question, so it turns the lists around one time and reads them many
+    /// times.
+    fn after(&self) -> Vec<Vec<usize>> {
+        let mut after: Vec<Vec<usize>> = vec![Vec::new(); self.steps.len()];
+        for (position, before) in self.before.iter().enumerate() {
+            for &earlier in before {
+                after[earlier].push(position);
+            }
+        }
+        after
+    }
+
+    /// This graph, or the cycle that keeps it from naming a step to start.
+    ///
+    /// # Errors
+    ///
+    /// Gives [`GraphError::Cycle`] with the numbers of one cycle.
+    fn refuse_cycle(self) -> Result<Self, GraphError> {
+        match self.cycle() {
+            Some(cycle) => Err(GraphError::Cycle(cycle)),
+            None => Ok(self),
+        }
+    }
+
+    /// The numbers of one cycle of the picture, or `None` when the picture
+    /// holds none.
+    ///
+    /// A depth first walk, and it names the one cycle that walk finds. A
+    /// topological sort names every node it could not put in an order instead,
+    /// and for one knot of two steps in a picture of twenty that is eighteen
+    /// numbers a reader must read past to reach the two that hold the knot.
+    ///
+    /// The walk carries its own path rather than the stack of the machine,
+    /// because a picture arrives from a clipboard and a clipboard holds a page.
+    fn cycle(&self) -> Option<Vec<IssueNumber>> {
+        let after = self.after();
+        let mut marks: Vec<Mark> = vec![Mark::New; self.steps.len()];
+        // The nodes of the path, and for each of them the place of the step to
+        // walk to next.
+        let mut path: Vec<usize> = Vec::new();
+        let mut walk: Vec<(usize, usize)> = Vec::new();
+        for start in 0..self.steps.len() {
+            if marks[start] != Mark::New {
+                continue;
+            }
+            marks[start] = Mark::OnPath;
+            path.push(start);
+            walk.push((start, 0));
+            while let Some((node, next)) = walk.pop() {
+                let Some(&successor) = after[node].get(next) else {
+                    // Every step after this node is walked, so the node leaves
+                    // the path. It stands last, because each node the walk
+                    // pushed after it left the path already.
+                    marks[node] = Mark::Done;
+                    path.pop();
+                    continue;
+                };
+                walk.push((node, next + 1));
+                match marks[successor] {
+                    // The path holds the successor, so the wires return to it.
+                    // The cycle is the tail of the path from that node on.
+                    Mark::OnPath => {
+                        if let Some(from) = path.iter().position(|&node| node == successor) {
+                            return Some(
+                                path[from..]
+                                    .iter()
+                                    .map(|&node| self.steps[node].number())
+                                    .collect(),
+                            );
+                        }
+                    }
+                    // A node the walk already left reaches no node of the path,
+                    // so it opens no cycle.
+                    Mark::Done => {}
+                    Mark::New => {
+                        marks[successor] = Mark::OnPath;
+                        path.push(successor);
+                        walk.push((successor, 0));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Every number the picture names, once, in the order of the steps.
@@ -791,9 +891,11 @@ pub enum GraphError {
 ///
 /// Gives the refusals of [`GraphError`] for a picture this reader claims and
 /// cannot read. They stand between the claim and the graph: a leftward
-/// arrowhead, a port whose text is not a step, and a net with a port on one
-/// side and nothing on the other. The drawing is read first, because a head
-/// that points the wrong way is what makes the text beside it read wrong.
+/// arrowhead, a port whose text is not a step, a net with a port on one side
+/// and nothing on the other, and a cycle. The drawing is read first, because a
+/// head that points the wrong way is what makes the text beside it read wrong,
+/// and the cycle is read last, because it is a question about the graph and
+/// not about the picture.
 pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
     let grid = Grid::new(text);
     // A net with no port at all is dropped without a word. The border of a box
@@ -810,7 +912,7 @@ pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
     Some(
         grid.refuse_drawing()
             .and_then(|()| refuse_ports(&wirings))
-            .map(|()| build(&wirings)),
+            .and_then(|()| build(&wirings).refuse_cycle()),
     )
 }
 
