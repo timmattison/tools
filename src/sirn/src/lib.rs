@@ -849,6 +849,19 @@ mod tests {
         // A leading-dot file like ".gitignore" has no Path extension.
         assert_eq!(ct(".gitignore"), "application/octet-stream");
     }
+
+    // The content-type table should be the UNION of localnext's and sirn's
+    // tables (issue #421): each table currently carries extensions the other
+    // lacks. `.map`, `.webmanifest`, `.avif`, and `.ttf` are localnext's; this
+    // crate's table does not have them yet, so this fails until the two
+    // tables are unified.
+    #[test]
+    fn the_table_carries_localnexts_export_extensions_too() {
+        assert_eq!(ct("chunk.js.map"), "application/json");
+        assert_eq!(ct("site.webmanifest"), "application/manifest+json");
+        assert_eq!(ct("hero.avif"), "image/avif");
+        assert_eq!(ct("inter.ttf"), "font/ttf");
+    }
 }
 
 #[cfg(test)]

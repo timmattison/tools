@@ -769,6 +769,16 @@ mod tests {
         assert_eq!(ct("notes.日本語"), "application/octet-stream");
         assert_eq!(ct("café.html"), "text/html; charset=utf-8");
     }
+
+    // The content-type table should be the UNION of localnext's and sirn's
+    // tables (issue #421): each table currently carries extensions the other
+    // lacks. `.md` and `.csv` are sirn's; this crate's table does not have
+    // them yet, so this fails until the two tables are unified.
+    #[test]
+    fn the_table_carries_sirns_document_extensions_too() {
+        assert_eq!(ct("README.md"), "text/markdown; charset=utf-8");
+        assert_eq!(ct("rows.csv"), "text/csv; charset=utf-8");
+    }
 }
 
 #[cfg(test)]
