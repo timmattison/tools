@@ -57,6 +57,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use thiserror::Error;
+use unicode_width::UnicodeWidthChar;
 
 use crate::chain::{IssueNumber, Snippet};
 use crate::plan::{one_step, Step};
@@ -279,8 +280,37 @@ fn sides_of(c: char) -> Option<Sides> {
     Some(sides)
 }
 
+/// One display column of one line of the picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cell {
+    /// The character that starts in this column.
+    Start(char),
+    /// The second column of a character that takes two.
+    ///
+    /// It carries no character of its own. It is no space, so the text of a
+    /// port that ends in a wide character ends there, and it draws no wire, so
+    /// no net runs through the middle of a word.
+    Tail,
+}
+
 /// One line of the picture, one cell for each display column.
-type Row = Vec<char>;
+type Row = Vec<Cell>;
+
+/// The cells of `line`, one for each display column.
+///
+/// A character of width zero, and a character of no known width, takes one
+/// column. Such a character can shift text and never a wire, because every
+/// wire character takes one column.
+fn row_of(line: &str) -> Row {
+    let mut cells: Row = Vec::new();
+    for c in line.chars() {
+        cells.push(Cell::Start(c));
+        for _ in 1..UnicodeWidthChar::width(c).unwrap_or(1).max(1) {
+            cells.push(Cell::Tail);
+        }
+    }
+    cells
+}
 
 /// The picture, as a grid of cells and the wire each of them draws.
 struct Grid {
@@ -293,7 +323,7 @@ struct Grid {
 impl Grid {
     /// The grid `text` draws.
     fn new(text: &str) -> Self {
-        let cells: Vec<Row> = text.lines().map(|line| line.chars().collect()).collect();
+        let cells: Vec<Row> = text.lines().map(row_of).collect();
         let wires = cells
             .iter()
             .enumerate()
@@ -306,9 +336,18 @@ impl Grid {
         Self { cells, wires }
     }
 
-    /// The character at `at`, or `None` when `at` is off the grid.
+    /// The character that starts at `at`, or `None` for the second column of a
+    /// wide character and for a place off the grid.
     fn glyph(cells: &[Row], at: Place) -> Option<char> {
-        cells.get(at.row)?.get(at.column).copied()
+        match cells.get(at.row)?.get(at.column)? {
+            Cell::Start(c) => Some(*c),
+            Cell::Tail => None,
+        }
+    }
+
+    /// The cell at `at`, or `None` when `at` is off the grid.
+    fn cell(&self, at: Place) -> Option<Cell> {
+        self.cells.get(at.row)?.get(at.column).copied()
     }
 
     /// The sides the cell at `at` touches, with the rule for an ASCII
@@ -467,7 +506,7 @@ impl Grid {
         while self.is_space(place) {
             place = side.from(place)?;
         }
-        Self::glyph(&self.cells, place).map(|_| place)
+        self.cell(place).map(|_| place)
     }
 
     /// The far end of the text of a port that starts at `near`.
@@ -478,7 +517,7 @@ impl Grid {
     fn text_edge(&self, near: Place, side: Side) -> Place {
         let mut edge = near;
         while let Some(next) = side.from(edge) {
-            if Self::glyph(&self.cells, next).is_none() || self.sides(next).is_some() {
+            if self.cell(next).is_none() || self.sides(next).is_some() {
                 break;
             }
             edge = next;
@@ -497,9 +536,13 @@ impl Grid {
         let mut text = String::new();
         let mut start: Option<usize> = None;
         for column in from..=to {
-            let Some(&glyph) = line.get(column) else {
+            let Some(&cell) = line.get(column) else {
                 break;
             };
+            // The second column of a wide character carries no character of
+            // its own, and the character that owns it already stands in the
+            // text.
+            let Cell::Start(glyph) = cell else { continue };
             if !glyph.is_whitespace() && start.is_none() {
                 start = Some(column);
             }
