@@ -1660,6 +1660,19 @@ A ──→ #4 ──┐
     }
 
     #[test]
+    fn a_text_this_reader_does_not_claim_raises_nothing() {
+        // The claim stands before every refusal, and this test pins that
+        // order. Each of these three lines holds a drawing this reader refuses
+        // inside a picture, and each of them stands on one line, so the chain
+        // reader answers it. A refusal that ran before the claim would take
+        // every one of them away from that reader and answer a chain with a
+        // message about a picture nobody drew.
+        assert!(read("#1 \u{2500}\u{2500}/ #2").is_none());
+        assert!(read("#2 \u{2190}\u{2500}\u{2500} #1").is_none());
+        assert!(read("#1 \u{2500}\u{2500}\u{2192}").is_none());
+    }
+
+    #[test]
     fn the_numbers_of_a_graph_name_each_one_once_and_the_work_first() {
         // One query answers the whole picture, so this list is what the query
         // asks about. `#2` stands twice in the picture and is one node, so it
