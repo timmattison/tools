@@ -947,4 +947,18 @@ mod tests {
         let fenced = format!("The plan of the week:\n\n```text\n{PASTE}\n```\n");
         assert_eq!(edges(&graph_of(&fenced)), edges(&graph_of(PASTE)));
     }
+
+    #[test]
+    fn a_sentence_over_the_picture_changes_nothing() {
+        // Prose holds a slash and a hyphen inside a word. A slash draws no
+        // wire at all, and a hyphen draws one only when a neighbor draws one
+        // as well, so a digit and a letter beside it keep it out of the
+        // picture.
+        const PROSE: &str = "See docs/plan.md. Each edit lands in a 30-line window.";
+        assert!(read(PROSE).is_none());
+
+        let page = format!("{PROSE}\n\n{PASTE}");
+        assert_eq!(nodes(&graph_of(&page)), nodes(&graph_of(PASTE)));
+        assert_eq!(edges(&graph_of(&page)), edges(&graph_of(PASTE)));
+    }
 }
