@@ -485,6 +485,13 @@ impl Grid {
     /// The walk steps over the spaces. It finds no port when it leaves the
     /// line, and no port when the first cell that is not a space draws a wire:
     /// two nets with nothing but spaces between them name nothing.
+    ///
+    /// This reading is lenient, and it must be. Text that names no step is not
+    /// a port here rather than an error, because the claim comes before every
+    /// refusal: a chain broken over two lines reaches this function, and it
+    /// must reach the chain reader after it with no message of its own. The
+    /// slice that refuses a picture names such a text with
+    /// [`GraphError::NotAStep`], after a net of the same text has claimed it.
     fn port(&self, at: Place, side: Side) -> Option<Port> {
         let near = self.first_mark(at, side)?;
         if self.sides(near).is_some() {
@@ -561,6 +568,10 @@ struct Port {
 }
 
 /// One net of the picture, and the steps it joins.
+///
+/// A net that names a step on one side and nothing on the other stands here
+/// with an empty list. It gives no edge, and the slice that refuses a picture
+/// refuses it.
 struct Wiring {
     /// The steps the net names on its left. Each of them comes before each
     /// step of `after`.
@@ -655,13 +666,22 @@ pub enum GraphError {
 /// chain reader takes such a text next: a chain broken over two lines must
 /// reach that reader and not a refusal of this one.
 ///
+/// Every node of the graph comes out of a net. A step that stands with no wire
+/// beside it names no port, so the slice that answers a graph decides whether
+/// such a step is a node of one.
+///
 /// # Errors
 ///
 /// Gives the refusals of [`GraphError`] for a picture this reader claims and
-/// cannot read. The slice that refuses a picture builds them, and the slice
-/// that finds a cycle refuses one here as well.
+/// cannot read. The slice that refuses a picture builds them here, between the
+/// claim and the graph: a leftward arrowhead, a diagonal wire, a port whose
+/// text is not a step, and a net with a port on one side and nothing on the
+/// other. The slice that puts the steps in a topological order refuses a cycle
+/// in the same place.
 pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
     let grid = Grid::new(text);
+    // A net with no port at all is dropped without a word. The border of a box
+    // table touches no step, so it carries no edge and it names no node.
     let wirings: Vec<Wiring> = grid
         .nets()
         .iter()
