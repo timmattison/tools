@@ -621,6 +621,15 @@ mod tests {
                 │
 #246 ──→ #248 ──┘";
 
+    /// The fan-out of issue #418.
+    ///
+    /// One net with one port on its left and two on its right. The same four
+    /// rules read it, because every left port comes before every right port
+    /// whichever side holds more of them.
+    const FAN_OUT: &str = "\
+#1 ──┬──→ #2
+     └──→ #3";
+
     /// The graph `text` draws.
     fn graph_of(text: &str) -> Graph {
         read(text)
@@ -672,5 +681,12 @@ mod tests {
     fn a_taller_bus_is_the_same_bus() {
         assert_eq!(nodes(&graph_of(TALL_PASTE)), nodes(&graph_of(PASTE)));
         assert_eq!(edges(&graph_of(TALL_PASTE)), edges(&graph_of(PASTE)));
+    }
+
+    #[test]
+    fn a_fan_out_names_one_step_before_two() {
+        let graph = graph_of(FAN_OUT);
+        assert_eq!(nodes(&graph), vec![1, 2, 3]);
+        assert_eq!(edges(&graph), vec![(1, 2), (1, 3)]);
     }
 }
