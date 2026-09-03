@@ -120,10 +120,31 @@ fn a_branch_that_exists_stops_a_random_directory_run_at_once() {
         !stderr.contains("after 10 attempts"),
         "no attempt after the first can succeed, so none may be spent:\n{stderr}"
     );
+
+    // How many attempts the run spent. `--quiet` silences nwt, so every line of
+    // standard error comes from git, and git writes one `fatal:` for each
+    // command that fails. The count is thus the number of attempts, and it was
+    // ten before this fix.
+    //
+    // The count reads `fatal:` and not the sentence after it. That prefix is
+    // how git marks an error in every message it writes, so it survives the
+    // rewording that defeated the check this test exists for.
+    let quiet = nwt_command(&repo)
+        .args([
+            "-b",
+            &branch,
+            "--random-directory",
+            "--no-bootstrap-hooks",
+            "-q",
+        ])
+        .output()
+        .expect("failed to run nwt");
+
+    let quiet_stderr = String::from_utf8_lossy(&quiet.stderr);
     assert_eq!(
-        stderr.matches("already exists").count(),
+        quiet_stderr.matches("fatal:").count(),
         1,
-        "git must be asked for the branch once, not once for each attempt:\n{stderr}"
+        "git must be asked for the branch once, not once for each attempt:\n{quiet_stderr}"
     );
 }
 

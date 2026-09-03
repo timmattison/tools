@@ -954,6 +954,32 @@ enum WorktreeResult {
     CommandError(std::io::Error),
 }
 
+/// True when `branch` is already a branch of the repository at `repo_root`.
+///
+/// `git worktree add -b <branch>` refuses when the branch is already there, and
+/// the user has to hear which of two problems they have: a branch that exists,
+/// which `--checkout` solves, or a directory that exists, which
+/// `--random-directory` solves. Only git can say which.
+///
+/// The whole inherited `GIT_*` family is shed first, through
+/// [`gitscratch::shed_inherited_git_environment`]. An inherited `GIT_DIR` aims
+/// the question at another repository, whose branches say nothing about this
+/// one. The rule is the prefix, never a list of names.
+fn branch_exists(repo_root: &Path, branch: &str) -> bool {
+    let mut command = Command::new("git");
+    shed_inherited_git_environment(&mut command);
+
+    command
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .current_dir(repo_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// Attempts to create a git worktree at the given path.
 ///
 /// Returns a `WorktreeResult` indicating success or the type of failure.
@@ -1025,11 +1051,25 @@ fn try_create_worktree(
     if status.success() {
         WorktreeResult::Success
     } else {
-        // Check for branch already exists first using git's specific error format.
-        // Git says: "fatal: A branch named '<branch>' already exists."
-        // We check for "A branch named" specifically to avoid false positives when
-        // the path contains the word "branch" (e.g., "/path/to/branch-test/").
-        if stderr.contains("A branch named") {
+        // Ask git whether the branch is there. Do not read the reason it gave.
+        //
+        // Git states that reason in prose, and prose is not a contract. The
+        // check here read it for "A branch named" with a capital letter, and
+        // git writes "fatal: a branch named 'x' already exists" in lower case.
+        // The check missed every time. The next check caught the words "already
+        // exists", so every branch collision was reported as a directory
+        // collision, naming a directory that did not exist and advising a new
+        // directory name that could not help. With a random directory name the
+        // miss cost ten attempts against the one branch that could never work.
+        //
+        // `show-ref --verify` answers with its exit status, which git does not
+        // reword. The question is asked only after the add failed, so it costs
+        // nothing on the path that works.
+        //
+        // A checkout run makes no branch, so it can have no branch collision.
+        // Its `branch_name` is the directory name, which can name a branch by
+        // coincidence, and asking about that one would report the wrong reason.
+        if checkout_ref.is_none() && branch_exists(repo_root, branch_name) {
             return WorktreeResult::BranchExists(branch_name.to_string());
         }
 
