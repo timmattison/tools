@@ -115,12 +115,6 @@ skill writes — the records it prints, the Markdown table it names, and the box
 arrives on the clipboard as — and names the issue to start in every stream of it. Only the Order \
 field of a plan is read as a chain, because the Notes field is prose about code and prose about \
 code is full of numbers.\n\n\
-A plan carries a `Waits for` column beside its streams. A cell of it names the work of other \
-streams that comes before the first step of that stream. The cell is a set and not a chain, so \
-`#96, #91` names two blockers and says nothing about which of the two comes first. An empty cell \
-and a plan with no such column are the common case and no error. A plan that names one blocker \
-or more is one graph, so its answer is one row for each step, in the order of the work, and one \
-start line for each stream that is ready.\n\n\
 A pull request and the issue it closes are one step of a stream and not two, written PR#344 \
 (#341) or the other way round as #4 (in flight, PR #15). A group in parentheses annotates the \
 step to its left. Inside it, only a word carrying the # is a number, a PR in front of one marks \
@@ -131,6 +125,12 @@ A plan drawn as a picture is a third shape of input. Two streams that join are t
 work at the same time, and no chain and no table says that. `wn` follows the wires from left to \
 right and names every issue that is ready to start now. A picture drawn from right to left is \
 refused, because a guess at the order sends somebody to the wrong issue.\n\n\
+A plan says that same thing in words, with a `Waits for` column beside its streams. A cell of it \
+names the work of other streams that comes before the first step of that stream. The cell is a \
+set and not a chain, so `#96, #91` names two blockers and says nothing about which of the two \
+comes first. An empty cell and a plan with no such column are the common case and no error. A \
+plan that names one blocker or more is one graph, so its answer is one row for each step, in the \
+order of the work, and one start line for each stream that is ready.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
