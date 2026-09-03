@@ -1195,3 +1195,29 @@ fn refuses_a_picture_that_holds_a_leftward_arrowhead() {
     );
     assert_eq!(stdout(&output), "", "nothing was printed as an answer");
 }
+
+#[test]
+fn refuses_a_picture_whose_wire_reaches_text_that_is_not_a_step() {
+    // A stream label beside a wire is a plan this form does not carry. The
+    // reader who wrote `A` meant work by it, so the run names the text rather
+    // than dropping the wire and the order it draws.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "\
+A ──→ #4
+#5 ──→ #6 ──┐
+            ├──→ #7
+#8 ──→ #9 ──┘
+",
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("\"A\" stands beside a wire and is not a step"),
+        "the error names the text, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
