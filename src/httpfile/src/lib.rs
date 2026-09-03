@@ -559,3 +559,118 @@ mod serve_file_tests {
         assert!(open_regular_file(&path).is_none());
     }
 }
+
+#[cfg(test)]
+mod range_tests {
+    use super::{parse_range, RangeOutcome};
+
+    #[test]
+    fn exact_range_is_served() {
+        assert_eq!(
+            parse_range("bytes=2-5", 10),
+            RangeOutcome::Partial { first: 2, last: 5 }
+        );
+    }
+
+    #[test]
+    fn a_single_byte_range_is_inclusive() {
+        assert_eq!(
+            parse_range("bytes=0-0", 10),
+            RangeOutcome::Partial { first: 0, last: 0 }
+        );
+    }
+
+    #[test]
+    fn open_ended_range_runs_to_the_end() {
+        assert_eq!(
+            parse_range("bytes=2-", 10),
+            RangeOutcome::Partial { first: 2, last: 9 }
+        );
+    }
+
+    #[test]
+    fn suffix_range_is_the_last_n_bytes() {
+        assert_eq!(
+            parse_range("bytes=-3", 10),
+            RangeOutcome::Partial { first: 7, last: 9 }
+        );
+    }
+
+    #[test]
+    fn a_last_past_the_end_is_clamped() {
+        assert_eq!(
+            parse_range("bytes=0-999999", 10),
+            RangeOutcome::Partial { first: 0, last: 9 }
+        );
+    }
+
+    #[test]
+    fn a_suffix_larger_than_the_file_is_clamped_to_the_whole_file() {
+        assert_eq!(
+            parse_range("bytes=-999999", 10),
+            RangeOutcome::Partial { first: 0, last: 9 }
+        );
+    }
+
+    #[test]
+    fn first_at_or_past_the_end_is_unsatisfiable() {
+        assert_eq!(parse_range("bytes=10-20", 10), RangeOutcome::Unsatisfiable);
+        assert_eq!(parse_range("bytes=10-", 10), RangeOutcome::Unsatisfiable);
+    }
+
+    #[test]
+    fn a_zero_length_suffix_is_unsatisfiable() {
+        assert_eq!(parse_range("bytes=-0", 10), RangeOutcome::Unsatisfiable);
+    }
+
+    #[test]
+    fn any_range_on_an_empty_file_is_unsatisfiable() {
+        assert_eq!(parse_range("bytes=0-0", 0), RangeOutcome::Unsatisfiable);
+        assert_eq!(parse_range("bytes=0-", 0), RangeOutcome::Unsatisfiable);
+        assert_eq!(parse_range("bytes=-5", 0), RangeOutcome::Unsatisfiable);
+    }
+
+    #[test]
+    fn a_multi_range_request_is_ignored() {
+        assert_eq!(parse_range("bytes=0-1,2-3", 10), RangeOutcome::Ignore);
+    }
+
+    #[test]
+    fn a_non_bytes_unit_is_ignored() {
+        assert_eq!(parse_range("items=0-1", 10), RangeOutcome::Ignore);
+    }
+
+    #[test]
+    fn unparsable_text_is_ignored() {
+        assert_eq!(parse_range("this makes no sense", 10), RangeOutcome::Ignore);
+        assert_eq!(parse_range("bytes=", 10), RangeOutcome::Ignore);
+        assert_eq!(parse_range("bytes=-", 10), RangeOutcome::Ignore);
+    }
+
+    #[test]
+    fn a_reversed_range_is_ignored() {
+        assert_eq!(parse_range("bytes=5-2", 10), RangeOutcome::Ignore);
+    }
+
+    #[test]
+    fn a_multi_byte_header_never_panics_and_is_ignored() {
+        assert_eq!(parse_range("byt\u{e9}s=0-1", 10), RangeOutcome::Ignore);
+        assert_eq!(parse_range("bytes=\u{65e5}\u{672c}\u{8a9e}", 10), RangeOutcome::Ignore);
+    }
+
+    #[test]
+    fn u64_max_first_is_unsatisfiable_without_overflow() {
+        assert_eq!(
+            parse_range("bytes=18446744073709551615-", 10),
+            RangeOutcome::Unsatisfiable
+        );
+    }
+
+    #[test]
+    fn u64_max_suffix_is_clamped_without_overflow() {
+        assert_eq!(
+            parse_range("bytes=-18446744073709551615", 10),
+            RangeOutcome::Partial { first: 0, last: 9 }
+        );
+    }
+}
