@@ -101,6 +101,19 @@ const LEFTWARD_HEADS: &[char] = &[
     '\u{25c0}', // ◀ BLACK LEFT-POINTING TRIANGLE
 ];
 
+/// The strokes that run corner to corner.
+///
+/// A diagonal touches no side of a cell, so the rule that joins two wires
+/// cannot read one. Prose holds both of the ASCII spellings — a path holds a
+/// slash and an escape holds a backslash — so a diagonal is a refusal on a line
+/// that holds a wire and nothing at all on every other line.
+const DIAGONALS: &[char] = &[
+    '/', '\\',       // the ASCII spellings, which stand in a path as well
+    '\u{2571}', // ╱ BOX DRAWINGS LIGHT DIAGONAL UPPER RIGHT TO LOWER LEFT
+    '\u{2572}', // ╲ BOX DRAWINGS LIGHT DIAGONAL UPPER LEFT TO LOWER RIGHT
+    '\u{2573}', // ╳ BOX DRAWINGS LIGHT DIAGONAL CROSS
+];
+
 /// The characters that draw a wire and stand inside prose as well.
 ///
 /// Prose holds all four of them: a hyphen inside a word, a bar between two
@@ -416,18 +429,33 @@ impl Grid {
             .collect()
     }
 
+    /// Does the line at `row` hold a wire?
+    ///
+    /// A line with no wire on it is prose, and prose holds a slash inside a
+    /// path. So the refusals of the drawing read the lines of the picture and
+    /// leave every other line alone.
+    fn is_drawn(&self, row: usize) -> bool {
+        self.wires
+            .get(row)
+            .is_some_and(|line| line.iter().any(Option::is_some))
+    }
+
     /// The refusal the drawing of the picture earns, or `Ok` when every line of
     /// it runs from left to right.
     ///
     /// # Errors
     ///
     /// Gives [`GraphError::Leftward`] for a line that holds an arrowhead which
-    /// points left.
+    /// points left, and [`GraphError::Diagonal`] for a line of the picture that
+    /// holds a stroke from corner to corner.
     fn refuse_drawing(&self) -> Result<(), GraphError> {
         for row in 0..self.cells.len() {
             let line = self.line(row);
             if line.chars().any(|glyph| LEFTWARD_HEADS.contains(&glyph)) {
                 return Err(GraphError::Leftward(Snippet::new(&line)));
+            }
+            if self.is_drawn(row) && line.chars().any(|glyph| DIAGONALS.contains(&glyph)) {
+                return Err(GraphError::Diagonal(Snippet::new(&line)));
             }
         }
         Ok(())
