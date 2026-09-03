@@ -1100,3 +1100,39 @@ fn a_stream_that_is_finished_leaves_the_other_stream_as_the_one_answer() {
         )
     );
 }
+
+#[test]
+fn a_picture_that_names_a_number_the_repository_does_not_have_still_answers() {
+    // The number keeps its row and earns the red note, the rows around it read
+    // as they always did, and the run exits 1. One typo takes down one row of
+    // the picture, and never the whole answer.
+    let body = r#"{"data":{"repository":{
+"i242":{"__typename":"Issue","number":242,"title":"Read the picture","state":"OPEN","stateReason":null},
+"i247":{"__typename":"Issue","number":247,"title":"Answer the picture","state":"OPEN","stateReason":null},
+"i246":{"__typename":"Issue","number":246,"title":"Read the table","state":"OPEN","stateReason":null},
+"i248":{"__typename":"Issue","number":248,"title":"Answer the table","state":"OPEN","stateReason":null},
+"i249":null
+}},"errors":[{"type":"NOT_FOUND","path":["repository","i249"],"message":"Could not resolve to an issue or pull request with the number of 249."}]}"#;
+    let gh = FakeGh::with_status(body, 1);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PICTURE);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a number the repository does not have is a failed run, stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "→ #242  Read the picture\n",
+            "· #247  Answer the picture  waits for #242\n",
+            "→ #246  Read the table\n",
+            "· #248  Answer the table    waits for #246\n",
+            "? #249  (no such issue)\n",
+            "\n",
+            "#249 is not in timmattison/tools.\n",
+            "Start #242 next with 'si 242'\n",
+            "Start #246 next with 'si 246'\n",
+        )
+    );
+}
