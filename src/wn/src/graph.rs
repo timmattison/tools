@@ -72,6 +72,33 @@
 //! reader still answers it. The border of a box-drawn table touches no step at
 //! all, so that table keeps its own reader.
 //!
+//! A picture of two streams that never join holds no such net, because every
+//! wire of it stands on one line:
+//!
+//! ```text
+//! #242 ──→ #247
+//! #246 ──→ #248
+//! ```
+//!
+//! It says the same thing the paste says, that two people start now, and a
+//! chain reader answers it as one line of work. So the text is claimed as well
+//! when two nets or more each join a step on their left to a step on their
+//! right, those nets do not all stand on one line, one of them holds a
+//! character of the box-drawing block, and no net of the text reaches a step
+//! on one side and nothing on the other.
+//!
+//! Each of the three tests beside the count keeps a text the chain reader
+//! answers today. The lines keep `#1 ──→ #2 ──→ #3` a chain, which holds two
+//! such nets on the one line the reader wrote. The box-drawing character keeps
+//! a page of prose out, because no word holds one and `→` stands in a sentence
+//! as often as in a picture. The net that reaches nothing on one side keeps a
+//! chain somebody wrapped out, because the `──→` at the end of the first line
+//! says the order runs on.
+//!
+//! The price is a chain wrapped after a box-drawn wire. `#1 ──→ #2,` on one
+//! line and `#3 ──→ #4` on the next reads as two streams, because nothing in
+//! it says the second row continues the first.
+//!
 //! # A step with no wire beside it
 //!
 //! A line that holds no wire, and whose whole text reads as exactly one step,
@@ -100,6 +127,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
+use std::ops::RangeInclusive;
 
 use thiserror::Error;
 use unicode_width::UnicodeWidthChar;
@@ -119,6 +147,20 @@ const NO_POSITIONS: &[usize] = &[];
 /// edge, and an edge is the one thing this form carries that no other form
 /// does.
 const CLAIMING_PORTS: usize = 2;
+
+/// The number of nets that join two steps a picture of streams needs.
+///
+/// One such net is a chain: `#1 ──→ #2` names the one order a chain names, and
+/// the chain reader answers it. Two of them are two streams, and two streams
+/// are the shape no chain writes.
+const CLAIMING_NETS: usize = 2;
+
+/// The block of characters that draw a box.
+///
+/// It holds every stroke, corner, tee, cross, and diagonal a reader draws a
+/// picture with. No word holds one of them, so a character of this block is
+/// the mark that somebody drew something rather than wrote a sentence.
+const BOX_DRAWING: RangeInclusive<char> = '\u{2500}'..='\u{257f}';
 
 /// The arrowheads that point right.
 ///
@@ -670,10 +712,17 @@ impl Grid {
             }
         }
         let spans_lines = net.iter().any(|place| place.row != net[0].row);
+        let row = net.iter().map(|place| place.row).min().unwrap_or_default();
+        let box_drawn = net
+            .iter()
+            .filter_map(|&at| Self::glyph(&self.cells, at))
+            .any(|glyph| BOX_DRAWING.contains(&glyph));
         Wiring {
             before,
             after,
             spans_lines,
+            row,
+            box_drawn,
         }
     }
 
@@ -795,6 +844,14 @@ struct Wiring {
     after: Vec<Port>,
     /// The cells of the net stand on more than one line.
     spans_lines: bool,
+    /// The first line the cells of the net stand on.
+    ///
+    /// [`streams_claim`] reads it, and every net it reads stands on one line
+    /// alone: a net that joins two steps and spans the lines claims the text
+    /// by itself, through [`Wiring::claims`].
+    row: usize,
+    /// A cell of the net holds a character of the box-drawing block.
+    box_drawn: bool,
 }
 
 impl Wiring {
@@ -803,7 +860,7 @@ impl Wiring {
         self.before.iter().chain(&self.after)
     }
 
-    /// Does this net claim the text for the reader of pictures?
+    /// Does this net claim the text for the reader of pictures on its own?
     ///
     /// It claims the text when it names two steps or more and its cells stand
     /// on more than one line. The second half is what keeps `#1 ──→ #2` a
@@ -813,10 +870,84 @@ impl Wiring {
     /// A port whose text names no step counts for nothing here. A picture is
     /// claimed by the work it joins, so a text this reader claims is a text
     /// that draws at least one edge.
+    ///
+    /// This is one of the two claims. A picture of streams that never join
+    /// holds no net that spans the lines, and [`streams_claim`] reads the nets
+    /// of the whole text together to find one.
     fn claims(&self) -> bool {
         self.spans_lines
             && self.ports().filter(|port| port.step.is_some()).count() >= CLAIMING_PORTS
     }
+
+    /// Does the net reach a step on its left and a step on its right?
+    ///
+    /// Such a net draws at least one edge, so it is one row of work. A text of
+    /// two of them or more says two rows, and that is what no chain says.
+    fn joins_two_steps(&self) -> bool {
+        names_a_step(&self.before) && names_a_step(&self.after)
+    }
+
+    /// Does the net reach a step on one side and nothing at all on the other?
+    ///
+    /// A chain somebody broke over two lines ends its first line with such a
+    /// net: the `──→` of `#1 ──→ #2 ──→` reaches `#2` on its left and the end
+    /// of the line on its right, and it says that the order runs on. So a text
+    /// that holds one is one chain, however many rows of work stand in it.
+    ///
+    /// A net that reaches text on both sides is no such net, whether that text
+    /// names a step or not. [`refuse_ports`] reads that text later, after a
+    /// claim, and names it back to the reader.
+    fn is_half(&self) -> bool {
+        (self.before.is_empty() && names_a_step(&self.after))
+            || (self.after.is_empty() && names_a_step(&self.before))
+    }
+}
+
+/// Does one port of `ports` name a step?
+fn names_a_step(ports: &[Port]) -> bool {
+    ports.iter().any(|port| port.step.is_some())
+}
+
+/// Do the nets of the text draw streams that never join?
+///
+/// Two rows of work with no bus between them say the one thing the paste says:
+/// two people start now. Every wire of such a picture stands on one line, so
+/// no net of it claims the text through [`Wiring::claims`], and the chain
+/// reader answers the whole page as one line of work. That answer names one
+/// issue where two are ready.
+///
+/// So the text is claimed when two nets or more each join a step on their left
+/// to a step on their right, and three tests stand beside that count. Each of
+/// them keeps a text the chain reader answers today.
+///
+/// The lines keep a chain a chain. `#1 ──→ #2 ──→ #3` holds two nets that each
+/// join two steps, and both of them stand on the one line the reader wrote.
+///
+/// A character of the box-drawing block keeps a page of prose out. `This
+/// depends on #1 → #2.` on one line and `Also see #3 → #4.` on another names
+/// issues on two lines and draws nothing. No word holds a character of that
+/// block, so one of them is the mark that somebody drew something.
+///
+/// A net that reaches a step on one side and nothing on the other keeps a
+/// wrapped chain out. `#1 ──→ #2 ──→` on one line and `#3 ──→ #4` on the next
+/// is one order somebody broke in two, and the trailing `──→` says so. The
+/// test reads every net of the text, because the net that says it stands
+/// beside the rows and not inside one of them.
+///
+/// The price is a chain wrapped after a box-drawn wire. `#1 ──→ #2,` on one
+/// line and `#3 ──→ #4` on the next reads as two streams, because nothing in
+/// it says the second row continues the first.
+fn streams_claim(wirings: &[Wiring]) -> bool {
+    let joining: Vec<&Wiring> = wirings
+        .iter()
+        .filter(|wiring| wiring.joins_two_steps())
+        .collect();
+    joining.len() >= CLAIMING_NETS
+        && joining
+            .first()
+            .is_some_and(|first| joining.iter().any(|wiring| wiring.row != first.row))
+        && joining.iter().any(|wiring| wiring.box_drawn)
+        && !wirings.iter().any(Wiring::is_half)
 }
 
 /// How far a walk of the wires has gone with one node.
@@ -1075,6 +1206,12 @@ pub enum GraphError {
 /// chain reader takes such a text next: a chain broken over two lines must
 /// reach that reader and not a refusal of this one.
 ///
+/// Two rules claim, and either one of them is enough. One net that names two
+/// steps and stands on more than one line claims the text, through
+/// [`Wiring::claims`]. A text of two nets or more that each join two steps
+/// claims it as a picture of streams that never join, through
+/// [`streams_claim`], which reads the nets of the whole text together.
+///
 /// Most nodes of the graph come out of a net. A step that stands on a line with
 /// no wire is a node with no edge, and it is read after a net claims the text,
 /// so it never claims the text on its own.
@@ -1098,7 +1235,7 @@ pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
         .map(|net| grid.wiring(net))
         .filter(|wiring| !wiring.before.is_empty() || !wiring.after.is_empty())
         .collect();
-    if !wirings.iter().any(Wiring::claims) {
+    if !wirings.iter().any(Wiring::claims) && !streams_claim(&wirings) {
         return None;
     }
     Some(

@@ -1156,9 +1156,19 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - The readers are tried in one order: the record form and the table form of a plan first, the
     picture second, and the chain last. A picture claims the text when one of its nets joins two
     steps that stand on different lines. That rule is what keeps `#1 ──→ #2` a chain, because both
-    of its steps stand on one line. A line with no wire and no step is ignored, so the fence of a
-    code block costs nothing, and a picture indented out of a Markdown list gives the edges a
-    picture at column zero gives.
+    of its steps stand on one line. It claims the text as well when two nets or more each join a
+    step on their left to a step on their right, those nets do not all stand on one line, one of
+    them holds a box-drawing character, and no net of the text reaches a step on one side and
+    nothing on the other. That second rule is what reads `#242 ──→ #247` over `#246 ──→ #248` —
+    two streams that never join — as two rows of work rather than as one, because every wire of
+    such a picture stands on one line. Each of the three tests beside the count keeps a text the
+    chain reader answers: the lines keep `#1 ──→ #2 ──→ #3` a chain, the box-drawing character
+    keeps a page of prose out, and the net that reaches nothing on one side keeps a chain somebody
+    wrapped out — `#1 ──→ #2 ──→` with `#3 ──→ #4` under it, where the trailing `──→` says the
+    order runs on. The price is a chain wrapped after a box-drawn wire: `#1 ──→ #2,` with
+    `#3 ──→ #4` under it reads as two streams. A line with no wire and no step is ignored, so the
+    fence of a code block costs nothing, and a picture indented out of a Markdown list gives the
+    edges a picture at column zero gives.
   - The answer names a state for every step. A step is ready when it is open and every step before
     it is finished, blocked when it is open and one step before it is not, and finished when it is
     done or dropped. `→` marks every ready step and `·` marks a blocked one, which is what those

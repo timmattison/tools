@@ -195,14 +195,17 @@ fn main() -> ExitCode {
 ///
 /// The shape of the text says which reader takes it. A page that names a
 /// `Stream` field or an `Order` field is a plan of parallel work, a text whose
-/// wires join two steps on different lines is a plan drawn as a picture, and
+/// wires join steps on more than one line is a plan drawn as a picture, and
 /// every other text is one chain. So a reader pipes or pastes what they have,
 /// and no flag stands between them and the answer.
 ///
 /// The picture is read after the plan and before the chain. A box-drawn table
 /// of a plan reaches its own reader first, and a chain that holds an arrow on
 /// one line reaches the chain reader, because a picture claims a text only
-/// when its wires join two steps that stand on different lines.
+/// when its wires join steps on more than one line: one net that joins two
+/// steps and spans the lines, or two box-drawn nets or more that each join two
+/// steps and stand on lines of their own. [`graph::read`] states the whole
+/// rule.
 ///
 /// The repository is resolved after the text is read, in both paths. A text
 /// nobody can read is a mistake the reader made, and reporting it costs no
