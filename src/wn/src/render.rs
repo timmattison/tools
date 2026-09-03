@@ -1380,6 +1380,37 @@ mod tests {
     }
 
     #[test]
+    fn a_row_of_a_picture_never_wraps_whatever_the_window_holds() {
+        // The last column takes its columns out of the window first, and the
+        // title is cut to what is left. A row that wrapped would cost two
+        // lines, and the second of them would carry no number.
+        let report = picture(PASTE, ALL_OPEN);
+        for width in [80, 40, 30] {
+            let block = graph_glyphs(&report, width);
+            for line in block.lines() {
+                assert!(
+                    UnicodeWidthStr::width(line) <= width,
+                    "no line is wider than the window of {width}, in {line:?}"
+                );
+            }
+        }
+
+        assert!(
+            row_of(&graph_glyphs(&report, 80), 249).contains("Paint the gallery"),
+            "a window wide enough holds the whole title beside the column"
+        );
+        assert!(
+            row_of(&graph_glyphs(&report, 40), 249).contains("Paint the…"),
+            "a narrower window cuts the title and keeps the column"
+        );
+        assert_eq!(
+            row_of(&graph_glyphs(&report, 30), 249),
+            "· #249  waits for #247, #248",
+            "a window with no columns for a title keeps the number and the column"
+        );
+    }
+
+    #[test]
     fn the_answer_of_a_picture_names_a_command_for_every_step_that_is_ready() {
         // Two streams that join are two people who work at the same time, and
         // an answer that names one issue loses the reason somebody drew the
