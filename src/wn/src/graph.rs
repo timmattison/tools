@@ -638,6 +638,24 @@ mod tests {
 #1 ──┬──→ #2
      └──→ #3";
 
+    /// `picture`, drawn with `+`, `-`, `|`, and `>`.
+    ///
+    /// Built out of the light form rather than typed a second time, so the two
+    /// hold one picture and a test that reads them apart reads the drawing and
+    /// never the plan.
+    fn ascii(picture: &str) -> String {
+        picture
+            .chars()
+            .map(|c| match c {
+                '─' => '-',
+                '│' => '|',
+                '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' => '+',
+                '→' => '>',
+                other => other,
+            })
+            .collect()
+    }
+
     /// The graph `text` draws.
     fn graph_of(text: &str) -> Graph {
         read(text)
@@ -696,5 +714,18 @@ mod tests {
         let graph = graph_of(FAN_OUT);
         assert_eq!(nodes(&graph), vec![1, 2, 3]);
         assert_eq!(edges(&graph), vec![(1, 2), (1, 3)]);
+    }
+
+    #[test]
+    fn the_ascii_spellings_draw_the_same_picture() {
+        assert_eq!(
+            nodes(&graph_of(&ascii(TALL_PASTE))),
+            nodes(&graph_of(PASTE))
+        );
+        assert_eq!(
+            edges(&graph_of(&ascii(TALL_PASTE))),
+            edges(&graph_of(PASTE))
+        );
+        assert_eq!(edges(&graph_of(&ascii(FAN_OUT))), edges(&graph_of(FAN_OUT)));
     }
 }
