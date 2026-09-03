@@ -759,6 +759,17 @@ mod tests {
             .collect()
     }
 
+    /// A plan of parallel work, as a Markdown table.
+    ///
+    /// The divider of such a table is a run of hyphens, and a hyphen is a wire
+    /// beside another hyphen. The run reaches no step for all that, because a
+    /// bar of the table stands between it and every cell.
+    const MARKDOWN_TABLE: &str = "\
+| Stream | Order | Zone | Notes |
+| --- | --- | --- | --- |
+| A | #1 → #2 | src/a | The two hunks sit 265 lines apart in a 5113-line file. |
+| B | #3 | src/b | One issue, no neighbors. |";
+
     /// The graph `text` draws.
     fn graph_of(text: &str) -> Graph {
         read(text)
@@ -915,5 +926,11 @@ mod tests {
         // because a bar touches its top and its bottom and never its sides, so
         // the net has no port at all and the table keeps its own reader.
         assert!(read(BOX_TABLE).is_none());
+    }
+
+    #[test]
+    fn a_markdown_table_and_an_ascii_table_are_tables() {
+        assert!(read(MARKDOWN_TABLE).is_none());
+        assert!(read(&ascii(BOX_TABLE)).is_none());
     }
 }
