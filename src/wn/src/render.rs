@@ -1443,6 +1443,224 @@ mod tests {
         );
     }
 
+    /// The numbers of the rows of a painted block, in the order they print.
+    ///
+    /// The rows are the lines over the blank line, and a row writes its own
+    /// number after the mark.
+    fn rows_of(block: &str) -> Vec<String> {
+        block
+            .lines()
+            .take_while(|line| !line.is_empty())
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_row_for_each_step_of_a_picture_and_one_answer_for_each_stream() {
+        assert_eq!(
+            graph_glyphs(&picture(PASTE, ALL_OPEN), 80),
+            concat!(
+                "→ #242  Read the picture\n",
+                "· #247  Answer the picture  waits for #242\n",
+                "→ #246  Read the table\n",
+                "· #248  Answer the table    waits for #246\n",
+                "· #249  Paint the gallery   waits for #247, #248\n",
+                "\n",
+                "Start #242 next with 'si 242'\n",
+                "Start #246 next with 'si 246'",
+            )
+        );
+    }
+
+    #[test]
+    fn a_step_that_is_finished_is_no_reason_for_the_step_after_it_to_wait() {
+        // The top stream is finished, so the bottom stream is the only one to
+        // start and the join waits for the one step of it that is left.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Done, "Read the picture"),
+                    (247, Status::Done, "Answer the picture"),
+                    (246, Status::Open, "Read the table"),
+                    (248, Status::Open, "Answer the table"),
+                    (249, Status::Open, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        let row = row_of(&block, 249);
+        assert!(
+            row.ends_with("waits for #248"),
+            "the row names the work that is left and not the work that is done, in {row:?}"
+        );
+        assert!(
+            block.ends_with("Start #246 next with 'si 246'"),
+            "the stream that is finished starts nothing, in {block:?}"
+        );
+        assert!(
+            !block.contains("Start #242"),
+            "a finished step is no answer, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn a_ready_row_and_a_finished_row_end_at_their_titles() {
+        // A row that waits for nothing writes no last column, and it ends at
+        // its title rather than in the spaces that would stand before one.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Done, "Read the picture"),
+                    (247, Status::Done, "Answer the picture"),
+                    (246, Status::Open, "Read the table"),
+                    (248, Status::Open, "Answer the table"),
+                    (249, Status::Open, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        assert_eq!(row_of(&block, 242), "✓ #242  Read the picture");
+        assert_eq!(row_of(&block, 246), "→ #246  Read the table");
+        for line in block.lines() {
+            assert!(
+                !line.ends_with(' '),
+                "no line of the block ends in a space, in {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rows_of_a_picture_keep_each_stream_together() {
+        // The rows stand in the order the graph holds them, which is a
+        // topological order with a tie going to the text. So the top stream of
+        // the paste prints before the bottom one, and a reader reads the
+        // streams the way they drew them.
+        let block = graph_glyphs(&picture(PASTE, ALL_OPEN), 80);
+        assert_eq!(
+            rows_of(&block),
+            vec!["#242", "#247", "#246", "#248", "#249"]
+        );
+    }
+
+    #[test]
+    fn a_number_the_repository_does_not_have_earns_a_note_and_blocks_the_step_after_it() {
+        // GitHub answered for every number but `#247`. Nothing is known about
+        // a missing step, so it is not finished and `#249` waits for it. The
+        // note under the rows says why nobody can start that work.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Done, "Read the picture"),
+                    (246, Status::Done, "Read the table"),
+                    (248, Status::Done, "Answer the table"),
+                    (249, Status::Open, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        assert_eq!(row_of(&block, 247), "? #247  (no such issue)");
+        assert!(
+            block.contains("#247 is not in timmattison/tools.\n"),
+            "the note names the number the repository does not have, in {block:?}"
+        );
+        let row = row_of(&block, 249);
+        assert!(
+            row.ends_with("waits for #247"),
+            "the row of the step behind it says so, in {row:?}"
+        );
+    }
+
+    #[test]
+    fn a_picture_with_nothing_open_and_a_missing_number_is_not_called_closed() {
+        // Nothing is open and one number is not an issue at all, so the
+        // picture is not finished. Saying it is would be a guess about the
+        // number nobody could read.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Done, "Read the picture"),
+                    (247, Status::Done, "Answer the picture"),
+                    (246, Status::Done, "Read the table"),
+                    (248, Status::Done, "Answer the table"),
+                ],
+            ),
+            80,
+        );
+        assert!(
+            block.ends_with("No issue in the graph is open."),
+            "the answer does not claim the picture is finished, in {block:?}"
+        );
+        assert!(
+            block.contains("#249 is not in timmattison/tools.\n"),
+            "the note names the number the repository does not have, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn work_closed_out_of_order_in_a_picture_earns_the_note_a_chain_earns() {
+        // `#242` is open and every other step is done, so `#247` is closed over
+        // the step before it and `#249` is closed over a step two hops back.
+        // A picture asks that question of every step the wires reach, and it
+        // writes the answer in the words a chain writes.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Open, "Read the picture"),
+                    (247, Status::Done, "Answer the picture"),
+                    (246, Status::Done, "Read the table"),
+                    (248, Status::Done, "Answer the table"),
+                    (249, Status::Done, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        assert!(
+            block.contains("#247 and #249 are already closed, out of order.\n"),
+            "the note names each step somebody closed early, in {block:?}"
+        );
+        assert!(
+            block.ends_with("Start #242 next with 'si 242'"),
+            "the answer still stands last, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn a_wide_title_of_a_picture_is_cut_by_columns_and_not_by_characters() {
+        // A Japanese character takes two columns and one character. A row that
+        // counted characters would run two columns past the window for each
+        // one of them, and the row would wrap.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Open, "Read the picture"),
+                    (247, Status::Open, "Answer the picture"),
+                    (246, Status::Open, "Read the table"),
+                    (248, Status::Open, "Answer the table"),
+                    (249, Status::Open, "日本語のタイトルはとても長い"),
+                ],
+            ),
+            40,
+        );
+        let row = row_of(&block, 249);
+        assert!(
+            row.contains("日本語の…"),
+            "the title is cut at a column and at a character, in {row:?}"
+        );
+        for line in block.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= 40,
+                "no line is wider than the window, in {line:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_picture_with_an_open_step_and_nothing_ready_says_why() {
         // GitHub answered for neither of the two steps that start the streams,
