@@ -1233,6 +1233,26 @@ A ──→ #4 ──┐
             .collect()
     }
 
+    /// Two streams that join, drawn so that every order reads differently.
+    ///
+    /// The text names the steps in the order 4, 5, 9, 1, 2, because the bus
+    /// reaches `#9` on the second line. A topological order that ties on the
+    /// text names them 4, 5, 1, 2, 9, and one that ties on the number names
+    /// them 1, 2, 4, 5, 9. So this picture parts the three.
+    const TIE: &str = "\
+#4 ──→ #5 ──┐
+            ├──→ #9
+#1 ──→ #2 ──┘";
+
+    /// The numbers of the steps of `graph`, in the order the graph holds them.
+    fn order(graph: &Graph) -> Vec<u64> {
+        graph
+            .steps()
+            .iter()
+            .map(|step| step.number().get())
+            .collect()
+    }
+
     /// The graph `text` draws.
     fn graph_of(text: &str) -> Graph {
         read(text)
@@ -1547,6 +1567,39 @@ A ──→ #4 ──┐
         // the plan never named.
         let graph = graph_of(&under_a_picture("See #123 for the details"));
         assert_eq!(nodes(&graph), vec![1, 3, 4]);
+    }
+
+    #[test]
+    fn the_steps_stand_in_a_topological_order() {
+        // Every step stands after the steps it waits for, and a tie goes to
+        // the step that stands first in the text. That keeps each stream
+        // together: the paste prints the top row, then the bottom row, then
+        // the step that joins them. The text names `#249` on its second line,
+        // so the order of the text is not this order.
+        assert_eq!(order(&graph_of(PASTE)), vec![242, 247, 246, 248, 249]);
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_step_that_stands_first_in_the_text() {
+        // Two streams start at the same moment, so the order between them is a
+        // tie. The reader wrote one of them first, and the answer reads the way
+        // the reader wrote it.
+        assert_eq!(order(&graph_of(TIE)), vec![4, 5, 1, 2, 9]);
+    }
+
+    #[test]
+    fn the_steps_before_a_step_name_places_of_the_topological_order() {
+        // The positions a row reads are the positions of the rows it prints
+        // beside, so they must count in the order the steps stand in. Each
+        // list is in ascending order, and every position of it is smaller than
+        // the position of the step that holds it.
+        let graph = graph_of(PASTE);
+        assert_eq!(order(&graph), vec![242, 247, 246, 248, 249]);
+        assert!(graph.before(0).is_empty());
+        assert_eq!(graph.before(1), [0]);
+        assert!(graph.before(2).is_empty());
+        assert_eq!(graph.before(3), [2]);
+        assert_eq!(graph.before(4), [1, 3]);
     }
 
     #[test]
