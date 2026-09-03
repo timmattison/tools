@@ -269,13 +269,17 @@ pub enum PlanError {
     },
 }
 
-/// The four fields a stream of a plan is written with.
+/// The five fields a stream of a plan is written with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
     /// The name of the stream.
     Stream,
-    /// The chain of the stream. The one field this module reads for numbers.
+    /// The chain of the stream. One of the two fields this module reads for
+    /// numbers.
     Order,
+    /// The work of other streams that comes before the first step of this one.
+    /// The other field this module reads for numbers.
+    WaitsFor,
     /// The part of the repository the stream works in.
     Zone,
     /// The prose of the stream.
@@ -283,14 +287,21 @@ enum Key {
 }
 
 impl Key {
-    /// The four keys, to read a line against.
-    const ALL: [Self; 4] = [Self::Stream, Self::Order, Self::Zone, Self::Notes];
+    /// The five keys, to read a line against.
+    const ALL: [Self; 5] = [
+        Self::Stream,
+        Self::Order,
+        Self::WaitsFor,
+        Self::Zone,
+        Self::Notes,
+    ];
 
     /// The word the key is written with.
     fn word(self) -> &'static str {
         match self {
             Self::Stream => "Stream",
             Self::Order => "Order",
+            Self::WaitsFor => "Waits for",
             Self::Zone => "Zone",
             Self::Notes => "Notes",
         }
@@ -323,9 +334,10 @@ pub fn looks_like_a_plan(text: &str) -> bool {
 /// [`PlanError::StreamWithoutOrder`] for one stream that names none while
 /// another one does,
 /// [`PlanError::NoIssues`] for an `Order` field with no number in it,
-/// [`PlanError::NotAnIssue`] for a token of an `Order` field that names no
-/// issue, and [`PlanError::UnattachedPair`] or [`PlanError::SecondPair`] for a
-/// group that attaches to no step or to a step that already holds one.
+/// [`PlanError::NotAnIssue`] for a token of an `Order` field or a `Waits for`
+/// field that names no issue, and [`PlanError::UnattachedPair`] or
+/// [`PlanError::SecondPair`] for a group that attaches to no step or to a step
+/// that already holds one.
 pub fn parse(text: &str) -> Result<Plan, PlanError> {
     let streams = match find_header(text) {
         Some((body, header)) => table_streams(text, body, &header)?,
@@ -370,7 +382,14 @@ fn record_streams(text: &str) -> Result<Vec<Stream>, PlanError> {
     records
         .iter()
         .enumerate()
-        .map(|(place, record)| stream_of(record.label.as_deref(), place, record.order.as_deref()))
+        .map(|(place, record)| {
+            stream_of(
+                record.label.as_deref(),
+                place,
+                record.order.as_deref(),
+                None,
+            )
+        })
         .collect()
 }
 
@@ -405,7 +424,7 @@ fn records_of(text: &str) -> Vec<Record> {
         let starts_a_record = match key {
             Key::Stream => true,
             Key::Order => open.as_ref().is_none_or(|record| record.order.is_some()),
-            Key::Zone | Key::Notes => false,
+            Key::WaitsFor | Key::Zone | Key::Notes => false,
         };
         if starts_a_record {
             records.extend(open.take());
@@ -426,7 +445,7 @@ fn close_field(field: &mut Option<(Key, String)>, open: &mut Option<Record>) {
     match key {
         Key::Stream => open.get_or_insert_with(Record::default).label = Some(text),
         Key::Order => open.get_or_insert_with(Record::default).order = Some(text),
-        Key::Zone | Key::Notes => {}
+        Key::WaitsFor | Key::Zone | Key::Notes => {}
     }
 }
 
@@ -492,8 +511,10 @@ fn is_rule_mark(c: char) -> bool {
 ///
 /// Gives the line the body of the table starts on, and the cells of the header
 /// itself. A row that names a `Stream` column or an `Order` column is the
-/// header, because those are the two columns this module reads. The `┌─┬─┐` a
-/// box table opens with is a rule and never a header.
+/// header, because a plan names its streams or the work in them. A `Waits for`
+/// column stands beside those two and never alone: a table of blockers and no
+/// work of its own is a table of nothing to start. The `┌─┬─┐` a box table
+/// opens with is a rule and never a header.
 fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
     text.lines().enumerate().find_map(|(place, line)| {
         if is_rule(line) {
@@ -514,15 +535,21 @@ fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
 /// Gives [`PlanError::NoOrder`] for a table with no `Order` column, the error
 /// of [`table_body`] for the lines under the header, and the errors of
 /// [`stream_of`] for one row of it.
+///
+/// A table with no `Waits for` column names no blocker, and that is a plan of
+/// streams that stand apart. So the column is optional, and its absence reads
+/// as an empty cell in every row.
 fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>, PlanError> {
     let order_at = column_of(header, Key::Order).ok_or(PlanError::NoOrder)?;
     let stream_at = column_of(header, Key::Stream);
+    let waits_at = column_of(header, Key::WaitsFor);
     let rows = rows_of(&table_body(text, body, header)?, order_at);
     rows.iter()
         .enumerate()
         .map(|(place, row)| {
             let named = stream_at.and_then(|at| row.get(at)).map(String::as_str);
-            stream_of(named, place, row.get(order_at).map(String::as_str))
+            let waits = waits_at.and_then(|at| row.get(at)).map(String::as_str);
+            stream_of(named, place, row.get(order_at).map(String::as_str), waits)
         })
         .collect()
 }
@@ -787,21 +814,28 @@ fn column_of(header: &[&str], key: Key) -> Option<usize> {
 /// The stream one record or one row writes.
 ///
 /// `named` is the text of the `Stream` field or cell, `place` is the place of
-/// the stream in the plan, and `order` is the text of the `Order` field or
-/// cell.
+/// the stream in the plan, `order` is the text of the `Order` field or cell,
+/// and `waits` is the text of the `Waits for` field or cell.
 ///
 /// # Errors
 ///
 /// Gives [`PlanError::StreamWithoutOrder`] when the stream names no `Order`
-/// field at all, and the errors of [`read_order`] for the chain in one.
-fn stream_of(named: Option<&str>, place: usize, order: Option<&str>) -> Result<Stream, PlanError> {
+/// field at all, the errors of [`read_order`] for the chain in one, and the
+/// errors of [`read_waits`] for the blockers of the stream.
+fn stream_of(
+    named: Option<&str>,
+    place: usize,
+    order: Option<&str>,
+    waits: Option<&str>,
+) -> Result<Stream, PlanError> {
     let label = label_of(named, place);
     let order = order.ok_or_else(|| PlanError::StreamWithoutOrder(Snippet::new(&label)))?;
     let steps = read_order(order, &label)?;
+    let waits_for = read_waits(waits, &label)?;
     Ok(Stream {
         label,
         steps,
-        waits_for: Vec::new(),
+        waits_for,
     })
 }
 
@@ -882,6 +916,34 @@ fn read_order(order: &str, label: &str) -> Result<Vec<Step>, PlanError> {
         return Err(PlanError::NoIssues(Snippet::new(label)));
     }
     Ok(readings.into_iter().map(|reading| reading.step).collect())
+}
+
+/// Read one `Waits for` field into the steps the stream waits for.
+///
+/// `waits` is the text of the field or the cell, and `label` names the stream
+/// every message repeats back.
+///
+/// A stream that waits for nothing writes an empty cell, and a plan whose
+/// streams all stand apart writes no column at all. Both are the common case
+/// and neither is an error, so a text of spaces alone and an absent text each
+/// give no steps. A drawn cell is padded to the width of its column, which is
+/// why the spaces are asked about.
+///
+/// Every other text is steps, and [`read_order`] is what reads a step. The
+/// order the steps arrive in says nothing: `Order` is a chain and `Waits for`
+/// is a set, so `#96 → #91` and `#96, #91` name the same two blockers and the
+/// stream starts when both are finished.
+///
+/// # Errors
+///
+/// Gives the errors of [`read_order`], so a cell of prose earns
+/// [`PlanError::NotAnIssue`] with the name of the stream and the word that
+/// names no issue.
+fn read_waits(waits: Option<&str>, label: &str) -> Result<Vec<Step>, PlanError> {
+    match waits.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => read_order(text, label),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// The one step `text` writes, or `None` when it writes none or more than one.
