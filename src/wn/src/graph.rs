@@ -1480,6 +1480,32 @@ A ──→ #4 ──┐
     }
 
     #[test]
+    fn a_step_with_no_wire_beside_it_is_a_node_with_no_edge() {
+        // A stream of one step is a plan as much as a stream of five is, and a
+        // reader who writes one under a picture wants to hear about it. So the
+        // node stands in the graph with no step before it.
+        let graph = graph_of(&under_a_picture("#6"));
+        assert_eq!(nodes(&graph), vec![1, 3, 4, 6]);
+        assert_eq!(edges(&graph), vec![(1, 3), (1, 4)]);
+        let alone = graph
+            .steps()
+            .iter()
+            .position(|step| step.number().get() == 6)
+            .expect("the picture names the step that stands alone");
+        assert!(graph.before(alone).is_empty());
+    }
+
+    #[test]
+    fn a_line_of_prose_that_names_a_number_is_no_node() {
+        // A line with no wire is a node only when the whole of it reads as one
+        // step. A sentence that names an issue writes no step, because `See`
+        // is no number, and a node for it would tell somebody to start work
+        // the plan never named.
+        let graph = graph_of(&under_a_picture("See #123 for the details"));
+        assert_eq!(nodes(&graph), vec![1, 3, 4]);
+    }
+
+    #[test]
     fn the_numbers_of_a_graph_name_each_one_once_and_the_work_first() {
         // One query answers the whole picture, so this list is what the query
         // asks about. `#2` stands twice in the picture and is one node, so it
