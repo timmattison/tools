@@ -197,4 +197,36 @@ mod tests {
     fn json_comes_back_unchanged_when_the_flag_does_not_ask_for_it() {
         assert_eq!(format_payload(br#"{"a":1}"#, false), r#"{"a":1}"#);
     }
+
+    #[test]
+    fn a_left_to_right_embedding_makes_a_hex_dump() {
+        assert_eq!(
+            format_payload("ab\u{202a}".as_bytes(), false),
+            "00000000  61 62 e2 80 aa                                    |ab...|"
+        );
+    }
+
+    #[test]
+    fn a_right_to_left_override_makes_a_hex_dump() {
+        assert_eq!(
+            format_payload("ab\u{202e}".as_bytes(), false),
+            "00000000  61 62 e2 80 ae                                    |ab...|"
+        );
+    }
+
+    #[test]
+    fn a_left_to_right_isolate_makes_a_hex_dump() {
+        assert_eq!(
+            format_payload("ab\u{2066}".as_bytes(), false),
+            "00000000  61 62 e2 81 a6                                    |ab...|"
+        );
+    }
+
+    #[test]
+    fn a_pop_directional_isolate_makes_a_hex_dump() {
+        assert_eq!(
+            format_payload("ab\u{2069}".as_bytes(), false),
+            "00000000  61 62 e2 81 a9                                    |ab...|"
+        );
+    }
 }
