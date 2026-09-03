@@ -682,6 +682,40 @@ mod tests {
             .collect()
     }
 
+    /// Each light character, and the heavy and the double character that draw
+    /// the same corner.
+    const SETS: [(char, char, char); 11] = [
+        ('─', '━', '═'),
+        ('│', '┃', '║'),
+        ('┌', '┏', '╔'),
+        ('┐', '┓', '╗'),
+        ('└', '┗', '╚'),
+        ('┘', '┛', '╝'),
+        ('├', '┣', '╠'),
+        ('┤', '┫', '╣'),
+        ('┬', '┳', '╦'),
+        ('┴', '┻', '╩'),
+        ('┼', '╋', '╬'),
+    ];
+
+    /// `picture`, drawn with the heavy set.
+    fn heavy(picture: &str) -> String {
+        redrawn(picture, |set| set.1)
+    }
+
+    /// `picture`, drawn with the double set.
+    fn double(picture: &str) -> String {
+        redrawn(picture, |set| set.2)
+    }
+
+    /// `picture`, with each light character replaced by the one `pick` names.
+    fn redrawn(picture: &str, pick: fn(&(char, char, char)) -> char) -> String {
+        picture
+            .chars()
+            .map(|c| SETS.iter().find(|set| set.0 == c).map_or(c, pick))
+            .collect()
+    }
+
     /// The graph `text` draws.
     fn graph_of(text: &str) -> Graph {
         read(text)
@@ -753,5 +787,21 @@ mod tests {
             edges(&graph_of(PASTE))
         );
         assert_eq!(edges(&graph_of(&ascii(FAN_OUT))), edges(&graph_of(FAN_OUT)));
+    }
+
+    #[test]
+    fn the_heavy_set_and_the_double_set_draw_the_same_picture() {
+        assert_eq!(
+            nodes(&graph_of(&heavy(TALL_PASTE))),
+            nodes(&graph_of(PASTE))
+        );
+        assert_eq!(
+            edges(&graph_of(&heavy(TALL_PASTE))),
+            edges(&graph_of(PASTE))
+        );
+        assert_eq!(
+            edges(&graph_of(&double(TALL_PASTE))),
+            edges(&graph_of(PASTE))
+        );
     }
 }
