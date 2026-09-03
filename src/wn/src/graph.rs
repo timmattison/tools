@@ -622,6 +622,11 @@ pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
 /// the picture is one node that carries the edges of both places. The step of
 /// the earliest place stands, because a reader who wrote the pair of a step
 /// once wrote it where the step first appears.
+///
+/// One edge stands between two nodes, however many nets draw it. A step that
+/// two rows of a bus reach comes before the step on the other side of that bus
+/// one time, and a list that names it twice would tell a reader to wait for it
+/// twice.
 fn build(wirings: &[Wiring]) -> Graph {
     let mut ports: Vec<&Port> = wirings
         .iter()
@@ -653,7 +658,9 @@ fn build(wirings: &[Wiring]) -> Graph {
                 let Some(&from) = positions.get(&earlier.step.number()) else {
                     continue;
                 };
-                before[to].push(from);
+                if !before[to].contains(&from) {
+                    before[to].push(from);
+                }
             }
         }
     }
