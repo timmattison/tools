@@ -64,6 +64,21 @@
 //! Such a node never claims the text. It is read after a net claims it, so a
 //! number in the prose of a page that draws no picture still reaches the chain
 //! reader.
+//!
+//! # What it refuses
+//!
+//! A claimed picture that this reader cannot follow is a refusal and never a
+//! guess, because a guess sends somebody to the wrong issue. It refuses a
+//! leftward arrowhead, a diagonal wire, a wire that reaches text which is not a
+//! step, a net that reaches a step on one side and nothing on the other, and a
+//! cycle. See [`GraphError`].
+//!
+//! A net with no port at all is dropped without a word. The border of a box
+//! table touches no step, so it says nothing about an order.
+//!
+//! Every refusal stands after the claim. A text this reader does not claim
+//! gives `None` and no message, whatever it is drawn with, because the chain
+//! reader answers such a text next.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
@@ -559,7 +574,7 @@ impl Grid {
         net
     }
 
-    /// The steps `net` joins.
+    /// The text `net` reaches on each of its sides.
     fn wiring(&self, net: &[Place]) -> Wiring {
         let mut before: Vec<Port> = Vec::new();
         let mut after: Vec<Port> = Vec::new();
@@ -986,11 +1001,11 @@ pub enum GraphError {
 ///
 /// Gives the refusals of [`GraphError`] for a picture this reader claims and
 /// cannot read. They stand between the claim and the graph: a leftward
-/// arrowhead, a port whose text is not a step, a net with a port on one side
-/// and nothing on the other, and a cycle. The drawing is read first, because a
-/// head that points the wrong way is what makes the text beside it read wrong,
-/// and the cycle is read last, because it is a question about the graph and
-/// not about the picture.
+/// arrowhead, a diagonal wire, a port whose text is not a step, a net with a
+/// port on one side and nothing on the other, and a cycle. The drawing is read
+/// first, because a head that points the wrong way is what makes the text
+/// beside it read wrong, and the cycle is read last, because it is a question
+/// about the graph and not about the picture.
 pub fn read(text: &str) -> Option<Result<Graph, GraphError>> {
     let grid = Grid::new(text);
     // A net with no port at all is dropped without a word. The border of a box
