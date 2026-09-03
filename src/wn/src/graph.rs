@@ -1303,6 +1303,15 @@ A ──→ #4 ──┐
     }
 
     #[test]
+    fn a_line_with_no_wire_is_never_asked_about_a_head_or_a_stroke() {
+        // A sentence over the picture holds a slash inside a path and an arrow
+        // inside a phrase. A line with no wire on it draws nothing, so neither
+        // of them belongs to the picture and the paste under it still reads.
+        let page = format!("see docs/plan.md \u{2190} here\n\n{PASTE}");
+        assert_eq!(edges(&graph_of(&page)), edges(&graph_of(PASTE)));
+    }
+
+    #[test]
     fn the_numbers_of_a_graph_name_each_one_once_and_the_work_first() {
         // One query answers the whole picture, so this list is what the query
         // asks about. `#2` stands twice in the picture and is one node, so it
