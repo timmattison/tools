@@ -770,6 +770,29 @@ mod tests {
 | A | #1 → #2 | src/a | The two hunks sit 265 lines apart in a 5113-line file. |
 | B | #3 | src/b | One issue, no neighbors. |";
 
+    /// A node whose text holds wide characters, and the bus under it.
+    ///
+    /// `日本語` takes three characters and six display columns. The corner of
+    /// the first line stands over the tee of the second line by display
+    /// column, so the two are one net. A grid that counted characters would
+    /// stand that corner three columns to the left of the tee, and the bus
+    /// would break in two.
+    const WIDE_NODE: &str = "\
+#1 (日本語) ──┐
+              ├──→ #3
+#2 ───────────┘";
+
+    /// The same picture, drawn with characters of one column each.
+    ///
+    /// Every cell of it stands in the same display column as the picture over
+    /// it, so the two draw one graph. It stands here to say which rule is at
+    /// work: the drawing did not change, and the width of the characters
+    /// inside one node did.
+    const PLAIN_NODE: &str = "\
+#1 (abcdef) ──┐
+              ├──→ #3
+#2 ───────────┘";
+
     /// The graph `text` draws.
     fn graph_of(text: &str) -> Graph {
         read(text)
@@ -960,5 +983,13 @@ mod tests {
         let page = format!("{PROSE}\n\n{PASTE}");
         assert_eq!(nodes(&graph_of(&page)), nodes(&graph_of(PASTE)));
         assert_eq!(edges(&graph_of(&page)), edges(&graph_of(PASTE)));
+    }
+
+    #[test]
+    fn a_wide_character_shifts_no_wire() {
+        let wide = graph_of(WIDE_NODE);
+        assert_eq!(nodes(&wide), vec![1, 2, 3]);
+        assert_eq!(edges(&wide), vec![(1, 3), (2, 3)]);
+        assert_eq!(edges(&graph_of(PLAIN_NODE)), edges(&wide));
     }
 }
