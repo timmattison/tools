@@ -273,6 +273,23 @@ fn a_name_selects_the_worktree_that_carries_it() {
 }
 
 #[test]
+fn the_help_says_which_path_the_main_entry_names() {
+    // A user who lands in `~/.local/share/yadm/repo.git` has to be able to
+    // learn from `cwt` itself why the shortcut took them to a directory whose
+    // name ends in `.git`. The long help of `--main` is where it says so.
+    let output = cwt(Path::new(env!("CARGO_MANIFEST_DIR")), &["--help"]);
+    assert_eq!(code(&output), 0, "cwt --help failed: {}", combined(&output));
+
+    let help = stdout(&output);
+    for phrase in ["detached from its work tree", "the git directory itself"] {
+        assert!(
+            help.contains(phrase),
+            "the help of --main must contain {phrase:?}, got: {help}"
+        );
+    }
+}
+
+#[test]
 fn main_from_the_git_directory_itself_reports_the_top_of_the_climb() {
     // The user stands at the main worktree, so `--main` climbs instead. Nothing
     // above the git directory is a repository, so the climb ends there. This is
