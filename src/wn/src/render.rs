@@ -19,9 +19,11 @@
 //! [`textfit::truncate_to_budget`], which gives an empty title rather than a
 //! marker that is itself one column too wide.
 //!
-//! A summary line of a plan is the one line that may wrap, and only in a
-//! window too narrow to hold the shortest label of a stream beside the answer.
-//! See [`summary`].
+//! Two lines may wrap, and each of them only in a window too narrow to hold
+//! what the reader came for. A summary line of a plan wraps in a window too
+//! narrow to hold the shortest label of a stream beside the answer: see
+//! [`summary`]. A row of a picture wraps in a window too narrow to hold the
+//! column that says what that row waits for.
 //!
 //! # A plan is one block for each stream
 //!
@@ -41,6 +43,10 @@
 //! is the one thing a reader of a blocked row came for, and a title is text
 //! the reader can already read in the picture they pasted. So the title is cut
 //! to what the column leaves, and the row still fits the window.
+//!
+//! A window that leaves no columns for the column itself is thus the one place
+//! such a row runs past the edge. A row that dropped the column instead would
+//! answer nothing at a width nobody reads at.
 
 use colored::{ColoredString, Colorize};
 use textfit::{pad_right, truncate_to_budget};
