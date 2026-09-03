@@ -47,6 +47,14 @@
 //! its hyphen. A box-drawing character never stands inside a word, so it needs
 //! no such test.
 //!
+//! A stroke that runs corner to corner needs a neighbor as well, and for the
+//! same reason. A line of the picture carries prose in the text of its ports,
+//! and `#249  (src/gallery)` is one port. So a stroke draws a diagonal only
+//! when a neighbor on one of its four sides draws a wire, and this reader
+//! refuses that stroke alone. Every spelling of the stroke reads this test,
+//! the box-drawing ones as well, because a reader who draws with `╲` writes
+//! prose in the same picture.
+//!
 //! # What this module claims
 //!
 //! A net claims the text when it names two steps or more and its cells stand
@@ -132,8 +140,9 @@ const LEFTWARD_HEADS: &[char] = &[
 ///
 /// A diagonal touches no side of a cell, so the rule that joins two wires
 /// cannot read one. Prose holds both of the ASCII spellings — a path holds a
-/// slash and an escape holds a backslash — so a diagonal is a refusal on a line
-/// that holds a wire and nothing at all on every other line.
+/// slash and an escape holds a backslash — and the text of a port carries such
+/// prose. So a diagonal is a refusal when it stands beside a wire, and nothing
+/// at all everywhere else.
 const DIAGONALS: &[char] = &[
     '/', '\\',       // the ASCII spellings, which stand in a path as well
     '\u{2571}', // ╱ BOX DRAWINGS LIGHT DIAGONAL UPPER RIGHT TO LOWER LEFT
@@ -461,10 +470,29 @@ impl Grid {
     /// A line with no wire on it is prose, and prose holds a slash inside a
     /// path and an arrow inside a phrase. So the refusals of the drawing read
     /// the lines of the picture and leave every other line alone.
+    ///
+    /// A line of the picture carries prose as well, in the text of each port
+    /// it reaches. So the refusal of a stroke asks about a place inside such a
+    /// line and never about the whole of it.
     fn is_drawn(&self, row: usize) -> bool {
         self.wires
             .get(row)
             .is_some_and(|line| line.iter().any(Option::is_some))
+    }
+
+    /// Does the cell at `at` draw a diagonal that belongs to the picture?
+    ///
+    /// A diagonal inside the prose of a port is a path or an escape, and it
+    /// draws nothing. A diagonal beside a wire is a stroke the reader meant,
+    /// and the rule that makes two wires one net cannot read it.
+    fn is_drawn_diagonal(&self, at: Place) -> bool {
+        let Some(glyph) = Self::glyph(&self.cells, at) else {
+            return false;
+        };
+        DIAGONALS.contains(&glyph)
+            && Side::ALL
+                .into_iter()
+                .any(|side| side.from(at).is_some_and(|next| self.sides(next).is_some()))
     }
 
     /// The refusal the drawing of the picture earns, or `Ok` when every line of
@@ -473,16 +501,24 @@ impl Grid {
     /// # Errors
     ///
     /// Gives [`GraphError::Leftward`] for a line of the picture that holds an
-    /// arrowhead which points left, and [`GraphError::Diagonal`] for one that
-    /// holds a stroke from corner to corner. A line with no wire on it draws
-    /// nothing, so this reads neither question to it.
+    /// arrowhead which points left, and [`GraphError::Diagonal`] for a stroke
+    /// which runs corner to corner beside a wire. A line with no wire on it
+    /// draws nothing, so this reads neither question to it.
+    ///
+    /// The two questions differ, because the two characters differ. A head
+    /// this reader drops is read into the text of a port, and a port that
+    /// swallows a head draws an edge nobody wrote, so a head that points left
+    /// is a refusal wherever it stands on a line of the picture. A stroke this
+    /// reader drops costs nothing, because a path and an escape stand in the
+    /// prose of a port every day.
     fn refuse_drawing(&self) -> Result<(), GraphError> {
         for row in (0..self.cells.len()).filter(|&row| self.is_drawn(row)) {
             let line = self.line(row);
             if line.chars().any(|glyph| LEFTWARD_HEADS.contains(&glyph)) {
                 return Err(GraphError::Leftward(Snippet::new(&line)));
             }
-            if line.chars().any(|glyph| DIAGONALS.contains(&glyph)) {
+            let columns = self.cells.get(row).map_or(0, Vec::len);
+            if (0..columns).any(|column| self.is_drawn_diagonal(Place { row, column })) {
                 return Err(GraphError::Diagonal(Snippet::new(&line)));
             }
         }
@@ -969,11 +1005,13 @@ pub enum GraphError {
     /// answer that names the last issue first sends somebody to the wrong work.
     #[error("{0:?} holds a leftward arrowhead, and this reader follows a wire from left to right")]
     Leftward(Snippet),
-    /// A line of the picture holds a wire that runs corner to corner.
+    /// A stroke that runs corner to corner stands beside a wire.
     ///
     /// A diagonal touches no side of a cell, so the rule that makes two wires
     /// one net cannot read it. The reader refuses the line rather than dropping
-    /// the wire, because a dropped wire is an order the answer loses.
+    /// the wire, because a dropped wire is an order the answer loses. A stroke
+    /// with no wire beside it stands in the prose of a port, where it draws
+    /// nothing and earns no refusal.
     #[error("{0:?} holds a diagonal wire, and a diagonal touches no side of a cell")]
     Diagonal(Snippet),
     /// The wires of the picture return to a step that comes before them.
@@ -1572,7 +1610,9 @@ A ──→ #4 ──┐
     fn a_diagonal_wire_is_refused_and_the_message_names_the_line() {
         // The two ASCII spellings and the three box-drawing ones. A diagonal
         // touches no side of a cell, so the picture says an order this reader
-        // cannot follow, whichever character draws it.
+        // cannot follow, whichever character draws it. Each stroke stands
+        // beside the wire on its left, which is what makes it a stroke of the
+        // picture and not a character of prose.
         for stroke in ['/', '\\', '\u{2571}', '\u{2572}', '\u{2573}'] {
             let line = format!("#5 ──{stroke} #6");
             assert_eq!(
@@ -1597,8 +1637,16 @@ A ──→ #4 ──┐
         ] {
             let picture = PASTE.replace("#249  (gallery)", label);
             let graph = graph_of(&picture);
-            assert_eq!(nodes(&graph), nodes(&graph_of(PASTE)), "the label {label:?}");
-            assert_eq!(edges(&graph), edges(&graph_of(PASTE)), "the label {label:?}");
+            assert_eq!(
+                nodes(&graph),
+                nodes(&graph_of(PASTE)),
+                "the label {label:?}"
+            );
+            assert_eq!(
+                edges(&graph),
+                edges(&graph_of(PASTE)),
+                "the label {label:?}"
+            );
         }
     }
 

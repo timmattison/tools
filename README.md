@@ -1169,7 +1169,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - A picture `wn` claims and cannot follow earns a refusal and never a guess, because a guess
     sends somebody to the wrong issue. A leftward arrowhead is refused, because a picture drawn
     from right to left says the opposite order. A diagonal wire is refused, because a diagonal
-    touches no side of a cell and the rule that makes two wires one net cannot read it. A port
+    touches no side of a cell and the rule that makes two wires one net cannot read it. A stroke
+    draws such a wire only when a neighbor on one of its four sides draws a wire as well, so the
+    slash of `#249 (src/gallery)` beside a wire is the prose of a label and costs nothing. A port
     whose text is not a step is refused and named back: `A ──→ #4` reports `A`, because a stream
     label beside a wire is a plan this form does not carry. A net that reaches a step on one side
     and nothing on the other is refused as well, because the other half of that order is what
