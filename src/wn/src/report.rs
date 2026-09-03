@@ -484,6 +484,32 @@ mod tests {
             .expect("the picture reads")
     }
 
+    /// The plan of issue #436, as a table of streams that names what each one
+    /// waits for.
+    ///
+    /// A table, and not a list of steps, because the test then says what a
+    /// reader typed. S0 starts alone, S1 waits for it, S2 waits for a step of
+    /// S0 and a step of S1, and S3 stands apart. The graph reads the steps in
+    /// the order 96, 91, 89, 94, 86.
+    const PLAN: &str = "\
+| Stream | Order | Waits for | Zone | Notes |
+|--------|-------|-----------|------|-------|
+| S0 — daemon leak | #96 | | crates/tsm (serve.rs) | Do first, solo. |
+| S1 — lifecycle | #91 | #96 | crates/tsm (kill.rs) | |
+| S2 — install | #89 → #94 | #96, #91 | crates/tsm (shell-init) | Same hotspot as S1. |
+| S3 — keymap | #86 | | packages/web | Disjoint. |";
+
+    /// The graph the plan `text` writes.
+    ///
+    /// The plan is parsed and then read as a graph, because that is the road
+    /// the text takes: a plan that names a blocker is a graph, and the same
+    /// report answers it.
+    fn graph_of_plan(text: &str) -> Graph {
+        crate::graph::of_plan(&crate::plan::parse(text).expect("the text is a plan"))
+            .expect("the plan draws a graph")
+            .expect("the plan reads")
+    }
+
     /// What GitHub says about each number of `answers`.
     ///
     /// A number nobody names here is a number the repository does not have, so
@@ -1040,6 +1066,95 @@ mod tests {
             ready_only_at_next(&finished),
             "a report with no issue to start marks no row ready"
         );
+    }
+
+    #[test]
+    fn a_plan_that_names_a_blocker_names_every_step_somebody_can_start_now() {
+        // The first step of a stream that waits for nothing, and no other. S0
+        // and S3 wait for nothing, so both of them start. S1 and S2 wait for
+        // `#96`, so neither of them does.
+        let states = states_of(&[
+            (96, Status::Open),
+            (91, Status::Open),
+            (89, Status::Open),
+            (94, Status::Open),
+            (86, Status::Open),
+        ]);
+        let report = Report::of_graph(&graph_of_plan(PLAN), &states);
+        assert_eq!(ready_of(&report), vec![96, 86]);
+    }
+
+    #[test]
+    fn a_stream_starts_once_the_work_of_its_cell_is_finished() {
+        // `#96` is done, so S1 starts. S2 waits for `#96` and for `#91`, and
+        // `#91` is still open, so S2 waits on. A cell of two blockers is a
+        // stream that starts when both of them are finished.
+        let states = states_of(&[
+            (96, Status::Done),
+            (91, Status::Open),
+            (89, Status::Open),
+            (94, Status::Open),
+            (86, Status::Open),
+        ]);
+        let report = Report::of_graph(&graph_of_plan(PLAN), &states);
+        assert_eq!(ready_of(&report), vec![91, 86]);
+        assert_eq!(
+            waits_of(&report, 89),
+            vec![91],
+            "a finished blocker is no reason to wait, and the other one still is"
+        );
+    }
+
+    #[test]
+    fn a_stream_behind_two_blockers_starts_once_both_of_them_are_finished() {
+        let states = states_of(&[
+            (96, Status::Done),
+            (91, Status::Done),
+            (89, Status::Open),
+            (94, Status::Open),
+            (86, Status::Open),
+        ]);
+        let report = Report::of_graph(&graph_of_plan(PLAN), &states);
+        assert_eq!(ready_of(&report), vec![89, 86]);
+        assert_eq!(
+            waits_of(&report, 89),
+            Vec::<u64>::new(),
+            "a step that is ready waits for nothing"
+        );
+    }
+
+    #[test]
+    fn a_blocked_row_of_a_plan_names_every_step_it_waits_for() {
+        // The cell of S2 names two blockers, and a row that named the first of
+        // them would send somebody to `#96` and hide `#91`. The numbers stand
+        // in the order the plan writes them.
+        let states = states_of(&[
+            (96, Status::Open),
+            (91, Status::Open),
+            (89, Status::Open),
+            (94, Status::Open),
+            (86, Status::Open),
+        ]);
+        let report = Report::of_graph(&graph_of_plan(PLAN), &states);
+        assert_eq!(waits_of(&report, 89), vec![96, 91]);
+    }
+
+    #[test]
+    fn a_blocker_the_repository_does_not_have_is_a_row_and_a_missing_number() {
+        // GitHub answered for `#91` alone, so the blocker `#999` is a number
+        // the repository does not have. It is one row of the answer and one
+        // number of the note, and the stream behind it starts nothing: a step
+        // behind a number nobody can read is not a step to start.
+        let text = "\
+| Stream | Order | Waits for |
+| --- | --- | --- |
+| S1 | #91 | #999 |";
+        let states = states_of(&[(91, Status::Open)]);
+        let report = Report::of_graph(&graph_of_plan(text), &states);
+        assert_eq!(report.entries().len(), 2, "the rows still stand");
+        assert_eq!(numbers(&report.missing()), vec![999]);
+        assert_eq!(waits_of(&report, 91), vec![999]);
+        assert!(!report.is_ready(row_of(&report, 91)));
     }
 
     #[test]

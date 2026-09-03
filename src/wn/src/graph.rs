@@ -133,7 +133,7 @@ use thiserror::Error;
 use unicode_width::UnicodeWidthChar;
 
 use crate::chain::{list, IssueNumber, Snippet};
-use crate::plan::{one_step, Step};
+use crate::plan::{one_step, Plan, Step};
 
 /// The list a position outside the graph gives.
 ///
@@ -1339,6 +1339,23 @@ fn build(wirings: &[Wiring], lone: &[Port]) -> Graph {
     Graph { steps, before }
 }
 
+/// The graph a plan of streams draws, or `None` when it draws none.
+// The command line is the caller, and the command line is the half of issue
+// #436 that lands next. The expectation itself fails on the day the run calls
+// this, so it goes then and nobody has to remember it. The tests call it
+// already, which is why the attribute stands outside a test build.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the run that answers a plan is the caller, and it lands next"
+    )
+)]
+pub fn of_plan(plan: &Plan) -> Option<Result<Graph, GraphError>> {
+    let _ = plan;
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1639,6 +1656,114 @@ A ──→ #4 ──┐
             .collect();
         numbers.sort_unstable();
         numbers
+    }
+
+    /// Every number `graph` names, sorted.
+    ///
+    /// Sorted for the reason [`nodes`] is sorted: the order of this list is
+    /// the order of the steps, and a test of what the list holds must read the
+    /// same before and after a topological sort.
+    fn named(graph: &Graph) -> Vec<u64> {
+        let mut numbers: Vec<u64> = graph.numbers().iter().map(|number| number.get()).collect();
+        numbers.sort_unstable();
+        numbers
+    }
+
+    /// The plan of issue #436, as a Markdown table.
+    ///
+    /// Four streams, and the three shapes a `Waits for` cell is written in: an
+    /// empty cell, one blocker, and two of them. S1 waits for the one step of
+    /// S0, and S2 waits for a step of S0 and a step of S1, so the plan draws
+    /// an edge into the first step of a stream from one stream and from two.
+    const WAITS_TABLE: &str = "\
+| Stream | Order | Waits for | Zone | Notes |
+|--------|-------|-----------|------|-------|
+| S0 — daemon leak | #96 | | crates/tsm (serve.rs) | Do first, solo. |
+| S1 — lifecycle | #91 | #96 | crates/tsm (kill.rs) | |
+| S2 — install | #89 → #94 | #96, #91 | crates/tsm (shell-init) | Same hotspot as S1. |
+| S3 — keymap | #86 | | packages/web | Disjoint. |";
+
+    /// The same four streams, as a record for each one.
+    ///
+    /// S0 writes an empty `Waits for` field and S3 writes none at all, because
+    /// a stream that waits for nothing is written both ways and the two say
+    /// the same thing.
+    const WAITS_RECORDS: &str = "\
+Stream: S0 — daemon leak
+Order: #96
+Waits for:
+Zone: crates/tsm (serve.rs)
+Notes: Do first, solo.
+────────────────────────────────────────
+Stream: S1 — lifecycle
+Order: #91
+Waits for: #96
+Zone: crates/tsm (kill.rs)
+────────────────────────────────────────
+Stream: S2 — install
+Order: #89 → #94
+Waits for: #96, #91
+Zone: crates/tsm (shell-init)
+Notes: Same hotspot as S1.
+────────────────────────────────────────
+Stream: S3 — keymap
+Order: #86
+Zone: packages/web
+Notes: Disjoint.";
+
+    /// The same four streams, drawn as a box table.
+    ///
+    /// The form a reader copies out of a terminal. The `Waits for` cells of S0
+    /// and S3 hold a run of spaces here, because a drawn cell is padded to the
+    /// width of its column.
+    const WAITS_BOX_TABLE: &str = "\
+┌──────────────────┬───────────┬───────────┬─────────────────────────┬─────────────────────┐
+│ Stream           │ Order     │ Waits for │ Zone                    │ Notes               │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S0 — daemon leak │ #96       │           │ crates/tsm (serve.rs)   │ Do first, solo.     │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S1 — lifecycle   │ #91       │ #96       │ crates/tsm (kill.rs)    │                     │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S2 — install     │ #89 → #94 │ #96, #91  │ crates/tsm (shell-init) │ Same hotspot as S1. │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S3 — keymap      │ #86       │           │ packages/web            │ Disjoint.           │
+└──────────────────┴───────────┴───────────┴─────────────────────────┴─────────────────────┘";
+
+    /// The plan `text` writes.
+    fn plan_of(text: &str) -> Plan {
+        crate::plan::parse(text).expect("the text is a plan")
+    }
+
+    /// The graph the plan `text` writes.
+    fn graph_of_plan(text: &str) -> Graph {
+        of_plan(&plan_of(text))
+            .expect("the plan draws a graph")
+            .expect("the plan reads")
+    }
+
+    /// The refusal the plan `text` earns.
+    ///
+    /// A [`Graph`] writes no `Debug` of itself, so this reads the error out of
+    /// the answer rather than through `expect_err`, exactly as [`refusal`]
+    /// does for a picture.
+    fn plan_refusal(text: &str) -> GraphError {
+        match of_plan(&plan_of(text)).expect("the plan draws a graph") {
+            Ok(_) => panic!("the plan reads, and this plan is a refusal"),
+            Err(error) => error,
+        }
+    }
+
+    /// A plan of the streams `rows` names, as a Markdown table.
+    ///
+    /// Each row is the label of a stream, the text of its `Order` cell, and
+    /// the text of its `Waits for` cell. Three columns and no prose, so a test
+    /// about one cell writes that cell and nothing around it.
+    fn table_of(rows: &[(&str, &str, &str)]) -> String {
+        let mut text = String::from("| Stream | Order | Waits for |\n| --- | --- | --- |\n");
+        for (label, order, waits) in rows {
+            text.push_str(&format!("| {label} | {order} | {waits} |\n"));
+        }
+        text
     }
 
     #[test]
@@ -2112,5 +2237,57 @@ A ──→ #4 ──┐
             refusal(CYCLE_OF_THREE).to_string(),
             "the wires return to #1, #2 and #3, so this picture names no step to start first"
         );
+    }
+
+    #[test]
+    fn a_plan_that_names_a_blocker_draws_the_nodes_and_the_edges_of_it() {
+        // The nodes stand in the order the plan writes them: the streams in
+        // the order of the plan, and the chain of a stream inside it. The
+        // edges are the chain of each stream, and one edge into the first step
+        // of a stream for each blocker its cell names. `#94` waits for `#89`
+        // alone, because the steps inside a stream keep their own chain.
+        let graph = graph_of_plan(WAITS_TABLE);
+        assert_eq!(order(&graph), vec![96, 91, 89, 94, 86]);
+        assert_eq!(edges(&graph), vec![(89, 94), (91, 89), (96, 89), (96, 91)]);
+    }
+
+    #[test]
+    fn the_three_written_forms_of_one_plan_give_one_graph() {
+        // A reader writes the plan as a table, as a record for each stream, or
+        // as the box table a terminal draws. The plan is the same plan, so the
+        // graph is the same graph.
+        for form in [WAITS_RECORDS, WAITS_BOX_TABLE] {
+            assert_eq!(
+                order(&graph_of_plan(form)),
+                order(&graph_of_plan(WAITS_TABLE))
+            );
+            assert_eq!(
+                edges(&graph_of_plan(form)),
+                edges(&graph_of_plan(WAITS_TABLE))
+            );
+        }
+    }
+
+    #[test]
+    fn a_number_that_stands_in_two_streams_of_a_plan_is_one_node() {
+        // Two streams that name the same issue join there, as they do in a
+        // picture. The node carries the edges of both places, and it carries
+        // each of them once: the chain of S1 and the cell of S2 both say that
+        // `#1` comes before `#2`, and a list that named it twice would tell a
+        // reader to wait for it twice.
+        let graph = graph_of_plan(&table_of(&[("S1", "#1 → #2", ""), ("S2", "#2 → #3", "#1")]));
+        assert_eq!(nodes(&graph), vec![1, 2, 3]);
+        assert_eq!(edges(&graph), vec![(1, 2), (2, 3)]);
+    }
+
+    #[test]
+    fn a_blocker_that_stands_in_no_order_field_is_a_node_of_its_own() {
+        // A blocker the repository does not have must reach the rows and turn
+        // the run red, and a row of the answer is the only place that says so.
+        // So the number is a node, and the one query names it.
+        let graph = graph_of_plan(&table_of(&[("S1", "#91", "#96")]));
+        assert_eq!(nodes(&graph), vec![91, 96]);
+        assert_eq!(edges(&graph), vec![(96, 91)]);
+        assert_eq!(named(&graph), vec![91, 96]);
     }
 }
