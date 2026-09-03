@@ -19,9 +19,11 @@
 //! [`textfit::truncate_to_budget`], which gives an empty title rather than a
 //! marker that is itself one column too wide.
 //!
-//! A summary line of a plan is the one line that may wrap, and only in a
-//! window too narrow to hold the shortest label of a stream beside the answer.
-//! See [`summary`].
+//! Two lines may wrap, and each of them only in a window too narrow to hold
+//! what the reader came for. A summary line of a plan wraps in a window too
+//! narrow to hold the shortest label of a stream beside the answer: see
+//! [`summary`]. A row of a picture wraps in a window too narrow to hold the
+//! column that says what that row waits for.
 //!
 //! # A plan is one block for each stream
 //!
@@ -29,12 +31,28 @@
 //! block for each of them. A block carries no answer of its own: the summary
 //! under the last block names the issue to start in every stream, so the
 //! reader reads the answers together and picks the stream they want.
+//!
+//! # A picture is one block with one column more
+//!
+//! A picture joins two streams, so the row over a row is not the work that row
+//! waits for. [`render_graph`] paints one block with a last column that names
+//! that work, and the answer under it names one command for each step somebody
+//! can start now.
+//!
+//! That column takes its columns out of the window before the title does. It
+//! is the one thing a reader of a blocked row came for, and a title is text
+//! the reader can already read in the picture they pasted. So the title is cut
+//! to what the column leaves, and the row still fits the window.
+//!
+//! A window that leaves no columns for the column itself is thus the one place
+//! such a row runs past the edge. A row that dropped the column instead would
+//! answer nothing at a width nobody reads at.
 
 use colored::{ColoredString, Colorize};
 use textfit::{pad_right, truncate_to_budget};
 use unicode_width::UnicodeWidthStr;
 
-use crate::chain::IssueNumber;
+use crate::chain::{list, IssueNumber};
 use crate::report::{Entry, Report, Status};
 use crate::StartCommand;
 
@@ -51,6 +69,27 @@ const MARK_MISSING: char = '?';
 
 /// The columns between the number and the title.
 const COLUMN_GAP: usize = 2;
+
+/// The words that open the last column of a row of a picture.
+const WAITS_FOR: &str = "waits for ";
+
+/// What stands between two numbers of that column.
+///
+/// A comma, and not the `and` of [`list`], because the column is a list and a
+/// sentence stands in a note.
+const NUMBER_SEPARATOR: &str = ", ";
+
+/// The last column of a row of one line of work.
+///
+/// A chain and a stream write no such column: the row above a row is the work
+/// it waits for, so the reader reads the line above it and needs no list.
+const NO_WAITS: &str = "";
+
+/// The columns a row of one line of work pads its title to.
+///
+/// Nothing stands after the title of such a row, so the title is padded to
+/// nothing and the row ends where the title ends.
+const NO_TITLE_WIDTH: usize = 0;
 
 /// The columns the mark of a row occupies. Every mark this module writes is
 /// one column wide.
@@ -80,6 +119,23 @@ const EVERY_ISSUE_CLOSED: &str = "every issue is closed";
 /// read.
 const NO_ISSUE_OPEN: &str = "no issue is open";
 
+/// The answer of a picture where every step is finished.
+const GRAPH_CLOSED: &str = "Every issue in the graph is closed. Nothing to start.";
+
+/// The answer of a picture where nothing is open and something could not be
+/// read.
+const GRAPH_NOT_OPEN: &str = "No issue in the graph is open.";
+
+/// The answer of a picture that holds an open step and no step to start.
+///
+/// Every open step of such a picture waits for work that is missing or
+/// dropped. The sentence says so, because a silent "nothing to start" reads as
+/// "the plan is done", which is the opposite of the truth.
+const GRAPH_NOT_READY: &str = concat!(
+    "No issue in the graph is ready. ",
+    "Every open issue waits for work that is not finished.",
+);
+
 /// Paint the chain, the notes it earns, and the answer.
 ///
 /// `repo` names the repository the states came from, and appears only in the
@@ -102,7 +158,16 @@ pub fn render(report: &Report, repo: &str, width: usize, start: &StartCommand) -
     let mut lines: Vec<String> = entries
         .iter()
         .enumerate()
-        .map(|(position, entry)| row(entry, report.next() == Some(position), number_width, width))
+        .map(|(position, entry)| {
+            row(
+                entry,
+                report.is_ready(position),
+                number_width,
+                width,
+                NO_WAITS,
+                NO_TITLE_WIDTH,
+            )
+        })
         .collect();
 
     lines.push(String::new());
@@ -152,8 +217,33 @@ fn style(status: Status, is_next: bool) -> Style {
     }
 }
 
-/// One row: the mark, the number, and as much of the title as the width
-/// holds.
+/// The columns a row spends before its title: the mark, the space after it,
+/// the number column, and the gap after that.
+///
+/// A block that measures its titles asks the same question a row asks, so both
+/// of them ask it here. Two answers to it would let the titles of a block and
+/// the rows of that block part company.
+fn title_start(number_width: usize) -> usize {
+    MARK_WIDTH + 1 + number_width + COLUMN_GAP
+}
+
+/// The title a row writes, cut to `budget` columns.
+///
+/// A row whose number names no issue writes [`MISSING_TITLE`], because a row
+/// that carried no title there would say nothing about the number beside it.
+/// The cut lives here and not at each call, so a block that measures its
+/// titles measures the same text its rows write.
+fn fitted_title(entry: &Entry, budget: usize) -> String {
+    let title = if entry.status == Status::Missing {
+        MISSING_TITLE
+    } else {
+        entry.title.as_str()
+    };
+    truncate_to_budget(title, budget)
+}
+
+/// One row: the mark, the number, as much of the title as the width holds, and
+/// what the step waits for.
 ///
 /// A row that has no columns left for a title ends at the number, rather than
 /// in the spaces that would have stood before one.
@@ -161,29 +251,49 @@ fn style(status: Status, is_next: bool) -> Style {
 /// The number a row writes is [`Entry::label`], so a step of a plan that names
 /// a pull request and the issue it closes writes both. The width of the column
 /// comes out of the same call, and the two can never part company.
-fn row(entry: &Entry, is_next: bool, number_width: usize, width: usize) -> String {
+///
+/// `waits` is the text of the last column, and `title_width` is the columns
+/// the title is padded to so that column lines up. One line of work waits for
+/// the row above it, so a chain and a stream pass an empty text and no width,
+/// and the row then ends at its title. Two shapes of input read one function
+/// here, because two functions that paint one row drift apart.
+///
+/// `width` is the columns the mark, the number, and the title have. The caller
+/// takes the columns of the last column out of the window first, so a row that
+/// names what it waits for still fits the window.
+fn row(
+    entry: &Entry,
+    is_next: bool,
+    number_width: usize,
+    width: usize,
+    waits: &str,
+    title_width: usize,
+) -> String {
     let style = style(entry.status, is_next);
     let number = entry.label();
-    let mark = style.mark.to_string();
+    let mark = (style.paint_mark)(&style.mark.to_string());
 
-    let spent = MARK_WIDTH + 1 + number_width + COLUMN_GAP;
-    let title = if entry.status == Status::Missing {
-        MISSING_TITLE
-    } else {
-        entry.title.as_str()
-    };
-    let title = truncate_to_budget(title, width.saturating_sub(spent));
+    let title = fitted_title(entry, width.saturating_sub(title_start(number_width)));
 
-    let mark = (style.paint_mark)(&mark);
-    if title.is_empty() {
+    if title.is_empty() && waits.is_empty() {
         return format!("{mark} {}", (style.paint_text)(&number));
     }
-    let number = pad_right(&number, number_width);
+    let number = (style.paint_text)(&pad_right(&number, number_width));
+    let gap = " ".repeat(COLUMN_GAP);
+    if waits.is_empty() {
+        return format!("{mark} {number}{gap}{}", (style.paint_text)(&title));
+    }
+    if title.is_empty() {
+        // The window holds no columns for a title, so the gap after the number
+        // is the one gap of the row and the reader still reads what the step
+        // waits for.
+        return format!("{mark} {number}{gap}{}", waits.dimmed());
+    }
+    let pad = " ".repeat(title_width.saturating_sub(UnicodeWidthStr::width(title.as_str())));
     format!(
-        "{mark} {}{}{}",
-        (style.paint_text)(&number),
-        " ".repeat(COLUMN_GAP),
-        (style.paint_text)(&title)
+        "{mark} {number}{gap}{}{pad}{gap}{}",
+        (style.paint_text)(&title),
+        waits.dimmed()
     )
 }
 
@@ -267,13 +377,134 @@ fn answer(report: &Report, start: &StartCommand) -> String {
             "No issue in the chain is open.".dimmed().to_string()
         };
     };
+    start_line(entry.number, start)
+}
+
+/// The sentence that names one issue to start, and the command that starts it.
+///
+/// A chain names one such issue, and a picture names one for each stream that
+/// is ready. Both write this sentence, so a reader who learned it on a chain
+/// reads the answer of a picture without learning a second one.
+fn start_line(number: IssueNumber, start: &StartCommand) -> String {
     format!(
         "Start {} next with '{}'",
-        entry.number.to_string().bold(),
-        format!("{} {}", start.as_str(), entry.number.get())
-            .cyan()
-            .bold()
+        number.to_string().bold(),
+        command(start, number).cyan().bold()
     )
+}
+
+/// Paint a plan drawn as a picture: the rows, the notes they earn, and the
+/// answer.
+///
+/// `repo`, `width`, and `start` mean what they mean in [`render`].
+///
+/// A picture names at least two steps, because a net that joins fewer of them
+/// claims no text. So this function paints no empty block, and the rows always
+/// stand over the answer.
+#[must_use]
+pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartCommand) -> String {
+    let entries = report.entries();
+    let number_width = entries
+        .iter()
+        .map(|entry| UnicodeWidthStr::width(entry.label().as_str()))
+        .max()
+        .unwrap_or(0);
+
+    let waits: Vec<String> = (0..entries.len())
+        .map(|position| waits_text(report.waits_for(position)))
+        .collect();
+
+    // The last column takes its columns out of the window first, and the
+    // titles are then cut to what is left. A block whose rows all wait for
+    // nothing keeps the whole window, gap and all.
+    let waits_width = waits
+        .iter()
+        .map(|text| UnicodeWidthStr::width(text.as_str()))
+        .max()
+        .unwrap_or(0);
+    let row_width = if waits_width == 0 {
+        width
+    } else {
+        width.saturating_sub(COLUMN_GAP + waits_width)
+    };
+
+    let budget = row_width.saturating_sub(title_start(number_width));
+    let title_width = entries
+        .iter()
+        .map(|entry| UnicodeWidthStr::width(fitted_title(entry, budget).as_str()))
+        .max()
+        .unwrap_or(0);
+
+    let mut lines: Vec<String> = entries
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| {
+            row(
+                entry,
+                report.is_ready(position),
+                number_width,
+                row_width,
+                &waits[position],
+                title_width,
+            )
+        })
+        .collect();
+
+    lines.push(String::new());
+    lines.extend(notes(report, repo));
+    lines.extend(graph_answer(report, start));
+    lines.join("\n")
+}
+
+/// The last column of one row: the numbers the step waits for.
+///
+/// A step that waits for nothing gives an empty text, and the row then ends at
+/// its title. Every other step gives `waits for #247, #248`, which is the
+/// question a reader of a blocked row asks and the only place the answer of a
+/// picture holds it.
+fn waits_text(numbers: &[IssueNumber]) -> String {
+    if numbers.is_empty() {
+        return String::new();
+    }
+    let written: Vec<String> = numbers.iter().map(ToString::to_string).collect();
+    format!("{WAITS_FOR}{}", written.join(NUMBER_SEPARATOR))
+}
+
+/// The answer of a picture: one line for each step somebody can start now.
+///
+/// The lines stand in the order of the rows, so a reader who read the rows
+/// reads the answers in the same order and finds the row of each of them.
+fn graph_answer(report: &Report, start: &StartCommand) -> Vec<String> {
+    let ready: Vec<String> = report
+        .entries()
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| report.is_ready(*position))
+        .map(|(_, entry)| start_line(entry.number, start))
+        .collect();
+    if ready.is_empty() {
+        return vec![nothing_to_start(report)];
+    }
+    ready
+}
+
+/// What the answer of a picture says when no step of it is ready.
+///
+/// A picture with every step finished is a plan somebody finished, and the
+/// answer says so. A picture that still holds an open step says why nobody
+/// starts it, because every one of those steps waits for work that is missing
+/// or dropped. A picture with nothing open and a step nobody could read is not
+/// finished, and saying it is would be a guess about the number nobody could
+/// read.
+fn nothing_to_start(report: &Report) -> String {
+    let entries = report.entries();
+    if entries.iter().all(|entry| entry.status.is_finished()) {
+        return GRAPH_CLOSED.dimmed().to_string();
+    }
+    if entries.iter().any(|entry| entry.status.is_open()) {
+        return GRAPH_NOT_READY.dimmed().to_string();
+    }
+    GRAPH_NOT_OPEN.dimmed().to_string()
 }
 
 /// One stream of a plan, painted as one block.
@@ -343,9 +574,11 @@ fn block(report: &Report, repo: &str, width: usize) -> Vec<String> {
         .map(|(position, entry)| {
             indent(&row(
                 entry,
-                report.next() == Some(position),
+                report.is_ready(position),
                 number_width,
                 row_width,
+                NO_WAITS,
+                NO_TITLE_WIDTH,
             ))
         })
         .collect();
@@ -492,24 +725,33 @@ fn summary(streams: &[StreamReport], width: usize, start: &StartCommand) -> Vec<
         .collect()
 }
 
-/// Write a list of numbers the way a sentence reads one.
-fn list(numbers: &[IssueNumber]) -> String {
-    let written: Vec<String> = numbers.iter().map(ToString::to_string).collect();
-    match written.split_last() {
-        None => String::new(),
-        Some((last, [])) => last.clone(),
-        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use crate::report::Closes;
+    use crate::report::{Closes, States};
 
     /// The repository the test states come from.
     const REPO: &str = "timmattison/tools";
+
+    /// The paste of issue #418: two streams that join.
+    ///
+    /// A picture, and not a list of entries, because the test then says what a
+    /// reader typed. The graph reads the steps in the order 242, 247, 246,
+    /// 248, 249, which keeps each stream of the picture together.
+    const PASTE: &str = "\
+#242 ──→ #247 ──┐
+                ├──→ #249  (gallery)
+#246 ──→ #248 ──┘";
+
+    /// What GitHub says about the paste when every issue of it is open.
+    const ALL_OPEN: &[(u64, Status, &str)] = &[
+        (242, Status::Open, "Read the picture"),
+        (247, Status::Open, "Answer the picture"),
+        (246, Status::Open, "Read the table"),
+        (248, Status::Open, "Answer the table"),
+        (249, Status::Open, "Paint the gallery"),
+    ];
 
     fn entry(number: u64, status: Status, title: &str) -> Entry {
         Entry {
@@ -1116,6 +1358,422 @@ mod tests {
         assert!(
             testcolor::strip_ansi(&painted).starts_with("S1 gitscratch\n  ✓ #344  First thing\n"),
             "the paint comes back out, in {painted:?}"
+        );
+    }
+
+    /// The report of the picture `text`, with what GitHub says about each of
+    /// the numbers `answers` names.
+    ///
+    /// The test builds the report out of a real picture, so it says what a
+    /// reader typed and what GitHub answered. A number `answers` does not name
+    /// is a number the repository does not have.
+    fn picture(text: &str, answers: &[(u64, Status, &str)]) -> Report {
+        let graph = crate::graph::read(text)
+            .expect("the text draws a graph")
+            .expect("the picture reads");
+        let states = States::of(
+            answers
+                .iter()
+                .map(|&(number, status, title)| entry(number, status, title))
+                .collect(),
+        );
+        Report::of_graph(&graph, &states)
+    }
+
+    /// Paint the picture, and take the color back out. See [`glyphs`].
+    fn graph_glyphs(report: &Report, width: usize) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
+            render_graph(report, REPO, width, &StartCommand::new(None))
+        }))
+    }
+
+    /// The row of the step `number` in a painted block.
+    ///
+    /// A row writes its own number after the mark, and the numbers it waits
+    /// for at the end. So the search reads the head of the line, and it never
+    /// finds a row that names the number in its last column.
+    fn row_of(block: &str, number: u64) -> String {
+        let number = format!("#{number}");
+        block
+            .lines()
+            .find(|line| line.split_whitespace().nth(1) == Some(number.as_str()))
+            .expect("the block holds a row for the number")
+            .to_string()
+    }
+
+    #[test]
+    fn a_blocked_row_names_every_step_it_waits_for() {
+        // Both steps before `#249` are open. A row that named the first of
+        // them would send somebody to `#247` and hide `#248`, so the row names
+        // both, in the order the picture holds them.
+        let block = graph_glyphs(&picture(PASTE, ALL_OPEN), 80);
+        let row = row_of(&block, 249);
+        assert!(
+            row.ends_with("waits for #247, #248"),
+            "the row names each step it waits for, in {row:?}"
+        );
+        assert!(
+            row.contains("Paint the gallery"),
+            "the row keeps its title beside the work it waits for, in {row:?}"
+        );
+    }
+
+    #[test]
+    fn a_picture_whose_every_step_is_finished_names_no_command() {
+        // Nothing of this picture is left to do, and the answer says so of the
+        // picture the reader pasted rather than of a chain they did not write.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Done, "Read the picture"),
+                    (247, Status::Done, "Answer the picture"),
+                    (246, Status::Done, "Read the table"),
+                    (248, Status::Dropped, "Answer the table"),
+                    (249, Status::Done, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        assert!(
+            block.ends_with("Every issue in the graph is closed. Nothing to start."),
+            "the answer names the shape the reader pasted, in {block:?}"
+        );
+        assert!(
+            !block.contains("Start #"),
+            "a picture with nothing left to do names no command, in {block:?}"
+        );
+    }
+
+    /// The numbers of the rows of a painted block, in the order they print.
+    ///
+    /// The rows are the lines over the blank line, and a row writes its own
+    /// number after the mark.
+    fn rows_of(block: &str) -> Vec<String> {
+        block
+            .lines()
+            .take_while(|line| !line.is_empty())
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_work_a_row_waits_for_is_the_quiet_half_of_that_row() {
+        // The title is what a reader reads down the block, so the last column
+        // is dimmed and the title stays the loud half. Every other test here
+        // strips the paint, and this one reads it.
+        let painted = testcolor::with_forced_ansi(|| {
+            render_graph(
+                &picture(PASTE, ALL_OPEN),
+                REPO,
+                80,
+                &StartCommand::new(None),
+            )
+        });
+        assert!(
+            painted.contains("\u{1b}[2mwaits for #242\u{1b}[0m"),
+            "the last column is dimmed, in {painted:?}"
+        );
+        assert!(
+            testcolor::strip_ansi(&painted).contains("waits for #242"),
+            "the paint comes back out, in {painted:?}"
+        );
+    }
+
+    #[test]
+    fn a_row_for_each_step_of_a_picture_and_one_answer_for_each_stream() {
+        assert_eq!(
+            graph_glyphs(&picture(PASTE, ALL_OPEN), 80),
+            concat!(
+                "→ #242  Read the picture\n",
+                "· #247  Answer the picture  waits for #242\n",
+                "→ #246  Read the table\n",
+                "· #248  Answer the table    waits for #246\n",
+                "· #249  Paint the gallery   waits for #247, #248\n",
+                "\n",
+                "Start #242 next with 'si 242'\n",
+                "Start #246 next with 'si 246'",
+            )
+        );
+    }
+
+    #[test]
+    fn a_step_that_is_finished_is_no_reason_for_the_step_after_it_to_wait() {
+        // The top stream is finished, so the bottom stream is the only one to
+        // start and the join waits for the one step of it that is left.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Done, "Read the picture"),
+                    (247, Status::Done, "Answer the picture"),
+                    (246, Status::Open, "Read the table"),
+                    (248, Status::Open, "Answer the table"),
+                    (249, Status::Open, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        let row = row_of(&block, 249);
+        assert!(
+            row.ends_with("waits for #248"),
+            "the row names the work that is left and not the work that is done, in {row:?}"
+        );
+        assert!(
+            block.ends_with("Start #246 next with 'si 246'"),
+            "the stream that is finished starts nothing, in {block:?}"
+        );
+        assert!(
+            !block.contains("Start #242"),
+            "a finished step is no answer, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn a_ready_row_and_a_finished_row_end_at_their_titles() {
+        // A row that waits for nothing writes no last column, and it ends at
+        // its title rather than in the spaces that would stand before one.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Done, "Read the picture"),
+                    (247, Status::Done, "Answer the picture"),
+                    (246, Status::Open, "Read the table"),
+                    (248, Status::Open, "Answer the table"),
+                    (249, Status::Open, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        assert_eq!(row_of(&block, 242), "✓ #242  Read the picture");
+        assert_eq!(row_of(&block, 246), "→ #246  Read the table");
+        for line in block.lines() {
+            assert!(
+                !line.ends_with(' '),
+                "no line of the block ends in a space, in {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rows_of_a_picture_keep_each_stream_together() {
+        // The rows stand in the order the graph holds them, which is a
+        // topological order with a tie going to the text. So the top stream of
+        // the paste prints before the bottom one, and a reader reads the
+        // streams the way they drew them.
+        let block = graph_glyphs(&picture(PASTE, ALL_OPEN), 80);
+        assert_eq!(
+            rows_of(&block),
+            vec!["#242", "#247", "#246", "#248", "#249"]
+        );
+    }
+
+    #[test]
+    fn a_number_the_repository_does_not_have_earns_a_note_and_blocks_the_step_after_it() {
+        // GitHub answered for every number but `#247`. Nothing is known about
+        // a missing step, so it is not finished and `#249` waits for it. The
+        // note under the rows says why nobody can start that work.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Done, "Read the picture"),
+                    (246, Status::Done, "Read the table"),
+                    (248, Status::Done, "Answer the table"),
+                    (249, Status::Open, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        assert_eq!(row_of(&block, 247), "? #247  (no such issue)");
+        assert!(
+            block.contains("#247 is not in timmattison/tools.\n"),
+            "the note names the number the repository does not have, in {block:?}"
+        );
+        let row = row_of(&block, 249);
+        assert!(
+            row.ends_with("waits for #247"),
+            "the row of the step behind it says so, in {row:?}"
+        );
+    }
+
+    #[test]
+    fn a_picture_with_nothing_open_and_a_missing_number_is_not_called_closed() {
+        // Nothing is open and one number is not an issue at all, so the
+        // picture is not finished. Saying it is would be a guess about the
+        // number nobody could read.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Done, "Read the picture"),
+                    (247, Status::Done, "Answer the picture"),
+                    (246, Status::Done, "Read the table"),
+                    (248, Status::Done, "Answer the table"),
+                ],
+            ),
+            80,
+        );
+        assert!(
+            block.ends_with("No issue in the graph is open."),
+            "the answer does not claim the picture is finished, in {block:?}"
+        );
+        assert!(
+            block.contains("#249 is not in timmattison/tools.\n"),
+            "the note names the number the repository does not have, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn work_closed_out_of_order_in_a_picture_earns_the_note_a_chain_earns() {
+        // `#242` is open and every other step is done, so `#247` is closed over
+        // the step before it and `#249` is closed over a step two hops back.
+        // A picture asks that question of every step the wires reach, and it
+        // writes the answer in the words a chain writes.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Open, "Read the picture"),
+                    (247, Status::Done, "Answer the picture"),
+                    (246, Status::Done, "Read the table"),
+                    (248, Status::Done, "Answer the table"),
+                    (249, Status::Done, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        assert!(
+            block.contains("#247 and #249 are already closed, out of order.\n"),
+            "the note names each step somebody closed early, in {block:?}"
+        );
+        assert!(
+            block.ends_with("Start #242 next with 'si 242'"),
+            "the answer still stands last, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn a_wide_title_of_a_picture_is_cut_by_columns_and_not_by_characters() {
+        // A Japanese character takes two columns and one character. A row that
+        // counted characters would run two columns past the window for each
+        // one of them, and the row would wrap.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (242, Status::Open, "Read the picture"),
+                    (247, Status::Open, "Answer the picture"),
+                    (246, Status::Open, "Read the table"),
+                    (248, Status::Open, "Answer the table"),
+                    (249, Status::Open, "日本語のタイトルはとても長い"),
+                ],
+            ),
+            40,
+        );
+        let row = row_of(&block, 249);
+        assert!(
+            row.contains("日本語の…"),
+            "the title is cut at a column and at a character, in {row:?}"
+        );
+        for line in block.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= 40,
+                "no line is wider than the window, in {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_picture_with_an_open_step_and_nothing_ready_says_why() {
+        // GitHub answered for neither of the two steps that start the streams,
+        // so nothing is known about them and neither of them is finished. The
+        // three steps that are open each wait for one of them. A silent
+        // "nothing to start" reads as "the plan is done", which is the
+        // opposite of the truth.
+        let block = graph_glyphs(
+            &picture(
+                PASTE,
+                &[
+                    (247, Status::Open, "Answer the picture"),
+                    (248, Status::Open, "Answer the table"),
+                    (249, Status::Open, "Paint the gallery"),
+                ],
+            ),
+            80,
+        );
+        assert!(
+            block.ends_with(concat!(
+                "No issue in the graph is ready. ",
+                "Every open issue waits for work that is not finished.",
+            )),
+            "the answer says why nobody starts anything, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn the_work_each_row_waits_for_stands_in_one_column() {
+        // The titles of a block are of different lengths, and a column that
+        // opened after each title would step left and right down the block.
+        // The reader then reads the column as prose and not as a column.
+        let block = graph_glyphs(&picture(PASTE, ALL_OPEN), 80);
+        let columns: Vec<usize> = block
+            .lines()
+            .filter_map(|line| line.split_once(WAITS_FOR))
+            .map(|(head, _)| UnicodeWidthStr::width(head))
+            .collect();
+        assert_eq!(columns.len(), 3, "three rows wait for work, in {block:?}");
+        assert!(
+            columns.iter().all(|column| *column == columns[0]),
+            "the column opens at one place in every row, in {block:?}"
+        );
+    }
+
+    #[test]
+    fn a_row_of_a_picture_never_wraps_whatever_the_window_holds() {
+        // The last column takes its columns out of the window first, and the
+        // title is cut to what is left. A row that wrapped would cost two
+        // lines, and the second of them would carry no number.
+        let report = picture(PASTE, ALL_OPEN);
+        for width in [80, 40, 30] {
+            let block = graph_glyphs(&report, width);
+            for line in block.lines() {
+                assert!(
+                    UnicodeWidthStr::width(line) <= width,
+                    "no line is wider than the window of {width}, in {line:?}"
+                );
+            }
+        }
+
+        assert!(
+            row_of(&graph_glyphs(&report, 80), 249).contains("Paint the gallery"),
+            "a window wide enough holds the whole title beside the column"
+        );
+        assert!(
+            row_of(&graph_glyphs(&report, 40), 249).contains("Paint the…"),
+            "a narrower window cuts the title and keeps the column"
+        );
+        assert_eq!(
+            row_of(&graph_glyphs(&report, 30), 249),
+            "· #249  waits for #247, #248",
+            "a window with no columns for a title keeps the number and the column"
+        );
+    }
+
+    #[test]
+    fn the_answer_of_a_picture_names_a_command_for_every_step_that_is_ready() {
+        // Two streams that join are two people who work at the same time, and
+        // an answer that names one issue loses the reason somebody drew the
+        // picture. Nothing of this paste is finished, so both streams start.
+        let block = graph_glyphs(&picture(PASTE, ALL_OPEN), 80);
+        assert!(
+            block.ends_with(concat!(
+                "Start #242 next with 'si 242'\n",
+                "Start #246 next with 'si 246'",
+            )),
+            "the answer names one command for each stream, in {block:?}"
         );
     }
 }

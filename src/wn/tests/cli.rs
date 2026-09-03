@@ -195,6 +195,50 @@ const BOX_ANSWER: &str = concat!(
     "  D — manifest      → #6   si 6\n",
 );
 
+/// A plan drawn as a picture: two streams that join.
+///
+/// The paste of issue #418. A picture says the one thing no chain and no table
+/// of a plan says: two streams that run at the same time, and the step they
+/// both reach.
+const PICTURE: &str = "\
+#242 ──→ #247 ──┐
+                ├──→ #249  (gallery)
+#246 ──→ #248 ──┘
+";
+
+/// What GitHub says about every number of [`PICTURE`] when each of them is
+/// open.
+const PICTURE_ISSUES: &str = r#"{"data":{"repository":{
+"i242":{"__typename":"Issue","number":242,"title":"Read the picture","state":"OPEN","stateReason":null},
+"i247":{"__typename":"Issue","number":247,"title":"Answer the picture","state":"OPEN","stateReason":null},
+"i246":{"__typename":"Issue","number":246,"title":"Read the table","state":"OPEN","stateReason":null},
+"i248":{"__typename":"Issue","number":248,"title":"Answer the table","state":"OPEN","stateReason":null},
+"i249":{"__typename":"Issue","number":249,"title":"Paint the gallery","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`PICTURE`] earns while every issue of it is open.
+///
+/// One row for each step, the work each blocked step waits for, and one start
+/// line for each stream that is ready.
+const PICTURE_ANSWER: &str = concat!(
+    "→ #242  Read the picture\n",
+    "· #247  Answer the picture  waits for #242\n",
+    "→ #246  Read the table\n",
+    "· #248  Answer the table    waits for #246\n",
+    "· #249  Paint the gallery   waits for #247, #248\n",
+    "\n",
+    "Start #242 next with 'si 242'\n",
+    "Start #246 next with 'si 246'\n",
+);
+
+/// The line that opens the summary of a plan, and thus the mark of an answer
+/// the plan reader wrote.
+const SUMMARY_HEADING: &str = "Take one from each stream:";
+
+/// The words that open the last column of a row of a picture, and thus the
+/// mark of an answer the picture reader wrote.
+const WAITS_FOR: &str = "waits for ";
+
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
     dir: tempfile::TempDir,
@@ -280,7 +324,22 @@ fn run_with_start(
 /// included, so a child of this helper touches the clipboard of the machine no
 /// more than any other child of this file does.
 fn run_with_stdin(gh: &FakeGh, args: &[&str], columns: &str, text: &str) -> Output {
-    let mut child = wn(gh, args, columns, false, None)
+    run_with_stdin_and_start(gh, args, columns, text, None)
+}
+
+/// The same, with [`START_COMMAND_ENV`] set to `start`.
+///
+/// `None` leaves the variable out of the environment, which is the state of a
+/// machine that never set it. One helper opens the pipe for both, so the two
+/// can never build a different environment.
+fn run_with_stdin_and_start(
+    gh: &FakeGh,
+    args: &[&str],
+    columns: &str,
+    text: &str,
+    start: Option<&str>,
+) -> Output {
+    let mut child = wn(gh, args, columns, false, start)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1021,4 +1080,239 @@ fn refuses_a_row_whose_cell_count_the_header_does_not_have() {
         stderr(&output)
     );
     assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn answers_a_plan_drawn_as_a_picture_from_a_pipe() {
+    // The headline of the feature: a picture pasted into a pipe gives one row
+    // for each step, the work each blocked step waits for, and one start line
+    // for each stream that is ready. Two streams that join are two people who
+    // work at the same time, and an answer that named one issue loses that.
+    // No flag says the text is a picture — the shape of the text does.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PICTURE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PICTURE_ANSWER);
+}
+
+#[test]
+fn a_stream_that_is_finished_leaves_the_other_stream_as_the_one_answer() {
+    // The top stream is closed, so one person is free and the other one is
+    // still on `#246`. The answer names that one issue, and the row of `#249`
+    // names the one step of the bottom stream it still waits for.
+    let body = r#"{"data":{"repository":{
+"i242":{"__typename":"Issue","number":242,"title":"Read the picture","state":"CLOSED","stateReason":"COMPLETED"},
+"i247":{"__typename":"Issue","number":247,"title":"Answer the picture","state":"CLOSED","stateReason":"COMPLETED"},
+"i246":{"__typename":"Issue","number":246,"title":"Read the table","state":"OPEN","stateReason":null},
+"i248":{"__typename":"Issue","number":248,"title":"Answer the table","state":"OPEN","stateReason":null},
+"i249":{"__typename":"Issue","number":249,"title":"Paint the gallery","state":"OPEN","stateReason":null}
+}}}"#;
+    let gh = FakeGh::new(body);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PICTURE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "✓ #242  Read the picture\n",
+            "✓ #247  Answer the picture\n",
+            "→ #246  Read the table\n",
+            "· #248  Answer the table    waits for #246\n",
+            "· #249  Paint the gallery   waits for #248\n",
+            "\n",
+            "Start #246 next with 'si 246'\n",
+        )
+    );
+}
+
+#[test]
+fn a_picture_that_names_a_number_the_repository_does_not_have_still_answers() {
+    // The number keeps its row and earns the red note, the rows around it read
+    // as they always did, and the run exits 1. One typo takes down one row of
+    // the picture, and never the whole answer.
+    let body = r#"{"data":{"repository":{
+"i242":{"__typename":"Issue","number":242,"title":"Read the picture","state":"OPEN","stateReason":null},
+"i247":{"__typename":"Issue","number":247,"title":"Answer the picture","state":"OPEN","stateReason":null},
+"i246":{"__typename":"Issue","number":246,"title":"Read the table","state":"OPEN","stateReason":null},
+"i248":{"__typename":"Issue","number":248,"title":"Answer the table","state":"OPEN","stateReason":null},
+"i249":null
+}},"errors":[{"type":"NOT_FOUND","path":["repository","i249"],"message":"Could not resolve to an issue or pull request with the number of 249."}]}"#;
+    let gh = FakeGh::with_status(body, 1);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PICTURE);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a number the repository does not have is a failed run, stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "→ #242  Read the picture\n",
+            "· #247  Answer the picture  waits for #242\n",
+            "→ #246  Read the table\n",
+            "· #248  Answer the table    waits for #246\n",
+            "? #249  (no such issue)\n",
+            "\n",
+            "#249 is not in timmattison/tools.\n",
+            "Start #242 next with 'si 242'\n",
+            "Start #246 next with 'si 246'\n",
+        )
+    );
+}
+
+#[test]
+fn refuses_a_picture_whose_wires_return_to_a_step_before_them() {
+    // The wires run from `#1` to `#2` and back to `#1`, so no step of the
+    // picture starts first. The message names the numbers of the cycle,
+    // because an answer of "nothing is ready" would hide the reason, and the
+    // run could not answer at all.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "\
+┌──→ #1 ──→ #2 ──┐
+│                │
+└────────────────┘
+",
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("the wires return to #1 and #2"),
+        "the error names the numbers of the cycle, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn refuses_a_picture_that_holds_a_leftward_arrowhead() {
+    // A picture drawn from right to left says the opposite order, and a guess
+    // at it sends somebody to the wrong issue. So the run stops and the
+    // message prints the line, which is what the reader must redraw.
+    let line = "#246 ←── #248 ──┘";
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        &format!(
+            "\
+#242 ──→ #247 ──┐
+                ├──→ #249  (gallery)
+{line}
+"
+        ),
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("holds a leftward arrowhead"),
+        "the error says what the picture holds, in {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains(line),
+        "the error prints the line, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn refuses_a_picture_whose_wire_reaches_text_that_is_not_a_step() {
+    // A stream label beside a wire is a plan this form does not carry. The
+    // reader who wrote `A` meant work by it, so the run names the text rather
+    // than dropping the wire and the order it draws.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "\
+A ──→ #4
+#5 ──→ #6 ──┐
+            ├──→ #7
+#8 ──→ #9 ──┘
+",
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("\"A\" stands beside a wire and is not a step"),
+        "the error names the text, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn the_environment_names_the_command_of_every_start_line_of_a_picture() {
+    // A picture names one issue for each stream that is ready, and the reader
+    // who set the variable set it for every one of them. A run that named the
+    // command of the first line alone would leave the second line unusable.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin_and_start(&gh, &["--repo", REPO], "80", PICTURE, Some("start"));
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with(concat!(
+            "Start #242 next with 'start 242'\n",
+            "Start #246 next with 'start 246'\n",
+        )),
+        "the answer names the command of the environment in every line, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_chain_of_two_issues_on_one_line_is_still_a_chain() {
+    // `→` is a wire of a picture, and the net it draws reaches `#277` on its
+    // left and `#278` on its right. Both steps stand on one line, so the
+    // picture claims nothing and the chain reader answers as it always did.
+    // A reader who types a chain must never meet the block of a picture.
+    let gh = FakeGh::new(THREE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", ONE_OPEN_CHAIN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "✓ #277  First thing\n",
+            "→ #278  Second thing\n",
+            "\n",
+            "Start #278 next with 'si 278'\n",
+        )
+    );
+}
+
+#[test]
+fn the_box_drawn_table_of_a_plan_is_still_a_plan() {
+    // The border of that table is one net that touches every cell of it, and
+    // the table stands on many lines. The plan reader is tried first, so the
+    // table keeps its own reader: the answer is one block for each stream
+    // under one summary, and no row of it names work it waits for.
+    let gh = FakeGh::new(BOX_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", BOX_TABLE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains(SUMMARY_HEADING),
+        "the plan reader answered, in {}",
+        stdout(&output)
+    );
+    assert!(
+        !stdout(&output).contains(WAITS_FOR),
+        "no block of a plan carries the column of a picture, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_picture_inside_a_fenced_code_block_reads_the_same_way() {
+    // This is how a reader copies a picture out of an issue: the sentence over
+    // it and the fence around it come with it. A line that holds no wire and
+    // writes no step is prose, so the sentence and the two fences cost
+    // nothing and the answer is the answer of the picture alone.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let pasted = format!("The plan of the gallery:\n\n```\n{PICTURE}```\n");
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &pasted);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PICTURE_ANSWER);
 }

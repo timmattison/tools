@@ -32,6 +32,12 @@ use thiserror::Error;
 /// of this repository are written with, plus the comma and the semicolon that
 /// a hand-typed list falls back on. Whitespace separates as well, and it is
 /// not in the list because [`char::is_whitespace`] already names it.
+///
+/// The three horizontal strokes of the box-drawing block stand here as well.
+/// A picture of one line is a chain, and a reader who draws one draws the
+/// tail of the arrow with the stroke that `graph` reads. Without them the run
+/// `──` reaches this module as one token, and the reader who typed the
+/// clearest chain of all gets a refusal.
 pub(crate) const SEPARATORS: &[char] = &[
     '\u{2192}', // → RIGHTWARDS ARROW
     '\u{27f6}', // ⟶ LONG RIGHTWARDS ARROW
@@ -43,6 +49,9 @@ pub(crate) const SEPARATORS: &[char] = &[
     '|',        // the ASCII spelling of the bar, doubled or not
     '>',        // the head of the ASCII arrow `->`
     '-',        // the tail of the ASCII arrow `->`
+    '\u{2500}', // ─ BOX DRAWINGS LIGHT HORIZONTAL
+    '\u{2501}', // ━ BOX DRAWINGS HEAVY HORIZONTAL
+    '\u{2550}', // ═ BOX DRAWINGS DOUBLE HORIZONTAL
     ',', ';',
 ];
 
@@ -133,6 +142,22 @@ impl fmt::Display for IssueNumber {
     /// Writes the number the way a plan writes it, with the `#`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{HASH}{}", self.0)
+    }
+}
+
+/// Write a list of numbers the way a sentence reads one.
+///
+/// It stands beside [`IssueNumber`], because a list of numbers is the plural of
+/// the one number the type writes with its `#`. Two callers write such a list:
+/// the note of a report that names the issues somebody closed early, and the
+/// message that names the steps of a cycle. One function keeps the two
+/// sentences in one voice.
+pub(crate) fn list(numbers: &[IssueNumber]) -> String {
+    let written: Vec<String> = numbers.iter().map(ToString::to_string).collect();
+    match written.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -246,6 +271,17 @@ mod tests {
         assert_eq!(numbers("1, 2; 3"), vec![1, 2, 3]);
         assert_eq!(numbers("#1#2"), vec![1, 2]);
         assert_eq!(numbers("277→278"), vec![277, 278]);
+    }
+
+    #[test]
+    fn a_chain_drawn_with_the_stroke_of_a_picture_is_a_chain() {
+        // A picture of one line is a chain, and a reader who draws one draws
+        // it with the stroke the picture reader accepts. The tail of that
+        // arrow is a run of one character, so a reader that did not know the
+        // character read the whole run as one token and refused it.
+        assert_eq!(numbers("#1 \u{2500}\u{2500}\u{2192} #2"), vec![1, 2]);
+        assert_eq!(numbers("#1 \u{2501}\u{2501}\u{2192} #2"), vec![1, 2]);
+        assert_eq!(numbers("#1 \u{2550}\u{2550}\u{21d2} #2"), vec![1, 2]);
     }
 
     #[test]

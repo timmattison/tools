@@ -13,9 +13,15 @@
 //! side by side, one for each stream, and `wn` answers the whole page with one
 //! query as well. The shape of the text says which reader takes it, so no flag
 //! and no subcommand stands between the reader and the answer.
+//!
+//! A plan drawn as a picture is the third shape. It says the one thing a chain
+//! and a table cannot: two streams that join. `wn` follows the wires from left
+//! to right and names every issue that is ready, because two streams are two
+//! people who work at the same time.
 
 mod chain;
 mod github;
+mod graph;
 mod input;
 mod plan;
 mod render;
@@ -109,6 +115,10 @@ step to its left. Inside it, only a word carrying the # is a number, a PR in fro
 that number as the work, and every other word is prose. The prose of a group holds a parenthesis \
 as well, so #4 (a note (see the docs)) is one group and the parenthesis that closes it is the \
 last one.\n\n\
+A plan drawn as a picture is a third shape of input. Two streams that join are two people who \
+work at the same time, and no chain and no table says that. `wn` follows the wires from left to \
+right and names every issue that is ready to start now. A picture drawn from right to left is \
+refused, because a guess at the order sends somebody to the wrong issue.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
@@ -184,9 +194,18 @@ fn main() -> ExitCode {
 /// only the input that answers is read, both live in [`input::Sources`].
 ///
 /// The shape of the text says which reader takes it. A page that names a
-/// `Stream` field or an `Order` field is a plan of parallel work, and every
-/// other text is one chain. So a reader pipes or pastes what they have, and no
-/// flag stands between them and the answer.
+/// `Stream` field or an `Order` field is a plan of parallel work, a text whose
+/// wires join steps on more than one line is a plan drawn as a picture, and
+/// every other text is one chain. So a reader pipes or pastes what they have,
+/// and no flag stands between them and the answer.
+///
+/// The picture is read after the plan and before the chain. A box-drawn table
+/// of a plan reaches its own reader first, and a chain that holds an arrow on
+/// one line reaches the chain reader, because a picture claims a text only
+/// when its wires join steps on more than one line: one net that joins two
+/// steps and spans the lines, or two box-drawn nets or more that each join two
+/// steps and stand on lines of their own. [`graph::read`] states the whole
+/// rule.
 ///
 /// The repository is resolved after the text is read, in both paths. A text
 /// nobody can read is a mistake the reader made, and reporting it costs no
@@ -214,6 +233,12 @@ fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Re
         let plan = plan::parse(chain.text()).map_err(|err| chain.blame(err))?;
         let repo = repo_of(cli)?;
         return answer_plan(&plan, &repo, width, start);
+    }
+
+    if let Some(graph) = graph::read(chain.text()) {
+        let graph = graph.map_err(|err| chain.blame(err))?;
+        let repo = repo_of(cli)?;
+        return answer_graph(&graph, &repo, width, start);
     }
 
     let numbers = parse_chain(chain.text()).map_err(|err| chain.blame(err))?;
@@ -281,6 +306,38 @@ fn answer_plan(
             .iter()
             .all(|stream| stream.report.missing().is_empty()),
     ))
+}
+
+/// Ask GitHub about the whole picture, print the rows, and give the status the
+/// run exits with.
+///
+/// One query answers the picture, as one query answers a chain and a plan.
+/// [`graph::Graph::numbers`] gives every number of the picture once, so a step
+/// that stands in two places costs one alias of the query and is reported in
+/// both of them.
+///
+/// The answer names every step somebody can start now, and not one of them.
+/// Two streams that join are two people who work at the same time, which is
+/// the whole reason somebody draws the picture.
+///
+/// # Errors
+///
+/// Fails for the reasons [`github::fetch`] fails: `gh` is not installed, the
+/// repository cannot be read, or GitHub could not answer for one number.
+fn answer_graph(
+    graph: &graph::Graph,
+    repo: &Repo,
+    width: usize,
+    start: &StartCommand,
+) -> Result<ExitCode> {
+    let states = report::States::of(github::fetch(repo, &graph.numbers())?);
+    let report = Report::of_graph(graph, &states);
+    println!(
+        "{}",
+        render::render_graph(&report, &repo.to_string(), width, start)
+    );
+
+    Ok(exit_status(report.missing().is_empty()))
 }
 
 /// The status a run that printed an answer exits with.
