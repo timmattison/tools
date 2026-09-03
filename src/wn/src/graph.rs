@@ -874,4 +874,20 @@ mod tests {
             .expect("the picture names the pull request");
         assert_eq!(work.closes().map(IssueNumber::get), Some(4));
     }
+
+    #[test]
+    fn a_step_that_stands_twice_is_one_node() {
+        // Two streams that name the same issue join there, whether a wire says
+        // so or not. The node carries the edges of both places it stands, and
+        // it carries each of them once: the bus reaches `#2` from two rows,
+        // and `#2` comes before `#4` one time.
+        let graph = graph_of(
+            "\
+#1 ──→ #2 ──┐
+            ├──→ #4
+#3 ──→ #2 ──┘",
+        );
+        assert_eq!(nodes(&graph), vec![1, 2, 3, 4]);
+        assert_eq!(edges(&graph), vec![(1, 2), (2, 4), (3, 2)]);
+    }
 }
