@@ -1071,3 +1071,32 @@ fn answers_a_plan_drawn_as_a_picture_from_a_pipe() {
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), PICTURE_ANSWER);
 }
+
+#[test]
+fn a_stream_that_is_finished_leaves_the_other_stream_as_the_one_answer() {
+    // The top stream is closed, so one person is free and the other one is
+    // still on `#246`. The answer names that one issue, and the row of `#249`
+    // names the one step of the bottom stream it still waits for.
+    let body = r#"{"data":{"repository":{
+"i242":{"__typename":"Issue","number":242,"title":"Read the picture","state":"CLOSED","stateReason":"COMPLETED"},
+"i247":{"__typename":"Issue","number":247,"title":"Answer the picture","state":"CLOSED","stateReason":"COMPLETED"},
+"i246":{"__typename":"Issue","number":246,"title":"Read the table","state":"OPEN","stateReason":null},
+"i248":{"__typename":"Issue","number":248,"title":"Answer the table","state":"OPEN","stateReason":null},
+"i249":{"__typename":"Issue","number":249,"title":"Paint the gallery","state":"OPEN","stateReason":null}
+}}}"#;
+    let gh = FakeGh::new(body);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PICTURE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "✓ #242  Read the picture\n",
+            "✓ #247  Answer the picture\n",
+            "→ #246  Read the table\n",
+            "· #248  Answer the table    waits for #246\n",
+            "· #249  Paint the gallery   waits for #248\n",
+            "\n",
+            "Start #246 next with 'si 246'\n",
+        )
+    );
+}
