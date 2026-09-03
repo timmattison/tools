@@ -23,6 +23,19 @@
 //! two numbers: `PR#344 (#341)` is a pull request that closes an issue. The
 //! step holds both, because the state of the work is the state of the pull
 //! request and the reader still wants to see which issue it finishes.
+//!
+//! A plan writes the same pair the other way round as well: `#4 (in flight,
+//! PR #15)` is the issue `#4`, whose work is the pull request `#15`. So a
+//! group in parentheses annotates the step to its left, and it never opens
+//! one. Inside a group, only a word that carries the `#` is a number, and the
+//! `PR` in front of one marks that number as the work. Every other word is
+//! prose the reader drops, which is what lets `#12 (human)` and `#4 (30-line
+//! window)` each hold one number.
+//!
+//! The prose of a group holds a parenthesis as readily as a word does, so a
+//! group counts its depth: `#4 (a note (see the docs))` is one group and not
+//! two, and the parenthesis that brings the depth to zero is the one that
+//! closes it.
 
 use thiserror::Error;
 
@@ -38,11 +51,17 @@ const HASH: char = '#';
 /// The character that stands between the key of a field and its text.
 const FIELD_COLON: char = ':';
 
-/// The character that stands between two cells of a table.
-const TABLE_BAR: char = '|';
-
-/// The characters a table draws the rule under its header with.
-const DELIMITER_CHARS: &[char] = &['-', ':', ' '];
+/// The characters that stand between two cells of a table.
+///
+/// The ASCII bar, and the two the box-drawing block writes. A row is split on
+/// these and never on a column position: a split by position needs the display
+/// width of every character in front of the column, and an em dash or a
+/// Japanese character inside one cell would then shift every cell after it.
+const TABLE_BARS: &[char] = &[
+    '|',        // the ASCII spelling
+    '\u{2502}', // │ BOX DRAWINGS LIGHT VERTICAL
+    '\u{2503}', // ┃ BOX DRAWINGS HEAVY VERTICAL
+];
 
 /// The character that opens the group of a pair.
 const GROUP_OPEN: char = '(';
@@ -52,19 +71,30 @@ const GROUP_CLOSE: char = ')';
 
 /// The prefix a plan writes before the number of a pull request.
 ///
-/// It carries no meaning for this module, because GitHub numbers a pull
-/// request out of the same series as an issue. It is read and dropped so a
-/// plan written the way a reader reads it is a plan this module reads too.
+/// It marks which number of a pair is the work. GitHub numbers a pull request
+/// out of the same series as an issue, so the mark is the only thing that says
+/// `PR#344 (#341)` and `#4 (in flight, PR #15)` name the work in opposite
+/// places.
 const PULL_REQUEST_PREFIX: &str = "pr";
 
 /// The word a stream with no `Stream` field takes as the first half of its
 /// label. The second half is the place of the stream in the plan.
 const UNNAMED_LABEL: &str = "Stream";
 
-/// The lowest number of characters a line of rule holds.
+/// The lowest number of marks a line of rule holds.
 ///
-/// Two characters are an arrow (`--`) or the start of a word. Three are a rule.
+/// Two marks are an arrow (`--`) or the start of a word. Three are a rule. The
+/// bar of a cell and the space around it are no marks, so they add nothing to
+/// this count.
 const RULE_CHARS: usize = 3;
+
+/// The marks a Markdown divider is drawn with.
+///
+/// The hyphen draws the line, and the colon names the alignment of a column.
+/// A divider carries these two and no other mark of [`is_rule_mark`], which is
+/// what parts it from the `├─────┼─────┤` of a box table and the `+-----+`
+/// of an ASCII one.
+const MARKDOWN_DIVIDER_MARKS: &[char] = &['-', ':'];
 
 /// One piece of work of a stream.
 ///
@@ -187,6 +217,27 @@ pub enum PlanError {
         /// The label of the stream that holds the group.
         stream: Snippet,
         /// The group itself.
+        token: Snippet,
+    },
+    /// A row of a table splits into a cell count the header does not have.
+    #[error("row has {cells} cells, the header has {header}: {line:?}")]
+    RowWidth {
+        /// The number of cells the row splits into.
+        cells: usize,
+        /// The number of columns the header names.
+        header: usize,
+        /// The row itself, as the table writes it.
+        line: Snippet,
+    },
+    /// A group opens and never closes, so where it ends is a guess. A
+    /// parenthesis of the prose inside it closes the group it opened and no
+    /// other, so `#4 (a (b) c` opens a group that never closes.
+    #[error("stream {stream:?}: {token:?} has no closing parenthesis")]
+    UnclosedGroup {
+        /// The label of the stream that holds the group.
+        stream: Snippet,
+        /// The group, from its opening parenthesis to the end of the field,
+        /// with every parenthesis of its prose.
         token: Snippet,
     },
     /// A second group stands on one step, and a step closes one issue.
@@ -374,24 +425,47 @@ fn key_of(line: &str) -> Option<(Key, &str)> {
     Some((key, rest))
 }
 
-/// Is `line` a rule a reader draws between two streams?
+/// Is `line` a rule a reader draws between two streams or two rows?
 ///
-/// A rule carries no field and no prose. Three characters at the least,
+/// One rule for both forms, and one rule for every drawing of a table. It
+/// deletes `┌─┬─┐`, `├─┼─┤`, and `└─┴─┘`, the `+---+` of an ASCII table, the
+/// `| --- |` divider of a Markdown table, and the `|:--- | ---:|` divider that
+/// carries an alignment colon. A divider that stayed would be a stream whose
+/// `Order` field is `---:`.
+///
+/// A rule carries no field and no prose: every character of it is a bar, a
+/// space, or a mark of [`is_rule_mark`]. It carries three marks at the least,
 /// because `--` is the tail of an arrow and a rule is a line.
+///
+/// The count leaves the bar and the space out, and that is what parts a rule
+/// from the empty row `|   |   |`. An empty row carries no mark, so it is no
+/// rule. [`table_body`] drops it, and a rule there would end the row above it
+/// and cut a row that wraps in two.
 fn is_rule(line: &str) -> bool {
     let trimmed = line.trim();
-    trimmed.chars().count() >= RULE_CHARS && trimmed.chars().all(is_rule_char)
+    trimmed.chars().all(is_rule_char)
+        && trimmed.chars().filter(|&c| is_rule_mark(c)).count() >= RULE_CHARS
 }
 
-/// Is `c` a character a reader draws a rule with?
+/// Is `c` a character a line of rule carries?
 ///
-/// The box-drawing block holds every line and every corner, and the four marks
-/// beside it are the ones a keyboard writes: the hyphen, the equals sign, the
-/// underscore, and the two dashes a word processor writes for a hyphen.
+/// A mark, the bar of a cell, or a space of any kind — the space a Markdown
+/// divider writes around its cells. The bar and the space draw nothing, so a
+/// line of nothing but those two is no rule.
 fn is_rule_char(c: char) -> bool {
+    is_rule_mark(c) || c.is_whitespace() || TABLE_BARS.contains(&c)
+}
+
+/// Is `c` a mark a reader draws a rule with?
+///
+/// The box-drawing block holds every line and every corner. Beside it stand
+/// the marks a keyboard writes: the hyphen, the equals sign, the underscore,
+/// the two dashes a word processor writes for a hyphen, the `+` of an ASCII
+/// table, and the `:` of an alignment.
+fn is_rule_mark(c: char) -> bool {
     matches!(
         c,
-        '\u{2500}'..='\u{257f}' | '-' | '=' | '_' | '\u{2013}' | '\u{2014}'
+        '\u{2500}'..='\u{257f}' | '-' | '=' | '_' | '+' | ':' | '\u{2013}' | '\u{2014}'
     )
 }
 
@@ -399,9 +473,13 @@ fn is_rule_char(c: char) -> bool {
 ///
 /// Gives the line the body of the table starts on, and the cells of the header
 /// itself. A row that names a `Stream` column or an `Order` column is the
-/// header, because those are the two columns this module reads.
+/// header, because those are the two columns this module reads. The `┌─┬─┐` a
+/// box table opens with is a rule and never a header.
 fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
     text.lines().enumerate().find_map(|(place, line)| {
+        if is_rule(line) {
+            return None;
+        }
         let cells = table_cells(line)?;
         let names_a_column = cells
             .iter()
@@ -412,6 +490,43 @@ fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
 
 /// The streams the body of a table writes.
 ///
+/// # Errors
+///
+/// Gives [`PlanError::NoOrder`] for a table with no `Order` column, the error
+/// of [`table_body`] for the lines under the header, and the errors of
+/// [`stream_of`] for one row of it.
+fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>, PlanError> {
+    let order_at = column_of(header, Key::Order).ok_or(PlanError::NoOrder)?;
+    let stream_at = column_of(header, Key::Stream);
+    let rows = rows_of(&table_body(text, body, header)?, order_at);
+    rows.iter()
+        .enumerate()
+        .map(|(place, row)| {
+            let named = stream_at.and_then(|at| row.get(at)).map(String::as_str);
+            stream_of(named, place, row.get(order_at).map(String::as_str))
+        })
+        .collect()
+}
+
+/// One line of the body of a table.
+///
+/// The rules stay, rather than being stepped over: a rule that stands between
+/// two row lines is where one row ends and the next one starts, and it is the
+/// only mark a table carries that says so for certain. A cell says nothing
+/// about the row it belongs to.
+///
+/// A rule carries the line it was drawn on, because how a rule is drawn says
+/// which table this is. `| --- |` opens a Markdown table and `├─┼─┤` opens a
+/// box one, and [`row_reading`] reads the two apart.
+enum BodyLine<'a> {
+    /// A line a reader draws between two rows, or around the table.
+    Rule(&'a str),
+    /// The cells of one line of a row.
+    Cells(Vec<&'a str>),
+}
+
+/// The lines the body of a table holds, from `body` to the end of the table.
+///
 /// The table ends at the first line that is no row of it, because a report of
 /// parallel work holds more than the stream table. A Housekeeping table and a
 /// table of the work already in flight stand under it, and neither one is more
@@ -419,29 +534,204 @@ fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
 /// of those tables as work, and a row whose cell under the `Order` column
 /// holds a word rather than a number took the whole plan down with it.
 ///
-/// The empty row and the rule under the header are rows of this table, so they
-/// are stepped over rather than taken as the end of it.
+/// A row of nothing but empty cells is dropped, and it ends the table no more
+/// than a rule does.
 ///
 /// # Errors
 ///
-/// Gives [`PlanError::NoOrder`] for a table with no `Order` column, and the
-/// errors of [`stream_of`] for one row of it.
-fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>, PlanError> {
-    let order_at = column_of(header, Key::Order).ok_or(PlanError::NoOrder)?;
-    let stream_at = column_of(header, Key::Stream);
-    let mut streams: Vec<Stream> = Vec::new();
+/// Gives [`PlanError::RowWidth`] for a row whose cell count `header` does not
+/// have.
+fn table_body<'a>(
+    text: &'a str,
+    body: usize,
+    header: &[&str],
+) -> Result<Vec<BodyLine<'a>>, PlanError> {
+    let mut lines: Vec<BodyLine<'a>> = Vec::new();
     for line in text.lines().skip(body) {
+        if is_rule(line) {
+            lines.push(BodyLine::Rule(line));
+            continue;
+        }
         let Some(cells) = table_cells(line) else {
             break;
         };
-        if cells.iter().all(|cell| cell.is_empty()) || is_delimiter(&cells) {
+        if cells.iter().all(|cell| cell.is_empty()) {
             continue;
         }
-        let named = stream_at.and_then(|at| cells.get(at)).copied();
-        let stream = stream_of(named, streams.len(), cells.get(order_at).copied())?;
-        streams.push(stream);
+        // The header names the column count, and a row that splits into
+        // another one puts every cell after its stray bar under the wrong
+        // column. Such a cell is rare, and guessing at it is worse than
+        // refusing it, because the guess reads a note as a chain.
+        if cells.len() != header.len() {
+            return Err(PlanError::RowWidth {
+                cells: cells.len(),
+                header: header.len(),
+                line: Snippet::new(line),
+            });
+        }
+        lines.push(BodyLine::Cells(cells));
     }
-    Ok(streams)
+    Ok(lines)
+}
+
+/// The rows `lines` writes, each one the cells of every line it wraps onto.
+///
+/// [`row_reading`] says which of the three readings tells the rows of this
+/// table apart, and each line of the body is then asked under that one.
+fn rows_of(lines: &[BodyLine], order_at: usize) -> Vec<Vec<String>> {
+    let reading = row_reading(lines);
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut row_is_open = false;
+    for line in lines {
+        let cells = match line {
+            BodyLine::Rule(_) => {
+                row_is_open = false;
+                continue;
+            }
+            BodyLine::Cells(cells) => cells,
+        };
+        let continues = match reading {
+            RowReading::Rules => row_is_open,
+            RowReading::Lines => false,
+            RowReading::Cells => continues_a_row(cells, order_at),
+        };
+        if continues {
+            // A continuation with no row above it continues nothing. The plan
+            // then holds one row fewer, and a plan of no rows at all is the
+            // error [`parse`] gives for a header with nothing under it.
+            if let Some(row) = rows.last_mut() {
+                join_row(row, cells);
+            }
+        } else {
+            rows.push(cells.iter().copied().map(str::to_string).collect());
+        }
+        row_is_open = true;
+    }
+    rows
+}
+
+/// Which of the three readings says where one row of a table ends.
+///
+/// A table says so with a mark of its own wherever it can, because a mark
+/// answers for every row and a cell answers for one line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowReading {
+    /// The rules of the table stand between its rows, so a row opens under a
+    /// rule and takes every line up to the next one.
+    Rules,
+    /// The table is a Markdown one, so one line writes one row and no line
+    /// continues another.
+    Lines,
+    /// The table carries neither mark, so each line is asked for itself with
+    /// [`continues_a_row`].
+    Cells,
+}
+
+/// Which reading tells the rows of `lines` apart.
+///
+/// The two marks come first, because each one answers for the whole table.
+/// [`continues_a_row`] answers for one line and it is the last reading asked.
+fn row_reading(lines: &[BodyLine]) -> RowReading {
+    if rules_divide_the_rows(lines) {
+        RowReading::Rules
+    } else if opens_with_a_markdown_divider(lines) {
+        RowReading::Lines
+    } else {
+        RowReading::Cells
+    }
+}
+
+/// Do the rules of `lines` say where each row of the table ends?
+///
+/// A rule with a row line above it and a row line under it stands between two
+/// rows, and a renderer that draws one draws them between every pair. So one
+/// such rule answers for the whole table.
+///
+/// The two other written forms answer `false` here. A Markdown table carries
+/// one rule and it stands over the first row. A box table drawn with its outer
+/// border alone carries two, and the one under the rows closes the table.
+fn rules_divide_the_rows(lines: &[BodyLine]) -> bool {
+    let is_row = |line: &BodyLine| matches!(line, BodyLine::Cells(_));
+    let first = lines.iter().position(is_row);
+    let last = lines.iter().rposition(is_row);
+    match (first, last) {
+        (Some(first), Some(last)) => lines[first..last]
+            .iter()
+            .any(|line| matches!(line, BodyLine::Rule(_))),
+        _ => false,
+    }
+}
+
+/// Is `lines` the body of a Markdown table?
+///
+/// A Markdown table opens its body with the divider that names the alignment
+/// of each column, so the first line of the body answers.
+fn opens_with_a_markdown_divider(lines: &[BodyLine]) -> bool {
+    matches!(lines.first(), Some(BodyLine::Rule(line)) if is_markdown_divider(line))
+}
+
+/// Is `line` the divider of a Markdown table?
+///
+/// A divider carries a bar and it is drawn with [`MARKDOWN_DIVIDER_MARKS`]
+/// alone: `|---|---|`, `| --- | --- |`, and `| :---: | :---: |`. Every other
+/// mark of [`is_rule_mark`] belongs to another drawing, so `├─────┼─────┤`
+/// and `+-----+-----+` answer `false` and their tables keep the reading they
+/// have.
+///
+/// Ask this of a line [`is_rule`] answers for. A row of prose carries no mark
+/// at all, and a line of no marks is a divider of nothing.
+fn is_markdown_divider(line: &str) -> bool {
+    line.contains(TABLE_BARS)
+        && line
+            .chars()
+            .filter(|&c| is_rule_mark(c))
+            .all(|c| MARKDOWN_DIVIDER_MARKS.contains(&c))
+}
+
+/// Does `cells` continue the row above it, rather than open one?
+///
+/// The third reading, for a table that carries neither mark of its own and
+/// where the cells are all a reader has. The `Order` cell is the one that
+/// answers: a step of a chain never opens with an arrow, and a row that
+/// carries no step carries no chain. "The first cell is empty" reads the same
+/// way and is wrong, because a label wraps as readily as a chain does — the
+/// row of stream B of a real report carries the word `engine` in its first
+/// cell and nothing in its `Order` cell.
+///
+/// It answers for one line, so it cannot hold a row together through a wrap
+/// that falls in the middle of a chain. `(#329)` opens no step and `#330`
+/// opens one, and a table with rules between its rows is what says that both
+/// of them continue the row above. [`rules_divide_the_rows`] finds that table.
+///
+/// It reads an empty `Order` cell as a wrap, and a Markdown table writes no
+/// wrap at all: one row of one is one line, by definition. So an empty cell
+/// there is a stream that names no chain, and the message that says which
+/// stream is worth more than a row this reading would drop.
+/// [`opens_with_a_markdown_divider`] finds that table.
+fn continues_a_row(cells: &[&str], order_at: usize) -> bool {
+    cells.get(order_at).is_some_and(|order| {
+        order.is_empty()
+            || order
+                .chars()
+                .next()
+                .is_some_and(|c| SEPARATORS.contains(&c))
+    })
+}
+
+/// Join each cell of `cells` to the cell of `row` above it, with one space.
+///
+/// An empty cell adds nothing and takes nothing, so the label of a row that
+/// wraps in its `Order` cell alone keeps the space it was written with.
+fn join_row(row: &mut [String], cells: &[&str]) {
+    for (held, cell) in row.iter_mut().zip(cells) {
+        if cell.is_empty() {
+            continue;
+        }
+        if !held.is_empty() {
+            held.push(' ');
+        }
+        held.push_str(cell);
+    }
 }
 
 /// The cells of `line`, or `None` when `line` is no row of a table.
@@ -450,10 +740,10 @@ fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>
 /// cells and never by its shape: `#1 || #2` holds two bars and names no
 /// column, and it is a chain.
 fn table_cells(line: &str) -> Option<Vec<&str>> {
-    if !line.contains(TABLE_BAR) {
+    if !line.contains(TABLE_BARS) {
         return None;
     }
-    let mut cells: Vec<&str> = line.split(TABLE_BAR).map(str::trim).collect();
+    let mut cells: Vec<&str> = line.split(TABLE_BARS).map(str::trim).collect();
     // The bar at each end of a row gives an empty cell that is no cell. The
     // two bars are optional, so each end is dropped only when it is empty.
     if cells.first().is_some_and(|cell| cell.is_empty()) {
@@ -463,13 +753,6 @@ fn table_cells(line: &str) -> Option<Vec<&str>> {
         cells.truncate(cells.len().saturating_sub(1));
     }
     Some(cells)
-}
-
-/// Is this row the rule a table draws under its header?
-fn is_delimiter(cells: &[&str]) -> bool {
-    cells
-        .iter()
-        .all(|cell| !cell.is_empty() && cell.chars().all(|c| DELIMITER_CHARS.contains(&c)))
 }
 
 /// Does `cell` name the column `key` names?
@@ -521,103 +804,273 @@ fn label_of(named: Option<&str>, place: usize) -> String {
 ///
 /// Gives [`PlanError::NotAnIssue`] for a token that names no issue,
 /// [`PlanError::UnattachedPair`] for a group that stands before every step,
-/// [`PlanError::SecondPair`] for a second group on one step, and
-/// [`PlanError::NoIssues`] for a field with no number in it.
+/// [`PlanError::SecondPair`] for a second group on one step,
+/// [`PlanError::NoIssues`] for a field with no number in it, and
+/// [`PlanError::UnclosedGroup`] for a group that opens and never closes.
 fn read_order(order: &str, label: &str) -> Result<Vec<Step>, PlanError> {
-    let mut steps: Vec<Step> = Vec::new();
-    for piece in pieces(order) {
+    let mut readings: Vec<Reading> = Vec::new();
+    let pieces = pieces(order).map_err(|open| PlanError::UnclosedGroup {
+        stream: Snippet::new(label),
+        token: Snippet::new(&format!("{GROUP_OPEN}{open}")),
+    })?;
+    for piece in pieces {
         match piece {
             Piece::Step(token) => {
-                let number = step_number(&token).ok_or_else(|| PlanError::NotAnIssue {
-                    stream: Snippet::new(label),
-                    token: Snippet::new(&token),
-                })?;
+                let (number, marked) =
+                    marked_number(&token).ok_or_else(|| PlanError::NotAnIssue {
+                        stream: Snippet::new(label),
+                        token: Snippet::new(&token),
+                    })?;
                 // Through the constructor, so one place builds a step. A
                 // group that follows attaches to it below.
-                steps.push(Step::new(number, None));
+                readings.push(Reading {
+                    step: Step::new(number, None),
+                    marked,
+                });
             }
-            Piece::Group(token) => {
+            Piece::Group(text) => {
                 // The group is repeated back with its parentheses, because
                 // that is how the reader wrote it and how they find it again.
-                let written = format!("{GROUP_OPEN}{token}{GROUP_CLOSE}");
-                let number = step_number(&token).ok_or_else(|| PlanError::NotAnIssue {
-                    stream: Snippet::new(label),
-                    token: Snippet::new(&written),
-                })?;
-                let step = steps.last_mut().ok_or_else(|| PlanError::UnattachedPair {
-                    stream: Snippet::new(label),
-                    token: Snippet::new(&written),
-                })?;
-                if step.closes.is_some() {
+                let written = group_text(&text);
+                // A group annotates the step to its left, and it never opens
+                // one. So a group that stands first attaches to nothing,
+                // whatever it holds.
+                if readings.is_empty() {
+                    return Err(PlanError::UnattachedPair {
+                        stream: Snippet::new(label),
+                        token: Snippet::new(&written),
+                    });
+                }
+                let Some(annotation) = annotation_of(&text, label)? else {
+                    continue;
+                };
+                let reading = readings.last_mut().expect("the list holds a step");
+                if reading.step.closes.is_some() {
                     return Err(PlanError::SecondPair {
                         stream: Snippet::new(label),
                         token: Snippet::new(&written),
                     });
                 }
-                step.closes = Some(number);
+                reading.annotate(annotation);
             }
         }
     }
-    if steps.is_empty() {
+    if readings.is_empty() {
         return Err(PlanError::NoIssues(Snippet::new(label)));
     }
-    Ok(steps)
+    Ok(readings.into_iter().map(|reading| reading.step).collect())
+}
+
+/// One step of a stream, with the mark the plan wrote on its number.
+///
+/// The mark stands here and not on [`Step`], because it says nothing to a
+/// reader of the answer. It settles one question inside this module: which of
+/// the two numbers of a pair is the work.
+struct Reading {
+    /// The step itself.
+    step: Step,
+    /// The number of the step carries a `PR` in front of it.
+    marked: bool,
+}
+
+impl Reading {
+    /// Give the step the number its annotation names.
+    ///
+    /// A step holds the work and the issue the work closes, in that order. The
+    /// plan marks the work with `PR`, so a marked number inside the group and
+    /// an unmarked number outside it means the two arrived the other way round
+    /// and swap here. A group that marks a step which is marked already names
+    /// a second pull request for one piece of work, and the number that opened
+    /// the step stands as the work, because it opened it.
+    fn annotate(&mut self, annotation: Annotation) {
+        if annotation.marked && !self.marked {
+            self.step.closes = Some(self.step.number);
+            self.step.number = annotation.number;
+            self.marked = true;
+            return;
+        }
+        self.step.closes = Some(annotation.number);
+    }
+}
+
+/// The number one group gives the step before it.
+struct Annotation {
+    /// The number itself.
+    number: IssueNumber,
+    /// The plan wrote `PR` in front of it, so this number is the work.
+    marked: bool,
 }
 
 /// One piece of an `Order` field.
 enum Piece {
     /// A step of the stream, as the field writes it.
     Step(String),
-    /// A group: the issue the step before it closes.
+    /// The text of a group, without the parentheses around it.
     Group(String),
+}
+
+/// A group of an `Order` field, while it is open.
+///
+/// The depth is what parts the parenthesis that closes the group from a
+/// parenthesis of its prose. A group holds prose, and prose holds parentheses.
+struct OpenGroup {
+    /// The text of the group so far, without the parenthesis that opened it.
+    text: String,
+    /// How many parentheses of the group stand open, the one that opened it
+    /// counted. The parenthesis that brings this to zero closes the group.
+    depth: usize,
 }
 
 /// Cut `order` into its steps and its groups.
 ///
-/// Whitespace, a separator of a chain, and a parenthesis each end a token. So
-/// does a `#` that arrives while a token is open, which is what makes `#1#2`
-/// two steps written with no separator at all. A `#` that arrives on the `PR`
-/// of a pull request ends nothing, because `PR#344` is one number written the
-/// way a plan writes it.
-fn pieces(order: &str) -> Vec<Piece> {
+/// A parenthesis opens and closes a group, and every character between the two
+/// belongs to it. The text outside them is cut into steps by [`tokens_of`].
+///
+/// A group counts its depth, so a parenthesis inside one belongs to it and
+/// only the parenthesis that brings the depth to zero closes it: `#4 (a note
+/// (see the docs))` is one group of prose, and `#4 (in flight (rebasing), PR
+/// #15)` still names the pull request of its step.
+///
+/// A closing parenthesis with no group open belongs to the token it arrived
+/// in, so `#4)` is one token that names no issue and earns the message that
+/// says so.
+///
+/// # Errors
+///
+/// Gives the text of a group that opens and never closes, so the caller can
+/// name the stream it stands in. A nested parenthesis closes the group it
+/// opened and no other, so `#4 (a (b) c` opens a group that never closes.
+fn pieces(order: &str) -> Result<Vec<Piece>, String> {
     let mut pieces: Vec<Piece> = Vec::new();
-    let mut token = String::new();
-    let mut in_group = false;
+    let mut outer = String::new();
+    let mut group: Option<OpenGroup> = None;
     for c in order.chars() {
-        if c == GROUP_OPEN || c == GROUP_CLOSE {
-            end_token(&mut token, in_group, &mut pieces);
-            in_group = c == GROUP_OPEN;
-            continue;
+        match group.as_mut() {
+            Some(open) if c == GROUP_CLOSE && open.depth == 1 => {
+                pieces.push(Piece::Group(std::mem::take(&mut open.text)));
+                group = None;
+            }
+            Some(open) => {
+                match c {
+                    GROUP_OPEN => open.depth += 1,
+                    // The arm above holds the last parenthesis of the group,
+                    // so the depth here is two at the least.
+                    GROUP_CLOSE => open.depth -= 1,
+                    _ => {}
+                }
+                open.text.push(c);
+            }
+            None if c == GROUP_OPEN => {
+                push_steps(&mut outer, &mut pieces);
+                group = Some(OpenGroup {
+                    text: String::new(),
+                    depth: 1,
+                });
+            }
+            None => outer.push(c),
         }
+    }
+    if let Some(open) = group {
+        return Err(open.text);
+    }
+    push_steps(&mut outer, &mut pieces);
+    Ok(pieces)
+}
+
+/// Put the steps `outer` writes into `pieces`, and empty it.
+fn push_steps(outer: &mut String, pieces: &mut Vec<Piece>) {
+    pieces.extend(tokens_of(outer).into_iter().map(Piece::Step));
+    outer.clear();
+}
+
+/// Cut `text` into the tokens that each name one number.
+///
+/// Whitespace and a separator of a chain each end a token. So does a `#` that
+/// arrives while a token is open, which is what makes `#1#2` two steps written
+/// with no separator at all. A `#` that arrives on the `PR` of a pull request
+/// ends nothing, because `PR#344` is one number written the way a plan writes
+/// it.
+fn tokens_of(text: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut token = String::new();
+    for c in text.chars() {
         if c.is_whitespace() || SEPARATORS.contains(&c) {
-            end_token(&mut token, in_group, &mut pieces);
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
             continue;
         }
         if c == HASH && !token.is_empty() && !token.eq_ignore_ascii_case(PULL_REQUEST_PREFIX) {
-            end_token(&mut token, in_group, &mut pieces);
+            tokens.push(std::mem::take(&mut token));
         }
         token.push(c);
     }
-    end_token(&mut token, in_group, &mut pieces);
-    pieces
-}
-
-/// Put the token that is open into `pieces`, and open a new one.
-fn end_token(token: &mut String, in_group: bool, pieces: &mut Vec<Piece>) {
-    if token.is_empty() {
-        return;
+    if !token.is_empty() {
+        tokens.push(token);
     }
-    let text = std::mem::take(token);
-    pieces.push(if in_group {
-        Piece::Group(text)
-    } else {
-        Piece::Step(text)
-    });
+    tokens
 }
 
-/// The issue number `token` names, or `None` when it names none.
-fn step_number(token: &str) -> Option<IssueNumber> {
-    read_number(without_pull_request_prefix(token))
+/// The number one group gives its step, or `None` when the group is prose
+/// alone.
+///
+/// Only a token that carries the `#` is a number here. Every other word is
+/// prose the reader drops, so an annotation states a count, a width, or who
+/// does the work without any of it reaching the chain. `text` is the whole
+/// group, so the prose it drops holds the parentheses of a nested group as
+/// well: the word `(rebasing)` carries no `#` and it is a word.
+///
+/// # Errors
+///
+/// Gives [`PlanError::NotAnIssue`] for a token that carries the `#` and names
+/// no issue, and [`PlanError::SecondPair`] for a second number in one group,
+/// because a step closes one issue.
+fn annotation_of(text: &str, label: &str) -> Result<Option<Annotation>, PlanError> {
+    let mut found: Option<Annotation> = None;
+    let mut marked = false;
+    for token in tokens_of(text) {
+        if token.eq_ignore_ascii_case(PULL_REQUEST_PREFIX) {
+            marked = true;
+            continue;
+        }
+        let bare = without_pull_request_prefix(&token);
+        let glued = bare.len() != token.len();
+        if !bare.starts_with(HASH) {
+            // Prose, and prose that stands between a mark and a number takes
+            // the mark with it: `PR` marks the number it stands in front of.
+            marked = false;
+            continue;
+        }
+        let number = read_number(bare).ok_or_else(|| PlanError::NotAnIssue {
+            stream: Snippet::new(label),
+            token: Snippet::new(&group_text(&token)),
+        })?;
+        if found.is_some() {
+            return Err(PlanError::SecondPair {
+                stream: Snippet::new(label),
+                token: Snippet::new(&group_text(&token)),
+            });
+        }
+        found = Some(Annotation {
+            number,
+            marked: marked || glued,
+        });
+        marked = false;
+    }
+    Ok(found)
+}
+
+/// `text` with the parentheses of a group around it, as a message writes it.
+fn group_text(text: &str) -> String {
+    format!("{GROUP_OPEN}{text}{GROUP_CLOSE}")
+}
+
+/// The number `token` names and whether it carries the `PR` mark, or `None`
+/// when it names no number.
+fn marked_number(token: &str) -> Option<(IssueNumber, bool)> {
+    let bare = without_pull_request_prefix(token);
+    let marked = bare.len() != token.len();
+    read_number(bare).map(|number| (number, marked))
 }
 
 /// `token` with its `PR` dropped, or `token` when it carries none.
@@ -639,6 +1092,8 @@ fn without_pull_request_prefix(token: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use unicode_width::UnicodeWidthStr;
+
     use super::*;
 
     /// The plan of issue #413, as a record for each stream.
@@ -728,6 +1183,48 @@ Notes: Independent of everything above.";
 | Issue | Action |
 | #330 | close |";
 
+    /// A Markdown table whose first row names no chain.
+    ///
+    /// The `Order` cell of stream A is empty. A Markdown table writes one row
+    /// on one line, so that cell is a stream with nothing to start, and never
+    /// a line that continues the row above it.
+    const MARKDOWN_WITH_AN_EMPTY_FIRST_ORDER: &str = "\
+| Stream | Order | Zone | Notes |
+| --- | --- | --- | --- |
+| A |  | src/a | nothing yet |
+| B | #1 | src/b | go |";
+
+    /// The same two rows, the other way round.
+    ///
+    /// The empty `Order` cell now stands under a row that holds a chain, which
+    /// is where a reader of wraps joins the two and names the pair `A B`.
+    const MARKDOWN_WITH_AN_EMPTY_SECOND_ORDER: &str = "\
+| Stream | Order | Zone | Notes |
+| --- | --- | --- | --- |
+| A | #1 | src/a | go |
+| B |  | src/b | nothing yet |";
+
+    /// The report of the `plan-parallel-work` skill, as it arrives on the
+    /// clipboard.
+    ///
+    /// The paste of issue #416, character for character. Every rule this form
+    /// needs stands in it: the `│` bar, the `┌─┬─┐` rules, a row that wraps
+    /// onto a second line in its `Order` cell, a row that wraps in its
+    /// `Stream` cell alone, and an `Order` field that annotates a step in
+    /// parentheses.
+    const BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work.txt");
+
+    /// The same report of the same skill, drawn with a narrower `Order`
+    /// column.
+    ///
+    /// The plan of this repository, character for character as it arrives on
+    /// the clipboard. Its `Order` column is 28 columns wide, so the chain of
+    /// S1 wraps twice, and neither line it wraps onto says that it continues a
+    /// row: the second one opens with the annotation `(#329)`, and the third
+    /// one opens with the step `#330`. The `├─┼─┤` rules are what say where
+    /// each row of this table ends.
+    const NARROW_BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work-narrow-order.txt");
+
     /// The numbers of one step: the work, and the issue the work closes.
     type StepNumbers = (u64, Option<u64>);
 
@@ -758,6 +1255,24 @@ Notes: Independent of everything above.";
                 .get(index)
                 .expect("the plan holds this stream"),
         )
+    }
+
+    /// [`BOX_TABLE`], drawn with `+---+` and `|`.
+    ///
+    /// Built out of the box form rather than typed a second time, so the two
+    /// hold one plan and a test that reads them apart is reading the drawing
+    /// and not the plan. The em dash of a label and the arrow of an `Order`
+    /// cell are not drawing, so they stay.
+    fn ascii_table() -> String {
+        BOX_TABLE
+            .chars()
+            .map(|c| match c {
+                '│' => '|',
+                '─' => '-',
+                '┌' | '┬' | '┐' | '├' | '┼' | '┤' | '└' | '┴' | '┘' => '+',
+                other => other,
+            })
+            .collect()
     }
 
     /// The plan `text` writes.
@@ -871,6 +1386,220 @@ Notes: Independent of everything above.";
     }
 
     #[test]
+    fn reads_the_box_drawn_form_of_a_plan() {
+        // The third written form, and the one a reader actually holds: the
+        // report of the skill, copied out of a terminal.
+        assert_eq!(
+            shape(&plan_of(BOX_TABLE)),
+            vec![
+                ("A — visualizers", vec![(15, Some(4)), (7, None)]),
+                ("B — audio engine", vec![(11, None), (5, None), (13, None)]),
+                ("C — MIDI array", vec![(9, None), (10, None), (12, None)]),
+                ("D — manifest", vec![(6, None)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_order_cell_joins_over_the_lines_its_row_wraps_onto() {
+        // The `Order` cell of stream A is `#4 (in flight, PR #15)` on one line
+        // and `→ #7` on the next. A reader that takes the second line for a
+        // row of its own gives stream A one step and the plan a fifth stream.
+        assert_eq!(
+            steps_at(&plan_of(BOX_TABLE), 0),
+            vec![(15, Some(4)), (7, None)]
+        );
+    }
+
+    #[test]
+    fn a_label_joins_over_the_lines_its_row_wraps_onto() {
+        // The label of stream B wraps, so the second line of that row carries
+        // `engine` in its first cell and nothing in its `Order` cell. A reader
+        // that calls a line with a non-empty first cell a new row loses the
+        // word and gains a stream with no chain.
+        assert_eq!(
+            plan_of(BOX_TABLE)
+                .streams()
+                .iter()
+                .map(Stream::label)
+                .collect::<Vec<_>>(),
+            vec![
+                "A — visualizers",
+                "B — audio engine",
+                "C — MIDI array",
+                "D — manifest",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_row_that_wraps_between_a_step_and_its_annotation_stays_one_row() {
+        // `PR#343` ends the first line of the `Order` cell of S1, and `(#329)`
+        // opens the second. A reader that takes that second line for a row of
+        // its own refuses the whole plan, because an annotation annotates the
+        // step to its left and this one has none:
+        //
+        //     wn: stream "grind → grime": "(#329)" stands before any issue
+        //     number
+        assert_eq!(
+            steps_at(&plan_of(NARROW_BOX_TABLE), 0),
+            vec![
+                (344, Some(341)),
+                (343, Some(329)),
+                (342, Some(328)),
+                (330, None),
+                (331, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_row_that_wraps_between_two_steps_stays_one_row() {
+        // The third line of the `Order` cell of S1 is `#330 → #331`, which
+        // opens a chain and is one. Nothing in that line says it continues a
+        // row, so a reader that asks the line gives the plan an eighth stream
+        // that carries no label and two steps that belong to S1.
+        assert_eq!(
+            shape(&plan_of(NARROW_BOX_TABLE)),
+            vec![
+                (
+                    "S1 gitscratch → grind → grime",
+                    vec![
+                        (344, Some(341)),
+                        (343, Some(329)),
+                        (342, Some(328)),
+                        (330, None),
+                        (331, None),
+                    ],
+                ),
+                ("S2 ic", vec![(350, None), (187, None), (188, None)]),
+                ("S3 crap", vec![(314, None), (296, None)]),
+                ("S4 prcp", vec![(265, None), (295, None)]),
+                ("S5 tvfind", vec![(321, None)]),
+                ("S6 vpn-tunnel", vec![(191, None)]),
+                ("S7 dwt", vec![(196, None)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_box_table_with_no_interior_rules_gives_the_same_streams() {
+        // A table with no rule between two of its rows is read by its cells
+        // instead, so a renderer that draws its outer border alone gives four
+        // streams as well. Every wrap of this one says so in its `Order` cell.
+        let no_rules: String = BOX_TABLE
+            .lines()
+            .filter(|line| !line.starts_with('├'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(plan_of(&no_rules), plan_of(BOX_TABLE));
+    }
+
+    #[test]
+    fn a_box_table_with_a_header_rule_alone_gives_the_same_streams() {
+        // A renderer that draws one rule under the header and none between
+        // the rows opens the body of the table with `├─────┼─────┤`. That is
+        // a rule and it is no Markdown divider, so the cells still say where
+        // each row ends and the wrap of stream B still joins the row above it.
+        let mut rules = 0;
+        let header_rule_alone: String = BOX_TABLE
+            .lines()
+            .filter(|line| {
+                if !line.starts_with('├') {
+                    return true;
+                }
+                rules += 1;
+                rules == 1
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            header_rule_alone.matches('├').count(),
+            1,
+            "the table keeps the one rule under its header"
+        );
+        assert_eq!(plan_of(&header_rule_alone), plan_of(BOX_TABLE));
+    }
+
+    #[test]
+    fn an_ascii_table_gives_the_streams_of_the_box_table() {
+        // Not a fourth shape to write code for: `+---+` is a rule line and `|`
+        // is a bar, so the two rules that read the box form already read this
+        // one.
+        assert_eq!(plan_of(&ascii_table()), plan_of(BOX_TABLE));
+    }
+
+    #[test]
+    fn every_drawing_of_a_rule_is_a_rule() {
+        // `is_rule` is asked here, and not a plan that carries the line. A
+        // plan hides the answer: a divider that stays reaches the row reader,
+        // and the row reader takes a divider for a continuation of the row
+        // above it whenever the `Order` cell opens with a hyphen. The test
+        // then stays green while the rule it names is broken.
+        //
+        // A Markdown divider is a rule with spaces in it, and a row of empty
+        // cells is a rule with cells in it. The two stand side by side here
+        // because one character of drawing is all that parts them.
+        let lines: &[(&str, &str, bool)] = &[
+            ("a box table opens", "┌─────┬─────┐", true),
+            ("a box table divides", "├─────┼─────┤", true),
+            ("a box table closes", "└─────┴─────┘", true),
+            ("an ascii table", "+-----+-----+", true),
+            (
+                "a record separator",
+                "────────────────────────────────────────",
+                true,
+            ),
+            ("a markdown divider, tight", "|---|---|", true),
+            ("a markdown divider, spaced", "| --- | --- |", true),
+            ("an alignment colon, tight", "|:---|---:|", true),
+            ("an alignment colon, spaced", "|:--- | ---:|", true),
+            ("an alignment on both sides", "| :---: | :---: |", true),
+            ("an alignment to the left", "| :--- | :--- |", true),
+            ("the tail of an ascii arrow", "--", false),
+            ("a row of the table", "| S1 | #350 |", false),
+            ("a row of empty cells", "|   |   |", false),
+        ];
+        for (name, line, expected) in lines {
+            assert_eq!(
+                is_rule(line),
+                *expected,
+                "{name} is {}a rule, and the line is `{line}`",
+                if *expected { "" } else { "no " }
+            );
+        }
+    }
+
+    #[test]
+    fn a_divider_row_that_carries_an_alignment_colon_contributes_no_stream() {
+        // A divider is a rule line, colons and all. A reader that takes it for
+        // a row gives the plan a stream whose `Order` field is `:---:`.
+        let plan = plan_of("| Stream | Order |\n| :---: | :---: |\n| S1 | #350 → #187 |");
+        assert_eq!(shape(&plan), vec![("S1", vec![(350, None), (187, None)])]);
+    }
+
+    #[test]
+    fn a_wide_cell_does_not_shift_the_cell_beside_it() {
+        // A reader that cuts a row at a column position needs the display
+        // width of every character in front of that column, and an em dash is
+        // not one column in every font the width tables know. A split on the
+        // bar needs no width at all, so this row reads whatever stands in it.
+        let notes = format!("{} — {} 日本語", "a".repeat(110), "b".repeat(105));
+        assert!(
+            UnicodeWidthStr::width(notes.as_str()) >= 220,
+            "the fixture is a wide cell, and it is {} columns",
+            UnicodeWidthStr::width(notes.as_str())
+        );
+        let table = format!(
+            "| Stream | Order | Notes |\n| --- | --- | --- |\n| S1 | #350 → #187 | {notes} |"
+        );
+        assert_eq!(
+            steps_at(&plan_of(&table), 0),
+            vec![(350, None), (187, None)]
+        );
+    }
+
+    #[test]
     fn the_table_form_gives_the_streams_of_the_record_form() {
         let plan = plan_of(TABLE);
         assert_eq!(plan.streams().len(), 7);
@@ -917,6 +1646,61 @@ Notes: Independent of everything above.";
     }
 
     #[test]
+    fn refuses_the_first_markdown_row_whose_order_cell_is_empty() {
+        // A Markdown table writes one row on one line, so no line of it
+        // continues another and an empty `Order` cell names no chain. A reader
+        // that takes the line for a wrap drops stream A and answers stream B
+        // alone, which is a plan short of one stream and no message anywhere.
+        assert_eq!(
+            parse(MARKDOWN_WITH_AN_EMPTY_FIRST_ORDER),
+            Err(PlanError::NoIssues(Snippet::new("A")))
+        );
+    }
+
+    #[test]
+    fn refuses_a_later_markdown_row_whose_order_cell_is_empty() {
+        // The same row under a row that holds a chain. A reader that takes it
+        // for a wrap joins the two and answers one stream named `A B`, which
+        // is a label no line of the table writes.
+        assert_eq!(
+            parse(MARKDOWN_WITH_AN_EMPTY_SECOND_ORDER),
+            Err(PlanError::NoIssues(Snippet::new("B")))
+        );
+    }
+
+    #[test]
+    fn refuses_a_row_whose_cell_count_the_header_does_not_have() {
+        // A cell that holds a stray bar is rare, and guessing at it is worse
+        // than refusing it: every cell after that bar stands under the wrong
+        // column, so the Notes of the row become its Order.
+        let row = "| S1 | #350 | src/ic | a note with a | bar |";
+        let message = parse(&format!(
+            "| Stream | Order | Zone | Notes |\n| --- | --- | --- | --- |\n{row}"
+        ))
+        .expect_err("a row of five cells is no row of a table of four")
+        .to_string();
+        assert!(message.contains("5 cells"), "{message}");
+        assert!(message.contains("the header has 4"), "{message}");
+        assert!(message.contains(row), "{message}");
+    }
+
+    #[test]
+    fn a_long_row_is_cut_in_the_message() {
+        // A row of a box-drawn table is 250 columns wide, and a message that
+        // repeats the whole of one hides its own last line.
+        let notes = "n".repeat(200);
+        let row = format!("| S1 | #350 | src/ic | {notes} | and one cell too many |");
+        let message = parse(&format!(
+            "| Stream | Order | Zone | Notes |\n| --- | --- | --- | --- |\n{row}"
+        ))
+        .expect_err("a row of five cells is no row of a table of four")
+        .to_string();
+        assert!(!message.contains(&notes), "{message}");
+        let cut: String = row.chars().take(crate::chain::SNIPPET_CHARS).collect();
+        assert!(message.contains(&format!("\"{cut}…\"")), "{message}");
+    }
+
+    #[test]
     fn a_group_names_the_issue_the_step_before_it_closes() {
         let steps = steps_at(&plan_of("Order: PR#344 (#341) → #330"), 0);
         assert_eq!(steps, vec![(344, Some(341)), (330, None)]);
@@ -936,6 +1720,70 @@ Notes: Independent of everything above.";
                 (330, None),
                 (331, None),
             ]
+        );
+    }
+
+    #[test]
+    fn an_annotation_names_the_pull_request_of_the_step_before_it() {
+        // `#4 (in flight, PR #15)` is the issue #4, whose work is the pull
+        // request #15. The mark says which of the two numbers is the work, so
+        // the step holds the pull request and the issue that work closes, the
+        // way `PR#344 (#341)` does.
+        assert_eq!(
+            steps_at(&plan_of("Order: #4 (in flight, PR #15) → #7"), 0),
+            vec![(15, Some(4)), (7, None)]
+        );
+    }
+
+    #[test]
+    fn a_glued_mark_inside_an_annotation_marks_the_number_as_well() {
+        assert_eq!(
+            steps_at(&plan_of("Order: #4 (PR#15)"), 0),
+            vec![(15, Some(4))]
+        );
+    }
+
+    #[test]
+    fn an_annotation_that_names_no_issue_is_prose() {
+        // `#12 (human)` is one step of one number, and the word is a note the
+        // reader wrote for themselves.
+        assert_eq!(
+            steps_at(&plan_of("Order: #9 → #10 → #12 (human)"), 0),
+            vec![(9, None), (10, None), (12, None)]
+        );
+    }
+
+    #[test]
+    fn a_number_of_an_annotation_that_carries_no_hash_is_prose() {
+        // The hash is what makes an annotation safe to read. A count of lines
+        // carries none, so it stays prose and never reaches the chain.
+        assert_eq!(
+            steps_at(&plan_of("Order: #4 (30-line window)"), 0),
+            vec![(4, None)]
+        );
+    }
+
+    #[test]
+    fn an_annotation_whose_prose_carries_a_parenthesis_is_one_group() {
+        // An annotation holds prose, and prose holds parentheses. A reader
+        // that closes the group on the first `)` leaves the second one outside
+        // it, where a stray parenthesis is a token that names no issue:
+        //
+        //     wn: stream "Stream 1": ")" is not an issue number
+        assert_eq!(
+            steps_at(&plan_of("Order: #4 (a note (see the docs)) → #7"), 0),
+            vec![(4, None), (7, None)]
+        );
+    }
+
+    #[test]
+    fn a_nested_parenthesis_does_not_hide_the_number_of_an_annotation() {
+        // The number of the pair stands after the nested parenthesis, so a
+        // reader that closes the group early reads `PR` and `#15)` as two
+        // steps of the chain and refuses the plan.
+        assert_eq!(
+            steps_at(&plan_of("Order: #4 (in flight (rebasing), PR #15)"), 0),
+            vec![(15, Some(4))]
         );
     }
 
@@ -1059,6 +1907,71 @@ Notes: Independent of everything above.";
                 stream: Snippet::new("S1 ic"),
                 token: Snippet::new("(#341)"),
             })
+        );
+    }
+
+    #[test]
+    fn refuses_a_group_that_never_closes() {
+        // Where an open group ends is a guess, and a guess about a chain is
+        // worse than a refusal. The message names the stream and repeats the
+        // group back from its parenthesis.
+        let message = parse("Stream: S1 ic\nOrder: #4 (in flight")
+            .expect_err("a group that never closes is not a chain")
+            .to_string();
+        assert!(message.contains("S1 ic"), "{message}");
+        assert!(message.contains("\"(in flight\""), "{message}");
+    }
+
+    #[test]
+    fn refuses_a_group_that_never_closes_around_a_nested_one() {
+        // A nested parenthesis closes the group it opened and no other, so a
+        // group whose own parenthesis never arrives is still a group that
+        // never closes. The message repeats it back from the parenthesis that
+        // opened it, the nested pair and all.
+        //
+        // A reader that closes the outer group on the parenthesis of the
+        // nested one answers a different message, about the word that stands
+        // after it:
+        //
+        //     wn: stream "S1 ic": "c" is not an issue number
+        for order in ["#4 (a (b", "#4 (a (b) c"] {
+            let message = parse(&format!("Stream: S1 ic\nOrder: {order}"))
+                .expect_err("a group that never closes is not a chain")
+                .to_string();
+            assert!(message.contains("S1 ic"), "{message}");
+            assert!(
+                message.contains("has no closing parenthesis"),
+                "the order is `{order}` and the message is {message}"
+            );
+            let group = order
+                .split_once(GROUP_OPEN)
+                .expect("the order opens a group");
+            assert!(
+                message.contains(&format!("\"{GROUP_OPEN}{}\"", group.1)),
+                "the order is `{order}` and the message is {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closing_parenthesis_with_no_group_open_belongs_to_its_token() {
+        // Counting the depth of a group must not give a stray parenthesis a
+        // group to close. `#4)` is one token, it names no issue, and the
+        // message says so and repeats the whole token back.
+        assert_eq!(
+            parse("Stream: S1 ic\nOrder: #4)"),
+            Err(PlanError::NotAnIssue {
+                stream: Snippet::new("S1 ic"),
+                token: Snippet::new("#4)"),
+            })
+        );
+        assert_eq!(
+            parse("Stream: S1 ic\nOrder: #4 (human) → #7)"),
+            Err(PlanError::NotAnIssue {
+                stream: Snippet::new("S1 ic"),
+                token: Snippet::new("#7)"),
+            }),
+            "the group before it closed, so this parenthesis closes nothing"
         );
     }
 

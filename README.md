@@ -1064,11 +1064,32 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - A plan of parallel work is a second shape of input, and it is not a change to the first one.
     The `plan-parallel-work` skill writes a plan as a set of streams, each with an `Order` field,
     and the streams run at the same time. `wn` reads the whole plan and names the issue to start
-    in every stream, under one summary that carries all of them. Both written forms work: the
-    records a terminal prints, and the Markdown table a file holds. No flag says which shape the
-    text is, because the shape of the text already does, so `pbpaste | wn` answers a plan the same
-    way it answers a chain. A table ends at the first line that is not a row of it, so a whole
-    report pastes in cleanly: the Housekeeping table under the streams is not more work to start.
+    in every stream, under one summary that carries all of them. All three written forms work: the
+    records a terminal prints, the Markdown table a file holds, and the box-drawn table the report
+    arrives on the clipboard as. No flag says which shape the text is, because the shape of the
+    text already does, so `pbpaste | wn` answers a plan the same way it answers a chain. A table
+    ends at the first line that is not a row of it, so a whole report pastes in cleanly: the
+    Housekeeping table under the streams is not more work to start.
+  - One reader takes all three tables, under three rules. A line drawn out of `─ ━ ═ - = + : _`
+    and the corners beside them carries no data, which deletes `┌─┬─┐`, `├─┼─┤`, `└─┴─┘`, the
+    `+---+` of an ASCII table, and both dividers of a Markdown one — `| --- |` and the `|:--- |
+    ---:|` that carries an alignment colon. A bar and a space stand in such a line as well, and
+    they draw nothing, so the line holds three marks at the least: the empty row `|   |   |` is a
+    row and never a rule, and a rule in its place would cut a row that wraps in two. A row splits
+    on the bar and never on a column position, so an em dash or a Japanese character inside one
+    cell shifts no cell after it. A row that wraps onto a second line joins the row above it, and
+    three readings say which lines wrap. The `├─┼─┤` rules give the first one wherever they stand
+    between two rows: a row opens under a rule and takes every line up to the next one. That
+    reading asks nothing of the cells, so a wrap that falls in the middle of a chain — between a
+    step and the annotation in parentheses that follows it, or between two steps — stays one row.
+    A Markdown table gives the second: a body that opens with `| --- |` writes one row on each
+    line, because one row of a Markdown table is one line. An empty `Order` cell there is a stream
+    that names no chain, and `wn` names that stream rather than dropping it. A table that carries
+    neither mark gives the third and is read by its `Order` cell: that cell is empty or it opens
+    with an arrow, because a step of a chain never does. Reading the first cell would be simpler
+    and wrong — a label wraps as readily as a chain. The header names the column count, so a row
+    that splits into another one holds a bar nobody escaped, and `wn` prints that row and exits
+    `2` rather than reading its `Notes` as a chain.
   - Only the `Order` field is a chain. `Stream`, `Zone`, and `Notes` are never read for numbers,
     and that rule is what makes the feature work: `Notes` is prose about code, and prose about
     code is full of numbers. `main.rs:1566-1650` is not `#1566` and `#1650`, and `265 lines apart
@@ -1080,6 +1101,18 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     request is the work. `wn` asks GitHub about both numbers, and a pair whose two states disagree
     earns a note — a merged pull request whose issue is still open is a real condition, and
     nothing else reports it.
+  - A plan writes that pair the other way round as well, and it writes prose beside it: `#4 (in
+    flight, PR #15)` is the issue `#4` whose work is the pull request `#15`, and `#12 (human)` is
+    one issue with a note about who does it. So a group in parentheses annotates the step to its
+    left and never opens one. Inside a group, only a word carrying the `#` is a number, and a `PR`
+    in front of one marks that number as the work — which is why `#4 (in flight, PR #15)` gives the
+    row `#15 (#4)`, the same step `PR#344 (#341)` gives. Every other word is prose that `wn` drops,
+    so `#4 (30-line window)` holds one number: the `30` carries no hash. That prose holds a
+    parenthesis as readily as a word, so a group counts its depth and the parenthesis that brings
+    the depth to zero is the one that closes it: `#4 (a note (see the docs)) → #7` is two steps,
+    and `#4 (in flight (rebasing), PR #15)` still gives the row `#15 (#4)`. A group that never
+    closes is refused, because where it ends is a guess — and a nested parenthesis closes the group
+    it opened and no other, so `#4 (a (b) c` is refused as well.
   - The whole plan is one GraphQL query, as one chain is. A plan of seven streams and eighteen
     numbers costs one round trip and one unit of the rate limit, and a number that stands in two
     streams is asked about once and reported in both. A stream that names a number the repository
