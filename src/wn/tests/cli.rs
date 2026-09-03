@@ -195,6 +195,42 @@ const BOX_ANSWER: &str = concat!(
     "  D — manifest      → #6   si 6\n",
 );
 
+/// A plan drawn as a picture: two streams that join.
+///
+/// The paste of issue #418. A picture says the one thing no chain and no table
+/// of a plan says: two streams that run at the same time, and the step they
+/// both reach.
+const PICTURE: &str = "\
+#242 ──→ #247 ──┐
+                ├──→ #249  (gallery)
+#246 ──→ #248 ──┘
+";
+
+/// What GitHub says about every number of [`PICTURE`] when each of them is
+/// open.
+const PICTURE_ISSUES: &str = r#"{"data":{"repository":{
+"i242":{"__typename":"Issue","number":242,"title":"Read the picture","state":"OPEN","stateReason":null},
+"i247":{"__typename":"Issue","number":247,"title":"Answer the picture","state":"OPEN","stateReason":null},
+"i246":{"__typename":"Issue","number":246,"title":"Read the table","state":"OPEN","stateReason":null},
+"i248":{"__typename":"Issue","number":248,"title":"Answer the table","state":"OPEN","stateReason":null},
+"i249":{"__typename":"Issue","number":249,"title":"Paint the gallery","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`PICTURE`] earns while every issue of it is open.
+///
+/// One row for each step, the work each blocked step waits for, and one start
+/// line for each stream that is ready.
+const PICTURE_ANSWER: &str = concat!(
+    "→ #242  Read the picture\n",
+    "· #247  Answer the picture  waits for #242\n",
+    "→ #246  Read the table\n",
+    "· #248  Answer the table    waits for #246\n",
+    "· #249  Paint the gallery   waits for #247, #248\n",
+    "\n",
+    "Start #242 next with 'si 242'\n",
+    "Start #246 next with 'si 246'\n",
+);
+
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
     dir: tempfile::TempDir,
@@ -1021,4 +1057,17 @@ fn refuses_a_row_whose_cell_count_the_header_does_not_have() {
         stderr(&output)
     );
     assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn answers_a_plan_drawn_as_a_picture_from_a_pipe() {
+    // The headline of the feature: a picture pasted into a pipe gives one row
+    // for each step, the work each blocked step waits for, and one start line
+    // for each stream that is ready. Two streams that join are two people who
+    // work at the same time, and an answer that named one issue loses that.
+    // No flag says the text is a picture — the shape of the text does.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PICTURE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PICTURE_ANSWER);
 }
