@@ -1387,8 +1387,15 @@ fn build(wirings: &[Wiring], lone: &[Port]) -> Graph {
     )
 )]
 pub fn of_plan(plan: &Plan) -> Option<Result<Graph, GraphError>> {
+    // The claim and the read share all of their work, as they do for a
+    // picture, so one function does both. The edges of the cells are what
+    // claim the plan, and they are edges of the graph after that.
+    let crossings = crossings_of(plan);
+    if crossings.is_empty() {
+        return None;
+    }
     let mut edges = chains_of(plan);
-    edges.extend(crossings_of(plan));
+    edges.extend(crossings);
     Some(Ok(Graph::of_edges(nodes_of(plan), &edges)))
 }
 
