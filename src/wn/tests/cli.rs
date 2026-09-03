@@ -231,6 +231,48 @@ const PICTURE_ANSWER: &str = concat!(
     "Start #246 next with 'si 246'\n",
 );
 
+/// A plan of four streams whose `Waits for` cells join three of them.
+///
+/// The paste of issue #436. `S0` comes before `S1`, and both of them come
+/// before `S2`. `S3` waits for nothing, and an empty cell is how a plan writes
+/// that. So the plan draws the edges `#96 → #91`, `#96 → #89`, `#91 → #89`,
+/// and `#89 → #94`, and the last of those is the chain of `S2` itself.
+const WAITS_PLAN: &str = "\
+| Stream | Order | Waits for | Zone | Notes |
+|--------|-------|-----------|------|-------|
+| S0 — daemon leak | #96 | | crates/tsm (serve.rs) | Do first, solo. |
+| S1 — lifecycle | #91 | #96 | crates/tsm (kill.rs) | |
+| S2 — install | #89 → #94 | #96, #91 | crates/tsm (shell-init) | Same hotspot as S1. |
+| S3 — keymap | #86 | | packages/web | Disjoint. |
+";
+
+/// What GitHub says about every number of [`WAITS_PLAN`] when each of them is
+/// open.
+const WAITS_ISSUES: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"OPEN","stateReason":null},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"OPEN","stateReason":null},
+"i89":{"__typename":"Issue","number":89,"title":"The install","state":"OPEN","stateReason":null},
+"i94":{"__typename":"Issue","number":94,"title":"The shell init","state":"OPEN","stateReason":null},
+"i86":{"__typename":"Issue","number":86,"title":"The keymap","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`WAITS_PLAN`] earns while every issue of it is open.
+///
+/// One row for each step, in the order of the work rather than the order of
+/// the plan, and one start line for each of the two streams that are ready.
+/// `#91`, `#89`, and `#94` each wait for work that is open, so no line of the
+/// answer names them.
+const WAITS_ANSWER: &str = concat!(
+    "→ #96  The daemon leak\n",
+    "· #91  The lifecycle    waits for #96\n",
+    "· #89  The install      waits for #96, #91\n",
+    "· #94  The shell init   waits for #89\n",
+    "→ #86  The keymap\n",
+    "\n",
+    "Start #96 next with 'si 96'\n",
+    "Start #86 next with 'si 86'\n",
+);
+
 /// The line that opens the summary of a plan, and thus the mark of an answer
 /// the plan reader wrote.
 const SUMMARY_HEADING: &str = "Take one from each stream:";
@@ -1315,4 +1357,17 @@ fn a_picture_inside_a_fenced_code_block_reads_the_same_way() {
     let output = run_with_stdin(&gh, &["--repo", REPO], "80", &pasted);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), PICTURE_ANSWER);
+}
+
+#[test]
+fn a_plan_that_names_a_blocker_answers_as_one_graph() {
+    // The headline of the `Waits for` column: one step of one stream blocks
+    // another stream, and no block of a plan says that. So a plan that names
+    // one crosses to the answer a picture earns — one row for each step, in
+    // the order of the work, and one start line for each stream that is ready.
+    // `#96` and `#86` are the two people who start now.
+    let gh = FakeGh::new(WAITS_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), WAITS_ANSWER);
 }
