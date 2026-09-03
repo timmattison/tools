@@ -9,7 +9,7 @@ use std::thread;
 use buildinfo::version_string;
 use clap::Parser;
 use names::Generator;
-use repowalker::find_main_repo;
+use repowalker::find_repo_context;
 use serde::Deserialize;
 use shellsetup::ShellIntegration;
 use walkdir::WalkDir;
@@ -1329,9 +1329,22 @@ fn main() {
         exit(exit_codes::TMUX_NOT_RUNNING);
     }
 
-    // Find the main git repo root (resolves to main repo even from worktree)
-    let repo_root = match find_main_repo() {
-        Some(root) => root,
+    // Find the main git repo root (resolves to main repo even from worktree).
+    //
+    // Git answers this, rather than a walk of the file system for a `.git`
+    // entry. A walk cannot read a repository whose git directory is detached
+    // from its work tree, which is how `yadm` keeps a directory of dotfiles:
+    // the git directory is `~/.local/share/yadm/repo.git`, the work tree is
+    // `$HOME`, and no `.git` entry exists anywhere.
+    //
+    // Git names the main worktree of that layout as the git directory itself.
+    // It builds the name from the common git directory with a trailing `/.git`
+    // removed, and this layout carries no such suffix. That path is the right
+    // answer for everything below it: `git worktree add` and `git ls-files`
+    // both work with it as their working directory, and the new worktree lands
+    // in `<git directory>-worktrees`, beside the git directory.
+    let repo_root = match find_repo_context() {
+        Some(context) => context.main_worktree().to_path_buf(),
         None => {
             error!(config.quiet, "Error: Not in a git repository");
             error!(
