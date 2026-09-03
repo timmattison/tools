@@ -273,6 +273,24 @@ const WAITS_ANSWER: &str = concat!(
     "Start #86 next with 'si 86'\n",
 );
 
+/// A plan of two streams that wait for each other.
+///
+/// Neither of the two starts, so the plan names no work at all. It carries the
+/// two fields a cycle is made of and no others, because a `Zone` and a `Notes`
+/// say nothing about the order.
+const WAITS_CYCLE: &str = "\
+| Stream | Order | Waits for |
+|--------|-------|-----------|
+| S1 — lifecycle | #91 | #96 |
+| S0 — daemon leak | #96 | #91 |
+";
+
+/// The word a message about a drawing holds.
+///
+/// A reader who wrote a table drew nothing, so the refusal of a plan must hold
+/// none of it. One graph carries both forms, so one message answers for both.
+const PICTURE_WORD: &str = "picture";
+
 /// The line that opens the summary of a plan, and thus the mark of an answer
 /// the plan reader wrote.
 const SUMMARY_HEADING: &str = "Take one from each stream:";
@@ -280,6 +298,12 @@ const SUMMARY_HEADING: &str = "Take one from each stream:";
 /// The words that open the last column of a row of a picture, and thus the
 /// mark of an answer the picture reader wrote.
 const WAITS_FOR: &str = "waits for ";
+
+/// The file the fake `gh` records the arguments of every call in.
+///
+/// It appears on the first call, so its absence is a run that never reached
+/// `gh` at all.
+const ARGS_FILE: &str = "args";
 
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
@@ -298,16 +322,16 @@ impl FakeGh {
     /// number the repository does not have produces.
     fn with_status(body: &str, status: i32) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let args_file = dir.path().join("args");
+        let args_file = dir.path().join(ARGS_FILE);
         let script = format!(
             r#"#!/bin/sh
+for arg in "$@"; do
+    printf '%s\n' "$arg" >> '{args}'
+done
 if [ "$1" = "repo" ]; then
     printf '%s\n' '{REPO}'
     exit 0
 fi
-for arg in "$@"; do
-    printf '%s\n' "$arg" >> '{args}'
-done
 cat <<'WN_FAKE_GH_BODY'
 {body}
 WN_FAKE_GH_BODY
@@ -325,9 +349,18 @@ exit {status}
         self.dir.path()
     }
 
-    /// The arguments of the last GraphQL call, one to a line.
+    /// The arguments of every call, one to a line.
     fn recorded_args(&self) -> String {
-        std::fs::read_to_string(self.dir.path().join("args")).unwrap()
+        std::fs::read_to_string(self.dir.path().join(ARGS_FILE)).unwrap()
+    }
+
+    /// Whether the tool asked `gh` nothing at all.
+    ///
+    /// The script writes the file on its first call of any kind, the call that
+    /// names the repository included, so a file that never appeared is a run
+    /// that never reached `gh`.
+    fn asked_nothing(&self) -> bool {
+        !self.dir.path().join(ARGS_FILE).exists()
     }
 }
 
@@ -1370,4 +1403,39 @@ fn a_plan_that_names_a_blocker_answers_as_one_graph() {
     let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), WAITS_ANSWER);
+}
+
+#[test]
+fn refuses_a_plan_whose_streams_wait_for_each_other() {
+    // Two streams that wait for each other leave no work to start between
+    // them, and an answer of "nothing is ready" hides the reason. So the run
+    // stops and the message names the two numbers.
+    //
+    // The reader of this message wrote a table and drew no picture, so the
+    // words of it name the order rather than a drawing. One graph carries the
+    // table and the picture both, and one message answers for both of them.
+    //
+    // The run names no repository, and the fake `gh` records every call it is
+    // given. So a run that reached `gh` at all wrote the file, and a mistake
+    // in the text of the reader costs no round trip.
+    let gh = FakeGh::new(WAITS_ISSUES);
+    let output = run_with_stdin(&gh, &[], "80", WAITS_CYCLE);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    for number in ["#91", "#96"] {
+        assert!(
+            message.contains(number),
+            "the error names {number} of the cycle, in {message}"
+        );
+    }
+    assert!(
+        !message.contains(PICTURE_WORD),
+        "the error of a plan names no drawing, in {message}"
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+    assert!(
+        gh.asked_nothing(),
+        "the run refused the plan before it asked GitHub, and it asked {}",
+        gh.recorded_args()
+    );
 }
