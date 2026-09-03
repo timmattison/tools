@@ -547,7 +547,15 @@ fn a_report_follows_the_locale_of_the_environment() {
         .env(LANG_VARIABLE, AMERICAN_ENGLISH)
         .arg("--input")
         .arg(&input));
-    let german = run(prgz().env(LANG_VARIABLE, GERMAN).arg("--input").arg(&input));
+    // The German run writes to the same default output path as the American
+    // run above, thus that output file is already there by the time this
+    // run starts. --yes answers the replace question so this test, which
+    // states the locale rule and not the replace rule, stays free of it.
+    let german = run(prgz()
+        .env(LANG_VARIABLE, GERMAN)
+        .arg("--input")
+        .arg(&input)
+        .arg("--yes"));
 
     assert!(
         american.ok,

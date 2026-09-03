@@ -4,10 +4,14 @@
 //! own: the command line, the progress bar, and the answer to a stop signal.
 //! The library beside it holds the compression and the closing report.
 //!
-//! A run that the user stops once leaves no output file behind. The Go tool
-//! that this binary replaces sent Ctrl-C to the quit path of its terminal
-//! library, thus it left a part of a gzip stream on the disk. A part of a
-//! gzip stream looks like a whole one, thus the user got a broken file.
+//! A run that the user stops once leaves no output file behind, when the run
+//! made that file itself. The Go tool that this binary replaces sent Ctrl-C
+//! to the quit path of its terminal library, thus it left a part of a gzip
+//! stream on the disk. A part of a gzip stream looks like a whole one, thus
+//! the user got a broken file. A run that replaced an output file that was
+//! already there, and that stops after the replace, leaves the part of that
+//! file that it had written in place instead: that file was already the
+//! user's before the run began.
 //!
 //! A run that the user stops twice ends at once, on the second signal, and
 //! it leaves the part of the output file that it had written. The second
@@ -15,12 +19,17 @@
 //! reads the stop flag a second time and the graceful stop above never
 //! happens. A user who meets that run gets the process back, at the cost of
 //! the part file that the graceful stop would have removed.
+//!
+//! A run whose output file is already there asks, on standard error, whether
+//! it may replace that file, unless `--yes` already answered the question.
+//! `prcp`, the sibling tool that copies files with a progress bar, asks the
+//! same way; this binary copies its model rather than invent a second one.
 
 #![warn(clippy::unwrap_used)]
 #![warn(clippy::expect_used)]
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,6 +65,19 @@ const CAUSE_SEPARATOR: &str = ": ";
 /// percentage, because the run does not know the whole yet.
 const UNKNOWN_LENGTH: u64 = 0;
 
+/// The placeholder inside [`REPLACE_PROMPT`] that a run replaces with the
+/// path of the output file before it prints the prompt.
+const REPLACE_PROMPT_PLACEHOLDER: &str = "{path}";
+
+/// The prompt that a run prints, to standard error, when the output file is
+/// already there and `--yes` did not already answer the question. The
+/// pattern matches the confirmation prompt of `prcp`: a blank line first,
+/// the path in quotes, and the `(y/N)` convention of a default no.
+const REPLACE_PROMPT: &str = "\nOutput file '{path}' already exists. Overwrite? (y/N): ";
+
+/// The one answer, in either case, that means yes.
+const YES_ANSWER: &str = "y";
+
 /// Compress one file with gzip and show the progress of the run.
 #[derive(Parser)]
 #[command(name = PROGRAM_NAME, version = version_string!(), about, long_about = None)]
@@ -68,6 +90,10 @@ struct Cli {
     /// input name
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
+
+    /// Replace the output file when it is already there, with no prompt
+    #[arg(long, short = 'y')]
+    yes: bool,
 }
 
 /// Why a run of the tool stopped short.
@@ -93,7 +119,7 @@ fn main() -> ExitCode {
         .output
         .unwrap_or_else(|| default_output_path(input.as_path()));
     let locale = locale_from_lang(&locale_value());
-    match compress_with_progress(input.as_path(), output.as_path()) {
+    match compress_with_progress(input.as_path(), output.as_path(), cli.yes) {
         Ok(stats) => {
             println!("{}", format_report(&stats, &locale));
             ExitCode::SUCCESS
@@ -124,24 +150,61 @@ fn locale_value() -> String {
 /// goes on.
 ///
 /// The bar goes away when the run ends, whether the run was a success or not.
-/// The library removes a part of an output file, thus a run that stops short
-/// leaves the disk as it found it.
+/// The library removes an output file that the run made itself when the run
+/// fails, but it keeps an output file that was already there and that the
+/// run replaced, thus a run that stops short of an existing output leaves
+/// that file, though not necessarily whole, on the disk.
+///
+/// A run whose output file is already there asks, on standard error, whether
+/// it may replace that file, unless `yes` already answers the question. The
+/// function settles that question before it makes the progress bar: the bar
+/// comes into being on the first byte of progress, which follows every check
+/// inside the library, thus a run that stops short of any progress — on the
+/// question above or on an earlier check — never draws a bar for the prompt
+/// to interleave with.
 ///
 /// # Errors
 ///
 /// Returns [`RunError::Signal`] when the system refuses the stop signals, and
 /// [`RunError::Compress`] when the compression stops short.
-fn compress_with_progress(input: &Path, output: &Path) -> Result<Stats, RunError> {
+fn compress_with_progress(input: &Path, output: &Path, yes: bool) -> Result<Stats, RunError> {
     let stop = stop_flag().map_err(RunError::Signal)?;
-    let bar = progress_bar(input);
+    let mut bar: Option<ProgressBar> = None;
     let result = compress_file(
         input,
         output,
+        &|path| yes || ask_to_replace(path),
         &|| stop.load(Ordering::Relaxed),
-        &mut |bytes| bar.set_position(bytes),
+        &mut |bytes| {
+            bar.get_or_insert_with(|| progress_bar(input))
+                .set_position(bytes);
+        },
     );
-    bar.finish_and_clear();
+    if let Some(bar) = bar {
+        bar.finish_and_clear();
+    }
     Ok(result?)
+}
+
+/// Ask, on standard error, whether a run may replace the output file at
+/// `path`, and answer what the user typed.
+///
+/// The function prints [`REPLACE_PROMPT`] with the path of `path` in place
+/// of [`REPLACE_PROMPT_PLACEHOLDER`], then reads one line from standard
+/// input. An answer of [`YES_ANSWER`], in either case, means yes. Every
+/// other answer means no, thus an answer that the read cannot get — the end
+/// of the input, or a failure of the read — also means no. The function
+/// never unwraps a failure of the terminal, because a run that meets such a
+/// failure must still get a clear no rather than a crash.
+fn ask_to_replace(path: &Path) -> bool {
+    let prompt = REPLACE_PROMPT.replace(REPLACE_PROMPT_PLACEHOLDER, &path.display().to_string());
+    eprint!("{prompt}");
+    let _ = io::stderr().flush();
+    let mut answer = String::new();
+    match io::stdin().read_line(&mut answer) {
+        Ok(_) => answer.trim().eq_ignore_ascii_case(YES_ANSWER),
+        Err(_) => false,
+    }
 }
 
 /// Make the progress bar of one run.

@@ -195,6 +195,13 @@ pub enum CompressError {
         /// The path of the output file.
         path: PathBuf,
     },
+    /// The output file is already there, and the caller did not permit the
+    /// run to replace it.
+    #[error("the output file {} is already there", path.display())]
+    OutputExists {
+        /// The path of the output file.
+        path: PathBuf,
+    },
 }
 
 /// The count of bytes in the buffer that holds one block of the input. A
@@ -341,22 +348,39 @@ fn output_is_input(_source: &File, input: &Path, output: &Path) -> bool {
 /// write a small gzip stream of nothing over the bytes that the user meant
 /// to keep.
 ///
-/// The function removes a part of an output file when the run fails, and also
-/// when the user stops the run. A part of a gzip stream looks like a complete
-/// one, thus a run that leaves such a file gives a broken file to the user.
-/// The refusal above returns before the function makes any output file, thus
-/// no removal follows it and the input file stays whole.
+/// When `output` is already there, and is not the input file, the function
+/// asks `may_replace` whether it may replace that file. `may_replace` gets
+/// the path of `output` and answers yes or no. The function itself never
+/// asks a person; a caller that must ask a person, such as a terminal
+/// prompt, owns that interaction and gives the function only the answer. An
+/// `output` that is not yet there needs no answer, thus the function calls
+/// `may_replace` only when `output` exists.
+///
+/// The function removes the output file when the run fails, and also when
+/// the user stops the run, but only when the run made that file itself. A
+/// part of a gzip stream looks like a complete one, thus a run that leaves
+/// such a file behind, where no file stood before, gives a broken file to
+/// the user. An output file that was already there, and that `may_replace`
+/// let the function replace, keeps its place on the disk even when the run
+/// fails after it: that file was already the user's before the run began,
+/// thus the run does not remove it, though the bytes inside it are still
+/// the part of the stream that the run managed to write. The refusal above
+/// returns before the function makes any output file, thus no removal
+/// follows it and the input file stays whole.
 ///
 /// # Errors
 ///
 /// Answers [`CompressError::OpenInput`] when the input file does not open.
 /// Answers [`CompressError::SameFile`] when the output path names the input
-/// file. Answers [`CompressError::CreateOutput`] when the output file does
-/// not open. Answers [`CompressError::ReadInput`], [`CompressError::WriteOutput`],
-/// or [`CompressError::Cancelled`] when the stream stops short.
+/// file. Answers [`CompressError::OutputExists`] when the output file is
+/// already there and `may_replace` answers no. Answers
+/// [`CompressError::CreateOutput`] when the output file does not open.
+/// Answers [`CompressError::ReadInput`], [`CompressError::WriteOutput`], or
+/// [`CompressError::Cancelled`] when the stream stops short.
 pub fn compress_file(
     input: &Path,
     output: &Path,
+    may_replace: &dyn Fn(&Path) -> bool,
     cancelled: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(u64),
 ) -> Result<Stats, CompressError> {
@@ -366,6 +390,12 @@ pub fn compress_file(
     })?;
     if output_is_input(&source, input, output) {
         return Err(CompressError::SameFile {
+            path: output.to_path_buf(),
+        });
+    }
+    let output_existed = output.exists();
+    if output_existed && !may_replace(output) {
+        return Err(CompressError::OutputExists {
             path: output.to_path_buf(),
         });
     }
@@ -389,8 +419,13 @@ pub fn compress_file(
         }),
         Err(error) => {
             // A failure to remove the file does not change the error that the
-            // caller gets. The caller must know why the run stopped.
-            let _ = fs::remove_file(output);
+            // caller gets. The caller must know why the run stopped. The run
+            // removes the file only when it made the file itself; an output
+            // file that was already there, and that the run replaced, keeps
+            // its place on the disk.
+            if !output_existed {
+                let _ = fs::remove_file(output);
+            }
             Err(error)
         }
     }
