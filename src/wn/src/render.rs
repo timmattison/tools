@@ -189,6 +189,16 @@ fn style(status: Status, is_next: bool) -> Style {
     }
 }
 
+/// The columns a row spends before its title: the mark, the space after it,
+/// the number column, and the gap after that.
+///
+/// A block that measures its titles asks the same question a row asks, so both
+/// of them ask it here. Two answers to it would let the titles of a block and
+/// the rows of that block part company.
+fn title_start(number_width: usize) -> usize {
+    MARK_WIDTH + 1 + number_width + COLUMN_GAP
+}
+
 /// The title a row writes, cut to `budget` columns.
 ///
 /// A row whose number names no issue writes [`MISSING_TITLE`], because a row
@@ -235,8 +245,7 @@ fn row(
     let number = entry.label();
     let mark = (style.paint_mark)(&style.mark.to_string());
 
-    let spent = MARK_WIDTH + 1 + number_width + COLUMN_GAP;
-    let title = fitted_title(entry, width.saturating_sub(spent));
+    let title = fitted_title(entry, width.saturating_sub(title_start(number_width)));
 
     if title.is_empty() && waits.is_empty() {
         return format!("{mark} {}", (style.paint_text)(&number));
@@ -381,6 +390,13 @@ pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartComm
         .map(|position| waits_text(report.waits_for(position)))
         .collect();
 
+    let budget = width.saturating_sub(title_start(number_width));
+    let title_width = entries
+        .iter()
+        .map(|entry| UnicodeWidthStr::width(fitted_title(entry, budget).as_str()))
+        .max()
+        .unwrap_or(0);
+
     let mut lines: Vec<String> = entries
         .iter()
         .enumerate()
@@ -391,7 +407,7 @@ pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartComm
                 number_width,
                 width,
                 &waits[position],
-                NO_TITLE_WIDTH,
+                title_width,
             )
         })
         .collect();
