@@ -1304,7 +1304,15 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> E
 /// parent directory to sit in ([`exit_codes::NO_PARENT_DIR`]).
 fn worktrees_dir(repo_root: &Path, quiet: bool) -> PathBuf {
     if let Some(stated) = stated_worktrees_dir(repo_root) {
-        return PathBuf::from(stated);
+        // A relative value answers "where, from the main worktree?". Reading it
+        // against the current directory would put the worktrees of one
+        // repository in a different place for every directory nwt runs in.
+        let stated = PathBuf::from(stated);
+        return if stated.is_absolute() {
+            stated
+        } else {
+            repo_root.join(stated)
+        };
     }
 
     // Get repo name from path with sanitization (fail-fast on non-UTF8)
