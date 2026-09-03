@@ -32,6 +32,12 @@ use thiserror::Error;
 /// of this repository are written with, plus the comma and the semicolon that
 /// a hand-typed list falls back on. Whitespace separates as well, and it is
 /// not in the list because [`char::is_whitespace`] already names it.
+///
+/// The three horizontal strokes of the box-drawing block stand here as well.
+/// A picture of one line is a chain, and a reader who draws one draws the
+/// tail of the arrow with the stroke that `graph` reads. Without them the run
+/// `──` reaches this module as one token, and the reader who typed the
+/// clearest chain of all gets a refusal.
 pub(crate) const SEPARATORS: &[char] = &[
     '\u{2192}', // → RIGHTWARDS ARROW
     '\u{27f6}', // ⟶ LONG RIGHTWARDS ARROW
@@ -43,6 +49,9 @@ pub(crate) const SEPARATORS: &[char] = &[
     '|',        // the ASCII spelling of the bar, doubled or not
     '>',        // the head of the ASCII arrow `->`
     '-',        // the tail of the ASCII arrow `->`
+    '\u{2500}', // ─ BOX DRAWINGS LIGHT HORIZONTAL
+    '\u{2501}', // ━ BOX DRAWINGS HEAVY HORIZONTAL
+    '\u{2550}', // ═ BOX DRAWINGS DOUBLE HORIZONTAL
     ',', ';',
 ];
 
