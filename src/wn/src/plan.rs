@@ -861,6 +861,26 @@ fn read_order(order: &str, label: &str) -> Result<Vec<Step>, PlanError> {
     Ok(readings.into_iter().map(|reading| reading.step).collect())
 }
 
+/// The one step `text` writes, or `None` when it writes none or more than one.
+///
+/// The reader of a picture asks this of the text beside a wire. A port of a
+/// net is one step and not a bare number, so `#249  (gallery)` is the step
+/// `#249` and `#4 (in flight, PR #15)` is one step that holds two numbers.
+/// The two forms read here exactly as they read in a table, because one
+/// function reads both.
+///
+/// It is built on [`read_order`], whose messages name the stream that holds
+/// the text. A picture has no stream to name, so the label is empty and the
+/// messages go nowhere: a port that names no step is not an error of this
+/// function, it is text that is not a port.
+pub(crate) fn one_step(text: &str) -> Option<Step> {
+    let steps = read_order(text, "").ok()?;
+    match steps.as_slice() {
+        [step] => Some(*step),
+        _ => None,
+    }
+}
+
 /// One step of a stream, with the mark the plan wrote on its number.
 ///
 /// The mark stands here and not on [`Step`], because it says nothing to a
