@@ -737,6 +737,20 @@ mod tests {
             .all(|position| report.is_ready(position) == (report.next() == Some(position)))
     }
 
+    /// The position of the row of `number`.
+    fn row_of(report: &Report, number: u64) -> usize {
+        report
+            .entries()
+            .iter()
+            .position(|entry| entry.number.get() == number)
+            .expect("the report holds a row for the number")
+    }
+
+    /// The numbers the row of `number` waits for.
+    fn waits_of(report: &Report, number: u64) -> Vec<u64> {
+        numbers(report.waits_for(row_of(report, number)))
+    }
+
     #[test]
     fn a_graph_names_every_step_somebody_can_start_now() {
         // Two streams that join are two people who work at the same time, and
@@ -754,6 +768,32 @@ mod tests {
             ready_of(&report),
             vec![242, 246],
             "a step with no step before it is ready, and each stream has one"
+        );
+    }
+
+    #[test]
+    fn a_blocked_step_names_the_work_it_waits_for() {
+        // The top stream is finished, so the bottom stream is the only one to
+        // start. The join then waits for the one step of it that is not
+        // finished, and the reader who reads the row of `#249` reads why
+        // nobody starts it.
+        let states = states_of(&[
+            (242, Status::Done),
+            (247, Status::Done),
+            (246, Status::Open),
+            (248, Status::Open),
+            (249, Status::Open),
+        ]);
+        let report = Report::of_graph(&graph_of(PASTE), &states);
+        assert_eq!(
+            ready_of(&report),
+            vec![246],
+            "the stream that is finished starts nothing, and the other one starts"
+        );
+        assert_eq!(
+            waits_of(&report, 249),
+            vec![248],
+            "a finished step before a row is no reason to wait"
         );
     }
 
