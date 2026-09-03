@@ -171,6 +171,8 @@ impl Sides {
     const HORIZONTAL: Self = Self(Side::Left.bit() | Side::Right.bit());
     /// The sides of `│`.
     const VERTICAL: Self = Self(Side::Up.bit() | Side::Down.bit());
+    /// The sides of `┼`, which joins every neighbor it has.
+    const ALL: Self = Self::HORIZONTAL.with(Self::VERTICAL);
 
     /// These sides and the sides of `other`.
     const fn with(self, other: Self) -> Self {
@@ -208,14 +210,20 @@ struct Place {
 /// because that rule reads the grid and this table does not.
 fn sides_of(c: char) -> Option<Sides> {
     let sides = match c {
-        // The light strokes, and the corners the bus of a picture is drawn
-        // with. The heavy set and the double set join them in the slice that
-        // reads them.
+        // The light set: the two strokes, the four corners, the four tees,
+        // and the cross. The heavy set and the double set join them in the
+        // slice that reads them.
         '\u{2500}' => Sides::HORIZONTAL, // ─
         '\u{2502}' => Sides::VERTICAL,   // │
+        '\u{250c}' => Sides::of(Side::Right).with(Sides::of(Side::Down)), // ┌
         '\u{2510}' => Sides::of(Side::Left).with(Sides::of(Side::Down)), // ┐
-        '\u{251c}' => Sides::VERTICAL.with(Sides::of(Side::Right)), // ├
+        '\u{2514}' => Sides::of(Side::Up).with(Sides::of(Side::Right)), // └
         '\u{2518}' => Sides::of(Side::Up).with(Sides::of(Side::Left)), // ┘
+        '\u{251c}' => Sides::VERTICAL.with(Sides::of(Side::Right)), // ├
+        '\u{2524}' => Sides::VERTICAL.with(Sides::of(Side::Left)), // ┤
+        '\u{252c}' => Sides::HORIZONTAL.with(Sides::of(Side::Down)), // ┬
+        '\u{2534}' => Sides::HORIZONTAL.with(Sides::of(Side::Up)), // ┴
+        '\u{253c}' => Sides::ALL,        // ┼
         head if RIGHTWARD_HEADS.contains(&head) => Sides::HORIZONTAL,
         _ => return None,
     };
