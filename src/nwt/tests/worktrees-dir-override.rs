@@ -83,6 +83,28 @@ fn set_override(repo: &Path, worktrees_dir: &str) {
     );
 }
 
+/// Check a new `branch` out into a linked worktree of `repo` at `path`.
+///
+/// A run from a linked worktree stands somewhere other than the main worktree.
+/// That is what tells the two candidate answers apart when the stated value is
+/// relative.
+fn add_linked_worktree(repo: &Path, path: &Path, branch: &str) {
+    assert!(
+        run_git(
+            repo,
+            &[
+                "worktree",
+                "add",
+                path.to_str().expect("utf-8 worktree path"),
+                "-b",
+                branch,
+            ],
+        ),
+        "git worktree add failed in {}",
+        repo.display()
+    );
+}
+
 #[test]
 fn an_absolute_value_places_the_worktree_in_a_detached_repository() {
     let repo = DetachedGitDirRepo::nested();
@@ -122,5 +144,24 @@ fn an_absolute_value_places_the_worktree_in_a_normal_repository() {
             .join("stated-worktrees")
             .join(&branch),
         "nwt must obey {WORKTREES_DIR_KEY} in a normal repository"
+    );
+}
+
+#[test]
+fn a_relative_value_resolves_against_the_main_worktree() {
+    let (temp, repo) = init_repo();
+    set_override(&repo, "stated-worktrees");
+    let linked = temp.path().join("linked");
+    add_linked_worktree(&repo, &linked, &unique_branch("relative-linked"));
+    let branch = unique_branch("relative");
+
+    // The run starts in the linked worktree, so the current directory and the
+    // main worktree are two different answers.
+    let created = created_worktree(&linked, &branch);
+
+    assert_eq!(
+        canonical(&created),
+        canonical(&repo).join("stated-worktrees").join(&branch),
+        "a relative {WORKTREES_DIR_KEY} must resolve against the main worktree"
     );
 }
