@@ -44,12 +44,30 @@ disallowed-methods = [
     # of both crates.
     #
     # `termsize` is the one entrance, and it states the one rule: a size whose
-    # columns or whose rows are zero is no answer. It keeps the two probes
-    # apart, because they read different file descriptors — `controlling_size`
-    # reads `/dev/tty` and `stdout_size` reads standard output — and a caller
-    # that measures one of them must not get the other. That crate holds the
-    # only two calls this ban allows, and each of them says so at the call site
-    # with an `#[allow]` and a reason.
+    # columns or whose rows are zero is no answer. It keeps three probes apart,
+    # because they read different file descriptors, and a caller that measures
+    # one of them must not get another. `controlling_size` reads `/dev/tty`, and
+    # it reads standard output when that open fails. `stdout_size` reads
+    # standard output, then standard error, then standard input.
+    # `drawing_window` reads one whole `winsize` off one file descriptor: the
+    # columns, the rows and the pixel size of one window. It reads standard
+    # output, then standard error, then standard input, and then `/dev/tty`.
+    #
+    # The raw ioctl is banned for the same reason. `TIOCGWINSZ` is the call
+    # under all three probes, so a crate that sends it directly writes a fourth
+    # probe that obeys none of the rules above. `termgfx` did exactly that. It
+    # held its own `TIOCGWINSZ` ioctl on file descriptor 1 and took the pixel
+    # size from there, and it took the cell counts from `stdout_size`. A tool
+    # that draws a picture divides the pixels by the cells to measure a
+    # character cell. That division only measures a cell when both halves come
+    # off one descriptor. A run whose standard output is a pipe measured no
+    # pixels at all and drew at a guess. GitHub issue #350 reports that defect.
+    #
+    # `termsize` holds the only read of a window this ban allows, and it says so
+    # at the call site with an `#[allow]` and a reason. The one other call is a
+    # different request: a test of `ic` sends `TIOCSCTTY`, which reads no window
+    # and claims a controlling terminal for a child.
     { path = "crossterm::terminal::size", reason = "call termsize::controlling_size or termsize::controlling_columns instead; a terminal that carries no window answers this call with Ok((0, 0)), and zero columns is not a width" },
     { path = "terminal_size::terminal_size", reason = "call termsize::stdout_size or termsize::stdout_columns instead; this call hands a zero back on Windows, and zero columns is not a width" },
+    { path = "libc::ioctl", reason = "call termsize::drawing_window instead; a raw TIOCGWINSZ on one file descriptor is the bypass that termgfx held, and GitHub issue #350 reports what it cost. An ioctl of another request says so at its call site with an #[allow]" },
 ]
