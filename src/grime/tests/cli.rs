@@ -458,3 +458,50 @@ fn a_merge_that_fails_with_nothing_to_measure_is_neither_clean_nor_conflicts() {
          qualify is a wrong sentence:\n{stderr}"
     );
 }
+
+/// `grime` simulates from HEAD, which is the only thing it *can* simulate from,
+/// so uncommitted work is not an error - but a `clean` verdict must never be
+/// read as covering it.
+///
+/// The clean run is taken first and used as the baseline, which is what makes
+/// this one test rather than three. It pins that a tree with nothing
+/// uncommitted says nothing at all - a note printed unconditionally would be
+/// noise people learn to ignore - and then that dirtying the tree adds the
+/// note and changes literally nothing else, neither the verdict a human reads
+/// nor the number a script acts on.
+///
+/// The note goes to stderr precisely so that last part is true: a caller
+/// piping stdout somewhere gets the same bytes either way.
+#[test]
+fn uncommitted_work_gets_a_note_on_stderr_and_leaves_the_answer_alone() {
+    let repo = independent_branches_repo();
+
+    let (clean_code, clean_stdout, clean_stderr) = run(&repo, "alpha", "beta");
+
+    assert_eq!(
+        clean_stderr, "",
+        "a tree with nothing uncommitted has nothing to warn about"
+    );
+
+    // One tracked file modified and one file never added, because
+    // `uncommitted_files` counts both and a note that missed either would be
+    // undercounting exactly the work it exists to mention.
+    repo.write_file("shared.txt", "locally edited, never committed\n");
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (dirty_code, dirty_stdout, dirty_stderr) = run(&repo, "alpha", "beta");
+
+    assert_eq!(
+        dirty_stderr, "grime: note: 2 uncommitted files are not included; simulating from HEAD",
+        "stdout:\n{dirty_stdout}"
+    );
+    assert_eq!(
+        dirty_code, clean_code,
+        "a dirty tree is not an error, so the exit code must not move\nstderr:\n{dirty_stderr}"
+    );
+    assert_eq!(
+        dirty_stdout, clean_stdout,
+        "the note belongs on stderr; stdout must be byte-for-byte what the \
+         clean run produced"
+    );
+}
