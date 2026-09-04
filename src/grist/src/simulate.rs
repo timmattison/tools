@@ -25,7 +25,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use gitscratch::{BranchName, Conflicts, Git, Repo, Scratch};
+use gitscratch::{BranchName, Conflicts, Repo, Scratch};
 
 use crate::metrics::OrderingScore;
 use crate::plan::{ordering_count, permutations};
@@ -135,7 +135,7 @@ impl Simulator {
     /// state the resolution loop cannot drive forward.
     pub fn score(&self, order: &[BranchName]) -> Result<OrderingScore> {
         let scratch = self.repo.scratch(&self.base)?;
-        let mut simulated_main = scratch.git().rev_parse(&self.base)?;
+        let mut simulated_main = self.repo.resolve(&self.base)?;
         let mut total = Conflicts::default();
 
         for branch in order {
@@ -162,7 +162,7 @@ impl Simulator {
         orderings_to_simulate(branches)?;
 
         let scratch = self.repo.scratch(&self.base)?;
-        let base_commit = scratch.git().rev_parse(&self.base)?;
+        let base_commit = self.repo.resolve(&self.base)?;
 
         let mut memo: HashMap<Vec<BranchName>, (String, Conflicts)> = HashMap::new();
         memo.insert(Vec::new(), (base_commit, Conflicts::default()));
@@ -207,32 +207,18 @@ impl Simulator {
         onto: &str,
         branch: &BranchName,
     ) -> Result<(String, Conflicts)> {
-        let git = scratch.git();
-
         self.report(&format!("replaying {branch}"));
 
-        // Detached, so the real branch ref is never moved.
-        //
-        // `--end-of-options` ahead of the name, because a `BranchName` carries
-        // whatever the caller put in it and a branch name can start with a
-        // dash. Without it `git checkout -q --detach --progress` is a complete
-        // and valid command: git reads `--progress` as its own option, finds no
-        // branch left to check out, and detaches HEAD where it already stands -
-        // exit 0, no complaint. The scratch worktree then stays on the base,
-        // the rebase finds nothing to replay, and the ordering scores zero for
-        // work nobody did. A plain `--` is the wrong separator here: `checkout`
-        // reads everything after it as a pathspec, so `--detach -- <branch>`
-        // refuses the branches that do exist. Pinned by `tests/simulation.rs`.
-        git.run(
-            "checkout",
-            &["-q", "--detach", "--end-of-options", branch.as_str()],
-        )
-        .with_context(|| format!("could not check out '{branch}'"))?;
+        // Detached, so the real branch ref is never moved. The separator that
+        // keeps a dash-leading branch name from being read as an option lives
+        // in `Scratch::check_out_detached`, along with the account of what it
+        // costs when it is missing. Pinned by `tests/simulation.rs`.
+        scratch.check_out_detached(branch.as_str())?;
 
         let cost = scratch
             .replay_rebase(onto)
             .with_context(|| format!("could not replay '{branch}' onto the simulated main"))?;
-        let next_main = squash_into(&git, onto, branch)?;
+        let next_main = squash_into(scratch, onto, branch)?;
 
         Ok((next_main, cost))
     }
@@ -250,10 +236,17 @@ fn into_score(conflicts: &Conflicts, order: Vec<BranchName>) -> OrderingScore {
 
 /// Collapse the checked-out (already rebased) branch into a single commit on
 /// top of `parent`, discarding its ancestry exactly as a squash merge does.
-fn squash_into(git: &Git, parent: &str, branch: &BranchName) -> Result<String> {
-    let tree = git.run("rev-parse", &["HEAD^{tree}"])?;
-    git.run(
-        "commit-tree",
-        &[&tree, "-p", parent, "-m", &format!("squash {branch}")],
-    )
+///
+/// Both halves are operations `Scratch` names, so `grist` never holds a git
+/// runner of its own. That is the crate's rule rather than a preference here: a
+/// scratch worktree is a linked worktree of the developer's real repository, and
+/// a runner reaches every command that repository answers.
+///
+/// # Errors
+///
+/// Returns an error if git could not be spawned, if the scratch worktree has no
+/// commit at HEAD, or if git refused to write the commit.
+fn squash_into(scratch: &Scratch, parent: &str, branch: &BranchName) -> Result<String> {
+    let tree = scratch.head_tree()?;
+    scratch.commit_tree(&tree, parent, &format!("squash {branch}"))
 }

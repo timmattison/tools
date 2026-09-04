@@ -47,7 +47,7 @@ fn replays_under_the_environment_a_git_hook_hands_down() {
     let _elsewhere = repo.add_worktree("left");
 
     let scratch = repo.scratch("main");
-    let git = scratch.git();
+    let git = scratch.testing_git();
     git.run("checkout", &["-q", "--detach", "right"])
         .expect("check out the branch detached in the scratch worktree");
 

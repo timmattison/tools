@@ -19,7 +19,7 @@ use gitscratch::{Conflicts, Files, Hunks, Scratch, Stops};
 /// in the scratch worktree, then rebase.
 fn replay(scratch: &Scratch, branch: &str, onto: &str) -> Conflicts {
     scratch
-        .git()
+        .testing_git()
         .run("checkout", &["-q", "--detach", branch])
         .expect("check out the branch detached in the scratch worktree");
     scratch

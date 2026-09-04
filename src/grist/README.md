@@ -152,11 +152,17 @@ broken, since both report green forever.
 lives, guard by guard, alongside the failure output captured at the time.
 
 `grist` keeps a `tests/safety.rs` of its own for the part `gitscratch` cannot
-see: that a full simulation, composed the way `grist` composes it — `checkout
---detach` → `replay_rebase` → `squash_into`, once per branch of every ordering —
-leaves every real branch ref where it found it. That detach belongs to `grist`,
-not to the harness, so dropping it would move a developer's real branches while
-every `gitscratch` test still passed.
+see: that a full simulation, composed the way `grist` composes it —
+`check_out_detached` → `replay_rebase` → `squash_into`, once per branch of every
+ordering — leaves every real branch ref where it found it. The composition is
+`grist`'s, and so is the detach it depends on, even though the harness now spells
+that checkout. `gitscratch`'s own `tests/safety.rs` writes its checkout out by
+hand rather than calling `check_out_detached`, because that detach is one of the
+guards under test and a guard read through the code it guards proves nothing —
+so a `check_out_detached` that lost `--detach` leaves every `gitscratch` test
+green and reddens this one. Watched, not assumed: the mutation reddens
+`a_full_simulation_never_moves_real_branch_refs` here and two more `grist`
+tests, and nothing in `gitscratch`.
 
 What is left over is small and worth naming: `gc.auto=0`, the
 `rebase.autoStash`/`autosquash` pair and `gpg.format` are established by

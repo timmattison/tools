@@ -8,10 +8,11 @@
 //!
 //! [`Repo`] is the pre-flight: open the repository, resolve the revisions, see
 //! whether the tree is dirty, and only then decide whether a replay is worth
-//! starting. It exists here rather than in each consuming tool because
-//! [`Git`](crate::Git) is deliberately crate-private — nothing outside this
-//! crate may build a git runner rooted at a real repository — so the queries a
-//! caller legitimately needs have to be part of this crate's public door.
+//! starting. It exists here rather than in each consuming tool because the git
+//! runner is deliberately crate-private — nothing outside this crate may build
+//! one rooted at a real repository, and nothing outside is handed one either —
+//! so the queries a caller legitimately needs have to be part of this crate's
+//! public door.
 //!
 //! It is also the *only* door. [`Repo::scratch`] is how a [`Scratch`] is built,
 //! because a pre-flight a caller can walk around is not a pre-flight — it is a

@@ -13,7 +13,7 @@ use gitscratch::{Conflicts, Files, Hunks, Repo, Scratch};
 /// it is spelled out here in the test rather than hidden behind a library call.
 fn replay(scratch: &Scratch, branch: &str, onto: &str) -> Conflicts {
     scratch
-        .git()
+        .testing_git()
         .run("checkout", &["-q", "--detach", branch])
         .expect("check out the branch detached in the scratch worktree");
     scratch
@@ -955,7 +955,7 @@ fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
 
     {
         let scratch = repo.scratch("main");
-        let git = scratch.git();
+        let git = scratch.testing_git();
         git.run("checkout", &["-q", "--detach", "right"])
             .expect("check out the branch detached in the scratch worktree");
 
@@ -1051,7 +1051,7 @@ fn replays_without_hanging_or_failing_when_commit_signing_is_enabled() {
     fn replay_under_signing(repo: &Path) -> anyhow::Result<Conflicts> {
         let scratch = Repo::open(repo)?.scratch("main")?;
 
-        let git = scratch.git();
+        let git = scratch.testing_git();
         git.run("checkout", &["-q", "--detach", "left"])?;
         scratch.replay_rebase("main")?;
 

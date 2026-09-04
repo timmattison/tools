@@ -191,10 +191,12 @@ teardown removes the scratch worktree by path rather than running the repo-wide
 
 None of that is implemented here. It all belongs to the shared
 [`gitscratch`](../gitscratch/README.md) harness, which is the only way to get a
-scratch worktree and only hands out a git runner already carrying the whole
-configuration — so `grind`, `grist` and anything built later cannot drift onto a
-weaker version of it. That README has the full table and the reason for every
-row.
+scratch worktree and answers only the operations it names, each of them under
+the whole configuration — so `grind`, `grist` and anything built later cannot
+drift onto a weaker version of it. The git runner that makes those calls never
+leaves that crate, because a scratch worktree is a linked worktree of your real
+repository and the configuration says nothing about `branch -D` or `push`. That
+README has the full table and the reason for every row.
 
 ## No shell integration
 

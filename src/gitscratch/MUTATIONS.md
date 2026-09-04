@@ -28,6 +28,7 @@ not have to re-derive which guard belongs to which test.
 | --- | --- | --- | --- |
 | `never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled` | `rebase.updateRefs=false` | `src/git.rs`, `Git::safety_config()` — drop the `"rebase.updateRefs=false"` entry | remove |
 | `works_when_the_branches_are_checked_out_in_other_worktrees` | The detached checkout of the branch under replay | `tests/safety.rs`, the `replay()` helper — drop `--detach` from `checkout -q --detach <branch>` | remove |
+| `a_full_simulation_never_moves_real_branch_refs` (`grist`, `tests/safety.rs`) | The detached checkout inside `Scratch::check_out_detached`, which is the one every consumer uses | `src/scratch.rs`, `Scratch::check_out_detached` — drop `--detach` | remove |
 | `never_disturbs_other_worktrees_whose_directories_are_temporarily_missing` | The **absence** of `git worktree prune` in teardown | `src/scratch.rs`, `impl Drop for Scratch` — add a `worktree prune` after the `worktree remove --force` | **add** |
 | `never_records_a_rerere_preimage_even_when_rerere_is_enabled` | `rerere.enabled=false`, `rerere.autoupdate=false` | `src/git.rs`, `Git::safety_config()` — drop both entries | remove |
 | `never_fires_a_hook_from_the_developer_s_repository` | `core.hooksPath` → the scratch's empty hooks directory | `src/git.rs`, `Git::safety_config()` — drop the chained `core.hooksPath=` argument | remove |
@@ -49,6 +50,7 @@ not have to re-derive which guard belongs to which test.
 | `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` (`src/scratch.rs`) | The parent count read ahead of both probes, which refuses a merge commit at a halt whatever the configuration says | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the `stopped_commit_parent_count` call and the `ensure!` under it | remove |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` (`tests/halts.rs`) | `--ignore-submodules=none` on the porcelain half of the empty-commit probe, which is what makes both halves read one tree under one set of rules | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the argument from the `git diff` invocation | remove |
 | `a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact` | `Git::path`, the byte-for-byte read of the one path git printed | `src/git.rs`, `Git::path` — read the answer the way `Git::run` reads one, `String::from_utf8_lossy(&output.stdout).trim()` in place of the one-newline strip | redirect |
+| The ` ```compile_fail ` doc-test on `Scratch` (`src/scratch.rs`) | The runner staying inside the crate — a consumer is never *handed* one, which is the half `Git::new` being crate-private does not cover | `src/scratch.rs`, `Scratch::git` — put the `pub` back | remove |
 
 ## What keeps each test honest
 
@@ -782,6 +784,78 @@ of them can be built here, and the call sites are held to it by review. There is
 one reader for a path list and one for a single path, and `Git::run` is
 neither of them.
 
+### The ` ```compile_fail ` doc-test on `Scratch`
+
+This guard is not a test in `tests/` and cannot be one. What it pins is what a
+consumer can *compile*, and a test that runs has already compiled. Rustdoc
+builds a doc-test as a program outside this crate, which is the seat a consumer
+sits in, so the block is the only place the property can be stated.
+
+Mutation: `Scratch::git` was made `pub` again — the state the crate was in when
+the finding was written.
+
+```text
+running 3 tests
+test src/gitscratch/src/git.rs - git::shed_inherited_git_environment (line 118) - compile ... ok
+test src/gitscratch/src/scratch.rs - scratch::Scratch (line 82) - compile ... ok
+test src/gitscratch/src/scratch.rs - scratch::Scratch (line 98) - compile fail ... FAILED
+
+---- src/gitscratch/src/scratch.rs - scratch::Scratch (line 98) stdout ----
+Test compiled successfully, but it's marked `compile_fail`.
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Red for the stated reason: the block compiled, and compiling is the whole of
+what it forbids. No collateral either — the run was `cargo test --no-fail-fast
+-p gitscratch -p grind -p grist`, and this doc-test is the only thing in the
+three crates the mutation reddens. That is expected rather than lucky: no other
+test reaches for the runner through `Scratch::git`, because the test suites go
+through `Scratch::testing_git`.
+
+**A ` ```compile_fail ` block passes on *any* compile error, so which error it
+gets was read rather than assumed.** A block that failed over a typo, a renamed
+method or a missing import would report exactly the same green, forever. Second
+check, with the source in its shipping state: a temporary test target under
+`tests/` — out-of-crate in the same way a doc-test is — was given the same three
+lines.
+
+```text
+error[E0624]: method `git` is private
+   --> src/gitscratch/tests/zz-probe.rs:7:27
+    |
+  7 |     let _runner = scratch.git();
+    |                           ^^^ private method
+    |
+   ::: src/gitscratch/src/scratch.rs:191:5
+    |
+191 |     pub(crate) fn git(&self) -> Git {
+    |     ------------------------------- private method defined here
+```
+
+The refusal is the visibility of `Scratch::git` and nothing else. That target
+also had the `testing` feature on, since a test target of this crate always
+does, so it records a second fact: `Scratch::testing_git` opens a door of its
+own and does not reopen this one.
+
+**The control is a start-state control, and it is worth naming as one.** The
+` ```no_run ` block beside the guard carries the same two setup lines with the
+named operations in place of the reach, and it has to compile. Without it a
+guard that fails over the setup — a `Repo::open` that changed shape, a `scratch`
+that stopped returning a `Result` — reads exactly like a guard doing its job.
+What the control cannot do is arm the hazard: only the mutation above shows the
+block is capable of going red, which is why both are recorded here.
+
+Two more routes to a runner were closed at the same time, and each was watched
+to fail from a consumer's own crate rather than argued for. A `grind` binary
+that names the type at the crate root is refused with E0425, "cannot find type
+Git in crate gitscratch", and a note that the item is gated behind the `testing`
+feature. One that names it through the module is refused with E0603, "module git
+is private". Neither refusal is a doc-test, because neither is a guard this
+crate has to keep on its own: they are the compiler reporting on a module and a
+re-export, and anything that reopened either would have to hand a runner back
+through `Scratch` as well, which is what the block above forbids.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
@@ -814,6 +888,20 @@ code moves. Every place below is load-bearing for the whole table:
   `--ignore-submodules=none` on both is that rule today. A change that adds a
   filter to one of them, or that hands a path list back to git instead of
   intersecting the two lists here, needs its own mutation and its own row.
+- **`Scratch::check_out_detached`** — the detached checkout every consumer now
+  makes. `tests/safety.rs` spells its own checkout out by hand rather than
+  calling this, on purpose: that detach is a guard under test, and a guard read
+  through the code it guards proves nothing. So this method's `--detach` is
+  covered by `grist`'s `tests/safety.rs` alone. The mutation was run: dropping
+  `--detach` here reddens `a_full_simulation_never_moves_real_branch_refs` and
+  two more `grist` tests, and nothing in `gitscratch`.
+- **`Scratch`'s public surface** — the named operations are the whole of what a
+  consumer may ask a scratch worktree to do, and `Scratch::git` is crate-private
+  so nothing else is reachable. A new `pub fn` that hands back a runner, under
+  any name, reopens the door whatever the doc-test says about `Scratch::git`;
+  `Scratch::testing_git` is behind the `testing` feature for exactly that
+  reason, and the feature is how this crate marks everything a test target may
+  have and a consumer may not.
 - **The parent count ahead of those two invocations** — both of them answer
   about a single-parent commit, and `git diff-tree` answers about a merge with
   silence rather than with a refusal. The count is what turns that silence into

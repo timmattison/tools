@@ -19,7 +19,7 @@ use gitscratch::Repo;
 let scratch = Repo::open(repo_path)?.scratch("main")?;
 
 // Check the candidate out detached, then replay it.
-scratch.git().run("checkout", &["-q", "--detach", "feature"])?;
+scratch.check_out_detached("feature")?;
 let conflicts = scratch.replay_rebase("main")?;
 
 if conflicts.is_clean() {
@@ -57,12 +57,36 @@ exactly when the set is non-empty — on the replay path and in a hand-built
 fixture alike.
 
 `Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
-to get a `Scratch`. A `Scratch` hands out a `Git` that already carries the whole
-safety configuration, so there is no way to get a worktree from here without
-also getting the hardening — nor without first having established that the
-directory is a repository at all, which is the pre-flight's job below.
+to get a `Scratch`. A `Scratch` answers the operations it names —
+`check_out_detached`, `replay_rebase`, `head_tree`, `commit_tree` — and each of
+them builds its own git call under the whole safety configuration. So there is
+no way to get a worktree from here without also getting the hardening — nor
+without first having established that the directory is a repository at all,
+which is the pre-flight's job below.
 
-Every reader on that `Git` takes the **subcommand as its own parameter**, ahead
+What a `Scratch` does **not** hand back is the runner that makes those calls. A
+scratch worktree is a *linked* worktree of the developer's real repository, so
+it shares that repository's refs, configuration and object store — and the
+hardening is configuration. It pins the settings that make a *replay*
+non-destructive, and it says nothing at all about `branch -D`, `update-ref`,
+`config --local` or `push`, because those are different commands and no setting
+refuses them. A consumer holding a runner reaches every one of them, in the
+developer's own repository.
+
+So the runner stays inside the crate, and both halves of that are needed.
+`Git::new` is crate-private, so nothing outside can *build* one; and `Scratch`
+answers with the operation rather than with the thing that performs it, so
+nothing outside is *handed* one. The crate carried the first half alone for a
+while, and the promise was false for the whole of it. A `compile_fail`
+doc-test on `Scratch` now holds the second half — see **Testing** below. An
+operation this list is missing is a pull request, not a reason to reopen the
+door.
+
+The rest of this section is the runner's own rules. A consumer never calls it,
+but a reader auditing the harness needs them, because they are what the named
+operations above are built on.
+
+Every reader on the runner takes the **subcommand as its own parameter**, ahead
 of the arguments, and that shape is a guard rather than a courtesy. Git reads
 whatever stands ahead of the subcommand as *its* options, and its rule for two
 `-c` pairs naming one key is that the last pair wins — so a caller whose
@@ -72,7 +96,7 @@ on the machine with `-C`. Naming the subcommand separately puts every caller
 argument after it, where git reads it as an argument of the subcommand. The
 bypass therefore does not compile, rather than being refused at run time.
 
-That `Git` offers exactly one way to read a **list of paths** back out of git,
+The runner offers exactly one way to read a **list of paths** back out of git,
 `nul_separated_paths`, which inserts `-z` right after the subcommand, splits
 stdout on NUL without trimming anything, and takes each field as the path those
 bytes spell:
@@ -159,9 +183,10 @@ where git accepts an option and answers cheaply instead of refusing.
 
 These live here rather than in each consuming tool for the same reason as
 everything else: `Git::new` is crate-private, so a repository-rooted runner can
-only be built from inside this crate. The queries are all reads, which fire no
-hooks, so unlike `Scratch` the pre-flight creates nothing at all — no temporary
-directory, no worktree, nothing to clean up if it rejects.
+only be built from inside this crate, and nothing here hands one out either. The
+queries are all reads, which fire no hooks, so unlike `Scratch` the pre-flight
+creates nothing at all — no temporary directory, no worktree, nothing to clean
+up if it rejects.
 
 And it is not optional. `Repo::scratch` is the only public entrance to a
 `Scratch`, so the last line above is not a convenience — it is the only line
@@ -499,6 +524,24 @@ actual commit to ask about, so it reads `git log` back for author, committer and
 both raw dates. It re-executes its own test binary with a hook's identity
 variables set on the *child* for the reason the two above do — the same mechanism
 `tests/isolation.rs` reaches for.
+
+**The door itself is pinned by a doc-test**, because the property is about what
+a consumer can *compile* and no ordinary test can state that. Rustdoc compiles a
+doc-test as a program outside this crate, which is exactly the seat a consumer
+sits in, so a ` ```compile_fail ` block on `Scratch` that reaches for
+`scratch.git()` is the guard: it passes only while that reach fails to compile.
+It was watched to fail first, with the runner still public — rustdoc reports
+`Test compiled successfully, but it's marked compile_fail` — and the reach was
+then confirmed to be refused as `error[E0624]: method git is private` rather
+than by some accident of the snippet.
+
+A block asserting that something does *not* compile passes just as readily when
+it never compiled for an unrelated reason, so the guard carries a control: a
+` ```no_run ` block beside it with the same two setup lines and the named
+operations in place of the reach. It has to compile. The two blocks differ by
+that one line, so the one line is what the ` ```compile_fail ` block measures.
+[`MUTATIONS.md`](./MUTATIONS.md) records the mutation: put the `pub` back on
+`Scratch::git` and watch the guard go red.
 
 The rest are about this document rather than about the code.
 `every_guard_the_safety_config_pins_is_named_in_the_readme_inventory` asks

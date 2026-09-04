@@ -144,6 +144,12 @@ impl Git {
     /// `hooks_path` that redirects nothing — an empty one still resolves hook
     /// lookups, relative to `cwd`. Both guards are established by
     /// [`Scratch::create`](crate::Scratch::create), so it stays the only way in.
+    ///
+    /// This closes one of the two routes to a runner, and it is worth naming
+    /// which. It stops a consumer *building* one. What stops a consumer being
+    /// *handed* one is that [`Scratch`](crate::Scratch) answers with the
+    /// operation rather than with the runner — see its own documentation, which
+    /// says what a runner in a consumer's hands can do to a real repository.
     #[must_use]
     pub(crate) fn new(cwd: impl Into<PathBuf>, hooks_path: impl Into<String>) -> Self {
         Self {
@@ -294,7 +300,7 @@ impl Git {
     /// `-z` is the first argument after the subcommand, ahead of everything the
     /// caller passed, so an argument list that finishes with `--` and a
     /// pathspec still gets it as a flag rather than as a path. That position is
-    /// structural: [`Git::command`] takes the subcommand separately and puts it
+    /// structural: `Git::command` takes the subcommand separately and puts it
     /// first, so `-z` at the front of this slice is `-z` right after the
     /// subcommand.
     ///

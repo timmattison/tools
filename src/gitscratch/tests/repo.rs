@@ -62,7 +62,7 @@ fn scratch_builds_a_worktree_of_the_repository_that_was_opened() {
 
     assert_eq!(
         scratch
-            .git()
+            .testing_git()
             .rev_parse("HEAD")
             .expect("read the scratch worktree's HEAD"),
         fixture.rev_parse("main"),
@@ -167,7 +167,7 @@ fn open_from_a_subdirectory_answers_for_the_whole_repository() {
 
     assert_eq!(
         scratch
-            .git()
+            .testing_git()
             .rev_parse("HEAD")
             .expect("read the scratch worktree's HEAD"),
         fixture.rev_parse("main"),

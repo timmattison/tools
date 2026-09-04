@@ -81,7 +81,7 @@ fn fixtures_and_replays_stay_inside_their_own_temporary_directories() {
 
     let scratch = repo.scratch("main");
     scratch
-        .git()
+        .testing_git()
         .run("checkout", &["-q", "--detach", "right"])
         .expect("check out the branch detached in the scratch worktree");
     let conflicts = scratch

@@ -59,11 +59,18 @@ the end of a name that had one, and never a lossy decode, which turns any byte o
 opens no file. The replay read the halted rebase's state directory through a reader that does both, and in a
 linked worktree git builds that answer out of the developer's own repository path — so a repository path holding
 such a byte reported no rebase in progress, and a real halt came out as "the rebase failed without leaving a
-rebase to resolve". A scratch worktree can only be built through `Scratch`, and a `Scratch` only hands out a git
-runner that already carries that configuration, so no tool can drift onto a weaker version of it. That runner
-takes the git subcommand as a parameter of its own, so a caller's arguments always land after it rather than in
-git's own option position, where one more `-c` pair would undo any of the pins above (git's rule is that the
-last pair naming a key wins) and a `-C` would aim the whole run at another repository. A revision the caller
+rebase to resolve". A scratch worktree can only be built through `Scratch`, and a `Scratch` answers the
+operations it names — check out detached, replay a rebase, read the HEAD tree, write a squash commit — each
+under that configuration, so no tool can drift onto a weaker version of it. The runner that makes those calls
+never leaves the crate, and both halves of that are needed: nothing outside can build one, because `Git::new`
+is crate-private, and nothing outside is handed one, because a `Scratch` answers with the operation rather than
+with the thing that performs it. The second half matters because a scratch worktree is a *linked* worktree of
+the real repository and the hardening is configuration — it says nothing about `branch -D`, `update-ref`,
+`config --local` or `push`, so a runner in a consumer's hands reaches all of them. A `compile_fail` doc-test
+holds that door shut. Inside the crate, the runner takes the git subcommand as a parameter of its own, so a
+caller's arguments always land after it rather than in git's own option position, where one more `-c` pair
+would undo any of the pins above (git's rule is that the last pair naming a key wins) and a `-C` would aim the
+whole run at another repository. A revision the caller
 supplies is kept out of that position too: `rev-parse` is asked with `--verify` and `--end-of-options`, and the
 commit-ish of `worktree add` and the upstream of `rebase` carry the same separator — because a bare `git
 rev-parse --root` prints its own argument back and exits 0, which read as a commit and let `grind` answer

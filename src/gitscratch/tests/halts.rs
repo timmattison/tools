@@ -41,7 +41,7 @@ fn rebase_in_progress(scratch: &Scratch) -> bool {
         .into_iter()
         .any(|state_dir| {
             let path = scratch
-                .git()
+                .testing_git()
                 .path("rev-parse", &["--git-path", state_dir])
                 .expect("ask git where the rebase state directory would be");
             scratch.path().join(path).exists()
@@ -66,7 +66,7 @@ fn refuses_to_report_a_cost_when_a_staged_resolution_could_not_be_committed() {
 
     let scratch = repo.scratch("main");
     scratch
-        .git()
+        .testing_git()
         .run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
@@ -126,7 +126,7 @@ fn refuses_to_report_a_cost_when_a_clean_pick_could_not_be_committed() {
 
     let scratch = repo.scratch("main");
     scratch
-        .git()
+        .testing_git()
         .run("checkout", &["-q", "--detach", "alpha"])
         .expect("check out alpha detached in the scratch worktree");
 
@@ -222,7 +222,7 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_commi
 
     let scratch = repo.scratch("main");
     scratch
-        .git()
+        .testing_git()
         .run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
@@ -328,7 +328,7 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not
 
     let scratch = repo.scratch("main");
     scratch
-        .git()
+        .testing_git()
         .run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
@@ -444,7 +444,7 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_b
 
     let scratch = repo.scratch("main");
     scratch
-        .git()
+        .testing_git()
         .run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
@@ -535,7 +535,7 @@ fn drops_a_commit_that_genuinely_became_empty_and_finishes_the_rebase() {
     let real_subject = repo.git(&["log", "-1", "--format=%s", "branch"]);
 
     let scratch = repo.scratch("main");
-    let git = scratch.git();
+    let git = scratch.testing_git();
     git.run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
@@ -660,7 +660,7 @@ fn refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped() {
         .expect("canonicalize the object database path");
 
     let scratch = repo.scratch("main");
-    let git = scratch.git();
+    let git = scratch.testing_git();
     git.run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 

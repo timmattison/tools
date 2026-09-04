@@ -2,8 +2,10 @@
 //!
 //! A [`Scratch`] is a detached worktree of the developer's real repository,
 //! living in a private temporary directory and removing itself on drop. Every
-//! git call made through it goes via [`Git`](crate::Git), so the whole safety
-//! configuration applies to the replay whether the caller remembered it or not.
+//! git call made through it goes via the crate-private `Git` runner, so the
+//! whole safety configuration applies to the replay whether the caller
+//! remembered it or not. The runner never leaves the crate, which is the other
+//! half of the same rule - see [`Scratch`].
 //!
 //! # Why markers, and what that means for the numbers
 //!
@@ -82,7 +84,12 @@ const MAX_RESOLUTION_ROUNDS: usize = 1_000;
 ///     .expect("a repository")
 ///     .scratch("HEAD")
 ///     .expect("a scratch worktree");
+/// scratch.check_out_detached("feature").expect("a checkout");
 /// let conflicts = scratch.replay_rebase("main").expect("a replay");
+/// let tree = scratch.head_tree().expect("a tree");
+/// let commit = scratch
+///     .commit_tree(&tree, "main", "squash feature")
+///     .expect("a commit");
 /// ```
 ///
 /// A reach for the runner does not. The block below is the same setup with one
@@ -174,9 +181,121 @@ impl Scratch {
     }
 
     /// A runner rooted in the scratch worktree.
+    ///
+    /// Crate-private, and that is the second half of the promise the crate
+    /// makes. [`Git::new`] being crate-private stops a consumer *building* a
+    /// runner; this stops a consumer being *handed* one. The type documentation
+    /// above says what a consumer could do with it, and the operations below
+    /// are what stands in its place.
     #[must_use]
-    pub fn git(&self) -> Git {
+    pub(crate) fn git(&self) -> Git {
         Git::new(&self.worktree, self.hooks.as_str())
+    }
+
+    /// The same runner, for a test suite outside this crate.
+    ///
+    /// This crate's own integration tests are out-of-crate consumers - the test
+    /// targets in `tests/` compile against the public API - and they have to
+    /// arm the controls the safety suite rests on and read the scratch worktree
+    /// back afterwards. Both jobs need a git call this type does not name, and
+    /// deliberately never will: `tests/safety.rs` spells its detached checkout
+    /// out rather than calling [`Scratch::check_out_detached`], because that
+    /// checkout is one of the guards under test and a guard read through the
+    /// code it guards proves nothing.
+    ///
+    /// A raw runner is safe to hand a test and not a consumer, and the
+    /// difference is what each of them is pointed at. A test builds a throwaway
+    /// repository, measures it, and deletes it, so the worst a stray command
+    /// costs is that fixture. A consumer is pointed at the developer's own
+    /// repository, where the same command costs a branch.
+    ///
+    /// The `testing` feature is how this crate marks everything that exists for
+    /// a test target and for nothing else, so this is gated the way
+    /// [`Conflicts::from_files`] is. Turning the feature on grants no new
+    /// power over a *real* repository: [`Repo::open`](crate::Repo::open) is
+    /// still the only door, and it is the door the pre-flight guards.
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn testing_git(&self) -> Git {
+        self.git()
+    }
+
+    /// Check `revision` out with a detached HEAD.
+    ///
+    /// Detached, so no branch ref moves. That is what lets a branch already
+    /// checked out in another worktree be replayed at all, and it is what keeps
+    /// the replay off the developer's own refs.
+    ///
+    /// `--end-of-options` stands ahead of the name, because `revision` arrives
+    /// from a caller and a revision can start with a dash. Without it
+    /// `git checkout -q --detach --progress` is a complete and valid command:
+    /// git reads `--progress` as its own option, finds no revision left to
+    /// check out, and detaches HEAD where it already stands - exit 0, no
+    /// complaint. The scratch worktree then stays on the base, a replay finds
+    /// nothing to replay, and the caller reports a cost of zero for work nobody
+    /// did. Zero is what a genuinely free replay reports too, so nothing
+    /// downstream tells the two apart. A plain `--` is the wrong separator
+    /// here: `checkout` reads everything after it as a pathspec, so
+    /// `--detach -- <revision>` refuses the revisions that do exist. Pinned by
+    /// `refuses_a_branch_whose_name_starts_with_a_dash_rather_than_scoring_a_replay_it_never_did`
+    /// in `grist`'s `tests/simulation.rs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if git refused the
+    /// checkout - most commonly because `revision` does not name a commit. The
+    /// message names the revision, because that name is what the caller typed
+    /// and has to correct.
+    pub fn check_out_detached(&self, revision: &str) -> Result<()> {
+        self.git()
+            .run(
+                "checkout",
+                &["-q", "--detach", "--end-of-options", revision],
+            )
+            .with_context(|| format!("could not check out '{revision}'"))?;
+
+        Ok(())
+    }
+
+    /// The id of the tree the scratch worktree's HEAD points at.
+    ///
+    /// The content of a commit without its ancestry, which is what a caller
+    /// building a squash needs: [`Scratch::commit_tree`] takes this and gives
+    /// it a parent of the caller's choosing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if HEAD does not
+    /// resolve - a worktree with no commit at HEAD being the ordinary way to
+    /// reach that.
+    pub fn head_tree(&self) -> Result<String> {
+        self.git()
+            .run("rev-parse", &["HEAD^{tree}"])
+            .context("could not read the tree the scratch worktree's HEAD points at")
+    }
+
+    /// Write a commit holding `tree`, with `parent` as its one parent, and
+    /// report the id of the commit written.
+    ///
+    /// This is the squash: the new commit carries the whole content of `tree`
+    /// and none of the ancestry that produced it, exactly as a squash merge
+    /// does. It writes an object and moves no ref, so the commit it reports is
+    /// reachable from nothing until a caller names it as the parent of the
+    /// next one.
+    ///
+    /// `tree` and `parent` are object ids rather than revisions a person typed.
+    /// [`Scratch::head_tree`] produces the first, and the second is either an
+    /// id this method returned before or one
+    /// [`Repo::resolve`](crate::Repo::resolve) settled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if git refused to write
+    /// the commit - `tree` naming no tree, or `parent` naming no commit.
+    pub fn commit_tree(&self, tree: &str, parent: &str, message: &str) -> Result<String> {
+        self.git()
+            .run("commit-tree", &[tree, "-p", parent, "-m", message])
+            .with_context(|| format!("could not write a commit holding the tree {tree}"))
     }
 
     /// Rebase the checked-out HEAD onto `onto`, walking the whole rebase and
