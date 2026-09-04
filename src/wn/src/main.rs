@@ -31,6 +31,7 @@
 //! second line of an `Order` cell, which costs a step. A document carries no
 //! layout, so `wn` reads it first and claims it on one character.
 
+mod build;
 mod chain;
 mod github;
 mod graph;
