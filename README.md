@@ -1977,6 +1977,8 @@ The trade-off: nwt does not parse or merge `.env` files, so when the hook writes
 
 On Unix, copied `.env` files are created at mode `0600` — owner read/write only — no matter what the source file's mode is. A `0644` `.env` in the main worktree therefore no longer propagates a world-readable secrets file into every worktree. The mode is applied when the file is created, so the copy is never briefly readable by anyone else. Windows has no equivalent mode; everything else behaves the same there.
 
+Some repositories keep the git directory apart from the work tree, which the *Where worktrees go* section above describes. Git names the git directory itself as the main worktree of such a repository, and no work tree is below that path. nwt finds no `.env` file there and copies none. This is deliberate: the work tree of such a repository is your home directory, and the `.env` files there are not the new worktree's to take.
+
 Disable copying for a single invocation with `--no-copy-env`, or set `copy_env = false` in `~/.nwt.toml` to disable it by default.
 
 ### Hook Bootstrap

@@ -19,6 +19,13 @@
 //! A normal repository is here too, from its root and from a linked worktree of
 //! it, because the correction must leave that path exactly as it was.
 //!
+//! The copy of `.env` files is here too. `nwt` copies untracked `.env` files
+//! from the main worktree, and the main worktree of this layout is the git
+//! directory. A git directory holds no `.env` file, so the copy finds nothing
+//! and takes nothing. That is the answer this repository wants. The work tree
+//! of such a repository is the home directory of the user, and the `.env`
+//! files there are not the new worktree's to take.
+//!
 //! `si` is here as well, in the two facts it rests on. `si` is a shell function
 //! in the configuration of the user and not a tool of this repository, so what
 //! this file pins is the ground it stands on: `git rev-parse
@@ -61,6 +68,21 @@ const INSIDE_A_WORK_TREE: &str = "true";
 
 /// The answer to [`IS_INSIDE_WORK_TREE`] that stops `si`.
 const OUTSIDE_A_WORK_TREE: &str = "false";
+
+/// The name of the untracked file this suite writes into the work tree.
+///
+/// `nwt` copies `.env` and every file whose name starts with `.env.`. The bare
+/// name is enough to pin the answer.
+const ENV_FILE: &str = ".env";
+
+/// The content of the work tree [`ENV_FILE`].
+///
+/// A copy carries the content with it, so content that no other fixture writes
+/// makes a copy easy to recognise.
+const HOME_ENV_CONTENTS: &str = "NWT_HOME_ONLY_SECRET=stays in the home directory\n";
+
+/// The first word of the line `nwt` prints when it copies a `.env` file.
+const COPIED_SUMMARY_PREFIX: &str = "Copied ";
 
 /// Resolve a path before an assertion reads it.
 ///
@@ -266,5 +288,65 @@ fn a_git_directory_beside_its_work_tree_answers_the_check_si_makes_the_other_way
         OUTSIDE_A_WORK_TREE,
         "git must call the git directory of the beside shape a place outside \
          the work tree"
+    );
+}
+
+#[test]
+fn a_nested_git_directory_copies_no_env_file_into_the_new_worktree() {
+    let repo = DetachedGitDirRepo::nested();
+    let home_env = repo.work_tree().join(ENV_FILE);
+    std::fs::write(&home_env, HOME_ENV_CONTENTS)
+        .unwrap_or_else(|e| panic!("write {}: {e}", home_env.display()));
+
+    let branch = unique_branch("nested-env-copy");
+    // No `--no-copy-env` here, unlike `new_worktree`. The copy runs, and what
+    // this test pins is what it finds.
+    let output = nwt_command(repo.git_dir())
+        .args(["-b", &branch, "--no-bootstrap-hooks"])
+        .output()
+        .expect("run the nwt binary");
+
+    assert!(
+        output.status.success(),
+        "nwt -b {branch} failed in {}:\n{}\n{}",
+        repo.git_dir().display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let created = expected_worktrees_dir(repo.git_dir()).join(&branch);
+    assert!(
+        created.is_dir(),
+        "nwt made no worktree at {}",
+        created.display()
+    );
+
+    // The work tree of this layout stands in for the home directory of the
+    // user. Git names the git directory as the main worktree, `nwt` walks the
+    // git directory, and a git directory holds no `.env` file. The copy
+    // therefore finds nothing, which is the answer this repository wants.
+    assert!(
+        !created.join(ENV_FILE).exists(),
+        "nwt must copy no {ENV_FILE} file into {}. The main worktree of this layout is \
+         the git directory, and the work tree above it is the home directory of the \
+         user. A copy takes a file out of the home directory of the user and puts it \
+         in a new worktree that nobody asked to hold it.",
+        created.display(),
+    );
+
+    // The other half of the same answer, from the report `nwt` makes of its own
+    // work. A count of copied files must not appear at all.
+    let printed = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !printed.contains(COPIED_SUMMARY_PREFIX),
+        "nwt must report no copied {ENV_FILE} file, and it printed:\n{printed}"
+    );
+
+    // The source file stays where the user put it.
+    assert_eq!(
+        std::fs::read_to_string(&home_env)
+            .unwrap_or_else(|e| panic!("read {}: {e}", home_env.display())),
+        HOME_ENV_CONTENTS,
+        "nwt must leave the {ENV_FILE} file of the work tree exactly as it found it"
     );
 }

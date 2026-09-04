@@ -621,6 +621,12 @@ ENV FILE COPYING:
     applied when the file is created, so the copy is never briefly readable by anyone
     else. Windows has no equivalent mode; everything else behaves the same there.
 
+    Some repositories keep the git directory apart from the work tree, which WHERE
+    WORKTREES GO describes above. Git names the git directory itself as the main
+    worktree of such a repository, and no work tree is below that path. nwt finds no
+    .env file there and copies none. The work tree of such a repository is your home
+    directory, and the .env files there are not the new worktree's to take.
+
     Use --no-copy-env to disable this for a single invocation, or set copy_env = false
     in ~/.nwt.toml to disable it by default.
 
@@ -770,6 +776,10 @@ struct Cli {
     /// by a `post-checkout` hook during `git worktree add`) is kept as-is rather than
     /// overwritten, and each copy is created at mode 0600 on Unix no matter what the
     /// source file's mode is.
+    ///
+    /// A repository that keeps its git directory apart from the work tree has no
+    /// work tree below the main worktree path. nwt finds no .env file there and
+    /// copies none.
     ///
     /// Use this flag to disable this behavior for a single invocation, or set
     /// `copy_env = false` in ~/.nwt.toml to disable it by default.
@@ -1231,6 +1241,13 @@ fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
 ///    world-readable .env in the main worktree never propagates its permissions — and a
 ///    destination that appears mid-pass is counted as kept rather than clobbered
 /// 8. Reports copied and kept files unless quiet mode is enabled
+///
+/// `main_repo` is the main worktree of the repository, and git names the git
+/// directory itself as the main worktree of a repository that keeps the two
+/// apart. A git directory holds no `.env` file, so this walk finds nothing and
+/// copies nothing there. That is the answer this repository wants: the work
+/// tree of such a repository is the home directory of the user, and the `.env`
+/// files there are not the new worktree's to take.
 ///
 /// Errors copying individual files are reported but don't stop the process.
 ///
