@@ -130,7 +130,7 @@ names the work of other streams that comes before the first step of that stream.
 set and not a chain, so `#96, #91` names two blockers and says nothing about which of the two \
 comes first. An empty cell and a plan with no such column are the common case and no error. A \
 plan that names one blocker or more is one graph, so its answer is one row for each step, in the \
-order of the work, and one start line for each stream that is ready.\n\n\
+order of the work, and one start line for each issue somebody can begin now.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
