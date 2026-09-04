@@ -6,7 +6,9 @@
 
 use std::path::Path;
 
-use gitscratch::testing::{conflicting_repo, independent_branches_repo};
+use gitscratch::testing::{
+    conflicting_repo, independent_branches_repo, unrelated_histories_repo,
+};
 use gitscratch::{Hunks, Stops};
 
 /// The verdict every tool built on this crate prints is "clean" or
@@ -107,5 +109,33 @@ fn a_merge_that_hits_a_contested_region_counts_its_hunks_and_files() {
         conflicts.file_hunks().collect::<Vec<_>>(),
         vec![(Path::new("shared.txt"), Hunks::new(1))],
         "the one contested file should carry the one region it was contested in"
+    );
+}
+
+/// A merge git will not perform is neither clean nor conflicting, and saying
+/// so is the whole job of this test.
+///
+/// Two histories with no commit in common give a developer nothing to resolve,
+/// because git never merged the trees at all. Reporting that as clean says the
+/// merge is free when git refuses to do it; reporting it as a conflict invents
+/// work nobody can do. Only an error says what happened.
+///
+/// The error has to carry git's own sentence, because that sentence is the one
+/// part of the answer that says which of the several ways a merge can be
+/// refused this was. A bare "the merge failed" sends the reader back to the
+/// terminal to run the command by hand.
+#[test]
+fn a_merge_git_refuses_outright_is_an_error_rather_than_a_verdict() {
+    let repo = unrelated_histories_repo();
+    let scratch = repo.scratch("main");
+
+    let refusal = scratch
+        .replay_merge("unrelated")
+        .expect_err("git refuses to merge two histories with no commit in common");
+
+    let words = format!("{refusal:#}");
+    assert!(
+        words.contains("refusing to merge unrelated histories"),
+        "the error has to carry git's own account of the refusal, got: {words}"
     );
 }
