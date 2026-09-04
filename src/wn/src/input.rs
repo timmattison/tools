@@ -1007,7 +1007,14 @@ The next run builds a new one."
         .chain()
         .expect_err("the run is off and refresh asks for one");
         assert_eq!(err, InputError::RefreshWithoutClaude);
-        assert!(err.to_string().contains(NO_CLAUDE_ENV), "{err}");
+        // Two sentences, each a real option. The instruction is a sentence of
+        // its own in the three other messages that carry it, so a clause in
+        // front of it has to close before it starts.
+        assert_eq!(
+            err.to_string(),
+            "wn --refresh builds a plan by running claude, and WN_NO_CLAUDE turns that run off. \
+Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
+        );
     }
 
     #[test]
