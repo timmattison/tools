@@ -9,6 +9,32 @@
 //! the number. That is what makes a renderer unable to word the same count two
 //! ways, and it is why a count crosses this crate's boundary as a counter
 //! rather than as the integer inside it.
+//!
+//! # A counter has no bare rendering
+//!
+//! That last claim holds only while the integer inside a counter is out of
+//! reach. `format!("{} across {}", hunks, files)` prints `"4 across 2"`, which
+//! is the wording failure these types exist to stop, and `{}` is the spelling a
+//! caller reaches for first. So a counter has no `Display`. A count leaves one
+//! through a method that names which rendering the caller wants.
+//!
+//! [`BranchName`] keeps its `Display`, and it is not a counter. That type *is*
+//! its string, so `{}` on it prints the branch name and nothing else.
+//!
+//! A counter renders through a method that names the rendering:
+//!
+//! ```
+//! let hunks = gitscratch::Hunks::new(4);
+//! assert_eq!(hunks.phrase(), "4 hunks");
+//! ```
+//!
+//! The block below is the same two lines with the rendering left unnamed, so
+//! what it proves is that the unnamed rendering is what stops it:
+//!
+//! ```compile_fail
+//! let hunks = gitscratch::Hunks::new(4);
+//! assert_eq!(format!("{hunks}"), "4");
+//! ```
 
 /// A git branch name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

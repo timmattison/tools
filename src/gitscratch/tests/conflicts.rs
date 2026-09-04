@@ -212,6 +212,12 @@ fn a_conflicted_path_git_cannot_print_plainly_keeps_its_name_and_its_hunk_count(
 /// Each ordering `grist` scores is a sequence of replays folded together, so
 /// the fold has to merge the breakdowns rather than let a later step's count
 /// for a file replace an earlier one's.
+///
+/// The stop count folds the same way and is asserted here for the first time.
+/// It is the one measure the fold carries as a number of its own rather than
+/// as a sum of the breakdown, so a fold that dropped a step's stops would leave
+/// every other assertion in this file green. `grist`'s `tests/simulation.rs`
+/// covers it end to end across two branches. Nothing in this crate did.
 #[test]
 fn absorbing_a_step_folds_its_breakdown_into_the_running_total() {
     let mut total = Conflicts::from_files(
@@ -233,4 +239,10 @@ fn absorbing_a_step_folds_its_breakdown_into_the_running_total() {
         "a file hit by both steps should carry the sum of the two"
     );
     assert_eq!(total.hunks(), Hunks::new(10));
+    assert_eq!(
+        total.stops(),
+        Stops::new(3),
+        "a fold adds the stops of every step it takes, the way it adds their \
+         hunks"
+    );
 }

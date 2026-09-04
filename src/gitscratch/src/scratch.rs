@@ -466,6 +466,44 @@ impl Drop for Scratch {
 }
 
 /// What replaying one operation - or a whole sequence of them - cost.
+///
+/// # A verdict is measured, never minted
+///
+/// The clean verdict is the one that renders "hit no conflicts" and exits 0,
+/// and it is exactly the value a `Default` derive hands out: no files, no
+/// stops. A derive puts that value behind the spelling every caller reaches for
+/// first, and behind every generic route to it besides -
+/// `..Default::default()`, `unwrap_or_default`, a collection filled with
+/// `Default::default`. [`Conflicts::from_files`] is compiled only for tests and
+/// for the `testing` feature on the grounds that a released binary has no
+/// business stating a cost that nothing measured, and a derive beside it makes
+/// that gate a form of words.
+///
+/// So there is no `Default`. A running total that a fold has taken nothing into
+/// yet is a real thing a caller needs, and it comes from a constructor that
+/// says so by name - `Conflicts::nothing_replayed`, which reads as the seed it
+/// is at every call site that uses it.
+///
+/// A replay measures a cost:
+///
+/// ```no_run
+/// let scratch = gitscratch::Repo::open(std::path::Path::new("."))
+///     .expect("a repository")
+///     .scratch("HEAD")
+///     .expect("a scratch worktree");
+/// let cost = scratch.replay_rebase("main").expect("a replay");
+/// ```
+///
+/// A derive does not. The block below is the same setup with the last line
+/// changed, so what it proves is that the changed line is what stops it:
+///
+/// ```compile_fail
+/// let scratch = gitscratch::Repo::open(std::path::Path::new("."))
+///     .expect("a repository")
+///     .scratch("HEAD")
+///     .expect("a scratch worktree");
+/// let cost = gitscratch::Conflicts::default();
+/// ```
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Conflicts {
     stops: usize,
