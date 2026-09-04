@@ -625,7 +625,8 @@ fn version_names_the_tool_the_release_and_the_build_it_came_from() {
 /// `grime` names no `about`, so the doc comment is the help. The manifest keeps
 /// a sentence of its own for crates.io and `cargo search`, where the reader has
 /// run nothing and `BRANCH` names nothing.
-const HELP_SUMMARY: &str = "Report whether merging BRANCH into HEAD would conflict, and by how much";
+const HELP_SUMMARY: &str =
+    "Report whether merging BRANCH into HEAD would conflict, and by how much";
 
 /// The help a user reads has to be the help a developer edits.
 ///
