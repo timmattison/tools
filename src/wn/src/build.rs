@@ -19,6 +19,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use thiserror::Error;
 
 use crate::chain::Snippet;
+use crate::envelope::Envelope;
 
 /// The variable that turns the run off.
 ///
@@ -75,7 +76,17 @@ const CLAUDE: &str = "claude";
 const ALLOWED_TOOLS: &str = "Bash Read Glob Grep Agent Task TodoWrite Skill";
 
 /// The arguments the run is given. The prompt goes on standard input.
-const ARGUMENTS: [&str; 3] = ["--print", "--allowed-tools", ALLOWED_TOOLS];
+///
+/// `--output-format json` is what makes the run say what it cost. Standard
+/// output then carries one JSON envelope, and the plan is the `result` field
+/// of it, which [`Envelope`] takes back out.
+const ARGUMENTS: [&str; 5] = [
+    "--print",
+    "--output-format",
+    "json",
+    "--allowed-tools",
+    ALLOWED_TOOLS,
+];
 
 /// How often a waiting run is asked whether it is finished.
 const POLL: Duration = Duration::from_millis(100);
@@ -215,7 +226,8 @@ fn looked_in_lines(paths: &[String]) -> String {
 /// [`BuildError::TimeoutTooFar`] for a timeout longer than a run waits,
 /// [`BuildError::NotInstalled`] when no path holds a `claude`,
 /// [`BuildError::TimedOut`] for a run that outlived its deadline,
-/// [`BuildError::NotAuthenticated`] for a `claude` with no account, and
+/// [`BuildError::NotAuthenticated`] for a `claude` with no account,
+/// [`BuildError::BadEnvelope`] for a run that printed no envelope, and
 /// [`BuildError::Failed`] for every other failure.
 ///
 /// The two refusals of the timeout stand before the run starts, because the
@@ -229,9 +241,9 @@ pub fn plan(
     let path = find(paths, answers)?;
 
     let spinner = spinner();
-    let built = ask(&path, waited);
+    let printed = ask(&path, waited);
     spinner.finish_and_clear();
-    built
+    Ok(Envelope::read(&printed?)?.document().to_string())
 }
 
 /// The spinner that stands while the run works.
@@ -410,7 +422,7 @@ fn reason_of(complained: &str, printed: &str, pipe: Option<&str>) -> String {
 /// login server, for one — is a failure of something else, and
 /// [`BuildError::NotAuthenticated`] carries no text, so such a run loses the
 /// reason it gave.
-fn refusal_of(said: &str) -> BuildError {
+pub fn refusal_of(said: &str) -> BuildError {
     let clause = said.trim();
     let lowered = clause.to_lowercase();
     if ["not authenticated", "/login", "log in"]
@@ -633,6 +645,10 @@ mod tests {
         // bypass flag answers every prompt of every tool, and that decision is
         // the reader\'s to make and not this tool\'s.
         assert!(ARGUMENTS.contains(&"--print"), "{ARGUMENTS:?}");
+        // The envelope is what says what the run cost. The plan is one field
+        // of it, so a run without this pair prints a plan nobody priced.
+        assert!(ARGUMENTS.contains(&"--output-format"), "{ARGUMENTS:?}");
+        assert!(ARGUMENTS.contains(&"json"), "{ARGUMENTS:?}");
         assert!(ARGUMENTS.contains(&"--allowed-tools"), "{ARGUMENTS:?}");
         assert!(ARGUMENTS.contains(&ALLOWED_TOOLS), "{ARGUMENTS:?}");
         assert!(

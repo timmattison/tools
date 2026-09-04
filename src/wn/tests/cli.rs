@@ -2062,15 +2062,40 @@ fn a_json_document_that_is_not_the_schema_names_the_path() {
 /// The variable that names the seconds the run of `claude` may take.
 const PLAN_TIMEOUT_ENV: &str = "WN_PLAN_TIMEOUT";
 
+/// The envelope a run of `claude --print --output-format json` prints, with
+/// `document` in its `result`.
+///
+/// Built with the JSON writer rather than with `format!`, because a plan holds
+/// newlines and quotation marks and every one of them has to be escaped. The
+/// numbers are the numbers of one measured run, so a test that reads them
+/// reads a shape a real `claude` really printed.
+fn envelope(document: &str) -> String {
+    serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": document,
+        "total_cost_usd": 0.054_637_9,
+        "duration_ms": 1886,
+        "num_turns": 1,
+    })
+    .to_string()
+}
+
+/// The shell of a fake `claude` that prints an envelope holding `document`.
+fn prints(document: &str) -> String {
+    format!(
+        "cat <<'WN_FAKE_CLAUDE_ENVELOPE'\n{}\nWN_FAKE_CLAUDE_ENVELOPE\n",
+        envelope(document)
+    )
+}
+
 /// The shell of a fake `claude` that prints the document of [`JSON_PLAN`].
 ///
 /// The plan names no moment, so its answer carries no note about its age. The
 /// tests of that note name the moment they want.
 fn prints_the_plan() -> String {
-    format!(
-        "cat <<'WN_FAKE_CLAUDE_PLAN'\n{}\nWN_FAKE_CLAUDE_PLAN\n",
-        undated(JSON_PLAN)
-    )
+    prints(&undated(JSON_PLAN))
 }
 
 #[test]
@@ -2195,7 +2220,7 @@ fn a_document_the_run_built_that_does_not_parse_names_no_clipboard() {
     // The refusal of the reader of a JSON plan, unchanged. A message that
     // named the clipboard would send the reader to look at a clipboard that
     // holds none of it.
-    let gh = FakeGh::new(JSON_ISSUES).with_claude("printf '{ \"version\": 1\\n'\n");
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints("{ \"version\": 1\n"));
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
     let message = stderr(&output);

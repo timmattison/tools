@@ -3,15 +3,27 @@
 //! The run answers with a document. `--output-format json` wraps that document
 //! in an envelope, which carries what the run cost beside it. So this module
 //! stands between the run and every reader of a plan: it takes the envelope
-//! apart, gives back the document, and builds the one line that says what the
-//! reader paid.
+//! apart and gives back the document.
+//!
+//! # Two kinds of field, and two kinds of strictness
+//!
+//! `result` is the plan, so a text that carries none of it is a refusal. Every
+//! other field is a number about the run, and a missing one costs a clause of
+//! one line. A refusal there would throw away a plan the reader already paid
+//! for, so an absent number leaves its clause out and the plan still stands.
 
-use crate::build::BuildError;
+use serde_json::Value;
+
+use crate::build::{refusal_of, BuildError};
+use crate::chain::Snippet;
 
 /// The key that holds the document the run answered with.
 const RESULT: &str = "result";
 
-/// What one run of `claude` answered, and what it cost.
+/// The key that says the run failed, whatever its exit status was.
+const IS_ERROR: &str = "is_error";
+
+/// What one run of `claude` answered.
 #[derive(Debug)]
 pub struct Envelope {
     /// The document the run answered with.
@@ -23,11 +35,33 @@ impl Envelope {
     ///
     /// # Errors
     ///
-    /// Gives [`BuildError::BadEnvelope`] for a text that is no envelope.
+    /// Gives [`BuildError::BadEnvelope`] for a text that is no JSON envelope,
+    /// and for one whose `result` is absent or is no string. Gives the
+    /// refusals of [`refusal_of`] for an envelope whose `is_error` is true:
+    /// its `result` then holds the reason the run gives and never a plan, and
+    /// a reader handed that document would get the refusal of the plan reader
+    /// naming that reason as though somebody had pasted it.
     pub fn read(printed: &str) -> Result<Self, BuildError> {
-        let _ = RESULT;
+        let document: Value =
+            serde_json::from_str(printed).map_err(|cause| BuildError::BadEnvelope {
+                text: Snippet::new(printed),
+                cause: cause.to_string(),
+            })?;
+        let Some(result) = document.get(RESULT).and_then(Value::as_str) else {
+            return Err(BuildError::BadEnvelope {
+                text: Snippet::new(printed),
+                cause: format!("it carries no {RESULT} string, which is where the plan stands"),
+            });
+        };
+        if document
+            .get(IS_ERROR)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(refusal_of(result));
+        }
         Ok(Self {
-            document: printed.to_string(),
+            document: result.to_string(),
         })
     }
 
@@ -50,7 +84,7 @@ mod tests {
             "subtype": "success",
             "is_error": false,
             "result": document,
-            "total_cost_usd": 0.0546379,
+            "total_cost_usd": 0.054_637_9,
             "duration_ms": 1886,
             "num_turns": 1,
         })
@@ -67,8 +101,7 @@ mod tests {
 
     #[test]
     fn half_an_envelope_is_a_refusal() {
-        let refused =
-            Envelope::read("{ \"result\": ").expect_err("half a document is no document");
+        let refused = Envelope::read("{ \"result\": ").expect_err("half a document is no document");
         assert!(
             matches!(refused, BuildError::BadEnvelope { .. }),
             "{refused:?}"
