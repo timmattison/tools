@@ -29,6 +29,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
+pub mod pathbytes;
 pub mod repair;
 pub mod scan;
 
