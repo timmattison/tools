@@ -242,11 +242,19 @@ chooses only the verb, because "1 uncommitted file **is**" and "3 uncommitted
 files **are**" are one agreement written in two places, and the half that names
 the thing being counted belongs to the counter.
 
-Two things about a file name are the renderer's to handle, and both of them
-happen once, ahead of the measurement and ahead of the print, so the string that
-was measured is the string that reaches the screen.
+Three things about a file name are the renderer's to handle, and every one of
+them happens once, ahead of the measurement and ahead of the print, so the
+string that was measured is the string that reaches the screen.
 
-The first is that a name holds every byte but NUL — which is the premise the
+The first is that a name is bytes and a terminal takes text. This is the one
+place the crate decodes a name at all, and it decodes it lossily, so a byte
+outside UTF-8 becomes U+FFFD here and nowhere earlier — earlier would put that
+name back into the map, where it names no file and costs the file its real hunk
+count. One replacement character per undecodable byte leaves the rest of the
+name alone, which is what lets a developer match `bad-<U+FFFD>.txt` against
+their own repository.
+
+The second is that a name holds every byte but NUL — which is the premise the
 `-z` reader rests on — so a newline, a carriage return and an ESC are all legal
 in one. `render_within` spells every control character out as `\u{...}`. A raw
 newline would split one row of this line-oriented layout in two and strand the
@@ -257,7 +265,7 @@ U+3000, a backslash, a double quote and an emoji all arrive unchanged — every
 one of them names a real file, and this crate went to some trouble to carry them
 here intact.
 
-The second is that a name has no bound. The count column sits past the widest
+The third is that a name has no bound. The count column sits past the widest
 name, and one deeply nested path — an ordinary thing to have — carries the
 counts of every row off the right-hand edge of the terminal, which then wraps
 each of them. `render_within` takes the width of the terminal and clamps the
@@ -637,7 +645,18 @@ over both classes of name the setting cannot rescue: one git quotes anyway
 `str::trim` eats as readily as a space). Both halves of the defect are asserted
 together, because they break together — the name and the count. `tests/repo.rs`
 covers the other call site's one wrinkle: `status --porcelain -z` spends two
-fields on a rename, and a rename is one uncommitted file.
+fields on a record that names where the content came from, and such a record is
+one uncommitted file. All four spellings of it have a test there, because the
+pairing reads two status bytes for two letters and an arm nothing can fail is an
+arm nobody can trust. `git mv` writes `R` in the index column;
+`status.renames=copies` — a key this crate pins nothing about, so it arrives out
+of the developer's own configuration — writes `C` there beside the modification
+of the source; and both letters reach the *working-tree* column where the
+destination is in the index with no content behind it, which is what
+`git add -N` records and what `git add -p` records for a new file. The two new
+tests each carry an armed control, since an undetected copy comes back as
+`A  copy.txt`, one field for one file, and the count is then right without the
+pairing ever running.
 
 **The removed location variables**, the `GIT_DIR` row above, are pinned by
 `tests/isolation.rs`, which has to reach for a mechanism the rest of the suite
@@ -779,7 +798,19 @@ across stops and adds up to the total it explains, and that a conflicted
 one is deliberately built on a file contested in *two* regions — with one, the
 undercount and the truth would both be 1 and the defect would pass. `Report`'s
 own tests sit beside it in `src/report.rs`, because rendering a `Conflicts` is
-pure string work that needs no repository at all.
+pure string work that needs no repository at all. Two of them cover the render
+boundary, where every byte this crate carried intact finally becomes text.
+`a_name_that_is_not_valid_utf_8_is_rendered_with_the_replacement_character`
+builds the name straight out of bytes — `Conflicts::from_files` takes a
+`PathBuf`, and APFS refuses such a name on disk — and asserts both the U+FFFD
+the decode writes and that the count of that row still starts in the column its
+ASCII sibling's does.
+`a_name_that_holds_a_space_or_an_emoji_is_rendered_as_it_stands` covers the
+printable characters the escape rule was written to leave alone: a leading
+space, a trailing space, U+3000 and an emoji, asserted through the rendered text
+rather than through the map. Both were watched to fail — replacing the decode
+with a `to_str` that gives up reddens the first, and trimming the converted name
+reddens the second.
 
 **That a counter's noun is the counter's own business** is pinned by a unit test
 in `src/metrics.rs` on `Uncommitted` — the newest counter, and the one whose

@@ -142,8 +142,8 @@ impl Repo {
             .git()
             .nul_separated("status", &["--porcelain", "--untracked-files=all"])?;
 
-        // Not `records.len()`: a rename spends two fields on one file. See
-        // `moved_from_elsewhere`.
+        // Not `records.len()`: a rename and a copy each spend two fields on one
+        // file. See `moved_from_elsewhere`.
         let mut fields = records.iter();
         let mut count = 0;
         while let Some(record) = fields.next() {
@@ -173,19 +173,29 @@ impl Repo {
 /// that two uncommitted files. It is one file, moved.
 ///
 /// The status is the first two bytes of the record - one for the index, one for
-/// the working tree - and either may carry the letter. Both are ASCII by
-/// definition: git writes one of a fixed set of letters and spaces there, and a
-/// space always separates them from the path, so the path can never reach these
-/// two positions. Reading them as bytes is therefore exact, and it is what lets
-/// the record stay the bytes git wrote - a path is a byte string on unix, and a
-/// record decoded into a `str` on the way here would have replaced every byte of
-/// one that is not valid UTF-8.
+/// the working tree - and both of them carry the letter. All four spellings are
+/// reachable, and `tests/repo.rs` holds one test for each pair, because an arm
+/// nothing can fail is an arm nobody can trust:
+///
+/// - `R` in the index column, which is what `git mv` stages.
+/// - `C` in the index column, which git writes for a copy it detects beside the
+///   modification of the source. Copy detection is off unless the developer
+///   turns it on with `status.renames`, and this crate pins nothing about that
+///   key, so the setting arrives out of the developer's own configuration.
+/// - `R` and `C` in the working-tree column, which git writes where the
+///   destination is in the index with no content behind it. `git add -N` records
+///   exactly that, and so does `git add -p` for a new file, so the spelling
+///   reaches a developer who never types `-N`.
+///
+/// Both bytes are ASCII by definition: git writes one of a fixed set of letters
+/// and spaces there, and a space always separates them from the path, so the
+/// path can never reach these two positions. Reading them as bytes is therefore
+/// exact, and it is what lets the record stay the bytes git wrote - a path is a
+/// byte string on unix, and a record decoded into a `str` on the way here would
+/// have replaced every byte of one that is not valid UTF-8.
 fn moved_from_elsewhere(record: &[u8]) -> bool {
-    // MUTATION, deliberate, and the next commit takes it back out: the copy
-    // letter is gone from the set, and only the index column is read. Both are
-    // what the two new tests in `tests/repo.rs` are here to catch.
-    [record.first()]
+    [record.first(), record.get(1)]
         .into_iter()
         .flatten()
-        .any(|status| *status == b'R')
+        .any(|status| *status == b'R' || *status == b'C')
 }

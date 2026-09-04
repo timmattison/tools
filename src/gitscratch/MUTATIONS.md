@@ -50,6 +50,8 @@ not have to re-derive which guard belongs to which test.
 | `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` (`src/scratch.rs`) | The parent count read ahead of both probes, which refuses a merge commit at a halt whatever the configuration says | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the `stopped_commit_parent_count` call and the `ensure!` under it | remove |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` (`tests/halts.rs`) | `--ignore-submodules=none` on the porcelain half of the empty-commit probe, which is what makes both halves read one tree under one set of rules | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the argument from the `git diff` invocation | remove |
 | `a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact` | `Git::path`, the byte-for-byte read of the one path git printed | `src/git.rs`, `Git::path` — read the answer the way `Git::run` reads one, `String::from_utf8_lossy(&output.stdout).trim()` in place of the one-newline strip | redirect |
+| `uncommitted_files_counts_a_staged_copy_as_the_one_file_it_is` (`tests/repo.rs`) | The copy letter in the pairing that skips the second field of a copy record | `src/repo.rs`, `moved_from_elsewhere` — drop the `b'C'` arm from the `any` predicate | remove |
+| `uncommitted_files_counts_a_working_tree_rename_and_copy_as_the_files_they_are` (`tests/repo.rs`) | The second status byte, the working-tree column, which carries the letter as readily as the index one | `src/repo.rs`, `moved_from_elsewhere` — reduce `[record.first(), record.get(1)]` to `[record.first()]` | narrow |
 | The ` ```compile_fail ` doc-test on `Scratch` (`src/scratch.rs`) | The runner staying inside the crate — a consumer is never *handed* one, which is the half `Git::new` being crate-private does not cover | `src/scratch.rs`, `Scratch::git` — put the `pub` back | remove |
 
 ## What keeps each test honest
@@ -114,6 +116,8 @@ registry that reports everything as fine is worth less than no registry at all.
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | The fixture sets `rebase.rebaseMerges true` and the value is read back first. | **Full, and the consequence was executed out of band.** The read-back arms the pin. The hazard behind it was watched by hand on git 2.55: a branch carrying a merge, rebased onto a moved base under `-c rebase.rebaseMerges=true`, comes out still carrying the merge (`git rev-list --min-parents=2 --count` answers 1), so a developer's own configuration really does put a merge commit on a replay's todo list. That demonstration is a shell session rather than an assertion, because a merge on the todo list only becomes a halt in a repository built to conflict at it, and the reviewer who found this could not construct one. |
 | `a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact` | The fixture repository is built at a directory whose own name ends in the whitespace under test, and `git init` through the runner panics if git refuses, so the repository provably sits at a path whose last character is the one at stake. | **Full.** The same answer is read back through `Git::run` first and must be missing exactly that character — `assert_eq!(format!("{through_run}{trailing}"), expected.to_string_lossy())`, "`run` no longer eats a space off the end of git's answer, so the assertion below could only pass vacuously". The trimming *is* the hazard, demonstrated before the new reader is asked anything. Both spellings `str::trim` eats get their own fixture: a space, and U+3000, which a Unicode-aware trimmer takes just as readily. |
 | `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` | The stopped commit is read back through plain git and must list three fields — its own id and two parents — "or there is nothing here to refuse". | **Full.** `git diff-tree`, asked through the runner with the arguments the probe really uses, must answer with nothing for that merge — "`diff-tree` no longer stays silent about a merge commit, so this test could only pass vacuously; that silence is what makes an unguarded probe read a merge as a commit that changes nothing". The silence *is* the hazard, demonstrated before the probe is asked anything. A closing control runs the other way: the same probe, pointed at a single-parent commit, must answer rather than refuse, so a probe that refused everything cannot pass. What the test does not build is a real halt — see the record below, and the row above it. |
+| `uncommitted_files_counts_a_staged_copy_as_the_one_file_it_is` | The fixture commits `big.txt`, so a copy has a source, and it stages the modification of that source that copy detection needs. Two untracked files sit beside the copy, so the count fails from both directions: pair nothing and the answer is 5, pair every record and it is 3, and only a count that pairs exactly the copy gives 4. | **Full.** Plain git, through the fixture, must report `C  copy.txt`, NUL, `big.txt` — "copy detection is not armed, so this test could only pass vacuously". That control is not a formality: git reports an undetected copy as `A  copy.txt`, one field for one file, so the closing count comes out right while the pairing never runs. The fixture arms `status.renames = copies` in its own repository rather than reading it out of `~/.gitconfig`, so the control holds on a machine whose developer has never set the key. |
+| `uncommitted_files_counts_a_working_tree_rename_and_copy_as_the_files_they_are` | The two files the fixture commits hold content of their own, because git pairs a copy with whichever source matches it best and two files spelled alike let it report the rename and the copy against one name — which is what the first draft of this fixture did. Two untracked files sit beside the pair, so the count fails from both directions: 7 with no pairing, 4 with every record paired, 5 only for a count that pairs exactly the two working-tree records. | **Full.** Plain git, through the fixture, must report ` R moved.txt`, NUL, `big.txt` and ` C other-copy.txt`, NUL, `other.txt` — "git no longer reports that in the working-tree column, so this test could only pass vacuously". Without the detection an undetected move is a delete beside an untracked file, which is two fields for two files and never pairs, so the control is what proves the second status byte is under test at all. The `git add -N` that arms it is the everyday route: `git add -p` records the same intent-to-add entry for a new file. |
 
 ### The rule for the next test
 
@@ -784,6 +788,80 @@ of them can be built here, and the call sites are held to it by review. There is
 one reader for a path list and one for a single path, and `Git::run` is
 neither of them.
 
+### The two letters and the two columns of `moved_from_elsewhere`
+
+One pairing rule, two arms, and neither arm had a test. `git status
+--porcelain -z` spends a *second* field on a record that names where the content
+came from, so the count skips that field rather than calling one file two. The
+rule reads two status bytes for two letters, and the one rename test reached
+exactly one of the four spellings: `git mv`, which writes `R` in the index
+column. Each arm was mutated on its own. Both runs were `cargo test
+--no-fail-fast -p gitscratch -p grind -p grist`, on git 2.50.1 (Apple
+Git-155).
+
+**The copy letter, dropped from the predicate.** Under
+`status.renames=copies` git writes `C  copy.txt`, NUL, `big.txt` for a copy it
+detects beside the modification of its source. Without the arm the count spends
+one on each field:
+
+```text
+thread 'uncommitted_files_counts_a_staged_copy_as_the_one_file_it_is'
+panicked at src/gitscratch/tests/repo.rs:
+assertion `left == right` failed: a copy is one uncommitted file, not one per
+name its content sits under
+  left: Uncommitted(5)
+ right: Uncommitted(4)
+
+test result: FAILED. 10 passed; 2 failed
+```
+
+Collateral, and it belongs to the same guard: the working-tree test below
+reddens too, at `left: Uncommitted(6)` against `right: Uncommitted(5)`, because
+its fixture holds a working-tree copy record beside the working-tree rename.
+Nothing else in `gitscratch`, `grind` or `grist` notices.
+
+**The second status byte, narrowed away.** Reducing
+`[record.first(), record.get(1)]` to `[record.first()]` leaves the rule reading
+the index column alone. Both working-tree records open with a space there, so
+the pairing stops firing at all:
+
+```text
+thread 'uncommitted_files_counts_a_working_tree_rename_and_copy_as_the_files_they_are'
+panicked at src/gitscratch/tests/repo.rs:
+assertion `left == right` failed: a move and a copy reported in the working-tree
+column are one file each
+  left: Uncommitted(7)
+ right: Uncommitted(5)
+
+test result: FAILED. 11 passed; 1 failed
+```
+
+No collateral: this is the only test that mutation reddens, in this crate and in
+`grind` and `grist`.
+
+**The working-tree column was probed before it was tested, because the honest
+alternative was deleting the arm.** An arm that cannot fire cannot be trusted,
+and git's own short-format table lists `R` and `C` under the working-tree column
+without saying how one gets there. Renaming a tracked file in the working tree
+does *not* produce one: git reports ` D big.txt` beside `?? moved.txt`, since an
+untracked file is not in the diff the detection runs over. The route is an
+intent-to-add entry — `git add -N`, and `git add -p` on a new file — which puts
+the destination in the index with no content behind it and so into that diff.
+Git 2.50.1 was watched to answer ` R moved.txt`, NUL, `big.txt` for it, and
+` C other-copy.txt`, NUL, `other.txt` for the copy beside it. The arm stays, and
+the doc comment on `moved_from_elsewhere` now names all four spellings rather
+than saying that either column carries the letter.
+
+**Not every wrong count fails this test, which is why both fixtures carry an
+armed control.** Copy detection is off unless the developer turns it on, and
+`Git::safety_config` pins nothing about `status.renames`, so the setting arrives
+out of the developer's own configuration. An undetected copy comes back as
+`A  copy.txt`: one field, one file, and the closing count is right while the
+pairing never runs. The control reads the record back through plain git and
+requires the two fields, so a git that stopped detecting the copy fails the test
+rather than quietly emptying it.
+
+
 ### The ` ```compile_fail ` doc-test on `Scratch`
 
 This guard is not a test in `tests/` and cannot be one. What it pins is what a
@@ -895,6 +973,12 @@ code moves. Every place below is load-bearing for the whole table:
   covered by `grist`'s `tests/safety.rs` alone. The mutation was run: dropping
   `--detach` here reddens `a_full_simulation_never_moves_real_branch_refs` and
   two more `grist` tests, and nothing in `gitscratch`.
+- **`moved_from_elsewhere`'s two status bytes and two letters** — the pairing
+  that keeps a moved file from counting as two uncommitted files. It reads both
+  status columns for both letters, all four spellings are reachable, and each
+  arm has a test in `tests/repo.rs`. A change that narrows either dimension
+  needs its own mutation and its own row: the wrong count reads as a plausible
+  number in a note about work a replay cannot see.
 - **`Scratch`'s public surface** — the named operations are the whole of what a
   consumer may ask a scratch worktree to do, and `Scratch::git` is crate-private
   so nothing else is reachable. A new `pub fn` that hands back a runner, under

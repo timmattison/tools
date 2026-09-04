@@ -287,11 +287,7 @@ impl<'a> Report<'a> {
 /// by an `n`, and this escape leaves that backslash alone, so `\n` on screen
 /// would name two different files. `\u{a}` names one.
 fn printable(name: &Path) -> String {
-    // MUTATION, deliberate, and the next commit takes it back out: the lossy
-    // decode is replaced by a `to_str` that gives up on a name it cannot decode,
-    // and the result is trimmed. Both losses are what the two new tests below
-    // are here to catch.
-    let text = std::borrow::Cow::<str>::Borrowed(name.to_str().unwrap_or("?").trim());
+    let text = name.to_string_lossy();
     if !text.contains(char::is_control) {
         return text.into_owned();
     }
