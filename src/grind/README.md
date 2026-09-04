@@ -35,6 +35,11 @@ Three codes rather than two, because "the rebase would conflict" and "I could no
 tell you" are different answers and a script has to be able to act on the
 difference.
 
+The table is about a run that names a `BRANCH`. `--help` and `--version` ask
+about the tool rather than about a rebase, so each answers and exits `0` with no
+replay behind it. A command line the argument parser refuses exits `2`, which is
+already the code for "I could not tell you".
+
 Three codes and *only* three, on every path. `grind main | head -1` closes the
 pipe before the verdict is finished, and a Rust program meets that as a write
 error rather than as `SIGPIPE`; the words are what a vanished reader costs, so a
@@ -112,7 +117,7 @@ grind [-q] <BRANCH>
 | Argument | Meaning |
 | --- | --- |
 | `<BRANCH>` | What to rebase HEAD onto. Anything git resolves to a commit works — a branch, a remote-tracking ref, a tag, a raw sha. |
-| `-q`, `--quiet` | Print nothing whatsoever. The exit code is still the answer. |
+| `-q`, `--quiet` | Print nothing about the rebase. The exit code is still the answer. |
 
 One positional argument and no `--onto`. `grind` simulates from `HEAD`, which is
 the only thing it *can* simulate from, so there is no second ref to give it.
@@ -122,6 +127,13 @@ so `-q` means silence rather than a terser rendering. It covers both streams:
 the verdict on stdout, the uncommitted-work note and any error on stderr. A
 caller redirecting stdout to `/dev/null` and getting chatter on the terminal
 anyway has not been given a quiet tool.
+
+`-q` silences everything `grind` itself says, and stops there. The argument
+parser answers before `grind` starts. So `grind -q` with no `BRANCH` still
+prints a usage error and exits `2`, and `grind -q --version` still prints the
+version and exits `0`. Both answer about the tool rather than about a rebase.
+The missing `BRANCH` is the likely one in the script below. A caller left with a
+bare `2` and no word about which argument is missing is worse off.
 
 ```console
 # only start the real rebase if the dry run says it is free
@@ -185,6 +197,12 @@ The count is staged, unstaged and untracked files alike, counted per file, so a
 newly created directory is reported as the files in it rather than as one entry.
 A tree with nothing uncommitted says nothing at all; a note printed
 unconditionally would be noise people learn to ignore.
+
+The note waits for the verdict it qualifies. A run that cannot build a scratch
+worktree, or whose replay fails outright, prints its error and no note: a caveat
+about an answer that never arrives is a wrong sentence rather than an early one.
+The count is still read before the scratch worktree is built, because a scratch
+worktree can land inside the repository and be counted as your own work.
 
 Being a caveat, it also cannot take the answer away. Some repositories have no
 working tree to take a status of — a bare one, where `git status` simply refuses
@@ -269,6 +287,14 @@ this repository requires, a conflicted `日本語.txt` replayed onto a branch na
 to fail, with a control run on a resolvable branch to show the poison really
 does reach the worktree-building half of `Repo::scratch` rather than being
 quietly ignored.
+
+Three more pin the surface on either side of `grind`'s own writes: the first
+line of `--help` against the sentence the source carries, and the usage error
+and version line that `-q` never reaches.
+
+Two of the failure tests now run over a *dirty* tree, so each has a caveat to
+hold back and can be caught printing one — the poisoned-`TMPDIR` control, which
+dies building the scratch worktree, and the replay that fails outright.
 
 Three of them are about a right answer surviving something going wrong around it,
 which is where a tool whose answer is a number is most easily robbed of it:

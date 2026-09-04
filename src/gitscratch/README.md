@@ -232,7 +232,13 @@ use termbar::TerminalWidth;
 // The tool's name alone, because the note below reads nothing else.
 let unworded = Report::for_tool("grind");
 
-if let Some(note) = unworded.dirty_note(repo.uncommitted_files()?) {
+// Read while no scratch worktree stands, and held: a caveat qualifies an
+// answer, so a run that fails before the answer must not print one.
+let note = unworded.dirty_note(repo.uncommitted_files()?);
+
+let conflicts = repo.scratch("HEAD")?.replay_rebase("main")?;
+
+if let Some(note) = note {
     eprintln!("{note}");
 }
 
@@ -260,9 +266,12 @@ in silence names a method the worded type does not have. A `compile_fail`
 doc-test holds the door — see **Testing** below.
 
 `dirty_note` sits on the unworded type rather than on `Report`, because it reads
-the tool's name and nothing else. A caller prints that caveat before it has an
-action string at all, which is the order `grind` uses. Both types are `Copy`, so
-neither `describing` nor `without_stops` spends the value it was called on.
+the tool's name and nothing else. A caller can read that caveat before it has an
+action string at all. `grind` reads it before the replay and prints it after.
+The count has to be taken while no scratch worktree stands, since a scratch
+worktree can land inside the repository and be counted as the user's own work. A
+caveat qualifies an answer that has arrived. Both types are `Copy`, so neither
+`describing` nor `without_stops` spends the value it was called on.
 
 ```console
 grind: conflicts - replaying HEAD onto main

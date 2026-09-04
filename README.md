@@ -687,8 +687,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     nothing to measure). A dirty tree isn't an error — it notes on stderr that uncommitted work isn't
     included and leaves the verdict alone. Nothing in your repo moves; the safety guarantees are the
     shared `gitscratch` harness's, not a second copy of them.
-  - Usage: `grind <BRANCH>`, `grind -q main && git rebase main` (`-q` prints nothing at all, on both
-    streams, since the exit code is the whole answer).
+  - Usage: `grind <BRANCH>`, `grind -q main && git rebase main`. `-q` silences everything grind
+    says, on both streams, since the exit code is the whole answer — but it stops at the argument
+    parser, so `grind -q` with no branch still prints a usage error and `grind -q --version` still
+    prints the version.
   - To install: `cargo install --git https://github.com/timmattison/tools grind`
 
 - krt (Knights of the Round Trip)

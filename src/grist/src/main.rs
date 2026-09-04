@@ -9,9 +9,19 @@ use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, ContentArrangement, Table};
 use grist::{orderings_to_simulate, BranchName, OrderingScore, Simulator};
 
+// No `about` in the attribute below, and the absence is the point. clap's
+// derive takes the doc comment as the help text. A bare `about` takes
+// `CARGO_PKG_DESCRIPTION` instead, and the doc comment then reaches nobody.
+// Two sentences describe the tool, one of them is dead, and the dead one sits
+// where a developer edits the help. The manifest keeps its own sentence, which
+// crates.io and `cargo search` show to a reader who has run nothing.
+//
+// One line only. A second paragraph here becomes clap's `long_about`, which
+// `--help` prints and `-h` does not, and the two spellings of one switch then
+// answer differently.
 /// Rank the orders you could squash-merge branches in, cheapest conflicts first
 #[derive(Parser, Debug)]
-#[clap(author, version = version_string!(), about)]
+#[clap(author, version = version_string!())]
 struct Args {
     /// Branches to land, in any order
     #[clap(required = true, value_name = "BRANCH")]

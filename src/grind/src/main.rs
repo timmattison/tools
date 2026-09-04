@@ -36,20 +36,37 @@ const CONFLICTS: u8 = 1;
 /// reported as a conflict.
 const ERROR: u8 = 2;
 
+// No `about` in the attribute below, and the absence is the point. clap's
+// derive takes the doc comment as the help text. A bare `about` takes
+// `CARGO_PKG_DESCRIPTION` instead, and the doc comment then reaches nobody.
+// Two sentences describe the tool, one of them is dead, and the dead one sits
+// where a developer edits the help. The manifest keeps its own sentence, which
+// crates.io and `cargo search` show to a reader who has run nothing.
+//
+// One line only. A second paragraph here becomes clap's `long_about`, which
+// `--help` prints and `-h` does not, and the two spellings of one switch then
+// answer differently.
 /// Report whether rebasing HEAD onto BRANCH would conflict, and by how much
 #[derive(Parser, Debug)]
-#[clap(author, version = version_string!(), about)]
+#[clap(author, version = version_string!())]
 struct Args {
     /// Branch to rebase HEAD onto
     #[clap(value_name = "BRANCH")]
     branch: String,
 
-    /// Print nothing; the exit code is the answer
+    /// Print nothing about the rebase - the exit code is the answer
     #[clap(short, long)]
     quiet: bool,
 }
 
 /// Everything `grind` says, and the one switch that can silence it.
+///
+/// The switch reaches what this type writes, and nothing before it.
+/// `Args::parse` runs ahead of the `Console`, so clap owns two writes of its
+/// own. One is the usage error for a command line it refuses, and the other is
+/// the version line. Both answer about the tool rather than about a rebase.
+/// Silencing the refusal leaves a caller with a bare exit code and no word
+/// about which argument is missing.
 ///
 /// `-q` has to reach three writes on three different paths - the
 /// uncommitted-work note, the verdict, and the failure - and the last of those
@@ -166,9 +183,23 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     let action = format!("replaying HEAD onto {}", args.branch);
     let report = unworded.describing(&action);
 
-    // Before the verdict, and on stderr rather than stdout: a reader has to see
-    // the caveat before the sentence it qualifies, and a caller piping stdout
-    // somewhere has to get the same bytes whether or not the tree was dirty.
+    // Read here and printed later, which is two decisions rather than one.
+    //
+    // Read before the scratch worktree exists, because a scratch worktree can
+    // land inside the repository. A `TMPDIR` pointing under the repository is
+    // all that takes, and `git status` then counts the scratch itself as the
+    // user's own uncommitted work.
+    //
+    // Printed after the replay comes back, because a caveat qualifies an
+    // answer. A caveat ahead of a failed scratch, or ahead of a failed replay,
+    // qualifies a verdict that never arrives. That is a wrong sentence rather
+    // than an early one. The suite states the same rule one step earlier, where
+    // a HEAD with nothing on it is refused with no note.
+    //
+    // The wait costs the reader nothing. The note goes to stderr and the
+    // verdict to stdout, so the caveat still reaches a terminal ahead of the
+    // sentence it qualifies. A caller who pipes stdout gets the same bytes
+    // whether or not the tree was dirty.
     //
     // `unwrap_or_default` rather than `?`, because a caveat that cannot be
     // computed has to cost the caveat and not the answer. A bare repository is
@@ -180,12 +211,15 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     // complaint about a query they never asked for, in place of a right answer.
     // A default count is a clean tree, which `UnwordedReport::dirty_note`
     // already words as no note at all.
-    if let Some(note) = unworded.dirty_note(repo.uncommitted_files().unwrap_or_default()) {
-        console.note(&note);
-    }
+    let dirty_note = unworded.dirty_note(repo.uncommitted_files().unwrap_or_default());
 
     let scratch = repo.scratch("HEAD")?;
     let conflicts = scratch.replay_rebase(&args.branch)?;
+
+    // There is a verdict now, so the caveat has something to qualify.
+    if let Some(note) = dirty_note {
+        console.note(&note);
+    }
 
     // The breakdown lines its hunk counts up in one column, and past the
     // right-hand edge of the terminal there is no such column: the terminal
