@@ -408,6 +408,15 @@ impl Git {
             .collect()
     }
 
+    /// Run git and return the one path it printed, as the bytes git wrote.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned or exited non-zero.
+    pub fn path(&self, subcommand: &str, args: &[&str]) -> Result<PathBuf> {
+        todo!("read one path back as bytes: git {}", invocation(subcommand, args))
+    }
+
     /// Resolve a revision to a full commit id.
     ///
     /// **Both flags are the question, not decoration.** A bare
@@ -991,6 +1000,87 @@ mod tests {
             "git reports a path as it is stored, so the reader must carry those \
              bytes back untouched rather than replacing them"
         );
+    }
+
+    /// The stem every fixture repository of the test below is named with. The
+    /// whitespace goes on the end of it.
+    const REPOSITORY_STEM: &str = "repository";
+
+    /// The two spellings of trailing whitespace that `str::trim` eats. A space
+    /// is the one a developer types by accident. U+3000 is the one nobody
+    /// expects a trimmer to touch, and Rust's trimmer is Unicode-aware, so it
+    /// takes that one just as readily.
+    const TRAILING_WHITESPACE: [(&str, char); 2] =
+        [("a space", ' '), ("U+3000, the ideographic space", '\u{3000}')];
+
+    /// A path git printed has to come back with its last character still on it,
+    /// and a repository whose own directory name ends in whitespace is where
+    /// that character is at risk.
+    ///
+    /// [`Git::run`] trims, and `str::trim` is Unicode-aware, so it eats a
+    /// trailing space and a trailing U+3000 alike. A path read back through it
+    /// therefore names a directory that does not exist, and every question
+    /// asked of that path is answered about nothing: `exists()` is false, an
+    /// open fails, and the caller reads the loss as an absence. Nothing says a
+    /// character went missing.
+    ///
+    /// `rev-parse --show-toplevel` is asked rather than the `--git-path` the
+    /// replay asks for, and the difference is worth stating. `--git-path` glues
+    /// a state directory name onto the end of its answer, so the repository's
+    /// own last character lands in the middle of the path and the trimmer
+    /// cannot reach it. What reaches it there is the other half of the same
+    /// defect - the lossy decode, which replaces every byte outside UTF-8 with
+    /// U+FFFD wherever it sits. APFS refuses a name with such a byte outright,
+    /// so no fixture on this machine can hold one, and `--show-toplevel` is the
+    /// answer whose last character is the repository's own. The reader is one
+    /// reader for both halves, so pinning the half that can be built here pins
+    /// the reader.
+    ///
+    /// The armed control runs first. It reads the same answer back through
+    /// [`Git::run`] and requires exactly the trailing character to be missing,
+    /// so the assertion below stands against a live loss rather than against a
+    /// trimmer that already leaves the path alone.
+    #[test]
+    fn a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact() {
+        for (spelling, trailing) in TRAILING_WHITESPACE {
+            let parent = TempDir::new().expect("create the directory the fixture sits in");
+            let root = parent.path().join(format!("{REPOSITORY_STEM}{trailing}"));
+            std::fs::create_dir(&root).unwrap_or_else(|error| {
+                panic!("create a repository directory whose name ends in {spelling}: {error}")
+            });
+
+            let git = Git::new(&root, "");
+            git.run("init", &["-q", "-b", "main"])
+                .expect("initialise the fixture repository");
+
+            // Git resolves symlinks on its way to an answer, and macOS puts a
+            // temporary directory behind one - `/var` for `/private/var` - so
+            // the two paths agree only after the same resolution.
+            let expected = std::fs::canonicalize(&root).expect("canonicalise the fixture path");
+
+            let through_run = git
+                .run("rev-parse", &["--show-toplevel"])
+                .expect("read the repository root back through the trimming reader");
+            assert_eq!(
+                format!("{through_run}{trailing}"),
+                expected.to_string_lossy(),
+                "`run` no longer eats {spelling} off the end of git's answer, so the assertion \
+                 below could only pass vacuously"
+            );
+
+            let read = git
+                .path("rev-parse", &["--show-toplevel"])
+                .expect("read the repository root back as the bytes git printed");
+
+            assert_eq!(
+                read,
+                expected,
+                "a reader for one path has to hand back the bytes git printed. A repository \
+                 directory named with {spelling} on the end spells that character as the last \
+                 character of its own path, and a trimmed answer names a directory nothing \
+                 holds."
+            );
+        }
     }
 
     /// The subcommand `stopped_commit_is_already_in_head` asks which paths a

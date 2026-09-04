@@ -395,6 +395,16 @@ survives it, where `Git::paths` refuses one outright. A path on unix is a byte
 string with no encoding promised, and a lossy conversion would destroy exactly
 the names that reader exists to preserve. The name never touches the filesystem —
 APFS rejects it outright — so the test puts it in the index directly.
+`a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact` pins the
+third, `Git::path`, which reads *one* path rather than a list. Its fixture is a
+repository whose own directory name ends in whitespace — a space, and U+3000,
+which Rust's Unicode-aware `str::trim` eats just as readily — so the repository
+spells that character as the last character of its own path, and
+`rev-parse --show-toplevel` prints it there. A trimmed answer names a directory
+nothing holds, and every question asked of that path is then answered about
+nothing. The test carries an armed control: the same answer, read back through
+`Git::run`, must be missing exactly that character, or the assertion under it
+stands against a loss that is already gone.
 
 Two more pin **the position a caller's arguments land in**, which is what keeps
 every row of the table above from being undone by the caller. Git reads the
