@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use thiserror::Error;
 
+use crate::chain::Snippet;
+
 /// The variable that turns the run off.
 ///
 /// It has the shape [`crate::input::NO_CLIPBOARD_ENV`] has: any value with a
@@ -485,6 +487,21 @@ pub enum BuildError {
     NoRepository {
         /// What said the directory is in no repository.
         said: String,
+    },
+    /// The run printed something that is no envelope.
+    ///
+    /// The run is asked for `--output-format json`, so what it prints is one
+    /// JSON envelope and the plan is one field of it. A text that is no
+    /// envelope is a `claude` that answered in another shape, and the plan
+    /// reader must never be handed it: the refusal would then name the plan
+    /// and the fault is in the run.
+    #[error("claude answered with {text:?}, which is no JSON envelope: {cause}")]
+    BadEnvelope {
+        /// What the run printed, cut to the length every message of this tool
+        /// cuts to.
+        text: Snippet,
+        /// What the JSON reader said about it.
+        cause: String,
     },
     /// The run failed for a reason only `claude` knows.
     #[error("claude could not build a plan: {said}")]

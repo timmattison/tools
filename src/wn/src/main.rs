@@ -41,6 +41,7 @@
 
 mod build;
 mod chain;
+mod envelope;
 mod github;
 mod graph;
 mod input;
