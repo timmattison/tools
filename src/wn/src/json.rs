@@ -256,8 +256,14 @@ impl Document {
     /// said the plan was built in -2 days would name it wrongly.
     #[must_use]
     pub fn age_note(&self, now: DateTime<Utc>) -> Option<String> {
-        let _ = now;
-        None
+        let days = (now - self.generated?).num_hours() / HOURS_OF_A_DAY;
+        if days < 1 {
+            return None;
+        }
+        let plural = if days == 1 { "" } else { "s" };
+        Some(format!(
+            "This plan was built {days} day{plural} ago. Run wn --refresh to build a new one."
+        ))
     }
 }
 
@@ -332,8 +338,34 @@ fn document_of(text: &str) -> Result<Document, JsonError> {
     }
     Ok(Document {
         graph: of_parts(nodes_of(&streams, &work), &edges_of(&streams))?,
-        generated: None,
+        generated: generated_of(&document)?,
     })
+}
+
+/// The moment `document` says it was built, when it says one.
+///
+/// The key is optional, because every written form of a plan carries no moment
+/// and a document a reader wrote by hand need not carry one either. A key that
+/// stands and is not a moment is a refusal all the same, for the reason `id`
+/// and `name` are: a document that writes one key as something other than what
+/// the schema names is not the schema, and a reader that answered it would be
+/// guessing about the rest of it.
+///
+/// # Errors
+///
+/// Gives [`JsonError::Wrong`] for a `generated` that is not a string, and for
+/// a string RFC 3339 does not name a moment with.
+fn generated_of(document: &Value) -> Result<Option<DateTime<Utc>>, JsonError> {
+    let Some(value) = optional(document, GENERATED) else {
+        return Ok(None);
+    };
+    let wrong = || JsonError::Wrong {
+        path: Path::root(GENERATED),
+        wanted: Kind::Time,
+    };
+    let written = value.as_str().ok_or_else(wrong)?;
+    let read = DateTime::parse_from_rfc3339(written).map_err(|_| wrong())?;
+    Ok(Some(read.with_timezone(&Utc)))
 }
 
 /// The steps of one stream, in the order its `order` array writes them.
