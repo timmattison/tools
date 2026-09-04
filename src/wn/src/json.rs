@@ -801,6 +801,57 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_for_the_issue_of_a_pair_reaches_the_pair() {
+        // The pull request of a pair does the work of the issue beside it, so
+        // a `waitsFor` that names the issue names that pull request. A JSON
+        // document cannot spell the pair inside `waitsFor`, so a reader who
+        // names the issue has no other way to write it, and a second node for
+        // one piece of work tells somebody to start work a pull request
+        // already does.
+        let text = "{ \"version\": 1, \"streams\": [
+            { \"order\": [ { \"issue\": 94, \"pr\": 102 } ] },
+            { \"order\": [ { \"issue\": 91, \"waitsFor\": [94] } ] }
+        ] }";
+        let graph = graph_of(text);
+        assert_eq!(nodes(&graph), vec![91, 102]);
+        assert_eq!(edges(&graph), vec![(102, 91)]);
+    }
+
+    #[test]
+    fn a_pair_that_waits_for_its_own_issue_draws_no_edge() {
+        // The issue of a pair is the work of that pair, so such an edge runs
+        // from a step to itself and says nothing. It is the rule a step that
+        // waits for its own number already reads under.
+        let graph = graph_of(&document_of(
+            "[ { \"issue\": 94, \"pr\": 102, \"waitsFor\": [94] } ]",
+        ));
+        assert_eq!(nodes(&graph), vec![102]);
+        assert!(edges(&graph).is_empty(), "a step waits for no step");
+    }
+
+    #[test]
+    fn a_number_a_step_carries_as_its_own_work_keeps_itself() {
+        // `#94` stands twice: one step closes it with a pull request, and one
+        // step is that number itself. The work a document names directly is
+        // the work, so the wait reaches the step of `#94` and the pair stands
+        // beside it. The answer is the same however the streams stand, because
+        // a rule that took the first stream would answer two orders of one
+        // plan two ways.
+        let pair = "{ \"order\": [ { \"issue\": 94, \"pr\": 102 } ] }";
+        let alone = "{ \"order\": [ { \"issue\": 94 } ] }";
+        let waiting = "{ \"order\": [ { \"issue\": 91, \"waitsFor\": [94] } ] }";
+        for streams in [
+            format!("{pair}, {alone}, {waiting}"),
+            format!("{alone}, {pair}, {waiting}"),
+        ] {
+            let text = format!("{{ \"version\": 1, \"streams\": [ {streams} ] }}");
+            let graph = graph_of(&text);
+            assert_eq!(nodes(&graph), vec![91, 94, 102], "with {streams}");
+            assert_eq!(edges(&graph), vec![(94, 91)], "with {streams}");
+        }
+    }
+
+    #[test]
     fn a_number_that_stands_in_two_streams_is_one_node() {
         let text = "{ \"version\": 1, \"streams\": [
             { \"order\": [ { \"issue\": 1 }, { \"issue\": 2 } ] },
