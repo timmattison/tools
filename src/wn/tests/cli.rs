@@ -365,6 +365,95 @@ const WAITS_CYCLE: &str = "\
 | S0 — daemon leak | #96 | #91 |
 ";
 
+/// A plan written as JSON, the shape a program hands back.
+///
+/// The same file the reader of it reads in its own tests, so the document this
+/// file drives the binary with is the document that reader was written for.
+///
+/// It names two streams. `S0` holds `#96`. `S1` holds `#91`, which waits for
+/// `#96`, and then `#94`, whose work is the pull request `#102`.
+const JSON_PLAN: &str = include_str!("../fixtures/plan-parallel-work.json");
+
+/// What GitHub says about every number of [`JSON_PLAN`] when each of them is
+/// open.
+///
+/// Four numbers and three steps: the pull request and the issue it closes are
+/// one step, and the query asks about both of them.
+const JSON_ISSUES: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"OPEN","stateReason":null},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"OPEN","stateReason":null},
+"i102":{"__typename":"PullRequest","number":102,"title":"The shell init","state":"OPEN"},
+"i94":{"__typename":"Issue","number":94,"title":"The install","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`JSON_PLAN`] earns while every issue of it is open.
+///
+/// The report of a graph, because a JSON plan is a graph: one row for each
+/// step in the order of the work, and one start line for each issue somebody
+/// can begin now. `#96` is the one of them.
+const JSON_ANSWER: &str = concat!(
+    "→ #96         The daemon leak\n",
+    "· #91         The lifecycle    waits for #96\n",
+    "· #102 (#94)  The shell init   waits for #91\n",
+    "\n",
+    "Start #96 next with 'si 96'\n",
+);
+
+/// What GitHub says about the numbers of [`JSON_PLAN`] once `#96` is done.
+const JSON_ISSUES_ONE_DONE: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"CLOSED","stateReason":"COMPLETED"},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"OPEN","stateReason":null},
+"i102":{"__typename":"PullRequest","number":102,"title":"The shell init","state":"OPEN"},
+"i94":{"__typename":"Issue","number":94,"title":"The install","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`JSON_PLAN`] earns once `#96` is done: `#91` is free.
+const JSON_ANSWER_ONE_DONE: &str = concat!(
+    "✓ #96         The daemon leak\n",
+    "→ #91         The lifecycle\n",
+    "· #102 (#94)  The shell init   waits for #91\n",
+    "\n",
+    "Start #91 next with 'si 91'\n",
+);
+
+/// A JSON plan whose two streams wait for each other.
+///
+/// Neither of the two starts, so the plan names no work at all.
+const JSON_CYCLE: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "S1", "name": "lifecycle", "order": [{ "issue": 91, "waitsFor": [96] }] },
+    { "id": "S0", "name": "daemon leak", "order": [{ "issue": 96, "waitsFor": [91] }] }
+  ]
+}"#;
+
+/// A JSON plan whose `waitsFor` names a number the repository does not have.
+///
+/// `#999` is the typo. It stands in no `order` array, so the rows are the only
+/// place that can say the repository does not have it.
+const JSON_PLAN_WITH_A_TYPO: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "S0", "order": [{ "issue": 96 }] },
+    { "id": "S1", "order": [{ "issue": 91, "waitsFor": [96, 999] }] }
+  ]
+}"#;
+
+/// A JSON plan with no work in it at all.
+///
+/// Somebody ran the skill on a repository with nothing to do. That is not an
+/// error, and the answer says so.
+const JSON_EMPTY: &str = "{ \"version\": 1, \"streams\": [] }";
+
+/// The answer [`JSON_EMPTY`] earns.
+const JSON_EMPTY_ANSWER: &str = "The plan holds no work. Nothing to start.\n";
+
+/// The words of the message a text that is not an issue number earns.
+///
+/// The mark of the chain reader. A document that does not parse must never
+/// reach it, because a message about a token names the wrong problem.
+const NOT_AN_ISSUE: &str = "is not an issue number";
+
 /// The word a message about a drawing holds.
 ///
 /// A reader who wrote a table drew nothing, so the refusal of a plan must hold
@@ -1633,5 +1722,160 @@ fn a_plan_with_no_waits_for_column_answers_as_it_always_did() {
         !stdout(&output).contains(WAITS_FOR),
         "no block of a plan carries the column of a graph, in {}",
         stdout(&output)
+    );
+}
+
+#[test]
+fn answers_a_plan_written_as_json() {
+    // The fifth shape of input, and the one a program hands back. A JSON plan
+    // is a graph, so it earns the report a picture earns: one row for each
+    // step in the order of the work, and one start line for each issue
+    // somebody can begin now.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+}
+
+#[test]
+fn a_finished_step_of_a_json_plan_frees_the_step_that_waited_for_it() {
+    let gh = FakeGh::new(JSON_ISSUES_ONE_DONE);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER_ONE_DONE);
+}
+
+#[test]
+fn a_pull_request_of_a_json_step_is_the_pair_the_row_writes() {
+    // `"pr": 102` on the step of `#94` is the pair `PR#102 (#94)` writes, and
+    // the state of the row is the state of the pull request, because the pull
+    // request is the work.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        answer.contains("#102 (#94)  The shell init"),
+        "the row writes the pair and the title of the work, in {answer}"
+    );
+}
+
+#[test]
+fn refuses_a_json_plan_whose_steps_wait_for_each_other() {
+    // The rule of a picture and of a `Waits for` column, unchanged: a cycle
+    // has no step to start, so the message names the numbers that hold the
+    // knot and the run costs no round trip.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let output = run_with_stdin(&gh, &[], "80", JSON_CYCLE);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    for number in ["#91", "#96"] {
+        assert!(
+            message.contains(number),
+            "the error names {number} of the cycle, in {message}"
+        );
+    }
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+    assert!(
+        gh.asked_nothing(),
+        "the run refused the plan before it asked GitHub, and it asked {}",
+        gh.recorded_args()
+    );
+}
+
+#[test]
+fn a_json_blocker_the_repository_does_not_have_still_earns_a_row() {
+    let gh = FakeGh::with_status(WAITS_ISSUES_WITH_A_TYPO, 1);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN_WITH_A_TYPO);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a number the repository does not have is a failed run, stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "→ #96   The daemon leak\n",
+            "? #999  (no such issue)\n",
+            "· #91   The lifecycle    waits for #96, #999\n",
+            "\n",
+            "#999 is not in timmattison/tools.\n",
+            "Start #96 next with 'si 96'\n",
+        )
+    );
+}
+
+#[test]
+fn a_json_plan_with_no_streams_in_it_is_no_error() {
+    // Somebody ran the skill on a repository with nothing to do. The answer
+    // says the plan is empty and the run exits 0, and it asks GitHub nothing:
+    // a query with no field in it is a syntax error, and there is nothing to
+    // ask about anyway.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_EMPTY);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_EMPTY_ANSWER);
+    assert!(
+        gh.asked_nothing(),
+        "an empty plan asks about nothing, and it asked {}",
+        gh.recorded_args()
+    );
+}
+
+#[test]
+fn a_document_that_does_not_parse_never_reaches_the_chain_reader() {
+    // A reader that fell through on a broken document would take a document
+    // with one missing brace to the chain reader, which would then report
+    // `"version" is not an issue number`. That message names the wrong
+    // problem.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let broken = JSON_PLAN.trim_end().trim_end_matches('}');
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", broken);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(
+        message.contains("is not a JSON document"),
+        "the error names the shape the reader pasted, in {message}"
+    );
+    assert!(
+        !message.contains(NOT_AN_ISSUE),
+        "the chain reader never saw it, in {message}"
+    );
+    assert!(
+        gh.asked_nothing(),
+        "the run refused the document before it asked GitHub, and it asked {}",
+        gh.recorded_args()
+    );
+}
+
+#[test]
+fn a_json_document_of_a_version_this_reader_does_not_know_is_refused() {
+    let gh = FakeGh::new(JSON_ISSUES);
+    let ahead = JSON_PLAN.replace("\"version\": 1", "\"version\": 2");
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &ahead);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(
+        message.contains("version 2") && message.contains("version 1"),
+        "the error names the version it read and the version it knows, in {message}"
+    );
+}
+
+#[test]
+fn a_json_document_that_is_not_the_schema_names_the_path() {
+    // The path is what says where to look, so the message walks the document
+    // rather than naming the key alone.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let text = JSON_PLAN.replace(
+        "{ \"issue\": 91, \"waitsFor\": [96] }",
+        "{ \"waitsFor\": [96] }",
+    );
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &text);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("streams[1].order[0].issue is missing"),
+        "the error names the path in the document, in {}",
+        stderr(&output)
     );
 }

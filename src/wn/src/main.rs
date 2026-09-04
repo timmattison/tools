@@ -24,11 +24,18 @@
 //! that names one blocker or more is one graph and answers as a picture
 //! answers. An empty cell and an absent column are the common case, and such a
 //! plan answers as it always did.
+//!
+//! A plan written as JSON is the fifth shape, and it is the shape a program
+//! hands back. The four written forms carry layout the reader has to undo, and
+//! layout is lossy: a table re-wrapped by whatever pasted it can lose the
+//! second line of an `Order` cell, which costs a step. A document carries no
+//! layout, so `wn` reads it first and claims it on one character.
 
 mod chain;
 mod github;
 mod graph;
 mod input;
+mod json;
 mod plan;
 mod render;
 mod report;
@@ -131,6 +138,12 @@ set and not a chain, so `#96, #91` names two blockers and says nothing about whi
 comes first. An empty cell and a plan with no such column are the common case and no error. A \
 plan that names one blocker or more is one graph, so its answer is one row for each step, in the \
 order of the work, and one start line for each issue somebody can begin now.\n\n\
+A plan written as JSON is a fifth shape of input, and it is the shape a program hands back. `wn` \
+reads the `streams` of it and nothing else: the order array of a stream is a chain, and the \
+waitsFor of a step names the work that comes before that step. JSON is tried first and claimed on \
+one character, because a text whose first character that is not a space is `{` is a JSON document \
+and nothing else `wn` reads starts that way. A document that does not parse is an error and never \
+a walk on to the next reader.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
@@ -205,11 +218,19 @@ fn main() -> ExitCode {
 /// environment, which `main` reads. The order of the inputs, and the rule that
 /// only the input that answers is read, both live in [`input::Sources`].
 ///
-/// The shape of the text says which reader takes it. A page that names a
-/// `Stream` field or an `Order` field is a plan of parallel work, a text whose
-/// wires join steps on more than one line is a plan drawn as a picture, and
-/// every other text is one chain. So a reader pipes or pastes what they have,
-/// and no flag stands between them and the answer.
+/// The shape of the text says which reader takes it. A text whose first
+/// character that is not a space is `{` is a plan written as JSON, a page that
+/// names a `Stream` field or an `Order` field is a plan of parallel work, a
+/// text whose wires join steps on more than one line is a plan drawn as a
+/// picture, and every other text is one chain. So a reader pipes or pastes
+/// what they have, and no flag stands between them and the answer.
+///
+/// JSON is read first, and it is claimed on one character. Nothing else `wn`
+/// reads starts with a brace, so the claim never costs a partial parse. A text
+/// that starts with `{` and does not parse is an error and never a walk on to
+/// the next reader: a document with one missing brace would otherwise reach
+/// the chain reader, which would report `"version" is not an issue number`,
+/// and that message names the wrong problem.
 ///
 /// A plan is read twice: once as a set of streams, and once as the graph its
 /// `Waits for` cells draw. A plan that draws one cross-stream edge or more
@@ -248,6 +269,12 @@ fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Re
         clipboard: (!clipboard_off).then_some(copied),
     }
     .chain()?;
+
+    if let Some(graph) = json::read(chain.text()) {
+        let graph = graph.map_err(|err| chain.blame(err))?;
+        let repo = repo_of(cli)?;
+        return answer_graph(&graph, &repo, width, start);
+    }
 
     if plan::looks_like_a_plan(chain.text()) {
         let plan = plan::parse(chain.text()).map_err(|err| chain.blame(err))?;

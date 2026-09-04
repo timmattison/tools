@@ -1177,7 +1177,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     and `PR#344 (#341)` is one step that holds a pair. A separator inside the cell says nothing
     about order. `Order` is a chain and `Waits for` is a set, so `#96 → #91` and `#96, #91` mean
     the same thing — both numbers must finish before the stream starts. Reading the cell as a
-    chain would claim an edge from `#96` to `#91` that the plan never wrote.
+    chain would claim an edge from `#96` to `#91` that the plan never wrote. A cell that names
+    the issue of a pair some `Order` writes reaches that pair. `#341` in a cell reaches the step
+    `PR#344 (#341)`, because the two numbers name one piece of work. One piece of work is one
+    row, and a wait on the issue of a pair names no second thing to start.
   - Every step of the cell comes before the first step of the stream, and before that step alone,
     because the steps inside the stream keep the edges `Order` already gives them. The plan above
     thus draws `#96 → #91`, `#96 → #89`, `#91 → #89`, and `#89 → #94`. That is a graph, and it is
@@ -1188,9 +1191,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     issue is open, and it names `#91` and `#86` once `#96` is closed.
   - An empty cell is a stream nothing outside it blocks, and it is the common case. An absent
     column is a plan with no cross-stream edge at all, which is every plan written before this
-    landed: such a plan still answers as one block for each stream under one summary, and nothing
-    about it changed. A cell that names the first step of its own stream draws no edge either,
-    because such an edge runs from a step to itself and says nothing.
+    landed: such a plan still answers as one block for each stream under one summary, and
+    nothing about it changed. A cell that names the first step of its own stream draws no edge
+    either, because such an edge runs from a step to itself and says nothing. A cell that names
+    the issue of that first step draws no edge for the same reason, because that issue names
+    that same step.
   - Three things are refused. A cell whose text is not a step earns the message a bad `Order` cell
     earns, naming the stream and the text: `after the leak lands` names no issue, and the reason a
     stream waits is prose that belongs in `Notes`. An order that returns to itself is a cycle, so
@@ -1232,22 +1237,22 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     prose of a port. `wn` reads the run and never the one character, so `a 30-line window` holds
     no wire, `(pass --hidden)` holds none, and `#1-->#2` holds one, because a digit and a `#` are
     no letters. A box-drawing character never stands inside a word, so it needs no such test.
-  - The readers are tried in one order: the record form and the table form of a plan first, the
-    picture second, and the chain last. A picture claims the text when one of its nets joins two
-    steps that stand on different lines. That rule is what keeps `#1 ──→ #2` a chain, because both
-    of its steps stand on one line. It claims the text as well when two nets or more each join a
-    step on their left to a step on their right, those nets do not all stand on one line, one of
-    them holds a box-drawing character, and no net of the text reaches a step on one side and
-    nothing on the other. That second rule is what reads `#242 ──→ #247` over `#246 ──→ #248` —
-    two streams that never join — as two rows of work rather than as one, because every wire of
-    such a picture stands on one line. Each of the three tests beside the count keeps a text the
-    chain reader answers: the lines keep `#1 ──→ #2 ──→ #3` a chain, the box-drawing character
-    keeps a page of prose out, and the net that reaches nothing on one side keeps a chain somebody
-    wrapped out — `#1 ──→ #2 ──→` with `#3 ──→ #4` under it, where the trailing `──→` says the
-    order runs on. The price is a chain wrapped after a box-drawn wire: `#1 ──→ #2,` with
-    `#3 ──→ #4` under it reads as two streams. A line with no wire and no step is ignored, so the
-    fence of a code block costs nothing, and a picture indented out of a Markdown list gives the
-    edges a picture at column zero gives.
+  - The readers are tried in one order: the JSON document first, the record form and the table
+    form of a plan second, the picture third, and the chain last. A picture claims the text
+    when one of its nets joins two steps that stand on different lines. That rule is what keeps
+    `#1 ──→ #2` a chain, because both of its steps stand on one line. It claims the text as
+    well when two nets or more each join a step on their left to a step on their right, those
+    nets do not all stand on one line, one of them holds a box-drawing character, and no net
+    of the text reaches a step on one side and nothing on the other. That second rule is what
+    reads `#242 ──→ #247` over `#246 ──→ #248` — two streams that never join — as two rows
+    of work rather than as one, because every wire of such a picture stands on one line. Each
+    of the three tests beside the count keeps a text the chain reader answers: the lines keep
+    `#1 ──→ #2 ──→ #3` a chain, the box-drawing character keeps a page of prose out, and the net
+    that reaches nothing on one side keeps a chain somebody wrapped out — `#1 ──→ #2 ──→` with
+    `#3 ──→ #4` under it, where the trailing `──→` says the order runs on. The price is a chain
+    wrapped after a box-drawn wire: `#1 ──→ #2,` with `#3 ──→ #4` under it reads as two streams.
+    A line with no wire and no step is ignored, so the fence of a code block costs nothing, and a
+    picture indented out of a Markdown list gives the edges a picture at column zero gives.
   - The answer names a state for every step. A step is ready when it is open and every step before
     it is finished, blocked when it is open and one step before it is not, and finished when it is
     done or dropped. `→` marks every ready step and `·` marks a blocked one, which is what those
@@ -1275,9 +1280,64 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     holds every number of the picture, `1` when the picture names a number the repository does not
     have, and `2` for a picture `wn` could not read and for a cycle. `wn` draws no graph back: the
     answer is the rows and what each row waits for, because a layout engine is a separate decision.
+  - A plan written as JSON is a fifth shape of input, and it is the shape a program hands back.
+    The four written forms were each written for a person to read, and three of them carry layout
+    the reader has to undo — a column width, a border, a cell that wrapped onto a second line.
+    Layout is lossy. A box table that left a terminal 100 columns wide and arrives in one 80
+    columns wide has been re-wrapped by whatever pasted it, and a `Notes` cell that lost its
+    second line costs nothing while an `Order` cell that lost its second line costs a step. A
+    document carries no layout at all, so a program that writes a plan writes this one.
+
+    ```json
+    {
+      "version": 1,
+      "streams": [
+        { "id": "S0", "name": "daemon leak", "order": [{ "issue": 96, "waitsFor": [] }] },
+        { "id": "S1", "name": "lifecycle", "order": [
+          { "issue": 91, "waitsFor": [96] },
+          { "issue": 94, "pr": 102, "waitsFor": [] }
+        ] }
+      ]
+    }
+    ```
+  - `wn` reads `streams` and nothing else. The `order` array of a stream is a chain, so each step
+    of it comes before the step after it. In one step, `issue` is the issue number, `pr` is the
+    pull request that does the work of that issue — the same pair `PR#344 (#341)` writes, and it
+    reaches the report as the row `#102 (#94)` — and `waitsFor` is the set of numbers that come
+    before that step. `waitsFor` is the JSON spelling of the `Waits for` cell, and it reaches the
+    same graph. A cell writes the pair as `PR#102 (#94)` and a `waitsFor` holds bare numbers, so
+    a `waitsFor` that names the issue of a pair reaches that pair. One piece of work is one row
+    in both readers, and a wait on the issue of a pair names no second thing to start. It stands
+    on each step rather than on the stream, so a later step of a stream names its own blockers.
+    `housekeeping` and `warnings` are read past: they stand in the document because the person
+    who ran the skill wants them, and `wn` answers one question. The document above draws
+    `#96 → #91` and `#91 → #94`, so it names `#96` while every issue is open and `#91` once `#96`
+    is closed.
+  - JSON is tried first, before the tables and before the chain. A text whose first character
+    that is not a space is `{` is a JSON document, and nothing else `wn` reads starts that way, so
+    the claim is decided on one character and never on a partial parse. A text that starts with
+    `{` and does not parse is an error and never a walk on to the next reader: a document with one
+    missing brace would otherwise reach the chain reader, which would answer `"version" is not an
+    issue number`, and that message names the wrong problem.
+  - Three things are refused, and each of them exits `2`. A `version` that is not `1` stops the
+    run and names the version it read beside the version `wn` knows, because a consumer that
+    guesses at a schema it does not know answers with the wrong plan. A document that is not the
+    schema — a missing `streams`, a stream with no `order`, a step with no `issue`, a number that
+    is not a number — names the path in the document, so `streams[1].order[0].issue` says where to
+    look. A cycle names the numbers that hold the knot, as it does for a picture and for a `Waits
+    for` column. A `waitsFor` that names a step of its own stream is refused by none of those: it
+    is an edge `order` already carries.
+  - An empty `streams` array is a plan with no work in it, and that is not an error. The answer
+    reads `The plan holds no work. Nothing to start.` and the run exits `0`, and it asks GitHub
+    nothing at all. Every other JSON plan earns the report a picture earns: one row for each step
+    in the order of the work, `→` on every ready step and `·` on a blocked one, the work each
+    blocked row waits for, and one start line for each issue somebody can begin now. A JSON plan
+    is a graph, a table with a `Waits for` column is the same graph, and one report answers both,
+    because two reports of one question drift apart.
   - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard), `wn "#230 → #315"`,
-    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole plan, or a plan drawn
-    as a picture), `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
+    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole plan, a plan drawn
+    as a picture, or a plan written as JSON),
+    `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 
 ## dirhash
