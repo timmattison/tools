@@ -65,9 +65,9 @@ pub type ClipboardRead = Result<Option<String>, ClipboardUnavailable>;
 
 /// What a run of `claude` gave back.
 ///
-/// `Ok` is the document it printed, which the JSON reader then takes. The
-/// document is not read here: this module knows where a text came from and
-/// never what is in it.
+/// `Ok` is the plan it printed, which one of the readers then takes. The plan
+/// is not read here: this module knows where a text came from and never what
+/// is in it.
 pub type PlanBuild = Result<String, BuildError>;
 
 /// What a write of the clipboard gave back.
@@ -161,10 +161,11 @@ impl Chain {
     /// argument, from a pipe, or from the clipboard is text the reader already
     /// has, and writing it back would overwrite their clipboard for nothing.
     ///
-    /// `read` is whether the reader of the document could read it. A document
-    /// that could not be read is never kept: a bad plan on the clipboard is a
-    /// bad plan every later run reads, and the reader would have to copy
-    /// something else to get out of it.
+    /// `read` is whether one of the readers could read the text, whichever
+    /// shape the run wrote the plan in. A plan that no reader could read is
+    /// never kept: a bad plan on the clipboard is a bad plan every later run
+    /// reads, and the reader would have to copy something else to get out of
+    /// it.
     ///
     /// `write` is `None` when [`NO_CLIPBOARD_ENV`] turns the clipboard off. A
     /// reader who turned the clipboard off turned the cache off with it, so

@@ -34,9 +34,10 @@
 //! The reader who has no plan at all has a repository full of open issues
 //! instead. That plan is one `claude` run away, and `wn` already knows the
 //! repository, so `wn` builds it: the run is the fourth input, after the
-//! argument, standard input, and the clipboard. The document it gives back
-//! goes on the clipboard, which is the cache the next run reads through the
-//! clipboard input that already stands.
+//! argument, standard input, and the clipboard. The plan it gives back goes on
+//! the clipboard, whichever of the five shapes it wrote the plan in, and the
+//! clipboard is the cache the next run reads through the clipboard input that
+//! already stands.
 
 mod build;
 mod chain;
@@ -162,9 +163,10 @@ value with a character in it to turn the clipboard off. An empty value leaves th
 because an exported but empty variable is a common accident.\n\n\
 The run of claude is the last input and the quietest one. It happens only when the other three \
 held nothing, it costs money and about a minute, and it runs the plan-parallel-work skill in the \
-repository of the current directory. The document it prints goes on the clipboard, so a second \
-`wn` a minute later reads it back rather than paying for a second run — and copying anything \
-else throws the plan away, which is what makes a plan cheap to rebuild. CAUTION: THE RUN \
+repository of the current directory. The plan it prints goes on the clipboard, whichever shape it \
+wrote the plan in, so a second `wn` a minute later reads it back rather than paying for a second \
+run — and copying anything else throws the plan away, which is what makes a plan cheap to \
+rebuild. CAUTION: THE RUN \
 OVERWRITES WHAT IS ON THE CLIPBOARD. It happens only when every other input was empty, and the \
 tool says so on the line under the answer.\n\n\
 `wn --refresh` runs claude whatever the other inputs hold, and it replaces the clipboard with \
@@ -473,6 +475,11 @@ fn reading_of(text: &str) -> Result<Reading, ReadError> {
 /// and about a minute, and a plan that never reaches the clipboard makes the
 /// next `wn` pay for a second run.
 ///
+/// A plan is kept whatever shape it came back in. `claude` answers with the
+/// shape it chose, so a run gives back a JSON document, a Markdown table, a
+/// box-drawn table, a picture, or one chain, and every one of them costs the
+/// same money and the same minute.
+///
 /// The plan is kept before the repository is resolved and before GitHub is
 /// asked. A run that read the plan and then could not reach GitHub still built
 /// a plan, and the reader must not pay for a second one.
@@ -486,11 +493,10 @@ fn read_and_keep(
     write: Option<&dyn Fn(&str) -> input::ClipboardWrite>,
 ) -> (Result<Reading, ReadError>, Option<String>) {
     let reading = reading_of(chain.text());
-    // A plan written as JSON is the one reading a plan is kept for.
-    let kept = match &reading {
-        Ok(Reading::Document(_)) => chain.keep(true, write),
-        _ => None,
-    };
+    // Every reading is kept, because `claude` answers with the shape it chose.
+    // A run that came back as a table, as a picture, or as one chain costs the
+    // same money and the same minute as a run that came back as a document.
+    let kept = chain.keep(reading.is_ok(), write);
     (reading, kept)
 }
 
