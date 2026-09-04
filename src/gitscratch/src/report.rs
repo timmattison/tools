@@ -50,6 +50,40 @@ const COUNT_GAP: usize = 4;
 /// one has to be able to derive `Debug` on the struct that holds it, and an
 /// assertion that fails while comparing two renderings has to be able to say
 /// which report produced them.
+///
+/// # An unworded report cannot render
+///
+/// A report says two things, and they arrive in two calls: the tool's own name,
+/// and what the tool did. A report that got only the first one has a hole in
+/// the middle of its sentence, and the hole reaches the screen as
+/// `grind: clean -  hit no conflicts`, with two spaces where the action
+/// belongs. Nothing but a reader's eye catches that, and the first call site
+/// that forgets the second call is the one that finds out.
+///
+/// So the first call hands back a report that cannot render. [`render`],
+/// [`render_within`] and [`without_stops`] arrive with the action, through
+/// [`describing`], and there is no other route to them.
+///
+/// A worded report renders:
+///
+/// ```
+/// let report = gitscratch::Report::for_tool("grind").describing("replaying HEAD onto main");
+/// let verdict = report.render(&gitscratch::Conflicts::nothing_replayed());
+/// ```
+///
+/// An unworded one does not. The block below is the same two lines with the
+/// wording left out, so what it proves is that the missing wording is what
+/// stops it:
+///
+/// ```compile_fail
+/// let report = gitscratch::Report::for_tool("grind");
+/// let verdict = report.render(&gitscratch::Conflicts::nothing_replayed());
+/// ```
+///
+/// [`describing`]: Report::describing
+/// [`render`]: Report::render
+/// [`render_within`]: Report::render_within
+/// [`without_stops`]: Report::without_stops
 #[derive(Debug, Clone, Copy)]
 pub struct Report<'a> {
     tool: &'a str,
