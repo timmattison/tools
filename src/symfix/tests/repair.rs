@@ -869,3 +869,208 @@ fn verbose_names_the_removed_candidate_and_calls_it_absent() {
         run.err
     );
 }
+
+/// The line the tool writes for one repair the prepend planned and did not
+/// make.
+fn would_prepend_line(link: &Path, target: &str) -> String {
+    format!(
+        "Would fix symlink by prepending: {} -> {target}\n",
+        link.display()
+    )
+}
+
+/// The line the tool writes for one repair the remove planned and did not make.
+fn would_remove_line(link: &Path, target: &str) -> String {
+    format!(
+        "Would fix symlink by removing prefix: {} -> {target}\n",
+        link.display()
+    )
+}
+
+// The dry run.
+//
+// A tool that rewrites links across a whole tree needs a way to show what it
+// would do and change nothing. Each test below thus asserts two things that
+// have to hold together: the report names the repair the run planned, and the
+// link on the disk still holds the target it was made with and is still
+// broken. A dry run that printed the right plan and then rewrote the link
+// would pass the first half alone, so neither half stands by itself.
+
+#[test]
+fn a_dry_run_plans_a_prepend_and_changes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let link = moved_up_one_directory(dir.path());
+
+    let run = run_with(&Options {
+        dry_run: true,
+        ..with_prepend(dir.path(), "../")
+    });
+
+    // `fixed` under a dry run counts the links the run would repair, so the
+    // count is the same one the run without the flag gives.
+    assert_eq!(
+        run.summary,
+        Summary {
+            broken: 1,
+            fixed: 1,
+            errors: 0
+        }
+    );
+    assert!(
+        run.out.contains(&would_prepend_line(&link, "../target.txt")),
+        "the planned repair is reported: {:?}",
+        run.out
+    );
+    assert!(
+        run.out.ends_with("Would fix 1 symlink(s).\n"),
+        "the report ends with the count of planned repairs: {:?}",
+        run.out
+    );
+    assert!(
+        !run.out.contains("Fixed "),
+        "nothing is reported as done: {:?}",
+        run.out
+    );
+
+    // The point of the whole flag: the link is untouched, thus it still holds
+    // the target it was made with and it is still broken.
+    assert_eq!(fs::read_link(&link).unwrap(), Path::new("target.txt"));
+    assert!(
+        fs::metadata(&link).is_err(),
+        "the link is still broken: {:?}",
+        fs::read_link(&link)
+    );
+}
+
+#[test]
+fn a_dry_run_plans_a_remove_and_changes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let link = carries_a_stale_prefix(dir.path());
+
+    let run = run_with(&Options {
+        dry_run: true,
+        ..with_remove(dir.path(), "oldprefix/")
+    });
+
+    assert_eq!(
+        run.summary,
+        Summary {
+            broken: 1,
+            fixed: 1,
+            errors: 0
+        }
+    );
+    assert!(
+        run.out.contains(&would_remove_line(&link, "path/target.txt")),
+        "the planned repair is reported: {:?}",
+        run.out
+    );
+    assert!(
+        run.out.ends_with("Would fix 1 symlink(s).\n"),
+        "the report ends with the count of planned repairs: {:?}",
+        run.out
+    );
+    assert!(
+        !run.out.contains("Fixed "),
+        "nothing is reported as done: {:?}",
+        run.out
+    );
+
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        Path::new("oldprefix/path/target.txt")
+    );
+    assert!(
+        fs::metadata(&link).is_err(),
+        "the link is still broken: {:?}",
+        fs::read_link(&link)
+    );
+}
+
+#[test]
+fn a_dry_run_that_can_plan_nothing_says_so() {
+    // A dry run that plans nothing has nothing to say differently, so the line
+    // a run with a fix flag and no repair prints does not change with the flag.
+    let dir = TempDir::new().unwrap();
+    let link = link_at(dir.path(), "link", "missing.txt");
+
+    let run = run_with(&Options {
+        dry_run: true,
+        ..with_prepend(dir.path(), "elsewhere/")
+    });
+
+    assert_eq!(
+        run.summary,
+        Summary {
+            broken: 1,
+            fixed: 0,
+            errors: 0
+        }
+    );
+    assert_eq!(
+        run.out,
+        format!(
+            "{}Found 1 broken symlink(s).\n{NOTHING_FIXED}",
+            broken_line(&link, "missing.txt")
+        )
+    );
+    assert!(
+        !run.out.contains("Would fix"),
+        "no repair is planned: {:?}",
+        run.out
+    );
+}
+
+#[test]
+fn a_dry_run_leaves_no_temporary_entry_behind() {
+    // The replacement makes the new link under a name of its own before it
+    // renames that link over the old one. A dry run makes no link at all, thus
+    // it makes no temporary one either, and the directory holds what the
+    // fixture made and nothing else.
+    let dir = TempDir::new().unwrap();
+    let link = moved_up_one_directory(dir.path());
+    let deeper = link.parent().unwrap();
+
+    let run = run_with(&Options {
+        dry_run: true,
+        ..with_prepend(dir.path(), "../")
+    });
+
+    assert_eq!(run.summary.fixed, 1);
+    let mut names: Vec<OsString> = fs::read_dir(deeper)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec![OsString::from("link")]);
+}
+
+#[test]
+fn the_same_fixture_repaired_for_real_reports_a_repair_that_happened() {
+    // This test and `a_dry_run_plans_a_prepend_and_changes_nothing` are one
+    // pair: the same fixture, one flag between them, and a report that says
+    // `Fixed` on this side and `Would fix` on the other. Neither wording can
+    // drift onto the wrong run without one of the two failing.
+    let dir = TempDir::new().unwrap();
+    let link = moved_up_one_directory(dir.path());
+
+    let run = run_with(&with_prepend(dir.path(), "../"));
+
+    assert_eq!(run.summary.fixed, 1);
+    assert!(
+        run.out.contains(&prepended_line(&link, "../target.txt")),
+        "the repair is reported as done: {:?}",
+        run.out
+    );
+    assert!(
+        run.out.ends_with("Fixed 1 symlink(s).\n"),
+        "the report ends with the count of repairs: {:?}",
+        run.out
+    );
+    assert!(
+        !run.out.contains("Would fix"),
+        "nothing is reported as merely planned: {:?}",
+        run.out
+    );
+    assert_eq!(fs::read_link(&link).unwrap(), Path::new("../target.txt"));
+}
