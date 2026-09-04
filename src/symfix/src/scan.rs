@@ -47,6 +47,16 @@ pub fn classify(path: &Path) -> LinkState {
 ///
 /// [`Options::skip`] names the directories the walk does not enter, and
 /// [`skipped`] says which entries those are.
+///
+/// The walk calls `walkdir` and not the `filewalker` crate of this workspace,
+/// for three reasons. `FileWalker::new` takes a `Vec<String>`, so a directory
+/// whose name is not UTF-8 cannot be named, and this tool carries every path as
+/// a `PathBuf` or an `OsString` on purpose. `FileWalker` has no skip: its
+/// filter matches a name, and `walk` applies that filter to an entry the walk
+/// already entered, though a skip must stop the descent. Last, `walk` writes
+/// its warnings with `eprintln!`, straight to the standard error of the
+/// process, and this tool writes every line through the two writers the caller
+/// gives it, which is what lets a test read the whole report back.
 pub(crate) fn scan(
     options: &Options,
     out: &mut dyn Write,
