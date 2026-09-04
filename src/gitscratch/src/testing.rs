@@ -1666,24 +1666,6 @@ mod tests {
     /// The work tree of the plant that holds a space, one level under it.
     const SPACED_WORK_TREE: &str = "home";
 
-    /// Prove the path check can fail, before a clean answer from it is trusted.
-    ///
-    /// Three tools rest on this one function - `gitnuke`, `nodenuke` and
-    /// `repotidy` each assert that it answers `None` for the output of a run -
-    /// and a matcher that never matches answers `None` for every input. A guard
-    /// that reports clean for the wrong reason is the defect those three files
-    /// exist to stop, so the check gets the same treatment it gives the tools.
-    ///
-    /// Five plants: the work tree, the directory above it, the same work tree
-    /// inside quotation marks and before a comma, a directory whose name holds
-    /// a space, and the git directory, which the nested shape keeps under the
-    /// work tree. The first four must match and the last one must not.
-    ///
-    /// The plant that holds a space carries a work tree of its own, because
-    /// every directory above the work tree of the fixture has a name of one
-    /// word. It is the parent of that second work tree, so the check must flag
-    /// it. A scan of white-space-separated tokens reads the first word of that
-    /// name alone and finds nothing.
     /// The name of the directory the ancestor check runs from, one level under
     /// the repository that holds it.
     const DIRECTORY_INSIDE_A_REPOSITORY: &str = "inside";
@@ -1728,6 +1710,24 @@ mod tests {
         );
     }
 
+    /// Prove the path check can fail, before a clean answer from it is trusted.
+    ///
+    /// Three tools rest on this one function - `gitnuke`, `nodenuke` and
+    /// `repotidy` each assert that it answers `None` for the output of a run -
+    /// and a matcher that never matches answers `None` for every input. A guard
+    /// that reports clean for the wrong reason is the defect those three files
+    /// exist to stop, so the check gets the same treatment it gives the tools.
+    ///
+    /// Five plants: the work tree, the directory above it, the same work tree
+    /// inside quotation marks and before a comma, a directory whose name holds
+    /// a space, and the git directory, which the nested shape keeps under the
+    /// work tree. The first four must match and the last one must not.
+    ///
+    /// The plant that holds a space carries a work tree of its own, because
+    /// every directory above the work tree of the fixture has a name of one
+    /// word. It is the parent of that second work tree, so the check must flag
+    /// it. A scan of white-space-separated tokens reads the first word of that
+    /// name alone and finds nothing.
     #[test]
     fn the_path_check_flags_the_work_tree_and_the_directory_above_it() {
         let repo = DetachedGitDirRepo::nested();

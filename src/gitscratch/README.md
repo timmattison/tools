@@ -622,6 +622,7 @@ in.
 | `awkward_names_repo()` | Conflicts in names git C-quotes whatever `core.quotePath` says — a backslash, a double quote — beside names with leading and trailing whitespace, including U+3000. Each is contested in two regions, so a mangled name floors at one hunk and the count fails, not just the spelling. Unix only, because the filesystem has to hold the names. |
 | `not_a_repository()` | A directory outside every repository, which checks its own premise and says so if `TMPDIR` turns out to sit inside one. |
 | `TestRepo::bare_clone(head)` | A `BareRepo`: `worktree add` succeeds there but `status --porcelain` cannot run, so a pre-flight query can fail where the replay still answers. |
+| `DetachedGitDirRepo::nested()` and `::beside()` | A repository whose git directory is detached from its work tree, the way `yadm` keeps a directory of dotfiles. The fixture leaves no `.git` entry anywhere, so a walk upward for one finds no repository at all. `nested` puts the git directory inside the work tree, which is what `yadm` does, and git reports `--is-inside-work-tree` as true from there. `beside` puts it outside, and git reports that same question as false and `--is-inside-git-dir` as true, so code that reads either answer needs both shapes. Like `not_a_repository()`, it checks its own premise and refuses a `TMPDIR` that sits inside a repository. |
 
 ```toml
 [dev-dependencies]
