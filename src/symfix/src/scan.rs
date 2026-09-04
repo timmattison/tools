@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 use crate::{line, repair, Options, Summary};
 
@@ -44,13 +44,30 @@ pub fn classify(path: &Path) -> LinkState {
 /// the thing to examine, and a walk that followed one would examine the tree
 /// behind it instead. The walk is not sorted, thus the order of the report
 /// follows the order the directories come back in.
+///
+/// [`Options::skip`] names the directories the walk does not enter, and
+/// [`skipped`] says which entries those are.
 pub(crate) fn scan(
     options: &Options,
     out: &mut dyn Write,
     err: &mut dyn Write,
     summary: &mut Summary,
 ) {
-    for entry in WalkDir::new(&options.root) {
+    // `filter_entry` is what makes `--skip` a skip and not a filter: an entry
+    // it refuses is never descended into, so the walk of a project never enters
+    // `node_modules` at all rather than walking it and dropping what it found.
+    //
+    // The predicate stays pure and writes nothing, though a `Skipping
+    // directory:` line under `--verbose` would be welcome. `filter_entry` holds
+    // the closure for the whole walk, so a closure that wrote to `err` would
+    // hold `err` borrowed across every iteration of the loop below, which also
+    // writes to it. A debug line is not worth a second writer, a cell, or a
+    // buffer of paths to be flushed after the walk.
+    let walk = WalkDir::new(&options.root)
+        .into_iter()
+        .filter_entry(|entry| !skipped(options, entry));
+
+    for entry in walk {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -236,4 +253,35 @@ fn report_walk_error(err: &mut dyn Write, error: &walkdir::Error) {
         ),
         None => line(err, format_args!("Warning: {error}")),
     }
+}
+
+/// Whether the walk leaves `entry`, and everything under it, out.
+///
+/// The walk asks this about every entry it reaches, so the three conditions
+/// below each answer a question a reader will have.
+///
+/// **The root is never skipped.** `filter_entry` asks about the root of the
+/// walk as well as about everything under it, and a root the predicate refused
+/// would give an empty walk with no account of why. So a caller who runs
+/// `--dir ./node_modules --skip node_modules` — a skip carried in a shell alias
+/// meeting a directory the caller named on purpose — gets the walk they asked
+/// for. Depth zero is the root and nothing else.
+///
+/// **Only a directory is skipped.** A file that carries a skipped name costs
+/// one `metadata` call to examine and hides nothing, and a *symbolic link* that
+/// carries one is the very thing this tool exists to look at. `file_type`
+/// describes the entry itself, because the walk does not follow links, thus it
+/// is false for a link that points at a directory and such a link reaches the
+/// classification like every other link.
+///
+/// **The comparison is on the file name and not on the path.** `--skip .git`
+/// leaves out every `.git` in the tree, at every depth, which is what a caller
+/// who writes it means.
+fn skipped(options: &Options, entry: &DirEntry) -> bool {
+    entry.depth() > 0
+        && entry.file_type().is_dir()
+        && options
+            .skip
+            .iter()
+            .any(|name| name.as_os_str() == entry.file_name())
 }
