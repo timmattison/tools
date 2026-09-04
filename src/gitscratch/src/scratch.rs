@@ -689,9 +689,10 @@ fn count_conflict_hunks(path: &Path) -> Result<usize> {
 mod tests {
     use anyhow::Result;
 
-    use super::{Conflicts, NonZeroUsize, Path, PathBuf};
+    use super::{stopped_commit_is_already_in_head, Conflicts, NonZeroUsize, Path, PathBuf};
+    use crate::git::Git;
     use crate::metrics::{Hunks, Stops};
-    use crate::testing::contested_region_repo;
+    use crate::testing::{contested_region_repo, TestRepo};
 
     /// How many rounds replaying `iterated` onto `single` spends.
     ///
@@ -849,6 +850,106 @@ mod tests {
                 "gave up on the rebase after {budget} resolution rounds"
             )),
             "the refusal has to say what it ran out of, got: {error}"
+        );
+    }
+
+    /// The paths a stopped commit touched, asked for the way
+    /// [`stopped_commit_is_already_in_head`] asks for them. Spelled here so the
+    /// control below demonstrates the hazard with the invocation the probe
+    /// really makes, rather than with a plausible-looking neighbour of it.
+    const TOUCHED_PATHS: [&str; 6] = [
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "--root",
+        "--ignore-submodules=none",
+        "REBASE_HEAD",
+    ];
+
+    /// A merge commit at a halt has to stop the replay, not read as a commit
+    /// that changes nothing.
+    ///
+    /// `diff-tree` prints no path at all for a merge commit unless it is asked
+    /// for `-c`, `--cc` or `-m`, and this probe asks for none of them. So an
+    /// unguarded probe finds an empty touched set, calls the halt
+    /// `Halt::EmptyCommit`, and the replay drops the commit with
+    /// `rebase --skip`. That throws away a whole side of history and reports a
+    /// cost for a branch that was never replayed, which is the one answer this
+    /// crate exists never to give.
+    ///
+    /// The refusal is structural rather than configured, and both halves are
+    /// wanted. `rebase.rebaseMerges=false` in `Git::safety_config` keeps the
+    /// replay away from a merge on the todo list at all, which is the route a
+    /// developer's own configuration opens today. This refusal counts
+    /// `REBASE_HEAD`'s parents before it asks anything else, so the
+    /// classification is correct whatever a later setting does.
+    ///
+    /// Two controls stand ahead of the assertion, because an assertion that
+    /// something did not happen passes just as readily when it was never
+    /// possible. The first proves the fixture really halts on a merge - two
+    /// parents, read back through plain git. The second proves `diff-tree`
+    /// really is silent about that merge, which is the hazard itself. A third
+    /// control follows the assertion: the same probe, pointed at a
+    /// single-parent commit, has to answer rather than refuse, or a probe that
+    /// refused every stopped commit would pass the assertion above and stop
+    /// every replay.
+    #[test]
+    fn refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing() {
+        let repo = TestRepo::init();
+        repo.commit_file("base.txt", "base\n", "base");
+        repo.branch("side");
+        repo.commit_file("side.txt", "the other side's work\n", "side work");
+        repo.checkout("main");
+        repo.commit_file("main.txt", "main's work\n", "main work");
+        repo.git(&["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+        // A halted rebase names the commit it stopped on with this ref, so the
+        // probe reads the fixture exactly as it reads a real halt.
+        repo.git(&["update-ref", "REBASE_HEAD", "HEAD"]);
+
+        let git = Git::new(repo.path(), "");
+
+        let parents = repo.git(&["rev-list", "--no-walk", "--parents", "REBASE_HEAD"]);
+        assert_eq!(
+            parents.split_whitespace().count(),
+            3,
+            "the fixture has to stop on a merge commit - its own id and two parents - or there is \
+             nothing here to refuse: {parents}"
+        );
+
+        assert!(
+            git.paths("diff-tree", &TOUCHED_PATHS)
+                .expect("ask which paths the stopped commit touched")
+                .is_empty(),
+            "`diff-tree` no longer stays silent about a merge commit, so this test could only \
+             pass vacuously; that silence is what makes an unguarded probe read a merge as a \
+             commit that changes nothing"
+        );
+
+        let stopped = repo.git(&["log", "-1", "--format=%h %s", "REBASE_HEAD"]);
+        let error = stopped_commit_is_already_in_head(&git, stopped.clone())
+            .map(|_| ())
+            .expect_err(
+                "a merge commit at a halt has to stop the replay. `diff-tree` reports no changed \
+                 path for one, so classifying it hands back `EmptyCommit`, and the replay skips a \
+                 whole side of history and reports a cost for a branch it never replayed",
+            );
+
+        assert!(
+            format!("{error:#}").contains(&stopped),
+            "the refusal has to name the commit the rebase stopped on, because that name is what \
+             the developer looks at next: {error:#}"
+        );
+        assert!(
+            format!("{error:#}").contains("merge commit"),
+            "the refusal has to say a merge commit at a halt is not something the replay can \
+             measure, or a reader repairs the wrong half: {error:#}"
+        );
+
+        repo.git(&["update-ref", "REBASE_HEAD", "side"]);
+        assert!(
+            stopped_commit_is_already_in_head(&git, "a single-parent commit".to_owned()).is_ok(),
+            "the refusal has to be about a merge and nothing else; a probe that refuses every \
+             stopped commit passes the assertion above and stops every replay"
         );
     }
 

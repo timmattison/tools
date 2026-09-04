@@ -738,6 +738,110 @@ mod tests {
         }
     }
 
+    /// Read one setting back twice: once through plain git, which has to answer
+    /// with the repository's own value, and once through the runner, which has
+    /// to answer with the pinned one.
+    ///
+    /// The first read is the armed control. A setting the fixture never took is
+    /// a setting the runner cannot be shown to override, so an assertion that
+    /// the pinned value came back would pass on a repository where nothing was
+    /// ever at stake. The fixture arms the opposite value, and plain git reports
+    /// it, before the runner is asked anything.
+    ///
+    /// `setting` is spelled the way [`Git::safety_config`] spells it, `key=value`
+    /// and nothing else, so the test names the pin rather than a paraphrase of
+    /// it.
+    fn assert_the_runner_pins(setting: &str, over: &str) {
+        let (key, pinned) = setting
+            .split_once('=')
+            .expect("a pinned setting is spelled `key=value`");
+
+        let repo = TestRepo::init();
+        repo.git(&["config", key, over]);
+
+        assert_eq!(
+            repo.git(&["config", "--get", key]),
+            over,
+            "the fixture does not hold `{key}={over}`, so there is nothing here for the runner to \
+             override and the assertion below is measured against nothing"
+        );
+
+        assert_eq!(
+            Git::new(repo.path(), "")
+                .run("config", &["--get", key])
+                .unwrap_or_else(|error| panic!("read `{key}` back through the runner: {error:#}")),
+            pinned,
+            "`{setting}` is not pinned, so git reads `{key}` out of the developer's own \
+             configuration and acts on it for the length of a replay"
+        );
+    }
+
+    /// Automatic maintenance is a second switch beside `gc.auto=0`, and the half
+    /// it leaves open reaches the network.
+    ///
+    /// `gc.auto=0` stops the gc task alone. `maintenance.auto` governs the whole
+    /// set, and git's `run_auto_maintenance` returns early only when that key is
+    /// explicitly false - the default is to run. Every resolved conflict runs
+    /// `rebase --continue`, which commits, and a commit reaches that call. On a
+    /// developer who has run `git maintenance start` the incremental strategy
+    /// turns the prefetch task on, and prefetch carries no auto-condition of its
+    /// own, so `--auto` does not hold it back. Prefetch fetches from every
+    /// remote and writes `refs/prefetch/*` into the real repository, because a
+    /// linked scratch worktree shares the common dir. A dry run that reaches the
+    /// network and writes refs is the class `gc.auto=0` was added for.
+    ///
+    /// The chain from `run_auto_maintenance` to prefetch is read from git's
+    /// source rather than executed. What this test executes is the pin: the
+    /// fixture turns the key on, and the runner has to report it off.
+    #[test]
+    fn pins_automatic_maintenance_off_even_when_the_repository_turns_it_on() {
+        assert_the_runner_pins("maintenance.auto=false", "true");
+    }
+
+    /// The filesystem monitor names a program git runs itself, so the redirected
+    /// `core.hooksPath` does not disable it.
+    ///
+    /// The classic watchman integration is spelled
+    /// `core.fsmonitor=.git/hooks/fsmonitor-watchman`. Git executes that path
+    /// directly rather than resolving it through the hooks directory, so the
+    /// redirect leaves it standing and every index refresh a replay performs
+    /// runs it - in the real repository and in the scratch worktree both.
+    /// `core.fsmonitor=true` costs more than that: git starts a daemon that
+    /// watches a temporary directory the replay is about to delete.
+    ///
+    /// `tests/safety.rs` states the guarantee as "no replay fires anything", and
+    /// the hooks it plants cannot reach this route at all, so the pin is
+    /// asserted here instead. A freshly created scratch worktree gains nothing
+    /// from a monitor, so the pin costs the replay nothing.
+    ///
+    /// Git's resolution of the setting is read from its source rather than
+    /// executed. What this test executes is the pin.
+    #[test]
+    fn pins_the_filesystem_monitor_off_even_when_the_repository_names_one() {
+        assert_the_runner_pins("core.fsmonitor=false", ".git/hooks/fsmonitor-watchman");
+    }
+
+    /// A merge-preserving rebase puts a merge commit on the replay's todo list,
+    /// and a merge commit at a halt is a commit the replay cannot measure.
+    ///
+    /// `diff-tree` prints no path at all for a merge commit unless it is asked
+    /// for `-c`, `--cc` or `-m`. The probe that decides whether a halted commit
+    /// adds anything to the new base asks for none of them, so an unguarded
+    /// probe reads a merge as a commit that changes nothing, and `rebase --skip`
+    /// drops a whole side of history. Git 2.55 was watched to re-create the
+    /// merge commit under `rebase.rebaseMerges=true`, so the developer's own
+    /// configuration is what opens this route.
+    ///
+    /// The probe refuses a stopped commit with more than one parent as well, and
+    /// that refusal holds whatever a later setting does. This pin closes the one
+    /// route into it that exists today. Both halves are wanted: the pin keeps
+    /// the replay away from a state it cannot measure, and the refusal makes the
+    /// classification correct if it ever arrives there anyway.
+    #[test]
+    fn pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on() {
+        assert_the_runner_pins("rebase.rebaseMerges=false", "true");
+    }
+
     /// `core.quotePath=false` needs its own test now that it protects nothing a
     /// caller can otherwise observe.
     ///

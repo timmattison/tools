@@ -402,6 +402,36 @@ structural rather than a check — `Git` takes the subcommand as a parameter of
 its own, so an argument can only land *after* it, where git reads it as an
 argument of the subcommand.
 
+Three more pin the settings that let git act on the repository **on its own**,
+without any command asking it to. Each fixture arms the opposite value in its own
+repository, reads it back through plain git — the armed control, since a setting
+the fixture never took is one the runner cannot be shown to override — and then
+requires the runner to answer with the pinned value.
+`pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` covers
+`maintenance.auto=false`, the row `gc.auto=0` does not reach: every resolved
+conflict runs `rebase --continue`, which commits, and a commit reaches git's
+automatic maintenance.
+`pins_the_filesystem_monitor_off_even_when_the_repository_names_one` covers
+`core.fsmonitor=false`, the one program git runs that the redirected
+`core.hooksPath` cannot take away, since git executes the named path directly.
+`pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` covers
+`rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo
+list — `git diff-tree` reports no changed path for a merge, so a halt on one
+reads as a commit that changes nothing. The first two settings are read from
+git's own source rather than executed; what these tests execute is the pin
+itself. The third was executed: git 2.55 was watched to re-create the merge
+commit under `rebase.rebaseMerges=true`.
+
+`src/scratch.rs` holds the structural half of that last one.
+`refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing`
+points `REBASE_HEAD` at a merge commit and requires the empty-commit probe to
+refuse it by name. The probe counts the stopped commit's parents before it asks
+anything else, so the classification is correct whatever a later setting does,
+where the pin above only closes the route into it that exists today. It carries
+two controls ahead of the assertion — the fixture's stopped commit really has two
+parents, and `diff-tree` really is silent about it — and one after it: the same
+probe, pointed at a single-parent commit, has to answer rather than refuse.
+
 The fixture builder stamps commits too, and is covered on its own ground in
 `src/testing.rs`, by
 `a_fixture_commits_under_its_own_identity_in_a_hook_environment`. It needs an
