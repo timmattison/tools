@@ -85,6 +85,12 @@ pub struct Repair {
 /// of a walk of a directory — every entry a walk finds sits in the directory it
 /// was found in — and a name with no directory to resolve against is a question
 /// this function cannot answer, so it answers `None`.
+///
+/// Each strategy refuses a candidate with no bytes in it, and it does so on its
+/// own. A guard on the result of this chain would read the same way and behave
+/// differently: an empty candidate from the prepend would end the chain there,
+/// and the remove would never get its turn on a link it can repair. A guard
+/// inside a strategy is a `None` like any other, so the chain falls through.
 pub fn plan(options: &Options, link: &Path, target: &OsStr, err: &mut dyn Write) -> Option<Repair> {
     let link_dir = link.parent()?;
 
@@ -94,6 +100,15 @@ pub fn plan(options: &Options, link: &Path, target: &OsStr, err: &mut dyn Write)
 
 /// Puts `options.prepend` in front of `target`, and accepts the result when the
 /// link would resolve to a file that is there.
+///
+/// A candidate with no bytes in it is refused before the check, as it is in the
+/// remove. This half needs an empty prefix and an empty target together, and
+/// the operating system refuses to make a link with an empty target, so nothing
+/// is known to reach it. It is here because the rule belongs to the check and
+/// not to one strategy: the reason the check cannot answer for an empty
+/// candidate is the same on both sides, and a rule that holds in one place and
+/// is a claim about link targets in the other is a rule that a later change
+/// breaks in silence.
 fn prepend(
     options: &Options,
     link: &Path,
@@ -118,6 +133,16 @@ fn prepend(
                 Path::new(&candidate).display()
             ),
         );
+    }
+
+    if candidate.is_empty() {
+        if options.verbose {
+            line(
+                err,
+                format_args!("Prepended target is empty: {}", link.display()),
+            );
+        }
+        return None;
     }
 
     if fs::metadata(resolved(link_dir, &candidate)).is_ok() {
@@ -146,6 +171,15 @@ fn prepend(
 /// A target that does not start with the prefix gives `None` before anything is
 /// written or read, so a run with `--remove-to-fix` costs nothing on the links
 /// it does not describe.
+///
+/// A prefix that is the whole target leaves no bytes at all, and such a
+/// candidate is refused before the check. The check cannot answer for it: the
+/// directory that holds the link, joined with nothing, is that directory again,
+/// and the directory is there, so the answer is about the directory and never
+/// about a target. A run that took that answer wrote an empty target over the
+/// link, and the text the link held is then gone from the only place that held
+/// it. `--remove-to-fix /old/path/` reaches this on any link whose target is
+/// exactly `/old/path/`.
 fn remove(
     options: &Options,
     link: &Path,
@@ -169,6 +203,16 @@ fn remove(
                 Path::new(&candidate).display()
             ),
         );
+    }
+
+    if candidate.is_empty() {
+        if options.verbose {
+            line(
+                err,
+                format_args!("Target with removed prefix is empty: {}", link.display()),
+            );
+        }
+        return None;
     }
 
     if fs::metadata(resolved(link_dir, &candidate)).is_ok() {
@@ -206,6 +250,12 @@ fn remove(
 /// resolves against the root. So this function names the path the link will
 /// resolve to, and not a second spelling of it. The check and the write thus
 /// name the same file.
+///
+/// That holds for every target but one. A target with no bytes in it names no
+/// file at all, while `link_dir.join("")` gives `link_dir` back, so this
+/// function would answer about the directory that holds the link. Both
+/// strategies refuse an empty candidate before they reach this call, which is
+/// what keeps the sentence above true of everything that arrives here.
 fn resolved(link_dir: &Path, target: &OsStr) -> PathBuf {
     link_dir.join(target)
 }

@@ -1779,7 +1779,8 @@ symfix --dir ~/projects/my-website --prepend-to-fix .. --verbose
 `symfix` builds a new target, checks it, and writes it:
 
 1. It builds the new target as text. `--prepend-to-fix` puts the string in front of the old target.
-   `--remove-to-fix` takes the string off the front, and only when the old target starts with it.
+   `--remove-to-fix` takes the string off the front, and only when the old target starts with it and something is
+   left after it.
 2. It checks **the exact path the new link will resolve to**. A relative target resolves against the directory that
    holds the link. An absolute target resolves against the root.
 3. It writes the new target **as it was built**. A relative target thus stays relative, and a tree you move again
@@ -1796,6 +1797,11 @@ A link whose target cannot be resolved **for a reason that is not absence** is r
 A directory you cannot traverse and a loop of links that point at each other both land here. `symfix` does not
 understand why such a link failed, so it cannot know that a rewrite would be an improvement, and rewriting one would
 destroy a link that works for everybody who can read the directory.
+
+A link whose whole target is the string `--remove-to-fix` names is left alone as well. That repair leaves no target
+at all, and a link with no target names no file, so it repairs nothing. `symfix` refuses it because the write is the
+end of the text: a symlink is the only place that holds its target, and a run that emptied one would take the name of
+the missing file away from the user who has to go and find it.
 
 ## rcc
 

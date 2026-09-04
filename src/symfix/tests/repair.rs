@@ -948,7 +948,8 @@ fn verbose_calls_an_empty_removed_candidate_empty() {
         run.err
     );
     assert!(
-        !run.err.contains("Target with removed prefix does not exist"),
+        !run.err
+            .contains("Target with removed prefix does not exist"),
         "the empty candidate is not called absent: {:?}",
         run.err
     );
