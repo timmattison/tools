@@ -13,6 +13,15 @@
 //! asks whether a line is present rather than comparing the whole report
 //! against one string. A test over a tree with one link compares the whole
 //! report, because there the whole report is fixed.
+//!
+//! Several tests below build a link the operating system refuses to resolve,
+//! and each one asserts that the link is an error and not a broken link. That
+//! distinction is the point of the tool. A loop of links gives `ELOOP` and a
+//! target behind a closed directory gives `EACCES`; neither answer says the
+//! target is absent, and only an absent target is a broken link. The tool
+//! reports what it cannot resolve and then leaves it alone, because a rewrite
+//! of a link whose failure the tool does not understand would destroy a working
+//! link to punish a directory that denied it a read.
 
 #![cfg(unix)]
 #![allow(
@@ -86,6 +95,15 @@ fn link_at(dir: &Path, name: &str, target: impl AsRef<Path>) -> PathBuf {
 /// The line the tool writes for one broken link.
 fn broken_line(link: &Path, target: &str) -> String {
     format!("Broken symlink: {} -> {target}\n", link.display())
+}
+
+/// The start of the line the tool writes for one link it cannot resolve.
+///
+/// The rest of that line is the message the operating system gave, and the
+/// wording of such a message belongs to the operating system. So a test pins
+/// the path and the target, which the tool chose, and leaves the message alone.
+fn unresolvable_prefix(link: &Path, target: &str) -> String {
+    format!("Error: cannot resolve {} -> {target}: ", link.display())
 }
 
 #[test]
@@ -309,4 +327,141 @@ fn a_directory_the_walk_cannot_read_gives_a_warning_and_the_walk_goes_on() {
         run.out
     );
     assert_eq!(run.summary.broken, 1);
+}
+
+#[test]
+fn two_links_that_point_at_each_other_are_errors_and_not_broken() {
+    // Each link resolves to the other, so the operating system gives `ELOOP`.
+    // That answer is not "the target is absent", thus neither link is broken
+    // and neither one may be rewritten.
+    let dir = TempDir::new().unwrap();
+    let first = link_at(dir.path(), "a", "b");
+    let second = link_at(dir.path(), "b", "a");
+
+    let run = run_in(dir.path());
+
+    assert_eq!(run.summary.broken, 0);
+    assert_eq!(run.summary.errors, 2);
+    assert!(
+        !run.out.contains("Broken symlink:"),
+        "no link is called broken: {:?}",
+        run.out
+    );
+    assert_eq!(run.out, "No broken symlinks found.\n");
+    assert!(
+        run.err.contains(&unresolvable_prefix(&first, "b")),
+        "the first link is named on the error stream: {:?}",
+        run.err
+    );
+    assert!(
+        run.err.contains(&unresolvable_prefix(&second, "a")),
+        "the second link is named on the error stream: {:?}",
+        run.err
+    );
+
+    // Nothing was rewritten: both links are still links, and both still hold
+    // the target they were made with.
+    assert!(
+        fs::symlink_metadata(&first)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the first link is still a link"
+    );
+    assert!(
+        fs::symlink_metadata(&second)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the second link is still a link"
+    );
+    assert_eq!(fs::read_link(&first).unwrap(), Path::new("b"));
+    assert_eq!(fs::read_link(&second).unwrap(), Path::new("a"));
+}
+
+#[test]
+fn a_link_that_points_at_itself_is_an_error_and_not_broken() {
+    // A link that names itself is the shortest loop there is, and it gives the
+    // same `ELOOP` a longer loop gives.
+    let dir = TempDir::new().unwrap();
+    let link = link_at(dir.path(), "self", "self");
+
+    let run = run_in(dir.path());
+
+    assert_eq!(run.summary.broken, 0);
+    assert_eq!(run.summary.errors, 1);
+    assert_eq!(run.out, "No broken symlinks found.\n");
+    assert!(
+        run.err.contains(&unresolvable_prefix(&link, "self")),
+        "the link is named on the error stream: {:?}",
+        run.err
+    );
+    assert_eq!(fs::read_link(&link).unwrap(), Path::new("self"));
+}
+
+#[test]
+fn a_link_whose_target_sits_behind_a_closed_directory_is_an_error_and_not_broken() {
+    // This is the case the Go tool this port replaces gets wrong. Its `os.Stat`
+    // gives `EACCES`, it reads every error as absence, and it then rewrites a
+    // link whose target is there and is only out of reach.
+    let dir = TempDir::new().unwrap();
+    let closed = dir.path().join("closed");
+    fs::create_dir(&closed).unwrap();
+    fs::write(closed.join("target.txt"), b"contents").unwrap();
+    let link = link_at(dir.path(), "link", "closed/target.txt");
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+    // A process that may read a directory whose mode is 000 — a process running
+    // as root — resolves the link and finds nothing to report at all, so the
+    // assertions only run when the mode took effect.
+    let still_readable = fs::read_dir(&closed).is_ok();
+
+    let run = run_in(dir.path());
+
+    // The mode goes back before any assertion, else a failing assertion would
+    // leave a directory the temporary directory cannot delete.
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).unwrap();
+
+    if !still_readable {
+        assert_eq!(run.summary.broken, 0);
+        assert_eq!(run.summary.errors, 1);
+        assert!(
+            run.err
+                .contains(&unresolvable_prefix(&link, "closed/target.txt")),
+            "the link is named on the error stream: {:?}",
+            run.err
+        );
+        assert!(
+            !run.out.contains("Broken symlink:"),
+            "the link is not called broken: {:?}",
+            run.out
+        );
+        assert_eq!(fs::read_link(&link).unwrap(), Path::new("closed/target.txt"));
+    }
+}
+
+#[test]
+fn a_broken_link_and_an_unresolvable_link_are_counted_apart() {
+    let dir = TempDir::new().unwrap();
+    let broken = link_at(dir.path(), "broken", "missing.txt");
+    let looped = link_at(dir.path(), "looped", "looped");
+
+    let run = run_in(dir.path());
+
+    assert_eq!(run.summary.broken, 1);
+    assert_eq!(run.summary.errors, 1);
+    // The whole report is fixed here, because only the broken link writes to
+    // it. The link that cannot be resolved is a diagnostic, and a diagnostic
+    // goes to the other stream.
+    assert_eq!(
+        run.out,
+        format!(
+            "{}Found 1 broken symlink(s).\n",
+            broken_line(&broken, "missing.txt")
+        )
+    );
+    assert!(
+        run.err.contains(&unresolvable_prefix(&looped, "looped")),
+        "the link that cannot be resolved is named on the error stream: {:?}",
+        run.err
+    );
 }
