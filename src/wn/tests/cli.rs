@@ -2224,10 +2224,12 @@ fn a_directory_that_is_in_no_repository_costs_no_run() {
     let gh = FakeGh::without_repo().with_claude(&prints_the_plan());
     let output = run_building(&gh, &[], &[]);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
-    assert!(
-        stderr(&output).contains("repo view"),
-        "the error names what could not answer, in {}",
-        stderr(&output)
-    );
+    let message = stderr(&output);
+    // The reason `gh` gave is carried, and the advice it carries for the
+    // reader of a query is not. That advice reads "Name the repository with
+    // --repo owner/name", and this refusal stands on the line above it saying
+    // that naming one does not help. Two adjacent lines must not disagree.
+    assert!(message.contains("not a git repository"), "{message}");
+    assert!(!message.contains("Name the repository with"), "{message}");
     assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
 }
