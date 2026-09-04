@@ -55,10 +55,10 @@ const CLAUDE: &str = "claude";
 /// The list names those tools and stops there. `--dangerously-skip-permissions`
 /// would answer every prompt of every tool, and a tool that reaches for the
 /// bypass on behalf of its reader has made a decision that is not its to make.
-const ALLOWED_TOOLS: &str = "";
+const ALLOWED_TOOLS: &str = "Bash Read Glob Grep Task TodoWrite Skill";
 
 /// The arguments the run is given. The prompt goes on standard input.
-const ARGUMENTS: [&str; 0] = [];
+const ARGUMENTS: [&str; 3] = ["--print", "--allowed-tools", ALLOWED_TOOLS];
 
 /// How often a waiting run is asked whether it is finished.
 const POLL: Duration = Duration::from_millis(100);
@@ -169,14 +169,168 @@ fn looked_in_lines(paths: &[String]) -> String {
         .join("\n")
 }
 
+/// The plan a run of `claude` builds, as the document it printed.
+///
+/// `paths` and `answers` are what [`find`] takes, and `timeout` is the value
+/// of [`TIMEOUT_ENV`]. All three arrive as arguments rather than as reads of
+/// the machine and of the environment, so the caller owns every input of the
+/// run and a test of the pieces under it touches neither.
+///
+/// The run inherits the directory `wn` was started in, because the skill asks
+/// `gh` and `git` about the repository of that directory.
+///
+/// A spinner runs on standard error while the run works, so a pipe still gets
+/// the document alone.
+///
+/// # Errors
+///
+/// Gives [`BuildError::BadTimeout`] for a timeout that names no seconds,
+/// [`BuildError::NotInstalled`] when no path holds a `claude`,
+/// [`BuildError::TimedOut`] for a run that outlived its deadline,
+/// [`BuildError::NotAuthenticated`] for a `claude` with no account, and
+/// [`BuildError::Failed`] for every other failure.
+pub fn plan(
+    paths: &[String],
+    answers: &dyn Fn(&str) -> bool,
+    timeout: Option<&str>,
+) -> Result<String, BuildError> {
+    let waited = seconds(timeout)?;
+    let path = find(paths, answers)?;
+
+    let spinner = spinner();
+    let built = ask(&path, waited);
+    spinner.finish_and_clear();
+    built
+}
+
+/// The spinner that stands while the run works.
+///
+/// It draws on standard error. The document goes to standard output, and a
+/// reader who pipes that output must get the document alone.
+fn spinner() -> ProgressBar {
+    let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
+    if let Ok(style) = ProgressStyle::with_template("{spinner:.cyan} {msg}") {
+        spinner.set_style(style.tick_strings(&[
+            "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+        ]));
+    }
+    spinner.set_message(WORKING);
+    spinner.enable_steady_tick(POLL);
+    spinner
+}
+
+/// Hand `path` the prompt and read the document it prints.
+///
+/// # Errors
+///
+/// Gives [`BuildError::TimedOut`] when the run outlives `waited`, and the
+/// refusals of [`refusal_of`] for a run that ended with a failure.
+fn ask(path: &str, waited: Duration) -> Result<String, BuildError> {
+    let mut child = Command::new(path)
+        .args(ARGUMENTS)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|cause| BuildError::Failed {
+            said: cause.to_string(),
+        })?;
+
+    // The pipe is closed as soon as the prompt is in it. A `claude` that reads
+    // standard input waits for the end of it, so a pipe left open is a run
+    // that never starts and then dies at the deadline.
+    if let Some(mut mouth) = child.stdin.take() {
+        mouth
+            .write_all(PROMPT.as_bytes())
+            .map_err(|cause| BuildError::Failed {
+                said: cause.to_string(),
+            })?;
+    }
+
+    // Both pipes are drained on threads of their own, and they are drained
+    // while the run works. A pipe nobody reads fills up, and a child that
+    // writes into a full pipe blocks there until the deadline.
+    let printed = child.stdout.take().map(read_whole);
+    let complained = child.stderr.take().map(read_whole);
+
+    let status = wait_for(&mut child, waited)?;
+    let printed = printed.map_or_else(String::new, joined);
+    let complained = complained.map_or_else(String::new, joined);
+
+    if status.success() {
+        Ok(printed)
+    } else {
+        Err(refusal_of(&complained))
+    }
+}
+
+/// Read the whole of `pipe` on a thread of its own.
+fn read_whole<R>(mut pipe: R) -> thread::JoinHandle<String>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut read = Vec::new();
+        // A pipe that ends early is a run that ended early, and the status of
+        // the run is what says so. What was read up to that point is kept.
+        let _ = pipe.read_to_end(&mut read);
+        String::from_utf8_lossy(&read).into_owned()
+    })
+}
+
+/// What the thread `reader` read, or nothing when the thread went down.
+fn joined(reader: thread::JoinHandle<String>) -> String {
+    reader.join().unwrap_or_default()
+}
+
+/// Wait for `child`, and kill it when it outlives `waited`.
+///
+/// # Errors
+///
+/// Gives [`BuildError::TimedOut`] for a run that outlived its deadline, and
+/// [`BuildError::Failed`] when the state of the child could not be read.
+fn wait_for(child: &mut Child, waited: Duration) -> Result<ExitStatus, BuildError> {
+    let deadline = Instant::now() + waited;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(cause) => {
+                return Err(BuildError::Failed {
+                    said: cause.to_string(),
+                })
+            }
+        }
+        if Instant::now() >= deadline {
+            // The run is killed here and not left to the exit of this process.
+            // A `claude` nobody waits for keeps reading the backlog, and it
+            // keeps spending while it does.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(BuildError::TimedOut {
+                seconds: waited.as_secs(),
+            });
+        }
+        thread::sleep(POLL);
+    }
+}
+
 /// The refusal a run that failed earns, out of what it wrote on standard error.
 ///
 /// A run that could not log in is the one failure with an answer the reader
 /// can act on, so it is the one failure that is told apart. Every other one
 /// carries what `claude` said, because this tool cannot know what that is.
 fn refusal_of(said: &str) -> BuildError {
+    let clause = said.trim();
+    let lowered = clause.to_lowercase();
+    if ["not authenticated", "/login", "log in", "login"]
+        .iter()
+        .any(|mark| lowered.contains(mark))
+    {
+        return BuildError::NotAuthenticated;
+    }
     BuildError::Failed {
-        said: String::new(),
+        said: clause.to_string(),
     }
 }
 
@@ -204,16 +358,19 @@ pub enum BuildError {
         looked_in: Vec<String>,
     },
     /// The run took longer than it was given.
-    #[error("PLACEHOLDER {seconds}")]
+    #[error(
+        "claude took longer than {seconds} seconds to build a plan. {TIMEOUT_ENV} names a \
+         different number of seconds."
+    )]
     TimedOut {
         /// The seconds it was given.
         seconds: u64,
     },
     /// `claude` has no account to run under.
-    #[error("PLACEHOLDER")]
+    #[error("claude is not logged in. Run: claude login")]
     NotAuthenticated,
     /// The run failed for a reason only `claude` knows.
-    #[error("PLACEHOLDER {said}")]
+    #[error("claude could not build a plan: {said}")]
     Failed {
         /// What the run wrote on standard error, with the space around it
         /// dropped.
