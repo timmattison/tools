@@ -116,16 +116,31 @@ pub fn answers_version(path: &str) -> bool {
 /// every path it looked in, and it names [`NO_CLAUDE_ENV`] for a reader who
 /// wants no run at all.
 pub fn find(paths: &[String], answers: &dyn Fn(&str) -> bool) -> Result<String, BuildError> {
-    let _ = (paths, answers);
-    Err(BuildError::NotInstalled {
-        looked_in: Vec::new(),
-    })
+    paths
+        .iter()
+        .find(|path| answers(path))
+        .map(ToString::to_string)
+        .ok_or_else(|| BuildError::NotInstalled {
+            looked_in: paths.to_vec(),
+        })
 }
 
 /// The paths of a refusal, one to a line and indented under it.
 fn looked_in_lines(paths: &[String]) -> String {
-    let _ = paths;
-    String::new()
+    paths
+        .iter()
+        .map(|path| {
+            // The bare name is the one entry that is no path at all. A reader
+            // who sees it beside three absolute paths has to guess where it
+            // was looked for, so the line says so.
+            if path.contains('/') {
+                format!("  {path}")
+            } else {
+                format!("  {path} (on PATH)")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Why no plan came back.
