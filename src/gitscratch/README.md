@@ -324,6 +324,21 @@ called empty and skipped. macOS will not let a working tree hold such a name at
 all, so the commit is built directly in the object database and the guard is
 pinned here rather than end-to-end.
 
+**The refusal of a revision that names no commit** is pinned by
+`refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back`. Plain
+`git rev-parse <revision>` reads a dash-leading argument as an option it does not
+know, prints the argument back, and exits 0. The pre-flight read that exit code
+as a commit, so `grind -- --root` announced a clean verdict for a branch that
+does not exist. `Git::rev_parse` asks with `--verify` and `--end-of-options`
+instead: `--verify` makes git refuse a revision it cannot resolve, and
+`--end-of-options` ends git's own option position, so the revision arrives as a
+revision. The test carries an armed control — plain git, through the fixture,
+must still print the argument back at exit 0, or the refusal stands against a
+hazard that is already gone.
+`resolves_a_revision_that_names_a_commit_to_its_full_id` holds the other side of
+the same guard, because a reader that refuses every revision passes the test
+above and breaks every caller.
+
 Two more cover the readers themselves, one per policy, because this crate has
 two of them and they answer an undecodable name differently on purpose.
 `a_non_ascii_path_read_back_through_run_is_not_octal_escaped` pins

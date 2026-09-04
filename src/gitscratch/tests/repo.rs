@@ -75,6 +75,38 @@ fn scratch_builds_a_worktree_of_the_repository_that_was_opened() {
     );
 }
 
+/// The revision a scratch is built at is a revision, even when it starts with a
+/// dash, and `git worktree add` has to read it as one.
+///
+/// `git worktree add -q --detach <path> --force` is a complete and valid
+/// command. Git reads `--force` in the commit-ish slot as its own `--force`
+/// flag, finds no commit-ish left, and builds the worktree at HEAD - exit 0,
+/// no complaint. So a caller who asked for a scratch of one revision silently
+/// got one of another, and every number measured in it describes work nobody
+/// asked about. That is the cheap answer this crate exists never to give, and
+/// it costs a whole simulation to produce.
+///
+/// `--force` rather than a name nobody would type, because it is the shape that
+/// succeeds. A dash-leading name git does not know fails either way; this one
+/// is the name that used to be obeyed.
+#[test]
+fn scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head() {
+    let fixture = conflicting_repo();
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    let error = repo.scratch("--force").map(|_| ()).expect_err(
+        "a revision that names no commit has to be refused, or the scratch is checked out \
+         somewhere the caller never asked about and every measurement taken in it is about \
+         another branch",
+    );
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("--force"),
+        "the refusal has to name the revision it could not use: {message}"
+    );
+}
+
 /// A developer is hardly ever standing in the repository root, so the directory
 /// a tool hands to [`Repo::open`] is usually a subdirectory of one.
 ///

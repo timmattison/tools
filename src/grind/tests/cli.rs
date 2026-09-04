@@ -457,6 +457,61 @@ fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists(
     );
 }
 
+/// A branch name that starts with a dash is a branch name, and the pre-flight
+/// has to read it as one.
+///
+/// `git rev-parse --root^{commit}` prints its argument back and exits 0,
+/// because rev-parse passes an option it does not know through to rev-list
+/// rather than refusing it. The pre-flight read that exit code as "the branch
+/// names a commit" and let the run through. `git rebase --root` then rebased
+/// the whole history onto nothing, hit no conflict, and `grind` printed
+/// `grind: clean - replaying HEAD onto --root hit no conflicts` at exit
+/// [`CLEAN`] - a clean verdict for a branch that does not exist. That is the
+/// exact defect this tool was written to kill, arriving through the one check
+/// that was supposed to stop it.
+///
+/// `--root` is the name that costs the most, because git knows it as an option
+/// of `rebase`. Every other dash-leading name reaches [`ERROR`] through a
+/// rebase that fails, so this one is the only one that answers, and it answers
+/// backwards.
+///
+/// The `--` in the argument list is how a user says "this is the positional".
+/// Without it clap reads `--root` as an option of grind's own and refuses it
+/// before any of the code under test runs, so the test would pass on clap's
+/// refusal and say nothing about the pre-flight.
+///
+/// The control at the end asks the same binary about a branch that does exist.
+/// Without it a `grind` that refused every branch would pass here.
+#[test]
+fn a_branch_name_that_starts_with_a_dash_is_refused_rather_than_reported_clean() {
+    let repo = independent_branches_repo();
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, "alpha", &["--", "--root"]));
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a branch name that names no commit must exit {ERROR}, never {CLEAN}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not resolve '--root'"),
+        "the message must name the branch that did not resolve, in grind's own words:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean") && !stderr.contains("clean"),
+        "a branch that does not exist must never be reported as a clean rebase\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let (control_code, control_stdout, control_stderr) = run(&repo, "alpha", "beta");
+
+    assert_eq!(
+        control_code,
+        Some(CLEAN),
+        "a branch that does exist must still be answered, or the refusal above proves only that \
+         this binary refuses everything\nstdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+}
+
 /// A run depends on *two* revisions - the branch the user named and the HEAD
 /// being replayed - and only one of them arrives as an argument, so the other is
 /// the one a pre-flight is liable to forget.

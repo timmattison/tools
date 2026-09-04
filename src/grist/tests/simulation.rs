@@ -299,6 +299,57 @@ fn refuses_to_score_an_ordering_whose_replay_could_not_be_carried_out() {
     }
 }
 
+/// A branch name that starts with a dash is a branch name, and the checkout
+/// that puts the replay on it has to read it as one.
+///
+/// `git checkout -q --detach --progress` is a complete and valid command. Git
+/// reads `--progress` as its own option, finds no branch left to check out, and
+/// detaches HEAD where it already stands - exit 0, no complaint. So the scratch
+/// worktree stayed on the base, the rebase found nothing to replay, and the
+/// ordering scored zero: a free ordering for a branch nobody replayed. Zero is
+/// also what a genuinely free ordering scores, so nothing downstream can tell
+/// the two apart.
+///
+/// `--progress` rather than a name nobody would type, because it is the shape
+/// that succeeds. A dash-leading name git does not know fails either way, and
+/// `-b` cannot be used with `--detach` at all; this one is the name that used
+/// to be obeyed.
+///
+/// The control at the end scores an ordering of real branches and requires it
+/// to cost something. Without it a simulator that refused every branch, or one
+/// that could not replay anything on this fixture, would pass here.
+#[test]
+fn refuses_a_branch_whose_name_starts_with_a_dash_rather_than_scoring_a_replay_it_never_did() {
+    let repo = contested_region_repo();
+    let simulator = Simulator::new(repo.path(), "main").expect("open the fixture repository");
+
+    let error = simulator
+        .score(&order(&["--progress"]))
+        .map(|score| format!("{score:?}"))
+        .expect_err(
+            "a branch name that names no branch has to stop the run. Reading it as an option \
+             leaves the scratch worktree on the base, so the ordering scores zero for work that \
+             was never replayed",
+        );
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("--progress"),
+        "the refusal has to name the branch it could not check out: {message}"
+    );
+
+    let control = simulator
+        .score(&order(&["single", "iterated"]))
+        .expect("score an ordering of branches the fixture really has");
+
+    assert!(
+        control.hunks() > Hunks::new(0),
+        "the fixture has to cost something, or the refusal above proves only that this \
+         simulator answers nothing at all, got {}",
+        control.hunks()
+    );
+}
+
 /// Replaying dozens of commits takes real time, so the caller needs to be told
 /// what is happening rather than staring at a silent terminal.
 #[test]

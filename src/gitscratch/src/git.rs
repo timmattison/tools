@@ -882,6 +882,77 @@ mod tests {
         );
     }
 
+    /// A revision that starts with a dash and names no commit in any fixture.
+    ///
+    /// `--root` is the one that costs the most, because git accepts it as an
+    /// option of `rebase`: a replay handed this name rebases the whole history
+    /// onto nothing, hits no conflict, and answers "clean" for a branch that
+    /// does not exist.
+    const DASH_LEADING_REVISION: &str = "--root";
+
+    /// A revision that starts with a dash is a revision, and the runner has to
+    /// hand it to git as one.
+    ///
+    /// Plain `git rev-parse <revision>` reads a dash-leading argument as an
+    /// option it does not know, prints the argument back, and exits 0. The
+    /// pre-flight reads that exit code as "this revision names a commit", so
+    /// the one check between a name that names nothing and a full replay lets
+    /// the run through. `grind -- --root` then printed a clean verdict for a
+    /// branch that does not exist, which is the cheap answer this crate exists
+    /// never to give.
+    ///
+    /// The armed control runs first. It proves that plain git still prints the
+    /// argument back at exit 0, so the refusal below stands against a live
+    /// hazard rather than against a git that already refuses.
+    #[test]
+    fn refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back() {
+        let repo = TestRepo::init();
+        repo.commit_file("seed.txt", "seed\n", "seed");
+        let asked = format!("{DASH_LEADING_REVISION}^{{commit}}");
+
+        assert_eq!(
+            repo.git(&["rev-parse", &asked]),
+            asked,
+            "git no longer prints a dash-leading argument back at exit 0, so this test could \
+             only pass vacuously"
+        );
+
+        let error = Git::new(repo.path(), "")
+            .rev_parse(DASH_LEADING_REVISION)
+            .expect_err(
+                "a revision that names no commit has to be refused. Accepting it lets a replay \
+                 start on a name that names nothing, and `--root` is a `rebase` option, so the \
+                 replay finishes and reports a clean verdict for a branch nobody has",
+            );
+
+        assert!(
+            format!("{error:#}").contains(DASH_LEADING_REVISION),
+            "the refusal has to name the revision that did not resolve, because that name is \
+             what the developer typed and has to correct: {error:#}"
+        );
+    }
+
+    /// The refusal above must refuse only what it cannot resolve.
+    ///
+    /// A guard that answers "no" to every revision passes the test above and
+    /// breaks every caller, and the two failures look nothing alike from the
+    /// outside: one is a run that stops, the other is a tool nobody can use.
+    /// So the reader is asked for a revision that does name a commit, and its
+    /// answer is compared with git's own.
+    #[test]
+    fn resolves_a_revision_that_names_a_commit_to_its_full_id() {
+        let repo = TestRepo::init();
+        repo.commit_file("seed.txt", "seed\n", "seed");
+
+        assert_eq!(
+            Git::new(repo.path(), "")
+                .rev_parse("HEAD")
+                .expect("resolve a revision that names a commit"),
+            repo.rev_parse("HEAD"),
+            "the reader has to agree with git about where HEAD points"
+        );
+    }
+
     /// The heading the guard inventory lives under. Named once because the
     /// tests below have to agree on which section of the README is the
     /// inventory before they can agree on what it says.
