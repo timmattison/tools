@@ -6,9 +6,16 @@
 //! was a shorthand for `prcp --rm`. A user who wants the shorthand writes
 //! `alias prmv='prcp --rm'`.
 //!
-//! Each test gives the binary a temporary home directory. A build that still
-//! holds the integration thus writes its block there, and the real shell config
-//! of the user stays untouched.
+//! Two tests run the binary, and each of them gives it a temporary home
+//! directory. A build that still holds the integration thus writes its block
+//! there, and the real shell config of the user stays untouched.
+//!
+//! Each of those two tests asserts through a function of its own, and each
+//! function holds one assertion that only a run of the real binary satisfies.
+//! Absences alone make no guard here, because a `prcp` that fails to start
+//! writes no shell config and no help, and that satisfies every absence. A
+//! third test feeds the two functions such a silent stand-in and asserts that
+//! both of them panic.
 
 // Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
 #![warn(clippy::panic)]
@@ -35,6 +42,21 @@ use tempfile::TempDir;
 /// The shell config files `shellsetup` writes, named relative to the home
 /// directory.
 const SHELL_CONFIG_FILES: [&str; 3] = [".zshrc", ".bashrc", ".bash_profile"];
+
+/// The phrase clap writes when it meets an argument it does not know.
+///
+/// The assertion on this phrase is the positive control of
+/// [`assert_shell_setup_rejected`], because only a binary that ran and read the
+/// flag writes it. A clap upgrade that changes the words breaks that assertion,
+/// and the name of this constant says where to look.
+const CLAP_UNEXPECTED_ARGUMENT: &str = "unexpected argument '--shell-setup' found";
+
+/// A flag the help of `prcp` keeps.
+///
+/// `prcp --rm` is the interface that replaced the `prmv` function, so this flag
+/// stays. The assertion on it is the positive control of
+/// [`assert_help_offers_no_shell_integration`], because an empty help fails it.
+const RM_FLAG: &str = "--rm";
 
 /// The raw wait status of a process that exited with the code 1.
 ///
@@ -76,13 +98,18 @@ fn visible_output(output: &Output) -> String {
 ///
 /// # Panics
 ///
-/// Panics when the run accepted the flag, or when the run left a shell config
-/// behind.
+/// Panics when the run accepted the flag, when the run named no unexpected
+/// argument, or when the run left a shell config behind.
 fn assert_shell_setup_rejected(output: &Output, home: &Path) {
+    let visible = visible_output(output);
+
     assert!(
         !output.status.success(),
-        "prcp must reject --shell-setup, but the run succeeded:\n{}",
-        visible_output(output)
+        "prcp must reject --shell-setup, but the run succeeded:\n{visible}"
+    );
+    assert!(
+        visible.contains(CLAP_UNEXPECTED_ARGUMENT),
+        "prcp did not name --shell-setup as an unexpected argument. A binary that never ran satisfies every other assertion here:\n{visible}"
     );
 
     for name in SHELL_CONFIG_FILES {
@@ -103,9 +130,13 @@ fn assert_shell_setup_rejected(output: &Output, home: &Path) {
 ///
 /// # Panics
 ///
-/// Panics when the help still offers the flag, or when it still names the
-/// function that flag installed.
+/// Panics when the help offers no `--rm`, when the help still offers the
+/// removed flag, or when it still names the function that flag installed.
 fn assert_help_offers_no_shell_integration(help: &str) {
+    assert!(
+        help.contains(RM_FLAG),
+        "the help of prcp offers no --rm. A help that says nothing satisfies every other assertion here:\n{help}"
+    );
     assert!(
         !help.contains("--shell-setup"),
         "the help of prcp still offers --shell-setup:\n{help}"
