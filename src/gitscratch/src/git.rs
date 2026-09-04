@@ -478,9 +478,53 @@ impl Git {
             "rebase.backend=merge",
             "rebase.autoStash=false",
             "rebase.autosquash=false",
+            // A rebase that keeps merges puts a merge commit on its todo list,
+            // and a merge commit at a halt is a commit the replay cannot
+            // measure: `diff-tree` prints no path at all for one unless it is
+            // asked for `-c`, `--cc` or `-m`, and the empty-commit probe asks
+            // for none of them. That probe would read the halt as a commit that
+            // changes nothing, and `rebase --skip` would drop a whole side of
+            // history. Executed rather than reasoned: git 2.55 was watched to
+            // re-create the merge commit under `rebase.rebaseMerges=true`, so
+            // the developer's own configuration is what opens this route.
+            // `stopped_commit_is_already_in_head` refuses a multi-parent
+            // stopped commit as well, and that refusal holds whatever a later
+            // setting does; this pin closes the one route into it that exists
+            // today.
+            "rebase.rebaseMerges=false",
             // Simulated mains are loose commits nothing references yet; an
             // opportunistic gc mid-run could collect one out from under us.
+            // This entry covers the gc task and nothing else - the switch on
+            // the rest of automatic maintenance is the entry below it.
             "gc.auto=0",
+            // Git's `run_auto_maintenance` starts the maintenance tasks unless
+            // this key is explicitly false, and the default is to run them.
+            // Every resolved conflict runs `rebase --continue`, which commits,
+            // and a commit reaches that call. On a developer who has run
+            // `git maintenance start` the incremental strategy turns the
+            // prefetch task on, and prefetch carries no auto-condition of its
+            // own, so `--auto` does not hold it back. Prefetch fetches from
+            // every remote and writes `refs/prefetch/*` into the real
+            // repository, because a linked scratch worktree shares the common
+            // dir. A dry run that reaches the network and writes refs is the
+            // class `gc.auto=0` was added for. The chain from
+            // `run_auto_maintenance` to prefetch is read from git's source
+            // rather than executed.
+            "maintenance.auto=false",
+            // The filesystem monitor names a program git runs itself rather
+            // than one it resolves through the hooks directory, so the
+            // redirected `core.hooksPath` does not take it away. The classic
+            // watchman integration is spelled
+            // `core.fsmonitor=.git/hooks/fsmonitor-watchman`, a path that
+            // survives the redirect verbatim, and every index refresh a replay
+            // performs would run it - in the developer's repository and in the
+            // scratch worktree both. `core.fsmonitor=true` costs more than
+            // that: git starts a daemon that watches a temporary directory the
+            // replay is about to delete. A freshly created scratch worktree
+            // gains nothing from a monitor, so the pin costs the replay
+            // nothing. Read from git's settings resolution rather than
+            // executed.
+            "core.fsmonitor=false",
             "commit.gpgsign=false",
             "gpg.format=openpgp",
             // Git's default is to C-quote and octal-escape any path outside

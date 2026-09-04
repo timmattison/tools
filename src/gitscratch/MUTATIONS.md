@@ -43,6 +43,10 @@ not have to re-derive which guard belongs to which test.
 | `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back` | The pair `--verify --end-of-options`, which is how the pre-flight asks a question git can refuse | `src/git.rs`, `Git::rev_parse` — drop both arguments | remove |
 | `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` (`tests/repo.rs`) | `--end-of-options` ahead of the two positionals of `worktree add` | `src/scratch.rs`, `Scratch::create` — drop the argument | remove |
 | `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | `--end-of-options` ahead of the upstream of `rebase` | `src/scratch.rs`, `Scratch::replay_rebase_within` — drop the argument | remove |
+| `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | `maintenance.auto=false`, the switch on automatic maintenance that `gc.auto=0` does not reach | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | `core.fsmonitor=false`, the one program git runs that the redirected `core.hooksPath` cannot take away | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | `rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo list | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` (`src/scratch.rs`) | The parent count read ahead of both probes, which refuses a merge commit at a halt whatever the configuration says | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the `stopped_commit_parent_count` call and the `ensure!` under it | remove |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` (`tests/halts.rs`) | `--ignore-submodules=none` on the porcelain half of the empty-commit probe, which is what makes both halves read one tree under one set of rules | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the argument from the `git diff` invocation | remove |
 
 ## What keeps each test honest
@@ -102,6 +106,10 @@ registry that reports everything as fine is worth less than no registry at all.
 | `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` | None beyond the fixture, which `conflicting_repo` builds with a `main` that resolves. | **Missing.** The hazard is that `git worktree add -q --detach <path> --force` succeeds and checks out HEAD, and arming it in-test means building the wrong scratch on purpose and then removing it. Asserting the wrong-scratch HEAD under a deliberately unseparated call closes it. The mutation record below is the out-of-band substitute. |
 | `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | The scratch worktree is checked out at `iterated`, through a call that panics if git refuses, so the replay provably starts somewhere a rebase can run. | **Full, as a control on the other side.** The same scratch then replays onto `single` and must cost `CONTESTED_ROUNDS` stops, so a replay that refused every upstream, or one that could not replay this fixture at all, fails there instead of passing on the refusal above. What is not armed is the halt itself: nothing states that plain `git rebase --root` succeeds on this fixture, and the mutation record below is what stands in for it. |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` | The stopped commit is asked of `diff-tree` first and must touch exactly one path — "the stopped commit has to touch the submodule pointer and nothing else; an ordinary path beside it comes back from the porcelain whatever the setting says, carries the refusal on its own, and leaves what the pointer costs invisible". An ordinary path alongside is what would let this test pass without the pointer ever mattering. | **Full.** Plain git, through the fixture, is asked for `diff --name-only branch~1 branch` and must answer with nothing — "`diff.ignoreSubmodules=all` is not hiding the pointer from `git diff`, so this test could only pass vacuously; the porcelain reported {porcelain:?} for a commit the plumbing reports {bumped:?} for". That silence *is* the hazard: it is the second probe's whole answer under the developer's own configuration, and it is demonstrated before the replay is asked anything. The fixture arms the setting itself rather than reading it out of `~/.gitconfig`, so the control holds on a machine whose developer has never set the key. |
+| `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | The fixture sets `maintenance.auto true` in its own repository, and the value is read back before the runner is asked anything. | **Full.** That read-back *is* the arming: plain git, through the fixture, must answer `true` — "the fixture does not hold `maintenance.auto=true`, so there is nothing here for the runner to override and the assertion below is measured against nothing". A key the fixture never took is a key the runner cannot be shown to override. What is **not** armed, and cannot be here, is the damage: the chain from git's `run_auto_maintenance` to a prefetch that writes `refs/prefetch/*` is read from git's source, and arming it would need a developer who has run `git maintenance start` and a remote to fetch from. This test pins the pin, not the consequence, and says so. |
+| `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | The fixture sets `core.fsmonitor .git/hooks/fsmonitor-watchman`, the classic watchman spelling, and the value is read back first. | **Full, for the pin.** Plain git must answer with that path before the runner is asked. The same limit as the row above applies to the *consequence*: proving git would execute the named program means letting a replay execute a program on the developer's machine, which no fixture here may do. `tests/safety.rs` cannot cover this route either — its planted hooks all live under `core.hooksPath`, and this program is executed directly — which is the reason the pin is asserted here at all. |
+| `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | The fixture sets `rebase.rebaseMerges true` and the value is read back first. | **Full, and the consequence was executed out of band.** The read-back arms the pin. The hazard behind it was watched by hand on git 2.55: a branch carrying a merge, rebased onto a moved base under `-c rebase.rebaseMerges=true`, comes out still carrying the merge (`git rev-list --min-parents=2 --count` answers 1), so a developer's own configuration really does put a merge commit on a replay's todo list. That demonstration is a shell session rather than an assertion, because a merge on the todo list only becomes a halt in a repository built to conflict at it, and the reviewer who found this could not construct one. |
+| `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` | The stopped commit is read back through plain git and must list three fields — its own id and two parents — "or there is nothing here to refuse". | **Full.** `git diff-tree`, asked through the runner with the arguments the probe really uses, must answer with nothing for that merge — "`diff-tree` no longer stays silent about a merge commit, so this test could only pass vacuously; that silence is what makes an unguarded probe read a merge as a commit that changes nothing". The silence *is* the hazard, demonstrated before the probe is asked anything. A closing control runs the other way: the same probe, pointed at a single-parent commit, must answer rather than refuse, so a probe that refused everything cannot pass. What the test does not build is a real halt — see the record below, and the row above it. |
 
 ### The rule for the next test
 
@@ -622,13 +630,120 @@ one edit away — at which point the hazard returns with no warning of its own.
 What must not happen is this file claiming a mutation nobody watched, so the
 absence is recorded here instead.
 
+### The three settings that let git act on its own
+
+Three entries were removed from `Git::safety_config()` one at a time, and each
+one reddened exactly one test. Every run was `cargo test --no-fail-fast -p
+gitscratch -p grind -p grist`, so the other two crates really ran rather than
+being skipped after the first failure.
+
+Mutation: removed `"maintenance.auto=false"`. `gc.auto=0` stops the gc task
+alone, so with this entry gone the fixture's own `maintenance.auto = true`
+stands, and git's `run_auto_maintenance` starts the rest of the maintenance
+tasks on every commit a replay makes.
+
+```text
+thread 'git::tests::pins_automatic_maintenance_off_even_when_the_repository_turns_it_on'
+panicked at src/gitscratch/src/git.rs:
+assertion `left == right` failed: `maintenance.auto=false` is not pinned, so
+git reads `maintenance.auto` out of the developer's own configuration and acts
+on it for the length of a replay
+  left: "true"
+ right: "false"
+
+test result: FAILED. 39 passed; 1 failed
+```
+
+Mutation: removed `"core.fsmonitor=false"`. The fixture's own
+`core.fsmonitor = .git/hooks/fsmonitor-watchman` then stands, and git executes
+that path directly rather than resolving it through `core.hooksPath`.
+
+```text
+thread 'git::tests::pins_the_filesystem_monitor_off_even_when_the_repository_names_one'
+panicked at src/gitscratch/src/git.rs:
+assertion `left == right` failed: `core.fsmonitor=false` is not pinned, so git
+reads `core.fsmonitor` out of the developer's own configuration and acts on it
+for the length of a replay
+  left: ".git/hooks/fsmonitor-watchman"
+ right: "false"
+
+test result: FAILED. 39 passed; 1 failed
+```
+
+Mutation: removed `"rebase.rebaseMerges=false"`. The fixture's own
+`rebase.rebaseMerges = true` then stands, and a replay of a branch carrying a
+merge puts that merge on the rebase's todo list.
+
+```text
+thread 'git::tests::pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on'
+panicked at src/gitscratch/src/git.rs:
+assertion `left == right` failed: `rebase.rebaseMerges=false` is not pinned, so
+git reads `rebase.rebaseMerges` out of the developer's own configuration and
+acts on it for the length of a replay
+  left: "true"
+ right: "false"
+
+test result: FAILED. 39 passed; 1 failed
+```
+
+No collateral in any of the three: each mutation reddens its own test and
+nothing else, in this crate and in `grind` and `grist`.
+
+**What these three pin is the pin, and the record says so rather than claiming
+more.** For `maintenance.auto` the chain from `run_auto_maintenance` to a
+prefetch that fetches from every remote and writes `refs/prefetch/*` into the
+developer's repository is read from git's source; for `core.fsmonitor` the
+resolution that runs the named program without consulting `core.hooksPath` is
+read from git's settings code. Neither was executed, because executing either
+means letting a dry run reach the network or run a program on a developer's
+machine, which is the damage the pins exist to prevent. `rebase.rebaseMerges`
+is the one of the three whose consequence *was* watched, out of band: on git
+2.55 a branch carrying a merge, rebased onto a moved base under
+`-c rebase.rebaseMerges=true`, came out still carrying the merge.
+
+### `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing`
+
+Mutation: removed the parent count and the refusal under it from
+`stopped_commit_is_already_in_head`, leaving the two probes to answer about a
+merge commit on their own. `git diff-tree` reports no changed path for a merge
+unless it is asked for `-c`, `--cc` or `-m`, and the probe asks for none of
+them, so the touched set comes back empty, the empty-set guard answers
+`Halt::EmptyCommit`, and the replay reaches for `rebase --skip`.
+
+```text
+thread 'scratch::tests::refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing'
+panicked at src/gitscratch/src/scratch.rs:
+a merge commit at a halt has to stop the replay. `diff-tree` reports no changed
+path for one, so classifying it hands back `EmptyCommit`, and the replay skips
+a whole side of history and reports a cost for a branch it never replayed: ()
+
+test result: FAILED. 39 passed; 1 failed
+```
+
+No collateral: this is the only test the mutation reddens, in this crate and in
+`grind` and `grist`. The mutated build also warns that
+`stopped_commit_parent_count` and `STOPPED_COMMIT` are never used, which is the
+compiler saying the same thing a second way.
+
+**The test drives the probe rather than a replay, and that is a limit worth
+stating.** A real merge halt needs `rebase.rebaseMerges` on *and* a conflict at
+the merge itself; the reviewer who found this could produce a merge halt only
+with unmerged paths, which the code already classifies correctly, and the pin
+above now closes that route for the harness anyway. So the fixture builds the
+state a halt leaves behind — a merge commit, with `REBASE_HEAD` pointing at it
+— and asks the probe the question a halt asks it. What that cannot cover is the
+path from `replay_rebase_within` to the probe. That path is exercised by every
+other halt test in `tests/halts.rs`, none of which this refusal changes.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
 code moves. Every place below is load-bearing for the whole table:
 
-- **`Git::safety_config()`** — five of the nine guards are entries in that
-  list. Adding, reordering, or removing one changes what the suite covers.
+- **`Git::safety_config()`** — five of the nine guards `tests/safety.rs` pins
+  are entries in that list, and the unit tests in `src/git.rs` pin four more of
+  its entries directly. Adding, reordering, or removing one changes what the
+  suite covers.
 - **`Scratch::create`** — the scratch worktree and its detached `worktree add`.
 - **The `Drop` teardown** — both the removal that must happen and the prune that
   must not.
@@ -652,6 +767,13 @@ code moves. Every place below is load-bearing for the whole table:
   `--ignore-submodules=none` on both is that rule today. A change that adds a
   filter to one of them, or that hands a path list back to git instead of
   intersecting the two lists here, needs its own mutation and its own row.
+- **The parent count ahead of those two invocations** — both of them answer
+  about a single-parent commit, and `git diff-tree` answers about a merge with
+  silence rather than with a refusal. The count is what turns that silence into
+  a refusal instead of into `EmptyCommit`. It reads the shape of the commit
+  rather than a setting, so it is the half that survives a configuration this
+  crate has not thought of; `rebase.rebaseMerges=false` is the other half, and
+  it closes the one route into it that exists today.
 
 Anyone touching those should re-run the relevant mutation and update this file
 with what they saw. A guard added without ever being watched to fail is back to

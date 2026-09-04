@@ -465,6 +465,15 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
 /// anyway, because the guard is not "rebase does not fire hooks" - it is "no
 /// replay fires anything" - and the merge replay a sibling tool will add must
 /// inherit a test that is already watching for it.
+///
+/// **The wider guarantee reaches one program this list cannot cover.**
+/// `core.fsmonitor` names a program git executes directly rather than one it
+/// resolves through the hooks directory, so redirecting `core.hooksPath` leaves
+/// it standing and no hook planted here can stand in for it. It is pinned off in
+/// `Git::safety_config` and asserted by
+/// `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` in
+/// `src/git.rs` instead. Saying so here keeps this list from reading as the
+/// whole of "no replay fires anything", which it is not.
 #[cfg(unix)]
 const PLANTED_HOOKS: [&str; 4] = [
     "post-checkout",

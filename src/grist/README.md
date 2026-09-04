@@ -97,8 +97,14 @@ directory, which is torn down afterwards. Specifically:
 - **`rerere` is disabled.** A simulated conflict resolution would otherwise be
   recorded in the shared `rr-cache` and silently pre-resolve your real merges
   later.
-- **Hooks are disabled** and `gc.auto` is off, so nothing fires and nothing
-  collects the simulated commits mid-run.
+- **Nothing of yours runs, and nothing of yours is collected.** Hooks are
+  redirected at an empty directory, and `core.fsmonitor` is pinned off beside
+  them — the filesystem monitor names a program git executes directly, so the
+  hooks redirect alone would leave it running. `gc.auto` and `maintenance.auto`
+  are both off, which is two switches rather than one: `gc.auto` holds back the
+  gc task, while `maintenance.auto` holds back the rest of automatic
+  maintenance, including a prefetch that would otherwise fetch from every remote
+  and write refs into your repository.
 - **Branches checked out in other worktrees work fine** — the usual case, and
   the one where a plain `git checkout` refuses outright.
 

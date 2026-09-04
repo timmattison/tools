@@ -592,6 +592,27 @@ fn classify_halt(git: &Git) -> Result<Halt> {
 /// `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed`
 /// in `tests/halts.rs`.
 fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt> {
+    // Read before anything else, because a merge commit makes every answer
+    // below meaningless. `diff-tree` prints no path at all for a merge unless it
+    // is asked for `-c`, `--cc` or `-m`, and neither invocation here asks, so
+    // the touched set comes back empty and the guard under it reads the halt as
+    // a commit that changes nothing. `rebase --skip` then drops a whole side of
+    // history and the replay reports a cost for a branch it never replayed.
+    //
+    // `rebase.rebaseMerges=false` in `Git::safety_config` closes the route a
+    // developer's own configuration opens. This refusal is the structural half:
+    // it reads the shape of the commit rather than a setting, so the
+    // classification stays correct whatever a later setting does. A refusal is
+    // the loud direction, which is the only direction this crate allows.
+    let parents = stopped_commit_parent_count(git)?;
+    anyhow::ensure!(
+        parents < 2,
+        "the rebase halted on {stopped}, a merge commit with {parents} parents. A merge commit at \
+         a halt is not something the replay can measure: git reports no changed path for one \
+         unless it is asked for a merge diff, so the probe that decides whether a halted commit \
+         adds anything to the new base cannot answer about it."
+    );
+
     let touched = git.paths(
         "diff-tree",
         &[
@@ -608,6 +629,11 @@ fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt>
     // here spares the second invocation. The intersection below reaches the same
     // answer on its own - nothing intersected with anything is nothing - so this
     // is the answer stated rather than an answer arrived at by set algebra.
+    //
+    // The statement is about a commit with one parent, which is the only kind
+    // that reaches this line: the refusal above has already taken the merge, and
+    // for a merge an empty list means git was not asked for a merge diff rather
+    // than a commit that changes nothing.
     if touched.is_empty() {
         return Ok(Halt::EmptyCommit { stopped });
     }
@@ -645,6 +671,45 @@ fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt>
             ),
         })
     }
+}
+
+/// How many parents the commit the rebase halted on has.
+///
+/// **`rev-list --parents` rather than `rev-parse REBASE_HEAD^@`, and the reason
+/// is the empty answer.** Both list the parents, and both list none for a root
+/// commit, so both answer the question. They part company on what an empty
+/// answer means: `rev-parse ^@` prints nothing for a root commit, which is the
+/// same nothing a reader that lost its answer would hand back, so a count taken
+/// from it reads every such loss as a root commit and lets it through.
+/// `rev-list --parents` prints the commit's own id first and its parents after
+/// it, so a resolvable commit can never answer with nothing at all, and an empty
+/// answer is refused below instead of being counted as no parents. That refusal
+/// is the direction this crate takes everywhere: a dry run may say "I cannot
+/// answer", never "cheap" because a probe came back blank.
+///
+/// `git rev-list --no-walk --count --parents` is not a third option. `--count`
+/// prints how many commits were listed, which `--no-walk` has already fixed at
+/// one, so it answers `1` for a root commit and `1` for a merge alike - watched
+/// on git 2.55.
+///
+/// `--no-walk` keeps the answer to the one commit asked about, rather than to
+/// the history behind it.
+///
+/// # Errors
+///
+/// Returns an error if git could not be spawned, if `REBASE_HEAD` does not
+/// resolve, or if git listed no id at all for it.
+fn stopped_commit_parent_count(git: &Git) -> Result<usize> {
+    let listed = git.run("rev-list", &["--no-walk", "--parents", "REBASE_HEAD"])?;
+    let mut fields = listed.split_whitespace();
+
+    anyhow::ensure!(
+        fields.next().is_some(),
+        "git listed no id at all for REBASE_HEAD, so the replay cannot count the parents of the \
+         commit the rebase halted on"
+    );
+
+    Ok(fields.count())
 }
 
 /// Whether git is sitting in a halted rebase.
