@@ -467,13 +467,26 @@ impl Scratch {
     pub fn replay_merge(&self, branch: &str) -> Result<Conflicts> {
         let git = self.git();
 
+        // `--no-ff`, because git takes a merge whose branch is strictly ahead
+        // as a fast-forward, and a fast-forward merges no trees at all. It
+        // moves HEAD to the other tip and stops, so the replay measures
+        // nothing and reports the clean verdict for an operation that never
+        // ran. That verdict is the one a genuinely free merge earns too, so
+        // nothing downstream tells the two apart. The flag makes git do the
+        // three-way merge the caller asked about. Pinned by
+        // `a_fast_forwardable_merge_still_runs_a_real_three_way_merge` in
+        // `tests/merges.rs`.
+        //
         // `--end-of-options` ahead of `branch`, because `branch` arrives from a
         // caller and a caller can spell a revision that starts with a dash.
         // Git reads such a name as an option of `merge` instead, and the
         // answer then describes a command nobody asked for. Every other
         // caller-supplied revision in this file carries the separator for the
         // same reason.
-        git.try_run("merge", &["--no-commit", "--end-of-options", branch])?;
+        git.try_run(
+            "merge",
+            &["--no-commit", "--no-ff", "--end-of-options", branch],
+        )?;
 
         Ok(Conflicts::nothing_replayed())
     }
