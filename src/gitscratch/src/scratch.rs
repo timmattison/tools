@@ -346,7 +346,7 @@ impl Scratch {
         let git = self.git();
         let worktree = self.path();
 
-        let mut cost = Conflicts::default();
+        let mut cost = Conflicts::nothing_replayed();
         // `--end-of-options` ahead of `onto`, because `onto` arrives from a
         // caller and git knows `--root` as an option of `rebase`. Without it a
         // replay onto `--root` rebases the whole history onto nothing, finishes
@@ -381,7 +381,7 @@ impl Scratch {
 
             match classify_halt(&git)? {
                 Halt::Conflict(conflicted) => {
-                    cost.stops += 1;
+                    cost.stops.increment();
                     for file in conflicted {
                         let hunks = count_conflict_hunks(&worktree.join(&file))?;
                         cost.add_file(file, hunks);
@@ -481,8 +481,11 @@ impl Drop for Scratch {
 ///
 /// So there is no `Default`. A running total that a fold has taken nothing into
 /// yet is a real thing a caller needs, and it comes from a constructor that
-/// says so by name - `Conflicts::nothing_replayed`, which reads as the seed it
-/// is at every call site that uses it.
+/// says so by name - [`Conflicts::nothing_replayed`], which reads as the seed
+/// it is at every call site that uses it. That seed still *reads* as clean,
+/// because nothing has conflicted yet. What the name buys is that rendering one
+/// straight off is a visible decision rather than an accident of the spelling a
+/// caller reached for.
 ///
 /// A replay measures a cost:
 ///
@@ -504,9 +507,15 @@ impl Drop for Scratch {
 ///     .expect("a scratch worktree");
 /// let cost = gitscratch::Conflicts::default();
 /// ```
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflicts {
-    stops: usize,
+    /// A [`Stops`] rather than the `usize` inside one, so the count is a
+    /// counter for the whole of its life. Storing the integer meant unwrapping
+    /// a `Stops` to put one here and wrapping it again to hand one back, and
+    /// the unwrap needed an accessor on [`Stops`] that this crate otherwise had
+    /// no use for. The two ways this number grows are [`Stops::increment`] and
+    /// [`Stops::add`].
+    stops: Stops,
     /// Every file that conflicted, mapped to the hunks it contributed.
     ///
     /// A map rather than a set beside a separate running total, because a
@@ -528,6 +537,27 @@ pub struct Conflicts {
 }
 
 impl Conflicts {
+    /// A running total that nothing has been replayed into yet.
+    ///
+    /// **This is a seed for a fold and not a measurement.** It is the value a
+    /// caller starts a sequence of replays from, before the first of them has
+    /// run - [`Scratch::replay_rebase`] starts every replay here, and `grist`
+    /// starts each candidate ordering and its memo of shared prefixes here.
+    /// Every one of them then folds real costs in with [`Conflicts::absorb`].
+    ///
+    /// It reads as clean, because nothing has conflicted yet, so a caller that
+    /// renders one straight off renders the clean verdict for a replay that
+    /// never happened. The name is what stops that being an accident: it says
+    /// at the call site that nothing was replayed, which `default()` did not.
+    /// See the type documentation above for why the derive is gone.
+    #[must_use]
+    pub fn nothing_replayed() -> Self {
+        Self {
+            stops: Stops::default(),
+            files: BTreeMap::new(),
+        }
+    }
+
     /// Build a result straight from a per-file hunk breakdown.
     ///
     /// The total is summed from `files` rather than accepted alongside it, so a
@@ -547,8 +577,16 @@ impl Conflicts {
     /// several stops does during a real replay.
     ///
     /// Compiled only for tests and for the `testing` feature. Every call site
-    /// is a fixture, and production code has no business minting a verdict that
+    /// is a fixture, and production code has no business stating a cost that
     /// nothing measured.
+    ///
+    /// That gate is a boundary rather than a form of words, and it took the
+    /// removal of the `Default` derive to become one. The ungated constructor
+    /// beside it is [`Conflicts::nothing_replayed`], which states no breakdown
+    /// and says at the call site that nothing has been replayed into it. So a
+    /// released binary can seed a fold and can hold what a replay measured, and
+    /// it has no way at all to write down a breakdown or a stop count of its
+    /// own.
     ///
     /// # Panics
     ///
@@ -566,8 +604,8 @@ impl Conflicts {
         stops: Stops,
     ) -> Self {
         let mut conflicts = Self {
-            stops: stops.count(),
-            ..Self::default()
+            stops,
+            files: BTreeMap::new(),
         };
         for (name, hunks) in files {
             conflicts.add_file(name, hunks.get());
@@ -575,7 +613,7 @@ impl Conflicts {
 
         assert_eq!(
             conflicts.is_clean(),
-            conflicts.stops == 0,
+            conflicts.stops == Stops::new(0),
             "a hand-built result has to agree with itself about whether \
              anything conflicted, got {} and {}",
             conflicts.files().phrase(),
@@ -587,7 +625,7 @@ impl Conflicts {
 
     /// Fold another step's cost into this running total.
     pub fn absorb(&mut self, other: Self) {
-        self.stops += other.stops;
+        self.stops.add(other.stops);
         for (name, hunks) in other.files {
             self.add_file(PathBuf::from(name), hunks);
         }
@@ -638,7 +676,7 @@ impl Conflicts {
     /// How many times the replay halted for manual resolution.
     #[must_use]
     pub fn stops(&self) -> Stops {
-        Stops::new(self.stops)
+        self.stops
     }
 
     /// How many conflict hunks would need hand-merging.
@@ -1060,7 +1098,7 @@ mod tests {
     /// "0 hunks across 1 file" with a "0 hunks" row underneath.
     #[test]
     fn a_conflicted_file_that_measured_no_hunks_still_costs_one() {
-        let mut conflicts = Conflicts::default();
+        let mut conflicts = Conflicts::nothing_replayed();
         conflicts.add_file(PathBuf::from("src/lib.rs"), 0);
 
         assert!(

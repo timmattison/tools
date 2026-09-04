@@ -16,7 +16,10 @@
 //! reach. `format!("{} across {}", hunks, files)` prints `"4 across 2"`, which
 //! is the wording failure these types exist to stop, and `{}` is the spelling a
 //! caller reaches for first. So a counter has no `Display`. A count leaves one
-//! through a method that names which rendering the caller wants.
+//! through a method that names which rendering the caller wants: `phrase` for a
+//! sentence, which supplies the noun, and `digits` for a table cell, whose
+//! column heading supplies it instead. Neither one is the free one, so a caller
+//! chooses between them rather than falling into either.
 //!
 //! [`BranchName`] keeps its `Display`, and it is not a counter. That type *is*
 //! its string, so `{}` on it prints the branch name and nothing else.
@@ -107,11 +110,20 @@ macro_rules! counter {
                     format!("{} {}s", self.0, $noun)
                 }
             }
-        }
 
-        impl std::fmt::Display for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}", self.0)
+            /// The count on its own, as digits - `"1"`, `"4"`.
+            ///
+            /// For a table cell under a heading that already carries the noun,
+            /// which is the one place a bare number reads correctly. It is a
+            /// method rather than a `Display`, so a caller who wants it has to
+            /// name it. A `Display` would make the bare number the free
+            /// rendering and `phrase` the remembered one, and
+            /// `format!("{} across {}", hunks, files)` would then compile and
+            /// print `"4 across 2"` - which is the sentence this module exists
+            /// to make unwritable.
+            #[must_use]
+            pub fn digits(&self) -> String {
+                self.0.to_string()
             }
         }
     };
@@ -123,17 +135,19 @@ counter!(Hunks, "hunk");
 counter!(Uncommitted, "uncommitted file");
 
 impl Stops {
-    /// The raw count, for the one place in this crate that has to put a `Stops`
-    /// back into the `usize` a `Conflicts` stores it as.
+    /// Count one more halt.
     ///
-    /// Compiled only alongside its single caller,
-    /// [`crate::scratch::Conflicts::from_files`], which is the whole
-    /// justification for it existing. Unwrapping a counter is precisely what
-    /// these types are here to stop, so the unwrap exists only in the builds
-    /// that have the fixture constructor to feed - never in a released binary.
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) const fn count(self) -> usize {
-        self.0
+    /// The two ways a stop count grows are here rather than at the call sites,
+    /// because a caller that could reach the integer to add to it could reach
+    /// it to print it. [`crate::scratch::Conflicts`] stores a `Stops` and never
+    /// a `usize`, so no route in this crate has to unwrap one.
+    pub(crate) fn increment(&mut self) {
+        self.0 += 1;
+    }
+
+    /// Fold another replay's halts into this running total.
+    pub(crate) fn add(&mut self, other: Self) {
+        self.0 += other.0;
     }
 }
 

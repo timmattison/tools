@@ -410,7 +410,7 @@ mod tests {
         let report = Report::for_tool("grind").describing("replaying HEAD onto origin/main");
 
         assert_eq!(
-            report.render(&Conflicts::default()),
+            report.render(&Conflicts::nothing_replayed()),
             "grind: clean - replaying HEAD onto origin/main hit no conflicts"
         );
     }

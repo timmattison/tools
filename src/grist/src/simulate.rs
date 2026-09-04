@@ -136,7 +136,7 @@ impl Simulator {
     pub fn score(&self, order: &[BranchName]) -> Result<OrderingScore> {
         let scratch = self.repo.scratch(&self.base)?;
         let mut simulated_main = self.repo.resolve(&self.base)?;
-        let mut total = Conflicts::default();
+        let mut total = Conflicts::nothing_replayed();
 
         for branch in order {
             let (next_main, step) = self.land(&scratch, &simulated_main, branch)?;
@@ -165,7 +165,7 @@ impl Simulator {
         let base_commit = self.repo.resolve(&self.base)?;
 
         let mut memo: HashMap<Vec<BranchName>, (String, Conflicts)> = HashMap::new();
-        memo.insert(Vec::new(), (base_commit, Conflicts::default()));
+        memo.insert(Vec::new(), (base_commit, Conflicts::nothing_replayed()));
 
         let mut scores = Vec::new();
 

@@ -53,8 +53,8 @@ fn charges_more_when_the_heavily_iterated_branch_lands_second() {
     assert!(
         iterated_second.hunks() > iterated_first.hunks(),
         "expected landing the iterated branch second to cost more hunks, got {} vs {}",
-        iterated_second.hunks(),
-        iterated_first.hunks()
+        iterated_second.hunks().phrase(),
+        iterated_first.hunks().phrase()
     );
 }
 
@@ -346,7 +346,7 @@ fn refuses_a_branch_whose_name_starts_with_a_dash_rather_than_scoring_a_replay_i
         control.hunks() > Hunks::new(0),
         "the fixture has to cost something, or the refusal above proves only that this \
          simulator answers nothing at all, got {}",
-        control.hunks()
+        control.hunks().phrase()
     );
 }
 

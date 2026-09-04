@@ -106,9 +106,9 @@ fn render(ranked: &[OrderingScore]) -> Table {
         let cells = [
             marker.to_string(),
             order,
-            score.hunks().to_string(),
-            score.stops().to_string(),
-            score.files().to_string(),
+            score.hunks().digits(),
+            score.stops().digits(),
+            score.files().digits(),
         ];
 
         let row: Vec<Cell> = cells

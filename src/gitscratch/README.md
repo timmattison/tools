@@ -50,11 +50,33 @@ on the way in or out. That holds off the conflict path too —
 `"uncommitted file"`, so the one count that is *not* about conflicts still
 arrives knowing what to call itself.
 
+A counter has no `Display`, and that is what makes the paragraph above true
+rather than merely intended. A count comes back out of one only through a method
+that names the rendering: `phrase()` for a sentence, which supplies the noun and
+the `s` it takes in the plural, and `digits()` for a table cell whose column
+heading carries the noun already. With a `Display` on the counters,
+`format!("{} across {}", c.hunks(), c.files())` compiles and prints
+`4 across 2` — the exact wording failure these types exist to stop — and `{}` is
+the spelling a caller reaches for first while `phrase()` is the one they have to
+remember. Neither rendering is free now, so a caller chooses one. `BranchName`
+keeps its `Display`, because that type *is* its string.
+
 `is_clean()` reads the file set rather than the counts, and the agreement
 between them is structural rather than observed. Adding to the breakdown is the
 one door in, and it floors every entry at one hunk, so hunks are non-zero
 exactly when the set is non-empty — on the replay path and in a hand-built
 fixture alike.
+
+A `Conflicts` a consumer holds is one a replay produced. There is no `Default`
+derive on it, because the value that derive hands out — no files, no stops — is
+the clean verdict, the one that renders "hit no conflicts" and exits 0, and a
+derive puts it behind the spelling every caller reaches for first and behind
+every generic route to it besides. The seed a fold really does need is
+`Conflicts::nothing_replayed()`, which says at the call site that nothing has
+been replayed into it. `Conflicts::from_files()`, the constructor that states a
+breakdown, is compiled only under the `testing` feature — and that gate is a
+boundary rather than a form of words only because no derive stands beside it.
+A `compile_fail` doc-test holds the derive out — see **Testing** below.
 
 `Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
 to get a `Scratch`. A `Scratch` answers the operations it names —
@@ -584,23 +606,43 @@ both raw dates. It re-executes its own test binary with a hook's identity
 variables set on the *child* for the reason the two above do — the same mechanism
 `tests/isolation.rs` reaches for.
 
-**The door itself is pinned by a doc-test**, because the property is about what
-a consumer can *compile* and no ordinary test can state that. Rustdoc compiles a
+**Three properties are pinned by doc-tests**, because each is about what a
+consumer can *compile* and no ordinary test can state that. Rustdoc compiles a
 doc-test as a program outside this crate, which is exactly the seat a consumer
-sits in, so a ` ```compile_fail ` block on `Scratch` that reaches for
-`scratch.git()` is the guard: it passes only while that reach fails to compile.
-It was watched to fail first, with the runner still public — rustdoc reports
-`Test compiled successfully, but it's marked compile_fail` — and the reach was
-then confirmed to be refused as `error[E0624]: method git is private` rather
-than by some accident of the snippet.
+sits in, so a ` ```compile_fail ` block is the only place such a property can be
+written down. Each of the three was watched to fail before it was believed —
+rustdoc reports `Test compiled successfully, but it's marked compile_fail` —
+and each refusal was then read, because a block that failed over a typo, a
+renamed method or a missing import reports exactly the same green forever.
+
+- **The door**, on `Scratch`. The block reaches for `scratch.git()`, and it
+  passes only while that reach fails to compile. Watched to fail with the runner
+  still public, and the refusal read as `error[E0624]: method git is private`.
+- **The verdict**, on `Conflicts`. The block writes `Conflicts::default()`, and
+  it passes only while the `Default` derive is gone. Watched to fail with the
+  derive put back, and the refusal read as `error[E0599]: no associated function
+  or constant named default found for struct Conflicts`, whose note points a
+  reader at `Conflicts::nothing_replayed` and `Conflicts::from_files`.
+- **The bare count**, on the `metrics` module. The block writes
+  `format!("{hunks}")`, and it passes only while the counters have no `Display`.
+  Watched to fail with the `Display` impl put back on the counter macro, and the
+  refusal read as `error[E0277]: Hunks doesn't implement std::fmt::Display`.
 
 A block asserting that something does *not* compile passes just as readily when
-it never compiled for an unrelated reason, so the guard carries a control: a
-` ```no_run ` block beside it with the same two setup lines and the named
-operations in place of the reach. It has to compile. The two blocks differ by
-that one line, so the one line is what the ` ```compile_fail ` block measures.
-[`MUTATIONS.md`](./MUTATIONS.md) records the mutation: put the `pub` back on
-`Scratch::git` and watch the guard go red.
+it never compiled for an unrelated reason, so each guard carries a control: a
+block beside it that has to compile and that differs by exactly the line under
+test. `Scratch`'s control puts the named operations in place of the reach.
+`Conflicts`'s control puts a measured `replay_rebase` in place of the derive.
+The counter's control puts `hunks.phrase()` in place of `{}`. One line differs,
+so the one line is what each ` ```compile_fail ` block measures.
+
+Each mutation reddens its own guard and nothing else across `gitscratch`,
+`grind` and `grist`. [`MUTATIONS.md`](./MUTATIONS.md) records the first two,
+whose failure is a plausible wrong answer nobody sees: a runner in a consumer's
+hands, and a clean verdict for a replay that never happened. The third is
+recorded here instead, on the basis the two render-boundary tests in
+`src/report.rs` set — what a `Display` on a counter costs is a sentence a reader
+sees on screen.
 
 The rest are about this document rather than about the code.
 `every_guard_the_safety_config_pins_is_named_in_the_readme_inventory` asks
@@ -822,9 +864,13 @@ root-relative name and a cwd-relative one are the same string.
 `tests/conflicts.rs` covers the answer rather than the safety of getting it:
 whether a replay conflicted at all, that the per-file breakdown accumulates
 across stops and adds up to the total it explains, and that a conflicted
-`日本語.txt` comes back by its real name carrying its real hunk count. That last
-one is deliberately built on a file contested in *two* regions — with one, the
-undercount and the truth would both be 1 and the defect would pass. `Report`'s
+`日本語.txt` comes back by its real name carrying its real hunk count. It also
+asserts that a fold adds the stop counts of the steps it takes. Stops are the
+one measure a fold carries as a number of its own rather than as a sum of the
+breakdown, so a fold that dropped a step's stops would leave every other
+assertion in that file green. The name test is deliberately built on a file
+contested in *two* regions — with one, the undercount and the truth would both
+be 1 and the defect would pass. `Report`'s
 own tests sit beside it in `src/report.rs`, because rendering a `Conflicts` is
 pure string work that needs no repository at all. Two of them cover the render
 boundary, where every byte this crate carried intact finally becomes text.
@@ -854,9 +900,12 @@ test beside it.
 **That a counter's noun is the counter's own business** is pinned by a unit test
 in `src/metrics.rs` on `Uncommitted` — the newest counter, and the one whose
 noun is two words rather than one, so it is where the macro's suffix-`s` rule is
-most worth asserting. `src/report.rs` pins the other end of the same seam: the
-note reads as a sentence at one file and at three, with the noun coming from the
-counter and the verb from the renderer, so the two cannot drift apart unnoticed.
+most worth asserting. The doc-test pair in that module's own documentation pins
+the half a unit test cannot reach: that a caller has no way to route around the
+noun by printing the bare number. See the doc-test account above.
+`src/report.rs` pins the other end of the same seam: the note reads as a
+sentence at one file and at three, with the noun coming from the counter and the
+verb from the renderer, so the two cannot drift apart unnoticed.
 A default `Uncommitted` is a clean tree, which is what lets a caller that could
 not measure fall back to saying nothing rather than to saying something about
 zero files.
@@ -893,7 +942,9 @@ charge written into one arm leaves the next arm uncounted.
 guard somebody watched fail.
 
 **That a `Conflicts` cannot contradict its own accessors** is pinned by three
-further unit tests in `src/scratch.rs`, which need no repository either. One
+further unit tests in `src/scratch.rs`, which need no repository either. The
+stop count is a `Stops` in the field as well as in the accessor, so there is no
+unwrapping step between the two for those tests to have to cover. One test
 attributes a measured count of zero to a file and requires the total to come
 back as one hunk: the floor lives at the single door into the breakdown, so it
 covers the replay path — the one place a count is still measured at runtime —
@@ -930,8 +981,12 @@ off.
 
 It also gates `Conflicts::from_files`, the hand-built-breakdown constructor
 `Report`'s tests are built on. Every call site is a fixture, and a released
-binary has no business minting a verdict that nothing measured, so the
-constructor is simply not compiled into one.
+binary has no business stating a cost that nothing measured, so the constructor
+is simply not compiled into one. What makes that a boundary rather than a form
+of words is that nothing ungated stands beside it: `Conflicts` lost its
+`Default` derive, and the one constructor a released binary keeps is
+`nothing_replayed()`, which states no breakdown and names itself as the seed of
+a fold.
 
 It also holds `path_at_or_above`, the safety matcher that reads the output of a
 destructive tool for a path at or above the work tree of a

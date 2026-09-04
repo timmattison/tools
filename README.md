@@ -67,7 +67,14 @@ is crate-private, and nothing outside is handed one, because a `Scratch` answers
 with the thing that performs it. The second half matters because a scratch worktree is a *linked* worktree of
 the real repository and the hardening is configuration — it says nothing about `branch -D`, `update-ref`,
 `config --local` or `push`, so a runner in a consumer's hands reaches all of them. A `compile_fail` doc-test
-holds that door shut. Inside the crate, the runner takes the git subcommand as a parameter of its own, so a
+holds that door shut. Two more hold the doors the *answer* comes through. `Conflicts` has no `Default` derive,
+because the value a derive hands out — no files, no stops — is the clean verdict, the one that renders "hit no
+conflicts" and exits 0, and a derive puts it behind the spelling every caller reaches for first. The seed a fold
+genuinely needs says so by name instead, as `Conflicts::nothing_replayed()`. And the count newtypes have no
+`Display`, so a count renders only through `phrase()` (`4 hunks`, with the noun and its plural coming from the
+counter) or `digits()` (a table cell whose heading carries the noun) — with a `Display` on them,
+`format!("{} across {}", hunks, files)` compiles and prints `4 across 2`, which is the wording failure the
+newtypes exist to stop. Inside the crate, the runner takes the git subcommand as a parameter of its own, so a
 caller's arguments always land after it rather than in git's own option position, where one more `-c` pair
 would undo any of the pins above (git's rule is that the last pair naming a key wins) and a `-C` would aim the
 whole run at another repository. A revision the caller

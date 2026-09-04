@@ -55,6 +55,7 @@ not have to re-derive which guard belongs to which test.
 | `uncommitted_files_counts_a_staged_copy_as_the_one_file_it_is` (`tests/repo.rs`) | The copy letter in the pairing that skips the second field of a copy record | `src/repo.rs`, `moved_from_elsewhere` — drop the `b'C'` arm from the `any` predicate | remove |
 | `uncommitted_files_counts_a_working_tree_rename_and_copy_as_the_files_they_are` (`tests/repo.rs`) | The second status byte, the working-tree column, which carries the letter as readily as the index one | `src/repo.rs`, `moved_from_elsewhere` — reduce `[record.first(), record.get(1)]` to `[record.first()]` | narrow |
 | The ` ```compile_fail ` doc-test on `Scratch` (`src/scratch.rs`) | The runner staying inside the crate — a consumer is never *handed* one, which is the half `Git::new` being crate-private does not cover | `src/scratch.rs`, `Scratch::git` — put the `pub` back | remove |
+| The ` ```compile_fail ` doc-test on `Conflicts` (`src/scratch.rs`) | A cost being measured rather than stated — a released binary has no ungated route to a `Conflicts` that claims one, `Conflicts::nothing_replayed` being a seed for a fold and clean because nothing has run yet | `src/scratch.rs`, the `Conflicts` derive — put `Default` back | **add** |
 
 ## What keeps each test honest
 
@@ -1054,6 +1055,91 @@ crate has to keep on its own: they are the compiler reporting on a module and a
 re-export, and anything that reopened either would have to hand a runner back
 through `Scratch` as well, which is what the block above forbids.
 
+### The ` ```compile_fail ` doc-test on `Conflicts`
+
+The same kind of guard as the one above, for the same reason: what it pins is
+what a consumer can *compile*, and a test that runs has already compiled.
+
+Mutation: `Default` was put back on the `Conflicts` derive — the state the crate
+was in when the finding was written.
+
+```text
+test src/gitscratch/src/scratch.rs - scratch::Conflicts (line 492) - compile ... ok
+test src/gitscratch/src/scratch.rs - scratch::Scratch (line 95) - compile ... ok
+test src/gitscratch/src/metrics.rs - metrics (line 37) - compile fail ... ok
+test src/gitscratch/src/scratch.rs - scratch::Scratch (line 111) - compile fail ... ok
+test src/gitscratch/src/scratch.rs - scratch::Conflicts (line 503) - compile fail ... FAILED
+
+---- src/gitscratch/src/scratch.rs - scratch::Conflicts (line 503) stdout ----
+Test compiled successfully, but it's marked `compile_fail`.
+
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Red for the stated reason: the block compiled, and compiling is the whole of
+what it forbids. No collateral — the run was `cargo test --no-fail-fast -p
+gitscratch -p grind -p grist`, and exactly one test target of the three crates
+reported `FAILED`, the doc-tests, with this one test inside it.
+
+**Which error the block gets was read rather than assumed**, for the reason the
+section above gives. A temporary target under `tests/` — out-of-crate in the
+same way a doc-test is — was given the line with the source in its shipping
+state.
+
+```text
+error[E0599]: no associated function or constant named `default` found for struct `Conflicts` in the current scope
+ --> src/gitscratch/tests/zz-probe.rs:5:39
+  |
+5 |     let cost = gitscratch::Conflicts::default();
+  |                                       ^^^^^^^ associated function or constant not found in `Conflicts`
+  |
+note: if you're trying to build a new `Conflicts` consider using one of the following associated functions:
+      Conflicts::nothing_replayed
+      Conflicts::from_files
+```
+
+The refusal is the absence of the derive and nothing else, and the compiler's
+own note names the two constructors that remain. That target had the `testing`
+feature on, since a test target of this crate always does, so it records a
+second fact: `from_files` is not a quiet second route to the same value. It
+states a breakdown, and the assertion inside it refuses a breakdown and a stop
+count that disagree about whether anything conflicted.
+
+**The control is a start-state control.** The ` ```no_run ` block beside the
+guard carries the same setup with a measured `replay_rebase` in place of the
+derive, and it has to compile. Without it a guard that fails over the setup — a
+`Repo::open` that changed shape, a `scratch` that stopped returning a `Result` —
+reads exactly like a guard doing its job. What the control cannot do is arm the
+hazard, which is why the mutation above is recorded beside it.
+
+### The ` ```compile_fail ` doc-test on the counters, and why it is not in the map
+
+`src/metrics.rs` carries a third block of the same shape. It writes
+`format!("{hunks}")` and passes only while the counters have no `Display`. It
+was watched to fail the same way. The `Display` impl was put back on the counter
+macro, `test src/gitscratch/src/metrics.rs - metrics (line 37) - compile fail
+... FAILED` came back with `Test compiled successfully, but it's marked
+compile_fail`, and the same three-crate run reported exactly one failing test
+target. The refusal was read from the same kind of temporary target.
+
+```text
+error[E0277]: `Hunks` doesn't implement `std::fmt::Display`
+ --> src/gitscratch/tests/zz-probe.rs:4:25
+  |
+4 |     assert_eq!(format!("{hunks}"), "4");
+  |                         ^^^^^^^ `Hunks` cannot be formatted with the default formatter
+  |
+  = help: the trait `std::fmt::Display` is not implemented for `Hunks`
+```
+
+It is deliberately absent from the map above. That map is for a guard whose
+failure is a plausible wrong answer or damage nobody sees — a runner in a
+consumer's hands, a clean verdict for a replay that never happened, a miscounted
+rename that reads as an ordinary number. What a `Display` on a counter costs is
+`4 across 2` printed on a developer's screen, which is the same visibility that
+keeps the two render-boundary tests in `src/report.rs` out of this map. The
+README carries the record for it, beside the account of the other two.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
@@ -1116,6 +1202,14 @@ code moves. Every place below is load-bearing for the whole table:
   `Scratch::testing_git` is behind the `testing` feature for exactly that
   reason, and the feature is how this crate marks everything a test target may
   have and a consumer may not.
+- **`Conflicts`'s constructors** — a released binary may seed a fold with
+  `nothing_replayed`, and it may hold what a replay measured. There is no third
+  route, and the doc-test forbids one spelling of a third route rather than the
+  idea of one. A `Default` derive, a `From<usize>`, or any other ungated
+  constructor that states a cost reopens the door whatever the block says about
+  `default()`, in the way a new `pub fn` returning a runner would reopen the one
+  above. `from_files` is behind the `testing` feature for the same reason
+  `testing_git` is.
 - **The parent count ahead of those two invocations** — both of them answer
   about a single-parent commit, and `git diff-tree` answers about a merge with
   silence rather than with a refusal. The count is what turns that silence into
