@@ -57,6 +57,7 @@ use chrono::Utc;
 use clap::Parser;
 use colored::Colorize;
 use termwindow::{effective_terminal_width, should_force_colors};
+use thiserror::Error;
 
 use crate::chain::parse_chain;
 use crate::github::Repo;
@@ -269,34 +270,9 @@ fn main() -> ExitCode {
 /// environment, which `main` reads. The order of the inputs, and the rule that
 /// only the input that answers is read, both live in [`input::Sources`].
 ///
-/// The shape of the text says which reader takes it. A text whose first
-/// character that is not a space is `{` is a plan written as JSON, a page that
-/// names a `Stream` field or an `Order` field is a plan of parallel work, a
-/// text whose wires join steps on more than one line is a plan drawn as a
-/// picture, and every other text is one chain. So a reader pipes or pastes
-/// what they have, and no flag stands between them and the answer.
-///
-/// JSON is read first, and it is claimed on one character. Nothing else `wn`
-/// reads starts with a brace, so the claim never costs a partial parse. A text
-/// that starts with `{` and does not parse is an error and never a walk on to
-/// the next reader: a document with one missing brace would otherwise reach
-/// the chain reader, which would report `"version" is not an issue number`,
-/// and that message names the wrong problem.
-///
-/// A plan is read twice: once as a set of streams, and once as the graph its
-/// `Waits for` cells draw. A plan that draws one cross-stream edge or more
-/// answers as a picture answers, because one step of one stream then blocks
-/// another stream and a block for each stream says nothing about that. A plan
-/// that draws none keeps the reader of streams, and that is every plan a
-/// reader wrote before the column stood.
-///
-/// The picture is read after the plan and before the chain. A box-drawn table
-/// of a plan reaches its own reader first, and a chain that holds an arrow on
-/// one line reaches the chain reader, because a picture claims a text only
-/// when its wires join steps on more than one line: one net that joins two
-/// steps and spans the lines, or two box-drawn nets or more that each join two
-/// steps and stand on lines of their own. [`graph::read`] states the whole
-/// rule.
+/// [`read_and_keep`] is the one entrance to the readers, so no path of this
+/// function can answer a text and keep no plan. [`reading_of`] states which
+/// reader takes which text.
 ///
 /// The repository is resolved after the text is read, in every path. A text
 /// nobody can read is a mistake the reader made, and reporting it costs no
@@ -354,53 +330,168 @@ fn run(
     }
     .chain()?;
 
-    if let Some(document) = json::read(chain.text()) {
-        // The plan is kept before the answer is asked for. A run that could
-        // read the document and then could not reach GitHub still built a
-        // plan, and the reader must not pay for a second one.
-        let kept = chain.keep(
-            document.is_ok(),
-            (!environment.clipboard_off).then_some(write),
-        );
-        let document = document.map_err(|err| chain.blame(err))?;
-        let repo = repo_of(cli)?;
-        let code = answer_graph(document.graph(), &repo, width, start)?;
-        for note in document.age_note(Utc::now()).into_iter().chain(kept) {
-            println!();
-            println!("{note}");
-        }
-        return Ok(code);
-    }
-
-    if plan::looks_like_a_plan(chain.text()) {
-        let plan = plan::parse(chain.text()).map_err(|err| chain.blame(err))?;
-        let graph = graph::of_plan(&plan)
-            .transpose()
-            .map_err(|err| chain.blame(err))?;
-        let repo = repo_of(cli)?;
-        return match graph {
-            Some(graph) => answer_graph(&graph, &repo, width, start),
-            None => answer_plan(&plan, &repo, width, start),
-        };
-    }
-
-    if let Some(graph) = graph::read(chain.text()) {
-        let graph = graph.map_err(|err| chain.blame(err))?;
-        let repo = repo_of(cli)?;
-        return answer_graph(&graph, &repo, width, start);
-    }
-
-    let numbers = parse_chain(chain.text()).map_err(|err| chain.blame(err))?;
+    let (reading, kept) = read_and_keep(&chain, (!environment.clipboard_off).then_some(write));
+    let reading = reading.map_err(|err| chain.blame(err))?;
     let repo = repo_of(cli)?;
 
-    let entries = github::fetch(&repo, &numbers)?;
-    let report = Report::build(entries);
-    println!(
-        "{}",
-        render::render(&report, &repo.to_string(), width, start)
-    );
+    let (code, age) = match &reading {
+        // Only a plan written as JSON carries the moment it was built, so only
+        // this arm asks for a note about the age of the plan.
+        Reading::Document(document) => (
+            answer_graph(document.graph(), &repo, width, start)?,
+            document.age_note(Utc::now()),
+        ),
+        Reading::Plan(plan) => (answer_plan(plan, &repo, width, start)?, None),
+        Reading::Picture(graph) => (answer_graph(graph, &repo, width, start)?, None),
+        Reading::Chain(numbers) => {
+            let entries = github::fetch(&repo, numbers)?;
+            let report = Report::build(entries);
+            println!(
+                "{}",
+                render::render(&report, &repo.to_string(), width, start)
+            );
+            (exit_status(report.missing().is_empty()), None)
+        }
+    };
 
-    Ok(exit_status(report.missing().is_empty()))
+    for note in age.into_iter().chain(kept) {
+        println!();
+        println!("{note}");
+    }
+
+    Ok(code)
+}
+
+/// What a text was read as.
+///
+/// One variant for each reader `wn` holds, and each one carries what that
+/// reader gave back. So a text is read once, and [`run`] answers a reading
+/// rather than reaching for a reader of its own.
+///
+/// A plan of streams arrives as one of two of them. A plan whose `Waits for`
+/// cells join one stream to another draws the graph a picture of the same plan
+/// draws, so it arrives as a picture. A plan whose cells join no stream to
+/// another is a plan of streams that stand apart, and it arrives as a plan.
+enum Reading {
+    /// A plan written as JSON.
+    Document(json::Document),
+    /// A plan of streams that stand apart.
+    Plan(plan::Plan),
+    /// A plan drawn as a picture, and a plan of streams that join.
+    Picture(graph::Graph),
+    /// One chain of numbers.
+    Chain(Vec<chain::IssueNumber>),
+}
+
+/// Why no reader could take the text.
+///
+/// One variant for each reader, and each one carries the reason of that reader
+/// unchanged. Every reader already names what it refused — a message about a
+/// stream came out of the plan reader, and a message about a wire came out of
+/// the picture — so this type writes no words of its own.
+///
+/// [`input::Chain::blame`] takes the reason and names the input the text came
+/// out of. It takes any error that is `Send` and `Sync`, which is what this
+/// type is.
+#[derive(Debug, Error)]
+enum ReadError {
+    /// The JSON reader refused the document.
+    #[error(transparent)]
+    Json(#[from] json::JsonError),
+    /// The plan reader refused the page.
+    #[error(transparent)]
+    Plan(#[from] plan::PlanError),
+    /// The picture reader refused the drawing, or the streams of a plan wait
+    /// for each other.
+    #[error(transparent)]
+    Picture(#[from] graph::GraphError),
+    /// The chain reader refused the line.
+    #[error(transparent)]
+    Chain(#[from] chain::ChainError),
+}
+
+/// What `text` is, as the reader that takes it reads it.
+///
+/// The shape of the text says which reader takes it. A text whose first
+/// character that is not a space is `{` is a plan written as JSON, a page that
+/// names a `Stream` field or an `Order` field is a plan of parallel work, a
+/// text whose wires join steps on more than one line is a plan drawn as a
+/// picture, and every other text is one chain. So a reader pipes or pastes
+/// what they have, and no flag stands between them and the answer.
+///
+/// JSON is read first, and it is claimed on one character. Nothing else `wn`
+/// reads starts with a brace, so the claim never costs a partial parse. A text
+/// that starts with `{` and does not parse is an error and never a walk on to
+/// the next reader: a document with one missing brace would otherwise reach
+/// the chain reader, which would report `"version" is not an issue number`,
+/// and that message names the wrong problem.
+///
+/// A plan is read twice: once as a set of streams, and once as the graph its
+/// `Waits for` cells draw. A plan that draws one cross-stream edge or more
+/// answers as a picture answers, because one step of one stream then blocks
+/// another stream and a block for each stream says nothing about that. A plan
+/// that draws none keeps the reader of streams, and that is every plan a
+/// reader wrote before the column stood.
+///
+/// The picture is read after the plan and before the chain. A box-drawn table
+/// of a plan reaches its own reader first, and a chain that holds an arrow on
+/// one line reaches the chain reader, because a picture claims a text only
+/// when its wires join steps on more than one line: one net that joins two
+/// steps and spans the lines, or two box-drawn nets or more that each join two
+/// steps and stand on lines of their own. [`graph::read`] states the whole
+/// rule.
+///
+/// # Errors
+///
+/// Gives the reason of whichever reader took the text, in the variant of
+/// [`ReadError`] that names that reader.
+fn reading_of(text: &str) -> Result<Reading, ReadError> {
+    if let Some(document) = json::read(text) {
+        return Ok(Reading::Document(document?));
+    }
+
+    if plan::looks_like_a_plan(text) {
+        let plan = plan::parse(text)?;
+        return Ok(match graph::of_plan(&plan).transpose()? {
+            Some(graph) => Reading::Picture(graph),
+            None => Reading::Plan(plan),
+        });
+    }
+
+    if let Some(graph) = graph::read(text) {
+        return Ok(Reading::Picture(graph?));
+    }
+
+    Ok(Reading::Chain(parse_chain(text)?))
+}
+
+/// Read the text of `chain`, and keep the plan a run of `claude` built.
+///
+/// One entrance to the readers, and the one place a plan reaches the
+/// clipboard. The reading and the note the run earned come back together, so a
+/// caller cannot reach a reader around the keep. A run of `claude` costs money
+/// and about a minute, and a plan that never reaches the clipboard makes the
+/// next `wn` pay for a second run.
+///
+/// The plan is kept before the repository is resolved and before GitHub is
+/// asked. A run that read the plan and then could not reach GitHub still built
+/// a plan, and the reader must not pay for a second one.
+///
+/// [`input::Chain::keep`] holds the two rules of what is kept: nothing is kept
+/// but a plan this run built, and a text no reader could read is never kept.
+///
+/// `write` is `None` when [`input::NO_CLIPBOARD_ENV`] turns the clipboard off.
+fn read_and_keep(
+    chain: &input::Chain,
+    write: Option<&dyn Fn(&str) -> input::ClipboardWrite>,
+) -> (Result<Reading, ReadError>, Option<String>) {
+    let reading = reading_of(chain.text());
+    // A plan written as JSON is the one reading a plan is kept for.
+    let kept = match &reading {
+        Ok(Reading::Document(_)) => chain.keep(true, write),
+        _ => None,
+    };
+    (reading, kept)
 }
 
 /// The repository the command line names, or the repository of the current
