@@ -1232,9 +1232,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     prose of a port. `wn` reads the run and never the one character, so `a 30-line window` holds
     no wire, `(pass --hidden)` holds none, and `#1-->#2` holds one, because a digit and a `#` are
     no letters. A box-drawing character never stands inside a word, so it needs no such test.
-  - The readers are tried in one order: the record form and the table form of a plan first, the
-    picture second, and the chain last. A picture claims the text when one of its nets joins two
-    steps that stand on different lines. That rule is what keeps `#1 ──→ #2` a chain, because both
+  - The readers are tried in one order: the JSON document first, the record form and the table
+    form of a plan second, the picture third, and the chain last. A picture claims the text when
+    one of its nets joins two steps that stand on different lines. That rule is what keeps `#1 ──→ #2` a chain, because both
     of its steps stand on one line. It claims the text as well when two nets or more each join a
     step on their left to a step on their right, those nets do not all stand on one line, one of
     them holds a box-drawing character, and no net of the text reaches a step on one side and
@@ -1275,9 +1275,61 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     holds every number of the picture, `1` when the picture names a number the repository does not
     have, and `2` for a picture `wn` could not read and for a cycle. `wn` draws no graph back: the
     answer is the rows and what each row waits for, because a layout engine is a separate decision.
+  - A plan written as JSON is a fifth shape of input, and it is the shape a program hands back.
+    The four written forms were each written for a person to read, and three of them carry layout
+    the reader has to undo — a column width, a border, a cell that wrapped onto a second line.
+    Layout is lossy. A box table that left a terminal 100 columns wide and arrives in one 80
+    columns wide has been re-wrapped by whatever pasted it, and a `Notes` cell that lost its
+    second line costs nothing while an `Order` cell that lost its second line costs a step. A
+    document carries no layout at all, so a program that writes a plan writes this one.
+
+    ```json
+    {
+      "version": 1,
+      "streams": [
+        { "id": "S0", "name": "daemon leak", "order": [{ "issue": 96, "waitsFor": [] }] },
+        { "id": "S1", "name": "lifecycle", "order": [
+          { "issue": 91, "waitsFor": [96] },
+          { "issue": 94, "pr": 102, "waitsFor": [] }
+        ] }
+      ]
+    }
+    ```
+  - `wn` reads `streams` and nothing else. The `order` array of a stream is a chain, so each step
+    of it comes before the step after it. In one step, `issue` is the issue number, `pr` is the
+    pull request that does the work of that issue — the same pair `PR#344 (#341)` writes, and it
+    reaches the report as the row `#102 (#94)` — and `waitsFor` is the set of numbers that come
+    before that step. `waitsFor` is the JSON spelling of the `Waits for` cell, and it reaches the
+    same graph. It stands on each step rather than on the stream, so a later step of a stream
+    names its own blockers. `housekeeping` and `warnings` are read past: they stand in the
+    document because the person who ran the skill wants them, and `wn` answers one question. The
+    document above draws `#96 → #91` and `#91 → #94`, so it names `#96` while every issue is open
+    and `#91` once `#96` is closed.
+  - JSON is tried first, before the tables and before the chain. A text whose first character
+    that is not a space is `{` is a JSON document, and nothing else `wn` reads starts that way, so
+    the claim is decided on one character and never on a partial parse. A text that starts with
+    `{` and does not parse is an error and never a walk on to the next reader: a document with one
+    missing brace would otherwise reach the chain reader, which would answer `"version" is not an
+    issue number`, and that message names the wrong problem.
+  - Three things are refused, and each of them exits `2`. A `version` that is not `1` stops the
+    run and names the version it read beside the version `wn` knows, because a consumer that
+    guesses at a schema it does not know answers with the wrong plan. A document that is not the
+    schema — a missing `streams`, a stream with no `order`, a step with no `issue`, a number that
+    is not a number — names the path in the document, so `streams[1].order[0].issue` says where to
+    look. A cycle names the numbers that hold the knot, as it does for a picture and for a `Waits
+    for` column. A `waitsFor` that names a step of its own stream is refused by none of those: it
+    is an edge `order` already carries.
+  - An empty `streams` array is a plan with no work in it, and that is not an error. The answer
+    reads `The plan holds no work. Nothing to start.` and the run exits `0`, and it asks GitHub
+    nothing at all. Every other JSON plan earns the report a picture earns: one row for each step
+    in the order of the work, `→` on every ready step and `·` on a blocked one, the work each
+    blocked row waits for, and one start line for each issue somebody can begin now. A JSON plan
+    is a graph, a table with a `Waits for` column is the same graph, and one report answers both,
+    because two reports of one question drift apart.
   - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard), `wn "#230 → #315"`,
-    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole plan, or a plan drawn
-    as a picture), `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
+    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole plan, a plan drawn
+    as a picture, or a plan written as JSON),
+    `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 
 ## dirhash
