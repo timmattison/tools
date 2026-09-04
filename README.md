@@ -148,10 +148,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       over a WebSocket it signs itself. The messages go to standard output and every other line goes to standard
       error, so `subito 'sensors/#' | jq` reads the messages and nothing else. It waits for the broker to answer
       each subscription, so a topic the policy denies says `Subscription refused` on standard error instead of
-      staying silent. A payload that is not printable text prints as a hex dump, and so does the topic that carried
-      it, so a stray escape sequence cannot change your terminal. A topic also prints as a hex dump when it holds a
-      line feed, because a publisher that sends one would otherwise write a whole message of its own into the
-      messages. A connection that drops comes back, with a fresh signature and a wait that doubles up to thirty
+      staying silent. A payload that is not printable text prints as a hex dump, so a stray escape sequence cannot
+      change your terminal. The tool holds a topic to the same rule on its own. The rule for a topic is stricter
+      still, because the tool prints a topic on a line of its own. A topic that holds a tab, a line feed or a
+      carriage return also prints as a hex dump. A publisher therefore cannot write a whole message of its own into
+      the messages. A connection that drops comes back, with a fresh signature and a wait that doubles up to thirty
       seconds. `Ctrl-C` stops the tool at once at every step of that cycle — while it reads credentials and signs a
       URL, while a session runs, and while it waits before the next attempt — and it sends a DISCONNECT for a
       session that is open, then exits 0.
