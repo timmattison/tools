@@ -264,8 +264,9 @@ fn graph_of(text: &str) -> Result<Graph, JsonError> {
         .enumerate()
         .map(|(place, stream)| read_stream(stream, &at.at(place)))
         .collect::<Result<_, _>>()?;
-    name_the_work(&mut streams);
-    Ok(of_parts(nodes_of(&streams), &edges_of(&streams))?)
+    let work = work_of(&streams);
+    name_the_work(&mut streams, &work);
+    Ok(of_parts(nodes_of(&streams, &work), &edges_of(&streams))?)
 }
 
 /// The steps of one stream, in the order its `order` array writes them.
@@ -336,29 +337,35 @@ fn read_step(value: &Value, at: &Path) -> Result<Reading, JsonError> {
     Ok(Reading { step, waits_for })
 }
 
-/// The number of the work of every number the plan names.
+/// The step that does the work of every number the plan names.
 ///
 /// A step names its own number. A pair names one number more: the issue its
 /// pull request closes. Both numbers reach one piece of work, so both give the
-/// number of that step — the pull request of a pair, and the issue of a step
-/// that stands alone. A number no step names stands in the map nowhere.
+/// step of that work — the pair of a pull request, and the lone step of an
+/// issue nothing closes. A number no step names stands in the map nowhere.
 ///
-/// A number one step carries as its own work and another step closes gives
-/// itself. The work a document names directly is the work. The map is then the
-/// same map however the streams of that document stand, and a rule that took
-/// the first stream would answer two orders of one plan two ways. Among pairs
-/// that close one issue, the first pair the document writes owns it, which is
-/// the rule [`nodes_of`] holds for a number that stands in two places.
-fn work_of(streams: &[Vec<Reading>]) -> BTreeMap<IssueNumber, IssueNumber> {
+/// One walk gives the number and the step together, because a reader of the
+/// map wants either one. [`name_the_work`] takes the number, to rewrite a
+/// `waitsFor`. [`nodes_of`] takes the step, so a blocker reaches the rows as
+/// the work the document wrote and never as a thinner copy of it.
+///
+/// A number one step carries as its own work and another step closes gives the
+/// step that carries it. The work a document names directly is the work. The
+/// map is then the same map however the streams of that document stand, and a
+/// rule that took the first stream would answer two orders of one plan two
+/// ways. Among steps that name one number, and among pairs that close one
+/// issue, the first the document writes owns it, which is the rule [`nodes_of`]
+/// holds for a number that stands in two places.
+fn work_of(streams: &[Vec<Reading>]) -> BTreeMap<IssueNumber, Step> {
     let steps = || streams.iter().flatten().map(|reading| reading.step);
-    let mut work: BTreeMap<IssueNumber, IssueNumber> = BTreeMap::new();
+    let mut work: BTreeMap<IssueNumber, Step> = BTreeMap::new();
     for step in steps() {
-        if let Some(closes) = step.closes() {
-            work.entry(closes).or_insert_with(|| step.number());
-        }
+        work.entry(step.number()).or_insert(step);
     }
     for step in steps() {
-        work.insert(step.number(), step.number());
+        if let Some(closes) = step.closes() {
+            work.entry(closes).or_insert(step);
+        }
     }
     work
 }
@@ -370,15 +377,14 @@ fn work_of(streams: &[Vec<Reading>]) -> BTreeMap<IssueNumber, IssueNumber> {
 /// writes the issue of it, and this is where that number becomes the pull
 /// request that does the work.
 ///
-/// One walk owns the rule, so [`nodes_of`] and [`edges_of`] both read numbers
+/// One map owns the rule, so [`nodes_of`] and [`edges_of`] both read numbers
 /// that name work. A number no step of the plan names is left as it stands,
 /// and it reaches the rows as a blocker the repository does not have.
-fn name_the_work(streams: &mut [Vec<Reading>]) {
-    let work = work_of(streams);
+fn name_the_work(streams: &mut [Vec<Reading>], work: &BTreeMap<IssueNumber, Step>) {
     for reading in streams.iter_mut().flatten() {
         for blocker in &mut reading.waits_for {
-            if let Some(&carries) = work.get(blocker) {
-                *blocker = carries;
+            if let Some(carries) = work.get(blocker) {
+                *blocker = carries.number();
             }
         }
     }
@@ -394,18 +400,30 @@ fn name_the_work(streams: &mut [Vec<Reading>]) {
 /// where the step first appears. [`crate::graph::of_plan`] states the same
 /// rule for a table, because a node is a node whichever form named it.
 ///
+/// A blocker carries the step `work` holds for its number, so a `waitsFor` that
+/// names the work of a pair reaches the rows as that pair. The step of a
+/// blocker is the step of the document, whichever stream stands first: a
+/// stream that waits builds no thinner copy of work another stream writes in
+/// full. A `Waits for` cell of a table writes the pair itself, and one report
+/// answers every form of a plan.
+///
 /// A number a `waitsFor` names and no step of the plan names is a node all the
-/// same. A blocker the repository does not have must reach the rows and turn
-/// the run red, and a row of the answer is the only place that says so. The
-/// issue of a pair is a number a step names, because [`name_the_work`] gave
-/// that `waitsFor` the number of the pull request before this walk.
-fn nodes_of(streams: &[Vec<Reading>]) -> Vec<Step> {
+/// same, and it carries the number alone. A blocker the repository does not
+/// have must reach the rows and turn the run red, and a row of the answer is
+/// the only place that says so. The issue of a pair is a number a step names,
+/// because [`name_the_work`] gave that `waitsFor` the number of the pull
+/// request before this walk.
+fn nodes_of(streams: &[Vec<Reading>], work: &BTreeMap<IssueNumber, Step>) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
     for stream in streams {
         let blockers = stream
             .iter()
             .flat_map(|reading| &reading.waits_for)
-            .map(|&number| Step::new(number, None));
+            .map(|&number| {
+                work.get(&number)
+                    .copied()
+                    .unwrap_or_else(|| Step::new(number, None))
+            });
         for step in stream.iter().map(|reading| reading.step).chain(blockers) {
             if !steps.iter().any(|held| held.number() == step.number()) {
                 steps.push(step);
