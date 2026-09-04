@@ -503,18 +503,31 @@ impl Scratch {
         // wrong.
         let conflicted = git.nul_separated_paths("diff", &["--name-only", "--diff-filter=U"])?;
 
-        if !conflicted.is_empty() {
-            // Once, whatever the merge left behind. A merge makes one
-            // three-way merge and stops at it, so the stop count is one for
-            // every conflicted merge and carries no information beyond
-            // "conflicted". The rebase replay increments the same counter once
-            // per halt, which is where the number does say something.
-            cost.stops.increment();
+        // A merge git would not perform leaves no unmerged path, and it is
+        // neither of the two verdicts. "refusing to merge unrelated histories"
+        // is the plain case, and a branch name that resolves to nothing is the
+        // other. Neither one is work a person could sit down and resolve, so
+        // neither is a conflict; and neither one is a merge that went through,
+        // so neither is clean. Only an error says what happened. Git's own two
+        // streams travel with it, because they hold the sentence that says
+        // which refusal this was.
+        anyhow::ensure!(
+            !conflicted.is_empty(),
+            "the merge failed and left nothing to resolve:\n{}\n{}",
+            outcome.stdout,
+            outcome.stderr
+        );
 
-            for file in conflicted {
-                let hunks = count_conflict_hunks(&worktree.join(&file))?;
-                cost.add_file(file, hunks);
-            }
+        // Once, whatever the merge left behind. A merge makes one three-way
+        // merge and stops at it, so the stop count is one for every conflicted
+        // merge and carries no information beyond "conflicted". The rebase
+        // replay increments the same counter once per halt, which is where the
+        // number does say something.
+        cost.stops.increment();
+
+        for file in conflicted {
+            let hunks = count_conflict_hunks(&worktree.join(&file))?;
+            cost.add_file(file, hunks);
         }
 
         Ok(cost)
