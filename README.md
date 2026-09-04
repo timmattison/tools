@@ -72,7 +72,6 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - prcp
     - Copies files with a beautiful progress bar using Unicode block characters. Supports wildcards, multi-file copy,
       and move mode (`--rm`) that verifies SHA256 before removing source. Press space to pause/resume, Ctrl+C to cancel.
-      Run `prcp --shell-setup` to add a `prmv` command for convenient moves.
     - To install: `cargo install --git https://github.com/timmattison/tools prcp`
 - prgz
     - Similar to `prcp` but instead of copying a file it gzip compresses it. It draws the same one-line progress bar
@@ -149,8 +148,22 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - subito
     - Subscribes to a list of topics on AWS IoT Core and prints out the messages it receives. This is useful for
       debugging and testing. I was going to call it `subiot` but `subito` actually means "immediately" in Italian and
-      I thought that was cooler. Just run `subito topic1 topic2 topic3 ...` and you'll see the messages.
-    - To install: `go install github.com/timmattison/tools/cmd/subito@latest`
+      I thought that was cooler. Just run `subito topic1 topic2 topic3 ...` and you'll see the messages. It takes the
+      credentials and the region from the ambient AWS configuration, the same chain the AWS CLI reads, and connects
+      over a WebSocket it signs itself. The messages go to standard output and every other line goes to standard
+      error, so `subito 'sensors/#' | jq` reads the messages and nothing else. It waits for the broker to answer
+      each subscription, so a topic the policy denies says `Subscription refused` on standard error instead of
+      staying silent. A payload that is not printable text prints as a hex dump, so a stray escape sequence cannot
+      change your terminal. A topic goes through the printer on its own, under a stricter rule, because the tool
+      prints a topic on a line of its own. A topic that holds a tab, a line feed or a carriage return also prints as
+      a hex dump. A publisher therefore cannot write a whole message of its own with the topic. A connection that
+      drops comes back, with a fresh signature and a wait that doubles up to thirty seconds. `Ctrl-C` stops the tool
+      at once at every step of that cycle — while it reads credentials and signs a URL, while a session runs, and
+      while it waits before the next attempt — and it sends a DISCONNECT for a session that is open, then exits 0.
+        - `--qos <0|1|2>` sets the quality of service of each subscription. The default is 0.
+        - `--endpoint <host>` names the AWS IoT data endpoint and skips the `DescribeEndpoint` call.
+        - `--json` prints a payload that holds JSON with indentation.
+    - To install: `cargo install --git https://github.com/timmattison/tools subito`
 - portplz
     - Generates an unprivileged port number based on the name of the current directory, the git branch, and the current
       user. Mixing in the user lets two people run the same branch of the same repo at the same time without colliding.
@@ -1389,13 +1402,20 @@ Copy files with a beautiful progress bar: `prcp <source>... <destination>`
 - `--continue-on-error` to keep going if some files fail
 - `-y` to skip confirmation prompts
 
-**Shell Integration:**
+**Want a `prmv` shorthand?**
 
-Run `prcp --shell-setup` to add a `prmv` function to your shell config. This provides a convenient move command:
+`prcp` installs nothing into your shell config. `prcp --rm` is the whole move
+command, and a shorthand for it is yours to define:
 
 ```bash
-prmv file.txt destination/   # Same as: prcp --rm file.txt destination/
+alias prmv='prcp --rm'       # add this to your ~/.zshrc or ~/.bashrc
+prmv file.txt destination/   # same as: prcp --rm file.txt destination/
 ```
+
+Earlier versions of `prcp` had a `--shell-setup` flag that wrote that function
+for you. The flag is gone. A `prmv` function it already wrote keeps working,
+because `prcp --rm` is unchanged, and you can replace it with the alias above
+whenever you like.
 
 ## prhash
 

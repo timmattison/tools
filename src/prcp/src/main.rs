@@ -13,7 +13,6 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar};
-use shellsetup::ShellIntegration;
 use termbar::{ProgressStyleBuilder, TerminalWidthWatcher};
 // Blake3 imported via blake3 crate (no Digest trait needed)
 use std::fs::{self, File};
@@ -172,12 +171,6 @@ struct Args {
     #[arg(num_args = 0..)]
     paths: Vec<PathBuf>,
 
-    /// Add shell integration to your shell config. Adds these commands:
-    ///
-    ///   prmv <src...> <dst>  - Copy with progress, remove sources after verification
-    #[arg(long, verbatim_doc_comment)]
-    shell_setup: bool,
-
     /// Remove source files after successful copy (verified by Blake3 hash)
     #[arg(long, short = 'r')]
     rm: bool,
@@ -217,26 +210,6 @@ struct Args {
     /// Suppress per-file status messages (only show progress bar)
     #[arg(long, short = 'q')]
     quiet: bool,
-}
-
-/// The shell code to add to shell config files.
-const SHELL_CODE: &str = r#"
-function prmv() {
-    prcp --rm "$@"
-}
-"#;
-
-/// Sets up shell integration by adding the prmv function to the user's shell config.
-fn setup_shell_integration() -> Result<()> {
-    let integration = ShellIntegration::new("prcp", "Progress Copy", SHELL_CODE)
-        .with_command(
-            "prmv",
-            "Copy files with progress, removing sources after verification",
-        )
-        // Old installations ended with this line (before end marker was added)
-        .with_old_end_marker(r#"prcp --rm "$@""#);
-    // Use ? operator to convert ShellSetupError -> anyhow::Error, preserving the error chain
-    Ok(integration.setup()?)
 }
 
 /// Minimum allowed buffer size (4KB)
@@ -417,11 +390,6 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-
-    // Handle shell setup (doesn't require sources/destination)
-    if args.shell_setup {
-        return setup_shell_integration();
-    }
 
     // Validate flag combinations
     if args.rm && args.no_verify {

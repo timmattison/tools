@@ -19,7 +19,7 @@ If the tool does **not** need to mutate the parent shell, **do not add `--shell-
 2. **A subcommand or second binary** for the variant behavior.
 3. **Documentation** telling users to add their own `alias` if they want a shorthand. A convenience alias is the user's choice to make, not something we install into their rc file.
 
-A shell function that merely forwards arguments to the binary (`function prmv() { prcp --rm "$@"; }`) is **cosmetic, not load-bearing** — it adds no capability the binary lacks. That is not a sufficient reason to touch the user's shell config.
+A shell function that merely forwards arguments to the binary (`function prmv() { prcp --rm "$@"; }`) is **cosmetic, not load-bearing** — it adds no capability the binary lacks. That is not a sufficient reason to touch the user's shell config. `prcp` shipped exactly that function and lost it in #265: `prcp --rm` is the interface, and a user who wants the shorthand writes `alias prmv='prcp --rm'`.
 
 ### Why
 
@@ -69,14 +69,13 @@ fn setup_shell_integration() -> Result<()> {
 - **Exactly one `##template*` alternate** (e.g. `~/.zshrc##template.default`) → writes the integration block to the **template** instead of the rendered file, and prints `yadm alt` re-render instructions. This prevents the block from being silently discarded on the next render.
 - **Multiple templates, or a non-template alternate** (`##os.Darwin`, `##class.work`, …) → refuses with `ShellSetupError::YadmAmbiguousConfig`, listing the candidates and the block to add by hand. Choosing the right alternate requires yadm's class/OS rules, which the library does not evaluate.
 
-This logic is centralized in `resolve_config_target`, so every consumer (`crap`, `cwt`, `prcp`) benefits without code changes.
+This logic is centralized in `resolve_config_target`, so every consumer (`crap`, `cwt`, `nwt`) benefits without code changes.
 
 ### Tools Currently Using shellsetup
 
 - `cwt` - Change Worktree (provides `wt`, `wtf`, `wtb`, `wtm` commands)
 - `nwt` - New Worktree (provides the worktree-creation cd function)
 - `crap` - Claude, Resume Anywhere Please (provides the `crap` cd-and-resume function)
-- `prcp` - Progress Copy (provides `prmv` command) — **slated for removal**, see issue #265; this is cosmetic shell integration, not load-bearing
 
 ## Progress Bar Display
 
@@ -295,7 +294,7 @@ func main() {
 
 ```bash
 ./scripts/build-go.sh           # Build all Go tools
-./scripts/build-go.sh subito symfix  # Build specific tools
+./scripts/build-go.sh symfix  # Build specific tools
 ```
 
 The build script reads the version from the `VERSION` file at the repository root.
@@ -307,7 +306,6 @@ All Rust tools use buildinfo for version information.
 ### Tools Currently Using internal/version
 
 All Go tools use internal/version:
-- `subito` - AWS IoT Subscriber
 - `symfix` - Symlink Fix
 
 ## Lint Configuration
