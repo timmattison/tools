@@ -22,12 +22,26 @@
     reason = "each unwrap and expect here acts on the temporary directory the test just made, or on the spawn of the freshly built binary. A failure of either is a broken harness, not the behavior under test"
 )]
 
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+#[cfg(unix)]
+use std::panic;
+use std::path::Path;
+#[cfg(unix)]
+use std::process::ExitStatus;
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
 /// The shell config files `shellsetup` writes, named relative to the home
 /// directory.
 const SHELL_CONFIG_FILES: [&str; 3] = [".zshrc", ".bashrc", ".bash_profile"];
+
+/// The raw wait status of a process that exited with the code 1.
+///
+/// [`ExitStatusExt::from_raw`] takes the wait status `waitpid` reports, and
+/// that status holds the exit code in the high byte of its low 16 bits.
+#[cfg(unix)]
+const EXIT_CODE_ONE_WAIT_STATUS: i32 = 1 << 8;
 
 /// Run the freshly built `prcp` binary against a home directory of its own.
 ///
@@ -53,18 +67,26 @@ fn visible_output(output: &Output) -> String {
     testcolor::strip_ansi(&text)
 }
 
-#[test]
-fn shell_setup_flag_is_rejected() {
-    let (output, home) = run_with_isolated_home(&["--shell-setup"]);
-
+/// Assert that a run of `prcp --shell-setup` rejected the flag and wrote no
+/// shell config.
+///
+/// `output` holds the result of that run, and `home` names the home directory
+/// the run got. The assertions live in a function of their own, apart from the
+/// run, so a test feeds them a result the binary never made.
+///
+/// # Panics
+///
+/// Panics when the run accepted the flag, or when the run left a shell config
+/// behind.
+fn assert_shell_setup_rejected(output: &Output, home: &Path) {
     assert!(
         !output.status.success(),
         "prcp must reject --shell-setup, but the run succeeded:\n{}",
-        visible_output(&output)
+        visible_output(output)
     );
 
     for name in SHELL_CONFIG_FILES {
-        let path = home.path().join(name);
+        let path = home.join(name);
         assert!(
             !path.exists(),
             "prcp wrote the shell config {}. It must write no shell config at all",
@@ -73,11 +95,17 @@ fn shell_setup_flag_is_rejected() {
     }
 }
 
-#[test]
-fn help_offers_no_shell_integration() {
-    let (output, _home) = run_with_isolated_home(&["--help"]);
-    let help = visible_output(&output);
-
+/// Assert that the help of `prcp` offers no shell integration.
+///
+/// `help` holds the visible glyphs of a run of `prcp --help`. The assertions
+/// live in a function of their own, apart from the run, so a test feeds them a
+/// text the binary never wrote.
+///
+/// # Panics
+///
+/// Panics when the help still offers the flag, or when it still names the
+/// function that flag installed.
+fn assert_help_offers_no_shell_integration(help: &str) {
     assert!(
         !help.contains("--shell-setup"),
         "the help of prcp still offers --shell-setup:\n{help}"
@@ -85,5 +113,59 @@ fn help_offers_no_shell_integration() {
     assert!(
         !help.contains("prmv"),
         "the help of prcp still names prmv:\n{help}"
+    );
+}
+
+#[test]
+fn shell_setup_flag_is_rejected() {
+    let (output, home) = run_with_isolated_home(&["--shell-setup"]);
+
+    assert_shell_setup_rejected(&output, home.path());
+}
+
+#[test]
+fn help_offers_no_shell_integration() {
+    let (output, _home) = run_with_isolated_home(&["--help"]);
+
+    assert_help_offers_no_shell_integration(&visible_output(&output));
+}
+
+/// The two assertion functions must reject a `prcp` that says nothing.
+///
+/// A `prcp` that fails to start exits non-zero, writes nothing, and thus writes
+/// no shell config either. Every absence assertion above holds for such a run,
+/// so a guard built out of absences alone reports the removal of the shell
+/// integration as verified while it verifies nothing. This test builds that
+/// silent stand-in and asserts that each assertion function panics on it.
+///
+/// The default panic hook stays in place through the two calls. That hook is
+/// process-global, and `cargo test` runs the tests of one binary on many
+/// threads, so a hook that prints nothing also hides the message of a sibling
+/// test that fails at the same time. `cargo test` captures the output of each
+/// test and prints it only for a test that fails, so the two panics of a run
+/// that passes stay out of sight. A run with `--nocapture` prints them.
+///
+/// Unix only: [`ExitStatusExt::from_raw`] builds an [`ExitStatus`] out of a raw
+/// wait status, and that is a unix extension.
+#[cfg(unix)]
+#[test]
+fn the_assertions_reject_a_binary_that_says_nothing() {
+    let home = tempfile::tempdir().expect("the test makes a temporary home directory");
+    let silent = Output {
+        status: ExitStatus::from_raw(EXIT_CODE_ONE_WAIT_STATUS),
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+
+    let flag_verdict = panic::catch_unwind(|| assert_shell_setup_rejected(&silent, home.path()));
+    let help_verdict = panic::catch_unwind(|| assert_help_offers_no_shell_integration(""));
+
+    assert!(
+        flag_verdict.is_err(),
+        "assert_shell_setup_rejected accepted a prcp that exited 1 and wrote nothing. It needs an assertion that only a run of the real binary satisfies"
+    );
+    assert!(
+        help_verdict.is_err(),
+        "assert_help_offers_no_shell_integration accepted an empty help. It needs an assertion that only the real help satisfies"
     );
 }
