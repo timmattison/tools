@@ -199,14 +199,6 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use clap::CommandFactory;
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-
-    /// A byte that begins no UTF-8 sequence.
-    ///
-    /// A symlink target that holds it is a target a Unix kernel accepts and a
-    /// Rust string cannot hold.
-    const NOT_TEXT: u8 = 0x80;
 
     #[test]
     fn the_command_line_is_well_formed() {
@@ -227,6 +219,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_prepend_value_that_is_not_text_reaches_the_run_whole() {
+        // These three live here, and not beside the other imports of the
+        // module, because `std::os::unix` is absent where the tool builds for
+        // another platform. The test itself is the one thing that needs them,
+        // so the `cfg` it already carries is the only one this needs.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // A byte that begins no UTF-8 sequence. A symlink target that holds it
+        // is a target a Unix kernel accepts and a Rust string cannot hold.
+        const NOT_TEXT: u8 = 0x80;
+
         // This is why the value is an `OsString`. A target that is not UTF-8 is
         // exactly the target whose repair nothing else can do, and a `String`
         // here would refuse to carry the prefix that repairs it.
