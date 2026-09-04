@@ -374,7 +374,15 @@ pub enum BuildError {
     /// warning rather than a crash. So a run in such a directory spends a
     /// minute and real money and then answers that the plan holds no work.
     /// The refusal stands before the run, where it costs one cheap call.
-    #[error("{said}")]
+    ///
+    /// It names which of the two repositories failed. `--repo` names the
+    /// repository `wn` asks about and never the one a run plans, and the
+    /// reader of this message has often passed it already.
+    #[error(
+        "a plan is built for the repository of this directory, and gh can name none for it. \
+         Run wn inside a checkout — --repo names the repository wn asks about and never the one \
+         a run plans.\n{said}"
+    )]
     NoRepository {
         /// What said the directory is in no repository.
         said: String,
