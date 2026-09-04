@@ -1,0 +1,29 @@
+[package]
+name = "grime"
+version = "0.1.0"
+edition.workspace = true
+# Not the sentence the doc comment on `Args` carries, and the difference is
+# deliberate. This one is read on crates.io and in `cargo search`, by somebody
+# who has run nothing, so `BRANCH` names nothing to them. The doc comment is
+# what `--help` prints, where `BRANCH` is the argument the reader just typed.
+description = "Reports whether merging a branch into HEAD would conflict, and by how much"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+gitscratch.workspace = true
+# The one entrance to the width of a terminal, and the one place that decides
+# between the two sources of it. A width the environment states in `COLUMNS`
+# wins, and the controlling terminal answers when the environment states none.
+# A terminal that carries no window answers the `TIOCGWINSZ` ioctl with zero
+# columns and the ioctl succeeds, so a caller that reads the raw answer lays the
+# breakdown out at no columns at all. `TerminalWidth::get_or_default` is where
+# that answer is refused and the fallback of 80 columns stands instead.
+termbar.workspace = true
+
+[dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true
