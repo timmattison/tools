@@ -181,16 +181,21 @@ fn refuses_to_report_a_cost_when_a_clean_pick_could_not_be_committed() {
 /// answer backwards instead of not answering at all.
 ///
 /// The probe asks git which paths the stopped commit touched and then asks
-/// whether the new base already holds that commit's content *at those paths*, so
-/// the paths make a round trip: out of one invocation as output, back into the
-/// next as pathspecs. Git does not spell a path the same way in both directions.
-/// It C-quotes a non-ASCII name into `"caf\303\251.txt"` when it prints one per
-/// line, and a leading space survives git only to be eaten by anything that
-/// trims the line — and it dequotes neither on the way back in. A pathspec that
-/// no longer names the file matches nothing, so a commit whose work is nowhere
-/// in the new base reads as a commit that adds nothing to it — and the replay
-/// reaches for `rebase --skip`, which is how the work gets thrown away and a
-/// cost of zero gets reported for a branch that was never replayed.
+/// whether the new base already holds that commit's content at those paths. Git
+/// does not spell a path the same way in every direction. It C-quotes a
+/// non-ASCII name into `"caf\303\251.txt"` when it prints one per line, and a
+/// leading space survives git only to be eaten by anything that trims the line.
+/// A probe that reads either spelling reasons about a file nobody has, and a
+/// commit whose work is nowhere in the new base reads as a commit that adds
+/// nothing to it — after which the replay reaches for `rebase --skip`, which is
+/// how the work gets thrown away and a cost of zero gets reported for a branch
+/// that was never replayed.
+///
+/// The probe used to hand those paths back to git as pathspecs, where a mangled
+/// spelling matched nothing; it now intersects two path lists in Rust, so both
+/// lists carry any mangling equally and the intersection holds. That closes one
+/// route to the wrong answer and leaves this test pinning the answer itself: the
+/// classification, and the names the refusal shows a developer.
 ///
 /// So the assertions below are about the *classification*, not merely about
 /// getting an error out. A sealed object database happens to refuse the skip too,
@@ -254,8 +259,8 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_commi
     // Both names, in the spelling the developer gave them. Whatever the replay
     // shows a human has to be findable in their own repository, and the C-quoted
     // form is not that - it is the artefact of having read git's output the wrong
-    // way, so seeing it here would mean the round trip is still broken and the
-    // refusal above happened for some other reason.
+    // way, so seeing it here means the reader is broken and the refusal above
+    // happened for some other reason.
     assert!(
         error.contains("café.txt"),
         "the error should name the quoted file whose change would have been lost, as it is \
@@ -281,18 +286,18 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_commi
     );
 }
 
-/// The same clean-pick failure a third time, in the half of the round trip the
-/// test above cannot reach: the way back in.
+/// The same clean-pick failure a third time, in the shape a probe that hands
+/// paths back to git reads as an answer about another file entirely.
 ///
-/// That test is about names git will not hand back verbatim. This one is about a
-/// name it hands back perfectly and then refuses to read back the same way,
-/// because the path leaving git is a path and the pathspec going in is not one.
-/// `:/foo.txt` — a `foo.txt` in a directory literally named `:` — is plain
-/// ASCII, so it survives git's output untouched; as a pathspec its leading `:/`
-/// is magic meaning *from the top of the working tree*, and it quietly names the
-/// root `foo.txt` instead. The fixture keeps an untouched `foo.txt` at the root
-/// for it to name, so the probe's diff comes back empty: a true answer about a
-/// file nobody asked about.
+/// The test above is about names git will not hand back verbatim. This one is
+/// about a name it hands back perfectly and a caller that reads back
+/// differently, because the path leaving git is a path and a pathspec going in
+/// is not one. `:/foo.txt` — a `foo.txt` in a directory literally named `:` — is
+/// plain ASCII, so it survives git's output untouched; as a pathspec its leading
+/// `:/` is magic meaning *from the top of the working tree*, and it quietly
+/// names the root `foo.txt` instead. The fixture keeps an untouched `foo.txt` at
+/// the root for it to name, so a probe built that way gets an empty diff back: a
+/// true answer about a file nobody asked about.
 ///
 /// Which is why this shape is the more dangerous of the two and gets pinned
 /// separately. A mangled pathspec matching nothing can only *add* to the paths a
@@ -300,10 +305,13 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_commi
 /// needed. A pathspec matching the wrong file *removes* them — here down to
 /// none — and no paths missing is the halt reading as a commit that adds nothing
 /// to the new base, which is `rebase --skip`, which is the work gone and a cost
-/// of zero reported for a branch that was never replayed. So the assertions
-/// below are about the classification: not that something went wrong, but that
-/// the commit was never called empty and that the path whose work was at stake
-/// is named as the developer spelled it.
+/// of zero reported for a branch that was never replayed.
+///
+/// The probe builds no pathspec today: it intersects the two path lists in Rust,
+/// so this name cannot resolve to anything but itself. What the test keeps is
+/// the answer, asserted end to end — a commit that adds a file the new base has
+/// never seen is never called empty, and the path whose work was at stake is
+/// named as the developer spelled it.
 #[test]
 fn refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not_be_committed() {
     let repo = branches_behind_main_with_a_pathspec_magic_path_repo();

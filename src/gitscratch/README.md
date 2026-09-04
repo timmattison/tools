@@ -230,6 +230,16 @@ state does not:
    path where both sides already agree the merge changes nothing, while a path
    `C` never touched cannot change either.
 
+   That probe takes two path lists from git and intersects them here, rather
+   than handing the first list back as a pathspec: one argv cannot hold every
+   path of a vendored-dependency drop, and a name read back in is a pathspec
+   rather than a path. Both of its invocations carry `--ignore-submodules=none`,
+   because one of them is plumbing and the other is porcelain, and the porcelain
+   one reads `diff.ignoreSubmodules` out of the developer's own configuration.
+   Under `diff.ignoreSubmodules=all` a commit that moves a submodule pointer and
+   touches nothing else is a path to one command and nothing to the other, which
+   reads as a commit that adds nothing to the new base.
+
 A refused `git rebase --skip` fails the replay immediately, carrying git's own
 message, rather than being re-issued until the round limit runs out.
 
@@ -251,7 +261,7 @@ because it quietly discarded the work.
 | `gpg.format=openpgp` | Belt to `commit.gpgsign`'s braces. `gpg.format = ssh` is a different signing backend entirely, with its own key and helper program; pinning the format back to git's default means that configuration is never consulted, so signing cannot be attempted through it. |
 | `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. |
 | `rebase.autoStash=false`, `rebase.autosquash=false` | The replay must be the operation as written, not a rewritten variant of it. |
-| `-z` on the way out, `--literal-pathspecs` on the way in | A path read out of one invocation goes straight back into the next as a pathspec, and a pathspec is not a path: a leading `:` is magic, `*`, `?` and `[` are wildcards, and git C-quotes a non-ASCII name on the way out while dequoting nothing on the way back in. `-z` turns the escaping off; `--literal-pathspecs` turns the magic off. A pathspec that matches *nothing* is the mild half — it can only add to the paths a probe finds missing, and that only ever buys a refusal nobody needed. The half worth the guard is one that matches the *wrong* file: `:/foo.txt` read as magic means from the top of the working tree, so it silently answers about the root `foo.txt`, and if that one is unchanged the diff comes back empty. An empty diff reads as a commit that adds nothing to the new base, which is a `rebase --skip`, which is the work gone and a cost of zero reported for a branch that was never replayed. |
+| `-z` on the way out, `--literal-pathspecs` on the way in | Git C-quotes a non-ASCII name whenever it prints a path on a line, and a name that begins or ends with whitespace survives git only to lose that whitespace to a trimming reader. `-z` turns the escaping off and separates on the one byte a path cannot contain, so a path comes back as the bytes it is stored under. `--literal-pathspecs` covers the other direction, where a path handed back to git stops being a path and becomes a pathspec: a leading `:` is magic, and `*`, `?` and `[` are wildcards. A pathspec that matches *nothing* is the mild half — it can only add to the paths a probe finds missing, and that only ever buys a refusal nobody needed. The half worth the guard is one that matches the *wrong* file: `:/foo.txt` read as magic means from the top of the working tree, so it silently answers about the root `foo.txt`. No call site in this crate hands a path back to git today — the empty-commit probe intersects two path lists in Rust instead — so the pin protects the next call site that does, at the cost of one argument on the single door every git call goes through. |
 | `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. The config half settles nothing on its own: an identity variable outranks every config source, `-c` included, which is why the row above sheds the whole inherited environment first. |
 | `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job (above); this narrows what a call site that reaches around it can get wrong. |
 
@@ -328,12 +338,16 @@ that hides the breakage, which is why the two guards cannot be left to police
 their own filters. **The UTF-8
 refusal in `Git::paths`** —
 `refuses_a_path_that_is_not_valid_utf_8_rather_than_replacing_the_byte` — covers
-the one loss the `-z` round trip cannot undo: a byte that is not UTF-8 has no
-`String` to come back *as*, and repairing it into U+FFFD would hand back a name
-no file has, which is a pathspec matching nothing, which is how a commit gets
-called empty and skipped. macOS will not let a working tree hold such a name at
-all, so the commit is built directly in the object database and the guard is
-pinned here rather than end-to-end.
+the one loss `-z` cannot undo: a byte that is not UTF-8 has no `String` to come
+back *as*, and repairing it into U+FFFD hands back a name no file has — a path
+the developer cannot find in their own repository, and a file nothing can open,
+which in this crate floors a conflicted file at one hunk and undercounts the
+work behind a plausible total. The classification is safe from this one, and the
+distinction is worth keeping straight: the empty-commit probe reads both of its
+path lists through `Git::paths`, so a lossy decode mangles the two lists the
+same way and their intersection is unchanged. macOS will not let a working tree
+hold such a name at all, so the commit is built directly in the object database
+and the guard is pinned here rather than end-to-end.
 
 **The refusal of a revision that names no commit** is pinned by
 `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back`. Plain
@@ -405,7 +419,11 @@ for a main option like `--literal-pathspecs`. So the inventory is checked, not
 merely maintained: a guard added to the configuration and forgotten here fails
 the build instead of leaving a reader with a table they will reasonably take for
 the complete list. `--literal-pathspecs` is why the test exists — it was
-load-bearing in `safety_config` for a while before it was ever a row.
+load-bearing in `safety_config` for a while before it was ever a row. It now
+makes the case for this check from the other side as well: the empty-commit
+probe stopped handing paths back to git, so no test in the workspace goes red
+when the pin is removed, and a guard whose own test has gone quiet still has to
+be a row.
 
 More of them pin the *scope* those checks read, since a check pointed at the
 wrong span of the file reports clean without ever having seen the table.
@@ -471,17 +489,37 @@ making the object database unwritable, which is the only cause of a failed
 commit write still reachable through the harness once signing, hooks and the
 editor are pinned off. It is Unix-only for that reason.
 
-Two of those clean picks are there for the path round trip specifically, one per
-direction, and both assert the *classification* rather than merely that
-something failed — the commit must never be called empty.
+Three of those clean picks are there for what the probe reads a path *as*, and
+every one of them asserts the *classification* rather than merely that something
+failed — the commit must never be called empty.
 `refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_committed`
-is the way out: a commit touching nothing but a `café.txt` and a name with a
-leading space, the two spellings a line-oriented read mangles, with no
+is the spelling git prints: a commit touching nothing but a `café.txt` and a name
+with a leading space, the two spellings a line-oriented read mangles, with no
 plainly-spelled file alongside to carry the refusal on its own.
 `refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not_be_committed`
-is the way back in: a `foo.txt` inside a directory literally named `:`, with an
-untouched `foo.txt` at the root for the magic spelling to answer about instead,
-so the probe's diff comes back empty — a true answer to a question nobody asked.
+is the spelling a pathspec reads back: a `foo.txt` inside a directory literally
+named `:`, with an untouched `foo.txt` at the root for the magic spelling to
+answer about instead, so a probe built out of pathspecs gets an empty diff back —
+a true answer to a question nobody asked.
+`refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed`
+is the path git declines to print at all: a commit that moves a submodule pointer
+and touches nothing else, in a fixture that sets `diff.ignoreSubmodules=all` in
+its own configuration. `diff-tree` is plumbing and reports the submodule;
+`git diff` is porcelain and reads that key, so it reports nothing. One tree, two
+sets of rules, and the answer that comes out of them is "this commit adds
+nothing". Both invocations now ask for `--ignore-submodules=none`, and the test
+carries an armed control proving the setting really does hide the pointer from
+the porcelain, so a git that stopped honouring it fails the test rather than
+quietly emptying it.
+
+The first two of those were written when the probe handed its paths back to git
+as pathspecs, and that round trip is gone — `missing` is now the intersection of
+the two path lists, computed in Rust, so a spelling that changes on the way out
+changes identically on both sides and no argv has to carry every path of a
+commit. Both tests keep their worth as the answer asserted end to end. What the
+magic-path one no longer does is redden when `--literal-pathspecs` is removed,
+which [`MUTATIONS.md`](./MUTATIONS.md) records rather than leaves to be
+re-derived.
 
 `tests/hook_environment.rs` runs a whole replay under the environment `git
 commit` actually exports to a pre-commit hook — the everyday way a consumer is
@@ -678,7 +716,8 @@ in.
 | `modify_delete_repo()` | A branch that modifies the file `main` deleted, so a replay is a modify/delete conflict. Its auto-resolution stages a blob the object store already holds, so this is the shape that gets all the way to `rebase --continue` under a sealed object database and fails on the commit write alone — the resolution staged, and nothing unmerged. Sealing is a permission trick, so the tests that reach these halts are Unix only. |
 | `branches_behind_main_repo()` | Two branches that each add a file of their own, and a `main` that has moved past both, so replaying either has to *write* a commit rather than move a ref. The pick applies cleanly, so a sealed object database halts it with nothing unmerged and nothing dirty — the state a commit that genuinely became empty is otherwise indistinguishable from. |
 | `branches_behind_main_with_quoted_and_space_led_paths_repo()` | The same shape with the branch's work in `café.txt`, which git C-quotes whenever it prints a path alone on a line, and ` leading space.txt`, which any trim of that line silently shortens. Neither path is plainly spelled, deliberately: an ordinary sibling in the same commit would come back matching and carry the refusal on its own, leaving what the mangled names cost invisible. |
-| `branches_behind_main_with_a_pathspec_magic_path_repo()` | The same shape again, with the branch's work in `:/foo.txt` and a decoy `foo.txt` committed at the root. Nothing mangles on the way out; the leading `:` is pathspec magic on the way back in, so the name asks about the decoy neither side touched — the direction that *shrinks* the set of paths a probe finds missing to empty, which is a halt read as a commit to skip. Unix only, because the filesystem has to hold a directory named `:`. |
+| `branches_behind_main_with_a_pathspec_magic_path_repo()` | The same shape again, with the branch's work in `:/foo.txt` and a decoy `foo.txt` committed at the root. Nothing mangles on the way out; the leading `:` is pathspec magic on the way back in, so the name asks about the decoy neither side touched — the direction that *shrinks* the set of paths a probe finds missing to empty, which is a halt read as a commit to skip. The probe builds no pathspec today, so what this fixture asks for now is the answer: such a commit is never called empty. Unix only, because the filesystem has to hold a directory named `:`. |
+| `branches_behind_main_with_a_submodule_pointer_bump_repo()` | The same shape once more, with the branch's work in a submodule pointer and `diff.ignoreSubmodules=all` set in the fixture's own configuration. `diff-tree` reports the moved gitlink and `git diff` reports nothing, so a probe that asks one command what the commit touched and the other whether the new base holds it reads one tree under two sets of rules — and calls a commit empty because the porcelain declined to mention its only path. The pointer's two values are commits of this repository's own object database, so no second repository is cloned or kept alive; a `.gitmodules` entry sits in the base commit, where a real superproject records one, leaving the bump commit touching the gitlink alone. |
 | `commit_emptied_by_main_repo()` | A branch whose first commit reaches content `main` arrived at by a different route, followed by a second commit that is real work. No commit shares a patch id with one on the other side, so git cannot drop the first early: under `--empty=stop` the rebase halts on it legitimately, and the second still has to survive. |
 | `multi_byte_names_repo()` | Branches `left-左` and `right-右` colliding in `readme.md` and `日本語.txt` — a name git would escape, a hunk count that collapses when it does, and two names whose byte, character and column widths disagree. |
 | `awkward_names_repo()` | Conflicts in names git C-quotes whatever `core.quotePath` says — a backslash, a double quote — beside names with leading and trailing whitespace, including U+3000. Each is contested in two regions, so a mangled name floors at one hunk and the count fails, not just the spelling. Unix only, because the filesystem has to hold the names. |

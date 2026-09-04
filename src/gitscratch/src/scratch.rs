@@ -32,7 +32,7 @@
 //! "this is expensive" or "I cannot answer"; it must never answer "this is
 //! cheap" because it quietly discarded the work it was asked to measure.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 #[cfg(any(test, feature = "testing"))]
 use std::num::NonZeroUsize;
@@ -557,13 +557,40 @@ fn classify_halt(git: &Git) -> Result<Halt> {
 /// replay says so rather than reporting a cheap number for a branch it never
 /// replayed.
 ///
-/// The paths make a round trip to get that answer - out of the first invocation
-/// as output, back into the second as pathspecs - so both go through
-/// [`Git::paths`] rather than [`Git::lines`]. Git's line-oriented output C-quotes
-/// a non-ASCII name and leaves a leading space to be trimmed away, and it
-/// dequotes nothing on the way back in: a mangled pathspec matches no file, an
-/// empty diff is what "the new base already has this" looks like, and the commit
-/// would be dropped for the one reason that is never allowed to be a guess.
+/// **The two answers meet here, not inside git.** `missing` is the intersection
+/// of the paths the commit touched with the paths that differ between
+/// `REBASE_HEAD` and `HEAD`, and each side of it is the bytes git printed. The
+/// alternative is a round trip - every touched path handed back to the second
+/// invocation as a pathspec - and it fails in two ways this one cannot. It puts
+/// every path of the commit on one argv, and an argv has a length limit: past
+/// the system's `ARG_MAX` the spawn fails with `E2BIG`, so one commit that
+/// touches enough paths takes the whole simulation down with it. A vendored
+/// dependency drop, a formatting sweep and a generated-code refresh all reach
+/// that size. The failure is loud, so no work is lost by it, but a repository
+/// holding one such commit and one halt with nothing unmerged cannot be
+/// measured at all. The second way is quieter: a path on the way out is a path,
+/// and a path on the way back in is a pathspec, where a leading `:` is magic and
+/// `*` is a wildcard. An intersection is bounded by memory rather than by argv,
+/// and it reads a name as a name and nothing else.
+///
+/// **Both invocations ask for `--ignore-submodules=none`, and that flag is the
+/// question rather than decoration.** `git diff` is porcelain, so it reads
+/// `diff.ignoreSubmodules` out of the developer's own `~/.gitconfig`;
+/// `diff-tree` is plumbing, so it reads only the flag - git documents the
+/// setting as reaching the porcelain alone, and git 2.55 was watched to agree.
+/// Left to the config, one tree therefore gets read under two sets of rules. A
+/// commit that moves a submodule pointer and touches nothing else is a path to
+/// `diff-tree` and nothing at all to `git diff` under
+/// `diff.ignoreSubmodules=all`: the touched set holds the submodule, so the
+/// guard below stays quiet, and the differing set has nothing to intersect with
+/// it. The commit reads as empty, `rebase --skip` throws the pointer away, and
+/// a branch nobody replayed is reported cheap - the one answer this crate exists
+/// never to give. The flag goes on both invocations rather than on the porcelain
+/// alone, because the rule is that the two probes read one tree under one set of
+/// rules. Which of them consults a config key is a fact about this version of
+/// git, and this crate takes the rule. Pinned by
+/// `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed`
+/// in `tests/halts.rs`.
 fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt> {
     let touched = git.paths(
         "diff-tree",
@@ -572,21 +599,40 @@ fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt>
             "--name-only",
             "-r",
             "--root",
+            "--ignore-submodules=none",
             "REBASE_HEAD",
         ],
     )?;
 
-    // Guarded before the diff below is built, because `git diff ... --` with an
-    // empty pathspec is not "diff nothing", it is "diff everything" - which
-    // would invert this answer for the one commit that cannot possibly lose
-    // anything, since it changes no path at all.
+    // A commit that changes no path at all cannot lose anything, and saying so
+    // here spares the second invocation. The intersection below reaches the same
+    // answer on its own - nothing intersected with anything is nothing - so this
+    // is the answer stated rather than an answer arrived at by set algebra.
     if touched.is_empty() {
         return Ok(Halt::EmptyCommit { stopped });
     }
 
-    let mut diff = vec!["--name-only", "REBASE_HEAD", "HEAD", "--"];
-    diff.extend(touched.iter().map(String::as_str));
-    let missing = git.paths("diff", &diff)?;
+    // Every path that differs between the stopped commit and the new base, with
+    // no pathspec narrowing it. Most of them belong to other commits; the
+    // intersection below takes only the ones this commit touched.
+    let differing: HashSet<String> = git
+        .paths(
+            "diff",
+            &[
+                "--name-only",
+                "--ignore-submodules=none",
+                "REBASE_HEAD",
+                "HEAD",
+            ],
+        )?
+        .into_iter()
+        .collect();
+
+    let missing: Vec<&str> = touched
+        .iter()
+        .filter(|path| differing.contains(path.as_str()))
+        .map(String::as_str)
+        .collect();
 
     if missing.is_empty() {
         Ok(Halt::EmptyCommit { stopped })

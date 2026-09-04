@@ -969,14 +969,19 @@ pub fn branches_behind_main_repo() -> TestRepo {
 /// ` leading space.txt`, which git prints as it is but which any trimming of
 /// that line silently shortens.
 ///
-/// Both are here because a replay reads paths out of one git invocation and
-/// feeds them straight back into the next as pathspecs, and git does not dequote
-/// a pathspec — so a name that changed on the way out matches nothing on the way
-/// back in, and a commit whose work is nowhere in the new base looks like a
-/// commit that adds nothing to it. Neither name is plainly spelled,
-/// deliberately: one ordinary path in the same commit would come back matching,
-/// the probe would find *its* work missing and refuse on that alone, and the
-/// silence of the other two would never show.
+/// Both are here because a replay classifies a halt from the paths git prints,
+/// and a name it prints wrongly is a name the classification reasons about
+/// wrongly. The empty-commit probe used to feed those paths back to git as
+/// pathspecs, where a mangled spelling matched nothing and a commit whose work
+/// is nowhere in the new base read as a commit that adds nothing to it; it now
+/// intersects two path lists in Rust, so the two lists are mangled the same way
+/// and the intersection survives. What this fixture pins today is the whole
+/// answer, end to end: such a commit must never be called empty, and the names
+/// the refusal shows must be the names the developer gave.
+///
+/// Neither name is plainly spelled, deliberately: one ordinary path in the same
+/// commit comes back matching, the probe finds *its* work missing and refuses on
+/// that alone, and the silence of the other two never shows.
 ///
 /// # Panics
 ///
@@ -1008,26 +1013,31 @@ pub fn branches_behind_main_with_quoted_and_space_led_paths_repo() -> TestRepo {
 /// quotes it nor leaves anything for a trim to eat — and that is the point. The
 /// mangling happens on the way back in, because a pathspec is not a path: a
 /// leading `:` is pathspec magic, and `:/` specifically means *from the top of
-/// the working tree*. Fed back as a pathspec the name therefore asks about the
-/// root `foo.txt` instead of the one the commit added, and `foo.txt` at the root
-/// is exactly what this fixture puts there — committed in the base, touched by
-/// neither side afterwards, and so identical in the replayed commit and the new
-/// base. A probe asking whether the commit's work is already in the new base
-/// gets an empty diff back, the honest answer about the *other* file, and reads
-/// it as yes.
+/// the working tree*. Handed back as a pathspec the name therefore asks about
+/// the root `foo.txt` instead of the one the commit added, and `foo.txt` at the
+/// root is exactly what this fixture puts there — committed in the base, touched
+/// by neither side afterwards, and so identical in the replayed commit and the
+/// new base. A probe built that way gets an empty diff back, the honest answer
+/// about the *other* file, and reads it as yes.
 ///
 /// That points the opposite way from the quoted names in
 /// [`branches_behind_main_with_quoted_and_space_led_paths_repo`], which is why
 /// it is worth a fixture of its own. A pathspec that matches nothing can only
 /// grow the set of paths a probe finds missing, and a bigger set only ever
 /// produces a refusal nobody needed; a pathspec that matches the *wrong* file
-/// can shrink that set to empty, which is a commit reclassified as adding
-/// nothing to the new base, skipped, and gone.
+/// shrinks that set to empty, which is a commit reclassified as adding nothing
+/// to the new base, skipped, and gone.
+///
+/// The empty-commit probe no longer builds a pathspec out of a name git printed,
+/// so the trap this shape was built for is disarmed at the source. The fixture
+/// stays because the answer it asks for stays: a commit that adds a file the new
+/// base has never seen is not an empty commit, whatever a name inside it reads
+/// as somewhere else.
 ///
 /// The branch's commit touches no plainly-spelled path at all, for the same
-/// reason that one does not: one ordinary file alongside would come back
-/// matching, the probe would find *its* work missing and refuse on that alone,
-/// and the magic name's silence would never show.
+/// reason that one does not: one ordinary file alongside comes back matching,
+/// the probe finds *its* work missing and refuses on that alone, and the magic
+/// name's silence never shows.
 ///
 /// # Panics
 ///

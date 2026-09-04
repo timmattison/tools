@@ -354,10 +354,13 @@ impl Git {
     /// output is not a faithful rendering of one. A name with a byte outside
     /// printable ASCII comes back C-quoted - `café.txt` as `"caf\303\251.txt"` -
     /// and a name with a leading or trailing space comes back intact only to
-    /// lose it to trimming. Neither loss announces itself, and a path read out of
-    /// one invocation is usually fed straight back into the next as a pathspec,
-    /// which git does not dequote: the mangled spelling matches nothing, and
-    /// matching nothing is indistinguishable from there being nothing to match.
+    /// lose it to trimming. Neither loss announces itself. A caller then reports
+    /// a name nobody typed, and a name nobody typed opens no file on disk - so
+    /// anything that goes on to read the path falls back to whatever it does for
+    /// a file it cannot read. In this crate that is one hunk for a conflicted
+    /// file, which undercounts the work and still looks plausible. A caller that
+    /// hands the spelling back to git as a pathspec pays twice, because git
+    /// dequotes nothing on the way in.
     ///
     /// So the paths are asked for NUL-delimited instead, which is git's own
     /// answer to this and turns the escaping off entirely. `-z` is the first
@@ -369,9 +372,9 @@ impl Git {
     ///
     /// Returns an error if git could not be spawned, if it exited non-zero, or
     /// if a path it printed is not valid UTF-8. That last one is deliberately
-    /// fatal: replacing an undecodable byte would substitute U+FFFD and hand
-    /// back a name that matches nothing, which is the very silence this method
-    /// exists to remove.
+    /// fatal: replacing an undecodable byte substitutes U+FFFD and hands back a
+    /// name no file has, which is the very silence this method exists to
+    /// remove.
     pub fn paths(&self, subcommand: &str, args: &[&str]) -> Result<Vec<String>> {
         let asked = with_nul_delimiters(args);
 
@@ -529,23 +532,29 @@ impl Git {
         .flat_map(|setting| ["-c".to_string(), setting])
         .collect();
 
-        // Paths read out of one invocation are fed straight back into the next
-        // as pathspecs, and a pathspec is not a path: a leading `:` is pathspec
-        // magic, and `*`, `?` and `[` are wildcards. Without this a file
-        // genuinely called `star*.txt` matches `starOTHER.txt` too, so a probe
-        // asking whether *this* path's content is in the new base quietly
-        // answers about some other file's. A main option rather than a `-c`
-        // pair, so it belongs here with them, ahead of the subcommand.
+        // A path read out of one invocation and handed back to the next is not
+        // a path any more, it is a pathspec: a leading `:` is pathspec magic,
+        // and `*`, `?` and `[` are wildcards. Without this a file genuinely
+        // called `star*.txt` matches `starOTHER.txt` too, so a question asked
+        // about *this* path quietly gets answered about some other file's. A
+        // main option rather than a `-c` pair, so it belongs here with them,
+        // ahead of the subcommand.
         //
-        // Over-matching like that is the mild half. It can only add to the set
-        // of paths a probe finds missing, and a bigger set only ever buys a
-        // refusal nobody needed. The half worth the guard is `:/foo.txt`, a
-        // `foo.txt` in a directory named `:`: read as magic its `:/` means from
-        // the top of the working tree, so it answers about the root `foo.txt`
-        // instead, and if that one is unchanged the diff comes back empty. An
-        // empty diff is a commit that adds nothing to the new base, which is a
-        // `rebase --skip`, which is the work gone and a cost of zero reported
-        // for a branch that was never replayed. Pinned by tests/halts.rs.
+        // Over-matching like that is the mild half. The half worth the guard is
+        // `:/foo.txt`, a `foo.txt` in a directory named `:`: read as magic its
+        // `:/` means from the top of the working tree, so git answers about the
+        // root `foo.txt` instead. An answer about the wrong file is an answer
+        // nothing downstream can tell from the right one.
+        //
+        // **No call site in this crate hands a path back to git today.** The
+        // empty-commit probe was the one that did, and it now intersects the two
+        // path lists in Rust instead - which is bounded by no argv and reads a
+        // name as a name. So this pin currently protects a call site nobody has
+        // written yet, and nothing in the suite can be made to fail by removing
+        // it; `MUTATIONS.md` records that removal being run and watched to change
+        // nothing. It stays because it costs one argument at the single door
+        // every git call in this crate goes through, and because the next call
+        // site that reads a path list back is one edit away.
         arguments.push("--literal-pathspecs".to_string());
 
         arguments
@@ -843,7 +852,16 @@ mod tests {
     const TOUCHED_PATHS_SUBCOMMAND: &str = "diff-tree";
 
     /// The arguments that go after it, with the commit left off the end.
-    const TOUCHED_PATHS: [&str; 4] = ["--no-commit-id", "--name-only", "-r", "--root"];
+    /// `--ignore-submodules=none` is one of them because the probe asks both of
+    /// its invocations for it, so that a submodule pointer reads the same way to
+    /// the plumbing command and to the porcelain one.
+    const TOUCHED_PATHS: [&str; 5] = [
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "--root",
+        "--ignore-submodules=none",
+    ];
 
     /// A path git cannot spell as UTF-8 has to stop the replay, not be repaired
     /// into one that matches nothing.
@@ -853,12 +871,18 @@ mod tests {
     /// delimiters and the original bytes come back — but a byte that is not
     /// valid UTF-8 has no `String` to come back *as*. Decoding it lossily, the
     /// way [`Git::try_run`] decodes git's output everywhere else, substitutes
-    /// U+FFFD and yields a name no file has. That name goes straight back into
-    /// the next invocation as a pathspec, matches nothing, and leaves the
-    /// `missing` set empty — which is what "the new base already has this
-    /// commit's work" looks like, so the commit is skipped and the work is
-    /// gone. Every other test in this suite would still pass, because no other
-    /// fixture holds a name git has to refuse.
+    /// U+FFFD and yields a name no file has. The replay then shows a developer a
+    /// path they cannot find in their own repository, and anything that opens
+    /// the path fails — which in this crate floors a conflicted file at one hunk
+    /// and undercounts the work while the total still looks plausible. Every
+    /// other test in this suite stays green, because no other fixture holds a
+    /// name git has to refuse.
+    ///
+    /// The classification is safe from this one, and it is worth saying which
+    /// half is which. `stopped_commit_is_already_in_head` reads both of its path
+    /// lists through this method, so a lossy decode mangles the two lists the
+    /// same way and their intersection is unchanged. What a repaired name still
+    /// costs is the report.
     ///
     /// So the guard is pinned here, at [`Git::paths`], rather than end-to-end
     /// through a sealed-object-store replay. Such a replay would need the
@@ -902,8 +926,8 @@ mod tests {
 
         let error = git.paths(TOUCHED_PATHS_SUBCOMMAND, &listed).expect_err(
             "a name git cannot spell as UTF-8 must stop the replay; decoding it lossily hands \
-             back a U+FFFD name that matches nothing, and a pathspec matching nothing is how a \
-             commit gets skipped and its work lost",
+             back a U+FFFD name that names no file, which is a path the developer cannot find \
+             and a file nothing can open",
         );
         assert!(
             format!("{error:#}").contains("listed a path that is not valid UTF-8"),
@@ -1072,11 +1096,14 @@ mod tests {
     /// reader most needs is the one nobody wrote down. `--literal-pathspecs` is
     /// how this test came to exist. It went into [`Git::safety_config`] as the
     /// guard between a path git printed and the pathspec that path becomes on
-    /// the way back in, it is load-bearing enough that removing it makes a
-    /// `tests/halts.rs` case misclassify a commit as adding nothing to the new
-    /// base — the silent skip that throws work away — and it reached the table
-    /// in neither the row list nor the prose beneath it. Nothing failed. The
-    /// inventory just quietly became a subset.
+    /// the way back in, it was load-bearing enough at the time that removing it
+    /// made a `tests/halts.rs` case misclassify a commit as adding nothing to
+    /// the new base — the silent skip that throws work away — and it reached the
+    /// table in neither the row list nor the prose beneath it. Nothing failed.
+    /// The inventory just quietly became a subset. The empty-commit probe stopped
+    /// handing paths back to git afterwards, so that mutation reddens nothing
+    /// today, which is the other half of the reason this check earns its place: a
+    /// guard whose own test has gone quiet still has to be a row.
     ///
     /// So the completeness of the table is checked here rather than maintained
     /// by care. What is asserted is only that: completeness, not correctness.

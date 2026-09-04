@@ -43,6 +43,7 @@ not have to re-derive which guard belongs to which test.
 | `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back` | The pair `--verify --end-of-options`, which is how the pre-flight asks a question git can refuse | `src/git.rs`, `Git::rev_parse` — drop both arguments | remove |
 | `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` (`tests/repo.rs`) | `--end-of-options` ahead of the two positionals of `worktree add` | `src/scratch.rs`, `Scratch::create` — drop the argument | remove |
 | `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | `--end-of-options` ahead of the upstream of `rebase` | `src/scratch.rs`, `Scratch::replay_rebase_within` — drop the argument | remove |
+| `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` (`tests/halts.rs`) | `--ignore-submodules=none` on the porcelain half of the empty-commit probe, which is what makes both halves read one tree under one set of rules | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the argument from the `git diff` invocation | remove |
 
 ## What keeps each test honest
 
@@ -100,6 +101,7 @@ registry that reports everything as fine is worth less than no registry at all.
 | `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back` | The fixture commits a file, so the repository is one a revision could resolve in, and the refusal cannot be a refusal of everything - `resolves_a_revision_that_names_a_commit_to_its_full_id` holds that side. | **Full.** Plain git, through the fixture, is asked for `--root^{commit}` and must print that argument straight back — "git no longer prints a dash-leading argument back at exit 0, so this test could only pass vacuously". That echo *is* the hazard: it exits 0, and the pre-flight reads an exit of 0 as a commit. |
 | `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` | None beyond the fixture, which `conflicting_repo` builds with a `main` that resolves. | **Missing.** The hazard is that `git worktree add -q --detach <path> --force` succeeds and checks out HEAD, and arming it in-test means building the wrong scratch on purpose and then removing it. Asserting the wrong-scratch HEAD under a deliberately unseparated call closes it. The mutation record below is the out-of-band substitute. |
 | `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | The scratch worktree is checked out at `iterated`, through a call that panics if git refuses, so the replay provably starts somewhere a rebase can run. | **Full, as a control on the other side.** The same scratch then replays onto `single` and must cost `CONTESTED_ROUNDS` stops, so a replay that refused every upstream, or one that could not replay this fixture at all, fails there instead of passing on the refusal above. What is not armed is the halt itself: nothing states that plain `git rebase --root` succeeds on this fixture, and the mutation record below is what stands in for it. |
+| `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` | The stopped commit is asked of `diff-tree` first and must touch exactly one path — "the stopped commit has to touch the submodule pointer and nothing else; an ordinary path beside it comes back from the porcelain whatever the setting says, carries the refusal on its own, and leaves what the pointer costs invisible". An ordinary path alongside is what would let this test pass without the pointer ever mattering. | **Full.** Plain git, through the fixture, is asked for `diff --name-only branch~1 branch` and must answer with nothing — "`diff.ignoreSubmodules=all` is not hiding the pointer from `git diff`, so this test could only pass vacuously; the porcelain reported {porcelain:?} for a commit the plumbing reports {bumped:?} for". That silence *is* the hazard: it is the second probe's whole answer under the developer's own configuration, and it is demonstrated before the replay is asked anything. The fixture arms the setting itself rather than reading it out of `~/.gitconfig`, so the control holds on a machine whose developer has never set the key. |
 
 ### The rule for the next test
 
@@ -554,6 +556,72 @@ rather than a footnote. The whole class was open for the life of the crate, and
 `grind -- --root` printed `grind: clean - replaying HEAD onto --root hit no
 conflicts` at exit 0 while every one of these suites passed.
 
+### `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed`
+
+Mutation: removed `"--ignore-submodules=none"` from the `git diff` invocation in
+`stopped_commit_is_already_in_head`. The probe then reads which paths the
+stopped commit touched with `diff-tree`, which is plumbing, and whether the new
+base holds them with `git diff`, which is porcelain and reads
+`diff.ignoreSubmodules` out of the repository's configuration. The fixture sets
+that key to `all`, so a commit that moves a submodule pointer and touches
+nothing else is one path to the first command and nothing at all to the second:
+the touched set is non-empty, so the empty-set guard stays quiet, and the
+missing set comes back empty. The replay calls the commit empty and reaches for
+`rebase --skip`.
+
+```text
+thread 'refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed'
+panicked at src/gitscratch/tests/halts.rs:
+a commit that moves a submodule the new base has at another commit is not an
+empty commit, whatever `diff.ignoreSubmodules` hides from the porcelain: the
+rebase halted on a commit that adds nothing to the new base, but git would not
+`rebase --skip` it: 988d57e branch moves the submodule on
+
+test result: FAILED. 6 passed; 1 failed
+```
+
+The sealed object database refuses that skip, so the run ends in an error either
+way. That is why the assertion is on the wording of the classification rather
+than on there being an error: in a repository where the skip succeeds, the same
+misclassification finishes the rebase, drops the pointer, and reports a cost of
+zero for a branch that was never replayed.
+
+No collateral: this is the only test the mutation reddens, in this crate and in
+`grind` and `grist`.
+
+**The plumbing half was mutated separately, and it reddens nothing.** Removing
+`"--ignore-submodules=none"` from the `diff-tree` invocation — and from the
+`TOUCHED_PATHS` constant in `src/git.rs` that spells the same call for the unit
+tests — leaves every suite green. Git documents `diff.ignoreSubmodules` as
+reaching the porcelain alone, and git 2.55 was watched to agree: under
+`-c diff.ignoreSubmodules=all`, `git diff-tree --name-only` still prints the
+moved gitlink. So that argument is unfalsifiable today and it is recorded as
+unfalsifiable rather than claimed as a guard. It stays because the rule the
+probe rests on is that both of its halves read one tree under one set of rules,
+and which of the two consults a config key is a fact about this version of git.
+
+### `--literal-pathspecs`, which nothing can redden any more
+
+Mutation: removed `arguments.push("--literal-pathspecs".to_string())` from
+`Git::safety_config()`. Every test in `gitscratch`, `grind` and `grist` stayed
+green.
+
+That is the finding, not a failure to find one. The pin used to be load-bearing:
+the empty-commit probe read a list of paths out of one invocation and handed it
+back to the next as pathspecs, where `:/foo.txt` — a `foo.txt` in a directory
+named `:` — reads as *from the top of the working tree* and answers about the
+root `foo.txt` instead.
+`refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not_be_committed`
+reddened on exactly that. The probe now intersects the two path lists in Rust,
+so no name this crate reads is ever spelled back to git, and that test passes
+with the pin gone.
+
+The pin stays anyway. It costs one argument at the single door every git call in
+this crate goes through, and the next call site that hands a path list back is
+one edit away — at which point the hazard returns with no warning of its own.
+What must not happen is this file claiming a mutation nobody watched, so the
+absence is recorded here instead.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
@@ -578,6 +646,12 @@ code moves. Every place below is load-bearing for the whole table:
   `Scratch::create` and `Scratch::replay_rebase_within`. Drop one and git reads
   a revision as an option of its own, which is how a name that names no commit
   buys a clean verdict.
+- **`stopped_commit_is_already_in_head`'s two invocations** — they answer the
+  same question about one tree, so anything that makes them read it under
+  different rules turns a commit git could not write into a commit to skip.
+  `--ignore-submodules=none` on both is that rule today. A change that adds a
+  filter to one of them, or that hands a path list back to git instead of
+  intersecting the two lists here, needs its own mutation and its own row.
 
 Anyone touching those should re-run the relevant mutation and update this file
 with what they saw. A guard added without ever being watched to fail is back to
