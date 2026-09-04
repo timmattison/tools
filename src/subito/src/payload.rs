@@ -23,6 +23,18 @@ const LAST_PRINTABLE: u8 = 0x7e;
 /// The character the ASCII gutter prints for every other byte.
 const UNPRINTABLE: char = '.';
 
+/// The character that gives the text beside it the direction of an Arabic
+/// letter, which is ARABIC LETTER MARK.
+const ARABIC_LETTER_MARK: char = '\u{61c}';
+
+/// The character that gives the text beside it the direction left to right,
+/// which is LEFT-TO-RIGHT MARK.
+const LEFT_TO_RIGHT_MARK: char = '\u{200e}';
+
+/// The character that gives the text beside it the direction right to left,
+/// which is RIGHT-TO-LEFT MARK.
+const RIGHT_TO_LEFT_MARK: char = '\u{200f}';
+
 /// The first character that embeds or overrides the direction of the text,
 /// which is LEFT-TO-RIGHT EMBEDDING.
 const FIRST_DIRECTION_OVERRIDE: char = '\u{202a}';
@@ -123,15 +135,20 @@ fn is_safe_to_print(character: char) -> bool {
 /// and the carriage return are control characters too, and they end a line
 /// that the tool holds to one line.
 ///
-/// A character that changes the direction of the text is also not safe. Two
-/// ranges hold such characters: the embeddings and the overrides, and the
-/// isolates. [`char::is_control`] answers for the Unicode category Cc alone,
-/// and these characters are in the category Cf. A terminal that prints one of
-/// them puts the characters of the line in an order the bytes do not have.
+/// A character that changes the direction of the text is also not safe.
+/// Unicode gives the property `Bidi_Control` to twelve characters, and this
+/// rule takes all twelve: the range of the embeddings and the overrides, the
+/// range of the isolates, and the three marks that stand on their own.
+/// [`char::is_control`] answers for the Unicode category Cc alone, and these
+/// characters are in the category Cf. A terminal that prints one of them puts
+/// the characters of the line in an order the bytes do not have.
 fn is_safe_on_one_line(character: char) -> bool {
     !character.is_control()
         && !(FIRST_DIRECTION_OVERRIDE..=LAST_DIRECTION_OVERRIDE).contains(&character)
         && !(FIRST_DIRECTION_ISOLATE..=LAST_DIRECTION_ISOLATE).contains(&character)
+        && character != ARABIC_LETTER_MARK
+        && character != LEFT_TO_RIGHT_MARK
+        && character != RIGHT_TO_LEFT_MARK
 }
 
 /// Gives the hex dump of a byte string.
