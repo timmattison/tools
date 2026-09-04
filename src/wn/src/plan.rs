@@ -248,6 +248,15 @@ pub enum PlanError {
     /// The `Order` field of a stream holds no number at all.
     #[error("stream {0:?}: the Order field holds no issue number")]
     NoIssues(Snippet),
+    /// The `Waits for` field of a stream holds text and no number at all.
+    ///
+    /// A field that holds nothing is a stream that waits for nothing, and that
+    /// is the common case. This is the other one: a reader wrote a hyphen or a
+    /// separator, and the field names no work to wait for. One message for
+    /// each field, because a message that named the `Order` field would send
+    /// the reader to a cell that reads.
+    #[error("stream {0:?}: the Waits for field holds no issue number")]
+    NoBlockers(Snippet),
     /// A group stands before the first step of a stream, so it attaches to
     /// nothing.
     #[error("stream {stream:?}: {token:?} stands before any issue number")]
@@ -353,6 +362,8 @@ pub fn looks_like_a_plan(text: &str) -> bool {
 /// [`PlanError::StreamWithoutOrder`] for one stream that names none while
 /// another one does,
 /// [`PlanError::NoIssues`] for an `Order` field with no number in it,
+/// [`PlanError::NoBlockers`] for a `Waits for` field that holds text and no
+/// number,
 /// [`PlanError::NotAnIssue`] for a token of an `Order` field or a `Waits for`
 /// field that names no issue, and [`PlanError::UnattachedPair`] or
 /// [`PlanError::SecondPair`] for a group that attaches to no step or to a step
@@ -972,9 +983,19 @@ fn read_order(order: &str, label: &str) -> Result<Vec<Step>, PlanError> {
 /// Gives the errors of [`read_order`], so a cell of prose earns
 /// [`PlanError::NotAnIssue`] with the name of the stream and the word that
 /// names no issue.
+///
+/// The one error of [`read_order`] that names a field is
+/// [`PlanError::NoIssues`], and it names the `Order` field. A cell here that
+/// holds text and no number earns [`PlanError::NoBlockers`] in its place,
+/// which names this field: a reader of a Markdown table writes a hyphen for a
+/// cell that holds nothing, and a message about the `Order` field would send
+/// that reader to a cell that reads.
 fn read_waits(waits: Option<&str>, label: &str) -> Result<Vec<Step>, PlanError> {
     match waits.map(str::trim).filter(|text| !text.is_empty()) {
-        Some(text) => read_order(text, label),
+        Some(text) => read_order(text, label).map_err(|error| match error {
+            PlanError::NoIssues(stream) => PlanError::NoBlockers(stream),
+            other => other,
+        }),
         None => Ok(Vec::new()),
     }
 }
