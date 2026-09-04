@@ -9652,6 +9652,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "buildinfo",
+ "chrono",
  "clap",
  "colored",
  "serde_json",

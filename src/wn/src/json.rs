@@ -59,6 +59,7 @@
 
 use std::fmt;
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -95,6 +96,12 @@ const ID: &str = "id";
 
 /// The key of a stream that holds the words of its name.
 const NAME: &str = "name";
+
+/// The key that names the moment the plan was built.
+const GENERATED: &str = "generated";
+
+/// The hours of a day, which is the age at which a plan earns a note.
+const HOURS_OF_A_DAY: i64 = 24;
 
 /// Where in the document a value stands, written `streams[1].order[0].issue`.
 ///
@@ -145,6 +152,8 @@ pub enum Kind {
     Number,
     /// A number GitHub gives an issue or a pull request, so one and up.
     Issue,
+    /// A moment, written as RFC 3339 names one: `2026-09-02T14:03:11Z`.
+    Time,
 }
 
 impl Kind {
@@ -156,6 +165,7 @@ impl Kind {
             Self::Text => "a string",
             Self::Number => "a number",
             Self::Issue => "an issue number",
+            Self::Time => "a moment, written as 2026-09-02T14:03:11Z",
         }
     }
 }
@@ -215,7 +225,43 @@ pub enum JsonError {
     Order(#[from] GraphError),
 }
 
-/// The graph the JSON document `text` writes, or `None` when `text` is no JSON
+/// A plan written as JSON: the work it names, and the moment it was built.
+///
+/// The two travel together because a plan is a claim about a backlog and a
+/// backlog moves. A reader who is handed the work alone has no way to know
+/// that the claim is three days old, and nothing else would tell them.
+pub struct Document {
+    /// The work the plan names, and the order of it.
+    graph: Graph,
+    /// The moment the plan was built, when the document says.
+    generated: Option<DateTime<Utc>>,
+}
+
+impl Document {
+    /// The work the plan names, and the order of it.
+    #[must_use]
+    pub fn graph(&self) -> &Graph {
+        &self.graph
+    }
+
+    /// The note this plan earns at `now`, when it earns one.
+    ///
+    /// `now` is an argument rather than a read of the clock, so a test of the
+    /// note names both moments and never races the machine that runs it.
+    ///
+    /// A plan of less than a day earns nothing: it is the plan the reader just
+    /// built, or one they built this morning, and a note on every run is a
+    /// note nobody reads. A plan built in the future earns nothing either. A
+    /// clock that ran backwards is a fault of the machine, and a note that
+    /// said the plan was built in -2 days would name it wrongly.
+    #[must_use]
+    pub fn age_note(&self, now: DateTime<Utc>) -> Option<String> {
+        let _ = now;
+        None
+    }
+}
+
+/// The plan the JSON document `text` writes, or `None` when `text` is no JSON
 /// document.
 ///
 /// The claim and the read share all of their work, so one function does both,
@@ -231,11 +277,11 @@ pub enum JsonError {
 /// the schema, and [`JsonError::Order`] for a plan whose steps wait for each
 /// other.
 #[must_use]
-pub fn read(text: &str) -> Option<Result<Graph, JsonError>> {
+pub fn read(text: &str) -> Option<Result<Document, JsonError>> {
     if !text.trim_start().starts_with(OPENING_BRACE) {
         return None;
     }
-    Some(graph_of(text))
+    Some(document_of(text))
 }
 
 /// One step of the plan, as one element of an `order` array writes it.
@@ -249,12 +295,12 @@ struct Reading {
     waits_for: Vec<IssueNumber>,
 }
 
-/// The graph the document `text` writes.
+/// The plan the document `text` writes.
 ///
 /// # Errors
 ///
 /// Gives the refusals of [`JsonError`].
-fn graph_of(text: &str) -> Result<Graph, JsonError> {
+fn document_of(text: &str) -> Result<Document, JsonError> {
     let document: Value = serde_json::from_str(text).map_err(|cause| JsonError::NotJson {
         text: Snippet::new(text),
         cause: cause.to_string(),
@@ -284,7 +330,10 @@ fn graph_of(text: &str) -> Result<Graph, JsonError> {
             *blocker = work.names(*blocker);
         }
     }
-    Ok(of_parts(nodes_of(&streams, &work), &edges_of(&streams))?)
+    Ok(Document {
+        graph: of_parts(nodes_of(&streams, &work), &edges_of(&streams))?,
+        generated: None,
+    })
 }
 
 /// The steps of one stream, in the order its `order` array writes them.
@@ -541,11 +590,23 @@ mod tests {
     /// is asked about the text the table reader answers.
     const BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work.txt");
 
-    /// The graph `text` writes.
-    fn graph_of(text: &str) -> Graph {
+    /// The plan `text` writes.
+    fn plan_of(text: &str) -> Document {
         read(text)
             .expect("the text is a JSON document")
             .expect("the document reads")
+    }
+
+    /// The graph `text` writes.
+    fn graph_of(text: &str) -> Graph {
+        plan_of(text).graph
+    }
+
+    /// A moment RFC 3339 writes as `text`.
+    fn moment(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .expect("the test writes a moment")
+            .with_timezone(&Utc)
     }
 
     /// The refusal `text` earns.
@@ -557,6 +618,88 @@ mod tests {
             Ok(_) => panic!("the document reads, and this text is a refusal"),
             Err(error) => error,
         }
+    }
+
+    #[test]
+    fn the_document_says_the_moment_it_was_built() {
+        assert_eq!(
+            plan_of(DOCUMENT).generated,
+            Some(moment("2026-09-02T14:03:11Z"))
+        );
+    }
+
+    #[test]
+    fn a_document_that_names_no_moment_names_none() {
+        // Every written form of a plan carries no moment at all, and a
+        // document a reader wrote by hand need not carry one either. The plan
+        // still answers, and it earns no note about its age.
+        assert_eq!(plan_of(&document_of("[]")).generated, None);
+        assert_eq!(
+            plan_of(&document_of("[]")).age_note(moment("2030-01-01T00:00:00Z")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_moment_that_is_not_a_string_is_a_refusal() {
+        assert_eq!(
+            refusal(&edited("\"generated\": \"2026-09-02T14:03:11Z\"", "\"generated\": 17")),
+            JsonError::Wrong {
+                path: Path::root(GENERATED),
+                wanted: Kind::Time,
+            }
+        );
+    }
+
+    #[test]
+    fn a_moment_no_reader_can_read_is_a_refusal() {
+        let refused = refusal(&edited("2026-09-02T14:03:11Z", "last Tuesday"));
+        assert_eq!(
+            refused,
+            JsonError::Wrong {
+                path: Path::root(GENERATED),
+                wanted: Kind::Time,
+            }
+        );
+        assert_eq!(
+            refused.to_string(),
+            "generated is not a moment, written as 2026-09-02T14:03:11Z"
+        );
+    }
+
+    #[test]
+    fn a_plan_of_a_few_hours_earns_no_note() {
+        let plan = plan_of(DOCUMENT);
+        assert_eq!(plan.age_note(moment("2026-09-02T14:03:11Z")), None);
+        assert_eq!(plan.age_note(moment("2026-09-02T23:59:00Z")), None);
+        // One minute short of a day is still a plan of today.
+        assert_eq!(plan.age_note(moment("2026-09-03T14:02:11Z")), None);
+    }
+
+    #[test]
+    fn a_plan_of_one_day_earns_a_note_that_names_one_day() {
+        let plan = plan_of(DOCUMENT);
+        assert_eq!(
+            plan.age_note(moment("2026-09-03T15:03:11Z")),
+            Some("This plan was built 1 day ago. Run wn --refresh to build a new one.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_plan_of_four_days_earns_a_note_that_names_four_days() {
+        assert_eq!(
+            plan_of(DOCUMENT).age_note(moment("2026-09-06T14:03:11Z")),
+            Some(
+                "This plan was built 4 days ago. Run wn --refresh to build a new one.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_plan_built_in_the_future_earns_no_note() {
+        // A clock that ran backwards is a fault of the machine, and a note
+        // that said the plan was built in -2 days would name it wrongly.
+        assert_eq!(plan_of(DOCUMENT).age_note(moment("2026-08-30T14:03:11Z")), None);
     }
 
     /// The number of every node of `graph`, sorted, so a test states the shape

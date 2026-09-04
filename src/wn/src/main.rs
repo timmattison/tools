@@ -273,10 +273,10 @@ fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Re
     }
     .chain()?;
 
-    if let Some(graph) = json::read(chain.text()) {
-        let graph = graph.map_err(|err| chain.blame(err))?;
+    if let Some(document) = json::read(chain.text()) {
+        let document = document.map_err(|err| chain.blame(err))?;
         let repo = repo_of(cli)?;
-        return answer_graph(&graph, &repo, width, start);
+        return answer_graph(document.graph(), &repo, width, start);
     }
 
     if plan::looks_like_a_plan(chain.text()) {
