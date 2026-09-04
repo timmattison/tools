@@ -857,6 +857,24 @@ impl DetachedGitDirRepo {
     /// the work tree.
     fn init(git_dir: &str) -> Self {
         let dir = TempDir::new().expect("create temp dir");
+        // Before anything else, and before this fixture makes a git directory
+        // of its own. The fixture leaves no `.git` entry, so a tool that walks
+        // upward for one finds whatever stands above the temporary directory.
+        // A repository up there becomes the root such a tool works in, and
+        // `nodenuke` deletes every `node_modules`, `.next`, `.open-next` and
+        // `.turbo` directory below its root. `TempDir` reads `TMPDIR`, so a
+        // `TMPDIR` inside a checkout aims every guard built on this fixture at
+        // that checkout.
+        if let Some(repository) = ancestor_repository(dir.path()) {
+            panic!(
+                "the temporary directory {} sits inside the git repository at {}. \
+                 A tool built on this fixture walks upward for a .git entry, finds \
+                 that repository, and works there. Some of those tools delete files. \
+                 Point TMPDIR at a directory that no repository holds.",
+                dir.path().display(),
+                repository.display(),
+            );
+        }
         let work_tree = dir.path().join(DETACHED_WORK_TREE);
         // `..` in the "beside" shape climbs back to the temporary directory, so
         // both shapes are one join from the work tree. Nothing normalises the
@@ -944,10 +962,21 @@ impl DetachedGitDirRepo {
 /// The nearest directory at or above `dir` that holds a `.git` entry.
 ///
 /// The answer includes `dir` itself, because `repowalker::find_git_repo` starts
-/// its upward walk at the directory a tool runs in. The walk stops at the root
-/// of the file system.
-fn ancestor_repository(_dir: &Path) -> Option<PathBuf> {
-    None
+/// its upward walk at the directory a tool runs in. The walk climbs one level
+/// at a time and stops at the root of the file system, which `pop` reports by
+/// answering false.
+fn ancestor_repository(dir: &Path) -> Option<PathBuf> {
+    let mut current = dir.to_path_buf();
+
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+
+        if !current.pop() {
+            return None;
+        }
+    }
 }
 
 /// Punctuation that a printed path can carry on either end.

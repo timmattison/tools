@@ -305,6 +305,19 @@ comparison. Its mutation test sits beside it in `src/testing.rs`:
 paths the matcher must flag, one of them under a directory whose name holds a
 space, and one path under the work tree that it must pass.
 
+`DetachedGitDirRepo` carries a precondition of its own, and it runs before the
+fixture builds anything. The fixture leaves no `.git` entry, so a tool that
+walks upward for one finds whatever stands above the temporary directory. A
+repository up there becomes the root that tool works in, and `nodenuke` deletes
+what it walks into without asking. `TempDir` reads `TMPDIR`, so a `TMPDIR`
+inside a checkout aims every guard built on this fixture at that checkout.
+`init` therefore asks `ancestor_repository` whether the temporary directory sits
+inside a repository, and panics with the offending path when it does. A path
+check that reads a run's output is a post-mortem; this one runs first.
+`the_ancestor_check_finds_the_repository_a_directory_sits_inside` pins it, and
+[`MUTATIONS.md`](./MUTATIONS.md) records both directions it was watched to fail
+in.
+
 ```toml
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }

@@ -36,6 +36,7 @@ not have to re-derive which guard belongs to which test.
 | `never_leaves_a_scratch_worktree_registered_in_the_real_repository` | `rebase.backend=merge` | `src/git.rs`, `Git::safety_config()` — drop the `"rebase.backend=merge"` entry | remove |
 | `replays_without_hanging_or_failing_when_commit_signing_is_enabled` | `commit.gpgsign=false` | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `the_path_check_flags_the_work_tree_and_the_directory_above_it` | `path_at_or_above`, the matcher `gitnuke`, `nodenuke` and `repotidy` read a run's output with | `src/testing.rs`, `candidate_paths()` — keep the first candidate of each start instead of every one | narrow |
+| `the_ancestor_check_finds_the_repository_a_directory_sits_inside` | `ancestor_repository`, the precondition `DetachedGitDirRepo::init` refuses a fixture inside a repository with | `src/testing.rs`, `ancestor_repository()` — answer `None` for every directory | narrow |
 
 ## What keeps each test honest
 
@@ -388,6 +389,58 @@ test result: FAILED. 0 passed; 1 failed
 
 No collateral in either direction: this is the only test the mutations redden.
 
+### `the_ancestor_check_finds_the_repository_a_directory_sits_inside`
+
+The other guard here that protects other crates rather than this one, and the
+one that runs before anything else does. `DetachedGitDirRepo` leaves no `.git`
+entry, so `repowalker::find_git_repo` walks past the whole fixture and finds
+whatever stands above the temporary directory. A repository up there becomes the
+root the tool under test works in, and `nodenuke` takes no `--dry-run`: it
+deletes every `node_modules`, `.next`, `.open-next` and `.turbo` directory below
+its root, plus the lock files beside them. `TempDir` reads `TMPDIR`, and a
+`TMPDIR` inside a checkout is a configuration some machines carry, so the fixture
+asks the question itself and panics before it builds anything.
+
+`path_at_or_above` reads the output of a run that already happened, which makes
+it a post-mortem. This check runs first, so the deletion never starts. Two
+mutations, because this matcher also fails in two directions.
+
+Mutation one: made `ancestor_repository` answer `None` for every directory. The
+plant above the fixture goes unseen.
+
+```text
+assertion `left == right` failed: the check must find the repository above the directory
+  left: None
+ right: Some("/var/folders/.../T/.tmp1utEXU")
+
+test result: FAILED. 11 passed; 1 failed
+```
+
+No collateral: this is the only test that mutation reddens, and that is the
+finding rather than a footnote. A check nothing calls and a check that answers
+`None` are the same green suite everywhere else.
+
+Mutation two: made `ancestor_repository` answer `Some` for every directory,
+which proves the other half — that `init` reads the answer, and reads it before
+it makes a git directory of its own. Every fixture in every crate refuses, and
+the refusal names the panic site inside `init`:
+
+```text
+thread 'a_nested_git_directory_holds_no_repository_nodenuke_can_find'
+panicked at src/gitscratch/src/testing.rs:869:13:
+the temporary directory /var/folders/.../T/.tmpgVzMgM sits inside the git
+repository at /var/folders/.../T/.tmpgVzMgM. A tool built on this fixture walks
+upward for a .git entry, finds that repository, and works there. Some of those
+tools delete files. Point TMPDIR at a directory that no repository holds.
+
+test result: FAILED. 0 passed; 2 failed
+```
+
+Collateral, and intended: every test that builds a `DetachedGitDirRepo` reddens,
+in `gitnuke`, `nodenuke` and `repotidy` alike. That spread is the point. The
+precondition belongs to the fixture rather than to one guard, so a destructive
+tool that takes the fixture next inherits it.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
@@ -401,6 +454,9 @@ code moves. Three places are load-bearing for the whole table:
 - **`path_at_or_above` and its `candidate_paths` scan** — the one guard here that
   three other crates rest on, and the one that reddens nothing in this crate
   when it goes narrow.
+- **`ancestor_repository` and the `init` that reads it** — the precondition every
+  fixture in three other crates starts with, and the only one that runs before a
+  destructive tool does.
 
 Anyone touching those should re-run the relevant mutation and update this file
 with what they saw. A guard added without ever being watched to fail is back to
