@@ -2421,6 +2421,20 @@ Notes: Disjoint.";
     }
 
     #[test]
+    fn a_waits_for_field_before_its_own_order_stays_with_that_record() {
+        // A record form with no `Stream` field cuts one record from the next
+        // at the `Order` field, and a `Waits for` field that stands before the
+        // `Order` of its own record must go into that record all the same. A
+        // field that landed in the record before it would take the blockers of
+        // one stream away and give them to another, and no message would say
+        // so.
+        let plan = plan_of("Waits for: #2\nOrder: #1\nWaits for: #4\nOrder: #3");
+        assert_eq!(plan.streams().len(), 2);
+        assert_eq!(waits_at(&plan, 0), vec![(2, None)]);
+        assert_eq!(waits_at(&plan, 1), vec![(4, None)]);
+    }
+
+    #[test]
     fn refuses_a_waits_for_cell_that_names_no_issue() {
         // The reason a stream waits is prose, and the prose of a stream
         // belongs in `Notes`. So a cell of prose here names no work to wait
