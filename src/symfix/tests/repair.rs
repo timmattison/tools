@@ -917,7 +917,8 @@ fn a_dry_run_plans_a_prepend_and_changes_nothing() {
         }
     );
     assert!(
-        run.out.contains(&would_prepend_line(&link, "../target.txt")),
+        run.out
+            .contains(&would_prepend_line(&link, "../target.txt")),
         "the planned repair is reported: {:?}",
         run.out
     );
@@ -961,7 +962,8 @@ fn a_dry_run_plans_a_remove_and_changes_nothing() {
         }
     );
     assert!(
-        run.out.contains(&would_remove_line(&link, "path/target.txt")),
+        run.out
+            .contains(&would_remove_line(&link, "path/target.txt")),
         "the planned repair is reported: {:?}",
         run.out
     );

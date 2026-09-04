@@ -125,6 +125,9 @@ fn read_target(path: &Path, err: &mut dyn Write) -> Option<PathBuf> {
 /// nothing. The link is still broken, the report already says so, and a count
 /// of repairs that included the ones that did not happen would be a number a
 /// reader cannot act on.
+///
+/// A run under [`Options::dry_run`] plans the repair, reports the plan, counts
+/// it in [`Summary::fixed`], and leaves the link alone.
 fn report_broken(
     options: &Options,
     path: &Path,
@@ -146,17 +149,21 @@ fn report_broken(
         return;
     };
 
+    // A dry run stops here, and this is the whole of the flag. Everything above
+    // this point only read the tree: `repair::plan` builds candidates and asks
+    // the operating system whether each one resolves, and it writes nothing at
+    // all. `repair::apply` is the one call that changes the tree, thus it is the
+    // one call a dry run leaves out, and the plan a dry run reports is the plan
+    // a real run over the same tree would carry out.
+    if options.dry_run {
+        report_repair(out, "Would fix", path, &plan);
+        summary.fixed += 1;
+        return;
+    }
+
     match repair::apply(path, &plan.target) {
         Ok(()) => {
-            line(
-                out,
-                format_args!(
-                    "Fixed symlink by {}: {} -> {}",
-                    plan.strategy.phrase(),
-                    path.display(),
-                    Path::new(&plan.target).display()
-                ),
-            );
+            report_repair(out, "Fixed", path, &plan);
             summary.fixed += 1;
         }
         Err(error) => line(
@@ -164,6 +171,26 @@ fn report_broken(
             format_args!("Warning: cannot replace {}: {error}", path.display()),
         ),
     }
+}
+
+/// Writes the line that names one repair, which `opening` says was made or was
+/// only planned.
+///
+/// The report says `Fixed symlink by {phrase}: {link} -> {target}` for a repair
+/// that happened and `Would fix symlink by {phrase}: ...` for one a dry run
+/// planned. The two lines differ in their first words and in nothing else, so
+/// they are one line here: a change to what a repair line names reaches both
+/// wordings, and neither one can drift away from the other.
+fn report_repair(out: &mut dyn Write, opening: &str, link: &Path, plan: &repair::Repair) {
+    line(
+        out,
+        format_args!(
+            "{opening} symlink by {}: {} -> {}",
+            plan.strategy.phrase(),
+            link.display(),
+            Path::new(&plan.target).display()
+        ),
+    );
 }
 
 /// Reports one link the operating system refused to resolve, and counts it.

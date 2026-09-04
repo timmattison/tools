@@ -60,7 +60,15 @@ pub struct Options {
 pub struct Summary {
     /// The number of links whose target is not there.
     pub broken: usize,
-    /// The number of links the run repaired.
+    /// The number of links the run repaired, or, under [`Options::dry_run`],
+    /// the number of links the run would have repaired.
+    ///
+    /// The flag changes what this number counts, and the name of the field
+    /// cannot say so on its own, thus a reader of the count reads it beside the
+    /// options the run was given. A dry run plans exactly the repairs a real
+    /// run over the same tree would make — the deciding is the same work, and
+    /// only the one call that writes to the tree is left out — so the two
+    /// numbers agree.
     pub fixed: usize,
     /// The number of links the run could not resolve, for a reason that is not
     /// absence.
@@ -99,7 +107,16 @@ pub fn run(options: &Options, out: &mut dyn Write, err: &mut dyn Write) -> Summa
         // fixed` under a run with no fix flag would read as a failure of a
         // tool that was only ever asked to look.
         if summary.fixed > 0 {
-            line(out, format_args!("Fixed {} symlink(s).", summary.fixed));
+            // A dry run counted the repairs it planned, so the closing line
+            // says what it would have done rather than claiming a change it did
+            // not make. Everything else about the line is the same, thus the
+            // two wordings sit in one place and cannot drift apart.
+            let verb = if options.dry_run {
+                "Would fix"
+            } else {
+                "Fixed"
+            };
+            line(out, format_args!("{verb} {} symlink(s).", summary.fixed));
         } else if options.prepend.is_some() || options.remove.is_some() {
             line(
                 out,
