@@ -59,6 +59,10 @@ not have to re-derive which guard belongs to which test.
 | `uncommitted_files_counts_a_working_tree_rename_and_copy_as_the_files_they_are` (`tests/repo.rs`) | The second status byte, the working-tree column, which carries the letter as readily as the index one | `src/repo.rs`, `moved_from_elsewhere` — reduce `[record.first(), record.get(1)]` to `[record.first()]` | narrow |
 | The ` ```compile_fail ` doc-test on `Scratch` (`src/scratch.rs`) | The runner staying inside the crate — a consumer is never *handed* one, which is the half `Git::new` being crate-private does not cover | `src/scratch.rs`, `Scratch::git` — put the `pub` back | remove |
 | The ` ```compile_fail ` doc-test on `Conflicts` (`src/scratch.rs`) | A cost being measured rather than stated — a released binary has no ungated route to a `Conflicts` that claims one, `Conflicts::nothing_replayed` being a seed for a fold and clean because nothing has run yet | `src/scratch.rs`, the `Conflicts` derive — put `Default` back | **add** |
+| `fixtures_and_replays_stay_inside_their_own_temporary_directories` (`tests/isolation.rs`) | The environment sweep at `TestRepo::git_with_stdin`, the spawn that pipes a record in on stdin | `src/testing.rs`, `TestRepo::git_with_stdin` — drop the `.without_inherited_git_environment()` call | remove |
+| `fixtures_and_replays_stay_inside_their_own_temporary_directories` (`tests/isolation.rs`) | The environment sweep at `DetachedGitDirRepo::run`, which the `--git-dir` and `--work-tree` arguments on that command line do not stand in for | `src/testing.rs`, `DetachedGitDirRepo::run` — drop the `.without_inherited_git_environment()` call | remove |
+| `a_child_half_that_ran_another_test_is_not_taken_for_the_one_that_was_named` (`src/testing.rs`) | The `CHILD_RAN` sentinel, which is a child half's proof that its own body ran | `src/testing.rs`, `run_child_half` — accept a child whose stdout holds `1 passed` instead of requiring the sentinel | narrow |
+| `uncommitted_files_refuses_a_repository_with_no_working_tree` (`tests/repo.rs`) | The failure `Repo::uncommitted_files` answers with where git has no working tree to read | `src/repo.rs`, `Repo::uncommitted_files` — take the status with `unwrap_or_default()` in place of `?` | narrow |
 
 ## What keeps each test honest
 
@@ -128,6 +132,7 @@ registry that reports everything as fine is worth less than no registry at all.
 | `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` | The stopped commit is read back through plain git and must list three fields — its own id and two parents — "or there is nothing here to refuse". | **Full.** `git diff-tree`, asked through the runner with the arguments the probe really uses, must answer with nothing for that merge — "`diff-tree` no longer stays silent about a merge commit, so this test could only pass vacuously; that silence is what makes an unguarded probe read a merge as a commit that changes nothing". The silence *is* the hazard, demonstrated before the probe is asked anything. A closing control runs the other way: the same probe, pointed at a single-parent commit, must answer rather than refuse, so a probe that refused everything cannot pass. What the test does not build is a real halt — see the record below, and the row above it. |
 | `uncommitted_files_counts_a_staged_copy_as_the_one_file_it_is` | The fixture commits `big.txt`, so a copy has a source, and it stages the modification of that source that copy detection needs. Two untracked files sit beside the copy, so the count fails from both directions: pair nothing and the answer is 5, pair every record and it is 3, and only a count that pairs exactly the copy gives 4. | **Full.** Plain git, through the fixture, must report `C  copy.txt`, NUL, `big.txt` — "copy detection is not armed, so this test could only pass vacuously". That control is not a formality: git reports an undetected copy as `A  copy.txt`, one field for one file, so the closing count comes out right while the pairing never runs. The fixture arms `status.renames = copies` in its own repository rather than reading it out of `~/.gitconfig`, so the control holds on a machine whose developer has never set the key. |
 | `uncommitted_files_counts_a_working_tree_rename_and_copy_as_the_files_they_are` | The two files the fixture commits hold content of their own, because git pairs a copy with whichever source matches it best and two files spelled alike let it report the rename and the copy against one name — which is what the first draft of this fixture did. Two untracked files sit beside the pair, so the count fails from both directions: 7 with no pairing, 4 with every record paired, 5 only for a count that pairs exactly the two working-tree records. | **Full.** Plain git, through the fixture, must report ` R moved.txt`, NUL, `big.txt` and ` C other-copy.txt`, NUL, `other.txt` — "git no longer reports that in the working-tree column, so this test could only pass vacuously". Without the detection an undetected move is a delete beside an untracked file, which is two fields for two files and never pairs, so the control is what proves the second status byte is under test at all. The `git add -N` that arms it is the everyday route: `git add -p` records the same intent-to-add entry for a new file. |
+| `uncommitted_files_refuses_a_repository_with_no_working_tree` | `Repo::open` on the bare clone must succeed, so what the count refuses below is a repository with no working tree rather than a directory that is no repository at all. `TestRepo::bare_clone` proves its own premise as well: it points HEAD at the branch it was asked for and resolves it, so a `head` that names nothing fails while the fixture is being built. | **Structural.** Git refuses `status` in a repository with no working tree by construction, so a fixture has nothing to arm. What a control adds is that same refusal read back through plain git, and `BareRepo` hands back no runner to ask with — it is a path and a `TempDir`. The mutation record below is the out-of-band substitute. |
 
 ### The rule for the next test
 
@@ -1317,6 +1322,220 @@ visibility that keeps the two render-boundary tests in `src/report.rs` out of
 this map as well. The README carries the record for it, beside the account of
 the other three.
 
+### The two spawn sites `tests/isolation.rs` did not reach
+
+`tests/isolation.rs` runs one child test under a leaked git environment, and its
+doc comment used to call that test the cover of "all four spawn sites". The
+crate had six. `TestRepo::git_with_stdin` and `DetachedGitDirRepo::run` were the
+two it left out, and they were the two most recently added — the shape this
+crate stops trusting everywhere else, a list of spellings that goes quietly out
+of date. Both spawns swept the environment already, so this was a coverage gap
+rather than a live leak. A coverage gap is exactly what a mutation exposes.
+
+The child test now reaches the first through `commit_file_named_by_bytes`, which
+writes a blob, a tree and a commit straight into an object database, and the
+second through a `DetachedGitDirRepo::nested` with one linked worktree. Each
+sweep was then dropped on its own. Both runs were `cargo test --no-fail-fast -p
+gitscratch -p grind -p grist`, on git 2.55.0.
+
+**The sweep at `TestRepo::git_with_stdin`, dropped.** `hash-object -w --stdin`
+and `mktree -z` write into whichever object database `GIT_DIR` names, and
+`commit-tree` runs through the scrubbed reader, which looks in the fixture:
+
+```text
+thread 'a_leaked_repository_location_never_reaches_the_repository_it_names'
+panicked at src/gitscratch/tests/isolation.rs:
+the fixtures did not survive GIT_DIR=<victim>/.git GIT_WORK_TREE=<victim> GIT_PREFIX=:
+the child half failed:
+
+thread 'fixtures_and_replays_stay_inside_their_own_temporary_directories'
+panicked at src/gitscratch/src/testing.rs:
+git ["commit-tree", "7b1af5f5b2829618144dd85398e2ac30b3f2e291", "-m", "a name git records as bytes"] failed:
+
+fatal: 7b1af5f5b2829618144dd85398e2ac30b3f2e291 is not a valid object
+
+test result: FAILED. 2 passed; 1 failed
+```
+
+The leaked-index test stays green under this one, and correctly: `hash-object`
+and `mktree` read no index, so `GIT_INDEX_FILE` alone moves nothing there.
+Nothing else in the three crates notices.
+
+**The sweep at `DetachedGitDirRepo::run`, dropped.** This is the site whose
+protection looks like it comes from somewhere else. Every spawn of that fixture
+names `--git-dir` and `--work-tree` on the command line, and those two arguments
+do outrank `GIT_DIR` and `GIT_WORK_TREE`. Nothing on a git command line outranks
+`GIT_INDEX_FILE`. Both leaked shapes redden, and they redden differently, which
+is the whole argument for reaching this site:
+
+```text
+thread 'a_leaked_repository_location_never_reaches_the_repository_it_names'
+panicked at src/gitscratch/tests/isolation.rs:
+the fixtures did not survive GIT_DIR=<victim>/.git GIT_WORK_TREE=<victim> GIT_PREFIX=:
+the child half failed:
+
+thread 'fixtures_and_replays_stay_inside_their_own_temporary_directories'
+panicked at src/gitscratch/src/testing.rs:
+remove the .git file that git init left in the work tree: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+```
+
+`git init --separate-git-dir` obeyed the inherited `GIT_DIR` and wrote no `.git`
+file at all, so the fixture failed at the step that removes one. The index leak
+is the quieter half, and it is the one the finding was about:
+
+```text
+thread 'a_leaked_index_file_never_has_a_fixture_staged_into_it'
+panicked at src/gitscratch/tests/isolation.rs:
+the fixtures did not survive GIT_INDEX_FILE=<victim>/.git/index:
+the child half failed:
+
+thread 'fixtures_and_replays_stay_inside_their_own_temporary_directories'
+panicked at src/gitscratch/src/testing.rs:
+git ["--git-dir=<fixture>/home/.local/share/yadm/repo.git", "--work-tree=<fixture>/home", "commit", "-q", "-m", "base"] failed:
+
+error: invalid object 100644 ae613bdb6e1b8e097e8ad187392bd4224b95f16f for 'victim.txt'
+error: Error building trees
+
+test result: FAILED. 1 passed; 2 failed
+```
+
+Read that failure in the other direction. The fixture's own `git add` went into
+the victim's index, and the commit it made afterwards was built from the
+victim's staged file. In a run that is not being watched, the damage is the
+mirror image: the fixture's file staged in the developer's index, pointing at an
+object their repository does not hold. That is the incident `.husky/pre-commit`
+already carries a comment about. Nothing outside `tests/isolation.rs` notices
+either mutation.
+
+The count is gone from that doc comment, and the six sites are named in its
+place. A number in prose is a fact nothing checks. Deriving it means scanning
+`src/testing.rs` for the shape of a spawn, and that matcher carries a spelling
+list of its own — `Command::new("git")` today, and whatever a later spawn is
+written as — which goes stale the same silent way the count did. Naming the
+sites keeps the list where a reader can hold it against the file.
+
+### `a_child_half_that_ran_another_test_is_not_taken_for_the_one_that_was_named`
+
+One child guard shipped three times at two strengths. `src/git.rs` required a
+sentinel the child prints from the end of its own body. `tests/isolation.rs` and
+the fixture-identity test in `src/testing.rs` accepted any child whose stdout
+held the literal `1 passed`. The runner is now one function,
+`gitscratch::testing::run_child_half`, and the two weaker copies are gone.
+
+The realistic failure both spellings catch is a filter that matches nothing:
+libtest prints `0 passed` and the count check refuses it. The failure only the
+sentinel catches is a filter pointed at a *neighbouring* test — the copied
+constant, the renamed function, the test split in two. That child runs, passes,
+and is counted as one test passed, while the assertions the parent is reading
+the run for never run at all.
+
+Mutation: `run_child_half` was put back to `stdout.contains("1 passed")`. The
+run was `cargo test --no-fail-fast -p gitscratch -p grind -p grist`, on git
+2.55.0.
+
+```text
+thread 'testing::tests::a_child_half_that_ran_another_test_is_not_taken_for_the_one_that_was_named'
+panicked at src/gitscratch/src/testing.rs:
+a child that ran some other test must be a failure: it passes, and libtest
+counts it exactly as it counts the test that was meant to run, so accepting that
+count means a filter pointed at a neighbour reports a pass while the assertions
+the parent needs never run: ()
+
+test result: FAILED. 50 passed; 1 failed
+```
+
+No collateral: that is the only test the mutation reddens, in this crate and in
+`grind` and `grist`. `a_child_half_that_matched_no_test_is_a_failure_not_a_pass`
+stays green under it, which is the point of keeping both — the count check is
+not useless, it is weaker, and only one of the two shapes tells them apart.
+
+The decoy the test hands the runner is
+`testing::tests::try_git_hands_back_a_failure_instead_of_raising_it`. It is a
+real test of the same file, it spawns no child of its own, and no child half
+names it, so the run it stands for is exactly the run a stale filter produces.
+
+### `uncommitted_files_refuses_a_repository_with_no_working_tree`
+
+`Repo::uncommitted_files` documents its own ordinary failure: a bare repository
+has no working tree, so `git status` cannot run there at all. The contract goes
+further and tells a caller who wants the count as a *caveat* to read that
+failure as no caveat, with `unwrap_or_default`. That reading is safe only while
+the answer really is an error. A count that answered zero says the tree is
+clean, which is a different statement about a repository that has no tree.
+
+Nothing pinned it. `BareRepo` exists in the fixture crate for this question, and
+the only test using it was `grind`'s
+`a_repository_with_no_working_tree_is_answered_rather_than_refused`, which
+asserts the composite — no caveat printed, and the verdict still right. A silent
+`Ok(0)` reads to that test exactly as an error does.
+
+Mutation: the `?` in `Repo::uncommitted_files` became `unwrap_or_default()`, so
+a failed status answers with no records. The run was `cargo test --no-fail-fast
+-p gitscratch -p grind -p grist`, on git 2.55.0.
+
+```text
+thread 'uncommitted_files_refuses_a_repository_with_no_working_tree'
+panicked at src/gitscratch/tests/repo.rs:
+a bare repository has no working tree to take a status of, so the count has to
+fail rather than answer zero, which a caller reads as a clean tree: ()
+
+test result: FAILED. 12 passed; 1 failed
+```
+
+No collateral, and that is the finding restated as a fact: with the count
+answering zero for a repository it cannot read, every other test in the three
+crates stayed green, `grind`'s bare-repository test included.
+
+### The seal guard's unwind, and why it is not in the map
+
+`TestRepo::seal_object_store` strips the write bit off every directory of the
+object database and hands back a guard that puts every mode back on drop. The
+guard is built before the walk, and the walk fills the guard's own list. Built
+out of what the walk returns, it is never built at all when the walk panics
+partway: the walk raises every I/O error as a panic, and the directories
+stripped up to that point keep their new modes.
+
+Mutation: the guard was built after the walk again, out of a plain local
+`Vec`. The run was `cargo test --no-fail-fast -p gitscratch -p grind -p grist`,
+on git 2.55.0.
+
+```text
+thread 'testing::tests::a_panic_inside_the_seal_walk_puts_back_the_directories_it_already_stripped'
+panicked at src/gitscratch/src/testing.rs:
+a panic inside the seal walk has to unwind through a live guard, so every
+directory it had already stripped comes back writable. These kept the mode the
+walk gave them: [".../objects/0c (40555)", ".../objects/e3 (40555)",
+".../objects/pack (40555)", ".../objects/info (40555)", ".../objects/d4
+(40555)", ".../objects/gitscratch-seal-panic/stripped-first (40555)"]
+
+test result: FAILED. 50 passed; 1 failed
+```
+
+No collateral: that is the only test the mutation reddens, in this crate and in
+`grind` and `grist`.
+
+**The panic is planted, and it has to be.** Nothing a test can put on disk makes
+that walk fail *after* it has stripped something. A directory is sealed only
+once every directory under it is sealed, so the first failure an unreadable
+directory raises arrives before anything is stripped, and which of two
+directories the walk meets first is the file system's choice rather than the
+test's. So the seam is a directory name, checked for under `#[cfg(test)]` alone,
+one level above a directory the walk strips first. No consumer's fixture carries
+the check, and no object database git builds holds a directory of that name.
+
+**One end stays out of reach.** A signal that terminates without unwinding runs
+no `Drop` at all, and `Ctrl-C` during `cargo test` is that signal. The doc
+comment says so rather than the crate installing a handler, and it names the
+repair: `chmod -R u+w` on the temporary directory the run left behind, which is
+needed before anything can delete it — `rm -rf` answers permission denied on the
+files and directory not empty on the parents.
+
+It is deliberately absent from the map above. That map is for a guard whose
+failure is a plausible wrong answer or damage nobody sees. What this one costs
+is a read-only tree in `TMPDIR` and a confusing cleanup. It is not a wrong
+answer: every fixture owns a temporary directory of its own, so two seals cannot
+collide and a stale seal cannot reach a later run.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
@@ -1410,6 +1629,24 @@ code moves. Every place below is load-bearing for the whole table:
   rather than a setting, so it is the half that survives a configuration this
   crate has not thought of; `rebase.rebaseMerges=false` is the other half, and
   it closes the one route into it that exists today.
+- **The environment sweep at every fixture spawn** — `src/testing.rs` spawns git
+  in five places and each one takes the sweep for itself, because the sweep is a
+  call rather than a type. A sixth spawn is a sixth place.
+  `tests/isolation.rs` reaches all five in one child test, and its doc comment
+  names them rather than counting them: the count it used to carry said four
+  while the crate had six. A spawn added there needs a line in that test and its
+  own mutation, and the mutation is the only thing that proves the line reaches
+  it.
+- **`run_child_half`'s sentinel** — the one child runner in this crate, and the
+  one place that decides what counts as a child that ran. It requires a line the
+  child prints from the end of its own body, because neither libtest's exit
+  status nor its count tells a stale filter from a good run. A second child
+  runner, or a caller that reads the child's output for itself, puts the weaker
+  check back under a different name.
+- **`seal_object_store`'s guard-first construction** — the walk panics on any
+  I/O error, so the guard has to exist before the walk starts. Building it out
+  of what the walk returns leaves a stripped tree behind on the one path the
+  guard exists for.
 
 Anyone touching those should re-run the relevant mutation and update this file
 with what they saw. A guard added without ever being watched to fail is back to

@@ -21,20 +21,19 @@
 //! not have, git's own answers stop being trustworthy.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
-use gitscratch::testing::{conflicting_repo, not_a_repository, DetachedGitDirRepo, TestRepo};
+use gitscratch::testing::{
+    child_ran, conflicting_repo, not_a_repository, run_child_half, DetachedGitDirRepo, TestRepo,
+};
 use gitscratch::Files;
 
 /// The test re-executed as the child, by exact name.
 ///
-/// A filter matching nothing exits zero, so a rename here that missed the
-/// function below would leave every test in this file passing over a child that
-/// ran nothing at all. [`run_in_child`] therefore checks the count too.
+/// The compiler never checks this string against the test it names. A rename
+/// that leaves it pointed at nothing, or at a neighbouring test, is a run
+/// libtest calls a success either way, so `run_child_half` requires the child
+/// to say that it ran rather than trusting this constant to stay current.
 const CHILD_TEST: &str = "fixtures_and_replays_stay_inside_their_own_temporary_directories";
-
-/// What libtest prints when exactly one test ran and passed.
-const ONE_TEST_PASSED: &str = "1 passed";
 
 /// The subject of the control commit the child makes through
 /// [`TestRepo::try_git`], so the fixture's own log can be asked whether that
@@ -67,8 +66,9 @@ const DETACHED_BRANCH: &str = "side";
 ///
 /// Run directly by `cargo test` like any other test — where it simply proves
 /// the fixtures build — and re-executed by the tests below with a leaked git
-/// environment, where it is the assertion. Every spawn site is covered in one
-/// pass because a leak reaches every one of them at once:
+/// environment, where it is the assertion. Every spawn a fixture makes is
+/// covered in one pass, along with the crate's own runner, because a leak
+/// reaches every one of them at once:
 ///
 /// - [`TestRepo`]'s builder, which is the spawn every fixture is made of.
 /// - [`TestRepo::commit_file_named_by_bytes`], which reaches the spawn that
@@ -93,6 +93,12 @@ const DETACHED_BRANCH: &str = "side";
 /// own spelling list is the next thing to go quietly out of date — the defect
 /// this list already had, moved into a guard. So the sites are named instead,
 /// where a reader can hold the list against the file.
+///
+/// What the list is of is worth stating too. It names what a fixture reaches:
+/// the spawns of `gitscratch::testing`, and the runner every consumer's replay
+/// goes through. A unit test that spawns git of its own — one in `src/git.rs`
+/// does, to write an index entry no fixture can — is a spawn nothing here can
+/// reach, and nothing here claims it.
 #[test]
 fn fixtures_and_replays_stay_inside_their_own_temporary_directories() {
     let repo = conflicting_repo();
@@ -147,7 +153,7 @@ fn fixtures_and_replays_stay_inside_their_own_temporary_directories() {
 
     // The detached-git-directory fixture, whose every spawn names the git
     // directory and the work tree on the command line. Those arguments outrank
-    // `GIT_DIR` and `GIT_WORK_TREE`; nothing on the command line outranks
+    // `GIT_DIR` and `GIT_WORK_TREE`, and nothing on the command line outranks
     // `GIT_INDEX_FILE`, so without the sweep this fixture's own `git add`
     // stages into whichever index the environment names.
     let detached = DetachedGitDirRepo::nested();
@@ -214,42 +220,45 @@ fn fixtures_and_replays_stay_inside_their_own_temporary_directories() {
          sweeps on the `GIT_` prefix and would take this one with it if it ran \
          second"
     );
+
+    // Reached only when every assertion above held, and read by a parent as the
+    // one proof that this test ran rather than some neighbour of it. Printed on
+    // a direct `cargo test` run as well, where libtest captures it.
+    child_ran();
 }
 
 /// Re-execute this binary running only [`CHILD_TEST`], with `leaked` added to
-/// its environment.
+/// its environment, and name the leak when the run fails.
+///
+/// The spawn itself belongs to `gitscratch::testing::run_child_half`, which
+/// every child half in this crate goes through and which decides what counts as
+/// a child that ran. What is added here is the diagnosis: the variables the
+/// child was handed are what a reader of a failure needs first, and the helper
+/// cannot know them.
 ///
 /// # Panics
 ///
 /// Panics if the child could not be spawned, if it failed, or if it did not run
-/// exactly one test — the last of which is what stops a stale [`CHILD_TEST`]
-/// from turning every caller green over a child that ran nothing.
-fn run_in_child(leaked: &[(&str, PathBuf)]) -> Output {
-    let mut command = Command::new(std::env::current_exe().expect("the running test binary"));
-    command.args([CHILD_TEST, "--exact"]);
-    for (name, value) in leaked {
-        command.env(name, value);
+/// the test [`CHILD_TEST`] names — the last of which is what stops a stale
+/// constant from turning every caller green over a child that never ran the
+/// assertions that test carries.
+fn run_in_child(leaked: &[(&str, PathBuf)]) {
+    let outcome = run_child_half(CHILD_TEST, |child| {
+        for (name, value) in leaked {
+            child.env(name, value);
+        }
+    });
+
+    if let Err(report) = outcome {
+        panic!(
+            "the fixtures did not survive {}:\n{report}",
+            leaked
+                .iter()
+                .map(|(name, value)| format!("{name}={}", value.display()))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
     }
-
-    let output = command.output().expect("re-run this test binary");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    assert!(
-        output.status.success(),
-        "the fixtures did not survive {}:\n{stdout}\n{stderr}",
-        leaked
-            .iter()
-            .map(|(name, value)| format!("{name}={}", value.display()))
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    assert!(
-        stdout.contains(ONE_TEST_PASSED),
-        "the child must have run exactly one test, got:\n{stdout}"
-    );
-
-    output
 }
 
 /// A repository standing in for the developer's own, with an identity of its

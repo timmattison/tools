@@ -521,18 +521,29 @@ which adds another repository's `GIT_DIR` and `GIT_INDEX_FILE` to that
 environment and watches neither reach git. Both of those last two run in a
 re-executed child of the test binary rather than in it: the environment is
 process-wide, and mutating it in place would reach every sibling test and every
-concurrent run of the suite. Each of them names the child by a libtest filter,
-which is a string the compiler never checks against the test it names, so a
-child that ran counts only when it *says* it ran — one sentinel line, printed
-at the end of the child's body and required in its output alongside a
-successful exit. The exit status alone cannot carry that, because libtest
-exits 0 when a filter matches no test at all, so a renamed test and a passing
-one look the same from the parent's side.
-`a_child_half_that_matched_no_test_is_a_failure_not_a_pass` pins the refusal:
-it hands the shared child runner a filter naming no test in this file and
-requires a failure that says so. The rename that breaks a filter is the rename
-that hides the breakage, which is why the two guards cannot be left to police
-their own filters. **The UTF-8
+concurrent run of the suite. Both go through `gitscratch::testing`'s
+`run_child_half`, which is the one child runner in this crate: every child half
+here, in `src/testing.rs` and in `tests/isolation.rs`, is spawned by it, and
+it alone decides what counts as a child that ran.
+
+That decision is the reason the runner is one function rather than a copy per
+suite. Each parent names its child by a libtest filter, which is a string the
+compiler never checks against the test it names, so a child that ran counts
+only when it *says* it ran — one sentinel line, printed at the end of the
+child's body and required in its output alongside a successful exit. Neither
+the exit status nor libtest's count can carry that. libtest exits 0 when a
+filter matches no test at all, and it counts a child that ran some *other*
+test exactly as it counts the right one — one test, passed — so a filter
+pointed at nothing and a filter pointed at a neighbour both look from the
+parent's side like the run that was asked for. Two tests in `src/testing.rs`
+pin the refusal, one for each of those shapes:
+`a_child_half_that_matched_no_test_is_a_failure_not_a_pass` hands the runner a
+filter naming no test at all, and
+`a_child_half_that_ran_another_test_is_not_taken_for_the_one_that_was_named`
+hands it a filter naming a different test of that file. Each requires a failure
+that says which filter went stale. The rename that breaks a filter is the
+rename that hides the breakage, which is why no guard is left to police its own
+filter. **The UTF-8
 refusal in `Git::paths`** —
 `refuses_a_path_that_is_not_valid_utf_8_rather_than_replacing_the_byte` — covers
 the one loss `-z` cannot undo: a byte that is not UTF-8 has no `String` to come
@@ -663,8 +674,12 @@ The fixture builder stamps commits too, and is covered on its own ground in
 `a_fixture_commits_under_its_own_identity_in_a_hook_environment`. It needs an
 actual commit to ask about, so it reads `git log` back for author, committer and
 both raw dates. It re-executes its own test binary with a hook's identity
-variables set on the *child* for the reason the two above do — the same mechanism
-`tests/isolation.rs` reaches for.
+variables set on the *child* for the reason the two above do, and through the
+same `run_child_half` — the runner `tests/isolation.rs` reaches for as well. It
+used to carry a child check of its own, which accepted any child whose output
+held the literal `1 passed`. `tests/isolation.rs` carried a third copy of that
+same weaker check. One runner is what stops three guards standing at two
+strengths.
 
 **Four properties are pinned by doc-tests**, because each is about what a
 consumer can *compile* and no ordinary test can state that. Rustdoc compiles a
@@ -792,6 +807,28 @@ it stop being trustworthy. Both shapes are covered — the severe one, where the
 fixture directory never gets a `.git` at all, and the `GIT_INDEX_FILE`-only one a
 `pre-commit` hook produces on its own. `grind`'s `tests/cli.rs` pins the same
 thing end to end through the binary.
+
+One child test carries every spawn a fixture makes, along with the crate's own
+runner, because one leaked environment reaches every one of them at once: the
+fixture builder, the spawn that pipes a record in on stdin, `TestRepo::try_git`,
+the `not_a_repository` probe, `DetachedGitDirRepo`'s runner, and the `Git` every
+replay goes through. Its doc comment names
+that list and gives no count. It used to say four, while the crate had six, and
+the two it left out were the two most recently added — the stdin spawn, reached
+here through `commit_file_named_by_bytes`, and the detached-git-directory
+runner, reached through a fixture with one linked worktree. A count written in
+prose is a fact nothing checks. Deriving it means scanning `src/testing.rs` for
+the shape of a spawn, and such a matcher carries a spelling list that goes
+stale the same silent way, so the sites are named where a reader can hold the
+list against the file.
+
+`DetachedGitDirRepo`'s runner is the site with the sharpest consequence.
+`--git-dir` and `--work-tree` on its command line outrank `GIT_DIR` and
+`GIT_WORK_TREE`, so that fixture looks protected by its own arguments — and
+nothing on a git command line outranks `GIT_INDEX_FILE`. Without the sweep, the
+fixture's own `git add` stages into the index the environment names. The
+mutation record in [`MUTATIONS.md`](./MUTATIONS.md) carries what that looks
+like: the victim's own staged file arriving in the fixture's commit.
 
 `tests/halts.rs` covers the other half of telling the truth: not that the
 harness leaves the repository alone, but that it does not report a cheap number
@@ -1082,6 +1119,26 @@ check that reads a run's output is a post-mortem; this one runs first.
 `the_ancestor_check_finds_the_repository_a_directory_sits_inside` pins it, and
 [`MUTATIONS.md`](./MUTATIONS.md) records both directions it was watched to fail
 in.
+
+`TestRepo::seal_object_store` is the fixture side of the halt tests, and the
+guard it hands back has to survive the walk that arms it. The walk strips the
+write bit off every directory of the object database, and it raises every I/O
+error as a panic. So the guard is built *before* the walk and the walk fills the
+guard's own list: built out of what the walk returns, it is never built at all
+when the walk panics partway, and the directories stripped up to that point keep
+their new modes. Such a tree stops its own `TempDir` from deleting itself, and
+`rm -rf` refuses it — permission denied on the files, directory not empty on the
+parents — until somebody runs `chmod -R u+w` on it.
+`a_panic_inside_the_seal_walk_puts_back_the_directories_it_already_stripped`
+pins the unwind. The panic is planted rather than provoked, by a directory name
+this crate's own test build alone checks for, because nothing a test can put on
+disk makes that walk fail *after* it has stripped something: a directory is
+sealed only once every directory under it is sealed, and which of two
+directories the walk meets first is the file system's choice. One end stays out
+of reach of every `Drop` — a signal that terminates without unwinding, which is
+what `Ctrl-C` during `cargo test` sends — and the doc comment says so and names
+the same repair. Each fixture owns a temporary directory of its own, so what
+that end leaves is litter on the disk rather than a hazard to a later run.
 
 | Fixture | Shape |
 | --- | --- |

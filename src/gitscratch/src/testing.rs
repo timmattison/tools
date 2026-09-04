@@ -237,13 +237,12 @@ impl TestRepo {
         let mut child = command
             .args(args)
             .current_dir(self.dir.path())
-            // MUTATION, deliberate, and the next commit takes it back out: the
-            // sweep is gone from this spawn. The same immunity `git_in` takes,
-            // in the same words and for the same reason: a fixture that
-            // inherits a redirected `GIT_DIR` or `GIT_INDEX_FILE` writes its
-            // objects into the developer's real repository instead of this one.
-            // `tests/isolation.rs` now reaches this spawn, and the mutation is
-            // what proves it reaches it.
+            // The same immunity `git_in` takes, in the same words and for the
+            // same reason: a fixture that inherits a redirected `GIT_DIR` or
+            // `GIT_INDEX_FILE` writes its objects into the developer's real
+            // repository instead of this one. `tests/isolation.rs` reaches this
+            // spawn through `commit_file_named_by_bytes`.
+            .without_inherited_git_environment()
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -480,15 +479,36 @@ impl TestRepo {
     /// mode is restored on drop, which the temporary directory's own removal
     /// depends on.
     ///
+    /// The guard is built before the walk rather than out of what the walk
+    /// hands back, and the walk fills the guard's own list. The walk raises
+    /// every I/O error as a panic, so a panic partway through it has to unwind
+    /// through a live guard: built afterwards, the guard is never built at all
+    /// on that path, and the directories stripped up to that point keep the
+    /// modes the walk gave them.
+    ///
+    /// One end still leaves the tree stripped, and it is the end no `Drop` can
+    /// reach: a signal that terminates without unwinding. `Ctrl-C` during
+    /// `cargo test` is that signal. The repair is
+    /// `chmod -R u+w` on the temporary directory the run left behind, and it is
+    /// needed before anything can delete that directory — `rm -rf` answers
+    /// permission denied on the files and directory not empty on the parents.
+    /// Every fixture owns a temporary directory of its own, so such a tree is
+    /// litter on the disk rather than a hazard to a later run.
+    ///
     /// # Panics
     ///
     /// Panics if the object database cannot be walked or its permissions cannot
     /// be changed.
     #[must_use]
     pub fn seal_object_store(&self) -> SealedObjectStore {
-        let mut restore = Vec::new();
-        seal_directories_under(&self.dir.path().join(".git").join("objects"), &mut restore);
-        SealedObjectStore { restore }
+        let mut sealed = SealedObjectStore {
+            restore: Vec::new(),
+        };
+        seal_directories_under(
+            &self.dir.path().join(".git").join("objects"),
+            &mut sealed.restore,
+        );
+        sealed
     }
 }
 
@@ -1511,16 +1531,16 @@ impl DetachedGitDirRepo {
         let output = command
             .args(args)
             .current_dir(cwd)
-            // MUTATION, deliberate, and the next commit takes it back out: the
-            // sweep is gone from this spawn. The same immunity
-            // `TestRepo::git_in` takes, in the same words and for the same
-            // reason: a fixture that inherits a redirected `GIT_DIR` or
-            // `GIT_INDEX_FILE` builds its repository somewhere else. This suite
-            // runs under a pre-commit hook that exports both. `--git-dir` and
-            // `--work-tree` on this command line outrank the first two
-            // variables and nothing on it outranks `GIT_INDEX_FILE`, so the
-            // sweep is the whole of the guard against a staged fixture landing
-            // in the developer's index.
+            // The same immunity `TestRepo::git_in` takes, in the same words and
+            // for the same reason: a fixture that inherits a redirected
+            // `GIT_DIR` or `GIT_INDEX_FILE` builds its repository somewhere
+            // else. This suite runs under a pre-commit hook that exports both.
+            // `--git-dir` and `--work-tree` on this command line outrank the
+            // first two variables, and nothing on it outranks `GIT_INDEX_FILE`,
+            // so the sweep is the whole of the guard against this fixture's own
+            // `git add` landing in the developer's index. `tests/isolation.rs`
+            // reaches this spawn.
+            .without_inherited_git_environment()
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
 
@@ -1681,29 +1701,110 @@ fn separates_a_path(character: char) -> bool {
     character.is_whitespace() || TRIMMED_PUNCTUATION.contains(character)
 }
 
+/// Printed by a child half that ran its own body to the end, and required by
+/// [`run_child_half`] before it calls the run a pass.
+///
+/// A zero exit is not evidence that anything ran, and neither is libtest's
+/// count. libtest exits zero when a filter matches no test, and it counts a
+/// child that ran some *other* test exactly as it counts the right one — one
+/// test, passed. A stale filter therefore hands the parent the exit status and
+/// the count of a good run. Only a child that reached the end of its own body
+/// prints this line, so the parent reads proof of the work it asked for instead
+/// of absence of failure.
+///
+/// The value is a token no libtest output holds, because the parent looks for
+/// it in the whole of that output. A sentinel that a test name or a progress
+/// line can spell reports the work of libtest as the work of the child.
+pub const CHILD_RAN: &str = "GITSCRATCH_CHILD_HALF_RAN";
+
+/// Say that this child half ran its own body.
+///
+/// Call it at the end of a child branch, after its assertions hold. The line
+/// goes to standard output, which [`run_child_half`] reads: `--nocapture` is
+/// already on the child's command line, so no other plumbing is needed.
+pub fn child_ran() {
+    println!("{CHILD_RAN}");
+}
+
+/// Re-execute this test binary on the one test `filter` names, under an
+/// environment `configure` sets, and report what the child wrote when the run
+/// failed.
+///
+/// A test needing an environment of its own cannot set it in place. An
+/// environment is process-wide, `std::env::set_var` is `unsafe` for that
+/// reason, and Rust runs a binary's tests as threads of one process — so a
+/// mutation reaches every sibling test and every concurrent run of the suite.
+/// The way that stays parallel-safe is a whole child process whose environment
+/// says what the test needs, which is also the leak shape verbatim for the
+/// suites that pin a leaked git environment. Anything the child needs beyond
+/// the filter goes in `configure`: the marker variable its own branch reads,
+/// and the variables under test.
+///
+/// A run counts only when the child exits zero **and** prints
+/// [`CHILD_RAN`]. That second half is the whole point of one helper rather than
+/// a copy per suite: `filter` is a string, nothing ties it to the test it
+/// names, and both ways of pointing it at nothing useful are runs libtest calls
+/// a success. It matches no test, which libtest reports as zero failures. Or it
+/// matches a *neighbouring* test, which passes and counts as one test passed.
+/// See `a_child_half_that_matched_no_test_is_a_failure_not_a_pass` and
+/// `a_child_half_that_ran_another_test_is_not_taken_for_the_one_that_was_named`
+/// in this module.
+///
+/// # Errors
+///
+/// Returns the child's own output as the message when the child exits non-zero,
+/// and when the child prints no [`CHILD_RAN`] line.
+///
+/// # Panics
+///
+/// Panics if the path of the running test binary cannot be read, or if the
+/// child cannot be spawned.
+pub fn run_child_half(filter: &str, configure: impl FnOnce(&mut Command)) -> Result<(), String> {
+    let mut child = Command::new(std::env::current_exe().expect("path of the running test binary"));
+    child.args([filter, "--exact", "--nocapture"]);
+    configure(&mut child);
+
+    let output = child.output().expect("re-run this test binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        return Err(format!("the child half failed:\n{stdout}{stderr}"));
+    }
+
+    if !stdout.contains(CHILD_RAN) {
+        return Err(format!(
+            "`{filter}` did not run the test it names, so this guard checked nothing. The child \
+             exited 0 and printed no `{CHILD_RAN}` line. libtest calls a filter that matched no \
+             test a success, and it counts a child that ran some other test exactly as it counts \
+             this one, so neither the exit status nor the count tells those runs apart. The child \
+             prints `{CHILD_RAN}` when it reaches the end of its body. Point the filter back at \
+             the test it names.\n{stdout}{stderr}"
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ancestor_repository, canonical, path_at_or_above, DetachedGitDirRepo, TestRepo,
-        FIXTURE_USER_EMAIL, FIXTURE_USER_NAME,
+        ancestor_repository, canonical, child_ran, path_at_or_above, run_child_half,
+        DetachedGitDirRepo, TestRepo, FIXTURE_USER_EMAIL, FIXTURE_USER_NAME,
     };
 
     /// Marks the re-executed child half of
     /// [`a_fixture_commits_under_its_own_identity_in_a_hook_environment`].
     const CHILD_MARKER: &str = "GITSCRATCH_FIXTURE_IDENTITY_CHILD";
 
-    /// libtest's exact filter for the one test the child half runs.
+    /// libtest's exact filter for the one test the child half runs. The
+    /// compiler never checks this string against the test it names, so
+    /// [`run_child_half`] requires the child to say that it ran rather than
+    /// trusting this constant to stay current.
     const IDENTITY_TEST_PATH: &str =
         "testing::tests::a_fixture_commits_under_its_own_identity_in_a_hook_environment";
-
-    /// What libtest prints when exactly one test ran and passed.
-    ///
-    /// A filter matching nothing exits zero, so a rename that missed
-    /// [`IDENTITY_TEST_PATH`] would otherwise leave the parent green over a
-    /// child that ran nothing at all.
-    const ONE_TEST_PASSED: &str = "1 passed";
 
     /// A timestamp no run of this suite can produce on its own, so a commit
     /// carrying it can only have taken it from the environment.
@@ -1810,6 +1911,9 @@ mod tests {
     fn a_fixture_commits_under_its_own_identity_in_a_hook_environment() {
         if std::env::var_os(CHILD_MARKER).is_some() {
             assert_fixture_identity();
+            // Reached only when the assertions above held, and read by the
+            // parent as the one proof that this branch ran at all.
+            child_ran();
             return;
         }
 
@@ -1825,42 +1929,39 @@ mod tests {
         }
     }
 
-    /// Re-execute this test binary on one test, under an environment
-    /// `configure` sets, and report what the child wrote when the run failed.
+    /// A libtest filter naming a test this file does not define, which is what
+    /// a renamed test looks like from the parent's side.
+    const UNMATCHED_TEST_PATH: &str = "testing::tests::no_test_in_this_file_carries_this_name";
+
+    /// A filter is a string, and nothing ties a string to the test it names.
+    /// Rename the test, the `tests` module or the `testing` module and the
+    /// filter stays as it was, so the child matches nothing — and libtest exits
+    /// 0 when a filter matches nothing. A parent that reads the exit status
+    /// alone therefore calls the rename a pass, and every guard built on
+    /// [`run_child_half`] checks nothing from that commit on, in silence.
     ///
-    /// The environment a parent needs is process-wide, and
-    /// `std::env::set_var` in the parent reaches every sibling test in the
-    /// binary and every concurrent run of the suite. So the parent sets the
-    /// variables on a *child* command instead, and names the one test that
-    /// child is to run.
-    ///
-    /// A run counts when the child exits zero and libtest reports one test
-    /// passed.
-    fn run_child_half(
-        filter: &str,
-        configure: impl FnOnce(&mut std::process::Command),
-    ) -> Result<(), String> {
-        let mut child = std::process::Command::new(
-            std::env::current_exe().expect("path of the running test binary"),
+    /// So the child runner has to refuse a child that ran no test, and this
+    /// pins that it does. The rename that breaks a filter is the rename that
+    /// hides the breakage, which is why the refusal cannot live in the filter
+    /// constants themselves.
+    #[test]
+    fn a_child_half_that_matched_no_test_is_a_failure_not_a_pass() {
+        let outcome = run_child_half(UNMATCHED_TEST_PATH, |_| {});
+
+        let report = outcome.expect_err(
+            "a child that matched no test must be a failure: libtest exits 0 on an empty filter, \
+             so accepting that exit means a renamed test reports a pass while nothing runs",
         );
-        child.args([filter, "--exact", "--nocapture"]);
-        configure(&mut child);
-
-        let output = child.output().expect("re-run this test binary");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if !output.status.success() {
-            return Err(format!("the child half failed:\n{stdout}{stderr}"));
-        }
-
-        if !stdout.contains(ONE_TEST_PASSED) {
-            return Err(format!(
-                "`{filter}` did not run exactly one test.\n{stdout}{stderr}"
-            ));
-        }
-
-        Ok(())
+        assert!(
+            report.contains(UNMATCHED_TEST_PATH),
+            "the refusal has to name the filter that matched nothing, because the filter is the \
+             thing that went stale: {report}"
+        );
+        assert!(
+            report.contains("did not run the test it names"),
+            "the refusal has to say what went wrong - a child that ran nothing, not a child that \
+             failed - or a reader repairs the wrong half: {report}"
+        );
     }
 
     /// A test of this file that no child half names, so a run of it stands for
@@ -1900,6 +2001,11 @@ mod tests {
             report.contains(DECOY_TEST_PATH),
             "the refusal has to name the filter that ran the wrong test, because the filter is \
              the thing that went stale: {report}"
+        );
+        assert!(
+            report.contains("did not run the test it names"),
+            "the refusal has to say what went wrong - a child that ran another test, not a child \
+             that failed - or a reader repairs the wrong half: {report}"
         );
     }
 
