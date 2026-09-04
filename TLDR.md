@@ -61,7 +61,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `sf` | Size of Files — total size of files in directories, with optional suffix/prefix/substring filters. |
 | `sirn` | Serve It Right Now — a zero-config HTTP file server; serves files or the current directory on a git-derived port. |
 | `spv` | Smart Process Viewer — find and view processes by PID/name/regex, with optional cwd, open files, environment, and network connections. |
-| `subito` | Subscribes to AWS IoT Core topics and prints received messages. |
+| `subito` | Subscribes to AWS IoT Core topics over a signed WebSocket and prints received messages, as text, indented JSON, or a hex dump. |
 | `swt` | Subagent Worktree — isolated-worktree helper for parallel TDD (create/merge with green checks). |
 | `symfix` | Recursively finds and optionally fixes broken symlinks. |
 | `tc` | Token Count — counts estimated LLM tokens in files (multiple OpenAI tokenizers, stdin support). |

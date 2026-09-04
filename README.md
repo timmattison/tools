@@ -143,8 +143,22 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - subito
     - Subscribes to a list of topics on AWS IoT Core and prints out the messages it receives. This is useful for
       debugging and testing. I was going to call it `subiot` but `subito` actually means "immediately" in Italian and
-      I thought that was cooler. Just run `subito topic1 topic2 topic3 ...` and you'll see the messages.
-    - To install: `go install github.com/timmattison/tools/cmd/subito@latest`
+      I thought that was cooler. Just run `subito topic1 topic2 topic3 ...` and you'll see the messages. It takes the
+      credentials and the region from the ambient AWS configuration, the same chain the AWS CLI reads, and connects
+      over a WebSocket it signs itself. The messages go to standard output and every other line goes to standard
+      error, so `subito 'sensors/#' | jq` reads the messages and nothing else. It waits for the broker to answer
+      each subscription, so a topic the policy denies says `Subscription refused` on standard error instead of
+      staying silent. A payload that is not printable text prints as a hex dump, so a stray escape sequence cannot
+      change your terminal. A topic goes through the printer on its own, under a stricter rule, because the tool
+      prints a topic on a line of its own. A topic that holds a tab, a line feed or a carriage return also prints as
+      a hex dump. A publisher therefore cannot write a whole message of its own with the topic. A connection that
+      drops comes back, with a fresh signature and a wait that doubles up to thirty seconds. `Ctrl-C` stops the tool
+      at once at every step of that cycle — while it reads credentials and signs a URL, while a session runs, and
+      while it waits before the next attempt — and it sends a DISCONNECT for a session that is open, then exits 0.
+        - `--qos <0|1|2>` sets the quality of service of each subscription. The default is 0.
+        - `--endpoint <host>` names the AWS IoT data endpoint and skips the `DescribeEndpoint` call.
+        - `--json` prints a payload that holds JSON with indentation.
+    - To install: `cargo install --git https://github.com/timmattison/tools subito`
 - portplz
     - Generates an unprivileged port number based on the name of the current directory, the git branch, and the current
       user. Mixing in the user lets two people run the same branch of the same repo at the same time without colliding.
