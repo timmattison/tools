@@ -55,7 +55,7 @@ const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// does not know is a run that stops before it starts, and the report would
 /// then name a level nothing ran at.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Effort(String);
+struct Effort(String);
 
 /// The model a run asks for.
 ///
@@ -65,7 +65,7 @@ pub struct Effort(String);
 /// decides what the run is allowed to do. That decision belongs to the reader
 /// and never to a variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelName(String);
+struct ModelName(String);
 
 impl Effort {
     /// The level `value`, the value of [`EFFORT_ENV`], names.
@@ -83,7 +83,7 @@ impl Effort {
     /// [`EFFORT_LEVELS`]. A reader who wrote `WN_PLAN_EFFORT=quick` and got
     /// the default back would learn nothing about why the plan still cost what
     /// it cost.
-    pub fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
+    fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
         let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
             return Ok(None);
         };
@@ -98,8 +98,7 @@ impl Effort {
     }
 
     /// The level, as the command line and the report write it.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
+    fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -117,7 +116,7 @@ impl ModelName {
     /// Every other value goes through: the models of `claude` are named by
     /// `claude` and not by this tool, so a list here would refuse a model that
     /// shipped after this build.
-    pub fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
+    fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
         let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
             return Ok(None);
         };
@@ -130,8 +129,7 @@ impl ModelName {
     }
 
     /// The model, as the command line writes it.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
+    fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -199,8 +197,7 @@ const ARGUMENTS: [&str; 5] = [
 ///
 /// A run that names neither gets [`ARGUMENTS`] and nothing more, so the two
 /// variables cost the reader who sets neither of them nothing at all.
-#[must_use]
-pub fn arguments(effort: Option<&Effort>, model: Option<&ModelName>) -> Vec<String> {
+fn arguments(effort: Option<&Effort>, model: Option<&ModelName>) -> Vec<String> {
     let mut carried: Vec<String> = ARGUMENTS.iter().map(ToString::to_string).collect();
     if let Some(effort) = effort {
         carried.push(EFFORT_FLAG.to_string());
@@ -586,7 +583,7 @@ fn reason_of(complained: &str, printed: &str, pipe: Option<&str>) -> String {
 /// login server, for one — is a failure of something else, and
 /// [`BuildError::NotAuthenticated`] carries no text, so such a run loses the
 /// reason it gave.
-pub fn refusal_of(said: &str) -> BuildError {
+pub(crate) fn refusal_of(said: &str) -> BuildError {
     let clause = said.trim();
     let lowered = clause.to_lowercase();
     if ["not authenticated", "/login", "log in"]
