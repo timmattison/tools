@@ -318,11 +318,23 @@ mod tests {
     /// Which terminal column the hunk count starts in, measured in display
     /// width rather than bytes or characters - which is the only measure a
     /// reader looking at aligned columns can see.
+    ///
+    /// Read from the *last* place `count` appears, because the count is the
+    /// last thing on the row. A name can spell the count itself -
+    /// `11 hunks.txt` is a legal file name, NUL being the one byte a path
+    /// cannot hold - and the first occurrence is then the name rather than the
+    /// count.
+    ///
+    /// Panics when `count` is nowhere on `line`, for the reason
+    /// [`row_holding`] does: a count the renderer never printed is a failure of
+    /// the renderer rather than of the search.
     fn count_column(line: &str, count: &str) -> usize {
-        line.split(count)
-            .next()
-            .expect("splitting always yields at least one piece")
-            .width()
+        let start = line
+            .rfind(count)
+            .unwrap_or_else(|| panic!("no {count:?} on the row {line:?}"));
+        let (prefix, _) = line.split_at(start);
+
+        prefix.width()
     }
 
     /// The per-file rows, which are everything after the blank line that

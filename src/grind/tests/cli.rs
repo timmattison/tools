@@ -80,6 +80,13 @@ fn grind_command(repo: &Path, args: &[&str]) -> Command {
         .current_dir(repo)
         .without_inherited_git_environment();
 
+    // After the scrub, and for the reason `TestRepo::try_git` applies a
+    // caller's own variables after its own: the rule the scrub applies is the
+    // `GIT_` prefix, so anything set ahead of it that wears that prefix comes
+    // straight back off. Neither name below wears it, and stating the order
+    // here is what spares the next reader who adds one that does.
+    command.envs(PINNED_LOCALE);
+
     command
 }
 
@@ -269,11 +276,23 @@ fn a_conflict_in_a_multi_byte_named_file_on_a_multi_byte_branch_survives_intact(
 /// Rust will hand you for a path that corresponds to what a reader sees. A
 /// helper that used `len` or `chars().count()` would agree with a renderer that
 /// made the same mistake and call a ragged column aligned.
+///
+/// Read from the *last* place `count` appears, because the count is the last
+/// thing on the row. A name can spell the count itself - `11 hunks.txt` is a
+/// legal file name - and the first occurrence is then the name rather than the
+/// count.
+///
+/// # Panics
+///
+/// Panics when `count` is nowhere on `line`, because a count the renderer never
+/// printed is a failure of the renderer rather than of the search.
 fn count_column(line: &str, count: &str) -> usize {
-    line.split(count)
-        .next()
-        .expect("splitting always yields at least one piece")
-        .width()
+    let start = line
+        .rfind(count)
+        .unwrap_or_else(|| panic!("no {count:?} on the row {line:?}"));
+    let (prefix, _) = line.split_at(start);
+
+    prefix.width()
 }
 
 /// The count is the last thing on a breakdown row, so [`count_column`] has to
@@ -823,6 +842,11 @@ fn a_directory_that_is_not_a_repository_is_an_error_not_a_conflict() {
 /// That is exactly the shape being pinned - git failed, there is no rebase in
 /// progress, and `git diff --diff-filter=U` is empty - reached without
 /// corrupting a repository or racing a background process to produce it.
+///
+/// This is the one assertion in the file that matches git's own words rather
+/// than grind's, so it is the one that [`PINNED_LOCALE`] exists for: git wraps
+/// `invalid upstream` in gettext, and a git built with the translations answers
+/// in the language of whoever runs the suite.
 #[test]
 fn a_rebase_that_fails_with_nothing_to_measure_is_neither_clean_nor_conflicts() {
     let repo = independent_branches_repo();

@@ -840,6 +840,17 @@ rather than through the map. Both were watched to fail — replacing the decode
 with a `to_str` that gives up reddens the first, and trimming the converted name
 reddens the second.
 
+Every column assertion in that file reads through one helper, `count_column`,
+and the helper has a test of its own —
+`the_count_column_is_read_from_the_last_place_the_count_appears`. The count is
+the last thing on a row, so the helper reads the last place the count appears. A
+name can spell its own count, `11 hunks.txt` being a legal file name, and a
+helper that stopped at the first occurrence answers with the column the *name*
+starts in — leaving every alignment assertion built on it passing or failing for
+a reason that has nothing to do with alignment. `grind`'s command-line suite
+carries the same helper over the rendered output of the binary, and the same
+test beside it.
+
 **That a counter's noun is the counter's own business** is pinned by a unit test
 in `src/metrics.rs` on `Uncommitted` — the newest counter, and the one whose
 noun is two words rather than one, so it is where the macro's suffix-`s` rule is

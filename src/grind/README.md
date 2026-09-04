@@ -253,12 +253,12 @@ remove the guard, watch the test fail, put it back.
 What `tests/cli.rs` pins is the part `gitscratch` cannot see. Every assertion is
 load-bearing on the exit code, because a test that only checked the words on
 stdout would pass for a binary that answered every question with the same
-number. It covers all three codes individually, `-q` on all three paths, the
-four-part `--version` line this repository requires, a conflicted `日本語.txt`
-replayed onto a branch named `left-左` surviving intact in name, count and
-column, and — the live defect `grind` was written to kill — that an unresolvable
-branch name is refused *before* any scratch worktree is built. That last one is
-proved by pointing
+number. It covers all three codes individually, `-q` on all three paths and
+`--quiet` answering byte for byte as `-q` does, the four-part `--version` line
+this repository requires, a conflicted `日本語.txt` replayed onto a branch named
+`left-左` surviving intact in name, count and column, and — the live defect
+`grind` was written to kill — that an unresolvable branch name is refused
+*before* any scratch worktree is built. That last one is proved by pointing
 `TMPDIR` at a directory that does not exist, so creating a scratch is guaranteed
 to fail, with a control run on a resolvable branch to show the poison really
 does reach the worktree-building half of `Repo::scratch` rather than being
@@ -279,3 +279,14 @@ which is where a tool whose answer is a number is most easily robbed of it:
   words, and no scratch path in them. `TMPDIR` is pointed at a directory the test
   knows the name of, which is what makes a leak assertable rather than merely
   unlikely.
+
+Every run in that suite starts from one builder, and the builder pins
+`LC_ALL=C` and `LANG=C` on top of the environment scrub. One assertion in the
+file matches git's own words rather than grind's — a rebase that fails outright
+says `invalid upstream`, and that sentence is the only part that says what went
+wrong — and git wraps its words in gettext. A git built with the translations
+answers a developer under a non-C locale in that developer's language, and the
+assertion then fails for a reason it is not about. The pin is read back off the
+built command by a test of its own, because a machine whose git ships no
+translations cannot show the failure, and a pin nothing asserts is a pin the
+next person deletes.
