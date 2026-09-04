@@ -1417,9 +1417,16 @@ fn build(wirings: &[Wiring], lone: &[Port]) -> Graph {
 /// it is the graph a picture of the same plan draws. So both forms are read
 /// into one model, and one report answers either of them.
 ///
+/// A `Waits for` cell names work, and [`Work`] says which work each number of
+/// it names. A cell that writes the issue of a pair some `Order` writes
+/// reaches that pair, exactly as the same cell written `PR#102 (#94)` reaches
+/// it. So one piece of work is one row, and a cell draws no second node for
+/// work another step already does.
+///
 /// `None` says that no cell of the plan draws an edge: every stream waits for
-/// nothing, or each cell names the first step of its own stream. Such a plan
-/// is the plan every reader wrote before this column
+/// nothing, or each cell names the first step of its own stream. A cell that
+/// names the issue of that first step names that step, so such a cell draws no
+/// edge either. Such a plan is the plan every reader wrote before this column
 /// stood, and the reader of streams answers it exactly as it always did.
 ///
 /// # Errors
@@ -1433,13 +1440,23 @@ pub fn of_plan(plan: &Plan) -> Option<Result<Graph, GraphError>> {
     // The claim and the read share all of their work, as they do for a
     // picture, so one function does both. The edges of the cells are what
     // claim the plan, and they are edges of the graph after that.
-    let crossings = crossings_of(plan);
+    //
+    // The work of the plan is read once, ahead of both walks, so the nodes and
+    // the edges of a `Waits for` cell name one piece of work and never two.
+    let ordered: Vec<Step> = plan
+        .streams()
+        .iter()
+        .flat_map(|stream| stream.steps())
+        .copied()
+        .collect();
+    let work = Work::of(&ordered);
+    let crossings = crossings_of(plan, &work);
     if crossings.is_empty() {
         return None;
     }
     let mut edges = chains_of(plan);
     edges.extend(crossings);
-    Some(of_parts(nodes_of(plan), &edges))
+    Some(of_parts(nodes_of(plan, &work), &edges))
 }
 
 /// The graph `steps` and `edges` draw, with its steps in a topological order.
@@ -1465,6 +1482,81 @@ pub(crate) fn of_parts(
         .map(Graph::in_topological_order)
 }
 
+/// The step that does the work of every number a plan names.
+///
+/// A step names its own number. A pair names one number more: the issue its
+/// pull request closes. Both numbers reach one piece of work, so both give the
+/// step of that work — the pair of a pull request, and the lone step of an
+/// issue nothing closes.
+///
+/// One rule stands on this map, and every reader of a plan holds it. A `Waits
+/// for` cell of a table or of a record, and the `waitsFor` array of a JSON
+/// document, all name work. A cell writes `PR#102 (#94)` and a `waitsFor`
+/// writes `94`, and both name the one piece of work. So one piece of work is
+/// one row whichever form the reader wrote, and a wait on the issue of a pair
+/// names no second thing to start. [`of_plan`] reads the three written forms
+/// through it, and [`crate::json::read`] reads the JSON form through it.
+pub(crate) struct Work(BTreeMap<IssueNumber, Step>);
+
+impl Work {
+    /// The work `steps` does, for every number those steps name.
+    ///
+    /// `steps` is the work a plan names directly: the `Order` of every stream,
+    /// in the order the plan writes them. Two passes walk it. The first
+    /// registers the number of each step, and the second registers the issue
+    /// each pair closes, so a number one step carries as its own work and
+    /// another step closes gives the step that carries it. The work a plan
+    /// names directly is the work.
+    ///
+    /// Among steps that name one number, and among pairs that close one issue,
+    /// the first the plan writes owns the number. That is the rule [`nodes_of`]
+    /// holds for a number that stands in two places, so the map is the same map
+    /// however the streams of that plan stand. A rule that took the first
+    /// stream would answer two orders of one plan two ways.
+    ///
+    /// The steps of a `Waits for` cell stand nowhere in `steps`, because such a
+    /// cell names work and declares none. A cell that registered its own number
+    /// would give the bare `#94` the lone step `#94`, and the issue of a pair
+    /// would then reach a thinner copy of that pair. A cell that names a pair
+    /// no `Order` writes keeps that pair as it stands.
+    pub(crate) fn of(steps: &[Step]) -> Self {
+        let mut work: BTreeMap<IssueNumber, Step> = BTreeMap::new();
+        for &step in steps {
+            work.entry(step.number()).or_insert(step);
+        }
+        for &step in steps {
+            if let Some(closes) = step.closes() {
+                work.entry(closes).or_insert(step);
+            }
+        }
+        Self(work)
+    }
+
+    /// The number of the work that carries `number`, or `number` itself when
+    /// no step of the plan names it.
+    ///
+    /// The issue of a pair gives the pull request that does the work, so an
+    /// edge into that work is one edge and never two.
+    pub(crate) fn names(&self, number: IssueNumber) -> IssueNumber {
+        self.step(number).number()
+    }
+
+    /// The step of the work that carries `number`, or a step of that number
+    /// alone when no step of the plan names it.
+    ///
+    /// A blocker reaches the rows as the work the plan wrote and never as a
+    /// thinner copy of it. A number the plan names nowhere is work all the
+    /// same: a blocker the repository does not have must reach the rows and
+    /// turn the run red, and a row of the answer is the only place that says
+    /// so.
+    pub(crate) fn step(&self, number: IssueNumber) -> Step {
+        self.0
+            .get(&number)
+            .copied()
+            .unwrap_or_else(|| Step::new(number, None))
+    }
+}
+
 /// The steps of `plan`, one for each number, in the order the plan writes
 /// them.
 ///
@@ -1475,16 +1567,25 @@ pub(crate) fn of_parts(
 /// first appears. [`build`] states the same rule for a picture, because a node
 /// is a node whichever form named it.
 ///
+/// A blocker carries the step `work` holds for its number, so a cell that
+/// names the issue of a pair reaches the rows as that pair. A stream that
+/// waits builds no thinner copy of work another stream writes in full, and the
+/// pair of a blocker stands whichever stream the plan writes first.
+///
 /// A step of a `Waits for` cell that stands in no `Order` field is a node all
-/// the same. A blocker the repository does not have must reach the rows and
-/// turn the run red, and a row of the answer is the only place that says so.
-fn nodes_of(plan: &Plan) -> Vec<Step> {
+/// the same, and it carries the number alone. A blocker the repository does
+/// not have must reach the rows and turn the run red, and a row of the answer
+/// is the only place that says so.
+fn nodes_of(plan: &Plan, work: &Work) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
-    for &step in plan
-        .streams()
-        .iter()
-        .flat_map(|stream| stream.steps().iter().chain(stream.waits_for()))
-    {
+    for step in plan.streams().iter().flat_map(|stream| {
+        stream.steps().iter().copied().chain(
+            stream
+                .waits_for()
+                .iter()
+                .map(|blocker| work.step(blocker.number())),
+        )
+    }) {
         if !steps.iter().any(|held| held.number() == step.number()) {
             steps.push(step);
         }
@@ -1515,9 +1616,11 @@ fn chains_of(plan: &Plan) -> Vec<(IssueNumber, IssueNumber)> {
 /// `Order` field gives them, so the second step waits for the first one and
 /// never for the whole cell.
 ///
-/// A blocker whose number is the number of the first step of that same stream
-/// draws no edge, because such an edge runs from a step to itself and says
-/// nothing.
+/// A blocker names the work `work` holds for its number, so a cell that writes
+/// the issue of a pair names that pair. A blocker whose work is the first step
+/// of that same stream draws no edge, because such an edge runs from a step to
+/// itself and says nothing. A cell that writes the issue of that first step
+/// draws no edge for the same reason.
 ///
 /// Every other blocker keeps its edge, a later step of that same stream
 /// included. Such a cell says the later step comes before the first one, and
@@ -1529,15 +1632,16 @@ fn chains_of(plan: &Plan) -> Vec<(IssueNumber, IssueNumber)> {
 /// A stream with no step at all draws nothing here, because there is no first
 /// step to reach. [`crate::plan::parse`] refuses such a stream, so this arm is
 /// the one a reader never meets.
-fn crossings_of(plan: &Plan) -> Vec<(IssueNumber, IssueNumber)> {
+fn crossings_of(plan: &Plan, work: &Work) -> Vec<(IssueNumber, IssueNumber)> {
     let mut edges: Vec<(IssueNumber, IssueNumber)> = Vec::new();
     for stream in plan.streams() {
         let Some(first) = stream.steps().first() else {
             continue;
         };
         for blocker in stream.waits_for() {
-            if blocker.number() != first.number() {
-                edges.push((blocker.number(), first.number()));
+            let before = work.names(blocker.number());
+            if before != first.number() {
+                edges.push((before, first.number()));
             }
         }
     }
@@ -2562,7 +2666,10 @@ Notes: Disjoint.";
         // the pair or writes the issue of it, and both name that pair. So the
         // cell reaches the pair, and the plan holds no second node for work
         // `#102` already does.
-        let graph = graph_of_plan(&table_of(&[("S0", "PR#102 (#94)", ""), ("S1", "#91", "#94")]));
+        let graph = graph_of_plan(&table_of(&[
+            ("S0", "PR#102 (#94)", ""),
+            ("S1", "#91", "#94"),
+        ]));
         assert_eq!(nodes(&graph), vec![91, 102]);
         assert_eq!(edges(&graph), vec![(102, 91)]);
     }

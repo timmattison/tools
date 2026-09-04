@@ -1177,7 +1177,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     and `PR#344 (#341)` is one step that holds a pair. A separator inside the cell says nothing
     about order. `Order` is a chain and `Waits for` is a set, so `#96 → #91` and `#96, #91` mean
     the same thing — both numbers must finish before the stream starts. Reading the cell as a
-    chain would claim an edge from `#96` to `#91` that the plan never wrote.
+    chain would claim an edge from `#96` to `#91` that the plan never wrote. A cell that names
+    the issue of a pair some `Order` writes reaches that pair. `#341` in a cell reaches the step
+    `PR#344 (#341)`, because the two numbers name one piece of work. One piece of work is one
+    row, and a wait on the issue of a pair names no second thing to start.
   - Every step of the cell comes before the first step of the stream, and before that step alone,
     because the steps inside the stream keep the edges `Order` already gives them. The plan above
     thus draws `#96 → #91`, `#96 → #89`, `#91 → #89`, and `#89 → #94`. That is a graph, and it is
@@ -1188,9 +1191,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     issue is open, and it names `#91` and `#86` once `#96` is closed.
   - An empty cell is a stream nothing outside it blocks, and it is the common case. An absent
     column is a plan with no cross-stream edge at all, which is every plan written before this
-    landed: such a plan still answers as one block for each stream under one summary, and nothing
-    about it changed. A cell that names the first step of its own stream draws no edge either,
-    because such an edge runs from a step to itself and says nothing.
+    landed: such a plan still answers as one block for each stream under one summary, and
+    nothing about it changed. A cell that names the first step of its own stream draws no edge
+    either, because such an edge runs from a step to itself and says nothing. A cell that names
+    the issue of that first step draws no edge for the same reason, because that issue names
+    that same step.
   - Three things are refused. A cell whose text is not a step earns the message a bad `Order` cell
     earns, naming the stream and the text: `after the leak lands` names no issue, and the reason a
     stream waits is prose that belongs in `Notes`. An order that returns to itself is a cycle, so
