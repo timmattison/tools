@@ -101,8 +101,28 @@ impl fmt::Display for Repo {
 ///
 /// Fails when `gh` is not installed, when the current directory is in no
 /// repository `gh` can name, or when `gh` answers something that is not
-/// `owner/name`.
+/// `owner/name`. The message names `--repo`, which is the answer for a caller
+/// that wants a repository to ask about. A caller that wants the repository of
+/// this directory itself has no such answer, so it calls [`repo_of_here`] and
+/// writes advice of its own.
 pub fn current_repo() -> Result<Repo> {
+    repo_of_here().map_err(|said| {
+        anyhow!("`{GH} repo view` failed. Name the repository with --repo owner/name.\n{said}")
+    })
+}
+
+/// The same, with the reason as `gh` gave it and no advice around it.
+///
+/// A caller writes the advice, because the two callers of this function want
+/// different things. One wants a repository to ask GitHub about, and `--repo`
+/// answers that. The other wants the repository of this directory, which
+/// `--repo` never names, so advice about `--repo` would contradict the
+/// sentence that caller writes above it.
+///
+/// # Errors
+///
+/// Gives what `gh` said, with the space around it dropped.
+pub fn repo_of_here() -> std::result::Result<Repo, String> {
     let output = Command::new(GH)
         .args([
             "repo",
@@ -113,16 +133,12 @@ pub fn current_repo() -> Result<Repo> {
             ".nameWithOwner",
         ])
         .output()
-        .with_context(|| format!("could not run `{GH}`. Is the GitHub CLI installed?"))?;
+        .map_err(|cause| format!("could not run `{GH}`. Is the GitHub CLI installed? {cause}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "`{GH} repo view` failed. Name the repository with --repo owner/name.\n{}",
-            stderr.trim()
-        );
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     let spec = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Repo::parse(&spec).with_context(|| format!("`{GH} repo view` answered {spec:?}"))
+    Repo::parse(&spec).map_err(|cause| format!("`{GH} repo view` answered {spec:?}: {cause:#}"))
 }
 
 /// The alias one number of the chain carries in the query.

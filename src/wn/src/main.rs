@@ -332,9 +332,7 @@ fn run(
         // rather than a crash. A run in a directory that is in no repository
         // would therefore spend a minute and real money and would then answer
         // that the plan holds no work. One cheap call refuses it first.
-        github::current_repo().map_err(|err| build::BuildError::NoRepository {
-            said: format!("{err:#}"),
-        })?;
+        github::repo_of_here().map_err(|said| build::BuildError::NoRepository { said })?;
         eprintln!("{} {announcement}", "wn:".bold());
         build::plan(
             &paths,
