@@ -37,7 +37,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `jsonboard` | Pretty-prints JSON on the clipboard and puts it back. |
 | `kitchen-sync` | Installs every Rust binary from a git repo with one command. |
 | `krt` | Knights of the Round Trip — records the network path to a destination, hop by hop, into an append-only JSONL file, and draws the live table of that path under a terminal. `krt replay` folds one run of a recorded file into one table of the path. `krt hunt` looks for the longest path it can find: it draws random addresses, traces a pool of them at once, and prints the shortest, longest, fastest, and slowest path it found, and `--mine` probes a few addresses near each destination that sets a record, to find whether a neighbor gives a longer path. |
-| `localnext` | Serves statically exported Next.js apps locally. |
+| `localnext` | Serves a statically exported Next.js app from its `out` directory, on a port derived from the project and the git branch. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
 | `nodeup` | Updates npm/pnpm/yarn packages across all `package.json` directories. |
@@ -49,9 +49,8 @@ A one-line description of every program documented in the [README](./README.md),
 | `polish` | Updates Rust dependencies across all `Cargo.toml` files in a repo. |
 | `portplz` | Generates a consistent unprivileged port number from directory name and git branch. |
 | `prcp` | Copies files with a Unicode progress bar; wildcards, multi-file, and verified move mode. |
-| `prgz` | Like `prcp` but gzip-compresses the file, showing progress in the console. |
+| `prgz` | Like `prcp` but gzip-compresses the file, with the same one-line progress bar and a closing report. |
 | `prhash` | Hashes files (MD5/SHA1/SHA256/SHA512/Blake3) with a progress bar, shasum-compatible output. |
-| `procinfo` | Detailed info about running processes matching a name (cwd, open files, connections). |
 | `r2-bucket-cleaner` | Lists and optionally clears all objects from a Cloudflare R2 bucket via wrangler. |
 | `rcc` | Rust Cross Compiler — simplifies cross-compilation (target detection, `Cross.toml`, build). |
 | `reposize` | Calculates the total size of a git repository, human-readable. |
@@ -62,7 +61,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `seescc` | Self-refreshing terminal viewer for sccache statistics, with sparklines and a one-shot JSON mode. |
 | `sf` | Size of Files — total size of files in directories, with optional suffix/prefix/substring filters. |
 | `sirn` | Serve It Right Now — a zero-config HTTP file server; serves files or the current directory on a git-derived port. |
-| `spv` | Smart Process Viewer — find and view processes by PID/name/regex, with optional cwd and open files. |
+| `spv` | Smart Process Viewer — find and view processes by PID/name/regex, with optional cwd, open files, environment, and network connections. |
 | `subito` | Subscribes to AWS IoT Core topics and prints received messages. |
 | `swt` | Subagent Worktree — isolated-worktree helper for parallel TDD (create/merge with green checks). |
 | `symfix` | Recursively finds and optionally fixes broken symlinks. |
@@ -77,7 +76,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `vpn-tunnel` | Generates Docker-based gluetun + ProtonVPN + WireGuard tunnels with helper scripts. |
 | `wifiqr` | Generates WiFi QR codes (with optional logo) for automatic device connection. |
 | `wl` | Shows which process is listening on a given port. |
-| `wn` | What's next — walks a chain of GitHub issues in order and names the first one still open. Takes the chain from the argument, then standard input, then the clipboard, so `wn` alone answers the chain you just copied (`WN_NO_CLIPBOARD` turns that off). The answer names the command that starts it, `si 278`. `si` is a shell function you supply, and `WN_START_COMMAND` names a different one. |
+| `wn` | What's next — walks a chain of GitHub issues in order and names the first one still open. Reads a whole parallel-work plan as well, naming the issue to start in each of its streams, where only the `Order` field is read as a chain. Takes that plan as records, as a Markdown table, or as the box-drawn table the report arrives on the clipboard as, and reads the annotation an `Order` field carries — `#4 (in flight, PR #15)` is one step. Reads a plan drawn as a picture too — `#242 ──→ #247 ──┐`, where two streams join — following the wires from left to right and naming every issue that is ready, each with its own start command. Takes the chain from the argument, then standard input, then the clipboard, so `wn` alone answers the chain you just copied (`WN_NO_CLIPBOARD` turns that off). The answer names the command that starts it, `si 278`. `si` is a shell function you supply, and `WN_START_COMMAND` names a different one. |
 | `wolly` | Wake-on-LAN tool that sends magic packets with auto subnet broadcast detection. |
 | `wu` | Cross-platform "who's using" a file/directory/device (process name, PID, user, mode). |
 | `zth` | Zero the Hero — recursively finds non-empty files that contain nothing but zero bytes. |

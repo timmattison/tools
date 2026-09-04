@@ -5,6 +5,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::{DirEntry, WalkDir};
 
+/// Walks the file system upward from the current directory for a `.git` entry.
+///
+/// This stays a file system walk on purpose, and a caller that wants git's own
+/// answer calls [`find_repo_context`] instead.
+///
+/// The tools that read this result walk the path it names, and most of them
+/// delete or rewrite files below it. Blindness to a detached git directory is
+/// the safe answer for all of them. In that layout the work tree is `$HOME`, so
+/// a walk that finds the repository hands them `$HOME` to work inside.
+/// `gitnuke`, `repotidy`, `polish`, `reposize`, `goup` and `glo` stop when this
+/// function answers `None`. `nodenuke`, `cdknuke`, `rr` and `nodeup` do not
+/// stop. They fall back to the directory they run in and scan there, so their
+/// safety comes from that scan root and not from the `None` itself.
 pub fn find_git_repo() -> Option<PathBuf> {
     let mut current_dir = env::current_dir().ok()?;
 
@@ -78,6 +91,135 @@ pub fn find_main_repo() -> Option<PathBuf> {
 
     // The parent of the .git directory is the repo root
     common_path.parent().map(|p| p.to_path_buf())
+}
+
+/// What git says about the repository a directory belongs to.
+///
+/// Every field comes from git, so the answer holds for a layout no file system
+/// walk can read. The one that matters is a detached git directory, which is
+/// how `yadm` keeps a directory of dotfiles: the git directory is
+/// `~/.local/share/yadm/repo.git`, the work tree is `$HOME`, and no `.git`
+/// entry exists anywhere for a walk to find.
+///
+/// The work tree is deliberately absent from this interface. In that layout it
+/// is `$HOME`, and a caller that walks and deletes must never receive it.
+#[derive(Debug, Clone)]
+pub struct RepoContext {
+    checkout: PathBuf,
+    main_worktree: PathBuf,
+}
+
+impl RepoContext {
+    /// The root of the checkout the directory is in.
+    ///
+    /// This is the linked worktree when the directory is in one. Otherwise it
+    /// is the main worktree, which git names as the git directory itself when
+    /// the git directory is detached.
+    pub fn checkout(&self) -> &Path {
+        &self.checkout
+    }
+
+    /// The main worktree, as `git worktree list --porcelain` names it.
+    ///
+    /// Git builds that name from the common git directory with a trailing
+    /// `/.git` removed. A detached git directory carries no such suffix, so the
+    /// main worktree of a `yadm` repository is the git directory itself.
+    pub fn main_worktree(&self) -> &Path {
+        &self.main_worktree
+    }
+}
+
+/// Asks git which repository the process's current directory belongs to.
+///
+/// Returns `None` when the directory is in no repository, or when git cannot
+/// answer.
+pub fn find_repo_context() -> Option<RepoContext> {
+    find_repo_context_at(&env::current_dir().ok()?)
+}
+
+/// Asks git which repository `dir` belongs to.
+///
+/// This is the seam the tests use. A test cannot change the process directory
+/// without racing every other test in the binary.
+///
+/// Returns `None` when `dir` is in no repository, or when git cannot answer.
+pub fn find_repo_context_at(dir: &Path) -> Option<RepoContext> {
+    // Two lines out, and never `--show-toplevel` beside them. A bare repository
+    // has no work tree, so it fails that request and takes the whole command
+    // down with it. This pair answers for a bare repository, and the answer is
+    // that the two directories are the same one.
+    let directories = git_stdout(dir, &["rev-parse", "--git-dir", "--git-common-dir"])?;
+    let mut directories = directories.lines();
+    let git_dir = resolve_against(dir, directories.next()?)?;
+    let common_dir = resolve_against(dir, directories.next()?)?;
+
+    // A linked worktree keeps a git directory of its own, under
+    // `worktrees/<name>` of the common one. Every other directory - the main
+    // worktree, the git directory itself, a bare repository - reports the same
+    // directory twice.
+    let in_a_linked_worktree = git_dir != common_dir;
+
+    let main_worktree = PathBuf::from(
+        git_stdout(dir, &["worktree", "list", "--porcelain"])?
+            .lines()
+            .find_map(|line| line.strip_prefix(WORKTREE_LINE_PREFIX))?,
+    );
+
+    let checkout = if in_a_linked_worktree {
+        PathBuf::from(git_stdout(dir, &["rev-parse", "--show-toplevel"])?.trim())
+    } else {
+        main_worktree.clone()
+    };
+
+    Some(RepoContext {
+        checkout,
+        main_worktree,
+    })
+}
+
+/// The prefix of the line that names a worktree in `git worktree list
+/// --porcelain`. The first such line names the main worktree.
+const WORKTREE_LINE_PREFIX: &str = "worktree ";
+
+/// Read one path out of `git rev-parse` as the directory git ran in reads it.
+///
+/// Git mixes the two forms in one answer, and the mixture is the trap. Standing
+/// in a subdirectory of a normal repository, `--git-dir` comes back absolute as
+/// `/repo/.git` while `--git-common-dir` comes back relative as `../../.git`.
+/// The two name one directory and read as two, which turns every subdirectory
+/// of a main worktree into a linked worktree.
+///
+/// So a relative path joins the directory git ran in, and both paths resolve
+/// before anything compares them.
+fn resolve_against(dir: &Path, path: &str) -> Option<PathBuf> {
+    let path = Path::new(path.trim());
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        dir.join(path)
+    };
+
+    fs::canonicalize(path).ok()
+}
+
+/// Run git in `dir` and hand back its standard output, or `None` when git
+/// cannot be spawned or exits non-zero.
+fn git_stdout(dir: &Path, args: &[&str]) -> Option<String> {
+    let mut command = Command::new("git");
+    // This crate's whole job is to answer which repository a directory belongs
+    // to, and an inherited `GIT_DIR` answers with a different repository. The
+    // tests below prove it, so without this they fail under the pre-commit
+    // hook, which exports `GIT_DIR` and `GIT_INDEX_FILE` to every command it
+    // runs.
+    gitscratch::shed_inherited_git_environment(&mut command);
+
+    let output = command.args(args).current_dir(dir).output().ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8(output.stdout).ok()
 }
 
 pub struct RepoWalker {
@@ -182,6 +324,144 @@ impl RepoWalker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gitscratch::testing::{DetachedGitDirRepo, TestRepo};
+
+    /// Resolve a path before an assertion reads it. Git hands back a resolved
+    /// path, and a fixture lives under a temporary directory that macOS reaches
+    /// through a symbolic link: `/var` resolves to `/private/var`.
+    fn canonical(path: &Path) -> PathBuf {
+        fs::canonicalize(path).unwrap_or_else(|e| panic!("canonicalize {}: {e}", path.display()))
+    }
+
+    /// Build a repository with one commit, so `git worktree list` has a HEAD to
+    /// report and a later worktree has a commit to branch from.
+    fn repo_with_one_commit() -> TestRepo {
+        let repo = TestRepo::init();
+        repo.commit_file("tracked.txt", "the file\n", "base");
+        repo
+    }
+
+    #[test]
+    fn a_nested_detached_git_directory_is_its_own_checkout() {
+        let repo = DetachedGitDirRepo::nested();
+
+        let context = find_repo_context_at(repo.git_dir()).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(repo.git_dir()));
+        assert_eq!(
+            canonical(context.main_worktree()),
+            canonical(repo.git_dir())
+        );
+    }
+
+    #[test]
+    fn a_detached_git_directory_beside_its_work_tree_is_its_own_checkout() {
+        let repo = DetachedGitDirRepo::beside();
+
+        let context = find_repo_context_at(repo.git_dir()).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(repo.git_dir()));
+        assert_eq!(
+            canonical(context.main_worktree()),
+            canonical(repo.git_dir())
+        );
+    }
+
+    #[test]
+    fn a_normal_repository_root_is_its_own_checkout() {
+        let repo = repo_with_one_commit();
+
+        let context = find_repo_context_at(repo.path()).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(repo.path()));
+        assert_eq!(canonical(context.main_worktree()), canonical(repo.path()));
+    }
+
+    #[test]
+    fn a_subdirectory_belongs_to_the_repository_above_it() {
+        let repo = repo_with_one_commit();
+        let deep = repo.path().join("sub").join("deeper");
+        fs::create_dir_all(&deep).expect("create the subdirectory");
+
+        let context = find_repo_context_at(&deep).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(repo.path()));
+        assert_eq!(canonical(context.main_worktree()), canonical(repo.path()));
+    }
+
+    #[test]
+    fn a_linked_worktree_of_a_nested_detached_repository_is_its_own_checkout() {
+        let repo = DetachedGitDirRepo::nested();
+        let worktree = repo.add_worktree(&repo.git_dir().join("wt-a"), "wt-a-branch");
+
+        let context = find_repo_context_at(&worktree).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(&worktree));
+        assert_eq!(
+            canonical(context.main_worktree()),
+            canonical(repo.git_dir())
+        );
+    }
+
+    #[test]
+    fn a_linked_worktree_of_a_beside_detached_repository_is_its_own_checkout() {
+        let repo = DetachedGitDirRepo::beside();
+        let worktree = repo.add_worktree(&repo.git_dir().join("wt-a"), "wt-a-branch");
+
+        let context = find_repo_context_at(&worktree).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(&worktree));
+        assert_eq!(
+            canonical(context.main_worktree()),
+            canonical(repo.git_dir())
+        );
+    }
+
+    #[test]
+    fn a_linked_worktree_of_a_normal_repository_is_its_own_checkout() {
+        let repo = repo_with_one_commit();
+        repo.branch("side");
+        repo.checkout("main");
+        let worktree = repo.add_worktree("side");
+
+        let context = find_repo_context_at(&worktree).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(&worktree));
+        assert_eq!(canonical(context.main_worktree()), canonical(repo.path()));
+    }
+
+    #[test]
+    fn a_subdirectory_of_a_linked_worktree_belongs_to_that_worktree() {
+        let repo = repo_with_one_commit();
+        repo.branch("side");
+        repo.checkout("main");
+        let worktree = repo.add_worktree("side");
+        let deep = worktree.join("sub").join("deeper");
+        fs::create_dir_all(&deep).expect("create the subdirectory");
+
+        let context = find_repo_context_at(&deep).expect("git knows this repository");
+
+        assert_eq!(canonical(context.checkout()), canonical(&worktree));
+        assert_eq!(canonical(context.main_worktree()), canonical(repo.path()));
+    }
+
+    #[test]
+    fn the_current_directory_answers_the_same_as_a_directory_named_by_hand() {
+        let here = env::current_dir().expect("read the current directory");
+        let named = find_repo_context_at(&here).expect("the tests run inside a git repository");
+
+        let current = find_repo_context().expect("the tests run inside a git repository");
+
+        assert_eq!(current.checkout(), named.checkout());
+        assert_eq!(current.main_worktree(), named.main_worktree());
+    }
+
+    #[test]
+    fn a_directory_that_is_no_repository_has_no_context() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+
+        assert!(find_repo_context_at(dir.path()).is_none());
+    }
 
     #[test]
     fn test_find_git_repo() {

@@ -26,6 +26,11 @@
 //! asserts only which path the run took, so it takes nothing away from the
 //! person at the keyboard.
 //!
+//! A plan of parallel work is many lines, and `Command::output` hands the
+//! child a standard input that holds nothing. So the tests that walk a plan go
+//! through `run_with_stdin`, which opens a pipe and builds the same
+//! environment every other child of this file gets.
+//!
 //! Each test builds its own temporary directory, so concurrent test runs stay
 //! isolated (see the parallel-safety note in the project guidelines).
 
@@ -36,9 +41,10 @@
     reason = "every unwrap in this file is an assertion, not an unhandled error: on the temporary directory and the fixture files the test just created, on spawning the freshly built binary (a spawn failure is a broken harness, not behavior under test), and on reading back a file the fake gh wrote. The error paths of the tool itself are never unwrapped — they are asserted through the exit status and the text on standard error"
 )]
 
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use unicode_width::UnicodeWidthStr;
 
@@ -76,6 +82,309 @@ const THREE_ISSUES: &str = r#"{"data":{"repository":{
 /// answer names #278 whichever command it prints.
 const ONE_OPEN_CHAIN: &str = "#277 → #278";
 
+/// A plan of three streams, as a record for each stream.
+///
+/// The notes carry real prose, because real prose is the trap the plan reader
+/// exists for: they name 265, 5113, and 1566-1650, and none of those is an
+/// issue of the repository. A run that read them would print a row for each
+/// and would exit `1`.
+const PLAN: &str = "\
+Stream: S1 gitscratch
+Order: #344 → #330
+Zone: src/gitscratch
+Notes: The two hunks sit 265 lines apart in a 5113-line file, so the rebase is cheap.
+
+Stream: S2 ic
+Order: #350 → #187
+Zone: src/ic
+Notes: Both land inside display_image (main.rs:1566-1650).
+
+Stream: S3 wn
+Order: #411
+Zone: src/wn
+Notes: One issue, no neighbors.
+";
+
+/// The same three streams, as one Markdown table.
+const PLAN_TABLE: &str = "\
+| Stream | Order | Zone | Notes |
+| --- | --- | --- | --- |
+| S1 gitscratch | #344 → #330 | src/gitscratch | The two hunks sit 265 lines apart in a 5113-line file. |
+| S2 ic | #350 → #187 | src/ic | Both land inside display_image (main.rs:1566-1650). |
+| S3 wn | #411 | src/wn | One issue, no neighbors. |
+";
+
+/// What GitHub says about every number of [`PLAN`]: one closed issue and four
+/// open ones.
+const PLAN_ISSUES: &str = r#"{"data":{"repository":{
+"i344":{"__typename":"Issue","number":344,"title":"First thing","state":"CLOSED","stateReason":"COMPLETED"},
+"i330":{"__typename":"Issue","number":330,"title":"Second thing","state":"OPEN","stateReason":null},
+"i350":{"__typename":"Issue","number":350,"title":"Third thing","state":"OPEN","stateReason":null},
+"i187":{"__typename":"Issue","number":187,"title":"Fourth thing","state":"OPEN","stateReason":null},
+"i411":{"__typename":"Issue","number":411,"title":"Fifth thing","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`PLAN`] earns: one block for each stream, and one summary that
+/// carries all three.
+const PLAN_ANSWER: &str = concat!(
+    "S1 gitscratch\n",
+    "  ✓ #344  First thing\n",
+    "  → #330  Second thing\n",
+    "\n",
+    "S2 ic\n",
+    "  → #350  Third thing\n",
+    "  · #187  Fourth thing\n",
+    "\n",
+    "S3 wn\n",
+    "  → #411  Fifth thing\n",
+    "\n",
+    "Take one from each stream:\n",
+    "  S1 gitscratch  → #330  si 330\n",
+    "  S2 ic          → #350  si 350\n",
+    "  S3 wn          → #411  si 411\n",
+);
+
+/// The report of the `plan-parallel-work` skill, as it arrives on the
+/// clipboard.
+///
+/// The same file the reader of the plan reads in its own tests, so the paste
+/// this test drives the binary with is the paste that reader was written for.
+const BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work.txt");
+
+/// What GitHub says about every number of [`BOX_TABLE`].
+///
+/// Three of the ten are done, so each of the four streams has one issue to
+/// start and none of them is the first step of its stream in every case.
+const BOX_ISSUES: &str = r#"{"data":{"repository":{
+"i15":{"__typename":"PullRequest","number":15,"title":"The visualizer branch","state":"OPEN"},
+"i4":{"__typename":"Issue","number":4,"title":"The visualizers","state":"OPEN","stateReason":null},
+"i7":{"__typename":"Issue","number":7,"title":"Keep or delete","state":"OPEN","stateReason":null},
+"i11":{"__typename":"Issue","number":11,"title":"The oscillator","state":"CLOSED","stateReason":"COMPLETED"},
+"i5":{"__typename":"Issue","number":5,"title":"The Scaled mapping","state":"OPEN","stateReason":null},
+"i13":{"__typename":"Issue","number":13,"title":"The sort tone","state":"OPEN","stateReason":null},
+"i9":{"__typename":"Issue","number":9,"title":"The MIDI array","state":"CLOSED","stateReason":"COMPLETED"},
+"i10":{"__typename":"Issue","number":10,"title":"The MIDI flags","state":"CLOSED","stateReason":"COMPLETED"},
+"i12":{"__typename":"Issue","number":12,"title":"Listen to it","state":"OPEN","stateReason":null},
+"i6":{"__typename":"Issue","number":6,"title":"The manifest","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`BOX_TABLE`] earns: one block for each of the four streams,
+/// and one summary that names an issue to start in each of them.
+const BOX_ANSWER: &str = concat!(
+    "A — visualizers\n",
+    "  → #15 (#4)  The visualizer branch\n",
+    "  · #7        Keep or delete\n",
+    "\n",
+    "B — audio engine\n",
+    "  ✓ #11  The oscillator\n",
+    "  → #5   The Scaled mapping\n",
+    "  · #13  The sort tone\n",
+    "\n",
+    "C — MIDI array\n",
+    "  ✓ #9   The MIDI array\n",
+    "  ✓ #10  The MIDI flags\n",
+    "  → #12  Listen to it\n",
+    "\n",
+    "D — manifest\n",
+    "  → #6  The manifest\n",
+    "\n",
+    "Take one from each stream:\n",
+    "  A — visualizers   → #15  si 15\n",
+    "  B — audio engine  → #5   si 5\n",
+    "  C — MIDI array    → #12  si 12\n",
+    "  D — manifest      → #6   si 6\n",
+);
+
+/// A plan drawn as a picture: two streams that join.
+///
+/// The paste of issue #418. A picture says the one thing no chain and no table
+/// of a plan says: two streams that run at the same time, and the step they
+/// both reach.
+const PICTURE: &str = "\
+#242 ──→ #247 ──┐
+                ├──→ #249  (gallery)
+#246 ──→ #248 ──┘
+";
+
+/// What GitHub says about every number of [`PICTURE`] when each of them is
+/// open.
+const PICTURE_ISSUES: &str = r#"{"data":{"repository":{
+"i242":{"__typename":"Issue","number":242,"title":"Read the picture","state":"OPEN","stateReason":null},
+"i247":{"__typename":"Issue","number":247,"title":"Answer the picture","state":"OPEN","stateReason":null},
+"i246":{"__typename":"Issue","number":246,"title":"Read the table","state":"OPEN","stateReason":null},
+"i248":{"__typename":"Issue","number":248,"title":"Answer the table","state":"OPEN","stateReason":null},
+"i249":{"__typename":"Issue","number":249,"title":"Paint the gallery","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`PICTURE`] earns while every issue of it is open.
+///
+/// One row for each step, the work each blocked step waits for, and one start
+/// line for each stream that is ready.
+const PICTURE_ANSWER: &str = concat!(
+    "→ #242  Read the picture\n",
+    "· #247  Answer the picture  waits for #242\n",
+    "→ #246  Read the table\n",
+    "· #248  Answer the table    waits for #246\n",
+    "· #249  Paint the gallery   waits for #247, #248\n",
+    "\n",
+    "Start #242 next with 'si 242'\n",
+    "Start #246 next with 'si 246'\n",
+);
+
+/// A plan of four streams whose `Waits for` cells join three of them.
+///
+/// The paste of issue #436. `S0` comes before `S1`, and both of them come
+/// before `S2`. `S3` waits for nothing, and an empty cell is how a plan writes
+/// that. So the plan draws the edges `#96 → #91`, `#96 → #89`, `#91 → #89`,
+/// and `#89 → #94`, and the last of those is the chain of `S2` itself.
+const WAITS_PLAN: &str = "\
+| Stream | Order | Waits for | Zone | Notes |
+|--------|-------|-----------|------|-------|
+| S0 — daemon leak | #96 | | crates/tsm (serve.rs) | Do first, solo. |
+| S1 — lifecycle | #91 | #96 | crates/tsm (kill.rs) | |
+| S2 — install | #89 → #94 | #96, #91 | crates/tsm (shell-init) | Same hotspot as S1. |
+| S3 — keymap | #86 | | packages/web | Disjoint. |
+";
+
+/// What GitHub says about every number of [`WAITS_PLAN`] when each of them is
+/// open.
+const WAITS_ISSUES: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"OPEN","stateReason":null},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"OPEN","stateReason":null},
+"i89":{"__typename":"Issue","number":89,"title":"The install","state":"OPEN","stateReason":null},
+"i94":{"__typename":"Issue","number":94,"title":"The shell init","state":"OPEN","stateReason":null},
+"i86":{"__typename":"Issue","number":86,"title":"The keymap","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`WAITS_PLAN`] earns while every issue of it is open.
+///
+/// One row for each step, in the order of the work rather than the order of
+/// the plan, and one start line for each of the two streams that are ready.
+/// `#91`, `#89`, and `#94` each wait for work that is open, so no line of the
+/// answer names them.
+const WAITS_ANSWER: &str = concat!(
+    "→ #96  The daemon leak\n",
+    "· #91  The lifecycle    waits for #96\n",
+    "· #89  The install      waits for #96, #91\n",
+    "· #94  The shell init   waits for #89\n",
+    "→ #86  The keymap\n",
+    "\n",
+    "Start #96 next with 'si 96'\n",
+    "Start #86 next with 'si 86'\n",
+);
+
+/// The same four streams as [`WAITS_PLAN`], with no `Waits for` column at all.
+///
+/// The plan every reader wrote before that column stood. The streams stand
+/// apart, so the answer is one block for each of them under one summary.
+const WAITS_PLAN_WITHOUT_THE_COLUMN: &str = "\
+| Stream | Order | Zone | Notes |
+|--------|-------|------|-------|
+| S0 — daemon leak | #96 | crates/tsm (serve.rs) | Do first, solo. |
+| S1 — lifecycle | #91 | crates/tsm (kill.rs) | |
+| S2 — install | #89 → #94 | crates/tsm (shell-init) | Same hotspot as S1. |
+| S3 — keymap | #86 | packages/web | Disjoint. |
+";
+
+/// The answer [`WAITS_PLAN_WITHOUT_THE_COLUMN`] earns: one block for each of
+/// the four streams, and one summary that names an issue to start in each of
+/// them.
+const WAITS_BLOCK_ANSWER: &str = concat!(
+    "S0 — daemon leak\n",
+    "  → #96  The daemon leak\n",
+    "\n",
+    "S1 — lifecycle\n",
+    "  → #91  The lifecycle\n",
+    "\n",
+    "S2 — install\n",
+    "  → #89  The install\n",
+    "  · #94  The shell init\n",
+    "\n",
+    "S3 — keymap\n",
+    "  → #86  The keymap\n",
+    "\n",
+    "Take one from each stream:\n",
+    "  S0 — daemon leak  → #96  si 96\n",
+    "  S1 — lifecycle    → #91  si 91\n",
+    "  S2 — install      → #89  si 89\n",
+    "  S3 — keymap       → #86  si 86\n",
+);
+
+/// What GitHub says about the numbers of [`WAITS_PLAN`] once `#96` is done.
+///
+/// The one step of `S0` is finished, so `S1` is free. `S2` waits for `S1` as
+/// well, so it is not.
+const WAITS_ISSUES_ONE_DONE: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"CLOSED","stateReason":"COMPLETED"},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"OPEN","stateReason":null},
+"i89":{"__typename":"Issue","number":89,"title":"The install","state":"OPEN","stateReason":null},
+"i94":{"__typename":"Issue","number":94,"title":"The shell init","state":"OPEN","stateReason":null},
+"i86":{"__typename":"Issue","number":86,"title":"The keymap","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// What GitHub says about the numbers of [`WAITS_PLAN`] once `#96` and `#91`
+/// are done.
+///
+/// Both blockers of `S2` are finished, so its first step is free at last.
+const WAITS_ISSUES_TWO_DONE: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"CLOSED","stateReason":"COMPLETED"},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"CLOSED","stateReason":"COMPLETED"},
+"i89":{"__typename":"Issue","number":89,"title":"The install","state":"OPEN","stateReason":null},
+"i94":{"__typename":"Issue","number":94,"title":"The shell init","state":"OPEN","stateReason":null},
+"i86":{"__typename":"Issue","number":86,"title":"The keymap","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// A plan whose `Waits for` cell names a number the repository does not have.
+///
+/// `#999` is the typo. It stands in no `Order` field, so the rows are the only
+/// place that can say the repository does not have it.
+const WAITS_PLAN_WITH_A_TYPO: &str = "\
+| Stream | Order | Waits for |
+|--------|-------|-----------|
+| S0 — daemon leak | #96 | |
+| S1 — lifecycle | #91 | #96, #999 |
+";
+
+/// What GitHub says about [`WAITS_PLAN_WITH_A_TYPO`]: two issues, and a
+/// refusal for the number nobody has.
+const WAITS_ISSUES_WITH_A_TYPO: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"OPEN","stateReason":null},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"OPEN","stateReason":null},
+"i999":null
+}},"errors":[{"type":"NOT_FOUND","path":["repository","i999"],"message":"Could not resolve to an issue or pull request with the number of 999."}]}"#;
+
+/// A plan of two streams that wait for each other.
+///
+/// Neither of the two starts, so the plan names no work at all. It carries the
+/// two fields a cycle is made of and no others, because a `Zone` and a `Notes`
+/// say nothing about the order.
+const WAITS_CYCLE: &str = "\
+| Stream | Order | Waits for |
+|--------|-------|-----------|
+| S1 — lifecycle | #91 | #96 |
+| S0 — daemon leak | #96 | #91 |
+";
+
+/// The word a message about a drawing holds.
+///
+/// A reader who wrote a table drew nothing, so the refusal of a plan must hold
+/// none of it. One graph carries both forms, so one message answers for both.
+const PICTURE_WORD: &str = "picture";
+
+/// The line that opens the summary of a plan, and thus the mark of an answer
+/// the plan reader wrote.
+const SUMMARY_HEADING: &str = "Take one from each stream:";
+
+/// The words that open the last column of a row of a picture, and thus the
+/// mark of an answer the picture reader wrote.
+const WAITS_FOR: &str = "waits for ";
+
+/// The file the fake `gh` records the arguments of every call in.
+///
+/// It appears on the first call, so its absence is a run that never reached
+/// `gh` at all.
+const ARGS_FILE: &str = "args";
+
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
     dir: tempfile::TempDir,
@@ -93,16 +402,16 @@ impl FakeGh {
     /// number the repository does not have produces.
     fn with_status(body: &str, status: i32) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let args_file = dir.path().join("args");
+        let args_file = dir.path().join(ARGS_FILE);
         let script = format!(
             r#"#!/bin/sh
+for arg in "$@"; do
+    printf '%s\n' "$arg" >> '{args}'
+done
 if [ "$1" = "repo" ]; then
     printf '%s\n' '{REPO}'
     exit 0
 fi
-for arg in "$@"; do
-    printf '%s\n' "$arg" >> '{args}'
-done
 cat <<'WN_FAKE_GH_BODY'
 {body}
 WN_FAKE_GH_BODY
@@ -120,9 +429,18 @@ exit {status}
         self.dir.path()
     }
 
-    /// The arguments of the last GraphQL call, one to a line.
+    /// The arguments of every call, one to a line.
     fn recorded_args(&self) -> String {
-        std::fs::read_to_string(self.dir.path().join("args")).unwrap()
+        std::fs::read_to_string(self.dir.path().join(ARGS_FILE)).unwrap()
+    }
+
+    /// Whether the tool asked `gh` nothing at all.
+    ///
+    /// The script writes the file on its first call of any kind, the call that
+    /// names the repository included, so a file that never appeared is a run
+    /// that never reached `gh`.
+    fn asked_nothing(&self) -> bool {
+        !self.dir.path().join(ARGS_FILE).exists()
     }
 }
 
@@ -146,14 +464,66 @@ fn run_with_start(
     color: bool,
     start: Option<&str>,
 ) -> Output {
+    wn(gh, args, columns, color, start).output().unwrap()
+}
+
+/// Run `wn` with `text` on standard input.
+///
+/// `Command::output` hands the child a standard input that holds nothing,
+/// which is what every other test of this file wants. A plan is many lines,
+/// and a plan reaches the tool through a pipe as readily as through the
+/// command line, so this helper opens a pipe, writes the text, closes it, and
+/// waits.
+///
+/// The environment is the environment [`wn`] builds, [`NO_CLIPBOARD_ENV`]
+/// included, so a child of this helper touches the clipboard of the machine no
+/// more than any other child of this file does.
+fn run_with_stdin(gh: &FakeGh, args: &[&str], columns: &str, text: &str) -> Output {
+    run_with_stdin_and_start(gh, args, columns, text, None)
+}
+
+/// The same, with [`START_COMMAND_ENV`] set to `start`.
+///
+/// `None` leaves the variable out of the environment, which is the state of a
+/// machine that never set it. One helper opens the pipe for both, so the two
+/// can never build a different environment.
+fn run_with_stdin_and_start(
+    gh: &FakeGh,
+    args: &[&str],
+    columns: &str,
+    text: &str,
+    start: Option<&str>,
+) -> Output {
+    let mut child = wn(gh, args, columns, false, start)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The pipe closes when it goes out of scope here, and the tool reads
+    // standard input to the end. A pipe that stayed open would hold the run.
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The command line of one child: the binary that was built, an environment
+/// built from nothing, and the arguments.
+///
+/// The one place that builds the environment of a child, so the clipboard step
+/// is off for every test that goes through it and no test has to remember the
+/// rule.
+fn wn(gh: &FakeGh, args: &[&str], columns: &str, color: bool, start: Option<&str>) -> Command {
     let path = format!("{}:/usr/bin:/bin", gh.path().display());
     let mut command = Command::new(env!("CARGO_BIN_EXE_wn"));
     command
         .env_clear()
         .env("PATH", path)
         .env("COLUMNS", columns)
-        // The one place that builds the environment of the helper, so the
-        // clipboard step is off for every test that goes through it.
         .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD);
     if !color {
         command.env("NO_COLOR", "1");
@@ -161,7 +531,8 @@ fn run_with_start(
     if let Some(start) = start {
         command.env(START_COMMAND_ENV, start);
     }
-    command.args(args).output().unwrap()
+    command.args(args);
+    command
 }
 
 fn stdout(output: &Output) -> String {
@@ -606,5 +977,661 @@ fn a_row_stops_one_column_short_of_the_window() {
         UnicodeWidthStr::width(row.as_str()),
         19,
         "the row stops one column short of the 20-column window, in {row:?}"
+    );
+}
+
+#[test]
+fn answers_a_whole_plan_of_parallel_work_from_a_pipe() {
+    // The headline of the feature: a plan pasted into a pipe gives one block
+    // for each stream and one summary that names the issue to start in each of
+    // them. No flag says the text is a plan — the shape of the text does.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PLAN_ANSWER);
+}
+
+#[test]
+fn a_plan_in_one_quoted_argument_answers_the_same_way() {
+    // A shell hands a quoted argument over whole, its newlines included, and
+    // the arguments join back into one line. So a plan works on the command
+    // line exactly as it works in a pipe.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run(&gh, &["--repo", REPO, PLAN], "80", false);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PLAN_ANSWER);
+}
+
+#[test]
+fn the_table_form_of_a_plan_gives_the_streams_of_the_record_form() {
+    // One plan is written two ways: the records a terminal prints, and the
+    // table a file holds. Both name the same streams, so both give one answer.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PLAN_TABLE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PLAN_ANSWER);
+}
+
+#[test]
+fn a_stream_that_names_a_number_the_repository_does_not_have_still_answers() {
+    // The number keeps its row and earns its note, the other stream answers as
+    // it always did, and the run exits 1. One typo takes down one row of one
+    // block, and never the whole plan.
+    let body = r#"{"data":{"repository":{
+"i344":{"__typename":"Issue","number":344,"title":"First thing","state":"CLOSED","stateReason":"COMPLETED"},
+"i999":null,
+"i330":{"__typename":"Issue","number":330,"title":"Second thing","state":"OPEN","stateReason":null},
+"i350":{"__typename":"Issue","number":350,"title":"Third thing","state":"OPEN","stateReason":null}
+}},"errors":[{"type":"NOT_FOUND","path":["repository","i999"],"message":"Could not resolve to an issue or pull request with the number of 999."}]}"#;
+    let gh = FakeGh::with_status(body, 1);
+    let plan = "Stream: S1 gitscratch\nOrder: #344 → #999 → #330\nStream: S2 ic\nOrder: #350\n";
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", plan);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a number the repository does not have is a failed run, stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "S1 gitscratch\n",
+            "  ✓ #344  First thing\n",
+            "  ? #999  (no such issue)\n",
+            "  → #330  Second thing\n",
+            "\n",
+            "  #999 is not in timmattison/tools.\n",
+            "\n",
+            "S2 ic\n",
+            "  → #350  Third thing\n",
+            "\n",
+            "Take one from each stream:\n",
+            "  S1 gitscratch  → #330  si 330\n",
+            "  S2 ic          → #350  si 350\n",
+        )
+    );
+}
+
+#[test]
+fn refuses_a_plan_whose_order_field_holds_a_word() {
+    // A plan holds several chains, so the message names the stream as well as
+    // the token. A message about the token alone leaves the reader to search
+    // the whole page for it.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "Stream: S2 ic\nOrder: #350 an #187\n",
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("stream \"S2 ic\": \"an\" is not an issue number"),
+        "the error names the stream and the token, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn refuses_a_plan_that_names_no_order_field() {
+    // A text that names streams and no chain reaches the plan reader, which
+    // says which field is missing. The chain reader would complain about the
+    // token "Stream:", which tells the reader nothing about what to write.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "Stream: S1 gitscratch\nZone: src/gitscratch\nStream: S2 ic\nZone: src/ic\n",
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("no Order field"),
+        "the error names the field that is missing, in {}",
+        stderr(&output)
+    );
+    assert!(
+        !stderr(&output).contains("\"Stream:\""),
+        "the chain reader never saw the text, in {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_number_that_stands_in_two_streams_is_asked_about_once() {
+    // The whole plan is one query, as one chain is. #330 stands in both
+    // streams, and it costs one alias and is reported in both.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "Stream: S1 gitscratch\nOrder: #344 → #330\nStream: S2 ic\nOrder: #330 → #350\n",
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+
+    let args = gh.recorded_args();
+    for number in [344, 330, 350] {
+        assert!(
+            args.contains(&format!("i{number}: issueOrPullRequest(number: {number})")),
+            "the query asks about {number}, in {args}"
+        );
+    }
+    assert_eq!(
+        args.matches("issueOrPullRequest").count(),
+        3,
+        "one query asked about all three, and #330 once, in {args}"
+    );
+    assert!(
+        stdout(&output).contains("  → #330  Second thing\n"),
+        "the number stands in both blocks, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_pull_request_and_the_issue_it_closes_are_one_row() {
+    // `PR#344 (#341)` is one step and not two. The state of the row is the
+    // state of the pull request, so a merged 344 is walked past although 341
+    // is still open — and the two states that disagree earn a note.
+    let body = r#"{"data":{"repository":{
+"i344":{"__typename":"PullRequest","number":344,"title":"First thing","state":"MERGED"},
+"i341":{"__typename":"Issue","number":341,"title":"The bug","state":"OPEN","stateReason":null},
+"i330":{"__typename":"Issue","number":330,"title":"Second thing","state":"OPEN","stateReason":null}
+}}}"#;
+    let gh = FakeGh::new(body);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "Stream: S1 gitscratch\nOrder: PR#344 (#341) → #330\n",
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "S1 gitscratch\n",
+            "  ✓ #344 (#341)  First thing\n",
+            "  → #330         Second thing\n",
+            "\n",
+            "  #344 is closed and #341 is open.\n",
+            "\n",
+            "Take one from each stream:\n",
+            "  S1 gitscratch  → #330  si 330\n",
+        )
+    );
+}
+
+#[test]
+fn answers_the_paste_of_the_plan_parallel_work_skill() {
+    // The whole point of the feature: copy the report of the skill out of a
+    // terminal, type `wn`, and read the issue to start in each stream. The
+    // paste draws its table with `│` and `┌─┬─┐`, it wraps two of its rows
+    // onto a second line, and its Order fields annotate two steps in
+    // parentheses.
+    let gh = FakeGh::new(BOX_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", BOX_TABLE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), BOX_ANSWER);
+}
+
+#[test]
+fn a_pull_request_an_annotation_names_is_the_work_of_its_step() {
+    // `#4 (in flight, PR #15)` is the issue #4 whose work is the pull request
+    // #15, so the row is the pull request and the state of the row is the
+    // state of it. A merged pull request over an open issue earns the same
+    // note the `PR#344 (#341)` order earns, because it is the same step.
+    let body = r#"{"data":{"repository":{
+"i15":{"__typename":"PullRequest","number":15,"title":"The visualizer branch","state":"MERGED"},
+"i4":{"__typename":"Issue","number":4,"title":"The visualizers","state":"OPEN","stateReason":null},
+"i7":{"__typename":"Issue","number":7,"title":"Keep or delete","state":"OPEN","stateReason":null}
+}}}"#;
+    let gh = FakeGh::new(body);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "Stream: A visualizers\nOrder: #4 (in flight, PR #15) → #7\n",
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "A visualizers\n",
+            "  ✓ #15 (#4)  The visualizer branch\n",
+            "  → #7        Keep or delete\n",
+            "\n",
+            "  #15 is closed and #4 is open.\n",
+            "\n",
+            "Take one from each stream:\n",
+            "  A visualizers  → #7  si 7\n",
+        )
+    );
+}
+
+#[test]
+fn refuses_a_row_whose_cell_count_the_header_does_not_have() {
+    // A note holding a bar it did not escape puts every cell after that bar
+    // under the wrong column. The message prints the row, and the run answers
+    // nothing.
+    let gh = FakeGh::new(PLAN_ISSUES);
+    let row = "| S1 | #350 | src/ic | a note with a | bar |";
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        &format!("| Stream | Order | Zone | Notes |\n| --- | --- | --- | --- |\n{row}\n"),
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("row has 5 cells, the header has 4"),
+        "the error names both counts, in {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains(row),
+        "the error prints the row, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn answers_a_plan_drawn_as_a_picture_from_a_pipe() {
+    // The headline of the feature: a picture pasted into a pipe gives one row
+    // for each step, the work each blocked step waits for, and one start line
+    // for each stream that is ready. Two streams that join are two people who
+    // work at the same time, and an answer that named one issue loses that.
+    // No flag says the text is a picture — the shape of the text does.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PICTURE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PICTURE_ANSWER);
+}
+
+#[test]
+fn a_stream_that_is_finished_leaves_the_other_stream_as_the_one_answer() {
+    // The top stream is closed, so one person is free and the other one is
+    // still on `#246`. The answer names that one issue, and the row of `#249`
+    // names the one step of the bottom stream it still waits for.
+    let body = r#"{"data":{"repository":{
+"i242":{"__typename":"Issue","number":242,"title":"Read the picture","state":"CLOSED","stateReason":"COMPLETED"},
+"i247":{"__typename":"Issue","number":247,"title":"Answer the picture","state":"CLOSED","stateReason":"COMPLETED"},
+"i246":{"__typename":"Issue","number":246,"title":"Read the table","state":"OPEN","stateReason":null},
+"i248":{"__typename":"Issue","number":248,"title":"Answer the table","state":"OPEN","stateReason":null},
+"i249":{"__typename":"Issue","number":249,"title":"Paint the gallery","state":"OPEN","stateReason":null}
+}}}"#;
+    let gh = FakeGh::new(body);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PICTURE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "✓ #242  Read the picture\n",
+            "✓ #247  Answer the picture\n",
+            "→ #246  Read the table\n",
+            "· #248  Answer the table    waits for #246\n",
+            "· #249  Paint the gallery   waits for #248\n",
+            "\n",
+            "Start #246 next with 'si 246'\n",
+        )
+    );
+}
+
+#[test]
+fn a_picture_that_names_a_number_the_repository_does_not_have_still_answers() {
+    // The number keeps its row and earns the red note, the rows around it read
+    // as they always did, and the run exits 1. One typo takes down one row of
+    // the picture, and never the whole answer.
+    let body = r#"{"data":{"repository":{
+"i242":{"__typename":"Issue","number":242,"title":"Read the picture","state":"OPEN","stateReason":null},
+"i247":{"__typename":"Issue","number":247,"title":"Answer the picture","state":"OPEN","stateReason":null},
+"i246":{"__typename":"Issue","number":246,"title":"Read the table","state":"OPEN","stateReason":null},
+"i248":{"__typename":"Issue","number":248,"title":"Answer the table","state":"OPEN","stateReason":null},
+"i249":null
+}},"errors":[{"type":"NOT_FOUND","path":["repository","i249"],"message":"Could not resolve to an issue or pull request with the number of 249."}]}"#;
+    let gh = FakeGh::with_status(body, 1);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", PICTURE);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a number the repository does not have is a failed run, stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "→ #242  Read the picture\n",
+            "· #247  Answer the picture  waits for #242\n",
+            "→ #246  Read the table\n",
+            "· #248  Answer the table    waits for #246\n",
+            "? #249  (no such issue)\n",
+            "\n",
+            "#249 is not in timmattison/tools.\n",
+            "Start #242 next with 'si 242'\n",
+            "Start #246 next with 'si 246'\n",
+        )
+    );
+}
+
+#[test]
+fn refuses_a_picture_whose_wires_return_to_a_step_before_them() {
+    // The wires run from `#1` to `#2` and back to `#1`, so no step of the
+    // picture starts first. The message names the numbers of the cycle,
+    // because an answer of "nothing is ready" would hide the reason, and the
+    // run could not answer at all.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "\
+┌──→ #1 ──→ #2 ──┐
+│                │
+└────────────────┘
+",
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("the order returns to #1 and #2"),
+        "the error names the numbers of the cycle, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn refuses_a_picture_that_holds_a_leftward_arrowhead() {
+    // A picture drawn from right to left says the opposite order, and a guess
+    // at it sends somebody to the wrong issue. So the run stops and the
+    // message prints the line, which is what the reader must redraw.
+    let line = "#246 ←── #248 ──┘";
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        &format!(
+            "\
+#242 ──→ #247 ──┐
+                ├──→ #249  (gallery)
+{line}
+"
+        ),
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("holds a leftward arrowhead"),
+        "the error says what the picture holds, in {}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains(line),
+        "the error prints the line, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn refuses_a_picture_whose_wire_reaches_text_that_is_not_a_step() {
+    // A stream label beside a wire is a plan this form does not carry. The
+    // reader who wrote `A` meant work by it, so the run names the text rather
+    // than dropping the wire and the order it draws.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin(
+        &gh,
+        &["--repo", REPO],
+        "80",
+        "\
+A ──→ #4
+#5 ──→ #6 ──┐
+            ├──→ #7
+#8 ──→ #9 ──┘
+",
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("\"A\" stands beside a wire and is not a step"),
+        "the error names the text, in {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+}
+
+#[test]
+fn the_environment_names_the_command_of_every_start_line_of_a_picture() {
+    // A picture names one issue for each stream that is ready, and the reader
+    // who set the variable set it for every one of them. A run that named the
+    // command of the first line alone would leave the second line unusable.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let output = run_with_stdin_and_start(&gh, &["--repo", REPO], "80", PICTURE, Some("start"));
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with(concat!(
+            "Start #242 next with 'start 242'\n",
+            "Start #246 next with 'start 246'\n",
+        )),
+        "the answer names the command of the environment in every line, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_chain_of_two_issues_on_one_line_is_still_a_chain() {
+    // `→` is a wire of a picture, and the net it draws reaches `#277` on its
+    // left and `#278` on its right. Both steps stand on one line, so the
+    // picture claims nothing and the chain reader answers as it always did.
+    // A reader who types a chain must never meet the block of a picture.
+    let gh = FakeGh::new(THREE_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", ONE_OPEN_CHAIN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "✓ #277  First thing\n",
+            "→ #278  Second thing\n",
+            "\n",
+            "Start #278 next with 'si 278'\n",
+        )
+    );
+}
+
+#[test]
+fn the_box_drawn_table_of_a_plan_is_still_a_plan() {
+    // The border of that table is one net that touches every cell of it, and
+    // the table stands on many lines. The plan reader is tried first, so the
+    // table keeps its own reader: the answer is one block for each stream
+    // under one summary, and no row of it names work it waits for.
+    let gh = FakeGh::new(BOX_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", BOX_TABLE);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains(SUMMARY_HEADING),
+        "the plan reader answered, in {}",
+        stdout(&output)
+    );
+    assert!(
+        !stdout(&output).contains(WAITS_FOR),
+        "no block of a plan carries the column of a picture, in {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_picture_inside_a_fenced_code_block_reads_the_same_way() {
+    // This is how a reader copies a picture out of an issue: the sentence over
+    // it and the fence around it come with it. A line that holds no wire and
+    // writes no step is prose, so the sentence and the two fences cost
+    // nothing and the answer is the answer of the picture alone.
+    let gh = FakeGh::new(PICTURE_ISSUES);
+    let pasted = format!("The plan of the gallery:\n\n```\n{PICTURE}```\n");
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &pasted);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), PICTURE_ANSWER);
+}
+
+#[test]
+fn a_plan_that_names_a_blocker_answers_as_one_graph() {
+    // The headline of the `Waits for` column: one step of one stream blocks
+    // another stream, and no block of a plan says that. So a plan that names
+    // one crosses to the answer a picture earns — one row for each step, in
+    // the order of the work, and one start line for each stream that is ready.
+    // `#96` and `#86` are the two people who start now.
+    let gh = FakeGh::new(WAITS_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), WAITS_ANSWER);
+}
+
+#[test]
+fn refuses_a_plan_whose_streams_wait_for_each_other() {
+    // Two streams that wait for each other leave no work to start between
+    // them, and an answer of "nothing is ready" hides the reason. So the run
+    // stops and the message names the two numbers.
+    //
+    // The reader of this message wrote a table and drew no picture, so the
+    // words of it name the order rather than a drawing. One graph carries the
+    // table and the picture both, and one message answers for both of them.
+    //
+    // The run names no repository, and the fake `gh` records every call it is
+    // given. So a run that reached `gh` at all wrote the file, and a mistake
+    // in the text of the reader costs no round trip.
+    let gh = FakeGh::new(WAITS_ISSUES);
+    let output = run_with_stdin(&gh, &[], "80", WAITS_CYCLE);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    for number in ["#91", "#96"] {
+        assert!(
+            message.contains(number),
+            "the error names {number} of the cycle, in {message}"
+        );
+    }
+    assert!(
+        !message.contains(PICTURE_WORD),
+        "the error of a plan names no drawing, in {message}"
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+    assert!(
+        gh.asked_nothing(),
+        "the run refused the plan before it asked GitHub, and it asked {}",
+        gh.recorded_args()
+    );
+}
+
+#[test]
+fn a_finished_blocker_frees_the_stream_that_waited_for_it() {
+    // `#96` is done, so `S1` starts. `S2` waits for `S1` as well, so `#89` is
+    // still blocked and no line of the answer names it. An answer that read
+    // the cell as a chain would name `#89` here, because the first blocker of
+    // it is finished.
+    let gh = FakeGh::new(WAITS_ISSUES_ONE_DONE);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "✓ #96  The daemon leak\n",
+            "→ #91  The lifecycle\n",
+            "· #89  The install      waits for #91\n",
+            "· #94  The shell init   waits for #89\n",
+            "→ #86  The keymap\n",
+            "\n",
+            "Start #91 next with 'si 91'\n",
+            "Start #86 next with 'si 86'\n",
+        )
+    );
+}
+
+#[test]
+fn a_stream_starts_when_every_blocker_of_it_is_finished() {
+    // `#96` and `#91` are both done, so the whole cell of `S2` is finished and
+    // `#89` is free. `#94` comes after it in the chain of that stream, so it
+    // waits for `#89` alone.
+    let gh = FakeGh::new(WAITS_ISSUES_TWO_DONE);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "✓ #96  The daemon leak\n",
+            "✓ #91  The lifecycle\n",
+            "→ #89  The install\n",
+            "· #94  The shell init   waits for #89\n",
+            "→ #86  The keymap\n",
+            "\n",
+            "Start #89 next with 'si 89'\n",
+            "Start #86 next with 'si 86'\n",
+        )
+    );
+}
+
+#[test]
+fn a_blocked_row_names_every_step_it_waits_for() {
+    // A `Waits for` cell is a set and not a chain, so a row that named the
+    // first blocker alone would tell a reader to start work that two other
+    // people still hold. `#89` waits for `#96` and for `#91`, and the row says
+    // both.
+    let gh = FakeGh::new(WAITS_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    let row = answer
+        .lines()
+        .find(|line| line.contains("#89"))
+        .unwrap_or_else(|| panic!("the answer holds a row of #89, in {answer}"))
+        .to_string();
+    assert!(
+        row.ends_with("waits for #96, #91"),
+        "the row names each step it waits for, in {row:?}"
+    );
+}
+
+#[test]
+fn a_blocker_the_repository_does_not_have_still_earns_a_row() {
+    // The typo stands in no `Order` field, so a row of the answer is the one
+    // place that can say the repository does not have it. The rows around it
+    // read as they always did, and the run exits 1.
+    let gh = FakeGh::with_status(WAITS_ISSUES_WITH_A_TYPO, 1);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN_WITH_A_TYPO);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a number the repository does not have is a failed run, stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "→ #96   The daemon leak\n",
+            "? #999  (no such issue)\n",
+            "· #91   The lifecycle    waits for #96, #999\n",
+            "\n",
+            "#999 is not in timmattison/tools.\n",
+            "Start #96 next with 'si 96'\n",
+        )
+    );
+}
+
+#[test]
+fn a_plan_with_no_waits_for_column_answers_as_it_always_did() {
+    // The plan every reader wrote before this column stood. Its streams stand
+    // apart, so the answer is one block for each of them under one summary,
+    // and no row of it names work it waits for. A run that read every plan as
+    // a graph would take that answer away from them.
+    let gh = FakeGh::new(WAITS_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN_WITHOUT_THE_COLUMN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), WAITS_BLOCK_ANSWER);
+    assert!(
+        stdout(&output).contains(SUMMARY_HEADING),
+        "the plan reader answered, in {}",
+        stdout(&output)
+    );
+    assert!(
+        !stdout(&output).contains(WAITS_FOR),
+        "no block of a plan carries the column of a graph, in {}",
+        stdout(&output)
     );
 }

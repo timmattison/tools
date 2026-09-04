@@ -1752,6 +1752,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "colored",
+ "gitscratch",
  "repowalker",
  "shellsetup",
  "tempfile",
@@ -1929,6 +1930,17 @@ dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
  "ctutils",
+]
+
+[[package]]
+name = "dirc"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "buildinfo",
+ "clap",
+ "tempfile",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2599,6 +2611,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "colored",
+ "gitscratch",
  "repowalker",
  "tempfile",
 ]
@@ -3912,6 +3925,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
+name = "httpfile"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tiny_http",
+]
+
+[[package]]
 name = "human_bytes"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4805,6 +4826,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
+name = "localnext"
+version = "0.1.0"
+dependencies = [
+ "buildinfo",
+ "clap",
+ "httpfile",
+ "percent-encoding",
+ "portplz-core",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tiny_http",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5177,6 +5212,7 @@ version = "0.1.0"
 dependencies = [
  "buildinfo",
  "clap",
+ "gitscratch",
  "repowalker",
 ]
 
@@ -6017,6 +6053,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "prgz"
+version = "0.1.0"
+dependencies = [
+ "buildinfo",
+ "clap",
+ "colored",
+ "flate2",
+ "indicatif",
+ "num-format",
+ "signal-hook 0.3.18",
+ "tempfile",
+ "termbar",
+ "testcolor",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "prhash"
 version = "0.1.0"
 dependencies = [
@@ -6641,6 +6694,7 @@ name = "repotidy"
 version = "0.1.0"
 dependencies = [
  "buildinfo",
+ "gitscratch",
  "repowalker",
 ]
 
@@ -6648,7 +6702,9 @@ dependencies = [
 name = "repowalker"
 version = "0.1.0"
 dependencies = [
+ "gitscratch",
  "ignore",
+ "tempfile",
  "walkdir",
 ]
 
@@ -7277,6 +7333,7 @@ version = "0.1.0"
 dependencies = [
  "buildinfo",
  "clap",
+ "httpfile",
  "percent-encoding",
  "portplz-core",
  "tempfile",
@@ -7344,6 +7401,7 @@ dependencies = [
  "libc",
  "regex",
  "sysinfo",
+ "unicode-width",
  "which",
 ]
 

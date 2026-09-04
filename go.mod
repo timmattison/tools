@@ -9,7 +9,6 @@ require (
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/timmattison/aws-iot-core-websockets-go v0.6.1
-	golang.design/x/clipboard v0.7.1
 	golang.org/x/text v0.40.0
 )
 
@@ -68,9 +67,6 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp v0.0.0-20260508232706-74f9aab9d74a // indirect
-	golang.org/x/exp/shiny v0.0.0-20260508232706-74f9aab9d74a // indirect
-	golang.org/x/image v0.41.0 // indirect
-	golang.org/x/mobile v0.0.0-20260520154334-0e4426e1883d // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect

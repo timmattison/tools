@@ -75,8 +75,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       Run `prcp --shell-setup` to add a `prmv` command for convenient moves.
     - To install: `cargo install --git https://github.com/timmattison/tools prcp`
 - prgz
-    - Similar to `prcp` but instead of copying a file it gzip compresses it. It shows the progress in the console.
-    - To install: `go install github.com/timmattison/tools/cmd/prgz@latest`
+    - Similar to `prcp` but instead of copying a file it gzip compresses it. It draws the same one-line progress bar
+      that `prcp` draws, and it closes with the sizes, the duration, and the rates, with the thousands separators of
+      your locale (`LC_ALL`, then `LC_NUMERIC`, then `LANG`). It asks before it replaces an output file that's
+      already there, the same way `prcp` does; `-y`/`--yes` skips the prompt. On Unix, Ctrl-C stops the run and
+      removes the part of the file it wrote, unless that file was already there and the run replaced it, in which
+      case the part-written file stays; a second Ctrl-C ends the run at once and leaves the part file behind either
+      way.
+    - To install: `cargo install --git https://github.com/timmattison/tools prgz`
 - update-aws-credentials
     - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
       your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
@@ -121,9 +127,16 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - To install: `cargo install --git https://github.com/timmattison/tools bm`
 - localnext
     - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
-      directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work
-      with [the templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates)
-    - To install: `go install github.com/timmattison/tools/cmd/localnext@latest`
+      directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work with [the
+      templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates). Run it from
+      the project directory or from inside `out`; either way it serves the same directory. Extensionless routes
+      resolve to their `.html` file, and anything it cannot find falls back to `index.html`. The listening port is
+      derived automatically (the same algorithm as `portplz`): inside a git repository from the repository name, the
+      branch, and the current user — the project directory plays no part there — or, outside one, from the directory
+      basename and the current user; either way it stays stable across runs. Two exports from the same repository on
+      the same branch derive the same port, so the second one needs `-p/--port`. Binds `127.0.0.1`. Answers HTTP
+      byte-range requests, so an exported `<video>`/`<audio>` element seeks instead of re-downloading the whole file.
+    - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
     - To install: `cargo install --git https://github.com/timmattison/tools unescapeboard`
@@ -151,7 +164,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       `/<basename>`, or `sirn` with no arguments to serve the current directory as a browsable tree. The listening
       port is derived automatically from the git repo root, branch, and current user (the same algorithm as `portplz`),
       so a given project always serves on a stable port and two users on one machine don't collide; override it with
-      `-p/--port`. Binds `127.0.0.1` by default — use `--bind 0.0.0.0` to expose it on the LAN.
+      `-p/--port`. Binds `127.0.0.1` by default — use `--bind 0.0.0.0` to expose it on the LAN. Answers HTTP
+      byte-range requests, so a served `<video>`/`<audio>` file seeks instead of re-downloading from the start.
     - To install: `cargo install --git https://github.com/timmattison/tools sirn`
 - uuidplz
     - Generates UUIDs. With no input it prints a random v4 UUID. Given a string or a file it seeds a name-based
@@ -178,16 +192,21 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       recently
       across different projects.
     - To install: `cargo install --git https://github.com/timmattison/tools gitrdun`
-- procinfo
-    - Shows detailed information about running processes matching a name. Displays process details, working directory,
-      command line, open files, network connections, and optionally environment variables. Useful for debugging and
-      investigating running applications.
-    - To install: `go install github.com/timmattison/tools/cmd/procinfo@latest`
 - spv (smart process viewer)
     - Smart process viewer with enhanced filtering and display. Find processes by PID (single or comma-separated),
-      name pattern (case-insensitive substring), or regex. Displays process info in a formatted table or raw output.
-      Optionally shows working directories (`--cwd`) and open files (`--lsof`). Examples: `spv 77763`, `spv node`,
-      `spv --regex 'node.*'`, `spv --cwd --lsof zsh`.
+      name pattern (case-insensitive substring), or regex. Add `--case-sensitive` to make the substring search
+      respect case, and `--full` to search the whole command line the way `pgrep -f` does. Displays process info in
+      a formatted table or raw output. Optionally shows working directories (`--cwd`), open files (`--lsof`),
+      environment variables (`--env`), and network connections (`--net`). `--all` turns on every section. A value
+      whose name reads like a credential is hidden, and `--show-secrets` prints it in full. A section that cannot be
+      read says why, and a run that touches a process belonging to another user says that sudo is needed. Examples:
+      `spv 77763`, `spv node`, `spv --regex 'node.*'`, `spv --cwd --lsof zsh`, `spv --all --full deploy.sh`.
+    - This tool replaces `procinfo`, which was removed. `procinfo` did not work on macOS. A `procinfo` user meets
+      three changes:
+        - A search that matches nothing exits 1. `procinfo` exited 0.
+        - The open files and network sections need `--lsof`, `--net`, or `--all`. `procinfo` printed both by default.
+        - A name search reads the executable name. `procinfo` read the whole command line, and `--full` gives that
+          reach back.
     - To install: `cargo install --git https://github.com/timmattison/tools spv`
 - pk (process killer)
     - Process killer with dry-run mode and detailed feedback. Uses macOS's libproc API (same as Activity Monitor)
@@ -247,9 +266,16 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - dirc
     - A versatile directory path tool that can both:
         - Copy the current working directory to the clipboard
-        - Read a directory path from the clipboard and output a command to change to that directory (`paste` mode)
-    - Works best with an alias like `dirp='eval $(dirc -paste)'` in your shell configuration.
-    - To install: `go install github.com/timmattison/tools/cmd/dirc@latest`
+        - Read a directory path from the clipboard and output a command to change to that directory (`--paste` mode)
+    - Works best with an alias like `dirp='eval "$(dirc --paste)"'` in your shell configuration. Keep the double
+      quotes. Bash and Zsh split the output of an unquoted `$(...)` at every character the field separator holds, so a
+      directory name that holds a tab or a newline reaches `cd` with that character turned into a space. In fish the
+      alias runs `eval (dirc --paste | string collect)` instead, because fish splits a substitution at every newline.
+    - The flag is `--paste`, with two dashes. The Go version of this tool also took the single-dash `-paste`, and this
+      one does not, so an alias written for the Go version needs the second dash.
+    - Set `DIRC_CLIPBOARD_FILE` to the path of a file to read and write that file in place of the clipboard of the
+      machine. This is what lets the tests of `dirc` run without touching the clipboard of the person at the keyboard.
+    - To install: `cargo install --git https://github.com/timmattison/tools dirc`
 - gitdiggin
     - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by
       default and optionally in commit contents (diffs). Useful for finding when and where specific changes were made
@@ -1054,10 +1080,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `export WN_START_COMMAND='gh issue develop'` makes the answer read
     `Start #278 next with 'gh issue develop 278'`. An empty value falls back to `si`.
   - Every separator means the same thing: the issue on the left comes before the issue on the
-    right. `→`, `->`, `∥`, `||`, a comma, and a semicolon all read as "then", so a chain
-    pasted out of a plan works whichever way it was typed. The double bar is read as an arrow on
-    purpose, because a chain handed to `wn` is a chain somebody decided to walk in order. Quote
-    the chain: a shell reads an unquoted `#` as the start of a comment.
+    right. `→`, `->`, `∥`, `||`, `─`, `━`, `═`, a comma, and a semicolon all read as "then", so a
+    chain pasted out of a plan works whichever way it was typed. The double bar is read as an
+    arrow on purpose, because a chain handed to `wn` is a chain somebody decided to walk in order.
+    The three horizontal strokes of the box-drawing block read as "then" because a picture of one
+    line is a chain: a reader who draws `#1 ──→ #2` draws the tail of the arrow with a stroke, and
+    without those strokes the run `──` reaches the chain reader as one token and earns a refusal.
+    Quote the chain: a shell reads an unquoted `#` as the start of a comment.
   - The chain comes out of the first input that holds one: the argument, then standard input,
     then the system clipboard. A chain almost always starts as text somebody copied out of a
     plan, an issue, or a comment, so `wn` alone answers the chain you just copied. A pipe still
@@ -1076,9 +1105,186 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     otherwise invisible, because the other five still name an issue to start. An issue that is
     closed after the next one is reported as done out of order, because the plan in your head is
     then wrong and nothing else would say so.
+  - A plan of parallel work is a second shape of input, and it is not a change to the first one.
+    The `plan-parallel-work` skill writes a plan as a set of streams, each with an `Order` field,
+    and the streams run at the same time. `wn` reads the whole plan and names the issue to start
+    in every stream, under one summary that carries all of them. All three written forms work: the
+    records a terminal prints, the Markdown table a file holds, and the box-drawn table the report
+    arrives on the clipboard as. No flag says which shape the text is, because the shape of the
+    text already does, so `pbpaste | wn` answers a plan the same way it answers a chain. A table
+    ends at the first line that is not a row of it, so a whole report pastes in cleanly: the
+    Housekeeping table under the streams is not more work to start.
+  - One reader takes all three tables, under three rules. A line drawn out of `─ ━ ═ - = + : _`
+    and the corners beside them carries no data, which deletes `┌─┬─┐`, `├─┼─┤`, `└─┴─┘`, the
+    `+---+` of an ASCII table, and both dividers of a Markdown one — `| --- |` and the `|:--- |
+    ---:|` that carries an alignment colon. A bar and a space stand in such a line as well, and
+    they draw nothing, so the line holds three marks at the least: the empty row `|   |   |` is a
+    row and never a rule, and a rule in its place would cut a row that wraps in two. A row splits
+    on the bar and never on a column position, so an em dash or a Japanese character inside one
+    cell shifts no cell after it. A row that wraps onto a second line joins the row above it, and
+    three readings say which lines wrap. The `├─┼─┤` rules give the first one wherever they stand
+    between two rows: a row opens under a rule and takes every line up to the next one. That
+    reading asks nothing of the cells, so a wrap that falls in the middle of a chain — between a
+    step and the annotation in parentheses that follows it, or between two steps — stays one row.
+    A Markdown table gives the second: a body that opens with `| --- |` writes one row on each
+    line, because one row of a Markdown table is one line. An empty `Order` cell there is a stream
+    that names no chain, and `wn` names that stream rather than dropping it. A table that carries
+    neither mark gives the third and is read by its `Order` cell: that cell is empty or it opens
+    with an arrow, because a step of a chain never does. Reading the first cell would be simpler
+    and wrong — a label wraps as readily as a chain. The header names the column count, so a row
+    that splits into another one holds a bar nobody escaped, and `wn` prints that row and exits
+    `2` rather than reading its `Notes` as a chain.
+  - Two fields are read for numbers: `Order`, which is a chain, and `Waits for`, which is a set
+    and stands below. `Stream`, `Zone`, and `Notes` are never read for numbers, and that rule is
+    what makes the feature work: `Notes` is prose about code, and prose about code is full of
+    numbers. `main.rs:1566-1650` is not `#1566` and `#1650`, and `265 lines apart in a 5113-line
+    file` is not `#265` — though `#265` is a real issue of this repository, and in one plan it is
+    the first step of another stream of that same plan. The digits alone cannot part a count of
+    lines from the number of an issue. Only the field they stand in can.
+  - A pull request and the issue it closes are one step, not two. `PR#344 (#341)` gets one row,
+    `#344 (#341)`, and the state of that row is the state of the pull request, because the pull
+    request is the work. `wn` asks GitHub about both numbers, and a pair whose two states disagree
+    earns a note — a merged pull request whose issue is still open is a real condition, and
+    nothing else reports it.
+  - A plan writes that pair the other way round as well, and it writes prose beside it: `#4 (in
+    flight, PR #15)` is the issue `#4` whose work is the pull request `#15`, and `#12 (human)` is
+    one issue with a note about who does it. So a group in parentheses annotates the step to its
+    left and never opens one. Inside a group, only a word carrying the `#` is a number, and a `PR`
+    in front of one marks that number as the work — which is why `#4 (in flight, PR #15)` gives the
+    row `#15 (#4)`, the same step `PR#344 (#341)` gives. Every other word is prose that `wn` drops,
+    so `#4 (30-line window)` holds one number: the `30` carries no hash. That prose holds a
+    parenthesis as readily as a word, so a group counts its depth and the parenthesis that brings
+    the depth to zero is the one that closes it: `#4 (a note (see the docs)) → #7` is two steps,
+    and `#4 (in flight (rebasing), PR #15)` still gives the row `#15 (#4)`. A group that never
+    closes is refused, because where it ends is a guess — and a nested parenthesis closes the group
+    it opened and no other, so `#4 (a (b) c` is refused as well.
+  - The whole plan is one GraphQL query, as one chain is. A plan of seven streams and eighteen
+    numbers costs one round trip and one unit of the rate limit, and a number that stands in two
+    streams is asked about once and reported in both. A stream that names a number the repository
+    does not have keeps its row and its note, the other streams still answer, and the run exits
+    `1`.
+  - A fifth column carries the one edge a table of streams could not: one stream that waits for a
+    step of another. `Waits for` stands beside `Stream`, `Order`, `Zone`, and `Notes`, it is
+    matched with the case ignored as those four are, and the record form writes it as the field
+    `Waits for:`.
+
+    ```
+    | Stream | Order | Waits for | Zone | Notes |
+    |--------|-------|-----------|------|-------|
+    | S0 — daemon leak | #96 | | crates/tsm (serve.rs) | Do first, solo. |
+    | S1 — lifecycle | #91 | #96 | crates/tsm (kill.rs) | |
+    | S2 — install | #89 → #94 | #96, #91 | crates/tsm (shell-init) | Same hotspot as S1. |
+    | S3 — keymap | #86 | | packages/web | Disjoint. |
+    ```
+
+    A plan that wrote that edge in a callout above the table instead sends two of three readers at
+    work that is blocked, and the answer is wrong in the one direction that costs a morning. The
+    plan did not lie. The table carried no edge.
+  - The cell holds steps, in the shape `Order` holds them: `#96` is one step, `#96, #91` is two,
+    and `PR#344 (#341)` is one step that holds a pair. A separator inside the cell says nothing
+    about order. `Order` is a chain and `Waits for` is a set, so `#96 → #91` and `#96, #91` mean
+    the same thing — both numbers must finish before the stream starts. Reading the cell as a
+    chain would claim an edge from `#96` to `#91` that the plan never wrote.
+  - Every step of the cell comes before the first step of the stream, and before that step alone,
+    because the steps inside the stream keep the edges `Order` already gives them. The plan above
+    thus draws `#96 → #91`, `#96 → #89`, `#91 → #89`, and `#89 → #94`. That is a graph, and it is
+    the graph a picture draws, so a plan that carries such an edge answers the way a picture
+    answers and earns no second report: one row for each step in a topological order, `→` on every
+    ready step and `·` on a blocked one, `waits for #96, #91` on the row of `#89`, and one start
+    line for each issue somebody can begin now. The plan above names `#96` and `#86` while every
+    issue is open, and it names `#91` and `#86` once `#96` is closed.
+  - An empty cell is a stream nothing outside it blocks, and it is the common case. An absent
+    column is a plan with no cross-stream edge at all, which is every plan written before this
+    landed: such a plan still answers as one block for each stream under one summary, and nothing
+    about it changed. A cell that names the first step of its own stream draws no edge either,
+    because such an edge runs from a step to itself and says nothing.
+  - Three things are refused. A cell whose text is not a step earns the message a bad `Order` cell
+    earns, naming the stream and the text: `after the leak lands` names no issue, and the reason a
+    stream waits is prose that belongs in `Notes`. An order that returns to itself is a cycle, so
+    `wn` names the numbers that hold the knot and exits `2` without asking GitHub anything. Two
+    streams that wait for each other are the common shape of one, and a cell that names a later
+    step of its own stream is another: that cell says the step comes before the first step of the
+    stream while `Order` says the opposite, and one half of a contradiction is no answer. A
+    blocker the repository does not have keeps its row and its note, and the run exits `1`,
+    because a blocker that is a typo is a stream that waits forever.
+  - A plan drawn as a picture is a third shape of input, and it says the one thing that no chain
+    and no table says: two streams that join.
+
+    ```
+    #242 ──→ #247 ──┐
+                    ├──→ #249  (gallery)
+    #246 ──→ #248 ──┘
+    ```
+
+    That picture says four things. Do `#242` before `#247`. Do `#246` before `#248`. Do both
+    `#247` and `#248` before `#249`. Work the top row and the bottom row at the same time, because
+    nothing joins them until `#249`. A picture reads from left to right, always, and an arrowhead
+    confirms that direction rather than sets it: a wire drawn with `──` alone says the same order
+    as one drawn with `──→`.
+  - The meaning of a picture is its geometry, so `wn` builds a grid of the text and walks it under
+    four rules. A connector character is a wire, and it names the sides it touches: `─` touches
+    left and right, `│` touches up and down, and `┐` touches left and down. Two wires that face
+    each other are one net, so one net runs from the first stroke of `──→` to the point of the
+    arrow. A net has ports on its left and ports on its right, and a port is the text that stands
+    beyond a free end of the net. Every left port comes before every right port, so the net that
+    joins the two rows above, with the left ports `#247` and `#248` and the right port `#249`,
+    draws two edges. A port is a step and not a bare number, so `#249  (gallery)` is the step
+    `#249` and `gallery` is prose, as it is in a plan.
+  - The light set, the heavy set, and the double set all draw wires — `─ ━ ═`, `│ ┃ ║`, and every
+    corner, tee, and cross beside them — and so do the ASCII spellings `-`, `|`, `+`, and `>`. An
+    ASCII `-`, `|`, `+`, or `>` is a wire only when a neighbor on a side it touches draws a wire
+    as well, and it draws no wire when the run it stands in ends at a letter. Prose holds all four
+    of those characters, and a neighbor alone is too little: the two hyphens of `--hidden` stand
+    beside each other, so a label such as `#249  (pass --hidden)` would run a wire through the
+    prose of a port. `wn` reads the run and never the one character, so `a 30-line window` holds
+    no wire, `(pass --hidden)` holds none, and `#1-->#2` holds one, because a digit and a `#` are
+    no letters. A box-drawing character never stands inside a word, so it needs no such test.
+  - The readers are tried in one order: the record form and the table form of a plan first, the
+    picture second, and the chain last. A picture claims the text when one of its nets joins two
+    steps that stand on different lines. That rule is what keeps `#1 ──→ #2` a chain, because both
+    of its steps stand on one line. It claims the text as well when two nets or more each join a
+    step on their left to a step on their right, those nets do not all stand on one line, one of
+    them holds a box-drawing character, and no net of the text reaches a step on one side and
+    nothing on the other. That second rule is what reads `#242 ──→ #247` over `#246 ──→ #248` —
+    two streams that never join — as two rows of work rather than as one, because every wire of
+    such a picture stands on one line. Each of the three tests beside the count keeps a text the
+    chain reader answers: the lines keep `#1 ──→ #2 ──→ #3` a chain, the box-drawing character
+    keeps a page of prose out, and the net that reaches nothing on one side keeps a chain somebody
+    wrapped out — `#1 ──→ #2 ──→` with `#3 ──→ #4` under it, where the trailing `──→` says the
+    order runs on. The price is a chain wrapped after a box-drawn wire: `#1 ──→ #2,` with
+    `#3 ──→ #4` under it reads as two streams. A line with no wire and no step is ignored, so the
+    fence of a code block costs nothing, and a picture indented out of a Markdown list gives the
+    edges a picture at column zero gives.
+  - The answer names a state for every step. A step is ready when it is open and every step before
+    it is finished, blocked when it is open and one step before it is not, and finished when it is
+    done or dropped. `→` marks every ready step and `·` marks a blocked one, which is what those
+    two marks already mean. Every ready issue gets its own start line — `Start #242 next with 'si
+    242'` and `Start #246 next with 'si 246'` — because two streams that join are two people who
+    work at the same time, and an answer that names one issue loses that. A blocked row names
+    every step it waits for and never the first one alone: `waits for #247, #248`. That column
+    takes its columns out of the window before the title does, because it is what the reader of a
+    blocked row came for. The rows print in a topological order, and a tie goes to the step that
+    stands first in the text, so each stream stays together.
+  - A picture `wn` claims and cannot follow earns a refusal and never a guess, because a guess
+    sends somebody to the wrong issue. A leftward arrowhead is refused, because a picture drawn
+    from right to left says the opposite order. A diagonal wire is refused, because a diagonal
+    touches no side of a cell and the rule that makes two wires one net cannot read it. A stroke
+    draws such a wire only when a neighbor on one of its four sides draws a wire as well, so the
+    slash of `#249 (src/gallery)` beside a wire is the prose of a label and costs nothing. A port
+    whose text is not a step is refused and named back: `A ──→ #4` reports `A`, because a stream
+    label beside a wire is a plan this form does not carry. A net that reaches a step on one side
+    and nothing on the other is refused as well, because the other half of that order is what
+    nobody can guess. A cycle is refused and its numbers are named, because a cycle has no
+    step to start and an answer of "nothing is ready" hides the reason. A net with no port at all
+    is dropped without a word, which is why the border of a box-drawn table costs nothing.
+  - The whole picture is one GraphQL query, as one chain and one plan are, so a step that stands
+    in two places is asked about once and reported in both. The run exits `0` when the repository
+    holds every number of the picture, `1` when the picture names a number the repository does not
+    have, and `2` for a picture `wn` could not read and for a cycle. `wn` draws no graph back: the
+    answer is the rows and what each row waits for, because a layout engine is a separate decision.
   - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard), `wn "#230 → #315"`,
-    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn`,
-    `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
+    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole plan, or a plan drawn
+    as a picture), `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 
 ## dirhash
@@ -1819,6 +2025,28 @@ copy_env = true
 bootstrap_hooks = true
 ```
 
+### Where worktrees go
+
+By default, a new worktree lands in `{repo-name}-worktrees`, beside the main worktree of the repository. A repository at `~/code/tools` therefore gets `~/code/tools-worktrees`.
+
+Some repositories keep the git directory apart from the work tree, which is what `yadm` does with a directory of dotfiles: the git directory is `~/.local/share/yadm/repo.git` and the work tree is `$HOME`. Git names the git directory itself as the main worktree of such a repository, so the default becomes `~/.local/share/yadm/repo.git-worktrees`, beside the git directory.
+
+A repository states a different answer with the `nwt.worktreesDir` git configuration key:
+
+```bash
+git config nwt.worktreesDir '/data/worktrees'   # an absolute path
+git config nwt.worktreesDir '~/worktrees'       # git expands the tilde
+git config nwt.worktreesDir 'worktrees'         # relative to the main worktree
+```
+
+Three rules govern the value:
+
+- Git expands a leading `~` or `~user` into a home directory, because nwt reads the key with `--type=path`. The quotation marks above keep the tilde for git, since a shell expands one that it sees. A git configuration value gets no shell expansion of its own.
+- A **relative** value is relative to the **main worktree** of the repository, never to the directory you run `nwt` in. A repository therefore keeps its worktrees in one place, whichever of its worktrees you start from.
+- An **empty** value names no directory, and git refuses a value it cannot read, such as the home directory of a user who does not exist. nwt prints an error naming the key, stops with exit code 12, and creates nothing. It never falls back to the default, because a silent fall back hides the mistake and puts the worktree somewhere you did not name.
+
+nwt reads the key with `git config --get`, which reads every scope. The answer can therefore come from the repository's own configuration, from `~/.gitconfig`, or from the system configuration. The repository's own configuration is the place for it: it travels with the repository, and `yadm` already tracks that file.
+
 ### Env File Copying
 
 After creating the worktree, nwt copies untracked `.env` files from the main worktree into the new one, preserving their relative paths, so development settings that aren't committed to git are there immediately. Two patterns are copied: `.env` exactly, and anything starting with `.env.` (`.env.local`, `.env.development`, and so on). Nothing else is — `.envrc` (direnv) and `.environment` don't match the pattern, and any file tracked by git is skipped, since git already puts it in the new worktree.
@@ -1834,6 +2062,8 @@ This exists because a repo's `post-checkout` hook lives in the shared git direct
 The trade-off: nwt does not parse or merge `.env` files, so when the hook writes a `.env.local`, the main worktree's `.env.local` does not reach the new worktree at all. Keys that live only in the main worktree's copy — `DISABLE_AUTH`, a shared API key, whatever else you keep there — will be missing, and you have to copy them over by hand. The per-file `Kept existing:` line is there so that divergence is discoverable. A trailing summary reports both counts (`Copied N untracked .env files to new worktree` and `Kept N existing .env files already in the new worktree`); `-q`/`--quiet` suppresses the per-file lines and the summary alike.
 
 On Unix, copied `.env` files are created at mode `0600` — owner read/write only — no matter what the source file's mode is. A `0644` `.env` in the main worktree therefore no longer propagates a world-readable secrets file into every worktree. The mode is applied when the file is created, so the copy is never briefly readable by anyone else. Windows has no equivalent mode; everything else behaves the same there.
+
+Some repositories keep the git directory apart from the work tree, which the *Where worktrees go* section above describes. Git names the git directory itself as the main worktree of such a repository, and no work tree is below that path. nwt finds no `.env` file there and copies none. This is deliberate: the work tree of such a repository is your home directory, and the `.env` files there are not the new worktree's to take.
 
 Disable copying for a single invocation with `--no-copy-env`, or set `copy_env = false` in `~/.nwt.toml` to disable it by default.
 
@@ -1903,6 +2133,13 @@ the main worktree.
 
 If your repository has neither branch checked out, `cwt -m` lists the worktrees and exits
 with code 3.
+
+In a repository whose git directory is detached from its work tree — a `yadm` repository of
+dotfiles, whose git directory is `~/.local/share/yadm/repo.git` and whose work tree is your
+home directory — git names the git directory itself as the main worktree. Git builds that
+name from the git directory with a trailing `/.git` removed, and this layout has no such
+suffix. So the path `cwt -m` takes you to ends in `.git`, and that is also the path the
+listing shows. Every `cwt` command works from there.
 
 #### Pressing it again climbs out
 

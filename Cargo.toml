@@ -49,6 +49,9 @@ sha1 = "0.10"
 md-5 = "0.10"
 hex = "0.4"
 
+# Compression
+flate2 = "1.1"
+
 # Terminal UI
 crossterm = "0.29"
 ratatui = "0.30"
@@ -175,6 +178,7 @@ op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
 gitscratch = { path = "src/gitscratch" }
+httpfile = { path = "src/httpfile" }
 portplz-core = { path = "src/portplz-core" }
 repowalker = { path = "src/repowalker" }
 shellsetup = { path = "src/shellsetup" }
