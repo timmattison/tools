@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
@@ -71,23 +71,32 @@ pub(crate) fn scan(
             line(err, format_args!("Found symlink: {}", path.display()));
         }
 
+        // This match is the whole gate a repair sits behind. A repair belongs
+        // in `report_broken` and nowhere else, so a link the tool could not
+        // resolve reaches no repair at all — not by a check inside the repair,
+        // which a later change could forget, but because the two states never
+        // meet the same code.
         match classify(path) {
             LinkState::Intact => {}
-            // The `Error:` line and the count of this state belong to the next
-            // slice, which adds them with tests of their own.
-            LinkState::Unresolvable(_) => {}
+            LinkState::Unresolvable(error) => report_unresolvable(path, &error, err, summary),
             LinkState::Broken => report_broken(path, out, err, summary),
         }
     }
 }
 
-/// Reports one broken link and counts it.
+/// Reads the target of the link at `path`, and writes the warning line when
+/// that read fails.
 ///
-/// The target is read only now, after the link is known to be broken, so a tree
+/// A link is read only once the tool has something to say about it, so a tree
 /// of working links costs one system call for each link and no more.
-fn report_broken(path: &Path, out: &mut dyn Write, err: &mut dyn Write, summary: &mut Summary) {
-    let target = match fs::read_link(path) {
-        Ok(target) => target,
+///
+/// A link whose target cannot be read counts in nothing at all. Both of the
+/// lines this module writes name the target, neither one can name a target it
+/// could not read, and a count with no line under it is a number a reader
+/// cannot act on.
+fn read_target(path: &Path, err: &mut dyn Write) -> Option<PathBuf> {
+    match fs::read_link(path) {
+        Ok(target) => Some(target),
         Err(error) => {
             line(
                 err,
@@ -96,8 +105,19 @@ fn report_broken(path: &Path, out: &mut dyn Write, err: &mut dyn Write, summary:
                     path.display()
                 ),
             );
-            return;
+            None
         }
+    }
+}
+
+/// Reports one broken link and counts it.
+///
+/// This is where a repair goes. The link that reaches this function is the one
+/// link the operating system says is absent, which is the one state a rewrite
+/// can improve, and its target is already in hand.
+fn report_broken(path: &Path, out: &mut dyn Write, err: &mut dyn Write, summary: &mut Summary) {
+    let Some(target) = read_target(path, err) else {
+        return;
     };
 
     line(
@@ -105,6 +125,34 @@ fn report_broken(path: &Path, out: &mut dyn Write, err: &mut dyn Write, summary:
         format_args!("Broken symlink: {} -> {}", path.display(), target.display()),
     );
     summary.broken += 1;
+}
+
+/// Reports one link the operating system refused to resolve, and counts it.
+///
+/// The line goes to the error stream, because it is a diagnostic and not a
+/// finding: the tool asked a question about the target and got no answer, so it
+/// knows nothing about that target and says so.
+///
+/// This never touches [`Summary::broken`], thus the closing summary of a run
+/// with such links and no broken ones is still `No broken symlinks found.`.
+/// That is deliberate, and the reason is the tool this port replaces: its
+/// summary counts broken links, its diagnostics go to the error stream, and it
+/// gives status 0 whatever it wrote there. A second summary line would be a new
+/// number in the report of a tool whose report other things already read.
+fn report_unresolvable(path: &Path, error: &io::Error, err: &mut dyn Write, summary: &mut Summary) {
+    let Some(target) = read_target(path, err) else {
+        return;
+    };
+
+    line(
+        err,
+        format_args!(
+            "Error: cannot resolve {} -> {}: {error}",
+            path.display(),
+            target.display()
+        ),
+    );
+    summary.errors += 1;
 }
 
 /// Reports one error the walk raised, and lets the walk go on.

@@ -80,6 +80,9 @@ pub fn run(options: &Options, out: &mut dyn Write, err: &mut dyn Write) -> Summa
     let mut summary = Summary::default();
     scan::scan(options, out, err, &mut summary);
 
+    // The closing summary counts broken links and nothing else. A link the
+    // walk could not resolve was already reported on the error stream by
+    // `scan::report_unresolvable`, which says there why it adds no line here.
     if summary.broken == 0 {
         line(out, format_args!("No broken symlinks found."));
     } else {

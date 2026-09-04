@@ -435,7 +435,10 @@ fn a_link_whose_target_sits_behind_a_closed_directory_is_an_error_and_not_broken
             "the link is not called broken: {:?}",
             run.out
         );
-        assert_eq!(fs::read_link(&link).unwrap(), Path::new("closed/target.txt"));
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            Path::new("closed/target.txt")
+        );
     }
 }
 
