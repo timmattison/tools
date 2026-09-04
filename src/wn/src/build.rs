@@ -217,8 +217,9 @@ fn looked_in_lines(paths: &[String]) -> String {
 /// The run inherits the directory `wn` was started in, because the skill asks
 /// `gh` and `git` about the repository of that directory.
 ///
-/// A spinner runs on standard error while the run works, so a pipe still gets
-/// the document alone.
+/// A spinner runs on standard error while the run works, and the report of
+/// what the run cost stands there after it, so a pipe still gets the document
+/// alone.
 ///
 /// # Errors
 ///
@@ -243,7 +244,15 @@ pub fn plan(
     let spinner = spinner();
     let printed = ask(&path, waited);
     spinner.finish_and_clear();
-    Ok(Envelope::read(&printed?)?.document().to_string())
+
+    let envelope = Envelope::read(&printed?)?;
+    // The report stands after the spinner is cleared, and on the pipe the
+    // spinner drew on. The document goes to standard output, and a reader who
+    // pipes that output must get the document alone.
+    if let Some(report) = envelope.report(None) {
+        eprintln!("{report}");
+    }
+    Ok(envelope.document().to_string())
 }
 
 /// The spinner that stands while the run works.

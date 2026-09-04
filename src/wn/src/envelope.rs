@@ -11,6 +11,25 @@
 //! other field is a number about the run, and a missing one costs a clause of
 //! one line. A refusal there would throw away a plan the reader already paid
 //! for, so an absent number leaves its clause out and the plan still stands.
+//!
+//! # The numbers cover the subagents
+//!
+//! The `plan-parallel-work` skill dispatches a subagent when the backlog holds
+//! eight open issues or more, so a report of the parent run alone would
+//! under-report every large backlog.
+//!
+//! One measured run settles it. A parent on `claude-haiku-4-5` was asked to
+//! dispatch a subagent on `opus`. Its `modelUsage` named `claude-haiku-4-5`
+//! ($0.0671493) and `claude-opus-5[1m]` ($0.2088975), and its
+//! `total_cost_usd` was $0.2760468, which is the sum of the two to the last
+//! digit. So `modelUsage` names every model of a run, subagents included, and
+//! `total_cost_usd` is the sum over it. That run is the fixture of this
+//! module.
+//!
+//! The top-level `usage` of that same envelope reported 10 input tokens and 57
+//! output tokens, against the 30 and the 417 that `modelUsage` gives for the
+//! parent model alone. It counts the last turn of the parent and nothing else,
+//! so the token counts of this report come out of `modelUsage`.
 
 use serde_json::Value;
 
@@ -23,11 +42,90 @@ const RESULT: &str = "result";
 /// The key that says the run failed, whatever its exit status was.
 const IS_ERROR: &str = "is_error";
 
-/// What one run of `claude` answered.
+/// The key that holds what the whole run cost, in dollars.
+const TOTAL_COST_USD: &str = "total_cost_usd";
+
+/// The key that holds one entry for each model the run used.
+const MODEL_USAGE: &str = "modelUsage";
+
+/// The key that holds how long the run took, in milliseconds.
+const DURATION_MS: &str = "duration_ms";
+
+/// The key of a model entry that holds what that model cost, in dollars.
+const COST_USD: &str = "costUSD";
+
+/// The key of a model entry that holds the tokens it was sent.
+const INPUT_TOKENS: &str = "inputTokens";
+
+/// The key of a model entry that holds the tokens it wrote.
+const OUTPUT_TOKENS: &str = "outputTokens";
+
+/// The key of a model entry that holds the tokens it read out of the cache.
+const CACHE_READ_TOKENS: &str = "cacheReadInputTokens";
+
+/// The key of a model entry that holds the tokens it wrote into the cache.
+const CACHE_WRITE_TOKENS: &str = "cacheCreationInputTokens";
+
+/// The words the report line opens with.
+const OPENING: &str = "plan:";
+
+/// The mark between two clauses of the report line.
+const BETWEEN: &str = " \u{b7} ";
+
+/// The dollars below which a report writes four decimal places.
+///
+/// Two places is what a reader wants of a run that cost dollars. A run of a
+/// small backlog on a small model costs less than a cent, and `$0.00` reads as
+/// a run that was free.
+const CENT: f64 = 0.01;
+
+/// The milliseconds of a second.
+const A_SECOND: u64 = 1_000;
+
+/// A thousand, which is where a written count picks up a `k`.
+const A_THOUSAND: u64 = 1_000;
+
+/// A million, which is where a written count picks up an `M`.
+const A_MILLION: u64 = 1_000_000;
+
+/// The seconds of a minute.
+const A_MINUTE: u64 = 60;
+
+/// The seconds of an hour.
+const AN_HOUR: u64 = 3_600;
+
+/// What one model of a run was given, and what it cost.
+///
+/// One struct for each entry of `modelUsage`, because a run uses more than one
+/// model whenever the skill dispatches a subagent, and a report that named the
+/// parent alone would name the cheaper half of what the reader paid for.
+#[derive(Debug)]
+struct Model {
+    /// The model id, as `modelUsage` keys the entry by.
+    id: String,
+    /// What this model cost, in dollars.
+    cost: f64,
+    /// The tokens it was sent.
+    input: u64,
+    /// The tokens it wrote.
+    output: u64,
+    /// The tokens it read out of the cache.
+    cache_read: u64,
+    /// The tokens it wrote into the cache.
+    cache_write: u64,
+}
+
+/// What one run of `claude` answered, and what it cost.
 #[derive(Debug)]
 pub struct Envelope {
     /// The document the run answered with.
     document: String,
+    /// What the whole run cost, in dollars, for an envelope that says.
+    dollars: Option<f64>,
+    /// Every model the run used, the dearest first.
+    models: Vec<Model>,
+    /// How long the run took, in milliseconds, for an envelope that says.
+    milliseconds: Option<u64>,
 }
 
 impl Envelope {
@@ -62,6 +160,9 @@ impl Envelope {
         }
         Ok(Self {
             document: result.to_string(),
+            dollars: document.get(TOTAL_COST_USD).and_then(Value::as_f64),
+            models: models_of(document.get(MODEL_USAGE)),
+            milliseconds: document.get(DURATION_MS).and_then(Value::as_u64),
         })
     }
 
@@ -79,8 +180,168 @@ impl Envelope {
     /// asked for and a run that asked for none earns no such words.
     #[must_use]
     pub fn report(&self, effort: Option<&str>) -> Option<String> {
-        let _ = effort;
-        None
+        let clauses: Vec<String> = [
+            self.dollars.map(dollars),
+            self.models_clause(effort),
+            self.tokens_clause(),
+            self.milliseconds.map(elapsed),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!clauses.is_empty()).then(|| format!("{OPENING} {}", clauses.join(BETWEEN)))
+    }
+
+    /// The clause that names the models and the level they ran at.
+    fn models_clause(&self, effort: Option<&str>) -> Option<String> {
+        let named = self
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        match (named.is_empty(), effort) {
+            (true, None) => None,
+            (true, Some(effort)) => Some(format!("effort {effort}")),
+            (false, None) => Some(named),
+            (false, Some(effort)) => Some(format!("{named} at effort {effort}")),
+        }
+    }
+
+    /// The clause that names the tokens, summed over every model of the run.
+    ///
+    /// A part that is zero is left out. A run always reads the cache and
+    /// writes it, and a zero there is a number the reader has no use for.
+    fn tokens_clause(&self) -> Option<String> {
+        let parts: Vec<String> = [
+            (self.tokens(|model| model.input), "in"),
+            (self.tokens(|model| model.output), "out"),
+            (self.tokens(|model| model.cache_read), "cache read"),
+            (self.tokens(|model| model.cache_write), "cache write"),
+        ]
+        .into_iter()
+        .filter(|(counted, _)| *counted > 0)
+        .map(|(counted, word)| format!("{} {word}", count(counted)))
+        .collect();
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
+
+    /// One token count of every model of the run, added up.
+    ///
+    /// The sum saturates rather than wrapping. No run reaches the top of a
+    /// `u64`, and a report that wrapped would name a number smaller than the
+    /// one model it came from.
+    fn tokens(&self, of: impl Fn(&Model) -> u64) -> u64 {
+        self.models
+            .iter()
+            .map(of)
+            .fold(0_u64, |sum, counted| sum.saturating_add(counted))
+    }
+}
+
+/// Every model of `usage`, the `modelUsage` of an envelope, the dearest first.
+///
+/// The order is the order a reader who thinks the plan cost too much reads in,
+/// and two models that cost the same stand by their ids, so one envelope
+/// always builds one line.
+///
+/// An absent `modelUsage`, and an entry that names no cost, both give a model
+/// of no cost rather than a refusal. The plan is already paid for.
+fn models_of(usage: Option<&Value>) -> Vec<Model> {
+    let Some(entries) = usage.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut models: Vec<Model> = entries
+        .iter()
+        .map(|(id, entry)| Model {
+            id: id.clone(),
+            cost: entry.get(COST_USD).and_then(Value::as_f64).unwrap_or(0.0),
+            input: counted(entry, INPUT_TOKENS),
+            output: counted(entry, OUTPUT_TOKENS),
+            cache_read: counted(entry, CACHE_READ_TOKENS),
+            cache_write: counted(entry, CACHE_WRITE_TOKENS),
+        })
+        .collect();
+    models.sort_by(|left, right| {
+        right
+            .cost
+            .partial_cmp(&left.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    models
+}
+
+/// The count `key` of `entry` holds, or zero.
+fn counted(entry: &Value, key: &str) -> u64 {
+    entry.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// `amount` dollars, as the report writes them.
+///
+/// Two decimal places, and four for an amount under a cent.
+fn dollars(amount: f64) -> String {
+    if amount < CENT {
+        format!("${amount:.4}")
+    } else {
+        format!("${amount:.2}")
+    }
+}
+
+/// `counted` tokens, as the report writes them.
+///
+/// A run reads tens of thousands of tokens out of the cache, and six digits of
+/// them say nothing a reader acts on. So a count of a thousand and up is
+/// written short: `9.9k`, `118k`, `1.2M`.
+fn count(counted: u64) -> String {
+    match counted {
+        counted if counted < A_THOUSAND => counted.to_string(),
+        counted if counted < 10 * A_THOUSAND => short(counted, A_THOUSAND, true, "k"),
+        counted if counted < A_MILLION => short(counted, A_THOUSAND, false, "k"),
+        counted if counted < 10 * A_MILLION => short(counted, A_MILLION, true, "M"),
+        counted => short(counted, A_MILLION, false, "M"),
+    }
+}
+
+/// `counted` over `divisor`, cut rather than rounded, with `suffix` after it
+/// and one decimal place when `decimal` says.
+///
+/// Cut and never rounded, for two reasons. A report must not name a number the
+/// run did not reach, and a cut number always stays inside the step that chose
+/// it: 999999 tokens are `999k` and never `1000k`.
+///
+/// The arithmetic is whole-number arithmetic throughout, so no count is
+/// written through an `f64` that cannot hold it.
+fn short(counted: u64, divisor: u64, decimal: bool, suffix: &str) -> String {
+    if !decimal {
+        return format!("{}{suffix}", counted / divisor);
+    }
+    let tenths = counted / (divisor / 10);
+    format!("{}.{}{suffix}", tenths / 10, tenths % 10)
+}
+
+/// `milliseconds`, as the report writes them.
+///
+/// Under a minute it writes seconds with one decimal place, because a fast run
+/// and a slow one differ by fractions there. A minute and up it writes whole
+/// minutes and seconds, and an hour and up it writes hours as well.
+///
+/// The seconds are cut and never rounded, for the reason [`short`] gives: a
+/// run of 59900 milliseconds is `59.9s` and never `60.0s`, which is a minute
+/// written in the shape of the branch below a minute.
+fn elapsed(milliseconds: u64) -> String {
+    let whole = milliseconds / A_SECOND;
+    if whole < A_MINUTE {
+        let tenths = milliseconds / (A_SECOND / 10);
+        return format!("{}.{}s", tenths / 10, tenths % 10);
+    }
+    let hours = whole / AN_HOUR;
+    let minutes = (whole % AN_HOUR) / A_MINUTE;
+    let seconds = whole % A_MINUTE;
+    if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else {
+        format!("{minutes}m {seconds}s")
     }
 }
 
@@ -256,7 +517,7 @@ mod tests {
     #[test]
     fn a_run_of_minutes_is_written_in_minutes_and_seconds() {
         for (milliseconds, written) in [
-            (1_886_u64, "1.9s"),
+            (1_886_u64, "1.8s"),
             (59_900, "59.9s"),
             (60_000, "1m 0s"),
             (192_000, "3m 12s"),
@@ -340,5 +601,54 @@ mod tests {
                 .report(Some("high")),
             Some("plan: effort high".to_string())
         );
+    }
+
+    #[test]
+    fn a_count_is_cut_and_never_rounded() {
+        // A cut count stays inside the step that chose it. A rounded one does
+        // not: 999999 would read as 1000k, which is a million written in the
+        // shape of the step below a million.
+        for (counted, written) in [
+            (999_u64, "999"),
+            (1_000, "1.0k"),
+            (9_999, "9.9k"),
+            (10_000, "10k"),
+            (94_683, "94k"),
+            (999_999, "999k"),
+            (1_000_000, "1.0M"),
+            (9_999_999, "9.9M"),
+            (10_000_000, "10M"),
+        ] {
+            let said = serde_json::json!({
+                "result": "x",
+                "modelUsage": { "m": { "costUSD": 1.0, "inputTokens": counted } }
+            })
+            .to_string();
+            let line = Envelope::read(&said)
+                .expect("the envelope reads")
+                .report(None)
+                .expect("the envelope carries numbers");
+            assert!(
+                line.ends_with(&format!("{written} in")),
+                "{counted}: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_seconds_of_a_run_are_cut_and_never_rounded() {
+        // 59900 milliseconds must not read as 60.0s, which is a minute written
+        // in the shape of the branch below a minute.
+        for (milliseconds, written) in [(59_900_u64, "59.9s"), (59_999, "59.9s")] {
+            let said =
+                serde_json::json!({ "result": "x", "duration_ms": milliseconds }).to_string();
+            assert_eq!(
+                Envelope::read(&said)
+                    .expect("the envelope reads")
+                    .report(None),
+                Some(format!("plan: {written}")),
+                "{milliseconds} milliseconds"
+            );
+        }
     }
 }
