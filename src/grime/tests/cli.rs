@@ -10,11 +10,31 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use gitscratch::testing::{independent_branches_repo, TestRepo};
+use gitscratch::testing::{equal_hunks_unequal_stops_repo, independent_branches_repo, TestRepo};
 use gitscratch::NoInheritedGitEnvironment;
 
 /// Exit code for a replay that hit no conflicts.
 const CLEAN: i32 = 0;
+
+/// Exit code for a replay that hit conflicts.
+///
+/// Deliberately not the code a failed run leaves behind: "the merge would
+/// collide" and "I could not tell you" are different answers, and conflating
+/// them is the defect `grime` exists to fix.
+const CONFLICTS: i32 = 1;
+
+/// The whole verdict for merging `two` into `one` in
+/// [`equal_hunks_unequal_stops_repo`].
+///
+/// A constant because it is the shape a reader compares against `grind`'s own
+/// verdict for the same fixture: the same header, the same summary indented
+/// under it, the same blank line, and the same breakdown - with the verb
+/// changed and the stop count gone.
+const EQUAL_HUNKS_VERDICT: &str = r"grime: conflicts - merging two into HEAD
+       2 hunks across 2 files
+
+  x.txt    1 hunk
+  y.txt    1 hunk";
 
 /// The locale every `grime` this file starts is pinned to, and the two
 /// variables that pin it.
@@ -182,5 +202,60 @@ fn a_merge_that_collides_with_nothing_exits_clean_and_says_so_in_one_line() {
     assert_eq!(
         stdout, "grime: clean - merging beta into HEAD hit no conflicts",
         "stderr:\n{stderr}"
+    );
+}
+
+/// `two` rewrites the same line of `x.txt` and `y.txt` that `one` already
+/// rewrote, so merging the two collides in both files at once.
+///
+/// Asserted as one block rather than line by line because the shape *is* the
+/// contract - the header, the summary indented under it, the blank line, and
+/// the breakdown that says where the work lands - and a developer comparing
+/// this against `grind` reads all of it together.
+#[test]
+fn a_merge_that_collides_exits_conflicts_and_says_how_much_work_lands_where() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let (code, stdout, stderr) = run(&repo, "one", "two");
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "a conflicting merge must exit {CONFLICTS}, not be lumped in with clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
+}
+
+/// A merge halts exactly once, so the number of halts is a constant dressed up
+/// as a measurement, and `grime` says nothing about it.
+///
+/// Its own test rather than a clause of the golden above, because the golden
+/// would hide it. A binary that started printing the stop count again would
+/// fail the golden for the same reason it would fail a change to any other
+/// character on that line, and nobody reading the failure would learn which
+/// claim broke. This one can only break for one reason.
+///
+/// The whole of stdout is searched rather than the summary line alone, because
+/// the claim is that the word reaches the reader nowhere - a stop count moved
+/// onto the header or into the breakdown is the same constant in a new place.
+///
+/// `Conflicts` still counts the halt. The count is what `grind` reports and
+/// what a fold over several replays adds up; only this rendering leaves it out.
+#[test]
+fn the_summary_of_a_conflicting_merge_carries_no_stop_count() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let (code, stdout, stderr) = run(&repo, "one", "two");
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the run has to reach a conflict verdict, or there is no summary to \
+         read\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("stop"),
+        "a merge halts once, so the number says nothing and belongs nowhere in \
+         the verdict:\n{stdout}"
     );
 }
