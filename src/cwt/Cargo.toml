@@ -15,6 +15,7 @@ repowalker.workspace = true
 shellsetup.workspace = true
 
 [dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 testcolor.workspace = true
 

@@ -8,8 +8,9 @@ use std::thread;
 
 use buildinfo::version_string;
 use clap::Parser;
+use gitscratch::shed_inherited_git_environment;
 use names::Generator;
-use repowalker::find_main_repo;
+use repowalker::find_repo_context;
 use serde::Deserialize;
 use shellsetup::ShellIntegration;
 use walkdir::WalkDir;
@@ -52,6 +53,18 @@ const SKIP_DIRECTORIES: &[&str] = &[
 /// explicitly at creation time instead.
 #[cfg(unix)]
 const ENV_FILE_MODE: u32 = 0o600;
+
+/// The git configuration key with which a repository states where its worktrees
+/// belong.
+///
+/// The default answer, `{repo-name}-worktrees` beside the main worktree, is
+/// right for a normal repository and for a repository whose git directory is
+/// detached from its work tree. It is not right for every layout, and a
+/// repository with an unusual one says so here. The key lives in git
+/// configuration rather than in `~/.nwt.toml` because the answer belongs to one
+/// repository, and because `yadm` already tracks the repository's own
+/// configuration file.
+const WORKTREES_DIR_KEY: &str = "nwt.worktreesDir";
 
 /// Shell code to be installed by --shell-setup.
 ///
@@ -472,8 +485,9 @@ mod exit_codes {
     pub const INVALID_REPO_NAME: i32 = 2;
     /// Repository has no parent directory
     pub const NO_PARENT_DIR: i32 = 3;
-    /// Failed to create worktrees directory
-    pub const DIR_CREATE_FAILED: i32 = 4;
+    // Note: Exit code 4 is reserved (previously DIR_CREATE_FAILED, now
+    // unreachable because `git worktree add` makes the worktrees directory
+    // itself)
     /// Could not find available directory name after max attempts
     pub const NAME_COLLISION: i32 = 5;
     /// Git command failed to execute
@@ -487,7 +501,9 @@ mod exit_codes {
     /// Tmux command failed to execute
     pub const TMUX_FAILED: i32 = 10;
     // Note: Exit code 11 is reserved (previously INVALID_WINDOW_NAME, now a debug assertion)
-    /// Config file error (invalid TOML, validation failed, etc.)
+    /// Configuration error: an invalid `~/.nwt.toml` (bad TOML, failed
+    /// validation), or a `nwt.worktreesDir` git configuration key that is set to
+    /// an empty value and therefore names no directory.
     pub const CONFIG_ERROR: i32 = 12;
     /// Tmux option specified but not running inside tmux
     pub const TMUX_NOT_RUNNING: i32 = 13;
@@ -524,6 +540,32 @@ const MAX_ATTEMPTS: u32 = 10;
 the repository. Generates Docker-style random names (adjective-noun) for both the directory \
 and branch unless overridden. Automatically copies untracked .env files from the main \
 worktree to preserve development settings.
+
+WHERE WORKTREES GO:
+    By default, a new worktree lands in '{repo-name}-worktrees', beside the main
+    worktree of the repository.
+
+    Some repositories keep the git directory apart from the work tree, which is what
+    yadm does with a directory of dotfiles. Git names the git directory itself as the
+    main worktree of such a repository, so the default becomes 'repo.git-worktrees',
+    beside the git directory.
+
+    A repository states a different answer with the 'nwt.worktreesDir' git
+    configuration key:
+
+        git config nwt.worktreesDir '/data/worktrees'
+        git config nwt.worktreesDir '~/worktrees'
+
+    Git expands a leading '~' or '~user' into a home directory. The quotation marks
+    above keep the tilde for git, because a shell expands one that it sees. A
+    relative value is relative to the main worktree of the repository. nwt reads the
+    key from every scope git reads, so the answer can come from the repository, from
+    ~/.gitconfig, or from the system configuration.
+
+    An empty value names no directory, and git refuses a value it cannot read, such
+    as the home directory of a user who does not exist. nwt then prints an error and
+    stops with exit code 12, and it makes nothing. It never falls back to the
+    default, because a silent fall back hides the mistake.
 
 CONFIGURATION:
     Default values can be set in ~/.nwt.toml. CLI arguments override config values.
@@ -578,6 +620,12 @@ ENV FILE COPYING:
     longer propagates a world-readable secrets file into every worktree. The mode is
     applied when the file is created, so the copy is never briefly readable by anyone
     else. Windows has no equivalent mode; everything else behaves the same there.
+
+    Some repositories keep the git directory apart from the work tree, which WHERE
+    WORKTREES GO describes above. Git names the git directory itself as the main
+    worktree of such a repository, and no work tree is below that path. nwt finds no
+    .env file there and copies none. The work tree of such a repository is your home
+    directory, and the .env files there are not the new worktree's to take.
 
     Use --no-copy-env to disable this for a single invocation, or set copy_env = false
     in ~/.nwt.toml to disable it by default.
@@ -639,7 +687,6 @@ EXIT CODES:
     1  Not in a git repository
     2  Invalid repository name
     3  Repository has no parent directory
-    4  Failed to create worktrees directory
     5  Could not find available directory name
     6  Git command failed to execute
     7  Git worktree creation failed
@@ -729,6 +776,10 @@ struct Cli {
     /// by a `post-checkout` hook during `git worktree add`) is kept as-is rather than
     /// overwritten, and each copy is created at mode 0600 on Unix no matter what the
     /// source file's mode is.
+    ///
+    /// A repository that keeps its git directory apart from the work tree has no
+    /// work tree below the main worktree path. nwt finds no .env file there and
+    /// copies none.
     ///
     /// Use this flag to disable this behavior for a single invocation, or set
     /// `copy_env = false` in ~/.nwt.toml to disable it by default.
@@ -913,6 +964,32 @@ enum WorktreeResult {
     CommandError(std::io::Error),
 }
 
+/// True when `branch` is already a branch of the repository at `repo_root`.
+///
+/// `git worktree add -b <branch>` refuses when the branch is already there, and
+/// the user has to hear which of two problems they have: a branch that exists,
+/// which `--checkout` solves, or a directory that exists, which
+/// `--random-directory` solves. Only git can say which.
+///
+/// The whole inherited `GIT_*` family is shed first, through
+/// [`gitscratch::shed_inherited_git_environment`]. An inherited `GIT_DIR` aims
+/// the question at another repository, whose branches say nothing about this
+/// one. The rule is the prefix, never a list of names.
+fn branch_exists(repo_root: &Path, branch: &str) -> bool {
+    let mut command = Command::new("git");
+    shed_inherited_git_environment(&mut command);
+
+    command
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .current_dir(repo_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// Attempts to create a git worktree at the given path.
 ///
 /// Returns a `WorktreeResult` indicating success or the type of failure.
@@ -984,11 +1061,25 @@ fn try_create_worktree(
     if status.success() {
         WorktreeResult::Success
     } else {
-        // Check for branch already exists first using git's specific error format.
-        // Git says: "fatal: A branch named '<branch>' already exists."
-        // We check for "A branch named" specifically to avoid false positives when
-        // the path contains the word "branch" (e.g., "/path/to/branch-test/").
-        if stderr.contains("A branch named") {
+        // Ask git whether the branch is there. Do not read the reason it gave.
+        //
+        // Git states that reason in prose, and prose is not a contract. The
+        // check here read it for "A branch named" with a capital letter, and
+        // git writes "fatal: a branch named 'x' already exists" in lower case.
+        // The check missed every time. The next check caught the words "already
+        // exists", so every branch collision was reported as a directory
+        // collision, naming a directory that did not exist and advising a new
+        // directory name that could not help. With a random directory name the
+        // miss cost ten attempts against the one branch that could never work.
+        //
+        // `show-ref --verify` answers with its exit status, which git does not
+        // reword. The question is asked only after the add failed, so it costs
+        // nothing on the path that works.
+        //
+        // A checkout run makes no branch, so it can have no branch collision.
+        // Its `branch_name` is the directory name, which can name a branch by
+        // coincidence, and asking about that one would report the wrong reason.
+        if checkout_ref.is_none() && branch_exists(repo_root, branch_name) {
             return WorktreeResult::BranchExists(branch_name.to_string());
         }
 
@@ -1151,6 +1242,13 @@ fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
 ///    destination that appears mid-pass is counted as kept rather than clobbered
 /// 8. Reports copied and kept files unless quiet mode is enabled
 ///
+/// `main_repo` is the main worktree of the repository, and git names the git
+/// directory itself as the main worktree of a repository that keeps the two
+/// apart. A git directory holds no `.env` file, so this walk finds nothing and
+/// copies nothing there. That is the answer this repository wants: the work
+/// tree of such a repository is the home directory of the user, and the `.env`
+/// files there are not the new worktree's to take.
+///
 /// Errors copying individual files are reported but don't stop the process.
 ///
 /// Returns an [`EnvCopySummary`] recording how many files were copied and how many
@@ -1277,6 +1375,182 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> E
     summary
 }
 
+/// The directory that holds every worktree of the repository at `repo_root`.
+///
+/// The repository states the answer with the [`WORKTREES_DIR_KEY`]
+/// configuration key. The default stands when the key says nothing: the name of
+/// the main worktree plus `-worktrees`, beside the main worktree.
+///
+/// # Exits
+///
+/// Exits the process when the answer cannot be built. A stated value that names
+/// no directory, and a value git refuses to read, are both configuration errors
+/// ([`exit_codes::CONFIG_ERROR`]). The default needs a repository name that is
+/// valid UTF-8 ([`exit_codes::INVALID_PATH_ENCODING`]) and survives sanitizing
+/// ([`exit_codes::INVALID_REPO_NAME`]), and it needs a parent directory to sit
+/// in ([`exit_codes::NO_PARENT_DIR`]).
+fn worktrees_dir(repo_root: &Path, quiet: bool) -> PathBuf {
+    match stated_worktrees_dir(repo_root) {
+        StatedWorktreesDir::Value(stated) => {
+            // A value of nothing, and a value of only whitespace, name no
+            // directory. Falling back to the default would hide the mistake,
+            // and taking the value as a path would make a directory named
+            // `-worktrees` at the root of the file system.
+            if stated.trim().is_empty() {
+                error!(
+                    quiet,
+                    "Error: Git configuration '{}' is set to an empty value", WORKTREES_DIR_KEY
+                );
+                error!(
+                    quiet,
+                    "Set it to the directory that holds this repository's worktrees, \
+                     or remove it with 'git config --unset {}'.",
+                    WORKTREES_DIR_KEY
+                );
+                exit(exit_codes::CONFIG_ERROR);
+            }
+
+            // A relative value answers "where, from the main worktree?".
+            // Reading it against the current directory would put the worktrees
+            // of one repository in a different place for every directory nwt
+            // runs in.
+            let stated = PathBuf::from(stated);
+            return if stated.is_absolute() {
+                stated
+            } else {
+                repo_root.join(stated)
+            };
+        }
+        StatedWorktreesDir::Unreadable(complaint) => {
+            // Git read the key and refused it: a home directory that belongs to
+            // nobody, or a configuration file it cannot parse. The default is no
+            // answer here. The user stated a place, and a silent fall back would
+            // put the worktree somewhere else without a word.
+            error!(
+                quiet,
+                "Error: Could not read git configuration '{}'", WORKTREES_DIR_KEY
+            );
+            for line in complaint.lines() {
+                error!(quiet, "  {}", line);
+            }
+            exit(exit_codes::CONFIG_ERROR);
+        }
+        StatedWorktreesDir::Unset => {}
+    }
+
+    // Get repo name from path with sanitization (fail-fast on non-UTF8)
+    let repo_name = match repo_root.file_name() {
+        Some(name) => {
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => {
+                    error!(
+                        quiet,
+                        "Error: Repository name contains invalid UTF-8 characters"
+                    );
+                    exit(exit_codes::INVALID_PATH_ENCODING);
+                }
+            };
+            match sanitize_repo_name(name_str) {
+                Some(sanitized) => sanitized,
+                None => {
+                    error!(quiet, "Error: Invalid repository name");
+                    exit(exit_codes::INVALID_REPO_NAME);
+                }
+            }
+        }
+        None => {
+            error!(quiet, "Error: Could not determine repository name");
+            exit(exit_codes::INVALID_REPO_NAME);
+        }
+    };
+
+    // Build worktrees directory path
+    let parent = match repo_root.parent() {
+        Some(p) => p,
+        None => {
+            error!(quiet, "Error: Repository has no parent directory");
+            exit(exit_codes::NO_PARENT_DIR);
+        }
+    };
+    parent.join(format!("{}-worktrees", repo_name))
+}
+
+/// What git says about [`WORKTREES_DIR_KEY`] in the repository nwt runs in.
+enum StatedWorktreesDir {
+    /// The key is set, and this is the value with the home directory expanded.
+    Value(String),
+    /// No scope sets the key, so the default stands.
+    Unset,
+    /// Git read the key and refused it. The text is what git said.
+    Unreadable(String),
+}
+
+/// The exit status `git config --get` gives when no scope sets the key.
+///
+/// Every other failing status carries a complaint on standard error, and means
+/// something other than "the key is not there".
+const GIT_CONFIG_KEY_NOT_FOUND: i32 = 1;
+
+/// Ask git what [`WORKTREES_DIR_KEY`] says in the repository at `repo_root`.
+///
+/// `git config --get` reads every scope, so the answer can come from the
+/// repository's own configuration, from `~/.gitconfig`, or from the system
+/// configuration.
+///
+/// `--type=path` makes git expand a leading `~` or `~user` into a home
+/// directory. A git configuration value gets no shell expansion, and git owns
+/// the rule for what a leading tilde means. A second copy of that rule here
+/// would drift from git's.
+///
+/// Git answers a key it cannot find with exit status
+/// [`GIT_CONFIG_KEY_NOT_FOUND`] and nothing else. It answers a value it cannot
+/// read — a home directory that belongs to nobody, a configuration file it
+/// cannot parse — with another status and a complaint, which becomes
+/// [`StatedWorktreesDir::Unreadable`]. Reading only the status would turn every
+/// such refusal into "the key is not set", and the run would then go somewhere
+/// the user never named.
+///
+/// A git that cannot be started at all is [`StatedWorktreesDir::Unset`]. That is
+/// no configuration error, and the run stops soon after at the `git worktree
+/// add` that says so plainly.
+///
+/// The command sheds the whole inherited `GIT_*` family through
+/// [`gitscratch::shed_inherited_git_environment`]. An inherited `GIT_DIR` aims
+/// git at another repository, and the answer would then be that repository's
+/// setting. The rule is the `GIT_` prefix and never a list of names: see that
+/// function for which variable walked through the last list.
+fn stated_worktrees_dir(repo_root: &Path) -> StatedWorktreesDir {
+    let mut command = Command::new("git");
+    shed_inherited_git_environment(&mut command);
+
+    let output = command
+        .args(["config", "--type=path", "--get", WORKTREES_DIR_KEY])
+        .current_dir(repo_root)
+        .output();
+
+    let Ok(output) = output else {
+        return StatedWorktreesDir::Unset;
+    };
+
+    if !output.status.success() {
+        if output.status.code() == Some(GIT_CONFIG_KEY_NOT_FOUND) {
+            return StatedWorktreesDir::Unset;
+        }
+
+        let complaint = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return StatedWorktreesDir::Unreadable(complaint);
+    }
+
+    // Git ends the value with a line break, and the line break is no part of
+    // the path.
+    StatedWorktreesDir::Value(
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches(['\n', '\r'])
+            .to_string(),
+    )
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -1329,9 +1603,22 @@ fn main() {
         exit(exit_codes::TMUX_NOT_RUNNING);
     }
 
-    // Find the main git repo root (resolves to main repo even from worktree)
-    let repo_root = match find_main_repo() {
-        Some(root) => root,
+    // Find the main git repo root (resolves to main repo even from worktree).
+    //
+    // Git answers this, rather than a walk of the file system for a `.git`
+    // entry. A walk cannot read a repository whose git directory is detached
+    // from its work tree, which is how `yadm` keeps a directory of dotfiles:
+    // the git directory is `~/.local/share/yadm/repo.git`, the work tree is
+    // `$HOME`, and no `.git` entry exists anywhere.
+    //
+    // Git names the main worktree of that layout as the git directory itself.
+    // It builds the name from the common git directory with a trailing `/.git`
+    // removed, and this layout carries no such suffix. That path is the right
+    // answer for everything below it: `git worktree add` and `git ls-files`
+    // both work with it as their working directory, and the new worktree lands
+    // in `<git directory>-worktrees`, beside the git directory.
+    let repo_root = match find_repo_context() {
+        Some(context) => context.main_worktree().to_path_buf(),
         None => {
             error!(config.quiet, "Error: Not in a git repository");
             error!(
@@ -1342,53 +1629,17 @@ fn main() {
         }
     };
 
-    // Get repo name from path with sanitization (fail-fast on non-UTF8)
-    let repo_name = match repo_root.file_name() {
-        Some(name) => {
-            let name_str = match name.to_str() {
-                Some(s) => s,
-                None => {
-                    error!(
-                        config.quiet,
-                        "Error: Repository name contains invalid UTF-8 characters"
-                    );
-                    exit(exit_codes::INVALID_PATH_ENCODING);
-                }
-            };
-            match sanitize_repo_name(name_str) {
-                Some(sanitized) => sanitized,
-                None => {
-                    error!(config.quiet, "Error: Invalid repository name");
-                    exit(exit_codes::INVALID_REPO_NAME);
-                }
-            }
-        }
-        None => {
-            error!(config.quiet, "Error: Could not determine repository name");
-            exit(exit_codes::INVALID_REPO_NAME);
-        }
-    };
-
-    // Build worktrees directory path
-    let parent = match repo_root.parent() {
-        Some(p) => p,
-        None => {
-            error!(config.quiet, "Error: Repository has no parent directory");
-            exit(exit_codes::NO_PARENT_DIR);
-        }
-    };
-    let worktrees_dir = parent.join(format!("{}-worktrees", repo_name));
-
-    // Create worktrees directory if needed
-    if let Err(e) = fs::create_dir_all(&worktrees_dir) {
-        error!(
-            config.quiet,
-            "Error: Could not create worktrees directory '{}': {}",
-            worktrees_dir.display(),
-            e
-        );
-        exit(exit_codes::DIR_CREATE_FAILED);
-    }
+    // Ask where this repository keeps its worktrees. The repository states the
+    // answer with `nwt.worktreesDir`, and the default stands when it says
+    // nothing.
+    //
+    // Nothing makes that directory here. `git worktree add` makes every
+    // directory that leads to the new worktree, and it makes none of them when
+    // it refuses the request. A run that made the directory first left it
+    // behind on every failure after that point, and nothing ever removed it —
+    // issue #439, where the stray directory was
+    // `~/.local/share/yadm-worktrees`.
+    let worktrees_dir = worktrees_dir(&repo_root, config.quiet);
 
     // Determine directory naming strategy:
     // - If branch is specified and --random-directory is not used, use the branch name
@@ -2633,7 +2884,6 @@ mod tests {
             exit_codes::NOT_IN_REPO,
             exit_codes::INVALID_REPO_NAME,
             exit_codes::NO_PARENT_DIR,
-            exit_codes::DIR_CREATE_FAILED,
             exit_codes::NAME_COLLISION,
             exit_codes::GIT_COMMAND_ERROR,
             exit_codes::WORKTREE_FAILED,
@@ -3469,7 +3719,6 @@ mod tests {
                 exit_codes::NOT_IN_REPO,
                 exit_codes::INVALID_REPO_NAME,
                 exit_codes::NO_PARENT_DIR,
-                exit_codes::DIR_CREATE_FAILED,
                 exit_codes::NAME_COLLISION,
                 exit_codes::GIT_COMMAND_ERROR,
                 exit_codes::WORKTREE_FAILED,

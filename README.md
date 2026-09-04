@@ -1984,6 +1984,28 @@ copy_env = true
 bootstrap_hooks = true
 ```
 
+### Where worktrees go
+
+By default, a new worktree lands in `{repo-name}-worktrees`, beside the main worktree of the repository. A repository at `~/code/tools` therefore gets `~/code/tools-worktrees`.
+
+Some repositories keep the git directory apart from the work tree, which is what `yadm` does with a directory of dotfiles: the git directory is `~/.local/share/yadm/repo.git` and the work tree is `$HOME`. Git names the git directory itself as the main worktree of such a repository, so the default becomes `~/.local/share/yadm/repo.git-worktrees`, beside the git directory.
+
+A repository states a different answer with the `nwt.worktreesDir` git configuration key:
+
+```bash
+git config nwt.worktreesDir '/data/worktrees'   # an absolute path
+git config nwt.worktreesDir '~/worktrees'       # git expands the tilde
+git config nwt.worktreesDir 'worktrees'         # relative to the main worktree
+```
+
+Three rules govern the value:
+
+- Git expands a leading `~` or `~user` into a home directory, because nwt reads the key with `--type=path`. The quotation marks above keep the tilde for git, since a shell expands one that it sees. A git configuration value gets no shell expansion of its own.
+- A **relative** value is relative to the **main worktree** of the repository, never to the directory you run `nwt` in. A repository therefore keeps its worktrees in one place, whichever of its worktrees you start from.
+- An **empty** value names no directory, and git refuses a value it cannot read, such as the home directory of a user who does not exist. nwt prints an error naming the key, stops with exit code 12, and creates nothing. It never falls back to the default, because a silent fall back hides the mistake and puts the worktree somewhere you did not name.
+
+nwt reads the key with `git config --get`, which reads every scope. The answer can therefore come from the repository's own configuration, from `~/.gitconfig`, or from the system configuration. The repository's own configuration is the place for it: it travels with the repository, and `yadm` already tracks that file.
+
 ### Env File Copying
 
 After creating the worktree, nwt copies untracked `.env` files from the main worktree into the new one, preserving their relative paths, so development settings that aren't committed to git are there immediately. Two patterns are copied: `.env` exactly, and anything starting with `.env.` (`.env.local`, `.env.development`, and so on). Nothing else is — `.envrc` (direnv) and `.environment` don't match the pattern, and any file tracked by git is skipped, since git already puts it in the new worktree.
@@ -1999,6 +2021,8 @@ This exists because a repo's `post-checkout` hook lives in the shared git direct
 The trade-off: nwt does not parse or merge `.env` files, so when the hook writes a `.env.local`, the main worktree's `.env.local` does not reach the new worktree at all. Keys that live only in the main worktree's copy — `DISABLE_AUTH`, a shared API key, whatever else you keep there — will be missing, and you have to copy them over by hand. The per-file `Kept existing:` line is there so that divergence is discoverable. A trailing summary reports both counts (`Copied N untracked .env files to new worktree` and `Kept N existing .env files already in the new worktree`); `-q`/`--quiet` suppresses the per-file lines and the summary alike.
 
 On Unix, copied `.env` files are created at mode `0600` — owner read/write only — no matter what the source file's mode is. A `0644` `.env` in the main worktree therefore no longer propagates a world-readable secrets file into every worktree. The mode is applied when the file is created, so the copy is never briefly readable by anyone else. Windows has no equivalent mode; everything else behaves the same there.
+
+Some repositories keep the git directory apart from the work tree, which the *Where worktrees go* section above describes. Git names the git directory itself as the main worktree of such a repository, and no work tree is below that path. nwt finds no `.env` file there and copies none. This is deliberate: the work tree of such a repository is your home directory, and the `.env` files there are not the new worktree's to take.
 
 Disable copying for a single invocation with `--no-copy-env`, or set `copy_env = false` in `~/.nwt.toml` to disable it by default.
 
@@ -2068,6 +2092,13 @@ the main worktree.
 
 If your repository has neither branch checked out, `cwt -m` lists the worktrees and exits
 with code 3.
+
+In a repository whose git directory is detached from its work tree — a `yadm` repository of
+dotfiles, whose git directory is `~/.local/share/yadm/repo.git` and whose work tree is your
+home directory — git names the git directory itself as the main worktree. Git builds that
+name from the git directory with a trailing `/.git` removed, and this layout has no such
+suffix. So the path `cwt -m` takes you to ends in `.git`, and that is also the path the
+listing shows. Every `cwt` command works from there.
 
 #### Pressing it again climbs out
 

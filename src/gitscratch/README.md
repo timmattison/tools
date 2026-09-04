@@ -291,6 +291,33 @@ with known conflict shapes, shared by every crate built on the harness so the
 fixtures exist once rather than once per test binary. Every fixture lives in its
 own `TempDir`, so concurrent `cargo test` runs never share a path.
 
+It also holds `path_at_or_above`, the safety matcher that reads the output of a
+destructive tool for a path at or above the work tree of a
+`DetachedGitDirRepo` — the work tree that stands in for `$HOME`. `gitnuke`,
+`nodenuke` and `repotidy` each assert that it answers `None` for a run in a
+detached git directory, and each of the three carried a byte-identical copy of
+it. A copy that widened left the other two narrow, and a matcher that finds too
+little answers `None` for the wrong reason, which is the defect those three
+guards exist to stop. The matcher reads one line at a time and tries the
+longest candidate of each start first, so a path that holds a space reaches the
+comparison. Its mutation test sits beside it in `src/testing.rs`:
+`the_path_check_flags_the_work_tree_and_the_directory_above_it` plants four
+paths the matcher must flag, one of them under a directory whose name holds a
+space, and one path under the work tree that it must pass.
+
+`DetachedGitDirRepo` carries a precondition of its own, and it runs before the
+fixture builds anything. The fixture leaves no `.git` entry, so a tool that
+walks upward for one finds whatever stands above the temporary directory. A
+repository up there becomes the root that tool works in, and `nodenuke` deletes
+what it walks into without asking. `TempDir` reads `TMPDIR`, so a `TMPDIR`
+inside a checkout aims every guard built on this fixture at that checkout.
+`init` therefore asks `ancestor_repository` whether the temporary directory sits
+inside a repository, and panics with the offending path when it does. A path
+check that reads a run's output is a post-mortem; this one runs first.
+`the_ancestor_check_finds_the_repository_a_directory_sits_inside` pins it, and
+[`MUTATIONS.md`](./MUTATIONS.md) records both directions it was watched to fail
+in.
+
 ```toml
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }

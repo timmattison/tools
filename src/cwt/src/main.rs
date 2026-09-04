@@ -14,7 +14,7 @@ use std::process::exit;
 
 use buildinfo::version_string;
 use clap::Parser;
-use repowalker::find_git_repo;
+use repowalker::find_repo_context;
 use shellsetup::ShellIntegration;
 
 mod ascent;
@@ -136,6 +136,11 @@ struct Cli {
     /// instead. It goes to the main worktree of the repository that holds yours, and it
     /// repeats that climb for each level above. A repository on the way with no main
     /// worktree is stepped over.
+    ///
+    /// In a repository whose git directory is detached from its work tree — a `yadm`
+    /// repository of dotfiles — git names the git directory itself as the main worktree.
+    /// That path ends in `.git`, and it is the path this flag takes you to and the path
+    /// the listing shows. Every `cwt` command works there.
     #[arg(short = 'm', long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "target", "shell_setup"])]
     main: bool,
 
@@ -269,15 +274,19 @@ fn main() {
         }
     }
 
-    // Find git repo root
-    let Some(repo_root) = find_git_repo() else {
+    // Find the checkout the user stands in. Git answers this, rather than a
+    // walk up the file system for a `.git` entry, because a repository whose
+    // git directory is detached from its work tree has no such entry anywhere.
+    // `cwt` navigates and never deletes, so git's answer is the right one here.
+    let Some(context) = find_repo_context() else {
         error!(cli.quiet, "Error: Not in a git repository");
         exit(exit_codes::NOT_IN_REPO);
     };
+    let repo_root = context.checkout();
 
     // Collect the family: this repository, and any repository beside it
     let scan_children = !cli.no_family && !no_family_in_env();
-    let family = match Family::discover(&repo_root, scan_children) {
+    let family = match Family::discover(repo_root, scan_children) {
         Ok(family) => family,
         Err(e) => {
             error!(cli.quiet, "Error getting worktrees: {}", e);

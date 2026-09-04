@@ -738,3 +738,490 @@ pub fn conflicting_repo() -> TestRepo {
     repo.checkout("main");
     repo
 }
+
+/// The name the detached-git-directory fixtures give the work tree, one level
+/// under the temporary directory so the "beside" shape has room for a sibling.
+const DETACHED_WORK_TREE: &str = "home";
+
+/// The one tracked file the detached-git-directory fixtures commit, so the
+/// repository has a HEAD and `git worktree add` has a commit to branch from.
+const DETACHED_TRACKED_FILE: &str = "dotfile.txt";
+
+/// A repository whose git directory is detached from its work tree, the way
+/// `yadm` keeps a directory of dotfiles.
+///
+/// `yadm` puts the git directory at `~/.local/share/yadm/repo.git`, names
+/// `$HOME` as the work tree through `core.worktree`, and leaves no `.git` entry
+/// anywhere. A search that walks the file system upward for a `.git` entry
+/// therefore finds no repository at all, in `$HOME` and in the git directory
+/// alike. Only git knows the layout, so only git can answer which repository a
+/// directory belongs to.
+///
+/// The fixture comes in two shapes, because git answers one question
+/// differently between them. [`DetachedGitDirRepo::nested`] puts the git
+/// directory inside the work tree, which is what `yadm` does, and git reports
+/// `--is-inside-work-tree` as true from there.
+/// [`DetachedGitDirRepo::beside`] puts the git directory outside the work tree,
+/// and git reports `--is-inside-work-tree` as false and `--is-inside-git-dir`
+/// as true from the same spot. Code that reads either answer therefore needs
+/// both shapes to prove itself.
+///
+/// Everything lives inside one `TempDir`, which deletes itself when the fixture
+/// drops, so concurrent `cargo test` runs never share a path.
+pub struct DetachedGitDirRepo {
+    dir: TempDir,
+    work_tree: PathBuf,
+    git_dir: PathBuf,
+}
+
+impl DetachedGitDirRepo {
+    /// Build the shape `yadm` builds: the git directory sits inside the work
+    /// tree, at the path `yadm` uses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the temporary directory cannot be created, if `git` is not
+    /// installed, or if any of the setup commands fail.
+    pub fn nested() -> Self {
+        Self::init(".local/share/yadm/repo.git")
+    }
+
+    /// Build the shape that keeps the git directory outside the work tree, so
+    /// the two are siblings and neither one contains the other.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the temporary directory cannot be created, if `git` is not
+    /// installed, or if any of the setup commands fail.
+    pub fn beside() -> Self {
+        Self::init("../data/repo.git")
+    }
+
+    /// The work tree, which stands in for `$HOME`.
+    pub fn work_tree(&self) -> &Path {
+        &self.work_tree
+    }
+
+    /// The git directory, which stands in for `~/.local/share/yadm/repo.git`.
+    ///
+    /// This is also the path git gives as the main worktree of the repository.
+    /// Git names the main worktree by taking the common git directory and
+    /// removing a trailing `/.git`, and a detached git directory carries no
+    /// such suffix.
+    pub fn git_dir(&self) -> &Path {
+        &self.git_dir
+    }
+
+    /// Check a new `branch` out into a linked worktree at `path`, and hand
+    /// `path` back.
+    ///
+    /// Put `path` inside the fixture's own temporary directory. The temporary
+    /// directory deletes everything under it on drop, and a worktree left
+    /// outside it survives the fixture.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` is not valid UTF-8 or if git fails — most likely
+    /// because `branch` already exists.
+    pub fn add_worktree(&self, path: &Path, branch: &str) -> PathBuf {
+        self.git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            path.to_str().expect("utf-8 worktree path"),
+        ]);
+        path.to_path_buf()
+    }
+
+    /// Run a git command against the fixture, with the work tree and the git
+    /// directory named on the command line.
+    ///
+    /// Naming both is the only way in. The work tree holds no `.git` entry, so
+    /// git discovers nothing from the directory it runs in.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `git` cannot be spawned or exits non-zero; the panic message
+    /// carries the command's stdout and stderr.
+    pub fn git(&self, args: &[&str]) -> String {
+        let git_dir = format!("--git-dir={}", self.git_dir.display());
+        let work_tree = format!("--work-tree={}", self.work_tree.display());
+        let mut all = vec![git_dir.as_str(), work_tree.as_str()];
+        all.extend_from_slice(args);
+        self.run(&self.work_tree, &all)
+    }
+
+    /// Build the layout with the git directory at `git_dir`, a path relative to
+    /// the work tree.
+    fn init(git_dir: &str) -> Self {
+        let dir = TempDir::new().expect("create temp dir");
+        // Before anything else, and before this fixture makes a git directory
+        // of its own. The fixture leaves no `.git` entry, so a tool that walks
+        // upward for one finds whatever stands above the temporary directory.
+        // A repository up there becomes the root such a tool works in, and
+        // `nodenuke` deletes every `node_modules`, `.next`, `.open-next` and
+        // `.turbo` directory below its root. `TempDir` reads `TMPDIR`, so a
+        // `TMPDIR` inside a checkout aims every guard built on this fixture at
+        // that checkout.
+        if let Some(repository) = ancestor_repository(dir.path()) {
+            panic!(
+                "the temporary directory {} sits inside the git repository at {}. \
+                 A tool built on this fixture walks upward for a .git entry, finds \
+                 that repository, and works there. Some of those tools delete files. \
+                 Point TMPDIR at a directory that no repository holds.",
+                dir.path().display(),
+                repository.display(),
+            );
+        }
+        let work_tree = dir.path().join(DETACHED_WORK_TREE);
+        // `..` in the "beside" shape climbs back to the temporary directory, so
+        // both shapes are one join from the work tree. Nothing normalises the
+        // result, and nothing needs to: git accepts the path as it is, and the
+        // fixture compares its own paths after canonicalisation.
+        let git_dir = work_tree.join(git_dir);
+
+        std::fs::create_dir_all(&work_tree).expect("create the work tree");
+        // `git init --separate-git-dir` writes the git directory itself, and it
+        // fails when the path that leads there does not exist.
+        std::fs::create_dir_all(git_dir.parent().expect("the git directory has a parent"))
+            .expect("create the path to the git directory");
+
+        let repo = Self {
+            dir,
+            work_tree,
+            git_dir,
+        };
+
+        let separate = format!("--separate-git-dir={}", repo.git_dir.display());
+        let work_tree_path = repo
+            .work_tree
+            .to_str()
+            .expect("utf-8 work tree path")
+            .to_string();
+        repo.run(
+            repo.dir.path(),
+            &["init", "--quiet", "-b", "main", &separate, &work_tree_path],
+        );
+
+        // What makes the layout detached. `git init` leaves a `.git` file in the
+        // work tree that points at the git directory, and `yadm` keeps no such
+        // file. Removing it is what makes an upward walk for a `.git` entry come
+        // back empty.
+        std::fs::remove_file(repo.work_tree.join(".git"))
+            .expect("remove the .git file that git init left in the work tree");
+
+        // The other half of the link. With no `.git` file in the work tree, the
+        // git directory is the only place that records which work tree it
+        // belongs to.
+        repo.git(&["config", "core.worktree", &work_tree_path]);
+        repo.git(&["config", "user.email", "gitscratch@example.com"]);
+        repo.git(&["config", "user.name", "gitscratch test"]);
+        // A commit-signing config in the developer's global gitconfig would
+        // otherwise make every fixture commit prompt or fail.
+        repo.git(&["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(
+            repo.work_tree.join(DETACHED_TRACKED_FILE),
+            "the one tracked dotfile\n",
+        )
+        .expect("write fixture file");
+        repo.git(&["add", DETACHED_TRACKED_FILE]);
+        repo.git(&["commit", "-q", "-m", "base"]);
+
+        repo
+    }
+
+    /// Run git in `cwd`, panicking on failure.
+    fn run(&self, cwd: &Path, args: &[&str]) -> String {
+        let mut command = Command::new("git");
+        // The same immunity `TestRepo::git_in` takes, for the same reason. A
+        // fixture that inherits a redirected `GIT_DIR` or `GIT_INDEX_FILE`
+        // builds its repository somewhere else. This suite runs under a
+        // pre-commit hook that exports both.
+        crate::git::shed_inherited_git_environment(&mut command);
+
+        let output = command
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+
+        assert!(
+            output.status.success(),
+            "git {args:?} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+}
+
+/// The nearest directory at or above `dir` that holds a `.git` entry.
+///
+/// The answer includes `dir` itself, because `repowalker::find_git_repo` starts
+/// its upward walk at the directory a tool runs in. The walk climbs one level
+/// at a time and stops at the root of the file system, which `pop` reports by
+/// answering false.
+fn ancestor_repository(dir: &Path) -> Option<PathBuf> {
+    let mut current = dir.to_path_buf();
+
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// Punctuation that a printed path can carry on either end.
+///
+/// [`path_at_or_above`] removes these characters from both ends of a candidate,
+/// so a path inside quotation marks or before a comma still reaches the
+/// comparison. Each of these characters also ends one candidate and starts the
+/// next.
+pub const TRIMMED_PUNCTUATION: &str = "\"'`,;:()[]{}";
+
+/// Resolve a path before an assertion reads it.
+///
+/// Every fixture lives under a temporary directory that macOS reaches through a
+/// symbolic link: `/var` resolves to `/private/var`. Git and the tools print
+/// the resolved form.
+///
+/// # Panics
+///
+/// Panics if the file system cannot resolve `path`.
+pub fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|e| panic!("canonicalize {}: {e}", path.display()))
+}
+
+/// Resolve `path` when the file system can, and hand it back as it is when it
+/// cannot.
+///
+/// A path the tool printed can name something that no longer exists, and such a
+/// path still has to reach the comparison.
+pub fn resolved(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The first path in `output` that is `work_tree` or a directory above it.
+///
+/// This is the safety matcher that every detached-git-directory guard reads the
+/// output of a destructive tool with. It lives here, once, because three of
+/// those guards ran a copy of it: a copy that widened left the other copies
+/// narrow, and a matcher that finds too little answers `None` for the wrong
+/// reason.
+///
+/// The work tree of a [`DetachedGitDirRepo`] stands in for `$HOME`, and the
+/// directories above it hold every other user of the machine. A tool that
+/// removes or rewrites files must name no path in that set. `starts_with` on
+/// the work tree is true for exactly that set: the work tree itself and each
+/// directory above it. A path below the work tree is a different answer, and
+/// this function passes it.
+///
+/// The scan reads one line at a time, because a path ends where the line ends.
+/// A candidate starts where a token starts, and white space or a character of
+/// [`TRIMMED_PUNCTUATION`] starts a token. A candidate ends at the end of the
+/// line or at a later white space character, and the longest candidate of a
+/// start comes first. A path that holds a space thus reaches the comparison,
+/// which a scan of single tokens misses, and the longest-first order keeps the
+/// whole path ahead of its own first word.
+///
+/// # Panics
+///
+/// Panics if the file system cannot resolve `work_tree`.
+pub fn path_at_or_above(output: &str, work_tree: &Path) -> Option<PathBuf> {
+    let work_tree = canonical(work_tree);
+
+    output
+        .lines()
+        .flat_map(candidate_paths)
+        .map(|candidate| resolved(&candidate))
+        .find(|candidate| work_tree.starts_with(candidate))
+}
+
+/// Every absolute path one line of output can hold, longest first at each
+/// start.
+///
+/// The ends of each candidate lose their white space and their punctuation
+/// before [`Path::is_absolute`] reads it, so a path inside quotation marks
+/// counts and the quotation marks do not.
+fn candidate_paths(line: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for start in token_starts(line) {
+        // `split_at` rather than an index range: `clippy::string_slice` is on
+        // for the whole workspace, and every index here comes from
+        // `char_indices`, so both halves stand on a character boundary.
+        let (_, tail) = line.split_at(start);
+
+        let mut ends: Vec<usize> = tail
+            .char_indices()
+            .filter(|(_, character)| character.is_whitespace())
+            .map(|(index, _)| index)
+            .collect();
+        ends.push(tail.len());
+
+        // Longest first, so the whole of a path that holds a space is read
+        // before the first word of it.
+        for end in ends.into_iter().rev() {
+            let (candidate, _) = tail.split_at(end);
+            let candidate = Path::new(candidate.trim_matches(separates_a_path));
+            if candidate.is_absolute() {
+                candidates.push(candidate.to_path_buf());
+            }
+        }
+    }
+
+    candidates
+}
+
+/// The index in `line` of the first character of each token.
+///
+/// One pass, and the start of the line counts as a boundary, so the first token
+/// of a line starts a candidate as well.
+fn token_starts(line: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut previous_separates = true;
+
+    for (index, character) in line.char_indices() {
+        let separates = separates_a_path(character);
+        if previous_separates && !separates {
+            starts.push(index);
+        }
+        previous_separates = separates;
+    }
+
+    starts
+}
+
+/// True for a character that stands between one candidate path and the next.
+fn separates_a_path(character: char) -> bool {
+    character.is_whitespace() || TRIMMED_PUNCTUATION.contains(character)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::{ancestor_repository, canonical, path_at_or_above, DetachedGitDirRepo, TestRepo};
+
+    /// The name of the planted directory that holds a space.
+    const SPACED_DIRECTORY: &str = "directory with a space";
+
+    /// The work tree of the plant that holds a space, one level under it.
+    const SPACED_WORK_TREE: &str = "home";
+
+    /// Prove the path check can fail, before a clean answer from it is trusted.
+    ///
+    /// Three tools rest on this one function - `gitnuke`, `nodenuke` and
+    /// `repotidy` each assert that it answers `None` for the output of a run -
+    /// and a matcher that never matches answers `None` for every input. A guard
+    /// that reports clean for the wrong reason is the defect those three files
+    /// exist to stop, so the check gets the same treatment it gives the tools.
+    ///
+    /// Five plants: the work tree, the directory above it, the same work tree
+    /// inside quotation marks and before a comma, a directory whose name holds
+    /// a space, and the git directory, which the nested shape keeps under the
+    /// work tree. The first four must match and the last one must not.
+    ///
+    /// The plant that holds a space carries a work tree of its own, because
+    /// every directory above the work tree of the fixture has a name of one
+    /// word. It is the parent of that second work tree, so the check must flag
+    /// it. A scan of white-space-separated tokens reads the first word of that
+    /// name alone and finds nothing.
+    /// The name of the directory the ancestor check runs from, one level under
+    /// the repository that holds it.
+    const DIRECTORY_INSIDE_A_REPOSITORY: &str = "inside";
+
+    /// Prove the ancestor check finds a repository that holds a directory.
+    ///
+    /// [`DetachedGitDirRepo`] stands on one fact about its own temporary
+    /// directory: no directory above it holds a `.git` entry. Every guard built
+    /// on the fixture rests on that fact, because `repowalker::find_git_repo`
+    /// walks upward and stops at the first `.git` entry it meets. A temporary
+    /// directory inside a repository therefore hands a tool that repository,
+    /// and `nodenuke` deletes every `node_modules`, `.next`, `.open-next` and
+    /// `.turbo` directory below the root it gets. `TempDir` reads `TMPDIR`, and
+    /// a `TMPDIR` inside a checkout is a configuration some machines carry.
+    ///
+    /// The check is what makes the fixture refuse such a machine, so the check
+    /// gets the treatment it gives the tools: a plant it must find, and a
+    /// directory it must pass.
+    #[test]
+    fn the_ancestor_check_finds_the_repository_a_directory_sits_inside() {
+        let repo = TestRepo::init();
+        let inside = repo.path().join(DIRECTORY_INSIDE_A_REPOSITORY);
+        std::fs::create_dir_all(&inside).expect("create a directory inside the repository");
+
+        assert_eq!(
+            ancestor_repository(&inside),
+            Some(repo.path().to_path_buf()),
+            "the check must find the repository above the directory"
+        );
+        assert_eq!(
+            ancestor_repository(repo.path()),
+            Some(repo.path().to_path_buf()),
+            "the check must find a repository the directory itself holds"
+        );
+
+        let outside = TempDir::new().expect("create temp dir");
+        assert_eq!(
+            ancestor_repository(outside.path()),
+            None,
+            "the check must find nothing above a bare temporary directory, and a \
+             failure here means TMPDIR sits inside a repository"
+        );
+    }
+
+    #[test]
+    fn the_path_check_flags_the_work_tree_and_the_directory_above_it() {
+        let repo = DetachedGitDirRepo::nested();
+        let work_tree = canonical(repo.work_tree());
+        let above = work_tree
+            .parent()
+            .expect("the work tree has a parent")
+            .to_path_buf();
+        let spaced = above.join(SPACED_DIRECTORY);
+        let spaced_work_tree = spaced.join(SPACED_WORK_TREE);
+        std::fs::create_dir_all(&spaced_work_tree)
+            .expect("create the work tree under a directory whose name holds a space");
+
+        assert_eq!(
+            path_at_or_above(&format!("root: {}", work_tree.display()), repo.work_tree()),
+            Some(work_tree.clone()),
+            "the check must flag the work tree itself"
+        );
+        assert_eq!(
+            path_at_or_above(&format!("root: {}", above.display()), repo.work_tree()),
+            Some(above),
+            "the check must flag a directory above the work tree"
+        );
+        assert_eq!(
+            path_at_or_above(
+                &format!("root: \"{}\", and more", work_tree.display()),
+                repo.work_tree()
+            ),
+            Some(work_tree),
+            "the check must flag a path that carries punctuation on either end"
+        );
+        assert_eq!(
+            path_at_or_above(&format!("root: {}", spaced.display()), &spaced_work_tree),
+            Some(canonical(&spaced)),
+            "the check must flag a path whose name holds a space"
+        );
+        assert_eq!(
+            path_at_or_above(
+                &format!("root: {}", repo.git_dir().display()),
+                repo.work_tree()
+            ),
+            None,
+            "the check must pass a directory under the work tree"
+        );
+    }
+}
