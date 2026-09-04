@@ -52,10 +52,17 @@ const CLAUDE: &str = "claude";
 /// tool it needs and cannot reach hangs the run until the timeout and then
 /// reports nothing.
 ///
+/// The subagent tool stands under both of its names. The skill dispatches one
+/// when the backlog holds eight open issues or more, and that tool is named
+/// `Agent` in a current `claude` and `Task` in an older one. `wn` names the
+/// versions of `claude` it finds and not the one it was built beside, so it
+/// carries both: a name the run does not know is read past, and a name it
+/// needs and does not carry is a prompt no run under `--print` can answer.
+///
 /// The list names those tools and stops there. `--dangerously-skip-permissions`
 /// would answer every prompt of every tool, and a tool that reaches for the
 /// bypass on behalf of its reader has made a decision that is not its to make.
-const ALLOWED_TOOLS: &str = "Bash Read Glob Grep Task TodoWrite Skill";
+const ALLOWED_TOOLS: &str = "Bash Read Glob Grep Agent Task TodoWrite Skill";
 
 /// The arguments the run is given. The prompt goes on standard input.
 const ARGUMENTS: [&str; 3] = ["--print", "--allowed-tools", ALLOWED_TOOLS];
