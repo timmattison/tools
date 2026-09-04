@@ -359,7 +359,7 @@ pub enum InputError {
     /// The reader asked for a new plan and turned the run that builds one off.
     #[error(
         "wn --refresh builds a plan by running claude, and {NO_CLAUDE_ENV} turns that run off. \
-         Unset {NO_CLAUDE_ENV}, or {PASS_IT_AS_AN_ARGUMENT}"
+         Unset it to build one. {PASS_IT_AS_AN_ARGUMENT}"
     )]
     RefreshWithoutClaude,
 }
