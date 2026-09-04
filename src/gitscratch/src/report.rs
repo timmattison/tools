@@ -116,6 +116,17 @@ impl<'a> Report<'a> {
     /// streams.
     #[must_use]
     pub fn render(&self, conflicts: &Conflicts) -> String {
+        self.render_within(conflicts, usize::MAX)
+    }
+
+    /// The same verdict, laid out for a terminal of `columns` columns.
+    ///
+    /// Nothing here reads the terminal. The number arrives as a parameter so
+    /// the library stays a library, and each binary answers the question with
+    /// `termbar::TerminalWidth::get_or_default`.
+    #[must_use]
+    pub fn render_within(&self, conflicts: &Conflicts, columns: usize) -> String {
+        let _ = columns;
         if conflicts.is_clean() {
             return format!("{}: clean - {} hit no conflicts", self.tool, self.action);
         }
@@ -206,7 +217,7 @@ mod tests {
 
     use unicode_width::UnicodeWidthStr;
 
-    use super::Report;
+    use super::{Report, FILE_INDENT};
     use crate::metrics::{Stops, Uncommitted};
     use crate::scratch::Conflicts;
 
@@ -218,6 +229,32 @@ mod tests {
             .next()
             .expect("splitting always yields at least one piece")
             .width()
+    }
+
+    /// The per-file rows, which are everything after the blank line that
+    /// separates them from the summary.
+    ///
+    /// Counted rather than searched for, so a name that split its own row in
+    /// two is a row count this suite can see.
+    fn breakdown(rendered: &str) -> Vec<&str> {
+        rendered
+            .lines()
+            .skip_while(|line| !line.is_empty())
+            .skip(1)
+            .collect()
+    }
+
+    /// The one rendered row that carries `count`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no row carries it, because a count the renderer never
+    /// printed is a failure of the renderer and not of the search.
+    fn row_holding<'a>(rendered: &'a str, count: &str) -> &'a str {
+        rendered
+            .lines()
+            .find(|line| line.contains(count))
+            .unwrap_or_else(|| panic!("no rendered row carries {count:?}:\n{rendered}"))
     }
 
     /// One entry of a per-file breakdown.
@@ -370,6 +407,118 @@ mod tests {
             count_column(lines[4], "1 hunk"),
             "the counts should start in the same terminal column:\n{rendered}"
         );
+    }
+
+    /// A file name holds every byte but NUL, which is the premise the `-z`
+    /// reader rests on, so a newline, a carriage return and an ESC are all
+    /// legal in one. This layout is line-oriented and column-aligned, and a raw
+    /// control character wrecks it three ways at once.
+    ///
+    /// A newline splits one row in two and leaves the count stranded on the
+    /// second. An ESC hands an escape sequence out of the repository straight
+    /// to the terminal of whoever ran the tool. And `unicode-width` measures
+    /// every control character as no columns at all, so the padding and the
+    /// terminal disagree about where the count column is - on every other row
+    /// as well, because one over-measured name sets the width of all of them.
+    ///
+    /// The escape happens once, ahead of the measurement and ahead of the
+    /// print, so the string that was measured is the string that reaches the
+    /// screen.
+    #[test]
+    fn a_control_character_in_a_name_is_escaped_rather_than_printed_raw() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let controlled = Conflicts::from_files(
+            [
+                file("plain.rs", 1),
+                file("src/esc\u{1b}[31m.rs", 1),
+                file("src/two\nlines.rs", 2),
+            ],
+            Stops::new(2),
+        );
+
+        let rendered = report.render(&controlled);
+        let rows = breakdown(&rendered);
+
+        assert_eq!(
+            rows.len(),
+            3,
+            "three conflicted files are three rows, whatever their names hold:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "an ESC out of a repository must never reach a terminal: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(r"src/two\u{a}lines.rs"),
+            "a newline is escaped in place, so the name stays one readable row:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(r"src/esc\u{1b}[31m.rs"),
+            "an ESC is escaped in place, so the name stays readable:\n{rendered}"
+        );
+
+        let columns: Vec<usize> = [
+            (rows[0], "1 hunk"),
+            (rows[1], "1 hunk"),
+            (rows[2], "2 hunks"),
+        ]
+        .into_iter()
+        .map(|(row, count)| count_column(row, count))
+        .collect();
+        assert!(
+            columns.iter().all(|column| *column == columns[0]),
+            "every count starts in the same terminal column, and a control \
+             character measured as nothing is what moves one of them: \
+             {columns:?}\n{rendered}"
+        );
+    }
+
+    /// The count column sits past the widest name, and nothing about a name is
+    /// bounded - a deeply nested path is ordinary, and it carries the counts of
+    /// every other row off the right-hand edge with it. The terminal then wraps
+    /// each of those rows, and a wrapped column reads worse than a column
+    /// nobody tried to align.
+    ///
+    /// So the caller says how many columns it has, and the name column is
+    /// clamped to what is left after the indent, the gap and the widest count.
+    /// A name too wide for that clamp takes a row of its own, and its count
+    /// takes the next row, in the same column as every other count. The name is
+    /// never cut short: a truncated path opens no file.
+    #[test]
+    fn a_name_too_wide_for_the_terminal_keeps_the_counts_on_screen_and_the_name_whole() {
+        /// A narrow terminal, so one ordinary nested path is wider than it.
+        const COLUMNS: usize = 40;
+        /// 61 columns of perfectly ordinary path.
+        const LONG: &str = "src/a/very/deeply/nested/directory/with/a/long/name/module.rs";
+
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let deep = Conflicts::from_files([file(LONG, 3), file("readme.md", 1)], Stops::new(2));
+
+        let rendered = report.render_within(&deep, COLUMNS);
+
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == format!("{FILE_INDENT}{LONG}")),
+            "a name too wide to pad takes a row of its own, whole - a path cut \
+             short opens no file:\n{rendered}"
+        );
+
+        let short_row = row_holding(&rendered, "1 hunk");
+        let long_row = row_holding(&rendered, "3 hunks");
+        assert_eq!(
+            count_column(short_row, "1 hunk"),
+            count_column(long_row, "3 hunks"),
+            "both counts still start in the same column:\n{rendered}"
+        );
+        for (row, count) in [(short_row, "1 hunk"), (long_row, "3 hunks")] {
+            assert!(
+                row.width() <= COLUMNS,
+                "the row carrying {count} has to fit in {COLUMNS} columns and \
+                 takes {}, so the terminal wraps it:\n{rendered}",
+                row.width()
+            );
+        }
     }
 
     /// A clean tree has nothing to warn about, and warning anyway would train
