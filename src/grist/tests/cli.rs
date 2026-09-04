@@ -28,6 +28,61 @@ fn grist(repo: &std::path::Path, args: &[&str]) -> std::process::Output {
         .expect("failed to run grist")
 }
 
+/// The sentence `--help` opens with, which is the doc comment on `Args`.
+///
+/// clap's derive takes the doc comment on the struct as the help text, unless
+/// the attribute names `about`. A bare `about` takes `CARGO_PKG_DESCRIPTION`
+/// instead, and the doc comment then says nothing to anybody who runs the tool.
+/// Two sentences describe `grist`, one of them is dead, and the dead one is the
+/// one sitting where a developer edits the help.
+///
+/// `grist` names no `about`, so the doc comment is the help. The manifest keeps
+/// a sentence of its own for crates.io and `cargo search`, where the reader has
+/// run nothing.
+const HELP_SUMMARY: &str =
+    "Rank the orders you could squash-merge branches in, cheapest conflicts first";
+
+/// The help a user reads has to be the help a developer edits.
+///
+/// The first line only, because the lines under it are clap's own layout, and
+/// pinning those makes an assertion about the version of clap.
+///
+/// Run outside every repository, because the help is a fact baked in at compile
+/// time and asking for it must not depend on where the binary stands.
+#[test]
+fn help_opens_with_the_summary_the_source_carries_rather_than_the_manifest_one() {
+    assert_ne!(
+        HELP_SUMMARY,
+        env!("CARGO_PKG_DESCRIPTION"),
+        "the two sentences have to differ, or this test cannot tell the help \
+         apart from the manifest wording it exists to keep out of it"
+    );
+
+    let elsewhere = not_a_repository();
+
+    let long = grist(elsewhere.path(), &["--help"]);
+    let short = grist(elsewhere.path(), &["-h"]);
+
+    let stdout = String::from_utf8_lossy(&long.stdout);
+
+    assert!(
+        long.status.success(),
+        "asking for the help is not a question about orderings, so it \
+         succeeds: {}",
+        String::from_utf8_lossy(&long.stderr)
+    );
+    assert_eq!(
+        stdout.lines().next(),
+        Some(HELP_SUMMARY),
+        "the help must open with the sentence the source carries\nstdout:\n{stdout}"
+    );
+    assert_eq!(
+        (short.status.code(), &short.stdout, &short.stderr),
+        (long.status.code(), &long.stdout, &long.stderr),
+        "-h and --help are two spellings of one switch, not two renderings"
+    );
+}
+
 /// `-q` exists so the answer can be piped straight into the next command.
 #[test]
 fn quiet_mode_prints_only_the_winning_order() {

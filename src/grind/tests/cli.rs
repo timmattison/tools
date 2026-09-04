@@ -526,9 +526,16 @@ fn grind_with_nowhere_to_put_a_scratch(
 /// The control half is what makes the first half mean anything: it proves the
 /// poisoned `TMPDIR` really does reach the worktree half rather than being
 /// quietly ignored, which would make "no scratch error" vacuously true.
+///
+/// The tree is dirty on purpose, which is what gives the two runs a caveat to
+/// hold back. The uncommitted-work note qualifies a verdict, so neither run
+/// prints one: the first has no verdict because the branch does not resolve,
+/// and the control has none because the scratch worktree cannot be built. The
+/// unborn-HEAD test below states the same rule one step earlier.
 #[test]
 fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists() {
     let repo = independent_branches_repo();
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
 
     let (code, stdout, stderr) = grind_with_nowhere_to_put_a_scratch(&repo, "nonexistent-branch");
 
@@ -552,6 +559,11 @@ fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists(
         !stdout.contains("conflicts") && !stderr.contains("conflicts"),
         "a typo'd branch name must never be reported as a conflict\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    assert!(
+        !stderr.contains("note:"),
+        "the tree is dirty, but a caveat qualifies a verdict and this run has \
+         no verdict to qualify:\n{stderr}"
+    );
 
     let (control_code, control_stdout, control_stderr) =
         grind_with_nowhere_to_put_a_scratch(&repo, "beta");
@@ -565,6 +577,11 @@ fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists(
         control_stderr.contains("could not create a scratch directory"),
         "a resolvable branch with the same poisoned TMPDIR must fail at the \
          scratch, or the assertion above proves nothing:\n{control_stderr}"
+    );
+    assert!(
+        !control_stderr.contains("note:"),
+        "the caveat about uncommitted work qualifies the verdict, so a run \
+         that dies before the verdict must not print it:\n{control_stderr}"
     );
 }
 
@@ -796,6 +813,65 @@ fn version_names_the_tool_the_release_and_the_build_it_came_from() {
     );
 }
 
+/// The sentence `--help` opens with, which is the doc comment on `Args`.
+///
+/// clap's derive takes the doc comment on the struct as the help text, unless
+/// the attribute names `about`. A bare `about` takes `CARGO_PKG_DESCRIPTION`
+/// instead, and the doc comment then says nothing to anybody who runs the tool.
+/// Two sentences describe `grind`, one of them is dead, and the dead one is the
+/// one sitting where a developer edits the help.
+///
+/// `grind` names no `about`, so the doc comment is the help. The manifest keeps
+/// a sentence of its own for crates.io and `cargo search`, where the reader has
+/// run nothing and `BRANCH` names nothing.
+const HELP_SUMMARY: &str =
+    "Report whether rebasing HEAD onto BRANCH would conflict, and by how much";
+
+/// The help a user reads has to be the help a developer edits.
+///
+/// The first line only, because the lines under it are clap's own layout, and
+/// pinning those makes an assertion about the version of clap.
+///
+/// `-h` is asserted byte for byte against `--help` for the reason the version
+/// test gives about `-V`: two spellings are one switch, and two renderings of
+/// one fact are the drift a shared format exists to stop.
+///
+/// Run outside every repository, because the help is a fact baked in at compile
+/// time and asking for it must not depend on where the binary stands.
+#[test]
+fn help_opens_with_the_summary_the_source_carries_rather_than_the_manifest_one() {
+    assert_ne!(
+        HELP_SUMMARY,
+        env!("CARGO_PKG_DESCRIPTION"),
+        "the two sentences have to differ, or this test cannot tell the help \
+         apart from the manifest wording it exists to keep out of it"
+    );
+
+    let elsewhere = not_a_repository();
+
+    let long = streams(&grind(elsewhere.path(), &["--help"]));
+    let short = streams(&grind(elsewhere.path(), &["-h"]));
+
+    assert_eq!(
+        long.0,
+        Some(0),
+        "asking for the help is not a question about conflicts, so it \
+         succeeds\nstdout:\n{}\nstderr:\n{}",
+        long.1,
+        long.2
+    );
+    assert_eq!(
+        long.1.lines().next(),
+        Some(HELP_SUMMARY),
+        "the help must open with the sentence the source carries\nstdout:\n{}",
+        long.1
+    );
+    assert_eq!(
+        short, long,
+        "-h and --help are two spellings of one switch, not two renderings"
+    );
+}
+
 /// Somewhere outside every repository there is no question to answer, and
 /// saying so has to be distinguishable from answering it.
 ///
@@ -850,6 +926,10 @@ fn a_directory_that_is_not_a_repository_is_an_error_not_a_conflict() {
 #[test]
 fn a_rebase_that_fails_with_nothing_to_measure_is_neither_clean_nor_conflicts() {
     let repo = independent_branches_repo();
+    // Dirty, so the run has a caveat to hold back. The scratch worktree gets
+    // built here and the replay is what fails, which is the other half of the
+    // rule the poisoned-TMPDIR test above pins.
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
 
     let (code, stdout, stderr) = run(&repo, "alpha", "@{-1}");
 
@@ -867,6 +947,11 @@ fn a_rebase_that_fails_with_nothing_to_measure_is_neither_clean_nor_conflicts() 
     assert!(
         !stdout.contains("clean") && !stdout.contains("conflicts"),
         "a run that could not measure anything must claim neither verdict:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("note:"),
+        "a replay that failed leaves no verdict, and a caveat with nothing to \
+         qualify is a wrong sentence:\n{stderr}"
     );
 }
 
@@ -1018,6 +1103,73 @@ fn the_long_spelling_of_quiet_answers_exactly_as_the_short_one_does() {
         (long.status.code(), &long.stdout, &long.stderr),
         (short.status.code(), &short.stdout, &short.stderr),
         "one switch has one behaviour, whichever way a caller spells it"
+    );
+}
+
+/// `-q` reaches every write `grind` owns, and stops at the argument parser,
+/// which answers before `grind` starts.
+///
+/// `Args::parse` runs ahead of the `Console` that carries the switch, so a
+/// command line clap refuses is answered by clap. That is the right place for
+/// it: silencing the refusal leaves a caller with a bare number and no way to
+/// learn which argument is missing, and the missing `BRANCH` is the likely one
+/// in the very script the README prints.
+///
+/// The code is [`ERROR`], which already means "I could not tell you". A command
+/// line `grind` cannot read is one more way to get no answer.
+///
+/// Run outside every repository, which is what shows the parser answered first:
+/// there is no repository here to answer from.
+#[test]
+fn quiet_leaves_the_usage_error_to_the_parser_that_answers_before_grind_starts() {
+    let elsewhere = not_a_repository();
+
+    let (code, stdout, stderr) = streams(&grind(elsewhere.path(), &["-q"]));
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a command line grind cannot read is a run that cannot answer, so \
+         {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("<BRANCH>"),
+        "the refusal has to name the argument that is missing:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "",
+        "the refusal belongs on stderr, where it cannot contaminate a pipeline"
+    );
+}
+
+/// `--version` answers about the binary rather than about a rebase, so `-q`
+/// leaves it alone.
+///
+/// Asserted byte for byte against the same run without `-q`, because the claim
+/// is that the switch does not reach this path at all.
+///
+/// The exit code is `0` without a rebase behind it, and that is the better
+/// trade. Every script that asks a tool which build it is reads that number, so
+/// moving the version off `0` to keep one table simple costs more than it buys.
+#[test]
+fn quiet_leaves_the_version_alone_because_it_answers_about_the_tool() {
+    let elsewhere = not_a_repository();
+
+    let quiet = streams(&grind(elsewhere.path(), &["-q", "--version"]));
+    let loud = streams(&grind(elsewhere.path(), &["--version"]));
+
+    assert_eq!(
+        quiet.0,
+        Some(0),
+        "asking for the version is not a question about conflicts, so it \
+         succeeds\nstdout:\n{}\nstderr:\n{}",
+        quiet.1,
+        quiet.2
+    );
+    assert_version_line(&quiet.1);
+    assert_eq!(
+        quiet, loud,
+        "-q silences what grind says about a rebase, and the version is not that"
     );
 }
 
