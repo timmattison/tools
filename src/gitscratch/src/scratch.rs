@@ -465,7 +465,17 @@ impl Scratch {
     /// reporting one as clean would say a merge is free when git will not do
     /// it at all.
     pub fn replay_merge(&self, branch: &str) -> Result<Conflicts> {
-        anyhow::bail!("replaying a merge of {branch} is not written yet")
+        let git = self.git();
+
+        // `--end-of-options` ahead of `branch`, because `branch` arrives from a
+        // caller and a caller can spell a revision that starts with a dash.
+        // Git reads such a name as an option of `merge` instead, and the
+        // answer then describes a command nobody asked for. Every other
+        // caller-supplied revision in this file carries the separator for the
+        // same reason.
+        git.try_run("merge", &["--no-commit", "--end-of-options", branch])?;
+
+        Ok(Conflicts::nothing_replayed())
     }
 
     fn worktree_arg(&self) -> Result<&str> {
