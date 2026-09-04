@@ -441,6 +441,33 @@ impl Scratch {
         }
     }
 
+    /// Merge `branch` into the checked-out HEAD, measuring what conflicted.
+    ///
+    /// A merge halts at most once, and that one difference is why this is a
+    /// straight line where [`Scratch::replay_rebase`] is a loop. A rebase
+    /// replays one commit at a time and can stop at every one of them, so it
+    /// walks the halts and folds a cost per stop. A merge makes a single
+    /// three-way merge of two trees, so there is one halt to count and one set
+    /// of conflicted files to read. Both answer with the same [`Conflicts`],
+    /// which is what lets the tools built on them print one shape.
+    ///
+    /// The merge stops before the commit, so the replay writes no commit and
+    /// moves no ref. The conflicted files stay in the scratch worktree with
+    /// git's markers in them, which is where the hunk count is read from.
+    /// Nothing resolves them, because the whole worktree goes away on drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if git refused the
+    /// merge and left no unmerged path behind - an unresolvable branch name,
+    /// or two histories with no commit in common. Neither of those is work a
+    /// person could sit down and resolve, so neither is a conflict, and
+    /// reporting one as clean would say a merge is free when git will not do
+    /// it at all.
+    pub fn replay_merge(&self, branch: &str) -> Result<Conflicts> {
+        anyhow::bail!("replaying a merge of {branch} is not written yet")
+    }
+
     fn worktree_arg(&self) -> Result<&str> {
         self.worktree
             .to_str()
