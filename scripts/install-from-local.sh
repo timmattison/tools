@@ -20,7 +20,11 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --list) LIST_ONLY=true; shift ;;
         -h|--help)
-            head -12 "$0" | tail -10
+            # Print the header comment, from the first line under the title to
+            # the line before the first line that is not a comment. The end of
+            # the comment block ends the help, so a line added to that block
+            # shows up in the help and truncates nothing.
+            sed -n '3,${/^#/!q;p;}' "$0"
             exit 0
             ;;
         *) echo "Unknown option: $1"; exit 1 ;;
