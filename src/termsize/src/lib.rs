@@ -293,6 +293,10 @@ mod unix {
             ws_ypixel: 0,
         };
 
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this is the helper the ban points every other caller at; the one call that reads the window of a terminal lives here"
+        )]
         // SAFETY: `TIOCGWINSZ` reads the size of the window of a terminal, and
         // it writes that size into the `winsize` that the third argument points
         // at. The pointer names a live local variable of exactly that type, and

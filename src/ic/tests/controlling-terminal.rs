@@ -274,6 +274,10 @@ fn ic_command(pty: &Pty, args: &[&str]) -> Command {
                 return Err(std::io::Error::last_os_error());
             }
 
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of the child, and termsize offers no call for that"
+            )]
             if libc::ioctl(slave, libc::c_ulong::from(libc::TIOCSCTTY), 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
