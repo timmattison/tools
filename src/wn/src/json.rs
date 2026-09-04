@@ -24,7 +24,10 @@
 //!   report as the pair the report already renders.
 //! * `waitsFor` is the set of numbers that come before that step. It is the
 //!   JSON spelling of the `Waits for` cell of a table, and it reaches the same
-//!   graph.
+//!   graph. It holds numbers and nothing else, so a `waitsFor` that names the
+//!   issue of a pair reaches the pair. A cell writes `PR#102 (#94)` and a
+//!   `waitsFor` writes `94`, and both name the one piece of work, which is
+//!   what keeps the two readers of one plan together.
 //!
 //! `housekeeping` and `warnings` are read past. They stand in the document
 //! because the person who ran the skill wants them, and `wn` answers one
@@ -51,6 +54,7 @@
 //! the graph a `Waits for` column draws, and one report answers all three. Two
 //! reports of one question drift apart.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde_json::Value;
@@ -255,11 +259,12 @@ fn graph_of(text: &str) -> Result<Graph, JsonError> {
     })?;
     refuse_version(&document)?;
     let at = Path::root(STREAMS);
-    let streams: Vec<Vec<Reading>> = array(field(&document, STREAMS, &at)?, &at)?
+    let mut streams: Vec<Vec<Reading>> = array(field(&document, STREAMS, &at)?, &at)?
         .iter()
         .enumerate()
         .map(|(place, stream)| read_stream(stream, &at.at(place)))
         .collect::<Result<_, _>>()?;
+    name_the_work(&mut streams);
     Ok(of_parts(nodes_of(&streams), &edges_of(&streams))?)
 }
 
@@ -331,6 +336,54 @@ fn read_step(value: &Value, at: &Path) -> Result<Reading, JsonError> {
     Ok(Reading { step, waits_for })
 }
 
+/// The number of the work of every number the plan names.
+///
+/// A step names its own number. A pair names one number more: the issue its
+/// pull request closes. Both numbers reach one piece of work, so both give the
+/// number of that step — the pull request of a pair, and the issue of a step
+/// that stands alone. A number no step names stands in the map nowhere.
+///
+/// A number one step carries as its own work and another step closes gives
+/// itself. The work a document names directly is the work. The map is then the
+/// same map however the streams of that document stand, and a rule that took
+/// the first stream would answer two orders of one plan two ways. Among pairs
+/// that close one issue, the first pair the document writes owns it, which is
+/// the rule [`nodes_of`] holds for a number that stands in two places.
+fn work_of(streams: &[Vec<Reading>]) -> BTreeMap<IssueNumber, IssueNumber> {
+    let steps = || streams.iter().flatten().map(|reading| reading.step);
+    let mut work: BTreeMap<IssueNumber, IssueNumber> = BTreeMap::new();
+    for step in steps() {
+        if let Some(closes) = step.closes() {
+            work.entry(closes).or_insert_with(|| step.number());
+        }
+    }
+    for step in steps() {
+        work.insert(step.number(), step.number());
+    }
+    work
+}
+
+/// Rewrite every `waitsFor` number to the number of the work that carries it.
+///
+/// A `waitsFor` holds numbers and nothing else, so a document has no way to
+/// write the pair `PR#102 (#94)` in one. A reader who waits for that work
+/// writes the issue of it, and this is where that number becomes the pull
+/// request that does the work.
+///
+/// One walk owns the rule, so [`nodes_of`] and [`edges_of`] both read numbers
+/// that name work. A number no step of the plan names is left as it stands,
+/// and it reaches the rows as a blocker the repository does not have.
+fn name_the_work(streams: &mut [Vec<Reading>]) {
+    let work = work_of(streams);
+    for reading in streams.iter_mut().flatten() {
+        for blocker in &mut reading.waits_for {
+            if let Some(&carries) = work.get(blocker) {
+                *blocker = carries;
+            }
+        }
+    }
+}
+
 /// The steps of the whole plan, one for each number, in the order the document
 /// writes them.
 ///
@@ -341,9 +394,11 @@ fn read_step(value: &Value, at: &Path) -> Result<Reading, JsonError> {
 /// where the step first appears. [`crate::graph::of_plan`] states the same
 /// rule for a table, because a node is a node whichever form named it.
 ///
-/// A number a `waitsFor` names and no `order` holds is a node all the same. A
-/// blocker the repository does not have must reach the rows and turn the run
-/// red, and a row of the answer is the only place that says so.
+/// A number a `waitsFor` names and no step of the plan names is a node all the
+/// same. A blocker the repository does not have must reach the rows and turn
+/// the run red, and a row of the answer is the only place that says so. The
+/// issue of a pair is a number a step names, because [`name_the_work`] gave
+/// that `waitsFor` the number of the pull request before this walk.
 fn nodes_of(streams: &[Vec<Reading>]) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
     for stream in streams {
@@ -366,13 +421,14 @@ fn nodes_of(streams: &[Vec<Reading>]) -> Vec<Step> {
 /// after it. The `waitsFor` of a step names the work that comes before that
 /// step, and before that step alone.
 ///
-/// A `waitsFor` that names the number of its own step draws no edge, because
-/// such an edge runs from a step to itself and says nothing. A `waitsFor` that
-/// names a step the chain of its own stream already reached draws an edge the
-/// chain already carries, and one edge stands between two nodes however many
-/// times the document writes it. A `waitsFor` that names a *later* step of its
-/// own stream draws an edge the chain contradicts, so the plan is a cycle and
-/// [`of_parts`] refuses it.
+/// A `waitsFor` that names the work of its own step draws no edge, because
+/// such an edge runs from a step to itself and says nothing. The issue of a
+/// pair names the work of that pair, so a pair that waits for its own issue
+/// draws no edge either. A `waitsFor` that names a step the chain of its own
+/// stream already reached draws an edge the chain already carries, and one edge
+/// stands between two nodes however many times the document writes it. A
+/// `waitsFor` that names a *later* step of its own stream draws an edge the
+/// chain contradicts, so the plan is a cycle and [`of_parts`] refuses it.
 fn edges_of(streams: &[Vec<Reading>]) -> Vec<(IssueNumber, IssueNumber)> {
     let mut edges: Vec<(IssueNumber, IssueNumber)> = Vec::new();
     for stream in streams {

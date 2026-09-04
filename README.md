@@ -1300,11 +1300,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     pull request that does the work of that issue — the same pair `PR#344 (#341)` writes, and it
     reaches the report as the row `#102 (#94)` — and `waitsFor` is the set of numbers that come
     before that step. `waitsFor` is the JSON spelling of the `Waits for` cell, and it reaches the
-    same graph. It stands on each step rather than on the stream, so a later step of a stream
-    names its own blockers. `housekeeping` and `warnings` are read past: they stand in the
-    document because the person who ran the skill wants them, and `wn` answers one question. The
-    document above draws `#96 → #91` and `#91 → #94`, so it names `#96` while every issue is open
-    and `#91` once `#96` is closed.
+    same graph. A cell writes the pair as `PR#102 (#94)` and a `waitsFor` holds bare numbers, so
+    a `waitsFor` that names the issue of a pair reaches that pair. One piece of work is one row
+    in both readers, and a wait on the issue of a pair names no second thing to start. It stands
+    on each step rather than on the stream, so a later step of a stream names its own blockers.
+    `housekeeping` and `warnings` are read past: they stand in the document because the person
+    who ran the skill wants them, and `wn` answers one question. The document above draws
+    `#96 → #91` and `#91 → #94`, so it names `#96` while every issue is open and `#91` once `#96`
+    is closed.
   - JSON is tried first, before the tables and before the chain. A text whose first character
     that is not a space is `{` is a JSON document, and nothing else `wn` reads starts that way, so
     the claim is decided on one character and never on a partial parse. A text that starts with
