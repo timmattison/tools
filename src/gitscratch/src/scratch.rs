@@ -37,9 +37,10 @@
 //! invocation separates them.
 //!
 //! So the replay classifies that halt from repository state - see the `Halt`
-//! enum below - rather than assuming the harmless cause. A dry run may legitimately answer
-//! "this is expensive" or "I cannot answer"; it must never answer "this is
-//! cheap" because it quietly discarded the work it was asked to measure.
+//! enum below - rather than assuming the harmless cause. A dry run may
+//! legitimately answer "this is expensive" or "I cannot answer"; it must never
+//! answer "this is cheap" because it quietly discarded the work it was asked to
+//! measure.
 
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;

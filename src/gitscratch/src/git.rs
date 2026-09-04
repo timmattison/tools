@@ -346,10 +346,12 @@ impl Git {
     /// conflicted file that cannot be opened is floored at one hunk, so a file
     /// contested in two regions reports one and the total still looks plausible.
     ///
-    /// A caller reading a list of *paths* wants [`Git::nul_separated_paths`],
-    /// which is this plus that one conversion. This one is for output whose
-    /// fields are not paths: a `status --porcelain -z` record is `XY <path>`,
-    /// so it is read as bytes and only its tail is ever a path.
+    /// A caller reading a list of *paths* wants one of the two readers built
+    /// on this: [`Git::nul_separated_paths`], which is this plus one
+    /// conversion, or [`Git::paths`], which decodes and refuses a name that is
+    /// not valid UTF-8. This one is for output whose fields are not paths: a
+    /// `status --porcelain -z` record is `XY <path>`, so it is read as bytes
+    /// and only its tail is ever a path.
     ///
     /// `-z` is the first argument after the subcommand, ahead of everything the
     /// caller passed, so an argument list that finishes with `--` and a
@@ -361,10 +363,6 @@ impl Git {
     /// Empty fields are dropped. Git terminates rather than separates, so the
     /// last NUL always leaves one; no path is ever the empty string, so nothing
     /// real is lost with it.
-    ///
-    /// Not for a list of paths — use [`Git::paths`]. Git escapes a path on its
-    /// way out of a line-oriented listing and the trimming here finishes the
-    /// job, so a name can come back spelled differently from the file it names.
     ///
     /// # Errors
     ///
@@ -654,22 +652,26 @@ impl Git {
             // quoted and escaped with this pinned, and are just as unopenable,
             // and cost just as many uncounted hunks, as a Japanese name would
             // be without it. A path list therefore cannot be read off git's
-            // lines under any setting, which is why the reader this type offers
-            // for one is [`Git::nul_separated_paths`]: `-z` turns quoting off
-            // outright and separates on the one byte a path cannot contain, and
-            // the bytes between two separators become the path without being
-            // decoded on the way - a path on unix is bytes, and a name that is
-            // not valid UTF-8 is destroyed by a lossy conversion exactly as
-            // thoroughly as by an octal escape.
+            // lines under any setting, which is why both readers this type
+            // offers for one - [`Git::nul_separated_paths`] and [`Git::paths`]
+            // - ask git for `-z`: it turns quoting off outright and separates
+            // on the one byte a path cannot contain. `nul_separated_paths`
+            // then takes the bytes between two separators as the path they
+            // spell, without decoding them on the way - a path on unix is
+            // bytes, and a name that is not valid UTF-8 is destroyed by a
+            // lossy conversion exactly as thoroughly as by an octal escape.
+            // `paths` decodes and refuses such a name outright rather than
+            // repairing it into one that opens no file.
             //
             // Kept anyway, because it costs one `-c` and it narrows what a
-            // future call site can do wrong. There are two readers for a path
-            // and `run` is neither of them: a list of paths goes through
-            // `nul_separated_paths`, one path goes through `path`, and reading
-            // either back through `run` is a bug. With this pinned it is a bug
-            // that survives the common case instead of mangling every
-            // non-ASCII name in the repository. Pinning it on the single door
-            // every git call goes through is what makes that free.
+            // future call site can do wrong. There are three readers for a
+            // path and `run` is none of them: a list of paths goes through
+            // `nul_separated_paths` or through `paths`, one path goes through
+            // `path`, and reading any of them back through `run` is a bug.
+            // With this pinned it is a bug that survives the common case
+            // instead of mangling every non-ASCII name in the repository.
+            // Pinning it on the single door every git call goes through is
+            // what makes that free.
             "core.quotePath=false",
             // The conflict style decides what git writes into a conflicted
             // file, and that file is what the hunk counter reads. All three

@@ -49,10 +49,12 @@ the shared `rr-cache`, hooks redirected at an empty directory, `gc.auto=0`, `com
 environment a halted rebase can't hang on. Path *names* get the same treatment: git will C-quote and octal-escape
 a name, which then matches no file on disk, so a conflicted `日本語.txt` came back under a name nobody typed *and*
 silently floored at "1 hunk" — a plausible-looking wrong total. `core.quotePath=false` is pinned against the
-common case, but it only governs non-ASCII, so the fix that actually holds is that the runner offers exactly one
-way to read a list of paths — `-z`, split on NUL, never trimmed, and handed back as the bytes git wrote rather
-than as text, since a path is a byte string on unix and decoding one lossily replaces exactly the names this
-exists to preserve — and no line-oriented alternative to forget it for. One path is the other reader, because
+common case, but it only governs non-ASCII, so the fix that actually holds is that every reader of a path asks
+git for `-z` — split on NUL, never trimmed — and no line-oriented alternative stands beside them to forget it
+for. A list of paths comes back through one of two readers, and what separates them is a name that is not valid
+UTF-8: `nul_separated_paths` hands over the bytes git wrote, since a path is a byte string on unix and decoding
+one lossily replaces exactly the names this exists to preserve, while `paths` decodes to text and refuses such a
+name outright rather than repairing it into one that opens no file. One path is a third reader, because
 `rev-parse` has no `-z` to ask with: it takes git's raw stdout, strips exactly one trailing newline, and hands
 back the rest as bytes. Never a trim, since `str::trim` is Unicode-aware and eats a trailing space or U+3000 off
 the end of a name that had one, and never a lossy decode, which turns any byte outside UTF-8 into a name that

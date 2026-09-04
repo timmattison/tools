@@ -235,9 +235,10 @@ the parent shell — it prints a verdict and exits with a number — so by this
 repository's own rule ([CLAUDE.md](../../CLAUDE.md)) it does not get to write
 into your shell config. The tools here that legitimately install one — `cwt`,
 `nwt`, `crap` — all have to change the parent shell's working directory, which a
-child process physically cannot do. (`prcp`'s `prmv` is the exception that
-proves it: cosmetic, and issue #265 exists to take it back out.) If you want a
-shorthand for `grind`, that is an `alias` you own.
+child process physically cannot do. `prcp` was the exception that proved it. It
+shipped a `prmv` function that only forwarded to `prcp --rm`, and that flag is
+gone now — `prcp --rm` is the whole interface, and the shorthand is an alias the
+user writes. If you want a shorthand for `grind`, that is an `alias` you own.
 
 ## Reading the numbers honestly
 

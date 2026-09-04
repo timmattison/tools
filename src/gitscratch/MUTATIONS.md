@@ -48,6 +48,7 @@ not have to re-derive which guard belongs to which test.
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | `core.fsmonitor=false`, the one program git runs that the redirected `core.hooksPath` cannot take away | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | `rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo list | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_the_conflict_style_even_when_the_repository_asks_for_diff3` | `merge.conflictStyle=merge`, which keeps the base version out of the region the hunk counter reads | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| `a_non_ascii_path_read_back_through_run_is_not_octal_escaped` | `core.quotePath=false`, which stops git C-quoting and octal-escaping a path it prints on a line | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `a_bracket_run_that_is_not_a_marker_does_not_count_as_a_conflict_region` | The exact marker shape — seven brackets, then a space or the end of the line | `src/scratch.rs`, `is_conflict_marker` — take the answer from `starts_with` and drop the test on what follows the run | widen |
 | `an_opening_marker_with_no_closing_one_does_not_count_as_a_conflict_region` | The closed-region rule, which is what makes an unpaired marker file content rather than a cost | `src/scratch.rs`, `count_conflict_hunks` — count the lines that open a region instead of the pairs that close one | widen |
 | `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` (`src/scratch.rs`) | The parent count read ahead of both probes, which refuses a merge commit at a halt whatever the configuration says | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the `stopped_commit_parent_count` call and the `ensure!` under it | remove |
@@ -129,6 +130,7 @@ registry that reports everything as fine is worth less than no registry at all.
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | The fixture sets `core.fsmonitor .git/hooks/fsmonitor-watchman`, the classic watchman spelling, and the value is read back first. | **Full, for the pin.** Plain git must answer with that path before the runner is asked. The same limit as the row above applies to the *consequence*: proving git would execute the named program means letting a replay execute a program on the developer's machine, which no fixture here may do. `tests/safety.rs` cannot cover this route either — its planted hooks all live under `core.hooksPath`, and this program is executed directly — which is the reason the pin is asserted here at all. |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | The fixture sets `rebase.rebaseMerges true` and the value is read back first. | **Full, and the consequence was executed out of band.** The read-back arms the pin. The hazard behind it was watched by hand on git 2.55: a branch carrying a merge, rebased onto a moved base under `-c rebase.rebaseMerges=true`, comes out still carrying the merge (`git rev-list --min-parents=2 --count` answers 1), so a developer's own configuration really does put a merge commit on a replay's todo list. That demonstration is a shell session rather than an assertion, because a merge on the todo list only becomes a halt in a repository built to conflict at it, and the reviewer who found this could not construct one. |
 | `pins_the_conflict_style_even_when_the_repository_asks_for_diff3` | The fixture sets `merge.conflictStyle diff3` and the value is read back first. | **Full, for the pin.** Plain git must answer `diff3` before the runner is asked anything — "the fixture does not hold `merge.conflictStyle=diff3`, so there is nothing here for the runner to override and the assertion below is measured against nothing". What the *style* does was executed out of band rather than asserted: a merge run under each setting was read, and `diff3` was watched to put the base version between a `|||||||` line and the `=======` one. Arming that inside the test means a fixture whose base carries a line reading as a marker, which measures the counter rather than the pin, and the counter has two tests of its own below. |
+| `a_non_ascii_path_read_back_through_run_is_not_octal_escaped` | The fixture stages a `日本語.txt`, so a name git would escape provably reaches the reader. Without it the assertion reads an empty answer against an expected one and fails for the wrong reason. | **Structural.** The escaping is git's own default, so the hazard is armed by git rather than by the fixture: an unpinned `core.quotePath` is what git does with no configuration at all, which is what the mutation below reads back. What no control here states is that git still escapes, so a git that stopped C-quoting would leave this test green about a hazard that had gone. Reading the same path back with `-c core.quotePath=true` pinned on one plain-git command would close it. |
 | `a_bracket_run_that_is_not_a_marker_does_not_count_as_a_conflict_region` | The document really conflicts in **two** places, and the merge that made it is required to have failed — "the merge came out clean, so the document holds no marker at all and the count below meets the floor instead of the markers". Two rather than one because the floor answers one for a counter that found the markers and for one that found nothing. | **Full.** The bracket lines the document carries are whole regions rather than lone lines, so a counter that reads closed regions and matches the run loosely counts them as well: the arming is that the mutation below really does answer 4. The markers on the other side are git's own, out of a real merge, so the shape under test is what git writes rather than what this file believes git writes. |
 | `an_opening_marker_with_no_closing_one_does_not_count_as_a_conflict_region` | The same two-region document and the same required merge failure. | **Full.** The lone marker is spelled exactly the way git spells one, so matching the run exactly does not reject it and the closed-region rule is the only thing that can: a counter that reads opening markers answers 3 whether it matches loosely or exactly. It sits after the last region git wrote, so no later closing marker can pair with it and hide the mutation. |
 | `a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact` | The fixture repository is built at a directory whose own name ends in the whitespace under test, and `git init` through the runner panics if git refuses, so the repository provably sits at a path whose last character is the one at stake. | **Full.** The same answer is read back through `Git::run` first and must be missing exactly that character — `assert_eq!(format!("{through_run}{trailing}"), expected.to_string_lossy())`, "`run` no longer eats a space off the end of git's answer, so the assertion below could only pass vacuously". The trimming *is* the hazard, demonstrated before the new reader is asked anything. Both spellings `str::trim` eats get their own fixture: a space, and U+3000, which a Unicode-aware trimmer takes just as readily. |
@@ -876,6 +878,92 @@ merge rather than asserted: under `diff3` and `zdiff3` git puts the base between
 inside the region under those two and outside it under `merge`. Arming that in
 the test would need a fixture whose base carries such a line, which measures the
 counter rather than the pin — and the counter has two tests of its own, below.
+
+### `core.quotePath`, the setting that decides how git spells a path
+
+Mutation: removed `"core.quotePath=false"` from `Git::safety_config()`. Git's
+own default then stands, and git C-quotes and octal-escapes every byte at or
+above `0x80` in a path it prints on a line. The run was `cargo test
+--no-fail-fast -p gitscratch -p grind -p grist` on git 2.55.0, so the other two
+crates really ran.
+
+```text
+---- git::tests::a_non_ascii_path_read_back_through_run_is_not_octal_escaped stdout ----
+
+thread 'git::tests::a_non_ascii_path_read_back_through_run_is_not_octal_escaped'
+panicked at src/gitscratch/src/git.rs:1068:9:
+assertion `left == right` failed: git must report the path as it is stored, not
+C-quoted and octal-escaped
+  left: "\"\\346\\227\\245\\346\\234\\254\\350\\252\\236.txt\""
+ right: "日本語.txt"
+
+test result: FAILED. 52 passed; 1 failed
+```
+
+No collateral. That is exactly one test across the three crates, and the number
+is the point of this record rather than a footnote. The pin used to be held from
+the other direction, by `tests/conflicts.rs` asserting the *answer* a conflicted
+non-ASCII path produces. It stopped being a test of this setting the day a `-z`
+reader became the way a path list comes back, because `-z` output is unquoted
+whatever `quotePath` says. So the pin spent a stretch with nothing able to
+redden it, and a guard nothing can fail is a guard that quietly stops working.
+`a_non_ascii_path_read_back_through_run_is_not_octal_escaped` puts it back
+against the surface the setting still covers: `Git::run`, the reader a future
+call site reaches for by mistake, where an escaped name arrives in silence.
+
+What the pin buys is narrower than the row in the README reads, and the two
+belong together. `quotePath` governs bytes at or above `0x80` and nothing else,
+and git quotes a `"`, a `\` and every control character whatever it is set to.
+So the pin is the belt and the three readers are the braces: a path list goes
+through `Git::nul_separated_paths` or `Git::paths`, one path goes through
+`Git::path`, and each of those asks git in a mode where no escaping happens at
+all. With the pin in place, a call site that reaches around them is a bug that
+survives the common case rather than one that mangles every non-ASCII name in
+the repository.
+
+### The pins nothing in this workspace can redden
+
+Six entries of `Git::safety_config()` have no map row, and this section is why.
+Each one was removed and the suite was run, so the absence is a measurement
+rather than an oversight. `--literal-pathspecs` is the seventh, and it has a
+section of its own above. Every run was `cargo test --no-fail-fast -p gitscratch
+-p grind -p grist` on git 2.55.0.
+
+Mutation: removed `"gc.auto=0"`, `"rebase.autoStash=false"`,
+`"rebase.autosquash=false"` and `"gpg.format=openpgp"` together rather than one
+at a time, which is the one place this file departs from its own rule. The
+finding is that none of the four reddens anything, and four separate green runs
+say no more than one does. Every test in the three crates stayed green. The README says these four are established by
+construction rather than by a test, and this is that claim measured: they are
+entries in a list that returns `-c key=value` arguments and nothing else, so
+what holds them is the shape of the function. `gpg.format` is the one that looks
+covered and is not — the signing test's own fixture pins `gpg.format=openpgp`
+for its own reasons, and that is the same value, so removing the harness's entry
+changes nothing that test can see.
+
+Mutation: removed `format!("user.name={HARNESS_NAME}")` and
+`format!("user.email={HARNESS_EMAIL}")` from the chained half of the same
+function. Every test in the three crates stayed green again, and the reason is
+the guard beside it. `Git::command` restates the identity as environment on
+every command it builds, and git reads `GIT_AUTHOR_NAME` and its three siblings
+ahead of every configuration source. So the environment half answers on its own,
+and `commits_under_the_crate_s_own_identity_not_a_consuming_tool_s` and
+`the_pinned_identity_survives_a_hook_environment` both pass with the config half
+gone.
+
+That redundancy is deliberate and it is stated as such at the call site: the
+identity has to survive either guard being edited away. What it costs is that
+neither half can be shown to fail while the other stands, so a test cannot tell
+this file which of the two is doing the work today. The half that *is*
+falsifiable is the two dates, because they are removed rather than pinned and
+the sweep alone leaves no trace of them on the command —
+`every_identity_variable_is_settled_on_the_command_the_runner_builds` reddens
+for those, and its record is below.
+
+All six pins stay. A pin that no test can redden is worth one `-c` on the single
+door every git call goes through, and it is the next edit to the guard beside it
+that makes the pin load-bearing again, with no warning of its own. What must not
+happen is this file reporting coverage it does not have.
 
 ### The two halves of `count_conflict_hunks`
 

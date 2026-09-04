@@ -118,22 +118,33 @@ on the machine with `-C`. Naming the subcommand separately puts every caller
 argument after it, where git reads it as an argument of the subcommand. The
 bypass therefore does not compile, rather than being refused at run time.
 
-The runner offers exactly one way to read a **list of paths** back out of git,
-`nul_separated_paths`, which inserts `-z` right after the subcommand, splits
-stdout on NUL without trimming anything, and takes each field as the path those
-bytes spell:
+The runner reads a **list of paths** back out of git through one of two
+readers. Each one inserts `-z` right after the subcommand and splits stdout on
+NUL without trimming anything. `nul_separated_paths` then takes each field as
+the path those bytes spell:
 
 ```rust
 let conflicted = git.nul_separated_paths("diff", &["--name-only", "--diff-filter=U"])?;
 ```
 
-The contract is byte-exact in both halves. `nul_separated` underneath it hands
+That reader is byte-exact in both halves. `nul_separated` underneath it hands
 back `Vec<Vec<u8>>` — git's bytes, for output whose fields are not all paths,
 such as a `status --porcelain -z` record of `XY <path>` — and
 `nul_separated_paths` converts each field with no decoding step at all, because
 on unix a path *is* an arbitrary byte string. Decoding one lossily would put
 `U+FFFD` where the bytes were, which is the same two-part failure C-quoting
 causes: a name nobody typed, and a name that opens no file.
+
+`paths` is the second list reader, and what separates it from the first is what
+it does with such a name. It asks git the same way and then decodes each field
+to a `String`, and it **fails** on a name that is not valid UTF-8 rather than
+repairing it. The refusal is the whole reason for a second reader: `-z` undoes
+the quoting and the trimming, but a byte outside UTF-8 has no `String` to come
+back *as*, so a repaired name carries `U+FFFD` where the bytes were and names
+no file at all. The empty-commit probe takes this reader, because it intersects
+two path lists and then names the difference in a sentence a developer reads. A
+conflicted path takes `nul_separated_paths`, because the report has to carry the
+name git holds all the way to the screen.
 
 There is deliberately no line-oriented equivalent, because one cannot be made
 correct. Git C-quotes a path containing `"`, `\` or a control character no
@@ -143,11 +154,11 @@ is destroyed by the reader instead, since Rust's `str::trim` is Unicode-aware
 and strips `U+3000` as readily as a space. Either way the path cannot be opened,
 and in this crate a conflicted file that cannot be opened is floored at one hunk
 — a wrong total that looks entirely plausible. `-z` is the one mode with no
-quoting and a separator no path can contain, so the reader that uses it is the
-only reader for a *list*.
+quoting and a separator no path can contain, so every reader for a *list* asks
+git for it.
 
-**One** path is a different question, and it has the other of the two path
-readers, `path`. `rev-parse` has no `-z` at all — it prints the flag back as an
+**One** path is a different question, and it has a third reader of its own,
+`path`. `rev-parse` has no `-z` at all — it prints the flag back as an
 unknown option and exits 0, so a NUL-delimited read of it hands back `-z` and
 the path as two fields — and a single answer needs no separator anyway, since
 the end of stdout ends the path. So `path` takes git's raw stdout, strips
@@ -459,7 +470,7 @@ because it quietly discarded the work.
 | `rebase.rebaseMerges=false` | A rebase that keeps merges puts a merge commit on the replay's todo list, and a merge commit at a halt is a commit the replay cannot measure: `git diff-tree` prints no path at all for one unless it is asked for `-c`, `--cc` or `-m`, and the empty-commit probe asks for none of them. That probe would read the halt as a commit that changes nothing, and `rebase --skip` would drop a whole side of history. Git 2.55 was watched to re-create the merge commit under `rebase.rebaseMerges=true`, so this is a developer's own configuration rather than a hypothetical. The probe refuses a multi-parent stopped commit outright as well, which holds whatever a later setting does; this pin closes the one route into it that exists today. |
 | `-z` on the way out, `--literal-pathspecs` on the way in | Git C-quotes a non-ASCII name whenever it prints a path on a line, and a name that begins or ends with whitespace survives git only to lose that whitespace to a trimming reader. `-z` turns the escaping off and separates on the one byte a path cannot contain, so a path comes back as the bytes it is stored under. `--literal-pathspecs` covers the other direction, where a path handed back to git stops being a path and becomes a pathspec: a leading `:` is magic, and `*`, `?` and `[` are wildcards. A pathspec that matches *nothing* is the mild half — it can only add to the paths a probe finds missing, and that only ever buys a refusal nobody needed. The half worth the guard is one that matches the *wrong* file: `:/foo.txt` read as magic means from the top of the working tree, so it silently answers about the root `foo.txt`. No call site in this crate hands a path back to git today — the empty-commit probe intersects two path lists in Rust instead — so the pin protects the next call site that does, at the cost of one argument on the single door every git call goes through. |
 | `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. The config half settles nothing on its own: an identity variable outranks every config source, `-c` included, which is why the row above sheds the whole inherited environment first. The runner then restates the identity as environment on every command it builds, so it holds with either guard edited away — the four variables that name a person pinned to the harness, and `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` *removed* rather than pinned, since a pinned date gives every commit of one run the same timestamp. All six, because a restatement that covered four of them would hold the name and let both dates through the day the sweep went away. |
-| `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job and reading one path is `Git::path`'s (both above), and this narrows what a call site that reaches around them can get wrong. |
+| `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job or `Git::paths`'s, and reading one path is `Git::path`'s (all three above), and this narrows what a call site that reaches around them can get wrong. |
 | `merge.conflictStyle=merge` | The count has to mean the same thing on every machine. All three styles open and close a conflict region with the same markers, so a region whose two sides carry no bracket line of their own costs one hunk under any of them. What `diff3` and `zdiff3` add is the **base** version of the region, between a `|||||||` line and the `=======` one — so a base carrying a line that reads as a marker lands inside the region under those two and outside it under `merge`. The replay then measures a different file on a developer who set the key, and `grist` ranks candidates on that count: two developers comparing the same branches read two orders and neither is told why. Read out of a real merge rather than from git's documentation. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
@@ -940,9 +951,15 @@ than by a test of their own, in two different places. `gpg.format`, `gc.auto`,
 and the `rebase.autoStash`/`autosquash` pair are entries in `safety_config`,
 which returns `-c key=value` arguments and nothing else; the editor and prompt
 environment — `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `GIT_TERMINAL_PROMPT` — is
-set on the command itself, in `Git::try_run`. The editor guard is at least
+set on the command itself, in `Git::command`. The editor guard is at least
 exercised indirectly: every conflict test above drives a rebase that halts, and
 a halted rebase without `GIT_EDITOR` set sits waiting on a commit message.
+
+Those four were measured rather than assumed: removing all of them together
+leaves every test in `gitscratch`, `grind` and `grist` green, which
+[`MUTATIONS.md`](./MUTATIONS.md) records under **The pins nothing in this
+workspace can redden**, alongside the same answer for the `user.name` and
+`user.email` pair.
 
 `gpg.format` looks like the signing test covers it and it does not, which is
 worth saying out loud so nobody re-derives the wrong answer. That test's fixture
