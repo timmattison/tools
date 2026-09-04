@@ -59,6 +59,42 @@ use crate::metrics::{Files, Hunks, Stops};
 const MAX_RESOLUTION_ROUNDS: usize = 1_000;
 
 /// A detached scratch worktree that removes itself.
+///
+/// # The runner stays inside this crate
+///
+/// A scratch worktree is a *linked* worktree of the developer's real
+/// repository, so it shares that repository's refs, configuration and object
+/// store. The hardening this crate applies is configuration: it pins the
+/// settings that make a *replay* non-destructive. It says nothing at all about
+/// `branch -D`, `update-ref`, `config --local` or `push`, because those are
+/// different commands and no setting refuses them. A consumer holding a runner
+/// can therefore send any of them straight into the real repository through the
+/// scratch worktree, and the crate's central promise - that a consumer cannot
+/// reach an unhardened git - is then false.
+///
+/// So the runner does not leave this crate. A consumer asks for the operation
+/// it wants by name, and this type builds the git call.
+///
+/// The named operations compile:
+///
+/// ```no_run
+/// let scratch = gitscratch::Repo::open(std::path::Path::new("."))
+///     .expect("a repository")
+///     .scratch("HEAD")
+///     .expect("a scratch worktree");
+/// let conflicts = scratch.replay_rebase("main").expect("a replay");
+/// ```
+///
+/// A reach for the runner does not. The block below is the same setup with one
+/// line added, so what it proves is that the added line is what stops it:
+///
+/// ```compile_fail
+/// let scratch = gitscratch::Repo::open(std::path::Path::new("."))
+///     .expect("a repository")
+///     .scratch("HEAD")
+///     .expect("a scratch worktree");
+/// let runner = scratch.git();
+/// ```
 pub struct Scratch {
     repo: PathBuf,
     /// Never read: held solely so the temporary directory - and everything the
