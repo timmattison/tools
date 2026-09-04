@@ -12,7 +12,7 @@ use std::process::{Command, Output};
 
 use gitscratch::testing::{
     equal_hunks_unequal_stops_repo, independent_branches_repo, multi_byte_names_repo,
-    not_a_repository, unrelated_histories_repo, TestRepo,
+    nested_conflict_repo, not_a_repository, unrelated_histories_repo, TestRepo,
 };
 use gitscratch::NoInheritedGitEnvironment;
 use unicode_width::UnicodeWidthStr;
@@ -1117,5 +1117,66 @@ fn a_branch_name_that_starts_with_a_dash_is_refused_rather_than_reported_clean()
         Some(CLEAN),
         "a branch that does exist must still be answered, or the refusal above proves only that \
          this binary refuses everything\nstdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+}
+
+/// `grime` takes its repository from the directory it was run in, and that
+/// directory is hardly ever the repository root - so the run this test performs
+/// is the ordinary one and every other test in this file is the special case.
+///
+/// What a subdirectory can quietly change is the *names*. Git will happily
+/// report a path relative to the directory it was asked from, so a breakdown
+/// naming `shared.txt` for a file that is really `sub/nested/shared.txt` reads
+/// as perfectly good output while pointing at the wrong file - and a reader
+/// scoped to the cwd instead drops the root `shared.txt` altogether and reports
+/// less work than there is. Both are asserted here, and [`nested_conflict_repo`]
+/// exists to make the two distinguishable: one conflicted file inside the
+/// subdirectory the run starts in, one outside it.
+///
+/// The final assertion is the strongest form of the claim: the whole answer is
+/// byte-identical to the one the same fixture gives from its root, which is the
+/// only place a developer's mental model of the tool comes from.
+#[test]
+fn a_run_from_a_subdirectory_names_conflicts_from_the_repository_root() {
+    let repo = nested_conflict_repo();
+    repo.checkout("left");
+    let nested = repo.path().join("sub").join("nested");
+
+    let (code, stdout, stderr) = streams(&grime(&nested, &["right"]));
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "a subdirectory of a repository is inside one, so the question is \
+         answerable from it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        breakdown(&stdout),
+        vec![
+            "  shared.txt               1 hunk",
+            "  sub/nested/shared.txt    1 hunk",
+        ],
+        "the breakdown has to name both files by their whole path from the \
+         repository root, including the one that conflicted outside the \
+         directory the run started in\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("../"),
+        "a path climbing out of the directory the run started in is a name \
+         relative to the cwd, not to the repository:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(&repo.path().display().to_string()),
+        "an absolute path inside a temporary fixture is no name for a \
+         conflicted file:\n{stdout}"
+    );
+
+    let (root_code, root_stdout, root_stderr) = streams(&grime(repo.path(), &["right"]));
+
+    assert_eq!(
+        (code, stdout),
+        (root_code, root_stdout),
+        "the same question about the same repository has one answer, whichever \
+         of its directories it was asked from\nstderr:\n{stderr}\nroot stderr:\n{root_stderr}"
     );
 }
