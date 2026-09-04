@@ -550,6 +550,120 @@ mod tests {
     };
     use crate::testing::TestRepo;
 
+    /// The setting the two tests below try to undo. It stands for every pin
+    /// [`Git::safety_config`] makes, because git resolves them all by one rule,
+    /// and it is the pin that costs the most: `tests/safety.rs` proves that a
+    /// replay rewrites the developer's own branch refs when this setting is on.
+    const PINNED_SETTING: &str = "rebase.updateRefs";
+
+    /// The value a smuggled `-c` pair puts in place of the pinned one. It is
+    /// not a boolean, so no reader can take it for another spelling of `false`.
+    const SMUGGLED_VALUE: &str = "OVERRIDDEN";
+
+    /// An argument the caller hands the runner must not reach the position
+    /// ahead of the subcommand, because that position belongs to git.
+    ///
+    /// Git reads the arguments ahead of the subcommand as its own options, and
+    /// its rule for two `-c` pairs that name one key is that the last pair
+    /// wins. An argument list that lands there therefore undoes every pin
+    /// [`Git::safety_config`] makes, one `-c` pair at a time.
+    ///
+    /// The runner keeps the caller out of that position by taking the
+    /// subcommand as a parameter of its own. An argument can only land after
+    /// the subcommand, where git reads it as an argument of the subcommand
+    /// rather than as one of its own. So the read below either fails, because
+    /// `config` refuses a `-c` it does not know, or hands back the pinned
+    /// value. Both of those are the guard holding.
+    ///
+    /// Two controls stand ahead of the assertion, because an assertion that
+    /// something did not happen passes just as readily when it was never
+    /// possible. The first proves the pin is real and readable. The second
+    /// proves git still lets the last `-c` pair win, which is the hazard.
+    #[test]
+    fn an_argument_cannot_re_pin_a_setting_the_safety_config_fixed() {
+        let repo = TestRepo::init();
+        let git = Git::new(repo.path(), "");
+        let smuggled = format!("{PINNED_SETTING}={SMUGGLED_VALUE}");
+
+        assert_eq!(
+            git.run(&["config", "--get", PINNED_SETTING])
+                .expect("read back the setting the safety configuration pins"),
+            "false",
+            "the safety configuration has to pin `{PINNED_SETTING}=false`, or there is nothing \
+             here for an argument to undo and the assertion below is measured against nothing"
+        );
+
+        assert_eq!(
+            repo.git(&[
+                "-c",
+                &format!("{PINNED_SETTING}=false"),
+                "-c",
+                &smuggled,
+                "config",
+                "--get",
+                PINNED_SETTING,
+            ]),
+            SMUGGLED_VALUE,
+            "git no longer lets the last `-c` pair win, so this test could only pass vacuously"
+        );
+
+        let read_back = git.run(&["-c", &smuggled, "config", "--get", PINNED_SETTING]);
+
+        if let Ok(setting) = read_back {
+            assert_eq!(
+                setting, "false",
+                "an argument reached the position ahead of the subcommand, where git reads it as \
+                 one of its own options, and the last `-c` pair wins. Every guard the safety \
+                 configuration pins is off for that invocation, `{PINNED_SETTING}=false` \
+                 included, and that one costs the developer the branch under replay."
+            );
+        }
+    }
+
+    /// The same position also carries `-C`, which moves git to another
+    /// directory, so the guard has to hold for where the runner works as well
+    /// as for what it pins.
+    ///
+    /// `-C` outranks the working directory [`Git::command`] sets, so an
+    /// argument that reaches the position ahead of the subcommand aims a runner
+    /// documented as pinned to one working directory at any repository on the
+    /// machine. The developer's own repository is the one that matters.
+    ///
+    /// Both fixtures answer through git itself, so the two paths are spelled
+    /// the way git spells them and nothing here has to canonicalise a path to
+    /// compare it. The difference between the two answers is the armed control:
+    /// it proves `-C` really does move git, and therefore that the assertion
+    /// below has a hazard to defend against.
+    #[test]
+    fn an_argument_cannot_aim_the_runner_at_another_repository() {
+        let here = TestRepo::init();
+        let elsewhere = TestRepo::init();
+        let git = Git::new(here.path(), "");
+        let their_path = elsewhere.path().to_str().expect("utf-8 fixture path");
+
+        let ours = git
+            .run(&["rev-parse", "--absolute-git-dir"])
+            .expect("ask git which repository the runner is rooted in");
+        let theirs = here.git(&["-C", their_path, "rev-parse", "--absolute-git-dir"]);
+
+        assert_ne!(
+            ours, theirs,
+            "`-C` no longer moves git to another directory, so this test could only pass vacuously"
+        );
+
+        let read_back = git.run(&["-C", their_path, "rev-parse", "--absolute-git-dir"]);
+
+        if let Ok(answered) = read_back {
+            assert_eq!(
+                answered, ours,
+                "an argument reached the position ahead of the subcommand, where `-C` moves git \
+                 to another directory. A runner pinned to one working directory answered about a \
+                 repository nobody pointed it at, and the developer's own repository is reachable \
+                 the same way."
+            );
+        }
+    }
+
     /// `core.quotePath=false` needs its own test now that it protects nothing a
     /// caller can otherwise observe.
     ///

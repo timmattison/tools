@@ -331,6 +331,26 @@ string with no encoding promised, and a lossy conversion would destroy exactly
 the names that reader exists to preserve. The name never touches the filesystem —
 APFS rejects it outright — so the test puts it in the index directly.
 
+Two more pin **the position a caller's arguments land in**, which is what keeps
+every row of the table above from being undone by the caller. Git reads the
+arguments ahead of the subcommand as its own options, so an argument list that
+reaches that position re-pins any setting `safety_config` fixed — git's rule for
+two `-c` pairs naming one key is that the last pair wins — and aims the runner
+at any repository on the machine with `-C`.
+`an_argument_cannot_re_pin_a_setting_the_safety_config_fixed` smuggles
+`-c rebase.updateRefs=OVERRIDDEN` past the runner and requires the pinned
+`false` to hold, and
+`an_argument_cannot_aim_the_runner_at_another_repository` smuggles a `-C` naming
+a second fixture and requires the answer to be about the first. Each carries an
+armed control ahead of its assertion, because both assertions say that
+something did *not* happen and an assertion of that shape passes just as
+cheerfully when the hazard was never live: the first reads the pin back
+unmodified and then watches plain git honour the last `-c` pair, and the second
+watches plain git follow `-C` into the other repository. The guard itself is
+structural rather than a check — `Git` takes the subcommand as a parameter of
+its own, so an argument can only land *after* it, where git reads it as an
+argument of the subcommand.
+
 The fixture builder stamps commits too, and is covered on its own ground in
 `src/testing.rs`, by
 `a_fixture_commits_under_its_own_identity_in_a_hook_environment`. It needs an
