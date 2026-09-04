@@ -237,11 +237,13 @@ impl TestRepo {
         let mut child = command
             .args(args)
             .current_dir(self.dir.path())
-            // The same immunity `git_in` takes, in the same words and for the
-            // same reason: a fixture that inherits a redirected `GIT_DIR` or
-            // `GIT_INDEX_FILE` writes its objects into the developer's real
-            // repository instead of this one.
-            .without_inherited_git_environment()
+            // MUTATION, deliberate, and the next commit takes it back out: the
+            // sweep is gone from this spawn. The same immunity `git_in` takes,
+            // in the same words and for the same reason: a fixture that
+            // inherits a redirected `GIT_DIR` or `GIT_INDEX_FILE` writes its
+            // objects into the developer's real repository instead of this one.
+            // `tests/isolation.rs` now reaches this spawn, and the mutation is
+            // what proves it reaches it.
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -513,6 +515,29 @@ impl Drop for SealedObjectStore {
     }
 }
 
+/// The directory name that makes the seal walk panic, so the guard's own unwind
+/// can be pinned.
+///
+/// The walk raises every I/O error as a panic, and a panic partway through it
+/// is the one failure the guard has to survive: the directories already
+/// stripped have to come back. Nothing a test can plant on disk makes the walk
+/// panic *after* a seal and before its own end. The walk seals a directory only
+/// once every directory under it is sealed, so the first failure a planted
+/// unreadable directory can raise arrives before anything is stripped, and
+/// which of two directories the walk meets first is the file system's choice
+/// rather than the test's.
+///
+/// A directory of this name is therefore the seam. It sits one level above a
+/// directory of its own, so the walk seals that one, meets this name on the way
+/// back up, and panics with exactly one directory stripped, in every order a
+/// file system can hand its entries back in.
+///
+/// The check exists in this crate's own test build alone, so no consumer's
+/// fixture carries it, and no object database git builds holds a directory of
+/// this name.
+#[cfg(all(unix, test))]
+const SEAL_PANIC_DIRECTORY: &str = "gitscratch-seal-panic";
+
 /// Strip the write bits from `path` and every directory beneath it, recording
 /// what each one had so the guard can put it back.
 #[cfg(unix)]
@@ -533,6 +558,16 @@ fn seal_directories_under(path: &Path, restore: &mut Vec<(PathBuf, std::fs::Perm
             seal_directories_under(&entry.path(), restore);
         }
     }
+
+    // The planted panic, and the seat it has to sit in: after the children of
+    // this directory are stripped, so the unwind has something to put back.
+    #[cfg(test)]
+    assert!(
+        !path.ends_with(SEAL_PANIC_DIRECTORY),
+        "the seal walk stops at the planted {}, which is how a panic partway \
+         through the walk is put under test",
+        path.display()
+    );
 
     let mut sealed = original.clone();
     sealed.set_mode(original.mode() & !0o222);
@@ -1476,11 +1511,16 @@ impl DetachedGitDirRepo {
         let output = command
             .args(args)
             .current_dir(cwd)
-            // The same immunity `TestRepo::git_in` takes, in the same words and
-            // for the same reason: a fixture that inherits a redirected
-            // `GIT_DIR` or `GIT_INDEX_FILE` builds its repository somewhere
-            // else. This suite runs under a pre-commit hook that exports both.
-            .without_inherited_git_environment()
+            // MUTATION, deliberate, and the next commit takes it back out: the
+            // sweep is gone from this spawn. The same immunity
+            // `TestRepo::git_in` takes, in the same words and for the same
+            // reason: a fixture that inherits a redirected `GIT_DIR` or
+            // `GIT_INDEX_FILE` builds its repository somewhere else. This suite
+            // runs under a pre-commit hook that exports both. `--git-dir` and
+            // `--work-tree` on this command line outrank the first two
+            // variables and nothing on it outranks `GIT_INDEX_FILE`, so the
+            // sweep is the whole of the guard against a staged fixture landing
+            // in the developer's index.
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
 
@@ -1773,27 +1813,93 @@ mod tests {
             return;
         }
 
+        let outcome = run_child_half(IDENTITY_TEST_PATH, |child| {
+            child.env(CHILD_MARKER, "1");
+            for (name, value) in HOOK_ENVIRONMENT {
+                child.env(name, value);
+            }
+        });
+
+        if let Err(report) = outcome {
+            panic!("a fixture commit did not survive a hook environment:\n{report}");
+        }
+    }
+
+    /// Re-execute this test binary on one test, under an environment
+    /// `configure` sets, and report what the child wrote when the run failed.
+    ///
+    /// The environment a parent needs is process-wide, and
+    /// `std::env::set_var` in the parent reaches every sibling test in the
+    /// binary and every concurrent run of the suite. So the parent sets the
+    /// variables on a *child* command instead, and names the one test that
+    /// child is to run.
+    ///
+    /// A run counts when the child exits zero and libtest reports one test
+    /// passed.
+    fn run_child_half(
+        filter: &str,
+        configure: impl FnOnce(&mut std::process::Command),
+    ) -> Result<(), String> {
         let mut child = std::process::Command::new(
             std::env::current_exe().expect("path of the running test binary"),
         );
-        child
-            .args([IDENTITY_TEST_PATH, "--exact", "--nocapture"])
-            .env(CHILD_MARKER, "1");
-        for (name, value) in HOOK_ENVIRONMENT {
-            child.env(name, value);
-        }
+        child.args([filter, "--exact", "--nocapture"]);
+        configure(&mut child);
 
         let output = child.output().expect("re-run this test binary");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        assert!(
-            output.status.success(),
-            "a fixture commit did not survive a hook environment:\n{stdout}\n{stderr}"
+        if !output.status.success() {
+            return Err(format!("the child half failed:\n{stdout}{stderr}"));
+        }
+
+        if !stdout.contains(ONE_TEST_PASSED) {
+            return Err(format!(
+                "`{filter}` did not run exactly one test.\n{stdout}{stderr}"
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// A test of this file that no child half names, so a run of it stands for
+    /// a filter pointed at the wrong test.
+    ///
+    /// It runs a git command of its own and returns, and it spawns no child, so
+    /// the child that runs it costs one repository and stops there.
+    const DECOY_TEST_PATH: &str =
+        "testing::tests::try_git_hands_back_a_failure_instead_of_raising_it";
+
+    /// A filter is a string, and nothing ties a string to the test it names.
+    /// A rename that leaves a filter pointed at a *neighbouring* test — the
+    /// copied constant, the renamed function, the test split in two — hands the
+    /// parent a child that ran, passed, and never touched the assertions the
+    /// parent is reading the run for.
+    ///
+    /// libtest's own count cannot tell those two runs apart, because both of
+    /// them are one test passing. Only the child can: a line it prints from the
+    /// end of its own body is proof of *which* work was done, where a count is
+    /// proof that some work was done.
+    ///
+    /// So this pins that the child runner refuses a child that ran another
+    /// test. The rename that breaks a filter is the rename that hides the
+    /// breakage, which is why the refusal cannot live in the filter constants
+    /// themselves.
+    #[test]
+    fn a_child_half_that_ran_another_test_is_not_taken_for_the_one_that_was_named() {
+        let outcome = run_child_half(DECOY_TEST_PATH, |_| {});
+
+        let report = outcome.expect_err(
+            "a child that ran some other test must be a failure: it passes, and libtest counts \
+             it exactly as it counts the test that was meant to run, so accepting that count \
+             means a filter pointed at a neighbour reports a pass while the assertions the \
+             parent needs never run",
         );
         assert!(
-            stdout.contains(ONE_TEST_PASSED),
-            "the child must have run exactly one test, got:\n{stdout}"
+            report.contains(DECOY_TEST_PATH),
+            "the refusal has to name the filter that ran the wrong test, because the filter is \
+             the thing that went stale: {report}"
         );
     }
 
@@ -1908,6 +2014,120 @@ mod tests {
             ),
             None,
             "the check must pass a directory under the work tree"
+        );
+    }
+
+    /// The directory the walk strips before the planted panic stops it. It sits
+    /// under [`super::SEAL_PANIC_DIRECTORY`], which is what makes the order the
+    /// file system hands its entries back in irrelevant.
+    #[cfg(unix)]
+    const SEALED_BEFORE_THE_PANIC: &str = "stripped-first";
+
+    /// The owner's write bit, the one bit the seal takes off a directory.
+    #[cfg(unix)]
+    const OWNER_WRITE: u32 = 0o200;
+
+    /// Every directory at or under `path`, with the mode it carries now.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a directory cannot be listed or a mode cannot be read.
+    #[cfg(unix)]
+    fn directory_modes(path: &std::path::Path) -> Vec<(std::path::PathBuf, u32)> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mode = std::fs::metadata(path)
+            .unwrap_or_else(|e| panic!("read permissions of {}: {e}", path.display()))
+            .permissions()
+            .mode();
+        let mut modes = vec![(path.to_path_buf(), mode)];
+
+        for entry in std::fs::read_dir(path)
+            .unwrap_or_else(|e| panic!("list {}: {e}", path.display()))
+            .flatten()
+        {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                modes.extend(directory_modes(&entry.path()));
+            }
+        }
+
+        modes
+    }
+
+    /// Put the owner's write bit back on `path` and every directory beneath it.
+    ///
+    /// The test repairs the tree itself rather than leaving the repair to the
+    /// guard, because whether the guard repaired it is the thing under test. A
+    /// tree that keeps its stripped write bits stops its own `TempDir` from
+    /// deleting itself, and the litter that leaves needs a `chmod -R u+w` by
+    /// hand.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a mode cannot be read or set.
+    #[cfg(unix)]
+    fn unseal_directories_under(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for (directory, mode) in directory_modes(path) {
+            let mut permissions = std::fs::metadata(&directory)
+                .unwrap_or_else(|e| panic!("read permissions of {}: {e}", directory.display()))
+                .permissions();
+            permissions.set_mode(mode | OWNER_WRITE);
+            std::fs::set_permissions(&directory, permissions)
+                .unwrap_or_else(|e| panic!("unseal {}: {e}", directory.display()));
+        }
+    }
+
+    /// The seal walk raises every I/O error as a panic, and the guard that puts
+    /// the modes back is what makes the fixture's own temporary directory
+    /// deletable again.
+    ///
+    /// So the guard has to be alive while the walk runs. Built after the walk
+    /// returns, it is never built at all when the walk panics partway: the
+    /// directories stripped up to that point keep their modes, `TempDir` cannot
+    /// delete the tree it owns, and the litter it leaves is a tree `rm -rf`
+    /// refuses — permission denied on the files, directory not empty on the
+    /// parents — until somebody runs `chmod -R u+w` on it by hand.
+    ///
+    /// The panic is planted rather than provoked, because nothing a test can
+    /// put on disk makes the walk fail *after* it has stripped something. See
+    /// [`super::SEAL_PANIC_DIRECTORY`].
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_inside_the_seal_walk_puts_back_the_directories_it_already_stripped() {
+        let repo = TestRepo::init();
+        repo.commit_file("seed.txt", "seed\n", "seed");
+
+        let objects = repo.path().join(".git").join("objects");
+        let stripped_first = objects
+            .join(super::SEAL_PANIC_DIRECTORY)
+            .join(SEALED_BEFORE_THE_PANIC);
+        std::fs::create_dir_all(&stripped_first)
+            .expect("plant the directory the walk strips before it panics");
+
+        let outcome = std::panic::catch_unwind(|| drop(repo.seal_object_store()));
+
+        // Read before the repair, and repaired before the assertions, so a
+        // failing run leaves no tree behind that the next developer has to
+        // chmod their way out of.
+        let modes = directory_modes(&objects);
+        unseal_directories_under(&objects);
+
+        outcome.expect_err(
+            "the planted directory has to stop the walk, or this test watches an unwind that \
+             never happened and reports that the guard survived it",
+        );
+        let held: Vec<String> = modes
+            .iter()
+            .filter(|(_, mode)| mode & OWNER_WRITE == 0)
+            .map(|(directory, mode)| format!("{} ({mode:o})", directory.display()))
+            .collect();
+        assert!(
+            held.is_empty(),
+            "a panic inside the seal walk has to unwind through a live guard, so every directory \
+             it had already stripped comes back writable. These kept the mode the walk gave \
+             them: {held:?}"
         );
     }
 }

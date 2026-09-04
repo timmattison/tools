@@ -469,3 +469,39 @@ fn uncommitted_files_counts_every_file_inside_an_untracked_directory() {
         "an untracked directory should count its files, not itself"
     );
 }
+
+/// A repository with no working tree cannot answer this question at all, and
+/// the error is part of the contract rather than an accident of it.
+///
+/// `git status` needs a working tree to take a status of, and a bare repository
+/// has none. `Repo::uncommitted_files` documents that as its ordinary failure,
+/// and tells a caller who wants the count as a *caveat* to read the failure as
+/// no caveat — `unwrap_or_default`, which `Uncommitted` derives for the purpose.
+/// That reading is only safe while the answer really is an error: a count that
+/// silently answered zero would say the tree is clean, which is a different
+/// statement about a repository that has no tree.
+///
+/// Nothing pinned the error. `grind`'s
+/// `a_repository_with_no_working_tree_is_answered_rather_than_refused` asserts
+/// the composite — no caveat printed, and the verdict still right — and an
+/// `Ok(0)` here reads to that test exactly as an error does, so it would stay
+/// green either way.
+#[test]
+fn uncommitted_files_refuses_a_repository_with_no_working_tree() {
+    let fixture = conflicting_repo();
+    let bare = fixture.bare_clone("main");
+
+    let repo = Repo::open(bare.path()).expect("a bare repository is a git repository");
+
+    let error = repo.uncommitted_files().map(|_| ()).expect_err(
+        "a bare repository has no working tree to take a status of, so the count has to fail \
+         rather than answer zero, which a caller reads as a clean tree",
+    );
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("status"),
+        "the error has to name the query that could not be answered, or a caller cannot tell \
+         this failure from any other: {message}"
+    );
+}

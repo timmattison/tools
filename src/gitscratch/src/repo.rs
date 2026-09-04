@@ -138,9 +138,15 @@ impl Repo {
     /// a replay needs no working tree, so a repository that cannot answer this
     /// question can still answer the expensive one.
     pub fn uncommitted_files(&self) -> Result<Uncommitted> {
+        // MUTATION, deliberate, and the next commit takes it back out: a failed
+        // status answers with no records instead of with the failure. The count
+        // is then zero for a repository with no working tree, which reads as a
+        // clean tree rather than as a question that cannot be answered. That is
+        // what the new test in `tests/repo.rs` is here to catch.
         let records = self
             .git()
-            .nul_separated("status", &["--porcelain", "--untracked-files=all"])?;
+            .nul_separated("status", &["--porcelain", "--untracked-files=all"])
+            .unwrap_or_default();
 
         // Not `records.len()`: a rename and a copy each spend two fields on one
         // file. See `moved_from_elsewhere`.

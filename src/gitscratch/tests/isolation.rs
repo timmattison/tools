@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use gitscratch::testing::{conflicting_repo, not_a_repository, TestRepo};
+use gitscratch::testing::{conflicting_repo, not_a_repository, DetachedGitDirRepo, TestRepo};
 use gitscratch::Files;
 
 /// The test re-executed as the child, by exact name.
@@ -53,17 +53,46 @@ const CONTROL_AUTHOR: &str = "the control's own author";
 /// tree a commit made in that fixture must be built from.
 const FIXTURE_FILE: &str = "shared.txt";
 
+/// A file name that is not valid UTF-8, which is the one name a fixture can
+/// only commit through [`TestRepo::commit_file_named_by_bytes`] — and so the
+/// one route to the spawn that pipes its argument in on stdin.
+const UNDECODABLE_NAME: &[u8] = b"\xff-byte-named.txt";
+
+/// The branch the detached-git-directory fixture checks out into a linked
+/// worktree here. Any name it does not already carry does.
+const DETACHED_BRANCH: &str = "side";
+
 /// Everything this crate spawns git for, exercised in whatever environment the
 /// process happens to have.
 ///
 /// Run directly by `cargo test` like any other test — where it simply proves
 /// the fixtures build — and re-executed by the tests below with a leaked git
-/// environment, where it is the assertion. All four spawn sites are covered in
-/// one pass because a leak reaches all four at once: [`TestRepo`]'s builder,
-/// the [`not_a_repository`] probe, [`TestRepo::try_git`] — the spawn a control
-/// run needs, because it is allowed to fail — and the crate's own `Git`, which
-/// `TestRepo::scratch` reaches twice over, first through `Repo::open`'s
-/// pre-flight and then through the `Scratch` it hands back.
+/// environment, where it is the assertion. Every spawn site is covered in one
+/// pass because a leak reaches every one of them at once:
+///
+/// - [`TestRepo`]'s builder, which is the spawn every fixture is made of.
+/// - [`TestRepo::commit_file_named_by_bytes`], which reaches the spawn that
+///   pipes a record in on stdin — the one way to name a path git records as
+///   bytes, and a spawn that writes straight into an object database.
+/// - [`TestRepo::try_git`] — the spawn a control run needs, because it is
+///   allowed to fail.
+/// - The [`not_a_repository`] probe.
+/// - [`DetachedGitDirRepo`], whose runner names the git directory and the work
+///   tree on the command line. Those two arguments outrank `GIT_DIR` and
+///   `GIT_WORK_TREE`, and nothing on that command line outranks
+///   `GIT_INDEX_FILE`, so the sweep is the whole of what keeps the fixture's
+///   own `git add` out of the developer's index.
+/// - The crate's own `Git`, which `TestRepo::scratch` reaches twice over,
+///   first through `Repo::open`'s pre-flight and then through the `Scratch` it
+///   hands back.
+///
+/// The list carries no count. A number written here is a fact nothing checks,
+/// and this one had gone stale: it said four while the crate had six, and both
+/// unlisted spawns were the two most recently added. Deriving the number means
+/// scanning `src/testing.rs` for the shape of a spawn, which is a matcher whose
+/// own spelling list is the next thing to go quietly out of date — the defect
+/// this list already had, moved into a guard. So the sites are named instead,
+/// where a reader can hold the list against the file.
 #[test]
 fn fixtures_and_replays_stay_inside_their_own_temporary_directories() {
     let repo = conflicting_repo();
@@ -93,14 +122,55 @@ fn fixtures_and_replays_stay_inside_their_own_temporary_directories() {
         "the fixture's own contested file should have conflicted"
     );
 
+    // The spawn that pipes its record in on stdin, which is how a fixture names
+    // a path git records as bytes. It writes a blob, a tree and a commit
+    // straight into an object database, so a leaked `GIT_DIR` puts all three in
+    // the developer's own store — and the commit is then read back through the
+    // scrubbed reader, which finds nothing.
+    let byte_named = repo.commit_file_named_by_bytes(
+        UNDECODABLE_NAME,
+        "content under a name no filesystem here can hold\n",
+        "a name git records as bytes",
+    );
+    assert_eq!(
+        repo.git(&["cat-file", "-t", &byte_named]),
+        "commit",
+        "the blob, the tree and the commit went to whichever repository the \
+         environment named rather than to the fixture they were aimed at"
+    );
+
     let elsewhere = not_a_repository();
     assert!(
         elsewhere.path().is_dir(),
         "the probe must hand back a directory that exists"
     );
 
-    // The fourth spawn site. A control run needs a git command that is allowed
-    // to fail — failing is what proves the hazard is armed — which
+    // The detached-git-directory fixture, whose every spawn names the git
+    // directory and the work tree on the command line. Those arguments outrank
+    // `GIT_DIR` and `GIT_WORK_TREE`; nothing on the command line outranks
+    // `GIT_INDEX_FILE`, so without the sweep this fixture's own `git add`
+    // stages into whichever index the environment names.
+    let detached = DetachedGitDirRepo::nested();
+    let linked = detached
+        .work_tree()
+        .parent()
+        .expect("the work tree sits under the fixture's temporary directory")
+        .join("linked-worktree");
+    detached.add_worktree(&linked, DETACHED_BRANCH);
+
+    assert!(
+        linked.is_dir(),
+        "the linked worktree must exist at {}",
+        linked.display()
+    );
+    assert_eq!(
+        detached.git(&["rev-parse", "--abbrev-ref", "HEAD"]),
+        "main",
+        "the detached fixture's own branch, not whichever one the environment names"
+    );
+
+    // The spawn a control run needs, which is a git command that is allowed to
+    // fail — failing is what proves the hazard is armed — and which
     // `TestRepo::git` cannot give it, because it panics on a non-zero exit. A
     // control that reached around the fixture for a raw `Command` would get
     // that permission and lose this scrub with it, and `.current_dir()` does
