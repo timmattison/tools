@@ -131,8 +131,10 @@ pub struct Scratch {
     worktree: PathBuf,
     /// Validated once in [`Scratch::create`] so every `Git` built from it can
     /// have the path infallibly. An empty `core.hooksPath` is not "hooks off" -
-    /// git still resolves hook lookups against it - so a path that cannot be
-    /// spelled for git has to fail the run, not degrade into one.
+    /// git joins the configured directory onto the hook name, so an empty one
+    /// resolves `pre-commit` to `/pre-commit`, at the root of the file system -
+    /// so a path that cannot be spelled for git has to fail the run, not
+    /// degrade into one. [`Git::new`] refuses the empty value outright.
     hooks: String,
 }
 
@@ -1091,6 +1093,7 @@ mod tests {
     };
     use crate::git::Git;
     use crate::metrics::{Hunks, Stops};
+    use crate::repo::PREFLIGHT_HOOKS_PATH;
     use crate::testing::{contested_region_repo, TestRepo};
 
     /// How many rounds replaying `iterated` onto `single` spends.
@@ -1451,7 +1454,7 @@ mod tests {
         // probe reads the fixture exactly as it reads a real halt.
         repo.git(&["update-ref", "REBASE_HEAD", "HEAD"]);
 
-        let git = Git::new(repo.path(), "");
+        let git = Git::new(repo.path(), PREFLIGHT_HOOKS_PATH);
 
         let parents = repo.git(&["rev-list", "--no-walk", "--parents", "REBASE_HEAD"]);
         assert_eq!(

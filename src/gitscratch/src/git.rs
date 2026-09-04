@@ -28,6 +28,14 @@ const HARNESS_EMAIL: &str = "gitscratch@localhost";
 /// [`NoInheritedGitEnvironment`] removes.
 const GIT_ENVIRONMENT_PREFIX: &str = "GIT_";
 
+/// The key that says where git looks a hook up.
+///
+/// Spelled once because [`Git::safety_config`] pins it and the README inventory
+/// check reads it back: the value is computed per run, so the key alone is the
+/// whole of what a document can quote, and two spellings that drifted apart
+/// would leave that check asking about a key nothing pins.
+const HOOKS_PATH_KEY: &str = "core.hooksPath";
+
 /// Spawn a command that takes its repository, and its identity, from nothing it
 /// inherited.
 ///
@@ -77,9 +85,12 @@ pub trait NoInheritedGitEnvironment {
     /// which is precisely why it has to be unconditional. The one run where it
     /// matters is the one nobody is watching.
     ///
-    /// A caller that wants one of these variables set does so *after* calling
-    /// this, and wins — which is how [`Git::command`] pins `GIT_EDITOR` and the
-    /// harness identity on top of a swept command.
+    /// A caller that wants one of these variables set — or wants it gone
+    /// whatever this process holds — does so *after* calling this, and wins.
+    /// That is how [`Git::command`] pins `GIT_EDITOR` and the four identity
+    /// names on top of a swept command, and takes the two identity dates off it
+    /// again: this sweep removes only what the process carries, so a restated
+    /// removal is what makes the second guard hold on its own.
     ///
     /// Keys are compared through [`std::ffi::OsStr::to_string_lossy`]: lossy
     /// conversion replaces invalid bytes with U+FFFD, so it can never
@@ -137,24 +148,53 @@ pub struct Git {
 }
 
 impl Git {
-    /// Run git in `cwd`, with hooks redirected to the empty `hooks_path`.
+    /// Run git in `cwd`, with hook lookups redirected to `hooks_path`.
     ///
     /// Crate-private on purpose. A caller outside this crate could otherwise
     /// build a runner rooted in the developer's real repository, with a
-    /// `hooks_path` that redirects nothing — an empty one still resolves hook
-    /// lookups, relative to `cwd`. Both guards are established by
-    /// [`Scratch::create`](crate::Scratch::create), so it stays the only way in.
+    /// `hooks_path` that fires the hooks sitting in it. The two paths this
+    /// crate redirects to are established for it: a real empty directory by
+    /// [`Scratch::create`](crate::Scratch::create), and
+    /// [`PREFLIGHT_HOOKS_PATH`](crate::repo::PREFLIGHT_HOOKS_PATH), a relative
+    /// path this crate never creates, by the read-only pre-flight.
     ///
     /// This closes one of the two routes to a runner, and it is worth naming
     /// which. It stops a consumer *building* one. What stops a consumer being
     /// *handed* one is that [`Scratch`](crate::Scratch) answers with the
     /// operation rather than with the runner — see its own documentation, which
     /// says what a runner in a consumer's hands can do to a real repository.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `hooks_path` is empty. An empty `core.hooksPath` is not "hooks
+    /// off": git joins the configured directory onto the hook name, so an empty
+    /// directory resolves `pre-commit` to `/pre-commit`, at the root of the file
+    /// system. That is one hooks directory shared by every repository on the
+    /// machine, where an unset key resolves the same hook inside the repository
+    /// and the pre-flight's relative path resolves it under the git directory.
+    /// So the empty value is not a redirect that reaches nothing; it is the
+    /// widest redirect there is.
+    ///
+    /// A panic rather than a `Result`, because the value belongs to this crate
+    /// and never to a caller: both real call sites compute it, and no argument
+    /// a user types reaches it. `debug_assert` is the wrong strength for the
+    /// same reason the guard exists — a consumer runs a release build against
+    /// their real repository, and that is the build the refusal has to hold in.
     #[must_use]
     pub(crate) fn new(cwd: impl Into<PathBuf>, hooks_path: impl Into<String>) -> Self {
+        let hooks_path = hooks_path.into();
+
+        assert!(
+            !hooks_path.is_empty(),
+            "a runner's hooks path cannot be empty. Git joins the configured directory onto the \
+             hook name, so an empty `{HOOKS_PATH_KEY}` resolves `pre-commit` to `/pre-commit` at \
+             the root of the file system - one hooks directory for every repository on the \
+             machine. Name a directory that holds no hook instead."
+        );
+
         Self {
             cwd: cwd.into(),
-            hooks_path: hooks_path.into(),
+            hooks_path,
         }
     }
 
@@ -204,14 +244,28 @@ impl Git {
             .env("GIT_EDITOR", "true")
             .env("GIT_SEQUENCE_EDITOR", "true")
             .env("GIT_TERMINAL_PROMPT", "0")
-            // Belt to the configuration's braces. Shedding the inherited
-            // attribution above already leaves `-c user.name` to decide, but
-            // saying it twice means the identity survives either guard being
-            // edited away, and git resolves the environment first.
+            // Belt to the configuration's braces, over all six variables git
+            // hands a hook rather than over the four that name a person.
+            // Shedding the inherited attribution above already leaves
+            // `-c user.name` to decide, but saying it twice means the identity
+            // survives either guard being edited away, and git resolves the
+            // environment first. The redundancy is only real where it covers
+            // all six: with the two dates left to the sweep alone, a sweep
+            // edited away holds the name and lets both dates through, and every
+            // commit a run makes then carries one identical timestamp.
             .env("GIT_AUTHOR_NAME", HARNESS_NAME)
             .env("GIT_AUTHOR_EMAIL", HARNESS_EMAIL)
             .env("GIT_COMMITTER_NAME", HARNESS_NAME)
-            .env("GIT_COMMITTER_EMAIL", HARNESS_EMAIL);
+            .env("GIT_COMMITTER_EMAIL", HARNESS_EMAIL)
+            // The two dates leave rather than get pinned, and that difference
+            // is the whole of what they add. A pinned date stamps every commit
+            // of one run with one identical time, which is the cost of a leaked
+            // date arriving by this crate's own hand. Removed, the clock gives
+            // each commit its own time, exactly as it does in a shell that
+            // holds nothing. Pinned by
+            // `every_identity_variable_is_settled_on_the_command_the_runner_builds`.
+            .env_remove("GIT_AUTHOR_DATE")
+            .env_remove("GIT_COMMITTER_DATE");
         command
     }
 
@@ -644,7 +698,7 @@ impl Git {
             // variables that would otherwise outrank them.
             format!("user.name={HARNESS_NAME}"),
             format!("user.email={HARNESS_EMAIL}"),
-            format!("core.hooksPath={}", self.hooks_path),
+            format!("{HOOKS_PATH_KEY}={}", self.hooks_path),
         ])
         .flat_map(|setting| ["-c".to_string(), setting])
         .collect();
@@ -740,8 +794,9 @@ mod tests {
 
     use super::{
         Git, NoInheritedGitEnvironment, PathBuf, GIT_ENVIRONMENT_PREFIX, HARNESS_EMAIL,
-        HARNESS_NAME,
+        HARNESS_NAME, HOOKS_PATH_KEY,
     };
+    use crate::repo::PREFLIGHT_HOOKS_PATH;
     use crate::testing::{child_ran, run_child_half, TestRepo};
 
     /// The setting the two tests below try to undo. It stands for every pin
@@ -776,7 +831,7 @@ mod tests {
     #[test]
     fn an_argument_cannot_re_pin_a_setting_the_safety_config_fixed() {
         let repo = TestRepo::init();
-        let git = Git::new(repo.path(), "");
+        let git = Git::new(repo.path(), PREFLIGHT_HOOKS_PATH);
         let smuggled = format!("{PINNED_SETTING}={SMUGGLED_VALUE}");
 
         assert_eq!(
@@ -832,7 +887,7 @@ mod tests {
     fn an_argument_cannot_aim_the_runner_at_another_repository() {
         let here = TestRepo::init();
         let elsewhere = TestRepo::init();
-        let git = Git::new(here.path(), "");
+        let git = Git::new(here.path(), PREFLIGHT_HOOKS_PATH);
         let their_path = elsewhere.path().to_str().expect("utf-8 fixture path");
 
         let ours = git
@@ -888,7 +943,7 @@ mod tests {
         );
 
         assert_eq!(
-            Git::new(repo.path(), "")
+            Git::new(repo.path(), PREFLIGHT_HOOKS_PATH)
                 .run("config", &["--get", key])
                 .unwrap_or_else(|error| panic!("read `{key}` back through the runner: {error:#}")),
             pinned,
@@ -1007,7 +1062,7 @@ mod tests {
         repo.write_file("日本語.txt", "staged\n");
         repo.git(&["add", "日本語.txt"]);
 
-        let staged = Git::new(repo.path(), "")
+        let staged = Git::new(repo.path(), PREFLIGHT_HOOKS_PATH)
             .run("diff", &["--cached", "--name-only"])
             .expect("list the staged path");
 
@@ -1078,7 +1133,7 @@ mod tests {
             "git could not be made to hold a non-UTF-8 name in its index"
         );
 
-        let staged = Git::new(repo.path(), "")
+        let staged = Git::new(repo.path(), PREFLIGHT_HOOKS_PATH)
             .nul_separated("diff", &["--cached", "--name-only"])
             .expect("list the staged path");
 
@@ -1143,7 +1198,7 @@ mod tests {
                 panic!("create a repository directory whose name ends in {spelling}: {error}")
             });
 
-            let git = Git::new(&root, "");
+            let git = Git::new(&root, PREFLIGHT_HOOKS_PATH);
             git.run("init", &["-q", "-b", "main"])
                 .expect("initialise the fixture repository");
 
@@ -1232,7 +1287,7 @@ mod tests {
     fn refuses_a_path_that_is_not_valid_utf_8_rather_than_replacing_the_byte() {
         let repo = TestRepo::init();
         repo.commit_file("ordinary.txt", "ordinary work\n", "ordinary work");
-        let git = Git::new(repo.path(), "");
+        let git = Git::new(repo.path(), PREFLIGHT_HOOKS_PATH);
 
         let mut ordinary = TOUCHED_PATHS.to_vec();
         ordinary.push("HEAD");
@@ -1302,7 +1357,7 @@ mod tests {
              only pass vacuously"
         );
 
-        let error = Git::new(repo.path(), "")
+        let error = Git::new(repo.path(), PREFLIGHT_HOOKS_PATH)
             .rev_parse(DASH_LEADING_REVISION)
             .expect_err(
                 "a revision that names no commit has to be refused. Accepting it lets a replay \
@@ -1330,7 +1385,7 @@ mod tests {
         repo.commit_file("seed.txt", "seed\n", "seed");
 
         assert_eq!(
-            Git::new(repo.path(), "")
+            Git::new(repo.path(), PREFLIGHT_HOOKS_PATH)
                 .rev_parse("HEAD")
                 .expect("resolve a revision that names a commit"),
             repo.rev_parse("HEAD"),
@@ -1459,10 +1514,9 @@ mod tests {
 
         let inventory = section_under(README, INVENTORY_HEADING);
 
-        // The hooks path is deliberately empty: this runner exists only to be
-        // asked what it would pin, and an empty value is what makes the
-        // computed-value rule below observable.
-        let settings = Git::new(std::env::temp_dir(), "").safety_config();
+        // This runner exists only to be asked what it would pin, so it takes
+        // the pre-flight's hooks path like every other read-only runner here.
+        let settings = Git::new(std::env::temp_dir(), PREFLIGHT_HOOKS_PATH).safety_config();
         assert!(
             !settings.is_empty(),
             "safety_config pins nothing at all, so there is no guard for the inventory to be \
@@ -1471,20 +1525,26 @@ mod tests {
 
         for argument in settings.iter().filter(|argument| argument.as_str() != "-c") {
             let named = match argument.split_once('=') {
-                // `core.hooksPath`'s value is a per-run temporary directory, so
-                // no document could quote it and the key alone is the whole
-                // promise. Anything else with a computed value lands here too
-                // and fails on the key rather than passing on a coincidence,
-                // which is the safe direction: a new guard the README has never
-                // heard of stops the build instead of slipping past it.
-                Some((key, "")) => key,
+                // The hooks path is a per-run temporary directory in a replay
+                // and a relative path in the pre-flight, so no document can
+                // quote it and the key alone is the whole promise. Named here
+                // rather than read off the value, because the rule that took an
+                // *empty* value for a computed one needed this runner to carry
+                // an empty hooks path - and an empty hooks path resolves a hook
+                // at the root of the file system, which is the one value
+                // `Git::new` refuses.
+                Some((key, _)) if key == HOOKS_PATH_KEY => key,
                 // A settled value is part of the guarantee - `gpg.format=ssh`
                 // is a different promise from `gpg.format=openpgp` - so the
-                // whole `key=value` has to be the thing the table says.
-                Some(_) => argument.as_str(),
-                // Not a `-c` setting at all, so there is no key to fall back
-                // to: the option is its own name. `--literal-pathspecs` today.
-                None => argument.as_str(),
+                // whole `key=value` has to be the thing the table says. An
+                // option that is not a `-c` setting at all has no key to fall
+                // back to: it is its own name, `--literal-pathspecs` today. Any
+                // further guard with a computed value lands here too and fails
+                // on the whole `key=value` rather than passing on a
+                // coincidence, which is the safe direction: a new guard the
+                // README has never heard of stops the build instead of
+                // slipping past it.
+                _ => argument.as_str(),
             };
 
             assert!(
@@ -1841,7 +1901,7 @@ mod tests {
     /// `temp_dir` is only ever a cwd here — nothing is created in it, so
     /// concurrent test runs cannot collide.
     fn assert_scratch_identity() {
-        let git = Git::new(std::env::temp_dir(), "");
+        let git = Git::new(std::env::temp_dir(), PREFLIGHT_HOOKS_PATH);
 
         let ident = git
             .run("var", &["GIT_AUTHOR_IDENT"])
@@ -1997,7 +2057,7 @@ mod tests {
     /// another repository, and pin that neither reached git.
     fn assert_the_inherited_environment_is_ignored() {
         let here = TempDir::new().expect("create the scratch stand-in");
-        let git = Git::new(here.path(), "");
+        let git = Git::new(here.path(), PREFLIGHT_HOOKS_PATH);
         git.run("init", &["-q", "-b", "main"])
             .expect("initialise the repository the runner is rooted in");
 
@@ -2091,7 +2151,8 @@ mod tests {
             );
         }
 
-        let command = Git::new(std::env::temp_dir(), "").command("var", &["GIT_AUTHOR_IDENT"]);
+        let command = Git::new(std::env::temp_dir(), PREFLIGHT_HOOKS_PATH)
+            .command("var", &["GIT_AUTHOR_IDENT"]);
         let settled: Vec<(OsString, Option<OsString>)> = command
             .get_envs()
             .map(|(key, value)| (key.to_os_string(), value.map(std::ffi::OsStr::to_os_string)))

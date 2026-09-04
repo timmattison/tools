@@ -63,6 +63,9 @@ not have to re-derive which guard belongs to which test.
 | `fixtures_and_replays_stay_inside_their_own_temporary_directories` (`tests/isolation.rs`) | The environment sweep at `DetachedGitDirRepo::run`, which the `--git-dir` and `--work-tree` arguments on that command line do not stand in for | `src/testing.rs`, `DetachedGitDirRepo::run` — drop the `.without_inherited_git_environment()` call | remove |
 | `a_child_half_that_ran_another_test_is_not_taken_for_the_one_that_was_named` (`src/testing.rs`) | The `CHILD_RAN` sentinel, which is a child half's proof that its own body ran | `src/testing.rs`, `run_child_half` — accept a child whose stdout holds `1 passed` instead of requiring the sentinel | narrow |
 | `uncommitted_files_refuses_a_repository_with_no_working_tree` (`tests/repo.rs`) | The failure `Repo::uncommitted_files` answers with where git has no working tree to read | `src/repo.rs`, `Repo::uncommitted_files` — take the status with `unwrap_or_default()` in place of `?` | narrow |
+| `every_identity_variable_is_settled_on_the_command_the_runner_builds` | The two `env_remove` calls that take `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` off every command, which is the half of the restated identity a commit cannot show | `src/git.rs`, `Git::command` — drop both calls | remove |
+| `refuses_an_empty_hooks_path_rather_than_resolving_a_hook_outside_the_repository` | The refusal of an empty `hooks_path`, which git resolves at the root of the file system rather than at nothing | `src/git.rs`, `Git::new` — drop the `assert!` | remove |
+| `sheds_every_inherited_git_variable_and_nothing_else` (`tests/inherited-environment.rs`) | The `GIT_` prefix, which is the whole of what the scrub covers beyond a list of names | `src/git.rs`, `NoInheritedGitEnvironment for Command` — narrow the prefix test over `std::env::vars_os` back to a fifteen-name list | narrow |
 
 ## What keeps each test honest
 
@@ -1536,6 +1539,171 @@ is a read-only tree in `TMPDIR` and a confusing cleanup. It is not a wrong
 answer: every fixture owns a temporary directory of its own, so two seals cannot
 collide and a stale seal cannot reach a later run.
 
+### `every_identity_variable_is_settled_on_the_command_the_runner_builds`
+
+Git hands a hook six variables that say who is committing, and each of them
+outranks every configuration source, `-c` included. `Git::command` sheds all six
+with the prefix sweep and then restates the identity on top, so the identity
+holds with either guard edited away. It restated four. `GIT_AUTHOR_DATE` and
+`GIT_COMMITTER_DATE` were swept and never said again, so a sweep that went away
+held the name and the address and let both dates through — and every commit a
+run made then carried one identical timestamp. The crate names that cost at
+`NoInheritedGitEnvironment` and tests for it in
+`a_fixture_commits_under_its_own_identity_in_a_hook_environment`, for the
+fixture builder alone.
+
+The two dates now *leave* rather than get pinned, and the difference is the
+whole of what they add. A pinned date is the same defect under this crate's own
+hand: one time on every commit of one run. Removed, the clock gives each commit
+its own.
+
+Mutation: both `env_remove` calls dropped from `Git::command`. The run was
+`cargo test --no-fail-fast -p gitscratch -p grind -p grist`, on git 2.55.0.
+
+```text
+thread 'git::tests::every_identity_variable_is_settled_on_the_command_the_runner_builds'
+panicked at src/gitscratch/src/git.rs:
+`GIT_AUTHOR_DATE` is not settled on the command at all. Git reads an identity
+variable ahead of every configuration source, `-c` included, so the runner has
+to say what each of the six is - and it has to say it whatever the process
+happens to hold, because the sweep covers only what is there to sweep. The
+command carries [("GIT_AUTHOR_EMAIL", Some("gitscratch@localhost")),
+("GIT_AUTHOR_NAME", Some("gitscratch")), ("GIT_COMMITTER_EMAIL",
+Some("gitscratch@localhost")), ("GIT_COMMITTER_NAME", Some("gitscratch")),
+("GIT_EDITOR", Some("true")), ("GIT_SEQUENCE_EDITOR", Some("true")),
+("GIT_TERMINAL_PROMPT", Some("0"))]
+
+test result: FAILED. 52 passed; 1 failed
+```
+
+No collateral: that is the only test the mutation reddens, in this crate and in
+`grind` and `grist`.
+
+**A commit cannot show this, which is why the test reads the command.** The
+sweep alone already keeps a leaked date out of a commit, so
+`tests/hook_environment.rs` — which sets both dates and reads the committer's
+date back — stays green under this mutation. Only both guards broken together
+redden it. That end-to-end assertion still earns its place: it is the statement
+that no leaked date reaches a commit, and the suite used to set
+`GIT_AUTHOR_DATE` and say nothing at all about a date.
+
+**The child half is the armed control, and it has to be.** The sweep schedules a
+removal only for a variable the process *holds*, so a run started from a git
+hook takes both dates off the command whatever `Git::command` says. The test
+therefore runs in a re-executed child handed all six variables removed, and
+asserts the child holds none of them before it reads the command back. In this
+process instead, under `cargo test` from `.husky/pre-commit`, the same assertion
+would pass on the sweep's work and say nothing about the pin — green for a
+reason it does not name, on a condition the test does not control.
+
+### `refuses_an_empty_hooks_path_rather_than_resolving_a_hook_outside_the_repository`
+
+`Git::new` took any `hooks_path`, and its doc comment said an empty one "still
+resolves hook lookups, relative to `cwd`". Measured against git 2.55.0, that
+understates the cost, and it understates it in the direction that matters:
+
+```text
+$ git -c core.hooksPath= rev-parse --git-path hooks/pre-commit
+/pre-commit
+$ git rev-parse --git-path hooks/pre-commit
+.git/hooks/pre-commit
+$ git -c core.hooksPath=.git/gitscratch-preflight-no-hooks rev-parse --git-path hooks/pre-commit
+.git/gitscratch-preflight-no-hooks/pre-commit
+```
+
+Git joins the configured directory onto the hook name, so an empty directory
+joins to an absolute path at the root of the file system. The empty value is not
+a redirect that lands nowhere; it is one hooks directory shared by every
+repository on the machine, and it is machine-wide where the doc comment called
+it run-local. Nothing on those paths fires a hook today — every
+`Git::new(path, "")` in the crate was a unit test asking a read-only question —
+so this was a latent shape rather than a live leak.
+
+`Git::new` now refuses the value, and every call site names a real hooks path:
+the scratch's own empty directory, or `PREFLIGHT_HOOKS_PATH`, the relative path
+the pre-flight uses and the one a read-only test can name without building a
+directory for it.
+
+Mutation: the `assert!` dropped from `Git::new`. Run as above.
+
+```text
+---- git::tests::refuses_an_empty_hooks_path_rather_than_resolving_a_hook_outside_the_repository stdout ----
+note: test did not panic as expected at src/gitscratch/src/git.rs:2261:8
+
+test result: FAILED. 52 passed; 1 failed
+```
+
+No collateral.
+
+**The control is armed and it is full.** Both readings above run through plain
+git inside the test, ahead of the refusal: `/pre-commit` for the empty key, and
+`.git/hooks/pre-commit` for the unset one. A git that stopped telling those two
+apart fails the test at the control rather than passing at the refusal — and
+`#[should_panic]` names the message it wants, so a panic raised by a control is
+not read as the refusal.
+
+**A panic rather than a `Result` or a newtype.** The value belongs to this crate
+and never to a caller: both real call sites compute it, and no argument a user
+types reaches it, so the empty string is a fault in this crate's own code rather
+than a condition a run can meet. `debug_assert` is the wrong strength for the
+reason the guard exists at all — a consumer runs a release build against their
+real repository, and that is the build the refusal has to hold in. A newtype for
+the hooks path is the strongest shape and it was weighed: emptiness is a
+property of a computed value, so a newtype still checks at run time and moves
+the check rather than removing it. What it adds is that a literal `""` stops
+being spellable at a call site. Against that, `Git::new` is already
+crate-private with two real call sites, and the check that catches the computed
+case has to exist either way.
+
+### `sheds_every_inherited_git_variable_and_nothing_else`, and which suite pins the prefix
+
+`.husky/pre-commit` cited `tests/isolation.rs` for the rule that the scrub
+matches the `GIT_` prefix and never a list of names. It cited the wrong suite,
+and the difference was measured rather than read.
+
+Mutation: `NoInheritedGitEnvironment for Command` narrowed from the prefix test
+over `std::env::vars_os` back to a fifteen-name list — the nine location names
+and the six identity names. Run as above.
+
+```text
+thread 'sheds_every_inherited_git_variable_and_nothing_else'
+panicked at src/gitscratch/tests/inherited-environment.rs:
+`GIT_CONFIG_PARAMETERS` survived the scrub: every git this crate spawns would
+run under configuration the launching shell injected, `user.email`, `core.bare`
+and `core.hooksPath` among it
+
+test result: FAILED. 0 passed; 1 failed
+```
+
+Exactly one test in the three crates goes red, and it is in
+`tests/inherited-environment.rs`. Every test of `tests/isolation.rs` stays
+green:
+
+```text
+running 3 tests
+test fixtures_and_replays_stay_inside_their_own_temporary_directories ... ok
+test a_leaked_index_file_never_has_a_fixture_staged_into_it ... ok
+test a_leaked_repository_location_never_reaches_the_repository_it_names ... ok
+
+test result: ok. 3 passed; 0 failed
+```
+
+That answer is a fact about what each suite leaks rather than a surprise.
+`tests/isolation.rs` leaks `GIT_DIR`, `GIT_WORK_TREE`, `GIT_PREFIX` and
+`GIT_INDEX_FILE`, and a name list removes every one of them. The
+`GIT_AUTHOR_NAME` it also sets goes on the control command *after* the scrub, so
+no scrub of any width takes that one either. So the hook now cites
+`tests/inherited-environment.rs` for the prefix: that file probes
+`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT` and a name git has never invented,
+and it keeps a `MUST_SURVIVE` list so the rule stays a prefix rather than a
+sweep of everything. `tests/isolation.rs` keeps the separate claim it does pin —
+the decoy repository comes back byte-identical.
+
+Pointing a reader at a test that cannot fail for the stated reason is the
+false-green shape this file exists to remove, and it is worse in a comment than
+in code: the comment is what the next person reads before deciding the rule is
+covered.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
@@ -1557,6 +1725,23 @@ code moves. Every place below is load-bearing for the whole table:
 - **`Git::command`'s argument shape** — the subcommand is a parameter of its own
   so that a caller's arguments land after it. Folding it back into the slice
   reopens git's option position to the caller and undoes every row above it.
+- **`Git::command`'s identity entries** — the restatement of the six variables
+  git hands a hook, four pinned to the harness and two removed. It is the belt
+  to the configuration's braces, and a belt is only a belt where it covers
+  everything the braces do: an entry dropped from the six is a variable left to
+  the sweep alone, which is the one guard the restatement exists to survive.
+  A date restated as a *pin* rather than a removal is the same row broken the
+  other way.
+- **The `GIT_` prefix in `NoInheritedGitEnvironment`** — the rule the whole
+  scrub is, and the only part of it a list cannot imitate.
+  `tests/inherited-environment.rs` is the suite that pins it, and its probes are
+  a sample of the family rather than its definition; `tests/isolation.rs` leaks
+  only names a list removes too, so it says nothing about the width of the rule.
+- **`Git::new`'s refusal of an empty hooks path** — an empty `core.hooksPath`
+  resolves a hook at the root of the file system, so the refusal is what leaves
+  the crate's two real hooks paths as the only ones a call site can write. A
+  third path added here needs to be a directory that holds no hook, and to say
+  where it comes from.
 - **The separator ahead of every caller-supplied revision** — `--verify` and
   `--end-of-options` in `Git::rev_parse`, and `--end-of-options` in
   `Scratch::create` and `Scratch::replay_rebase_within`. Drop one and git reads

@@ -32,13 +32,15 @@ use crate::scratch::Scratch;
 
 /// Where hook lookups are pointed while answering a pre-flight question.
 ///
-/// [`Scratch`](crate::Scratch) creates a real, empty directory for this because
+/// [`Scratch`] creates a real, empty directory for this because
 /// a replay runs commands - `rebase`, `commit`, `checkout` - that genuinely
-/// fire hooks, and an empty `core.hooksPath` is not "hooks off": git still
-/// resolves hook lookups against it. Nothing here is such a command. Every
-/// query on a [`Repo`] is a read (`rev-parse`, `status`), and reads fire no
-/// hook at all, so the redirect only has to name somewhere that will never hold
-/// an executable.
+/// fire hooks, and an empty `core.hooksPath` is not "hooks off": git joins the
+/// configured directory onto the hook name, so an empty one resolves
+/// `pre-commit` to `/pre-commit`, at the root of the file system.
+/// [`Git::new`](crate::git::Git::new) refuses that value for exactly this
+/// reason. Nothing here is such a command. Every query on a [`Repo`] is a read
+/// (`rev-parse`, `status`), and reads fire no hook at all, so the redirect only
+/// has to name somewhere that will never hold an executable.
 ///
 /// That distinction is worth the const rather than a `TempDir`, because it is
 /// what makes the pre-flight unconditionally cheap: telling a developer they
@@ -46,7 +48,13 @@ use crate::scratch::Scratch;
 /// temporary directory, and must not leave a scratch worktree behind on the way
 /// to saying so. A relative path this crate never creates keeps the redirect
 /// pointed somewhere harmless without touching the filesystem at all.
-const PREFLIGHT_HOOKS_PATH: &str = ".git/gitscratch-preflight-no-hooks";
+///
+/// Crate-visible because the unit tests of [`Git`] and
+/// [`Scratch`] ask the same question of it: each one reads
+/// through git rather than writing, so each takes the path that reads fire no
+/// hook from. It is the one hooks path a test can name without building a
+/// directory for it.
+pub(crate) const PREFLIGHT_HOOKS_PATH: &str = ".git/gitscratch-preflight-no-hooks";
 
 /// A git repository, opened for the read-only questions that precede a replay.
 #[derive(Debug)]
