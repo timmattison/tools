@@ -10,7 +10,10 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use gitscratch::testing::{equal_hunks_unequal_stops_repo, independent_branches_repo, TestRepo};
+use gitscratch::testing::{
+    equal_hunks_unequal_stops_repo, independent_branches_repo, not_a_repository,
+    unrelated_histories_repo, TestRepo,
+};
 use gitscratch::NoInheritedGitEnvironment;
 
 /// Exit code for a replay that hit no conflicts.
@@ -22,6 +25,13 @@ const CLEAN: i32 = 0;
 /// collide" and "I could not tell you" are different answers, and conflating
 /// them is the defect `grime` exists to fix.
 const CONFLICTS: i32 = 1;
+
+/// Exit code for a run that could not answer the question at all.
+///
+/// Deliberately not [`CONFLICTS`]: "the merge would collide" and "I could not
+/// tell you" are different answers, and conflating them is the defect `grime`
+/// exists to fix.
+const ERROR: i32 = 2;
 
 /// The whole verdict for merging `two` into `one` in
 /// [`equal_hunks_unequal_stops_repo`].
@@ -177,9 +187,16 @@ fn streams(output: &Output) -> (Option<i32>, String, String) {
 
 /// Stand on `head` and ask about `branch`, the way a developer would.
 fn run(repo: &TestRepo, head: &str, branch: &str) -> (Option<i32>, String, String) {
+    streams(&run_raw(repo, head, &[branch]))
+}
+
+/// The raw output, for the assertions that care about the difference between
+/// "printed nothing" and "printed only whitespace" - which [`streams`] trims
+/// away and `-q` is judged on.
+fn run_raw(repo: &TestRepo, head: &str, args: &[&str]) -> Output {
     repo.checkout(head);
 
-    streams(&grime(repo.path(), &[branch]))
+    grime(repo.path(), args)
 }
 
 /// Two branches that each add a file of their own merge into each other without
@@ -257,5 +274,187 @@ fn the_summary_of_a_conflicting_merge_carries_no_stop_count() {
         !stdout.contains("stop"),
         "a merge halts once, so the number says nothing and belongs nowhere in \
          the verdict:\n{stdout}"
+    );
+}
+
+/// Run `grime` with nowhere to put a temporary directory, so creating a scratch
+/// worktree is guaranteed to fail and everything before it is not.
+///
+/// `TMPDIR` is set on the child process only. `std::env::set_var` is
+/// process-global and Rust runs the tests in this binary as threads of one
+/// process, so poisoning it there would sabotage every other test in the file.
+fn grime_with_nowhere_to_put_a_scratch(
+    repo: &TestRepo,
+    branch: &str,
+) -> (Option<i32>, String, String) {
+    // Under the fixture's own `TempDir`, so two concurrent copies of this test
+    // cannot name the same path - and never created, so it stays missing.
+    let missing = repo.path().join("tmpdir-that-does-not-exist");
+
+    let output = grime_command(repo.path(), &[branch])
+        .env("TMPDIR", missing)
+        .output()
+        .expect("failed to run grime");
+
+    streams(&output)
+}
+
+/// A branch name that does not resolve is a bad argument, not a conflict, and
+/// answering it must not cost a scratch worktree.
+///
+/// Proving *no scratch worktree was created* needs a discriminator that
+/// survives the tool's own cleanup. `git worktree list` is not one: a `Scratch`
+/// removes itself on drop, so the list comes back empty whether one was built
+/// or not, and the assertion would pass for exactly the binary it is supposed
+/// to catch.
+///
+/// `TMPDIR` is that discriminator. Building a scratch worktree - `Repo::scratch`
+/// and, behind it, `Scratch`'s own constructor - calls `TempDir::new`, which
+/// resolves `TMPDIR`. The pre-flight queries beside it (`Repo::open`,
+/// `Repo::resolve`, `Repo::uncommitted_files`) deliberately create no temporary
+/// directory at all, which is what makes them unconditionally cheap. Pointing
+/// `TMPDIR` at a path that does not exist therefore breaks exactly one of the
+/// two - so if resolution still gets its word in, it demonstrably ran first.
+///
+/// The control half is what makes the first half mean anything: it proves the
+/// poisoned `TMPDIR` really does reach the worktree half rather than being
+/// quietly ignored, which would make "no scratch error" vacuously true.
+///
+/// The tree is dirty on purpose, which is what gives the two runs a caveat to
+/// hold back. The uncommitted-work note qualifies a verdict, so neither run
+/// prints one: the first has no verdict because the branch does not resolve,
+/// and the control has none because the scratch worktree cannot be built.
+#[test]
+fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists() {
+    let repo = independent_branches_repo();
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (code, stdout, stderr) = grime_with_nowhere_to_put_a_scratch(&repo, "nonexistent-branch");
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "an unresolvable branch must exit {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not resolve 'nonexistent-branch'"),
+        "the message must name the ref that did not resolve, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("scratch directory"),
+        "resolution must happen before a scratch worktree is built, but the run \
+         got as far as needing one:\n{stderr}"
+    );
+    // The live defect this tool was written to kill: the shell function it
+    // replaces ran a bare `git merge` and announced a typo as a conflict.
+    assert!(
+        !stdout.contains("conflicts") && !stderr.contains("conflicts"),
+        "a typo'd branch name must never be reported as a conflict\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("note:"),
+        "the tree is dirty, but a caveat qualifies a verdict and this run has \
+         no verdict to qualify:\n{stderr}"
+    );
+
+    let (control_code, control_stdout, control_stderr) =
+        grime_with_nowhere_to_put_a_scratch(&repo, "beta");
+
+    assert_eq!(
+        control_code,
+        Some(ERROR),
+        "stdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+    assert!(
+        control_stderr.contains("could not create a scratch directory"),
+        "a resolvable branch with the same poisoned TMPDIR must fail at the \
+         scratch, or the assertion above proves nothing:\n{control_stderr}"
+    );
+    assert!(
+        !control_stderr.contains("note:"),
+        "the caveat about uncommitted work qualifies the verdict, so a run \
+         that dies before the verdict must not print it:\n{control_stderr}"
+    );
+}
+
+/// Somewhere outside every repository there is no question to answer, and
+/// saying so has to be distinguishable from answering it.
+///
+/// The exit code is the whole point. A tool that reported this as [`CONFLICTS`]
+/// would be telling a script "the merge would conflict" about a directory it
+/// never found a repository in.
+#[test]
+fn a_directory_that_is_not_a_repository_is_an_error_not_a_conflict() {
+    let elsewhere = not_a_repository();
+
+    let (code, stdout, stderr) = streams(&grime(elsewhere.path(), &["main"]));
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "running outside a repository must exit {ERROR}, never {CONFLICTS}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("is not inside a git repository"),
+        "the message must say what was wrong with the directory, got:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("conflicts") && !stderr.contains("conflicts"),
+        "there was no merge to conflict\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// Git refuses to merge two histories with no commit in common, and a refusal
+/// leaves no unmerged path to measure - so a replay that measured nothing must
+/// not therefore announce that nothing went wrong.
+///
+/// This is the shape the merge replay guards against, reached end to end: git
+/// failed, the merge never started, and `git diff --diff-filter=U` is empty.
+/// A binary that read "no unmerged paths" as "no conflicts" would tell a
+/// developer that a merge git will not perform at all costs nothing.
+///
+/// The exit code is the load-bearing half. [`CLEAN`] would say the merge is
+/// free and [`CONFLICTS`] would say it costs work a person can sit down and
+/// resolve. Neither is true, and only [`ERROR`] says so.
+///
+/// This is the one assertion in the file that matches git's own words rather
+/// than `grime`'s, so it is the one that [`PINNED_LOCALE`] exists for: git
+/// wraps `refusing to merge unrelated histories` in gettext, and a git built
+/// with the translations answers in the language of whoever runs the suite.
+///
+/// The tree is dirty on purpose. The scratch worktree gets built here and the
+/// replay is what fails, which is the other half of the rule the poisoned
+/// `TMPDIR` test above pins: a caveat qualifies a verdict, and this run has no
+/// verdict to qualify.
+#[test]
+fn a_merge_that_fails_with_nothing_to_measure_is_neither_clean_nor_conflicts() {
+    let repo = unrelated_histories_repo();
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (code, stdout, stderr) = run(&repo, "main", "unrelated");
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a merge git would not perform must exit {ERROR}, not {CLEAN} for \
+         having counted no conflicts\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("refusing to merge unrelated histories"),
+        "git's own explanation is the only part that says what went wrong, so \
+         it has to survive to the user:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean")
+            && !stdout.contains("conflicts")
+            && !stderr.contains("clean")
+            && !stderr.contains("conflicts"),
+        "a run that could not measure anything must claim neither \
+         verdict\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("note:"),
+        "a merge that failed leaves no verdict, and a caveat with nothing to \
+         qualify is a wrong sentence:\n{stderr}"
     );
 }
