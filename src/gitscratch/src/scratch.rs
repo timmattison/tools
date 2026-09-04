@@ -781,4 +781,58 @@ mod tests {
             "the refusal has to say what it ran out of, got: {error}"
         );
     }
+
+    /// An upstream that starts with a dash is an upstream, and the rebase has
+    /// to read it as one.
+    ///
+    /// `git rebase --root` is a complete and valid command: it replays the
+    /// whole history onto nothing. So a replay handed `--root` as its upstream
+    /// finished without a single conflict and reported a clean result for a
+    /// revision that names no commit. Zero is also what a genuinely free replay
+    /// reports, so nothing downstream can tell the two apart - and the tool
+    /// that read this answer printed `clean` for a branch nobody has.
+    ///
+    /// [`Repo::resolve`](crate::Repo::resolve) refuses the same name earlier
+    /// and every tool in this repository asks it first. This method is public
+    /// and takes a revision of its own, so the refusal has to hold here too:
+    /// `grist` reaches it directly, once per branch, with no second pre-flight
+    /// between the two.
+    ///
+    /// The control replays a revision that does name a commit, on the same
+    /// scratch worktree, because a replay that refused every upstream would
+    /// pass the assertion above and answer nothing at all.
+    #[test]
+    fn refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root() {
+        let repo = contested_region_repo();
+        let scratch = repo.scratch("main");
+        scratch
+            .git()
+            .run("checkout", &["-q", "--detach", "iterated"])
+            .expect("check out the branch detached in the scratch worktree");
+
+        let error = scratch
+            .replay_rebase("--root")
+            .map(|cost| format!("{cost:?}"))
+            .expect_err(
+                "an upstream that names no commit has to stop the replay. Git knows `--root` as \
+                 an option of `rebase`, so reading it as one replays the whole history onto \
+                 nothing, hits no conflict, and reports a cost of zero for a revision nobody has",
+            );
+
+        assert!(
+            format!("{error:#}").contains("--root"),
+            "the refusal has to name the upstream git would not use: {error:#}"
+        );
+
+        let control = scratch
+            .replay_rebase("single")
+            .expect("replay onto a revision the fixture really has");
+
+        assert_eq!(
+            control.stops(),
+            Stops::new(CONTESTED_ROUNDS),
+            "the fixture has to cost something, or the refusal above proves only that this \
+             replay answers nothing at all"
+        );
+    }
 }
