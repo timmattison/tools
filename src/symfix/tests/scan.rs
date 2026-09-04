@@ -100,10 +100,7 @@ fn a_tree_with_no_symlinks_reports_none() {
     assert_eq!(run.out, "No broken symlinks found.\n");
     assert_eq!(
         run.err,
-        format!(
-            "Scanning for broken symlinks: {}\n",
-            dir.path().display()
-        )
+        format!("Scanning for broken symlinks: {}\n", dir.path().display())
     );
     assert_eq!(run.summary.broken, 0);
 }

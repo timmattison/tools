@@ -19,11 +19,20 @@
 //! The walk never follows a link. A link is the thing this tool examines, thus
 //! a walk that followed one would examine the tree behind it instead — and a
 //! link that points at one of its own parents would make the walk endless.
+//!
+//! A link that the operating system refuses to resolve is not a broken link.
+//! [`scan::classify`] keeps the two apart, because the repairs act on
+//! [`scan::LinkState::Broken`] alone: a tool that rewrote a link whose failure
+//! it did not understand would destroy a working link to punish a directory
+//! that denied it a read.
 
 #![cfg_attr(not(test), warn(clippy::unwrap_used))]
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
+pub mod scan;
+
 use std::ffi::OsString;
+use std::fmt;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -62,6 +71,35 @@ pub struct Summary {
 /// The report goes to `out` and the diagnostics go to `err`. The walk carries
 /// on past a directory it cannot read and past a link it cannot read, so one
 /// unreadable corner of a tree never hides the rest of it.
-pub fn run(_options: &Options, _out: &mut dyn Write, _err: &mut dyn Write) -> Summary {
-    Summary::default()
+pub fn run(options: &Options, out: &mut dyn Write, err: &mut dyn Write) -> Summary {
+    line(
+        err,
+        format_args!("Scanning for broken symlinks: {}", options.root.display()),
+    );
+
+    let mut summary = Summary::default();
+    scan::scan(options, out, err, &mut summary);
+
+    if summary.broken == 0 {
+        line(out, format_args!("No broken symlinks found."));
+    } else {
+        line(
+            out,
+            format_args!("Found {} broken symlink(s).", summary.broken),
+        );
+    }
+
+    summary
+}
+
+/// Writes one line to `w`, and drops the error the write may give back.
+///
+/// Every line this crate writes goes through here, so the decision to drop that
+/// error sits in one place instead of at each call. The tool reports; it does
+/// not depend on the report arriving. A reader that stopped reading — a pipe
+/// into `head`, a terminal that went away — must not turn a scan of a tree into
+/// a failure, and the writer a test gives this crate is a `Vec<u8>`, which can
+/// fail in no way at all.
+fn line(w: &mut dyn Write, message: fmt::Arguments<'_>) {
+    let _ = w.write_fmt(format_args!("{message}\n"));
 }
