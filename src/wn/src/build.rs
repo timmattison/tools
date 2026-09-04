@@ -653,4 +653,36 @@ plans.\n`gh repo view` failed."
             ]
         );
     }
+
+    #[test]
+    fn a_timeout_no_run_waits_is_a_refusal() {
+        let refused = seconds(Some("18446744073709551615")).expect_err("no run waits that long");
+        assert!(refused.to_string().contains(TIMEOUT_ENV), "{refused}");
+    }
+
+    #[test]
+    fn the_cap_itself_is_a_timeout_a_run_takes() {
+        // The cap is the last value the refusal lets through, and a reader who
+        // names it gets the run they asked for.
+        assert_eq!(
+            seconds(Some("31536000")),
+            Ok(Duration::from_secs(31_536_000))
+        );
+    }
+
+    #[test]
+    fn a_timeout_no_clock_can_hold_kills_the_child_rather_than_panicking() {
+        // The panic this pins left the child alive: `wn` died at the addition and
+        // the run it started was reparented to PID 1.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("/bin/sleep");
+        let refused = wait_for(&mut child, Duration::from_secs(u64::MAX))
+            .expect_err("no clock holds that deadline");
+        assert!(
+            matches!(refused, BuildError::TimedOut { .. }),
+            "{refused:?}"
+        );
+    }
 }
