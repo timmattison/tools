@@ -89,7 +89,7 @@ commit-ish of `worktree add` and the upstream of `rebase` carry the same separat
 rev-parse --root` prints its own argument back and exits 0, which read as a commit and let `grind` answer
 `clean` for a branch that does not exist. Teardown removes the scratch worktree by path and deliberately never
 runs the repo-wide `git worktree prune`, which would delete the administrative state of any worktree whose
-directory is merely missing right now. Used by `grist` and `grind`.
+directory is merely missing right now. Used by `grist`, `grind` and `grime`.
 
 See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of guarantees.
 
@@ -694,6 +694,26 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     parser, so `grind -q` with no branch still prints a usage error and `grind -q --version` still
     prints the version.
   - To install: `cargo install --git https://github.com/timmattison/tools grind`
+
+- grime (Git ReadIness for Merging Externally)
+  - Answers "would merging that branch into HEAD conflict, and by how much?" without touching your
+    repository. It merges the branch into HEAD in a detached scratch worktree in a temp directory,
+    counts the conflict hunks and the files they land in, and tears the worktree down before you see
+    the answer. The merge carries `--no-ff`, because git takes a merge whose branch is strictly
+    ahead as a fast-forward and a fast-forward merges no trees at all — the replay would then report
+    a clean verdict for an operation it never performed. The exit code is the answer: 0 clean, 1
+    conflicts, 2 could not tell you (bad ref, not a repository, git refused the merge and left
+    nothing to measure, as it does for two histories with no commit in common). It prints no stop
+    count: a merge halts exactly once, so the number is a constant dressed up as a measurement and
+    printing it would invite a false comparison against `grind`'s real one. A dirty tree is not an
+    error — it notes on stderr that uncommitted work is not included and leaves the verdict alone.
+    Nothing in your repo moves; the safety guarantees are the shared `gitscratch` harness's, not a
+    second copy of them.
+  - Usage: `grime <BRANCH>`, `grime -q feature && git merge feature`. `-q` silences everything grime
+    says, on both streams, since the exit code is the whole answer — but it stops at the argument
+    parser, so `grime -q` with no branch still prints a usage error and `grime -q --version` still
+    prints the version.
+  - To install: `cargo install --git https://github.com/timmattison/tools grime`
 
 - krt (Knights of the Round Trip)
   - Records the network path to a destination, hop by hop. `krt` accepts one destination and the
