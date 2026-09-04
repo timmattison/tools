@@ -644,6 +644,19 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_that_only_holds_the_word_login_keeps_its_reason() {
+        // The bare mark claimed such a run, and NotAuthenticated carries no text,
+        // so the reason went missing.
+        let said = "could not reach the login server: 503";
+        assert_eq!(
+            refusal_of(said),
+            BuildError::Failed {
+                said: said.to_string()
+            }
+        );
+    }
+
+    #[test]
     fn every_other_failure_carries_what_claude_said() {
         let refused = refusal_of("  the model is overloaded.\n");
         assert_eq!(
