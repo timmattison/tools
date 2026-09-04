@@ -607,6 +607,18 @@ git's own source rather than executed; what these tests execute is the pin
 itself. The third was executed: git 2.55 was watched to re-create the merge
 commit under `rebase.rebaseMerges=true`.
 
+One more pins the setting that decides **what git writes into a conflicted
+file**, which is the thing the hunk counter measures.
+`pins_the_conflict_style_even_when_the_repository_asks_for_diff3` covers
+`merge.conflictStyle=merge`, against a fixture that asks for `diff3`. The three
+styles open and close a region with the same markers, so the count holds for a
+region whose two sides carry no bracket line of their own; what `diff3` and
+`zdiff3` add is the base version, between a `|||||||` line and the `=======`
+one. A base carrying a line that reads as a marker therefore lands inside the
+region under those two styles and outside it under `merge`, and the same replay
+measures a different file on a developer who set the key. The style each setting
+writes was read out of a real merge; what the test executes is the pin.
+
 `src/scratch.rs` holds the structural half of that last one.
 `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing`
 points `REBASE_HEAD` at a merge commit and requires the empty-commit probe to

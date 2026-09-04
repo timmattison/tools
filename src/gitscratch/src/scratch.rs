@@ -1032,7 +1032,10 @@ fn count_conflict_hunks(path: &Path) -> Result<usize> {
 mod tests {
     use anyhow::Result;
 
-    use super::{stopped_commit_is_already_in_head, Conflicts, NonZeroUsize, Path, PathBuf};
+    use super::{
+        count_conflict_hunks, stopped_commit_is_already_in_head, Conflicts, NonZeroUsize, Path,
+        PathBuf,
+    };
     use crate::git::Git;
     use crate::metrics::{Hunks, Stops};
     use crate::testing::{contested_region_repo, TestRepo};
@@ -1111,6 +1114,152 @@ mod tests {
             "a conflicted file is at least one decision for whoever resolves \
              it, so it can never contribute zero to the total its breakdown is \
              supposed to explain"
+        );
+    }
+
+    /// How many places [`conflicted_document_writing`] really conflicts in.
+    ///
+    /// Two rather than one on purpose. A file that conflicts in one place
+    /// cannot tell a counter that reads git's markers from one that reads
+    /// nothing at all, because the floor under a marker-less conflict answers
+    /// one for both. Two is a number only a counter that found the markers can
+    /// reach.
+    const REGIONS_IN_THE_DOCUMENT: usize = 2;
+
+    /// A real conflict in a document that writes bracket runs of its own.
+    ///
+    /// The two paragraphs both sides rewrite are far enough apart that git
+    /// writes two regions rather than one, and `aside` is prose neither side
+    /// touches, added after them. That is where a line that looks like a marker
+    /// and is not one goes: a fixture for a conflict parser, a saved merge
+    /// transcript, a document about resolving conflicts.
+    ///
+    /// The markers come from a real merge rather than from bytes written here,
+    /// because the question is what git writes and not what this file believes
+    /// git writes. The merge runs through [`TestRepo::try_git`] and its failure
+    /// is asserted: a merge that came out clean leaves a document with no
+    /// marker in it at all, and the count then meets the floor and reads as a
+    /// pass.
+    ///
+    /// The repository comes back with the path because it owns the temporary
+    /// directory the path is inside; dropping it deletes the document.
+    fn conflicted_document_writing(aside: &str) -> (TestRepo, PathBuf) {
+        /// The document both sides rewrite.
+        const DOCUMENT: &str = "conflict-markers.md";
+        /// The paragraph at the top, rewritten by both sides.
+        const OPENING: &str = "OPENING";
+        /// The paragraph at the bottom, rewritten by both sides as well.
+        const CLOSING: &str = "CLOSING";
+
+        let base = format!(
+            "# Conflict markers\n\
+             \n\
+             {OPENING}\n\
+             \n\
+             Both paragraphs are rewritten by both sides, and the four lines\n\
+             between them by neither, so git writes two regions here.\n\
+             \n\
+             {CLOSING}\n\
+             \n\
+             {aside}\n"
+        );
+        let rewritten = |side: &str| {
+            base.replace(OPENING, &format!("{OPENING}, as {side} wrote it"))
+                .replace(CLOSING, &format!("{CLOSING}, as {side} wrote it"))
+        };
+
+        let repo = TestRepo::init();
+        repo.commit_file(DOCUMENT, &base, "the document");
+
+        repo.branch("other");
+        repo.commit_file(
+            DOCUMENT,
+            &rewritten("other"),
+            "other rewrites both paragraphs",
+        );
+
+        repo.checkout("main");
+        repo.commit_file(
+            DOCUMENT,
+            &rewritten("main"),
+            "main rewrites both paragraphs",
+        );
+
+        let merged = repo.try_git(&["merge", "other"], &[]);
+        assert!(
+            !merged.status.success(),
+            "the merge came out clean, so the document holds no marker at all and the count \
+             below meets the floor instead of the markers:\n{}",
+            String::from_utf8_lossy(&merged.stdout)
+        );
+
+        let document = repo.path().join(DOCUMENT);
+        (repo, document)
+    }
+
+    /// A run of brackets git never wrote opens no conflict region.
+    ///
+    /// Git opens a region with exactly seven `<`, and follows the run with a
+    /// space and a label, or with the end of the line when the label is empty.
+    /// Counted by the run alone, every other bracket line in the file counts
+    /// too, and a document that writes about markers on purpose - a fixture for
+    /// a conflict parser, a saved merge transcript - adds a region for each one
+    /// it holds. `grist` ranks candidates on this number, so an inflated count
+    /// reorders them behind a total nobody can see is wrong.
+    ///
+    /// The asides here are the two shapes a run alone cannot tell from a
+    /// marker, and each is a whole region rather than a lone line, so a counter
+    /// that reads closed regions and matches the run loosely counts them too.
+    /// One is a run of eight, which git never writes. The other has no space
+    /// after the run.
+    #[test]
+    fn a_bracket_run_that_is_not_a_marker_does_not_count_as_a_conflict_region() {
+        let (_repo, document) = conflicted_document_writing(
+            "A run of eight is one bracket too many:\n\
+             <<<<<<<< not a marker\n\
+             mine\n\
+             ========\n\
+             theirs\n\
+             >>>>>>>> not a marker\n\
+             A run with no space after it is not one either:\n\
+             <<<<<<<ours\n\
+             mine\n\
+             =======\n\
+             theirs\n\
+             >>>>>>>theirs",
+        );
+
+        assert_eq!(
+            count_conflict_hunks(&document).expect("count the document's conflict regions"),
+            REGIONS_IN_THE_DOCUMENT,
+            "the document conflicts in two places, and every other bracket line in it is prose \
+             about markers rather than a marker git wrote"
+        );
+    }
+
+    /// An opening marker nothing closes is file content, not a conflict.
+    ///
+    /// A region costs a decision because it holds two versions of the same
+    /// lines and a person has to choose. An opening marker on its own holds
+    /// nothing and closes nothing, so it costs no decision, and a document that
+    /// names the opening marker in a sentence is where one comes from.
+    ///
+    /// The aside sits after the last region git wrote, so nothing closes it. A
+    /// counter that reads opening markers alone counts it whether it matches
+    /// the run loosely or exactly, because the line here is spelled the way git
+    /// spells one.
+    #[test]
+    fn an_opening_marker_with_no_closing_one_does_not_count_as_a_conflict_region() {
+        let (_repo, document) = conflicted_document_writing(
+            "Git opens the region it could not merge with a line of this shape:\n\
+             <<<<<<< ours",
+        );
+
+        assert_eq!(
+            count_conflict_hunks(&document).expect("count the document's conflict regions"),
+            REGIONS_IN_THE_DOCUMENT,
+            "an opening marker that closes nothing holds no second version of anything, so \
+             there is no decision in it for anyone to make"
         );
     }
 

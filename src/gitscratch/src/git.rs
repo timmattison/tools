@@ -946,6 +946,30 @@ mod tests {
         assert_the_runner_pins("rebase.rebaseMerges=false", "true");
     }
 
+    /// The conflict style decides what git writes into a conflicted file, and
+    /// the file is what the hunk counter measures.
+    ///
+    /// `diff3` and `zdiff3` open and close a region with the same markers
+    /// `merge` does, so the count holds for a region whose two sides carry no
+    /// bracket line. What they add is the **base** version, between a
+    /// `|||||||` line and the `=======` one. A base that carries a line of its
+    /// own that reads as a marker therefore lands inside the region under those
+    /// two styles and outside it under `merge`, and the same replay then
+    /// measures a different file on a developer who set the key.
+    ///
+    /// The cost is a count that is self-consistent within one run and different
+    /// across machines. `grist` ranks candidates on that count, so two
+    /// developers comparing the same branches read two orders and neither is
+    /// told why. Pinning the style makes the measured file the same everywhere.
+    ///
+    /// The style git writes under each setting was read out of a real merge
+    /// rather than from git's documentation. What this test executes is the
+    /// pin: the fixture asks for `diff3`, and the runner has to report `merge`.
+    #[test]
+    fn pins_the_conflict_style_even_when_the_repository_asks_for_diff3() {
+        assert_the_runner_pins("merge.conflictStyle=merge", "diff3");
+    }
+
     /// `core.quotePath=false` needs its own test now that it protects nothing a
     /// caller can otherwise observe.
     ///
