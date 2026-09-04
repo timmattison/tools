@@ -423,6 +423,13 @@ fn record_streams(text: &str) -> Result<Vec<Stream>, PlanError> {
 /// record to go into or that meets a record which already holds one. A plan
 /// written with no `Stream` field at all is therefore still a plan of several
 /// streams.
+///
+/// A `Waits for` field carries the same rule, because a record holds one of
+/// each. A reader writes the two fields in whichever order they like, so a
+/// `Waits for` that stands before the `Order` of its own record must open that
+/// record rather than close the one before it. A field that landed in the
+/// record before it would take the blockers of one stream away and give them
+/// to another, and no message would say so.
 fn records_of(text: &str) -> Vec<Record> {
     let mut records: Vec<Record> = Vec::new();
     let mut open: Option<Record> = None;
@@ -448,7 +455,8 @@ fn records_of(text: &str) -> Vec<Record> {
         let starts_a_record = match key {
             Key::Stream => true,
             Key::Order => open.as_ref().is_none_or(|record| record.order.is_some()),
-            Key::WaitsFor | Key::Zone | Key::Notes => false,
+            Key::WaitsFor => open.as_ref().is_none_or(|record| record.waits.is_some()),
+            Key::Zone | Key::Notes => false,
         };
         if starts_a_record {
             records.extend(open.take());
