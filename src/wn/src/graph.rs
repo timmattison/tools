@@ -1439,11 +1439,30 @@ pub fn of_plan(plan: &Plan) -> Option<Result<Graph, GraphError>> {
     }
     let mut edges = chains_of(plan);
     edges.extend(crossings);
-    Some(
-        Graph::of_edges(nodes_of(plan), &edges)
-            .refuse_cycle()
-            .map(Graph::in_topological_order),
-    )
+    Some(of_parts(nodes_of(plan), &edges))
+}
+
+/// The graph `steps` and `edges` draw, with its steps in a topological order.
+///
+/// The one entrance every reader that is not a picture builds a graph through.
+/// `steps` holds one step for each node, in the order the reader wrote them,
+/// and each edge names the number of the step before and the number of the
+/// step after. A reader states the nodes and the edges of its own form, and
+/// this function turns them into the one model that answers every form, so no
+/// two forms can draw one shape two ways.
+///
+/// # Errors
+///
+/// Gives [`GraphError::Cycle`] for an order that returns to a step which comes
+/// before it. A cycle names no step to start, and an answer of "nothing is
+/// ready" hides the reason.
+pub(crate) fn of_parts(
+    steps: Vec<Step>,
+    edges: &[(IssueNumber, IssueNumber)],
+) -> Result<Graph, GraphError> {
+    Graph::of_edges(steps, edges)
+        .refuse_cycle()
+        .map(Graph::in_topological_order)
 }
 
 /// The steps of `plan`, one for each number, in the order the plan writes

@@ -57,7 +57,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::chain::{IssueNumber, Snippet};
-use crate::graph::{Graph, GraphError};
+use crate::graph::{of_parts, Graph, GraphError};
+use crate::plan::Step;
 
 /// The character a JSON document opens with.
 const OPENING_BRACE: char = '{';
@@ -82,6 +83,12 @@ const PULL_REQUEST: &str = "pr";
 
 /// The key of a step that holds the numbers that come before it.
 const WAITS_FOR: &str = "waitsFor";
+
+/// The key of a stream that holds its short name, such as `S0`.
+const ID: &str = "id";
+
+/// The key of a stream that holds the words of its name.
+const NAME: &str = "name";
 
 /// Where in the document a value stands, written `streams[1].order[0].issue`.
 ///
@@ -222,7 +229,259 @@ pub fn read(text: &str) -> Option<Result<Graph, JsonError>> {
     if !text.trim_start().starts_with(OPENING_BRACE) {
         return None;
     }
-    None
+    Some(graph_of(text))
+}
+
+/// One step of the plan, as one element of an `order` array writes it.
+///
+/// It holds the step and the work that comes before it, because those are two
+/// different things: the step becomes a node, and the numbers become edges.
+struct Reading {
+    /// The work itself, and the issue that work closes.
+    step: Step,
+    /// The numbers that come before this step.
+    waits_for: Vec<IssueNumber>,
+}
+
+/// The graph the document `text` writes.
+///
+/// # Errors
+///
+/// Gives the refusals of [`JsonError`].
+fn graph_of(text: &str) -> Result<Graph, JsonError> {
+    let document: Value = serde_json::from_str(text).map_err(|cause| JsonError::NotJson {
+        text: Snippet::new(text),
+        cause: cause.to_string(),
+    })?;
+    refuse_version(&document)?;
+    let at = Path::root(STREAMS);
+    let streams: Vec<Vec<Reading>> = array(field(&document, STREAMS, &at)?, &at)?
+        .iter()
+        .enumerate()
+        .map(|(place, stream)| read_stream(stream, &at.at(place)))
+        .collect::<Result<_, _>>()?;
+    Ok(of_parts(nodes_of(&streams), &edges_of(&streams))?)
+}
+
+/// The steps of one stream, in the order its `order` array writes them.
+///
+/// The `id` and the `name` of a stream are read for their kind and for nothing
+/// else. The answer of a plan that draws edges is one list of rows in the order
+/// of the work, so it carries no label of a stream to write them into. They are
+/// read all the same, because a document that writes them as something other
+/// than words is not the schema, and a reader that answered such a document
+/// would be guessing about the rest of it.
+///
+/// # Errors
+///
+/// Gives [`JsonError::Wrong`] for a stream that is not an object, for an `id`
+/// or a `name` that is not a string, and for an `order` that is not an array.
+/// Gives [`JsonError::Missing`] for a stream with no `order`, and the errors of
+/// [`read_step`] for one step of it.
+fn read_stream(value: &Value, at: &Path) -> Result<Vec<Reading>, JsonError> {
+    refuse_unless_object(value, at)?;
+    for key in [ID, NAME] {
+        let named = at.then(key);
+        if let Some(text) = value.get(key).filter(|value| !value.is_null()) {
+            if !text.is_string() {
+                return Err(JsonError::Wrong {
+                    path: named,
+                    wanted: Kind::Text,
+                });
+            }
+        }
+    }
+    let at = at.then(ORDER);
+    array(field(value, ORDER, &at)?, &at)?
+        .iter()
+        .enumerate()
+        .map(|(place, step)| read_step(step, &at.at(place)))
+        .collect()
+}
+
+/// The one step of an `order` array that `value` writes.
+///
+/// A step that names a `pr` is the pair `PR#344 (#341)` writes: the pull
+/// request is the work, and the issue is what the work finishes. So the number
+/// of the step is the pull request, and the issue stands beside it.
+///
+/// # Errors
+///
+/// Gives [`JsonError::Wrong`] for a step that is not an object, for a number
+/// that is not an issue number, and for a `waitsFor` that is not an array.
+/// Gives [`JsonError::Missing`] for a step with no `issue`.
+fn read_step(value: &Value, at: &Path) -> Result<Reading, JsonError> {
+    refuse_unless_object(value, at)?;
+    let issue_at = at.then(ISSUE);
+    let issue = issue_number(field(value, ISSUE, &issue_at)?, &issue_at)?;
+    let pull_at = at.then(PULL_REQUEST);
+    let pull = optional(value, PULL_REQUEST)
+        .map(|value| issue_number(value, &pull_at))
+        .transpose()?;
+    let waits_at = at.then(WAITS_FOR);
+    let waits_for = match optional(value, WAITS_FOR) {
+        Some(value) => array(value, &waits_at)?
+            .iter()
+            .enumerate()
+            .map(|(place, number)| issue_number(number, &waits_at.at(place)))
+            .collect::<Result<Vec<IssueNumber>, JsonError>>()?,
+        None => Vec::new(),
+    };
+    let step = match pull {
+        Some(pull) => Step::new(pull, Some(issue)),
+        None => Step::new(issue, None),
+    };
+    Ok(Reading { step, waits_for })
+}
+
+/// The steps of the whole plan, one for each number, in the order the document
+/// writes them.
+///
+/// The walk takes the streams in the order of the document, and inside a
+/// stream it takes the chain first and the work that stream waits for after
+/// it. A number that stands in two places is one node, and the step of the
+/// first place stands: a document that wrote the pair of a step once wrote it
+/// where the step first appears. [`crate::graph::of_plan`] states the same
+/// rule for a table, because a node is a node whichever form named it.
+///
+/// A number a `waitsFor` names and no `order` holds is a node all the same. A
+/// blocker the repository does not have must reach the rows and turn the run
+/// red, and a row of the answer is the only place that says so.
+fn nodes_of(streams: &[Vec<Reading>]) -> Vec<Step> {
+    let mut steps: Vec<Step> = Vec::new();
+    for stream in streams {
+        let blockers = stream
+            .iter()
+            .flat_map(|reading| &reading.waits_for)
+            .map(|&number| Step::new(number, None));
+        for step in stream.iter().map(|reading| reading.step).chain(blockers) {
+            if !steps.iter().any(|held| held.number() == step.number()) {
+                steps.push(step);
+            }
+        }
+    }
+    steps
+}
+
+/// The edges the whole plan draws.
+///
+/// The `order` of a stream is a chain, so each step of it comes before the step
+/// after it. The `waitsFor` of a step names the work that comes before that
+/// step, and before that step alone.
+///
+/// A `waitsFor` that names the number of its own step draws no edge, because
+/// such an edge runs from a step to itself and says nothing. A `waitsFor` that
+/// names a step the chain of its own stream already reached draws an edge the
+/// chain already carries, and one edge stands between two nodes however many
+/// times the document writes it. A `waitsFor` that names a *later* step of its
+/// own stream draws an edge the chain contradicts, so the plan is a cycle and
+/// [`of_parts`] refuses it.
+fn edges_of(streams: &[Vec<Reading>]) -> Vec<(IssueNumber, IssueNumber)> {
+    let mut edges: Vec<(IssueNumber, IssueNumber)> = Vec::new();
+    for stream in streams {
+        for (earlier, later) in stream.iter().zip(stream.iter().skip(1)) {
+            edges.push((earlier.step.number(), later.step.number()));
+        }
+        for reading in stream {
+            let number = reading.step.number();
+            edges.extend(
+                reading
+                    .waits_for
+                    .iter()
+                    .filter(|&&blocker| blocker != number)
+                    .map(|&blocker| (blocker, number)),
+            );
+        }
+    }
+    edges
+}
+
+/// Refuse a document whose `version` this reader does not know.
+///
+/// # Errors
+///
+/// Gives [`JsonError::Missing`] for a document that names no version,
+/// [`JsonError::Wrong`] for a version that is not a whole number, and
+/// [`JsonError::Version`] for every version but [`SCHEMA_VERSION`].
+fn refuse_version(document: &Value) -> Result<(), JsonError> {
+    let at = Path::root(VERSION);
+    let named = field(document, VERSION, &at)?;
+    let read = named.as_u64().ok_or(JsonError::Wrong {
+        path: at,
+        wanted: Kind::Number,
+    })?;
+    if read == SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(JsonError::Version { read })
+    }
+}
+
+/// The value the key `name` of `parent` holds.
+///
+/// A key that holds `null` counts as a key that stands nowhere, because a
+/// writer that has nothing to say for a key writes either.
+///
+/// # Errors
+///
+/// Gives [`JsonError::Missing`] naming `at`.
+fn field<'a>(parent: &'a Value, name: &str, at: &Path) -> Result<&'a Value, JsonError> {
+    optional(parent, name).ok_or_else(|| JsonError::Missing(at.clone()))
+}
+
+/// The value the key `name` of `parent` holds, for a key the schema does not
+/// need. `null` reads as a key that stands nowhere, as it does in [`field`].
+fn optional<'a>(parent: &'a Value, name: &str) -> Option<&'a Value> {
+    parent.get(name).filter(|value| !value.is_null())
+}
+
+/// The elements of the array `value` holds.
+///
+/// # Errors
+///
+/// Gives [`JsonError::Wrong`] naming `at` for a value that is no array.
+fn array<'a>(value: &'a Value, at: &Path) -> Result<&'a [Value], JsonError> {
+    value
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| JsonError::Wrong {
+            path: at.clone(),
+            wanted: Kind::Array,
+        })
+}
+
+/// Refuse a value that is no object.
+///
+/// # Errors
+///
+/// Gives [`JsonError::Wrong`] naming `at`.
+fn refuse_unless_object(value: &Value, at: &Path) -> Result<(), JsonError> {
+    if value.is_object() {
+        Ok(())
+    } else {
+        Err(JsonError::Wrong {
+            path: at.clone(),
+            wanted: Kind::Object,
+        })
+    }
+}
+
+/// The issue number `value` writes.
+///
+/// GitHub numbers an issue from one and up, so a float, a negative, a string,
+/// and a zero are each a number this tool cannot ask GitHub about.
+///
+/// # Errors
+///
+/// Gives [`JsonError::Wrong`] naming `at`.
+fn issue_number(value: &Value, at: &Path) -> Result<IssueNumber, JsonError> {
+    value
+        .as_u64()
+        .and_then(IssueNumber::new)
+        .ok_or_else(|| JsonError::Wrong {
+            path: at.clone(),
+            wanted: Kind::Issue,
+        })
 }
 
 #[cfg(test)]
@@ -236,6 +495,12 @@ mod tests {
     /// and the test of the command line read the same bytes. A second copy
     /// would drift.
     const DOCUMENT: &str = include_str!("../fixtures/plan-parallel-work.json");
+
+    /// The character a JSON document closes with.
+    ///
+    /// The test of a document that does not parse takes it off the end, which
+    /// leaves a text that still opens with `{` and holds one brace too few.
+    const CLOSING_BRACE: char = '}';
 
     /// The box-drawn table of a plan, as it arrives on the clipboard.
     ///
@@ -370,15 +635,17 @@ mod tests {
         // The chain reader never sees it. A reader that fell through here
         // would answer a missing brace with `"version" is not an issue
         // number`, which names the wrong problem.
-        let broken = DOCUMENT.replacen('{', " ", 1);
-        let text = format!("{OPENING_BRACE}{broken}");
-        let refused = refusal(&text);
+        let broken = DOCUMENT
+            .trim_end()
+            .strip_suffix(CLOSING_BRACE)
+            .expect("the document closes with a brace");
+        let refused = refusal(broken);
         assert!(
             matches!(refused, JsonError::NotJson { .. }),
             "a broken document is not JSON, and this is {refused:?}"
         );
         assert!(
-            refused.to_string().starts_with("\"{ "),
+            refused.to_string().starts_with("\"{"),
             "the message names the document, and it reads {refused}"
         );
     }
