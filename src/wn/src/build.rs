@@ -210,9 +210,7 @@ pub fn plan(
 fn spinner() -> ProgressBar {
     let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
     if let Ok(style) = ProgressStyle::with_template("{spinner:.cyan} {msg}") {
-        spinner.set_style(style.tick_strings(&[
-            "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-        ]));
+        spinner.set_style(style.tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]));
     }
     spinner.set_message(WORKING);
     spinner.enable_steady_tick(POLL);
@@ -369,6 +367,18 @@ pub enum BuildError {
     /// `claude` has no account to run under.
     #[error("claude is not logged in. Run: claude login")]
     NotAuthenticated,
+    /// The directory the run would happen in is in no repository.
+    ///
+    /// The skill asks `gh` and `git` about the repository of the directory
+    /// `wn` was run in, and its gather script turns a failure of either into a
+    /// warning rather than a crash. So a run in such a directory spends a
+    /// minute and real money and then answers that the plan holds no work.
+    /// The refusal stands before the run, where it costs one cheap call.
+    #[error("{said}")]
+    NoRepository {
+        /// What said the directory is in no repository.
+        said: String,
+    },
     /// The run failed for a reason only `claude` knows.
     #[error("claude could not build a plan: {said}")]
     Failed {

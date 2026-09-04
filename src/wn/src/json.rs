@@ -458,7 +458,7 @@ fn read_step(value: &Value, at: &Path) -> Result<Reading, JsonError> {
 /// same, and it carries the number alone. A blocker the repository does not
 /// have must reach the rows and turn the run red, and a row of the answer is
 /// the only place that says so. The issue of a pair is a number a step names,
-/// because [`graph_of`] gave that `waitsFor` the number of the pull request
+/// because [`document_of`] gave that `waitsFor` the number of the pull request
 /// before this walk.
 fn nodes_of(streams: &[Vec<Reading>], work: &Work) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
@@ -675,7 +675,10 @@ mod tests {
     #[test]
     fn a_moment_that_is_not_a_string_is_a_refusal() {
         assert_eq!(
-            refusal(&edited("\"generated\": \"2026-09-02T14:03:11Z\"", "\"generated\": 17")),
+            refusal(&edited(
+                "\"generated\": \"2026-09-02T14:03:11Z\"",
+                "\"generated\": 17"
+            )),
             JsonError::Wrong {
                 path: Path::root(GENERATED),
                 wanted: Kind::Time,
@@ -731,7 +734,10 @@ mod tests {
     fn a_plan_built_in_the_future_earns_no_note() {
         // A clock that ran backwards is a fault of the machine, and a note
         // that said the plan was built in -2 days would name it wrongly.
-        assert_eq!(plan_of(DOCUMENT).age_note(moment("2026-08-30T14:03:11Z")), None);
+        assert_eq!(
+            plan_of(DOCUMENT).age_note(moment("2026-08-30T14:03:11Z")),
+            None
+        );
     }
 
     /// The number of every node of `graph`, sorted, so a test states the shape

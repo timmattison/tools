@@ -628,6 +628,15 @@ cat > '{prompt}'
     fn asked_nothing(&self) -> bool {
         !self.dir.path().join(ARGS_FILE).exists()
     }
+
+    /// Whether the tool sent no query about any issue.
+    ///
+    /// A run that named the repository and stopped there sent no query. The
+    /// call that names the repository is one cheap round trip, and the query
+    /// is the one that costs a unit of the rate limit.
+    fn sent_no_query(&self) -> bool {
+        self.asked_nothing() || !self.recorded_args().contains("graphql")
+    }
 }
 
 /// Run `wn` with an environment built from nothing, and with no start command
@@ -2112,8 +2121,8 @@ fn a_run_that_printed_nothing_names_claude() {
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
     assert!(stderr(&output).contains("claude"), "{}", stderr(&output));
     assert!(
-        gh.asked_nothing(),
-        "a run with no plan asks GitHub nothing, and it asked {}",
+        gh.sent_no_query(),
+        "a run with no plan asks about no issue, and it asked {}",
         gh.recorded_args()
     );
 }

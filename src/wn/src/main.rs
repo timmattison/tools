@@ -30,6 +30,13 @@
 //! layout is lossy: a table re-wrapped by whatever pasted it can lose the
 //! second line of an `Order` cell, which costs a step. A document carries no
 //! layout, so `wn` reads it first and claims it on one character.
+//!
+//! The reader who has no plan at all has a repository full of open issues
+//! instead. That plan is one `claude` run away, and `wn` already knows the
+//! repository, so `wn` builds it: the run is the fourth input, after the
+//! argument, standard input, and the clipboard. The document it gives back
+//! goes on the clipboard, which is the cache the next run reads through the
+//! clipboard input that already stands.
 
 mod build;
 mod chain;
@@ -148,18 +155,33 @@ and nothing else `wn` reads starts that way. A document that does not parse is a
 a walk on to the next reader.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
-the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
-because a pipe is explicit. Set WN_NO_CLIPBOARD to any value with a character in it to turn the \
-clipboard off, which gives back the error a run with no chain printed before. An empty value \
-leaves the clipboard on, because an exported but empty variable is a common accident.\n\n\
+the system clipboard, then a run of claude that builds a plan. So `wn` alone answers the chain \
+you just copied, and a pipe still wins, because a pipe is explicit. Set WN_NO_CLIPBOARD to any \
+value with a character in it to turn the clipboard off. An empty value leaves the clipboard on, \
+because an exported but empty variable is a common accident.\n\n\
+The run of claude is the last input and the quietest one. It happens only when the other three \
+held nothing, it costs money and about a minute, and it runs the plan-parallel-work skill in the \
+repository of the current directory. The document it prints goes on the clipboard, so a second \
+`wn` a minute later reads it back rather than paying for a second run — and copying anything \
+else throws the plan away, which is what makes a plan cheap to rebuild. CAUTION: THE RUN \
+OVERWRITES WHAT IS ON THE CLIPBOARD. It happens only when every other input was empty, and the \
+tool says so on the line under the answer.\n\n\
+`wn --refresh` runs claude whatever the other inputs hold, and it replaces the clipboard with \
+what comes back. It is the one way past a plan that is still on the clipboard and no longer \
+true. A plan older than a day says its age under the answer, because a plan is a claim about a \
+backlog and a backlog moves.\n\n\
+Set WN_NO_CLAUDE to any value with a character in it to turn the run off, which gives back the \
+error a run with no chain printed before. Set WN_PLAN_TIMEOUT to a number of seconds to wait \
+something other than 600 for it.\n\n\
 The answer names the command that starts the work: `si 278`. This tool ships no `si` — it is a \
 shell function you supply. Set WN_START_COMMAND to name a different one, for example \
 `export WN_START_COMMAND='gh issue develop'`."
 )]
 struct Cli {
     /// The chain, for example "#277 → #278 ∥ #279", or a whole plan of
-    /// parallel work. Read from standard input when it is not given, and from
-    /// the clipboard when neither gives one.
+    /// parallel work. Read from standard input when it is not given, from the
+    /// clipboard when neither gives one, and built by running claude when
+    /// none of the three does.
     #[arg(value_name = "CHAIN")]
     chain: Vec<String>,
 
@@ -305,6 +327,14 @@ fn run(
         "no plan to read. Building one with claude…"
     };
     let built: &dyn Fn() -> input::PlanBuild = &|| {
+        // The skill plans the repository of the directory `wn` was run in, and
+        // its gather script turns a `gh` or a `git` failure into a warning
+        // rather than a crash. A run in a directory that is in no repository
+        // would therefore spend a minute and real money and would then answer
+        // that the plan holds no work. One cheap call refuses it first.
+        github::current_repo().map_err(|err| build::BuildError::NoRepository {
+            said: format!("{err:#}"),
+        })?;
         eprintln!("{} {announcement}", "wn:".bold());
         build::plan(
             &paths,
