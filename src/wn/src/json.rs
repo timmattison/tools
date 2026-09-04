@@ -281,14 +281,11 @@ fn graph_of(text: &str) -> Result<Graph, JsonError> {
 fn read_stream(value: &Value, at: &Path) -> Result<Vec<Reading>, JsonError> {
     refuse_unless_object(value, at)?;
     for key in [ID, NAME] {
-        let named = at.then(key);
-        if let Some(text) = value.get(key).filter(|value| !value.is_null()) {
-            if !text.is_string() {
-                return Err(JsonError::Wrong {
-                    path: named,
-                    wanted: Kind::Text,
-                });
-            }
+        if optional(value, key).is_some_and(|named| !named.is_string()) {
+            return Err(JsonError::Wrong {
+                path: at.then(key),
+                wanted: Kind::Text,
+            });
         }
     }
     let at = at.then(ORDER);
