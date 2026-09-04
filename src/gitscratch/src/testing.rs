@@ -1069,6 +1069,92 @@ pub fn branches_behind_main_with_a_pathspec_magic_path_repo() -> TestRepo {
     repo
 }
 
+/// [`branches_behind_main_repo`]'s shape with the branch's work moved into a
+/// submodule pointer, in a repository that sets `diff.ignoreSubmodules=all`.
+///
+/// A submodule is a `.gitmodules` entry beside a gitlink, and a commit that
+/// moves the submodule on changes the gitlink and nothing else. Git reports
+/// that path from `diff-tree`, which is plumbing, and hides it from `git diff`,
+/// which is porcelain and reads `diff.ignoreSubmodules`. So a probe that asks
+/// one command which paths the commit touched and the other command whether the
+/// new base holds them reads one tree under two sets of rules: the first
+/// command finds work, the second finds none, and a commit whose pointer is
+/// nowhere in the new base looks like a commit that adds nothing to it.
+///
+/// The setting lives in this fixture's own configuration rather than in the
+/// developer's `~/.gitconfig`, so the hazard is armed on every machine and on
+/// none of them by accident. A local key outranks a global one, so a developer
+/// who already sets it gets the same fixture as one who does not.
+///
+/// The bump commit touches the gitlink alone, deliberately. `.gitmodules` goes
+/// into the base commit with the pointer's first value, exactly as a real
+/// superproject records a submodule once and moves it afterwards - and a
+/// `.gitmodules` in the bump commit would be an ordinary file the porcelain
+/// reports whatever the setting says, so it would carry the refusal on its own
+/// and the pointer's silence would never show.
+///
+/// The two values the pointer takes are commits of this repository's own object
+/// database, made with `commit-tree` on an empty tree and referenced by nothing
+/// else. Git records a gitlink as an opaque commit id and never resolves it, so
+/// no second repository has to be cloned, kept alive, or reached over the file
+/// protocol - and a scratch worktree gets no submodule checked out in any case,
+/// which is the repository the probes actually run in.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn branches_behind_main_with_a_submodule_pointer_bump_repo() -> TestRepo {
+    /// Where the submodule sits in the superproject, named distinctly enough
+    /// that a test can look for it in a message.
+    const SUBMODULE_PATH: &str = "vendored";
+    /// The mode git records a gitlink under.
+    const GITLINK_MODE: &str = "160000";
+
+    let repo = TestRepo::init();
+    // The hostile setting, armed here rather than inherited, so this fixture
+    // reproduces the hazard on a machine whose developer has never heard of it.
+    repo.git(&["config", "diff.ignoreSubmodules", "all"]);
+
+    // An empty tree, and two commits on it to stand for the submodule's own
+    // history. The messages differ, so the two ids differ.
+    let empty_tree = repo.git_with_stdin(&["mktree"], b"");
+    let before = repo.git(&["commit-tree", &empty_tree, "-m", "the submodule, before"]);
+    let after = repo.git(&["commit-tree", &empty_tree, "-m", "the submodule, after"]);
+
+    repo.write_file("shared.txt", &numbered_lines(30));
+    repo.write_file(
+        ".gitmodules",
+        &format!(
+            "[submodule \"{SUBMODULE_PATH}\"]\n\tpath = {SUBMODULE_PATH}\n\turl = \
+             ../{SUBMODULE_PATH}\n"
+        ),
+    );
+    repo.git(&["add", "shared.txt", ".gitmodules"]);
+    // `git add` cannot stage a gitlink for a submodule that was never cloned,
+    // so the index entry is written directly. Nothing has to exist on disk at
+    // `SUBMODULE_PATH` for that, and nothing does.
+    repo.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("{GITLINK_MODE},{before},{SUBMODULE_PATH}"),
+    ]);
+    repo.git(&["commit", "-q", "-m", "base"]);
+
+    repo.branch("branch");
+    repo.git(&[
+        "update-index",
+        "--cacheinfo",
+        &format!("{GITLINK_MODE},{after},{SUBMODULE_PATH}"),
+    ]);
+    repo.git(&["commit", "-q", "-m", "branch moves the submodule on"]);
+
+    repo.checkout("main");
+    repo.commit_file("main.txt", "main moved on\n", "main moves ahead");
+
+    repo
+}
+
 /// A branch whose first commit arrives at content `main` has since reached by a
 /// different route, followed by a second commit that is real work. Replaying the
 /// branch onto `main` empties that first commit while the second one still has

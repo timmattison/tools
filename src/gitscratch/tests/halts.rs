@@ -16,6 +16,7 @@
 
 use gitscratch::testing::{
     branches_behind_main_repo, branches_behind_main_with_a_pathspec_magic_path_repo,
+    branches_behind_main_with_a_submodule_pointer_bump_repo,
     branches_behind_main_with_quoted_and_space_led_paths_repo, commit_emptied_by_main_repo,
     modify_delete_repo,
 };
@@ -361,6 +362,121 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not
         error.contains(":/foo.txt"),
         "the error should name the file whose change would have been lost, as it is actually \
          spelled: {error}"
+    );
+
+    // The rollback left the repository pristine, so there is no uncommitted
+    // content for the other probe to find; the only thing that proves the commit
+    // was lost is that its change is absent from the new base.
+    assert!(
+        !error.contains("uncommitted"),
+        "nothing was left uncommitted - git rolled the index back - so the evidence must come \
+         from the commit's content being absent from the new base: {error}"
+    );
+}
+
+/// The same clean-pick failure a fourth time, in the shape where the two probes
+/// disagree because they read one tree under two sets of rules.
+///
+/// The first probe asks `diff-tree`, which is plumbing. The second asked
+/// `git diff`, which is porcelain and reads `diff.ignoreSubmodules` out of the
+/// developer's own configuration. A commit that moves a submodule pointer and
+/// touches nothing else is therefore work to the first command and nothing at
+/// all to the second: the touched set holds the submodule, so the empty-set
+/// guard does not fire, and the missing set comes back empty, which is what "the
+/// new base already has this commit's work" looks like. The replay then reaches
+/// for `rebase --skip`, which is the pointer gone and a cost of zero reported
+/// for a branch that was never replayed.
+///
+/// So the assertions below are about the *classification* rather than about
+/// getting an error out. A sealed object database refuses the skip as well, so
+/// the replay stops either way; what it stops and says is the whole difference
+/// between naming the submodule whose work is at stake and calling the commit
+/// empty on the way to a skip that happened to fail.
+///
+/// Two controls stand ahead of the replay. The first proves the stopped commit
+/// touches nothing but the pointer, since one ordinary path beside it would come
+/// back from the porcelain and carry the refusal on its own. The second proves
+/// the hazard is live: under the fixture's own `diff.ignoreSubmodules=all`, the
+/// porcelain has to report nothing for a commit the plumbing reports a path for.
+#[test]
+fn refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed() {
+    let repo = branches_behind_main_with_a_submodule_pointer_bump_repo();
+    // Read the abbreviation from the same object database the implementation
+    // will abbreviate against, so `%h` here and `%h` there agree.
+    let dropped_sha = repo.git(&["log", "-1", "--format=%h", "branch"]);
+    let dropped_subject = repo.git(&["log", "-1", "--format=%s", "branch"]);
+
+    // The start-state control, and the source of the path this test looks for:
+    // the fixture names the submodule, not this file.
+    let bumped = repo.git(&["diff-tree", "--no-commit-id", "--name-only", "-r", "branch"]);
+    assert_eq!(
+        bumped.lines().count(),
+        1,
+        "the stopped commit has to touch the submodule pointer and nothing else; an ordinary \
+         path beside it comes back from the porcelain whatever the setting says, carries the \
+         refusal on its own, and leaves what the pointer costs invisible: {bumped:?}"
+    );
+
+    // The armed control. `diff.ignoreSubmodules` is what makes the two probes
+    // disagree, so a git that stopped honouring it - or a fixture that stopped
+    // setting it - would leave this test passing against a hazard that is gone.
+    let porcelain = repo.git(&["diff", "--name-only", "branch~1", "branch"]);
+    assert!(
+        porcelain.is_empty(),
+        "`diff.ignoreSubmodules=all` is not hiding the pointer from `git diff`, so this test \
+         could only pass vacuously; the porcelain reported {porcelain:?} for a commit the \
+         plumbing reports {bumped:?} for"
+    );
+
+    let scratch = repo.scratch("main");
+    scratch
+        .git()
+        .run("checkout", &["-q", "--detach", "branch"])
+        .expect("check out the branch detached in the scratch worktree");
+
+    // Sealed only now: adding the worktree and checking out write no objects,
+    // but everything before this point would fail against a read-only store.
+    let sealed = repo.seal_object_store();
+    let result = scratch.replay_rebase("main");
+    // Released before a single assertion runs, so a failing one cannot leave a
+    // read-only directory behind for the temporary directory to trip over.
+    drop(sealed);
+
+    let error = match result {
+        Ok(conflicts) => panic!(
+            "the replay reported a cost for a commit git never wrote: {conflicts:?}\n\
+             a submodule pointer the porcelain hides is still work that would be thrown away"
+        ),
+        Err(error) => format!("{error:#}"),
+    };
+
+    assert!(
+        error.contains(&dropped_sha),
+        "the error should name the commit that was about to be dropped ({dropped_sha}): {error}"
+    );
+    assert!(
+        error.contains(&dropped_subject),
+        "the error should carry the dropped commit's subject ({dropped_subject}): {error}"
+    );
+
+    // The classification itself, pinned separately from the fact that something
+    // went wrong. This commit moves the submodule somewhere the new base has
+    // never had it, so calling it a commit that adds nothing to the new base is
+    // simply false - and it is the false half, not the failed skip that follows
+    // from it, that would cost a developer their work in a repository where the
+    // skip succeeds.
+    assert!(
+        !error.contains("adds nothing to the new base"),
+        "a commit that moves a submodule the new base has at another commit is not an empty \
+         commit, whatever `diff.ignoreSubmodules` hides from the porcelain: {error}"
+    );
+
+    // The path itself, so the refusal is about the pointer rather than about
+    // something else that went wrong on the way.
+    assert!(
+        error.contains(&bumped),
+        "the error should name the submodule whose pointer would have been lost ({bumped}): \
+         {error}"
     );
 
     // The rollback left the repository pristine, so there is no uncommitted
