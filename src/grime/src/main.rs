@@ -181,7 +181,19 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     // value serves both.
     let unworded = Report::for_tool(TOOL);
     let action = format!("merging {} into HEAD", args.branch);
-    let report = unworded.describing(&action);
+
+    // `without_stops`, because a merge halts exactly once. Git makes one
+    // three-way merge and stops at it, so the count is `1` for every conflicted
+    // merge and `0` for every clean one - a constant dressed up as a
+    // measurement. Printing it would invite a reader to weigh it against
+    // `grind`'s stop count, which is a real measurement of how many times a
+    // rebase halted, and the comparison would be meaningless.
+    //
+    // The count is dropped from the *words* and nowhere else. `Conflicts` still
+    // records the halt, because a caller folding several replays together adds
+    // those halts up, and because the two tools have to measure the same thing
+    // to stay comparable. Only this sentence leaves it out.
+    let report = unworded.describing(&action).without_stops();
 
     // Read here and printed later, which is two decisions rather than one.
     //
