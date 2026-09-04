@@ -518,13 +518,26 @@ outrank every `-c` the harness pins. **The inherited git environment, shed** is
 asserted by
 `ignores_an_inherited_git_environment_naming_another_identity_or_repository`,
 which adds another repository's `GIT_DIR` and `GIT_INDEX_FILE` to that
-environment and watches neither reach git. Both of those last two run in a
-re-executed child of the test binary rather than in it: the environment is
-process-wide, and mutating it in place would reach every sibling test and every
-concurrent run of the suite. Both go through `gitscratch::testing`'s
-`run_child_half`, which is the one child runner in this crate: every child half
-here, in `src/testing.rs` and in `tests/isolation.rs`, is spawned by it, and
-it alone decides what counts as a child that ran.
+environment and watches neither reach git.
+`every_identity_variable_is_settled_on_the_command_the_runner_builds` pins the
+same identity from the other side: what the runner *says*, rather than what git
+resolves. Git hands a hook six identity variables, and the runner settles all
+six on every command it builds — the four that name a person pinned to the
+harness, and the two that carry a time removed, since a pinned date gives every
+commit of one run the same timestamp. The sweep and those entries are two guards
+over one hazard, kept apart so the identity survives either one being edited
+away, and that redundancy is only real where it covers all six: with two of them
+left to the sweep alone, a sweep that goes away holds the name and lets both
+dates through. A commit cannot show this, because the sweep alone already keeps
+a leaked date out of one — so the test reads the command's own environment
+overrides, in a child half handed all six variables removed, where nothing on
+the command came from the sweep. Those three run in a re-executed child of the
+test binary rather than in it: the environment is process-wide, and mutating it
+in place reaches every sibling test and every concurrent run of the suite. All
+three go through `gitscratch::testing`'s `run_child_half`, which is the one
+child runner in this crate: every child half here, in `src/testing.rs` and in
+`tests/isolation.rs`, is spawned by it, and it alone decides what counts as a
+child that ran.
 
 That decision is the reason the runner is one function rather than a copy per
 suite. Each parent names its child by a libtest filter, which is a string the
@@ -556,6 +569,20 @@ path lists through `Git::paths`, so a lossy decode mangles the two lists the
 same way and their intersection is unchanged. macOS will not let a working tree
 hold such a name at all, so the commit is built directly in the object database
 and the guard is pinned here rather than end-to-end.
+
+**The refusal of an empty hooks path** is pinned by
+`refuses_an_empty_hooks_path_rather_than_resolving_a_hook_outside_the_repository`.
+An empty `core.hooksPath` is not "hooks off". Git joins the configured directory
+onto the hook name, so an empty directory resolves `pre-commit` to
+`/pre-commit`, at the root of the file system — one hooks directory shared by
+every repository on the machine, where an unset key resolves the same hook
+inside the repository. `Git::new` refuses the value outright, which is what
+leaves the two real spellings as the only ones a call site can write: the
+scratch's own empty directory, and the relative path the pre-flight names. The
+test carries an armed control ahead of the refusal, since refusing a harmless
+value proves nothing — plain git has to answer `/pre-commit` for the empty key
+and `.git/hooks/pre-commit` for the unset one, or the two answers the refusal
+tells apart are no longer different.
 
 **The refusal of a revision that names no commit** is pinned by
 `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back`. Plain

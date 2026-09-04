@@ -733,6 +733,8 @@ fn path_from_git(field: Vec<u8>) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{OsStr, OsString};
+
     use pulldown_cmark::{Event, Parser, Tag};
     use tempfile::TempDir;
 
@@ -2034,5 +2036,194 @@ mod tests {
             "an inherited GIT_INDEX_FILE must not become the index a replay stages into: {}",
             index.display()
         );
+    }
+    /// Marks the re-executed child half of
+    /// [`every_identity_variable_is_settled_on_the_command_the_runner_builds`].
+    const SETTLED_CHILD_MARKER: &str = "GITSCRATCH_SETTLED_IDENTITY_CHILD";
+
+    /// libtest's exact filter for the one test the child half runs. The
+    /// compiler never checks this string against the test it names, and a
+    /// rename that leaves it matching nothing is a run libtest calls a success,
+    /// so [`run_child_half`] requires the child to say it ran rather than
+    /// trusting this constant to stay current.
+    const SETTLED_TEST_PATH: &str =
+        "git::tests::every_identity_variable_is_settled_on_the_command_the_runner_builds";
+
+    /// The six variables git hands a hook to say who is committing, and what
+    /// [`Git::command`] has to do with each one before git reads it.
+    ///
+    /// `Some(value)` is a pin, `None` is a removal, and the difference is the
+    /// point. The four that name a person are pinned to the harness, because a
+    /// scratch commit has to be attributable to the harness that made it. The
+    /// two that carry a time are taken off instead: a pinned date would give
+    /// every commit of one run the same timestamp, which is the defect the
+    /// crate names for a *leaked* date, arriving by the crate's own hand.
+    ///
+    /// Spelled here as literals rather than read out of the source, so a name
+    /// misspelled in [`Git::command`] fails this test instead of agreeing with
+    /// it.
+    const SETTLED_IDENTITY: [(&str, Option<&str>); 6] = [
+        ("GIT_AUTHOR_NAME", Some(HARNESS_NAME)),
+        ("GIT_AUTHOR_EMAIL", Some(HARNESS_EMAIL)),
+        ("GIT_COMMITTER_NAME", Some(HARNESS_NAME)),
+        ("GIT_COMMITTER_EMAIL", Some(HARNESS_EMAIL)),
+        ("GIT_AUTHOR_DATE", None),
+        ("GIT_COMMITTER_DATE", None),
+    ];
+
+    /// The child half: with the process holding none of the six, read back what
+    /// the runner puts on the command it builds.
+    ///
+    /// The armed control comes first, and it is what makes the assertion mean
+    /// anything. [`NoInheritedGitEnvironment`] schedules a removal for every
+    /// `GIT_` variable the process *holds*, so a run started from a git hook
+    /// would see both date variables removed from the command whether or not
+    /// [`Git::command`] says anything about them. Under a process that holds
+    /// none of the six, every entry the command carries was put there by the
+    /// runner.
+    fn assert_the_identity_is_settled() {
+        for (name, _) in SETTLED_IDENTITY {
+            assert!(
+                std::env::var_os(name).is_none(),
+                "the child half must hold none of the six identity variables, or the sweep \
+                 schedules the removals this test reads and the assertions below are measured \
+                 against the sweep rather than against the pin: `{name}` is set"
+            );
+        }
+
+        let command = Git::new(std::env::temp_dir(), "").command("var", &["GIT_AUTHOR_IDENT"]);
+        let settled: Vec<(OsString, Option<OsString>)> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(std::ffi::OsStr::to_os_string)))
+            .collect();
+
+        for (name, pinned) in SETTLED_IDENTITY {
+            let (_, carried) = settled
+                .iter()
+                .find(|(key, _)| key == OsStr::new(name))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`{name}` is not settled on the command at all. Git reads an identity \
+                         variable ahead of every configuration source, `-c` included, so the \
+                         runner has to say what each of the six is - and it has to say it \
+                         whatever the process happens to hold, because the sweep covers only \
+                         what is there to sweep. The command carries {settled:?}"
+                    )
+                });
+
+            match pinned {
+                Some(value) => assert_eq!(
+                    carried.as_deref(),
+                    Some(OsStr::new(value)),
+                    "`{name}` has to be pinned to the harness, so the identity holds even with \
+                     the sweep edited away"
+                ),
+                None => assert!(
+                    carried.is_none(),
+                    "`{name}` has to be removed rather than pinned. A removal leaves the clock to \
+                     give each commit its own timestamp; a pin would give every commit of one run \
+                     one identical time, which is the cost the crate names for a leaked date"
+                ),
+            }
+        }
+    }
+
+    /// Every one of the six identity variables is settled on the command the
+    /// runner builds, and settled there whatever the process holds.
+    ///
+    /// The sweep and the pins are two guards over one hazard, and the crate
+    /// keeps both so the identity survives either one being edited away. That
+    /// redundancy is only real where it is complete: with four of the six
+    /// restated and two left to the sweep alone, a sweep that was edited away
+    /// would hold the name and the address and let both dates through - and
+    /// every commit a run makes would carry one identical timestamp, which is
+    /// the cost the crate already names at [`NoInheritedGitEnvironment`].
+    ///
+    /// Read off the command rather than out of a commit, because the question
+    /// is what the runner says rather than what git resolves. A commit made in
+    /// a fixture answers the same either way: the sweep alone already keeps a
+    /// leaked date out of it, which is exactly why this second guard cannot be
+    /// seen from there.
+    ///
+    /// The environment belongs to a re-executed child of this test binary. The
+    /// child is handed the six variables removed, so the process holds none of
+    /// them and no removal on the command can have come from the sweep. Doing
+    /// that in this process instead would mean [`std::env::set_var`], which
+    /// mutates a global while sibling tests run.
+    #[test]
+    fn every_identity_variable_is_settled_on_the_command_the_runner_builds() {
+        if std::env::var_os(SETTLED_CHILD_MARKER).is_some() {
+            assert_the_identity_is_settled();
+            // Reached only when the assertions above held, and read by the
+            // parent as the one proof that this branch ran at all.
+            child_ran();
+            return;
+        }
+
+        let outcome = run_child_half(SETTLED_TEST_PATH, |child| {
+            child.env(SETTLED_CHILD_MARKER, "1");
+            for (name, _) in SETTLED_IDENTITY {
+                child.env_remove(name);
+            }
+        });
+
+        if let Err(report) = outcome {
+            panic!("the settled-identity guard did not report a pass:\n{report}");
+        }
+    }
+
+    /// The hook lookup an empty `core.hooksPath` resolves to, which is what
+    /// makes the empty value worse than no redirect at all.
+    ///
+    /// Git joins the configured directory onto the hook name, so an empty
+    /// directory joins to an absolute path at the root of the file system. With
+    /// the key unset git answers `.git/hooks/pre-commit`, inside the repository;
+    /// with it empty it answers this, which is one path for every repository on
+    /// the machine.
+    const HOOK_AT_THE_FILESYSTEM_ROOT: &str = "/pre-commit";
+
+    /// The hook a repository fires first and most often, used here only as the
+    /// name git resolves.
+    const A_HOOK: &str = "hooks/pre-commit";
+
+    /// A hooks path of nothing is refused, because an empty `core.hooksPath` is
+    /// not "no hooks" - it is one hooks directory shared by the whole machine.
+    ///
+    /// Git resolves a hook by joining the configured directory onto the hook
+    /// name. An empty directory therefore resolves `pre-commit` to
+    /// `/pre-commit`, at the root of the file system, where an unset key would
+    /// have resolved it inside the repository and where the relative path the
+    /// pre-flight names resolves it to a directory this crate never creates. So
+    /// the empty value does not point hook lookups at nothing; it points every
+    /// repository's hook lookups at one place, and at a place outside every
+    /// repository.
+    ///
+    /// The runner is crate-private, so nothing outside can reach this. What the
+    /// refusal removes is the shape a call site inside the crate can still
+    /// write: a runner whose hooks redirect reads as "hooks off" and is not.
+    ///
+    /// The armed control runs first, through plain git, because the assertion
+    /// below says the runner refuses a value and that is worth nothing if the
+    /// value were harmless. It reads the two resolutions back and requires them
+    /// to differ, so the refusal stands against a live hazard.
+    #[test]
+    #[should_panic(expected = "hooks path")]
+    fn refuses_an_empty_hooks_path_rather_than_resolving_a_hook_outside_the_repository() {
+        let repo = TestRepo::init();
+
+        assert_eq!(
+            repo.git(&["-c", "core.hooksPath=", "rev-parse", "--git-path", A_HOOK]),
+            HOOK_AT_THE_FILESYSTEM_ROOT,
+            "git no longer resolves a hook against an empty `core.hooksPath` at the root of the \
+             file system, so the refusal below stands against nothing"
+        );
+        assert_eq!(
+            repo.git(&["rev-parse", "--git-path", A_HOOK]),
+            format!(".git/{A_HOOK}"),
+            "git no longer resolves a hook inside the repository when the key is unset, so the \
+             two answers this control tells apart are no longer different"
+        );
+
+        let _refused = Git::new(repo.path(), "");
     }
 }
