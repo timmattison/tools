@@ -261,10 +261,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       Works on macOS (using lsof), Linux (using /proc), and Windows (using system APIs). Supports JSON output and verbose mode.
     - To install: `cargo install --git https://github.com/timmattison/tools wu`
 - symfix
-    - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove
-      a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving
-      directories or restructuring projects.
-    - To install: `go install github.com/timmattison/tools/cmd/symfix@latest`
+    - Recursively scans directories for broken symlinks and optionally repairs them. Can prepend a string to, or
+      remove a prefix from, a broken symlink target. `--dry-run` prints every planned change and touches nothing.
+      Useful after moving directories or restructuring a project.
+    - To install: `cargo install --git https://github.com/timmattison/tools symfix`
 - diskhog
     - Shows per-process disk I/O usage on macOS in a continuously updating terminal UI. Displays disk bandwidth
       (read/write bytes per second) for all processes. When run with sudo, also shows IOPS (operations per second)
@@ -1693,59 +1693,109 @@ Verbose output groups processes by PID and shows all files each process has open
 
 ## symfix
 
-Recursively scans directories for broken symlinks and optionally fixes them by modifying the symlink targets.
+Recursively scans directories for broken symlinks and optionally repairs them by rewriting the symlink target.
+
+A symlink holds its target as text, and the text says nothing about whether the target is there. A tree that moved, an
+archive that unpacked somewhere else, or a checkout at a new prefix leaves links that name files which are not there.
+`symfix` finds them, and repairs the ones you tell it how to repair.
 
 ### Basic Usage
 
 ```
-symfix                                # Scan current directory for broken symlinks
-symfix -dir /path/to/scan             # Scan a specific directory
-symfix -prepend-to-fix ../            # Fix broken symlinks by prepending "../" to targets
-symfix -remove-to-fix /old/path/      # Fix broken symlinks by removing "/old/path/" prefix
+symfix                                 # Scan the current directory for broken symlinks
+symfix --dir /path/to/scan             # Scan a specific directory
+symfix --prepend-to-fix ../            # Repair by prepending "../" to the target
+symfix --remove-to-fix /old/path/      # Repair by removing the "/old/path/" prefix from the target
+symfix --prepend-to-fix ../ --dry-run  # Print the plan and change nothing
 ```
 
 ### Options
 
-- `-dir`: Directory to scan for broken symlinks (default: current directory)
-- `-prepend-to-fix`: String to prepend to broken symlink targets to attempt fixing them
-- `-remove-to-fix`: String to remove from the beginning of broken symlink targets
-- `-verbose`: Enable verbose output for debugging
-- `-help`: Show help message with usage information
+- `-d, --dir <DIR>`: The directory to scan (default: the current directory)
+- `--prepend-to-fix <STRING>`: Put this string in front of a broken symlink target
+- `--remove-to-fix <STRING>`: Take this string off the front of a broken symlink target
+- `-n, --dry-run`: Print every planned change and touch nothing
+- `--skip <NAME>`: Do not enter a directory with this name. Repeatable
+- `-v, --verbose`: Write the debug lines to standard error
+- `-h, --help`: Print the help
+- `-V, --version`: Print the version
+
+**The single-dash spellings are gone.** The Go version of this tool accepted `-dir` and `--dir` for the same flag.
+The Rust version reads `-dir` as the three short flags `-d`, `-i` and `-r`, and refuses it. Every flag now needs two
+dashes, except the short forms in the list above.
 
 ### Examples
 
-Find all broken symlinks in the current directory:
+Find every broken symlink in the current directory:
 
 ```
 symfix
 ```
 
-Find all broken symlinks in a specific directory:
+Find every broken symlink in a specific directory:
 
 ```
-symfix -dir ~/projects/my-website
+symfix --dir ~/projects/my-website
 ```
 
-Fix broken symlinks by prepending a string to their targets:
+Repair broken symlinks by prepending a string to the target:
 
 ```
-symfix -prepend-to-fix ../
+symfix --prepend-to-fix ../
 ```
 
-Fix broken symlinks by removing a prefix from their targets:
+Repair broken symlinks by removing a prefix from the target:
 
 ```
-symfix -remove-to-fix /old/path/prefix/
+symfix --remove-to-fix /old/path/prefix/
 ```
 
-Scan a specific directory and fix symlinks by prepending:
+Scan a specific directory and repair by prepending:
 
 ```
-symfix -dir ~/projects/my-website -prepend-to-fix ..
+symfix --dir ~/projects/my-website --prepend-to-fix ..
 ```
 
-When fixing symlinks, targets are resolved relative to the symlink's location. The tool will report all broken symlinks
-found and indicate which ones were fixed.
+See what a repair would do, and change nothing:
+
+```
+symfix --prepend-to-fix ../ --dry-run
+```
+
+Leave out the directories that hold no source:
+
+```
+symfix --skip node_modules --skip .git
+```
+
+Scan a directory, repair by prepending, and print the debug lines:
+
+```
+symfix --dir ~/projects/my-website --prepend-to-fix .. --verbose
+```
+
+### How a repair works
+
+`symfix` builds a new target, checks it, and writes it:
+
+1. It builds the new target as text. `--prepend-to-fix` puts the string in front of the old target.
+   `--remove-to-fix` takes the string off the front, and only when the old target starts with it.
+2. It checks **the exact path the new link will resolve to**. A relative target resolves against the directory that
+   holds the link. An absolute target resolves against the root.
+3. It writes the new target **as it was built**. A relative target thus stays relative, and a tree you move again
+   keeps working.
+
+`--prepend-to-fix` is tried first. `--remove-to-fix` is tried only when the prepend did not repair the link.
+
+The replacement is atomic. `symfix` makes the new link under a name of its own in the same directory and renames it
+over the old one, so a run that is killed part way leaves either the old link or the new one, and never no link at all.
+
+### What `symfix` will not repair
+
+A link whose target cannot be resolved **for a reason that is not absence** is reported as an error and left alone.
+A directory you cannot traverse and a loop of links that point at each other both land here. `symfix` does not
+understand why such a link failed, so it cannot know that a rewrite would be an improvement, and rewriting one would
+destroy a link that works for everybody who can read the directory.
 
 ## rcc
 

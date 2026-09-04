@@ -5,6 +5,8 @@ edition.workspace = true
 description = "Recursively finds and optionally repairs broken symlinks"
 
 [dependencies]
+buildinfo.workspace = true
+clap.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
