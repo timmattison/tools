@@ -7642,6 +7642,8 @@ dependencies = [
 name = "symfix"
 version = "0.1.0"
 dependencies = [
+ "buildinfo",
+ "clap",
  "tempfile",
  "walkdir",
 ]
