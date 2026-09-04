@@ -185,10 +185,10 @@ fn unreachable_path_dir() -> String {
 ///
 /// The test invocation makes a Sixel image of 100 pixels by 100 pixels. One
 /// character cell is 20 pixels high, because a child with no controlling
-/// terminal measures no cell and `cell_pixels_or_estimate` gives the estimate
-/// of 10 pixels by 20. The image therefore fills 5 rows. The Kitty routine and
-/// the iTerm2 routine take the size of the image in character cells, and the
-/// same test invocation asks them for 5 rows.
+/// terminal measures no cell and `cell_pixels_or_estimate_of` gives the
+/// estimate of 10 pixels by 20. The image therefore fills 5 rows. The Kitty
+/// routine and the iTerm2 routine take the size of the image in character
+/// cells, and the same test invocation asks them for 5 rows.
 const EXPECTED_ROWS: i64 = 5;
 
 /// The cursor movement that a byte stream requests, in rows.
