@@ -49,6 +49,9 @@ sha1 = "0.10"
 md-5 = "0.10"
 hex = "0.4"
 
+# Compression
+flate2 = "1.1"
+
 # Terminal UI
 crossterm = "0.29"
 ratatui = "0.30"

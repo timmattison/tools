@@ -48,7 +48,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `polish` | Updates Rust dependencies across all `Cargo.toml` files in a repo. |
 | `portplz` | Generates a consistent unprivileged port number from directory name and git branch. |
 | `prcp` | Copies files with a Unicode progress bar; wildcards, multi-file, and verified move mode. |
-| `prgz` | Like `prcp` but gzip-compresses the file, showing progress in the console. |
+| `prgz` | Like `prcp` but gzip-compresses the file, with the same one-line progress bar and a closing report. |
 | `prhash` | Hashes files (MD5/SHA1/SHA256/SHA512/Blake3) with a progress bar, shasum-compatible output. |
 | `r2-bucket-cleaner` | Lists and optionally clears all objects from a Cloudflare R2 bucket via wrangler. |
 | `rcc` | Rust Cross Compiler — simplifies cross-compilation (target detection, `Cross.toml`, build). |

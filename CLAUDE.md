@@ -295,7 +295,7 @@ func main() {
 
 ```bash
 ./scripts/build-go.sh           # Build all Go tools
-./scripts/build-go.sh prgz procinfo  # Build specific tools
+./scripts/build-go.sh localnext subito  # Build specific tools
 ```
 
 The build script reads the version from the `VERSION` file at the repository root.
@@ -308,7 +308,6 @@ All Rust tools use buildinfo for version information.
 
 All Go tools use internal/version:
 - `localnext` - Local Next.js Server
-- `prgz` - Progress Gzip
 - `subito` - AWS IoT Subscriber
 - `symfix` - Symlink Fix
 

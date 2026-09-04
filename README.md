@@ -69,8 +69,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       Run `prcp --shell-setup` to add a `prmv` command for convenient moves.
     - To install: `cargo install --git https://github.com/timmattison/tools prcp`
 - prgz
-    - Similar to `prcp` but instead of copying a file it gzip compresses it. It shows the progress in the console.
-    - To install: `go install github.com/timmattison/tools/cmd/prgz@latest`
+    - Similar to `prcp` but instead of copying a file it gzip compresses it. It draws the same one-line progress bar
+      that `prcp` draws, and it closes with the sizes, the duration, and the rates, with the thousands separators of
+      your locale (`LC_ALL`, then `LC_NUMERIC`, then `LANG`). It asks before it replaces an output file that's
+      already there, the same way `prcp` does; `-y`/`--yes` skips the prompt. On Unix, Ctrl-C stops the run and
+      removes the part of the file it wrote, unless that file was already there and the run replaced it, in which
+      case the part-written file stays; a second Ctrl-C ends the run at once and leaves the part file behind either
+      way.
+    - To install: `cargo install --git https://github.com/timmattison/tools prgz`
 - update-aws-credentials
     - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
       your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
