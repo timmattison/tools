@@ -1721,8 +1721,8 @@ symfix --prepend-to-fix ../ --dry-run  # Print the plan and change nothing
 - `-V, --version`: Print the version
 
 **The single-dash spellings are gone.** The Go version of this tool accepted `-dir` and `--dir` for the same flag.
-The Rust version reads `-dir` as the three short flags `-d`, `-i` and `-r`, and refuses it. Every flag now needs two
-dashes, except the short forms in the list above.
+The Rust version reads `-dir` as the short flag `-d` carrying the value `ir`, and then refuses the directory that
+follows. Every flag now needs two dashes, except the short forms in the list above.
 
 ### Examples
 
