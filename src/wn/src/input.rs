@@ -178,8 +178,17 @@ impl Chain {
         read: bool,
         write: Option<&dyn Fn(&str) -> ClipboardWrite>,
     ) -> Option<String> {
-        let _ = (read, write);
-        None
+        if self.source != Source::Plan || !read {
+            return None;
+        }
+        let write = write?;
+        match write(&self.text) {
+            Ok(()) => Some(KEPT.to_string()),
+            Err(cause) => Some(format!(
+                "The plan could not be written to the clipboard ({cause}). \
+The next run builds a new one."
+            )),
+        }
     }
 
     /// The reason the text could not be read, with an invisible input named.
