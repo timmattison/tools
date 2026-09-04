@@ -287,7 +287,11 @@ impl<'a> Report<'a> {
 /// by an `n`, and this escape leaves that backslash alone, so `\n` on screen
 /// would name two different files. `\u{a}` names one.
 fn printable(name: &Path) -> String {
-    let text = name.to_string_lossy();
+    // MUTATION, deliberate, and the next commit takes it back out: the lossy
+    // decode is replaced by a `to_str` that gives up on a name it cannot decode,
+    // and the result is trimmed. Both losses are what the two new tests below
+    // are here to catch.
+    let text = std::borrow::Cow::<str>::Borrowed(name.to_str().unwrap_or("?").trim());
     if !text.contains(char::is_control) {
         return text.into_owned();
     }
@@ -359,6 +363,26 @@ mod tests {
     fn file(name: &str, hunks: usize) -> (PathBuf, NonZeroUsize) {
         (
             PathBuf::from(name),
+            NonZeroUsize::new(hunks).expect("a conflicted file contributes at least one hunk"),
+        )
+    }
+
+    /// The same entry under a name spelled as raw bytes.
+    ///
+    /// A path on unix is an arbitrary byte string, and the whole reason the
+    /// breakdown is keyed on an `OsString` is that such a name reaches the
+    /// renderer intact. It cannot reach the renderer through [`file`], because
+    /// a `&str` is UTF-8 by definition, so the bytes go in through
+    /// `OsString::from_vec` instead. No filesystem is involved: APFS refuses
+    /// such a name outright, and [`Conflicts::from_files`] asks only for a
+    /// `PathBuf`.
+    #[cfg(unix)]
+    fn named_by_bytes(name: &[u8], hunks: usize) -> (PathBuf, NonZeroUsize) {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        (
+            PathBuf::from(OsString::from_vec(name.to_vec())),
             NonZeroUsize::new(hunks).expect("a conflicted file contributes at least one hunk"),
         )
     }
@@ -564,6 +588,137 @@ mod tests {
             "every count starts in the same terminal column, and a control \
              character measured as nothing is what moves one of them: \
              {columns:?}\n{rendered}"
+        );
+    }
+
+    /// A name is bytes, and a terminal takes text, so the one conversion the
+    /// crate cannot avoid happens here - and this is the only test that watches
+    /// it happen.
+    ///
+    /// Everything upstream of this line carries the bytes git wrote:
+    /// `Git::nul_separated` reads them without decoding, [`Conflicts`] keys the
+    /// breakdown on an `OsString`, and `file_hunks` hands back a `&Path`. That
+    /// is deliberate work, and it is worth nothing if the exit door quietly
+    /// replaces the name with something else. `to_string_lossy` writes one
+    /// U+FFFD per byte that is not UTF-8 and leaves the rest of the name alone,
+    /// so a developer reads a name they can still match against their own
+    /// repository - `bad-<U+FFFD>.txt` names one file, where `?` names every
+    /// file the renderer could not decode.
+    ///
+    /// The column is asserted beside the name because the replacement character
+    /// is one column wide and the byte it stands for measured none. The
+    /// conversion happens once, ahead of the measurement and ahead of the print,
+    /// so the count of an undecodable name starts in the same column as an ASCII
+    /// sibling's.
+    ///
+    /// Unix only, and the fixture never touches a filesystem: APFS refuses such
+    /// a name with `EILSEQ`, and [`Conflicts::from_files`] takes a `PathBuf`, so
+    /// the bytes go straight in.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_valid_utf_8_is_rendered_with_the_replacement_character() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let undecodable = Conflicts::from_files(
+            [named_by_bytes(b"bad-\xff.txt", 1), file("plain.txt", 2)],
+            Stops::new(2),
+        );
+
+        let rendered = report.render(&undecodable);
+
+        assert_eq!(
+            rendered,
+            [
+                "grind: conflicts - replaying HEAD onto main",
+                "       3 hunks across 2 files, 2 stops",
+                "",
+                "  bad-\u{fffd}.txt    1 hunk",
+                "  plain.txt    2 hunks",
+            ]
+            .join("\n")
+        );
+
+        let rows = breakdown(&rendered);
+        assert_eq!(
+            count_column(rows[0], "1 hunk"),
+            count_column(rows[1], "2 hunks"),
+            "the replacement character is measured as the one column it prints \
+             as, so both counts start in the same column:\n{rendered}"
+        );
+    }
+
+    /// A name that holds a space at either end, an ideographic space or an emoji
+    /// reaches the screen exactly as git reported it.
+    ///
+    /// Each of those characters names a real file, and each is a character some
+    /// obvious way of writing this renderer would have eaten. `str::trim` is
+    /// Unicode-aware, so it takes a leading space, a trailing space and U+3000
+    /// alike. [`char::escape_debug`] takes U+3000 as well, because that
+    /// character is a space separator rather than a printable one by the table
+    /// that function reads. Either loss hands back a name that opens no file,
+    /// which is the failure the crate spends `-z` and an `OsString` key to
+    /// avoid, undone at the last line.
+    ///
+    /// The emoji is the width case beside them: it is one character, four bytes
+    /// and two terminal columns, so a renderer measuring either of the first two
+    /// numbers moves the count column of every row. `awkward_names_repo` builds
+    /// these names in a real repository and `tests/conflicts.rs` asserts the map
+    /// they produce; this is the other end, where the map becomes text.
+    #[test]
+    fn a_name_that_holds_a_space_or_an_emoji_is_rendered_as_it_stands() {
+        /// A space no reader sees and every trimmer eats.
+        const LEADING_SPACE: &str = " lead.txt";
+        /// The same loss at the other end of the name.
+        const TRAILING_SPACE: &str = "trail.txt ";
+        /// U+3000 IDEOGRAPHIC SPACE: two columns wide, and whitespace to both
+        /// `str::trim` and `char::escape_debug`.
+        const IDEOGRAPHIC_SPACE: &str = "\u{3000}wide.txt";
+        /// U+1F389 PARTY POPPER: one character, four bytes, two columns.
+        const EMOJI: &str = "emoji-\u{1f389}.txt";
+
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let awkward = Conflicts::from_files(
+            [
+                file(LEADING_SPACE, 1),
+                file(EMOJI, 2),
+                file(TRAILING_SPACE, 3),
+                file(IDEOGRAPHIC_SPACE, 4),
+            ],
+            Stops::new(4),
+        );
+
+        let rendered = report.render(&awkward);
+
+        // The names sort by bytes, which is git's own order: a space is 0x20,
+        // `e` is 0x65, `t` is 0x74, and U+3000 opens with 0xe3.
+        assert_eq!(
+            rendered,
+            [
+                "grind: conflicts - replaying HEAD onto main".to_string(),
+                "       10 hunks across 4 files, 4 stops".to_string(),
+                String::new(),
+                format!("{FILE_INDENT}{LEADING_SPACE}       1 hunk"),
+                format!("{FILE_INDENT}{EMOJI}    2 hunks"),
+                format!("{FILE_INDENT}{TRAILING_SPACE}      3 hunks"),
+                format!("{FILE_INDENT}{IDEOGRAPHIC_SPACE}      4 hunks"),
+            ]
+            .join("\n")
+        );
+
+        let rows = breakdown(&rendered);
+        let columns: Vec<usize> = [
+            (rows[0], "1 hunk"),
+            (rows[1], "2 hunks"),
+            (rows[2], "3 hunks"),
+            (rows[3], "4 hunks"),
+        ]
+        .into_iter()
+        .map(|(row, count)| count_column(row, count))
+        .collect();
+        assert!(
+            columns.iter().all(|column| *column == columns[0]),
+            "every count starts in the same terminal column, and a name measured \
+             in characters or in bytes rather than in columns is what moves one \
+             of them: {columns:?}\n{rendered}"
         );
     }
 

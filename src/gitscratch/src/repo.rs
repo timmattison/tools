@@ -181,8 +181,11 @@ impl Repo {
 /// record decoded into a `str` on the way here would have replaced every byte of
 /// one that is not valid UTF-8.
 fn moved_from_elsewhere(record: &[u8]) -> bool {
-    [record.first(), record.get(1)]
+    // MUTATION, deliberate, and the next commit takes it back out: the copy
+    // letter is gone from the set, and only the index column is read. Both are
+    // what the two new tests in `tests/repo.rs` are here to catch.
+    [record.first()]
         .into_iter()
         .flatten()
-        .any(|status| *status == b'R' || *status == b'C')
+        .any(|status| *status == b'R')
 }

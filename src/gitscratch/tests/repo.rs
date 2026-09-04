@@ -7,8 +7,31 @@
 //! Every fixture lives in its own `TempDir`, so concurrent `cargo test` runs
 //! never share a path.
 
-use gitscratch::testing::{conflicting_repo, nested_conflict_repo, not_a_repository, TestRepo};
+use gitscratch::testing::{
+    conflicting_repo, nested_conflict_repo, not_a_repository, numbered_lines, TestRepo,
+};
 use gitscratch::{Repo, Uncommitted};
+
+/// Every porcelain record plain git reports, byte for byte.
+///
+/// Through [`TestRepo::try_git`] rather than [`TestRepo::git`], because the
+/// second one trims its answer and the first character of the first record is
+/// the index column - a space wherever the record belongs to the working tree,
+/// which is exactly what the controls below read.
+fn porcelain_records(fixture: &TestRepo) -> String {
+    let output = fixture.try_git(
+        &["status", "--porcelain", "-z", "--untracked-files=all"],
+        &[],
+    );
+
+    assert!(
+        output.status.success(),
+        "a control has to be able to read the status it asserts about: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
 
 /// The whole point of opening a repository up front is that "you pointed me at
 /// somewhere that is not a repository" is a different, cheaper answer than "the
@@ -293,6 +316,134 @@ fn uncommitted_files_counts_a_rename_as_the_one_file_it_is() {
         repo.uncommitted_files().expect("count uncommitted files"),
         Uncommitted::new(3),
         "a rename is one uncommitted file, not one per name it has had"
+    );
+}
+
+/// A copied file is one uncommitted file as well, and a copy is the record no
+/// `git mv` can produce.
+///
+/// Git spends the same two fields on a copy that it spends on a rename - `C  new`,
+/// NUL, `old` - so the count has to pair that record too. It reports a copy only
+/// where copy detection is on, `status.renames` is the key that turns it on, and
+/// this crate pins nothing about that key: the harness reads the developer's own
+/// configuration for it, and `copies` is a value a developer really carries. The
+/// fixture arms the key in its own repository, which settles the question
+/// whatever the developer's global configuration holds.
+///
+/// Git pairs a copy with a source the same change touches, so `big.txt` is
+/// modified in the same staged set. That arming is what the control below reads
+/// back, and the control is not a formality: an undetected copy comes back as
+/// `A  copy.txt`, which is one field for one file, so the total is right for the
+/// wrong reason and the pairing never runs at all.
+///
+/// The two untracked files beside the copy make this fail from both directions,
+/// the same way the rename test does. Pair nothing and the answer is 5, one
+/// field per name. Pair every record and it is 3. Only a count that pairs
+/// exactly the copy gives 4.
+#[test]
+fn uncommitted_files_counts_a_staged_copy_as_the_one_file_it_is() {
+    let fixture = TestRepo::init();
+    fixture.commit_file("big.txt", &numbered_lines(10), "base");
+    fixture.git(&["config", "status.renames", "copies"]);
+
+    std::fs::copy(
+        fixture.path().join("big.txt"),
+        fixture.path().join("copy.txt"),
+    )
+    .expect("copy a tracked file");
+    fixture.write_file("big.txt", &format!("{}line11\n", numbered_lines(10)));
+    fixture.git(&["add", "copy.txt", "big.txt"]);
+    for name in ["one-more.txt", "two-more.txt"] {
+        fixture.write_file(name, "brand new\n");
+    }
+
+    let records = porcelain_records(&fixture);
+    assert!(
+        records.contains("C  copy.txt\0big.txt"),
+        "copy detection is not armed, so this test could only pass vacuously: git \
+         reports an undetected copy as `A  copy.txt`, one field for one file, and \
+         the count below then comes out right without the pairing ever running. \
+         Plain git reported {records:?}"
+    );
+
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    assert_eq!(
+        repo.uncommitted_files().expect("count uncommitted files"),
+        Uncommitted::new(4),
+        "a copy is one uncommitted file, not one per name its content sits under"
+    );
+}
+
+/// The *second* status column carries the letter as well, and a count that reads
+/// only the first one pairs nothing at all in this fixture.
+///
+/// A porcelain record opens with two status bytes, one for the index and one for
+/// the working tree, and git puts an `R` or a `C` in either. The working-tree
+/// spelling arrives when the destination is in the index with no content behind
+/// it, which is what `git add -N` records - and what `git add -p` records for a
+/// new file, so it reaches a developer who never types `-N`. The record is the
+/// same two fields with the index column blank: ` R moved.txt`, NUL, `big.txt`.
+///
+/// Both working-tree spellings sit in one fixture because one status call
+/// reports both. `big.txt` is renamed to `moved.txt`, and `other-copy.txt` is
+/// copied from the `other.txt` that the same fixture modifies, which is the
+/// source copy detection needs. The controls read both records back through
+/// plain git, since a git that stopped detecting either would leave the count
+/// measuring an ordinary delete beside an untracked file.
+///
+/// This fails from both directions too. Pair nothing - which is what reading
+/// only the index column does here, because both records hold a space there -
+/// and the answer is 7. Pair every record and it is 4. Only a count that pairs
+/// exactly the two working-tree records gives 5.
+#[test]
+fn uncommitted_files_counts_a_working_tree_rename_and_copy_as_the_files_they_are() {
+    // Two files of their own content, because git pairs a copy with whichever
+    // source matches it best: two files spelled alike leave the pairing free to
+    // report the rename and the copy against the same name.
+    let other = (1..=10).map(|n| format!("other{n}\n")).collect::<String>();
+    let fixture = TestRepo::init();
+    fixture.commit_files(
+        &[("big.txt", &numbered_lines(10)), ("other.txt", &other)],
+        "base",
+    );
+    fixture.git(&["config", "status.renames", "copies"]);
+
+    std::fs::rename(
+        fixture.path().join("big.txt"),
+        fixture.path().join("moved.txt"),
+    )
+    .expect("rename a tracked file in the working tree");
+    std::fs::copy(
+        fixture.path().join("other.txt"),
+        fixture.path().join("other-copy.txt"),
+    )
+    .expect("copy a tracked file in the working tree");
+    fixture.write_file("other.txt", &format!("{other}other11\n"));
+    // `-N` records the name in the index and none of the content, which is what
+    // puts both destinations in the working-tree half of the status.
+    fixture.git(&["add", "-N", "moved.txt", "other-copy.txt"]);
+    for name in ["one-more.txt", "two-more.txt"] {
+        fixture.write_file(name, "brand new\n");
+    }
+
+    let records = porcelain_records(&fixture);
+    for expected in [" R moved.txt\0big.txt", " C other-copy.txt\0other.txt"] {
+        assert!(
+            records.contains(expected),
+            "git no longer reports {expected:?} in the working-tree column, so this \
+             test could only pass vacuously: an undetected move is a delete beside \
+             an untracked file, which is two fields for two files and never pairs. \
+             Plain git reported {records:?}"
+        );
+    }
+
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    assert_eq!(
+        repo.uncommitted_files().expect("count uncommitted files"),
+        Uncommitted::new(5),
+        "a move and a copy reported in the working-tree column are one file each"
     );
 }
 
