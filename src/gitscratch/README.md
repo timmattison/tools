@@ -35,6 +35,40 @@ if conflicts.is_clean() {
 }
 ```
 
+A rebase is one of the two questions this crate answers. The other is the
+merge, and it is a straight line where the rebase is a loop:
+
+```rust
+// A worktree standing where the merge would happen, and the cost of merging
+// `feature` into it.
+let conflicts = Repo::open(repo_path)?.scratch("HEAD")?.replay_merge("feature")?;
+```
+
+`replay_rebase` replays one commit at a time and can halt at every one of them,
+so it walks the halts and folds a cost per stop. `replay_merge` makes a single
+three-way merge of two trees, so it has one halt to count and one set of
+conflicted files to read — which is why its stop count is only ever one or zero
+and tells a reader nothing the verdict has not said already. Both answer with
+the same `Conflicts`, and that is what lets `grind` and `grime` print one shape.
+
+Two flags on that merge are load-bearing. `--no-ff` is there because git takes a
+merge whose branch is strictly ahead as a fast-forward, and a fast-forward
+merges no trees at all: it moves HEAD to the other tip and stops, so the replay
+measures nothing and still answers clean — which is the answer a genuinely free
+merge earns, so nothing downstream tells the two apart. `--end-of-options` is
+there because the branch name arrives from a caller and a caller can spell a
+revision that starts with a dash, which git reads as an option of `merge`. Every
+caller-supplied revision in this crate carries that separator for the same
+reason.
+
+A merge git will not perform at all is neither verdict. It leaves no unmerged
+path, so there is nothing for a person to resolve, and it wrote nothing, so
+nothing is clean either. `replay_merge` returns an error carrying git's own two
+streams — "refusing to merge unrelated histories" is the plain case, and a
+branch name that resolves to nothing is the other — because that sentence is the
+only part of the answer that says which refusal this was. `replay_rebase`
+refuses the same shape of state for the same reason.
+
 A `Conflicts` records how many times the replay halted and, for every file that
 conflicted, how many hunks it contributed. The headline totals — `hunks()`,
 `files()`, `stops()` — are summaries of that breakdown rather than numbers
@@ -80,7 +114,8 @@ A `compile_fail` doc-test holds the derive out — see **Testing** below.
 
 `Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
 to get a `Scratch`. A `Scratch` answers the operations it names —
-`check_out_detached`, `replay_rebase`, `head_tree`, `commit_tree` — and each of
+`check_out_detached`, `replay_rebase`, `replay_merge`, `head_tree`,
+`commit_tree` — and each of
 them builds its own git call under the whole safety configuration. So there is
 no way to get a worktree from here without also getting the hardening — nor
 without first having established that the directory is a repository at all,

@@ -34,6 +34,15 @@
 //! on top (`grist`, and the `grime`/`grind` dry-run reporters) cannot drift
 //! apart on safety, because there is only one implementation of it.
 //!
+//! Two operations are replayed behind that door, and they answer the two
+//! questions a developer asks before doing the work. [`Scratch::replay_rebase`]
+//! walks a whole rebase, halt by halt, and folds a cost per stop.
+//! [`Scratch::replay_merge`] makes one three-way merge and reads what git could
+//! not merge, so it counts one stop or none. Both answer with the same
+//! [`Conflicts`], and both refuse rather than answer when git would not perform
+//! the operation at all - "refusing to merge unrelated histories" is neither a
+//! clean verdict nor a conflicted one.
+//!
 //! The git runner is no part of that door. It is crate-private, and both halves
 //! of that are needed: nothing outside this crate can *build* a runner, because
 //! `Git::new` is crate-private, and nothing outside is *handed* one,
