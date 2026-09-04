@@ -874,6 +874,34 @@ mod tests {
     }
 
     #[test]
+    fn the_pair_of_a_blocker_stands_however_the_streams_stand() {
+        // The work of `#94` reaches the waiting stream as a blocker, and a
+        // blocker is a node like any other. So the node of `#102` carries the
+        // issue that pull request closes whichever stream the document writes
+        // first. A report that read `#102` in one order and `#102 (#94)` in
+        // the other would answer one plan two ways, and the table reader keeps
+        // the pair either way round.
+        let pair = "{ \"order\": [ { \"issue\": 94, \"pr\": 102 } ] }";
+        let waiting = "{ \"order\": [ { \"issue\": 91, \"waitsFor\": [94] } ] }";
+        for streams in [format!("{pair}, {waiting}"), format!("{waiting}, {pair}")] {
+            let text = format!("{{ \"version\": 1, \"streams\": [ {streams} ] }}");
+            let graph = graph_of(&text);
+            assert_eq!(nodes(&graph), vec![91, 102], "with {streams}");
+            assert_eq!(edges(&graph), vec![(102, 91)], "with {streams}");
+            let work = graph
+                .steps()
+                .iter()
+                .find(|step| step.number().get() == 102)
+                .expect("the plan names the pull request");
+            assert_eq!(
+                work.closes().map(IssueNumber::get),
+                Some(94),
+                "with {streams}"
+            );
+        }
+    }
+
+    #[test]
     fn a_pair_that_waits_for_its_own_issue_draws_no_edge() {
         // The issue of a pair is the work of that pair, so such an edge runs
         // from a step to itself and says nothing. It is the rule a step that
