@@ -18,6 +18,13 @@
 //! index for comparing candidates measured under identical rules, not as an
 //! exact prediction.
 //!
+//! A hunk is a closed conflict region: an opening marker, and the closing
+//! marker that comes after it. Both are matched exactly - seven brackets, then
+//! a space or the end of the line - because that shape is the only thing
+//! separating a marker git wrote from a line of file content that begins with
+//! brackets. `merge.conflictStyle` is pinned beside that rule, so the file the
+//! count is read from is the same file on every machine.
+//!
 //! # Why a halt with nothing unmerged is a question, not an answer
 //!
 //! A rebase can also stop with no unmerged paths at all, and that state has
@@ -1001,10 +1008,50 @@ fn rebase_in_progress(git: &Git, worktree: &Path) -> Result<bool> {
     Ok(false)
 }
 
+/// How many brackets git writes in a conflict marker.
+///
+/// Exactly seven, opening and closing alike. A run of eight is a run git never
+/// wrote.
+const MARKER_BRACKETS: usize = 7;
+
+/// Whether `line` is a conflict marker built out of `bracket`.
+///
+/// Git writes the run of seven and then a space and a label naming the side, or
+/// nothing at all when the label is empty. Both spellings were read out of real
+/// git output: `git merge` labels the sides, and `git merge-file` with three
+/// empty labels writes the bare run. So a space or the end of the line ends a
+/// marker, and anything else in that position means the line is file content
+/// that happens to start with brackets.
+fn is_conflict_marker(line: &[u8], bracket: u8) -> bool {
+    let Some(after_run) = line.strip_prefix(&[bracket; MARKER_BRACKETS]) else {
+        return false;
+    };
+
+    matches!(after_run.first(), None | Some(b' '))
+}
+
 /// Count the conflict regions a human would have to hand-merge in one file.
 ///
+/// A region is an opening marker and the closing marker that comes after it.
+/// Both are matched exactly, by [`is_conflict_marker`], because the shape is
+/// the only thing that separates a marker git wrote from a line of file content
+/// that begins with brackets - and files full of such lines are ordinary. A
+/// document about resolving conflicts, a fixture for a conflict parser and a
+/// saved merge transcript all hold them, and `grist` ranks candidates on this
+/// count, so a line taken for a marker reorders them behind a number nobody can
+/// see is wrong.
+///
+/// An opening marker that nothing closes is file content by the same rule. It
+/// holds one version of the lines under it rather than two, so there is no
+/// decision in it for anyone to make. A closing marker with no opening one
+/// before it closes nothing and is counted as nothing, which is the same
+/// reasoning read the other way round: counting it on its own would put the
+/// over-count straight back in by the other door.
+///
 /// Conflicts with no markers at all - binary files, add/add on a blob git will
-/// not diff, delete/modify - still cost one decision each.
+/// not diff, delete/modify - still cost one decision each. That is the floor
+/// below, and it stands under a second file as well: one whose every bracket
+/// line is content rather than a region.
 ///
 /// [`Conflicts::add_file`] floors its entries at one too, which makes this
 /// floor redundant for the total but not for the measurement, so it stays. The
@@ -1020,12 +1067,18 @@ fn count_conflict_hunks(path: &Path) -> Result<usize> {
         return Ok(1);
     };
 
-    let markers = contents
-        .split(|byte| *byte == b'\n')
-        .filter(|line| line.starts_with(b"<<<<<<<"))
-        .count();
+    let mut regions = 0;
+    let mut inside_a_region = false;
+    for line in contents.split(|byte| *byte == b'\n') {
+        if is_conflict_marker(line, b'<') {
+            inside_a_region = true;
+        } else if inside_a_region && is_conflict_marker(line, b'>') {
+            inside_a_region = false;
+            regions += 1;
+        }
+    }
 
-    Ok(markers.max(1))
+    Ok(regions.max(1))
 }
 
 #[cfg(test)]

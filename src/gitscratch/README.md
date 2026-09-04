@@ -342,6 +342,25 @@ again, which is faithful to reality, since a human resolution also leaves later
 commits conflicting against the resolved state. Treat a `Conflicts` as a cost
 index measured under identical rules, not as an exact prediction.
 
+A hunk is a **closed conflict region**: an opening marker, and the closing
+marker that comes after it. Both are matched exactly — seven brackets, then a
+space or the end of the line — because that shape is the only thing separating a
+marker git wrote from a line of file content that begins with brackets, and
+files full of such lines are ordinary. A document about resolving conflicts, a
+fixture for a conflict parser and a saved merge transcript all hold them. An
+opening marker nothing closes is content by the same rule: it holds one version
+of the lines under it rather than two, so there is no decision in it for anyone
+to make. A closing marker with no opening one before it closes nothing and
+counts as nothing, which is that reasoning read the other way round — counting
+it alone would put the over-count back in by the other door. A conflict with no
+markers at all — a binary file, a delete/modify — costs one decision, which is
+the floor every conflicted file meets.
+
+The "identical rules" are what `merge.conflictStyle=merge` in the table below
+buys. `diff3` and `zdiff3` put the base version inside the region, so a base
+carrying a line that reads as a marker is measured on a developer who set the
+key and not on one who did not.
+
 ## Three ways a rebase halts, and why the third one matters
 
 A halted rebase with **no unmerged paths** is a classification point, not a
@@ -432,6 +451,7 @@ because it quietly discarded the work.
 | `-z` on the way out, `--literal-pathspecs` on the way in | Git C-quotes a non-ASCII name whenever it prints a path on a line, and a name that begins or ends with whitespace survives git only to lose that whitespace to a trimming reader. `-z` turns the escaping off and separates on the one byte a path cannot contain, so a path comes back as the bytes it is stored under. `--literal-pathspecs` covers the other direction, where a path handed back to git stops being a path and becomes a pathspec: a leading `:` is magic, and `*`, `?` and `[` are wildcards. A pathspec that matches *nothing* is the mild half — it can only add to the paths a probe finds missing, and that only ever buys a refusal nobody needed. The half worth the guard is one that matches the *wrong* file: `:/foo.txt` read as magic means from the top of the working tree, so it silently answers about the root `foo.txt`. No call site in this crate hands a path back to git today — the empty-commit probe intersects two path lists in Rust instead — so the pin protects the next call site that does, at the cost of one argument on the single door every git call goes through. |
 | `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. The config half settles nothing on its own: an identity variable outranks every config source, `-c` included, which is why the row above sheds the whole inherited environment first. |
 | `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job and reading one path is `Git::path`'s (both above), and this narrows what a call site that reaches around them can get wrong. |
+| `merge.conflictStyle=merge` | The count has to mean the same thing on every machine. All three styles open and close a conflict region with the same markers, so a region whose two sides carry no bracket line of their own costs one hunk under any of them. What `diff3` and `zdiff3` add is the **base** version of the region, between a `|||||||` line and the `=======` one — so a base carrying a line that reads as a marker lands inside the region under those two and outside it under `merge`. The replay then measures a different file on a developer who set the key, and `grist` ranks candidates on that count: two developers comparing the same branches read two orders and neither is told why. Read out of a real merge rather than from git's documentation. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the

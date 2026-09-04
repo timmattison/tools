@@ -238,6 +238,12 @@ rebase against that one, or today's against last week's — not as a prediction 
 exactly how many conflict markers you will meet. The verdict and the exit code
 are the product; the totals are supporting evidence.
 
+A hunk is a closed conflict region — an opening marker, and the closing marker
+after it — and both are matched exactly, so a line of file content that merely
+begins with brackets is not one. `merge.conflictStyle` is pinned beside that
+rule, because `diff3` and `zdiff3` put the base version inside the region, so
+the same replay measures the same file whatever your own git config says.
+
 ## Development
 
 ```console

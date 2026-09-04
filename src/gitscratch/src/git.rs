@@ -617,6 +617,21 @@ impl Git {
             // non-ASCII name in the repository. Pinning it on the single door
             // every git call goes through is what makes that free.
             "core.quotePath=false",
+            // The conflict style decides what git writes into a conflicted
+            // file, and that file is what the hunk counter reads. All three
+            // styles open and close a region with the same markers, so a
+            // region whose two sides carry no bracket line of their own costs
+            // the same under any of them. What `diff3` and `zdiff3` add is the
+            // *base* version of the region, between a `|||||||` line and the
+            // `=======` one. A base carrying a line that reads as a marker
+            // therefore lands inside the region under those two and outside it
+            // under `merge`, and the same replay measures a different file on
+            // a developer who set the key. The count is then self-consistent
+            // within one run and different across machines, and `grist` ranks
+            // candidates on it, so two developers comparing the same branches
+            // read two orders and neither is told why. Read out of a real
+            // merge rather than from git's documentation.
+            "merge.conflictStyle=merge",
         ]
         .iter()
         .map(|setting| (*setting).to_string())

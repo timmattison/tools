@@ -122,6 +122,13 @@ measured under identical rules**, not as a prediction of exactly how many
 conflict markers you'll see. The ranking is the product; the absolute numbers
 are supporting evidence.
 
+A hunk is a closed conflict region — an opening marker, and the closing marker
+after it — and both are matched exactly, so a line of file content that merely
+begins with brackets is not one. `merge.conflictStyle` is pinned beside that
+rule, because `diff3` and `zdiff3` put the base version inside the region: the
+file the markers are counted in is then the same file on every machine, and two
+developers ranking the same branches read the same order.
+
 What it will not do is guess. If git cannot carry a replay out — it refuses to
 write a commit because the object database is full or read-only, say — `grist`
 fails and tells you which branch and which commit, rather than counting the

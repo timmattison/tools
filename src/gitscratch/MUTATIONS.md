@@ -47,6 +47,9 @@ not have to re-derive which guard belongs to which test.
 | `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | `maintenance.auto=false`, the switch on automatic maintenance that `gc.auto=0` does not reach | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | `core.fsmonitor=false`, the one program git runs that the redirected `core.hooksPath` cannot take away | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | `rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo list | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| `pins_the_conflict_style_even_when_the_repository_asks_for_diff3` | `merge.conflictStyle=merge`, which keeps the base version out of the region the hunk counter reads | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| `a_bracket_run_that_is_not_a_marker_does_not_count_as_a_conflict_region` | The exact marker shape — seven brackets, then a space or the end of the line | `src/scratch.rs`, `is_conflict_marker` — take the answer from `starts_with` and drop the test on what follows the run | widen |
+| `an_opening_marker_with_no_closing_one_does_not_count_as_a_conflict_region` | The closed-region rule, which is what makes an unpaired marker file content rather than a cost | `src/scratch.rs`, `count_conflict_hunks` — count the lines that open a region instead of the pairs that close one | widen |
 | `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` (`src/scratch.rs`) | The parent count read ahead of both probes, which refuses a merge commit at a halt whatever the configuration says | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the `stopped_commit_parent_count` call and the `ensure!` under it | remove |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` (`tests/halts.rs`) | `--ignore-submodules=none` on the porcelain half of the empty-commit probe, which is what makes both halves read one tree under one set of rules | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the argument from the `git diff` invocation | remove |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed` (`tests/halts.rs`) | `--root` on the plumbing half of the empty-commit probe, which is what makes `diff-tree` name the paths a commit with no parent adds | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the argument from the `diff-tree` invocation | remove |
@@ -118,6 +121,9 @@ registry that reports everything as fine is worth less than no registry at all.
 | `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | The fixture sets `maintenance.auto true` in its own repository, and the value is read back before the runner is asked anything. | **Full.** That read-back *is* the arming: plain git, through the fixture, must answer `true` — "the fixture does not hold `maintenance.auto=true`, so there is nothing here for the runner to override and the assertion below is measured against nothing". A key the fixture never took is a key the runner cannot be shown to override. What is **not** armed, and cannot be here, is the damage: the chain from git's `run_auto_maintenance` to a prefetch that writes `refs/prefetch/*` is read from git's source, and arming it would need a developer who has run `git maintenance start` and a remote to fetch from. This test pins the pin, not the consequence, and says so. |
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | The fixture sets `core.fsmonitor .git/hooks/fsmonitor-watchman`, the classic watchman spelling, and the value is read back first. | **Full, for the pin.** Plain git must answer with that path before the runner is asked. The same limit as the row above applies to the *consequence*: proving git would execute the named program means letting a replay execute a program on the developer's machine, which no fixture here may do. `tests/safety.rs` cannot cover this route either — its planted hooks all live under `core.hooksPath`, and this program is executed directly — which is the reason the pin is asserted here at all. |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | The fixture sets `rebase.rebaseMerges true` and the value is read back first. | **Full, and the consequence was executed out of band.** The read-back arms the pin. The hazard behind it was watched by hand on git 2.55: a branch carrying a merge, rebased onto a moved base under `-c rebase.rebaseMerges=true`, comes out still carrying the merge (`git rev-list --min-parents=2 --count` answers 1), so a developer's own configuration really does put a merge commit on a replay's todo list. That demonstration is a shell session rather than an assertion, because a merge on the todo list only becomes a halt in a repository built to conflict at it, and the reviewer who found this could not construct one. |
+| `pins_the_conflict_style_even_when_the_repository_asks_for_diff3` | The fixture sets `merge.conflictStyle diff3` and the value is read back first. | **Full, for the pin.** Plain git must answer `diff3` before the runner is asked anything — "the fixture does not hold `merge.conflictStyle=diff3`, so there is nothing here for the runner to override and the assertion below is measured against nothing". What the *style* does was executed out of band rather than asserted: a merge run under each setting was read, and `diff3` was watched to put the base version between a `|||||||` line and the `=======` one. Arming that inside the test means a fixture whose base carries a line reading as a marker, which measures the counter rather than the pin, and the counter has two tests of its own below. |
+| `a_bracket_run_that_is_not_a_marker_does_not_count_as_a_conflict_region` | The document really conflicts in **two** places, and the merge that made it is required to have failed — "the merge came out clean, so the document holds no marker at all and the count below meets the floor instead of the markers". Two rather than one because the floor answers one for a counter that found the markers and for one that found nothing. | **Full.** The bracket lines the document carries are whole regions rather than lone lines, so a counter that reads closed regions and matches the run loosely counts them as well: the arming is that the mutation below really does answer 4. The markers on the other side are git's own, out of a real merge, so the shape under test is what git writes rather than what this file believes git writes. |
+| `an_opening_marker_with_no_closing_one_does_not_count_as_a_conflict_region` | The same two-region document and the same required merge failure. | **Full.** The lone marker is spelled exactly the way git spells one, so matching the run exactly does not reject it and the closed-region rule is the only thing that can: a counter that reads opening markers answers 3 whether it matches loosely or exactly. It sits after the last region git wrote, so no later closing marker can pair with it and hide the mutation. |
 | `a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact` | The fixture repository is built at a directory whose own name ends in the whitespace under test, and `git init` through the runner panics if git refuses, so the repository provably sits at a path whose last character is the one at stake. | **Full.** The same answer is read back through `Git::run` first and must be missing exactly that character — `assert_eq!(format!("{through_run}{trailing}"), expected.to_string_lossy())`, "`run` no longer eats a space off the end of git's answer, so the assertion below could only pass vacuously". The trimming *is* the hazard, demonstrated before the new reader is asked anything. Both spellings `str::trim` eats get their own fixture: a space, and U+3000, which a Unicode-aware trimmer takes just as readily. |
 | `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` | The stopped commit is read back through plain git and must list three fields — its own id and two parents — "or there is nothing here to refuse". | **Full.** `git diff-tree`, asked through the runner with the arguments the probe really uses, must answer with nothing for that merge — "`diff-tree` no longer stays silent about a merge commit, so this test could only pass vacuously; that silence is what makes an unguarded probe read a merge as a commit that changes nothing". The silence *is* the hazard, demonstrated before the probe is asked anything. A closing control runs the other way: the same probe, pointed at a single-parent commit, must answer rather than refuse, so a probe that refused everything cannot pass. What the test does not build is a real halt — see the record below, and the row above it. |
 | `uncommitted_files_counts_a_staged_copy_as_the_one_file_it_is` | The fixture commits `big.txt`, so a copy has a source, and it stages the modification of that source that copy detection needs. Two untracked files sit beside the copy, so the count fails from both directions: pair nothing and the answer is 5, pair every record and it is 3, and only a count that pairs exactly the copy gives 4. | **Full.** Plain git, through the fixture, must report `C  copy.txt`, NUL, `big.txt` — "copy detection is not armed, so this test could only pass vacuously". That control is not a formality: git reports an undetected copy as `A  copy.txt`, one field for one file, so the closing count comes out right while the pairing never runs. The fixture arms `status.renames = copies` in its own repository rather than reading it out of `~/.gitconfig`, so the control holds on a machine whose developer has never set the key. |
@@ -830,6 +836,95 @@ is the one of the three whose consequence *was* watched, out of band: on git
 2.55 a branch carrying a merge, rebased onto a moved base under
 `-c rebase.rebaseMerges=true`, came out still carrying the merge.
 
+### `merge.conflictStyle`, the setting that decides what a replay reads
+
+Mutation: removed `"merge.conflictStyle=merge"` from `Git::safety_config()`. The
+fixture's own `merge.conflictStyle = diff3` then stands, and git writes the base
+version of every region into the conflicted file, between a `|||||||` line and
+the `=======` one. The run was `cargo test --no-fail-fast -p gitscratch -p grind
+-p grist`, so the other two crates really ran.
+
+```text
+thread 'git::tests::pins_the_conflict_style_even_when_the_repository_asks_for_diff3'
+panicked at src/gitscratch/src/git.rs:
+assertion `left == right` failed: `merge.conflictStyle=merge` is not pinned, so
+git reads `merge.conflictStyle` out of the developer's own configuration and
+acts on it for the length of a replay
+  left: "diff3"
+ right: "merge"
+
+test result: FAILED. 48 passed; 1 failed
+```
+
+No collateral. In particular the README inventory guard stays green, which is
+the right answer and worth stating: it asks that every setting the config pins
+has a row, not that every row is a setting the config pins, so a pin that
+disappears leaves its row behind in silence. The row is a promise about the
+harness and this test is the only thing holding the harness to it.
+
+What this test pins is the pin. What the *style* does was read out of a real
+merge rather than asserted: under `diff3` and `zdiff3` git puts the base between
+`|||||||` and `=======`, so a base carrying a line that reads as a marker lands
+inside the region under those two and outside it under `merge`. Arming that in
+the test would need a fixture whose base carries such a line, which measures the
+counter rather than the pin — and the counter has two tests of its own, below.
+
+### The two halves of `count_conflict_hunks`
+
+The counter reads one conflicted file and answers with the number of decisions
+in it, and `grist` ranks candidates on the total. A wrong answer here is the
+quiet kind: it reorders a ranking behind a number that looks exactly like a
+right one. Two guards hold it, they fail apart, and each was mutated on its own.
+Both runs were `cargo test --no-fail-fast -p gitscratch -p grind -p grist`.
+
+Mutation: widened `is_conflict_marker` to `line.starts_with(&[bracket;
+MARKER_BRACKETS])`, dropping the test on what follows the run. The document's
+own bracket lines — a run of eight, and a run with no space after it — then read
+as markers, and the two whole regions they make read as two more conflicts.
+
+```text
+thread 'scratch::tests::a_bracket_run_that_is_not_a_marker_does_not_count_as_a_conflict_region'
+panicked at src/gitscratch/src/scratch.rs:
+assertion `left == right` failed: the document conflicts in two places, and
+every other bracket line in it is prose about markers rather than a marker git
+wrote
+  left: 4
+ right: 2
+
+test result: FAILED. 48 passed; 1 failed
+```
+
+Mutation: counted the lines that open a region instead of the pairs that close
+one, keeping the exact match. The lone opening marker the document names in a
+sentence then costs a decision, although it holds one version of the lines under
+it rather than two.
+
+```text
+thread 'scratch::tests::an_opening_marker_with_no_closing_one_does_not_count_as_a_conflict_region'
+panicked at src/gitscratch/src/scratch.rs:
+assertion `left == right` failed: an opening marker that closes nothing holds no
+second version of anything, so there is no decision in it for anyone to make
+  left: 3
+ right: 2
+
+test result: FAILED. 48 passed; 1 failed
+```
+
+No collateral in either direction, and each mutation reddens exactly one of the
+two: the first document's bracket lines are already refused by the exact match,
+so the region rule alone leaves it green, and the second document's lone marker
+is spelled the way git spells one, so the exact match alone leaves it green. A
+guard that reddens whatever you break is a guard that says nothing about which
+half broke.
+
+The markers both tests read are git's own, out of a merge the fixture runs and
+asserts the failure of. That matters more here than usual, because the finding
+behind these two guards is a matcher that enumerated a spelling: a fixture that
+wrote the markers itself would pin this file's belief about git rather than git.
+The two spellings git really writes were read the same way — `git merge` labels
+each side, and `git merge-file` with three empty labels writes the bare run of
+seven and nothing after it.
+
 ### `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing`
 
 Mutation: removed the parent count and the refusal under it from
@@ -1228,7 +1323,7 @@ The record above describes the code as it stands, and it decays the moment the
 code moves. Every place below is load-bearing for the whole table:
 
 - **`Git::safety_config()`** — five of the nine guards `tests/safety.rs` pins
-  are entries in that list, and the unit tests in `src/git.rs` pin four more of
+  are entries in that list, and the unit tests in `src/git.rs` pin five more of
   its entries directly. Adding, reordering, or removing one changes what the
   suite covers.
 - **`Scratch::create`** — the scratch worktree and its detached `worktree add`.
@@ -1258,6 +1353,15 @@ code moves. Every place below is load-bearing for the whole table:
   commit against its parent, so it names nothing at all for a commit that has
   none, and an empty touched set is what the guard below reads as a commit that
   changes nothing.
+- **`count_conflict_hunks` and `is_conflict_marker`** — the shape a marker is
+  matched by, and the pairing that turns two markers into one decision. They
+  fail apart and each has its own row, because a counter that reads the run
+  loosely and a counter that reads opening markers are two different wrong
+  answers. A third place belongs to the same line: `merge.conflictStyle=merge`
+  in `Git::safety_config()` decides which bytes the counter is handed, so a
+  change to any of the three needs its own mutation and its own row. The wrong
+  count reads as a plausible number in a ranking `grist` hands over as an
+  answer.
 - **`replay_rebase_within`'s three halt arms** — the round budget is charged once
   at the top of the loop, and which arms that charge can decide anything about is
   a fact about the arms rather than about the charge. Two of the three stop the
