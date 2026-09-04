@@ -22,8 +22,15 @@ use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 #[must_use]
 pub fn strip_prefix(target: &OsStr, prefix: &OsStr) -> Option<OsString> {
-    let _ = (target, prefix);
-    None
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    // `<[u8]>::strip_prefix` reads the bytes and never indexes them, so a
+    // prefix that ends inside a multi-byte character takes the bytes it names
+    // and leaves the rest whole, rather than panicking on a boundary.
+    target
+        .as_bytes()
+        .strip_prefix(prefix.as_bytes())
+        .map(|rest| OsString::from_vec(rest.to_vec()))
 }
 
 /// The same, on a platform with no byte view of an `OsStr`.
@@ -33,8 +40,10 @@ pub fn strip_prefix(target: &OsStr, prefix: &OsStr) -> Option<OsString> {
 #[cfg(not(unix))]
 #[must_use]
 pub fn strip_prefix(target: &OsStr, prefix: &OsStr) -> Option<OsString> {
-    let _ = (target, prefix);
-    None
+    // `str::strip_prefix` also reads without indexing, so this half carries the
+    // same guarantee on the text it can read.
+    let (target, prefix) = (target.to_str()?, prefix.to_str()?);
+    target.strip_prefix(prefix).map(OsString::from)
 }
 
 #[cfg(test)]

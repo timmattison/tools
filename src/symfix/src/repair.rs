@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{line, Options};
+use crate::{line, pathbytes, Options};
 
 /// How many names the replacement tries before it gives the collision back.
 ///
@@ -72,6 +72,15 @@ pub struct Repair {
 /// wants to know is one expression and a new strategy joins it by adding one
 /// link.
 ///
+/// There is no flag beside this chain that says whether a repair was found.
+/// The tool this port replaces carries a `fixed` boolean, its prepend branch
+/// sets it, its remove branch never does, and nothing reads the flag after that
+/// point — so the omission changes nothing today, which is exactly why it
+/// survived. Here the [`Option`] this function gives back **is** that state:
+/// `Some` ends the chain and `None` says no strategy had a candidate that
+/// resolved. The order of the strategies is thus one expression a reader sees
+/// whole, and there is no second place for the order and the state to disagree.
+///
 /// A link with no parent directory gets no repair. Such a link cannot come out
 /// of a walk of a directory — every entry a walk finds sits in the directory it
 /// was found in — and a name with no directory to resolve against is a question
@@ -80,6 +89,7 @@ pub fn plan(options: &Options, link: &Path, target: &OsStr, err: &mut dyn Write)
     let link_dir = link.parent()?;
 
     prepend(options, link, link_dir, target, err)
+        .or_else(|| remove(options, link, link_dir, target, err))
 }
 
 /// Puts `options.prepend` in front of `target`, and accepts the result when the
@@ -122,6 +132,57 @@ fn prepend(
             err,
             format_args!(
                 "Prepended target does not exist: {} -> {}",
+                link.display(),
+                Path::new(&candidate).display()
+            ),
+        );
+    }
+    None
+}
+
+/// Takes `options.remove` off the front of `target`, and accepts the result
+/// when the link would resolve to a file that is there.
+///
+/// A target that does not start with the prefix gives `None` before anything is
+/// written or read, so a run with `--remove-to-fix` costs nothing on the links
+/// it does not describe.
+fn remove(
+    options: &Options,
+    link: &Path,
+    link_dir: &Path,
+    target: &OsStr,
+    err: &mut dyn Write,
+) -> Option<Repair> {
+    let prefix = options.remove.as_ref()?;
+
+    // A raw byte prefix, as the tool this port replaces has. `pathbytes` says
+    // there why `Path::strip_prefix` would answer a different question.
+    let candidate = pathbytes::strip_prefix(target, prefix)?;
+
+    if options.verbose {
+        line(
+            err,
+            format_args!(
+                "Attempting to fix by removing prefix: {}: {} -> {}",
+                link.display(),
+                Path::new(target).display(),
+                Path::new(&candidate).display()
+            ),
+        );
+    }
+
+    if fs::metadata(resolved(link_dir, &candidate)).is_ok() {
+        return Some(Repair {
+            target: candidate,
+            strategy: Strategy::Remove,
+        });
+    }
+
+    if options.verbose {
+        line(
+            err,
+            format_args!(
+                "Target with removed prefix does not exist: {} -> {}",
                 link.display(),
                 Path::new(&candidate).display()
             ),
