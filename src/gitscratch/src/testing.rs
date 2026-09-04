@@ -941,6 +941,15 @@ impl DetachedGitDirRepo {
     }
 }
 
+/// The nearest directory at or above `dir` that holds a `.git` entry.
+///
+/// The answer includes `dir` itself, because `repowalker::find_git_repo` starts
+/// its upward walk at the directory a tool runs in. The walk stops at the root
+/// of the file system.
+fn ancestor_repository(_dir: &Path) -> Option<PathBuf> {
+    None
+}
+
 /// Punctuation that a printed path can carry on either end.
 ///
 /// [`path_at_or_above`] removes these characters from both ends of a candidate,
@@ -1069,7 +1078,9 @@ fn separates_a_path(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical, path_at_or_above, DetachedGitDirRepo};
+    use tempfile::TempDir;
+
+    use super::{ancestor_repository, canonical, path_at_or_above, DetachedGitDirRepo, TestRepo};
 
     /// The name of the planted directory that holds a space.
     const SPACED_DIRECTORY: &str = "directory with a space";
@@ -1095,6 +1106,50 @@ mod tests {
     /// word. It is the parent of that second work tree, so the check must flag
     /// it. A scan of white-space-separated tokens reads the first word of that
     /// name alone and finds nothing.
+    /// The name of the directory the ancestor check runs from, one level under
+    /// the repository that holds it.
+    const DIRECTORY_INSIDE_A_REPOSITORY: &str = "inside";
+
+    /// Prove the ancestor check finds a repository that holds a directory.
+    ///
+    /// [`DetachedGitDirRepo`] stands on one fact about its own temporary
+    /// directory: no directory above it holds a `.git` entry. Every guard built
+    /// on the fixture rests on that fact, because `repowalker::find_git_repo`
+    /// walks upward and stops at the first `.git` entry it meets. A temporary
+    /// directory inside a repository therefore hands a tool that repository,
+    /// and `nodenuke` deletes every `node_modules`, `.next`, `.open-next` and
+    /// `.turbo` directory below the root it gets. `TempDir` reads `TMPDIR`, and
+    /// a `TMPDIR` inside a checkout is a configuration some machines carry.
+    ///
+    /// The check is what makes the fixture refuse such a machine, so the check
+    /// gets the treatment it gives the tools: a plant it must find, and a
+    /// directory it must pass.
+    #[test]
+    fn the_ancestor_check_finds_the_repository_a_directory_sits_inside() {
+        let repo = TestRepo::init();
+        let inside = repo.path().join(DIRECTORY_INSIDE_A_REPOSITORY);
+        std::fs::create_dir_all(&inside).expect("create a directory inside the repository");
+
+        assert_eq!(
+            ancestor_repository(&inside),
+            Some(repo.path().to_path_buf()),
+            "the check must find the repository above the directory"
+        );
+        assert_eq!(
+            ancestor_repository(repo.path()),
+            Some(repo.path().to_path_buf()),
+            "the check must find a repository the directory itself holds"
+        );
+
+        let outside = TempDir::new().expect("create temp dir");
+        assert_eq!(
+            ancestor_repository(outside.path()),
+            None,
+            "the check must find nothing above a bare temporary directory, and a \
+             failure here means TMPDIR sits inside a repository"
+        );
+    }
+
     #[test]
     fn the_path_check_flags_the_work_tree_and_the_directory_above_it() {
         let repo = DetachedGitDirRepo::nested();
