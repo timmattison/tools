@@ -86,7 +86,11 @@ const STATED_WIDTH: &str = "200";
 /// The scrub is belt to the binary's braces. `grime` reaches git only through
 /// `gitscratch`, which scrubs at the single place it spawns one, so a leak
 /// cannot reach the tool - but a test suite that let one through would be
-/// asserting against a run nobody could reproduce.
+/// asserting against a run nobody could reproduce, and the two tests at the
+/// bottom of this file set these variables *deliberately*. Those two build
+/// their command by hand for that reason. Leaving the ambient environment in
+/// play nowhere else is what keeps them the only place the answer depends on
+/// it.
 fn grime_command(repo: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_grime"));
     command
@@ -1308,5 +1312,128 @@ fn a_note_or_a_failure_nobody_is_reading_costs_the_words_and_not_the_answer() {
         Some(ERROR),
         "a failure it could not print is still a failure, and still \
          {ERROR}\nstdout:\n{error_stdout}"
+    );
+}
+
+/// Read a file that must come back byte-identical after `grime` has run.
+///
+/// # Panics
+///
+/// Panics if the file cannot be read.
+fn snapshot(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// `grime` answering a question about the repository it is standing in, while
+/// its environment insists the repository is somewhere else entirely.
+///
+/// Not a contrived situation: git exports `GIT_DIR`, `GIT_WORK_TREE`,
+/// `GIT_INDEX_FILE` and `GIT_PREFIX` into every hook it runs, and every child
+/// of that hook inherits them. A `pre-push` hook that asks `grime` whether the
+/// branch about to be pushed would merge cleanly is exactly this shape - and
+/// so is `git bisect run`, `rebase --exec`, and a `cargo test` run from
+/// `.husky/pre-commit`.
+///
+/// The environment is set on the *child* process. `std::env::set_var` is
+/// process-global and Rust runs the tests in this binary as threads of one
+/// process, so poisoning it there would sabotage every other test in the file -
+/// and a whole process whose environment names another repository is the leak
+/// verbatim anyway.
+///
+/// The two branches are named so they cannot exist in the repository the
+/// environment points at, which is what makes the failure unambiguous: a
+/// `grime` that took the environment's word for where it was would be looking
+/// for `two` in a repository that has only `alpha`, `beta` and `main`.
+#[test]
+fn a_leaked_repository_location_does_not_redirect_the_replay() {
+    let repo = equal_hunks_unequal_stops_repo();
+    let hooks_repo = independent_branches_repo();
+    repo.checkout("one");
+
+    let git_dir = hooks_repo.path().join(".git");
+    let config = snapshot(&git_dir.join("config"));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_grime"))
+        .arg("two")
+        .current_dir(repo.path())
+        .env("GIT_DIR", &git_dir)
+        .env("GIT_WORK_TREE", hooks_repo.path())
+        .env("GIT_PREFIX", "")
+        // The verdict below is a golden with a breakdown in it, so this run
+        // states its width for the reason every run built by `grime_command`
+        // does. The command is built by hand here to leave the rest of the
+        // ambient environment in play, and the width is no part of what this
+        // test is about.
+        .env(WIDTH_VARIABLE, STATED_WIDTH)
+        .output()
+        .expect("failed to run grime");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the answer is about the directory grime is standing in, not the one \
+         the environment names\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
+    assert_eq!(
+        snapshot(&git_dir.join("config")),
+        config,
+        "grime wrote into the config of the repository the environment named"
+    );
+    assert!(
+        !git_dir.join("worktrees").exists(),
+        "grime built its scratch worktree in the repository the environment named"
+    );
+}
+
+/// The half of the leak that a hook produces on its own: `.husky/pre-commit`
+/// runs `cargo test`, and `GIT_INDEX_FILE` is what that inherits. Repository
+/// discovery still finds the right repository, so the run looks fine - but
+/// every index read and write goes to the hook's repository instead.
+///
+/// Two things give it away. `git status` against a foreign index sees the whole
+/// working tree as uncommitted, so the note appears over a tree with nothing
+/// uncommitted in it; and the index it read is left rewritten, carrying entries
+/// for files that do not exist in that repository at all. The index is
+/// snapshotted rather than re-read through git, because once a phantom entry
+/// points at an object the victim does not have, git's own answers about it
+/// stop being trustworthy.
+#[test]
+fn a_leaked_index_file_is_neither_read_from_nor_written_to() {
+    let repo = equal_hunks_unequal_stops_repo();
+    let hooks_repo = independent_branches_repo();
+    repo.checkout("one");
+
+    let index = hooks_repo.path().join(".git").join("index");
+    let before = snapshot(&index);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_grime"))
+        .arg("two")
+        .current_dir(repo.path())
+        .env("GIT_INDEX_FILE", &index)
+        // Stated for the same reason as the run above: this test asserts a
+        // golden with a breakdown in it, and a breakdown is laid out for a
+        // width.
+        .env(WIDTH_VARIABLE, STATED_WIDTH)
+        .output()
+        .expect("failed to run grime");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        stderr, "",
+        "the tree has nothing uncommitted in it; a note here means the status \
+         was taken against the index the environment named\nstdout:\n{stdout}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
+    assert_eq!(
+        snapshot(&index),
+        before,
+        "grime wrote into the index the environment named"
     );
 }
