@@ -627,4 +627,159 @@ mod tests {
     fn the_space_around_a_command_is_dropped() {
         assert_eq!(StartCommand::new(Some("  start  ")).as_str(), "start");
     }
+
+    /// A plan of two streams, written as a Markdown table.
+    const TABLE_PLAN: &str = "\
+| Stream | Order |
+| --- | --- |
+| S1 gitscratch | #344 → #330 |
+| S2 wn | #411 |
+";
+
+    /// The report of the `plan-parallel-work` skill, as it arrives on the
+    /// clipboard: a plan of four streams, drawn as a box table.
+    const BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work.txt");
+
+    /// A plan drawn as a picture: two streams that join.
+    const PICTURE: &str = "\
+#242 ──→ #247 ──┐
+                ├──→ #249  (gallery)
+#246 ──→ #248 ──┘
+";
+
+    /// One chain of numbers, which is the shape `wn` read before every other
+    /// one stood.
+    const CHAIN: &str = "#277 → #278";
+
+    /// A plan written as JSON, which is the shape a program hands back.
+    const DOCUMENT: &str = "{\"version\": 1, \"streams\": []}";
+
+    /// A page of prose, which no reader of `wn` can take.
+    const PROSE: &str = "the notes of a meeting, and no plan of work at all";
+
+    /// A writer of the clipboard that must never run.
+    fn unwritten_clipboard(_text: &str) -> input::ClipboardWrite {
+        panic!("the clipboard was written for a text this run did not build")
+    }
+
+    /// What [`read_and_keep`] gives for a plan a run of `claude` built as
+    /// `text`, with every text it wrote to the clipboard.
+    ///
+    /// The write is a function of this test and never the system clipboard.
+    /// The clipboard is one shared resource of the whole machine, and a test
+    /// that writes it destroys what the person at the keyboard copied.
+    fn built_and_kept(text: &str) -> (Result<Reading, ReadError>, Option<String>, Vec<String>) {
+        let written = std::cell::RefCell::new(Vec::new());
+        let write = |kept: &str| -> input::ClipboardWrite {
+            written.borrow_mut().push(kept.to_string());
+            Ok(())
+        };
+        let build = || -> input::PlanBuild { Ok(text.to_string()) };
+        let chain = input::Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&build),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan");
+        let (reading, kept) = read_and_keep(&chain, Some(&write));
+        (reading, kept, written.into_inner())
+    }
+
+    /// The note a run that kept its plan earns names the clipboard and the way
+    /// to build a new plan.
+    fn names_the_clipboard(kept: Option<String>) {
+        let note = kept.expect("a plan that was kept earns a note");
+        assert!(note.contains("clipboard"), "{note}");
+        assert!(note.contains("--refresh"), "{note}");
+    }
+
+    #[test]
+    fn a_plan_written_as_a_table_reaches_the_clipboard() {
+        let (reading, kept, written) = built_and_kept(TABLE_PLAN);
+        assert!(
+            matches!(reading, Ok(Reading::Plan(_))),
+            "a Markdown table of streams is a plan"
+        );
+        assert_eq!(written, vec![TABLE_PLAN.to_string()]);
+        names_the_clipboard(kept);
+    }
+
+    #[test]
+    fn the_box_drawn_table_of_a_plan_reaches_the_clipboard() {
+        let (reading, kept, written) = built_and_kept(BOX_TABLE);
+        assert!(
+            matches!(reading, Ok(Reading::Plan(_))),
+            "a box-drawn table of streams is a plan"
+        );
+        assert_eq!(written, vec![BOX_TABLE.to_string()]);
+        names_the_clipboard(kept);
+    }
+
+    #[test]
+    fn a_plan_drawn_as_a_picture_reaches_the_clipboard() {
+        let (reading, kept, written) = built_and_kept(PICTURE);
+        assert!(
+            matches!(reading, Ok(Reading::Picture(_))),
+            "wires that join steps draw a picture"
+        );
+        assert_eq!(written, vec![PICTURE.to_string()]);
+        names_the_clipboard(kept);
+    }
+
+    #[test]
+    fn a_chain_of_numbers_reaches_the_clipboard() {
+        let (reading, kept, written) = built_and_kept(CHAIN);
+        assert!(
+            matches!(reading, Ok(Reading::Chain(_))),
+            "a line of numbers is one chain"
+        );
+        assert_eq!(written, vec![CHAIN.to_string()]);
+        names_the_clipboard(kept);
+    }
+
+    #[test]
+    fn a_plan_written_as_json_reaches_the_clipboard() {
+        let (reading, kept, written) = built_and_kept(DOCUMENT);
+        assert!(
+            matches!(reading, Ok(Reading::Document(_))),
+            "a text that opens with a brace is a document"
+        );
+        assert_eq!(written, vec![DOCUMENT.to_string()]);
+        names_the_clipboard(kept);
+    }
+
+    #[test]
+    fn a_text_no_reader_can_read_never_reaches_the_clipboard() {
+        // A bad plan on the clipboard is a bad plan every later run reads, and
+        // the reader would have to copy something else to get out of it.
+        let (reading, kept, written) = built_and_kept(PROSE);
+        assert!(reading.is_err(), "prose is no plan and no chain");
+        assert!(written.is_empty(), "{written:?}");
+        assert_eq!(kept, None);
+    }
+
+    #[test]
+    fn a_chain_from_the_clipboard_is_never_written_back() {
+        // The reader already has this text. A write of it would overwrite
+        // their clipboard for nothing.
+        let clipboard = || -> input::ClipboardRead { Ok(Some(CHAIN.to_string())) };
+        let chain = input::Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: Some(&clipboard),
+            plan: None,
+            refresh: false,
+        }
+        .chain()
+        .expect("the clipboard holds the chain");
+        let (reading, kept) = read_and_keep(&chain, Some(&unwritten_clipboard));
+        assert!(
+            matches!(reading, Ok(Reading::Chain(_))),
+            "a line of numbers is one chain"
+        );
+        assert_eq!(kept, None);
+    }
 }
