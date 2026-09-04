@@ -13,7 +13,8 @@
 //! The run says what it cost, because a reader who pays for one must learn the
 //! price. `--output-format json` wraps the plan in an envelope that carries
 //! that price beside it, and [`crate::envelope`] writes one line of it on
-//! standard error.
+//! standard error. A run that failed and printed an envelope says what it cost
+//! as well, because such a run spent the money before it failed.
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -361,7 +362,8 @@ pub struct Settings<'a> {
 ///
 /// A spinner runs on standard error while the run works, and the report of
 /// what the run cost stands there after it, so a pipe still gets the document
-/// alone.
+/// alone. A run that failed and printed an envelope earns that report as well,
+/// because it spent the money before it failed.
 ///
 /// # Errors
 ///
@@ -389,17 +391,21 @@ pub fn plan(
     let path = find(paths, answers)?;
 
     let spinner = spinner();
-    let printed = ask(&path, waited, effort.as_ref(), model.as_ref());
+    let answered = ask(&path, waited, effort.as_ref(), model.as_ref());
     spinner.finish_and_clear();
 
-    let envelope = Envelope::read(&printed?)?;
+    let envelope = answered?;
     // The report stands after the spinner is cleared, and on the pipe the
     // spinner drew on. The document goes to standard output, and a reader who
     // pipes that output must get the document alone.
+    //
+    // It also stands before the answer is taken. A run that failed after
+    // several turns spent the money before it failed, so the reader of such a
+    // run learns the price as well.
     if let Some(report) = envelope.report(effort.as_ref().map(Effort::as_str)) {
         eprintln!("{report}");
     }
-    Ok(envelope.document().to_string())
+    Ok(envelope.answer()?.to_string())
 }
 
 /// The spinner that stands while the run works.
@@ -416,20 +422,25 @@ fn spinner() -> ProgressBar {
     spinner
 }
 
-/// Hand `path` the prompt and read the document it prints.
+/// Hand `path` the prompt and read the envelope it prints.
 ///
 /// # Errors
 ///
-/// Gives [`BuildError::TimedOut`] when the run outlives `waited`, and the
-/// refusals of [`refusal_of`] for a run that ended with a failure. Such a
-/// refusal carries the reason [`reason_of`] picks out of the two pipes and
-/// out of the write of the prompt.
+/// Gives [`BuildError::TimedOut`] when the run outlives `waited`, and
+/// [`BuildError::BadEnvelope`] for a run that printed no envelope. Gives the
+/// refusals of [`refusal_of`] for a run that ended with a failure and printed
+/// no envelope that says why. Such a refusal carries the reason [`reason_of`]
+/// picks out of the two pipes and out of the write of the prompt.
+///
+/// A run that ended with a failure and printed an envelope that says so gives
+/// that envelope. The reason then stands in its `result`, and
+/// [`Envelope::answer`] is what hands it on.
 fn ask(
     path: &str,
     waited: Duration,
     effort: Option<&Effort>,
     model: Option<&ModelName>,
-) -> Result<String, BuildError> {
+) -> Result<Envelope, BuildError> {
     let mut child = Command::new(path)
         .args(arguments(effort, model))
         .stdin(Stdio::piped())
@@ -471,13 +482,26 @@ fn ask(
     if status.success() {
         // A run that answered with a plan says the write of the prompt got
         // there. An error of that pipe is then worth nothing, so it is dropped.
-        Ok(printed)
+        Envelope::read(&printed)
     } else {
-        Err(refusal_of(&reason_of(
-            &complained,
-            &printed,
-            pipe.as_deref(),
-        )))
+        // The envelope stands in front of the pipes for a run that failed. A
+        // failing run prints its envelope as well, and the `result` of that
+        // envelope carries the sentence a reader can act on. Standard error
+        // carries a machine tag on the likeliest mistake of all — a model that
+        // does not exist — and a tag names the fault without saying what to do
+        // about it.
+        //
+        // A run that printed no envelope falls back to the pipes, and so does
+        // one whose envelope says it did not fail: such an envelope says
+        // nothing at all about the failure the exit status reports.
+        match Envelope::read(&printed) {
+            Ok(envelope) if envelope.answer().is_err() => Ok(envelope),
+            _ => Err(refusal_of(&reason_of(
+                &complained,
+                &printed,
+                pipe.as_deref(),
+            ))),
+        }
     }
 }
 
@@ -698,8 +722,11 @@ pub enum BuildError {
     /// The run failed for a reason only `claude` knows.
     #[error("claude could not build a plan: {said}")]
     Failed {
-        /// The reason the run gave, on whichever pipe carried it, with the
-        /// space around it dropped.
+        /// The reason the run gave, with the space around it dropped.
+        ///
+        /// It comes out of the envelope the run printed, which is where
+        /// `claude` writes the sentence a reader can act on. A run that
+        /// printed no envelope gives it on one of the two pipes instead.
         said: String,
     },
 }

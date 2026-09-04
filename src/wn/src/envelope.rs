@@ -5,6 +5,15 @@
 //! stands between the run and every reader of a plan: it takes the envelope
 //! apart and gives back the document.
 //!
+//! # A run that failed prints an envelope as well
+//!
+//! Such an envelope carries the reason the run gives in its `result`, and it
+//! carries what the run cost beside it. So the reading and the judging are two
+//! steps here. [`Envelope::read`] reads every envelope, the one a failure
+//! prints included, and [`Envelope::answer`] is what tells a plan from a
+//! reason. A reader who pays for a run that failed still learns the price,
+//! because [`Envelope::report`] stands on the near side of that gate.
+//!
 //! # Two kinds of field, and two kinds of strictness
 //!
 //! `result` is the plan, so a text that carries none of it is a refusal. Every
@@ -120,6 +129,8 @@ struct Model {
 pub struct Envelope {
     /// The document the run answered with.
     document: String,
+    /// Whether the run says it failed, whatever its exit status was.
+    failed: bool,
     /// What the whole run cost, in dollars, for an envelope that says.
     dollars: Option<f64>,
     /// Every model the run used, the dearest first.
@@ -131,14 +142,15 @@ pub struct Envelope {
 impl Envelope {
     /// The envelope `printed` holds.
     ///
+    /// It reads the envelope and it judges none of it. A run that failed
+    /// prints an envelope as well, and that envelope carries the reason the
+    /// run gives beside what the run cost. So a failure reads here like every
+    /// other answer, and [`Self::answer`] is where the two part company.
+    ///
     /// # Errors
     ///
     /// Gives [`BuildError::BadEnvelope`] for a text that is no JSON envelope,
-    /// and for one whose `result` is absent or is no string. Gives the
-    /// refusals of [`refusal_of`] for an envelope whose `is_error` is true:
-    /// its `result` then holds the reason the run gives and never a plan, and
-    /// a reader handed that document would get the refusal of the plan reader
-    /// naming that reason as though somebody had pasted it.
+    /// and for one whose `result` is absent or is no string.
     pub fn read(printed: &str) -> Result<Self, BuildError> {
         let document: Value =
             serde_json::from_str(printed).map_err(|cause| BuildError::BadEnvelope {
@@ -151,15 +163,12 @@ impl Envelope {
                 cause: format!("it carries no {RESULT} string, which is where the plan stands"),
             });
         };
-        if document
-            .get(IS_ERROR)
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Err(refusal_of(result));
-        }
         Ok(Self {
             document: result.to_string(),
+            failed: document
+                .get(IS_ERROR)
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             dollars: document.get(TOTAL_COST_USD).and_then(Value::as_f64),
             models: models_of(document.get(MODEL_USAGE)),
             milliseconds: document.get(DURATION_MS).and_then(Value::as_u64),
@@ -167,9 +176,21 @@ impl Envelope {
     }
 
     /// The document the run answered with.
-    #[must_use]
-    pub fn document(&self) -> &str {
-        &self.document
+    ///
+    /// The document stands behind a `Result` for one reason: no caller can
+    /// reach a refusal and hand it on as a plan.
+    ///
+    /// # Errors
+    ///
+    /// Gives the refusals of [`refusal_of`] for an envelope whose `is_error`
+    /// is true: its `result` then holds the reason the run gives and never a
+    /// plan, and a reader handed that document would get the refusal of the
+    /// plan reader naming that reason as though somebody had pasted it.
+    pub fn answer(&self) -> Result<&str, BuildError> {
+        if self.failed {
+            return Err(refusal_of(&self.document));
+        }
+        Ok(&self.document)
     }
 
     /// The one line that says what the run cost, or nothing for an envelope
@@ -369,7 +390,10 @@ mod tests {
         // The whole point of the envelope: the plan is one field of it, and a
         // reader handed the envelope itself gets JSON that is no plan.
         let read = Envelope::read(&envelope("# The plan\n")).expect("the envelope reads");
-        assert_eq!(read.document(), "# The plan\n");
+        assert_eq!(
+            read.answer().expect("the envelope holds a plan"),
+            "# The plan\n"
+        );
     }
 
     #[test]
@@ -413,22 +437,32 @@ mod tests {
         assert!(refused.to_string().contains("claude"), "{refused}");
     }
 
-    #[test]
-    fn an_envelope_that_says_it_is_an_error_carries_that_reason() {
-        // The run exits 0 and says so inside the envelope. Its `result` then
-        // holds the reason and never a plan, so a reader handed that document
-        // would get the refusal of the plan reader, naming the reason as
-        // though somebody had pasted it.
-        let said = serde_json::json!({
+    /// An envelope of a run that says it failed, with `reason` in its
+    /// `result`.
+    ///
+    /// It carries the numbers a failing run really carries. A run that failed
+    /// after several turns spent money, and the reader paid for it.
+    fn refused(reason: &str) -> String {
+        serde_json::json!({
             "type": "result",
             "subtype": "error_during_execution",
             "is_error": true,
-            "result": "the model is overloaded",
+            "result": reason,
+            "total_cost_usd": 0.054_637_9,
+            "duration_ms": 1886,
         })
-        .to_string();
-        let refused = Envelope::read(&said).expect_err("an error is no plan");
+        .to_string()
+    }
+
+    #[test]
+    fn an_envelope_that_says_it_is_an_error_carries_that_reason() {
+        // The run says it failed inside the envelope. Its `result` then holds
+        // the reason and never a plan, so a reader handed that document would
+        // get the refusal of the plan reader, naming the reason as though
+        // somebody had pasted it.
+        let read = Envelope::read(&refused("the model is overloaded")).expect("the envelope reads");
         assert_eq!(
-            refused,
+            read.answer().expect_err("an error is no plan"),
             BuildError::Failed {
                 said: "the model is overloaded".to_string()
             }
@@ -437,15 +471,21 @@ mod tests {
 
     #[test]
     fn an_envelope_of_a_run_that_could_not_log_in_names_claude_login() {
-        let said = serde_json::json!({
-            "is_error": true,
-            "result": "Invalid API key · Please run /login",
-        })
-        .to_string();
+        let read =
+            Envelope::read(&refused("Invalid API key · Please run /login")).expect("it reads");
         assert_eq!(
-            Envelope::read(&said).expect_err("no account is no plan"),
+            read.answer().expect_err("no account is no plan"),
             BuildError::NotAuthenticated
         );
+    }
+
+    #[test]
+    fn a_run_that_failed_still_says_what_it_cost() {
+        // The reader pays for such a run as well. The report stands on the
+        // near side of the gate `answer` holds, so the price is written
+        // whether the run answered with a plan or with a reason.
+        let read = Envelope::read(&refused("the model is overloaded")).expect("the envelope reads");
+        assert_eq!(read.report(None), Some("plan: $0.05 · 1.8s".to_string()));
     }
 
     /// The envelope of one measured run, with a plan in its `result`.
