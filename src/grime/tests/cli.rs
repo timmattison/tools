@@ -959,3 +959,163 @@ fn the_per_file_counts_line_up_by_display_width_when_a_name_is_multi_byte() {
         "the counts must start in the same terminal column:\n{stdout}"
     );
 }
+
+/// A bare repository is where the cheap pre-flight query turns out to be
+/// *stricter* than the expensive replay it exists to spare you: `git worktree
+/// add --detach HEAD` works against one, so the merge can be replayed and
+/// measured exactly as usual, while `git status --porcelain` cannot run at all
+/// - there is no working tree to take a status of.
+///
+/// The dirty-tree note is documented as a caveat that qualifies the verdict
+/// without changing it, so a caveat that cannot be computed must cost the
+/// caveat. Failing the run instead trades a right answer - these two branches
+/// genuinely collide - for git's own complaint about a query the user never
+/// asked for, which does not even say what is unsupported.
+///
+/// Asserted against [`EQUAL_HUNKS_VERDICT`], so the claim is the strong one:
+/// the same fixture answers a bare repository with the byte-identical verdict
+/// it gives through its working tree, since a replay never looks at the working
+/// tree in the first place.
+#[test]
+fn a_repository_with_no_working_tree_is_answered_rather_than_refused() {
+    let repo = equal_hunks_unequal_stops_repo();
+    let bare = repo.bare_clone("one");
+
+    let (code, stdout, stderr) = streams(&grime(bare.path(), &["two"]));
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the replay can run in a bare repository, so the answer is {CONFLICTS} \
+         rather than {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
+    assert_eq!(
+        stderr, "",
+        "a note that cannot be computed is a note nobody gets, not an error \
+         message about git internals"
+    );
+}
+
+/// A run depends on *two* revisions - the branch the user named and the HEAD
+/// being merged into - and only one of them arrives as an argument, so the
+/// other is the one a pre-flight is liable to forget.
+///
+/// An orphan branch is the shape where they disagree: `git checkout --orphan`
+/// leaves HEAD naming a branch that has no commit on it, while every other
+/// branch in the repository resolves as usual. Built inline rather than added
+/// to `gitscratch::testing` because it is one git call on top of an existing
+/// fixture, and *which* revision is unborn is the whole subject of this test
+/// rather than a shape other suites would share.
+///
+/// The exit code was never wrong here, so this is about the message. Without
+/// HEAD resolved up front, a repository with nothing committed pays for a
+/// `TempDir` and a real `git worktree add` on the way to being told off, and is
+/// then told off in git's words rather than `grime`'s - `fatal: invalid
+/// reference: HEAD`, wrapped around an absolute path inside a temporary
+/// directory that no longer exists by the time anybody reads it. A bad argument
+/// has to arrive looking like a bad argument.
+///
+/// `TMPDIR` is pointed somewhere this test knows the name of, which is what
+/// makes the leak assertable rather than merely unlikely: the scratch path is
+/// otherwise a name only the child process ever learns.
+#[test]
+fn a_head_with_no_commit_on_it_is_refused_in_grimes_own_words_and_costs_no_worktree() {
+    let repo = independent_branches_repo();
+    repo.git(&["checkout", "-q", "--orphan", "unborn"]);
+
+    // Under the fixture's own `TempDir`, so two concurrent copies of this test
+    // cannot name the same path, and created rather than missing, so a run that
+    // gets as far as building a scratch worktree succeeds at it and leaks the
+    // path instead of failing earlier for an unrelated reason.
+    let scratch_tmp = repo.path().join("scratch-tmp");
+    std::fs::create_dir(&scratch_tmp).expect("create the scratch TMPDIR");
+
+    let output = grime_command(repo.path(), &["beta"])
+        .env("TMPDIR", &scratch_tmp)
+        .output()
+        .expect("failed to run grime");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a HEAD with nothing on it is a state grime cannot answer from, so \
+         {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("a merge starts from HEAD") && stderr.contains("no commit at HEAD"),
+        "the message must say in grime's own words that HEAD is what has \
+         nothing on it, since the user named a branch and never mentioned \
+         HEAD:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(&scratch_tmp.display().to_string()),
+        "an internal temporary path is no part of a bad-argument message, and \
+         the directory it names is gone before anyone reads it:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("worktree add"),
+        "resolving HEAD costs nothing, so it has to happen before a scratch \
+         worktree is built rather than inside one:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("note:"),
+        "a repository with nothing to merge into is refused before there is \
+         anything to qualify with a caveat:\n{stderr}"
+    );
+}
+
+/// A branch name that starts with a dash is a branch name, and the pre-flight
+/// has to read it as one.
+///
+/// `git rev-parse --root^{commit}` prints its argument back and exits 0,
+/// because rev-parse passes an option it does not know through to rev-list
+/// rather than refusing it. A pre-flight built on that exit code reads "the
+/// revision names a commit" for a name that names nothing, and `grind -- --root`
+/// answered `clean` for a branch that does not exist - the one answer this
+/// family of tools exists never to give.
+///
+/// `--verify` is what refuses it, so the refusal arrives from the pre-flight in
+/// `grime`'s own words and before any scratch worktree is built. `git merge`
+/// would refuse `--root` too, having no such option, but only after a temporary
+/// directory and a real `git worktree add` have been paid for, and then in
+/// git's words about a command nobody typed. Both halves are asserted: the
+/// exit code, and whose sentence says why.
+///
+/// The `--` in the argument list is how a user says "this is the positional".
+/// Without it clap reads `--root` as an option of grime's own and refuses it
+/// before any of the code under test runs, so the test would pass on clap's
+/// refusal and say nothing about the pre-flight.
+///
+/// The control at the end asks the same binary about a branch that does exist.
+/// Without it a `grime` that refused every branch would pass here.
+#[test]
+fn a_branch_name_that_starts_with_a_dash_is_refused_rather_than_reported_clean() {
+    let repo = independent_branches_repo();
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, "alpha", &["--", "--root"]));
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a branch name that names no commit must exit {ERROR}, never {CLEAN}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not resolve '--root'"),
+        "the message must name the branch that did not resolve, in grime's own words:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean") && !stderr.contains("clean"),
+        "a branch that does not exist must never be reported as a clean merge\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let (control_code, control_stdout, control_stderr) = run(&repo, "alpha", "beta");
+
+    assert_eq!(
+        control_code,
+        Some(CLEAN),
+        "a branch that does exist must still be answered, or the refusal above proves only that \
+         this binary refuses everything\nstdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+}
