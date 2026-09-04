@@ -84,11 +84,24 @@ All tools in this repository that display progress bars **should** use the `term
 ### Why
 
 The `termbar` library provides:
-- Terminal width detection with fallback. `TerminalWidth` reads the terminal
-  through the `termsize` crate, so a terminal that carries no window reports no
-  width and the fallback stands. Such a terminal answers the `TIOCGWINSZ` ioctl
-  with zero columns, and the ioctl succeeds, so a caller that reads the raw
-  answer lays a progress bar out at no columns. `script -q /dev/null` makes one.
+- Terminal width detection with fallback. `TerminalWidth` reads two sources and
+  decides between them. A width the environment states in `COLUMNS` wins, which
+  is the rule POSIX gives that variable. The controlling terminal answers when
+  the environment states none, through the `termsize` crate, so a terminal that
+  carries no window reports no width and the fallback stands. Such a terminal
+  answers the `TIOCGWINSZ` ioctl with zero columns, and the ioctl succeeds, so a
+  caller that reads the raw answer lays a progress bar out at no columns.
+  `script -q /dev/null` makes one.
+- A test of a tool that lays text out for a terminal states the width in
+  `COLUMNS` on the command it starts. `cargo test` gives the test binary the
+  terminal of whoever started the run, and the read of the controlling terminal
+  reaches it through `/dev/tty` whatever standard output points at. A test that
+  compares a laid-out block against a golden therefore passes in a wide window
+  and fails in a narrow one, which is the same class of defect as a test that
+  compares painted output against plain text. `src/grind/tests/cli.rs` states
+  the width on every run it builds, and
+  `src/grind/tests/controlling-terminal.rs` holds the rule itself against a
+  pseudo-terminal of a size it chose.
 - Progress bar width calculation that adapts to terminal size
 - Pre-built progress bar styles (copy, verify, batch, hash)
 - Escape function for template braces in filenames

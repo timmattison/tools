@@ -180,6 +180,17 @@ lays it out for 80 columns. A control character in a name is spelled out as
 `\u{...}`, so a name holding a newline stays one row and a name holding an ESC
 cannot write an escape sequence to your terminal.
 
+You can state the width instead of letting `grind` measure one. A value in
+`COLUMNS` wins over the terminal, which is the rule POSIX gives that variable:
+
+```console
+$ COLUMNS=40 grind origin/main
+```
+
+Two callers want this. A wrapper such as `viddy(1)` holds the terminal and hands
+`grind` a pipe, so the wrapper exports the width it measured. And a test states
+a width rather than arranging a terminal to produce one.
+
 ## Uncommitted work
 
 ```console

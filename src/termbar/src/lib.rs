@@ -4,7 +4,11 @@
 //! adapt to terminal width changes. It includes:
 //!
 //! - **Terminal width detection**: Synchronous and async utilities for getting
-//!   the current terminal width and watching for resize events.
+//!   the current terminal width and watching for resize events. The width comes
+//!   from the environment when it states one in [`WIDTH_VARIABLE`], and from the
+//!   controlling terminal otherwise. A statement wins, which is the rule POSIX
+//!   gives that variable, and it is how a wrapper reports the terminal it holds
+//!   and how a test states a width of its own.
 //! - **Progress style builders**: Pre-configured styles for common operations
 //!   like file copying, verification, hashing, and batch operations.
 //! - **Dynamic resizing**: Support for updating progress bar styles when the
@@ -47,7 +51,7 @@ mod width;
 
 pub use error::{Result, TermbarError};
 pub use style::ProgressStyleBuilder;
-pub use width::{TerminalWidth, TerminalWidthWatcher};
+pub use width::{TerminalWidth, TerminalWidthWatcher, WIDTH_VARIABLE};
 
 /// Default terminal width when detection fails (80 columns).
 pub const DEFAULT_TERMINAL_WIDTH: u16 = 80;

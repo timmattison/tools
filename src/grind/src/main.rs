@@ -234,6 +234,13 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     // A run laid out at zero columns puts every name on a line of its own for
     // no reason. `get_or_default` refuses the zero and stands the fallback of
     // 80 columns in its place.
+    //
+    // It also decides between the two sources of a width. A width the
+    // environment states in `COLUMNS` wins, and the ioctl answers when the
+    // environment states none. That is the rule POSIX gives the variable, and
+    // it is what lets a wrapper report the terminal it holds and lets a test
+    // state a width of its own. `tests/controlling-terminal.rs` holds that rule
+    // against a pseudo-terminal of a size it chose.
     console
         .verdict(&report.render_within(&conflicts, usize::from(TerminalWidth::get_or_default())));
 

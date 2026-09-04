@@ -2,11 +2,29 @@
 //!
 //! This module provides utilities for getting the current terminal width
 //! and watching for terminal resize events.
+//!
+//! Two sources answer the question, and this module decides between them. The
+//! first source is the width that the environment states in [`WIDTH_VARIABLE`].
+//! The second source is the width that the controlling terminal reports. A
+//! statement wins, which is the rule POSIX gives that variable and the rule that
+//! `ls`, `git` and `less` follow.
+//!
+//! The statement is what a wrapper such as `viddy(1)` exports for the tool it
+//! runs, because the wrapper holds the terminal and the tool holds a pipe. It is
+//! also what a test states, because `cargo test` gives the test binary the
+//! terminal of whoever started the run, and a test that measured that terminal
+//! would answer one way in a wide window and another way in a narrow one.
 
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::DEFAULT_TERMINAL_WIDTH;
+
+/// The variable that states the width of the terminal, in columns.
+///
+/// POSIX says a value here overrides the width the system selects, so this
+/// crate reads it ahead of the terminal.
+pub const WIDTH_VARIABLE: &str = "COLUMNS";
 
 /// Utilities for synchronous terminal width detection.
 pub struct TerminalWidth;
@@ -14,8 +32,9 @@ pub struct TerminalWidth;
 impl TerminalWidth {
     /// Get the current terminal width.
     ///
-    /// Returns the terminal width in columns if it can be detected,
-    /// otherwise returns `None`.
+    /// Returns the width that the environment states in [`WIDTH_VARIABLE`], or
+    /// the width of the controlling terminal when the environment states none,
+    /// or `None` when neither answers.
     ///
     /// A terminal that carries no window is a terminal that cannot be detected.
     /// It answers the `TIOCGWINSZ` ioctl with zero columns and zero rows, and
@@ -23,20 +42,20 @@ impl TerminalWidth {
     /// documentation of that crate says why.
     #[must_use]
     pub fn get() -> Option<u16> {
-        Self::columns_of(termsize::controlling_columns())
+        Self::columns_of(Self::answer())
     }
 
     /// Get the current terminal width with a fallback.
     ///
-    /// Returns the terminal width in columns if it can be detected,
-    /// otherwise returns the provided fallback value.
+    /// Returns the width that [`get`](Self::get) reports, or the fallback that
+    /// the caller named when [`get`](Self::get) reports none.
     ///
     /// # Arguments
     ///
     /// * `fallback` - The value to return if terminal width cannot be detected.
     #[must_use]
     pub fn get_or(fallback: u16) -> u16 {
-        Self::columns_or(termsize::controlling_columns(), fallback)
+        Self::columns_or(Self::answer(), fallback)
     }
 
     /// Get the current terminal width with the default fallback.
@@ -48,31 +67,81 @@ impl TerminalWidth {
         Self::get_or(DEFAULT_TERMINAL_WIDTH)
     }
 
-    /// The width to report, from the answer that the terminal gave.
+    /// The width that both sources together give, before the fallback.
     ///
-    /// The read of the terminal stands apart from this decision, so a test
-    /// names the answer of a terminal without a terminal to name it with.
-    /// [`get`](Self::get) reads the terminal and hands the answer here.
+    /// The two public readers share this one line, so the order of the sources
+    /// is stated one time. [`stated_or_measured`](Self::stated_or_measured)
+    /// holds the order itself, apart from the read of either source, so a test
+    /// names both answers without a terminal and without an environment to name
+    /// them with.
+    fn answer() -> Option<u16> {
+        Self::stated_or_measured(Self::stated(), termsize::controlling_columns)
+    }
+
+    /// The width that the environment states, or `None` when it states none.
+    fn stated() -> Option<u16> {
+        Self::stated_of(std::env::var(WIDTH_VARIABLE).ok().as_deref())
+    }
+
+    /// The width that a value of [`WIDTH_VARIABLE`] states.
     ///
-    /// `None` is a run that measured no terminal, and it stays `None`. A width
+    /// A value that is no number states no width, and neither does a value that
+    /// is larger than `u16`. The `TIOCGWINSZ` ioctl answers in that type, so a
+    /// value above it is a width no terminal reports.
+    ///
+    /// A value that is not valid text states no width either, and it arrives
+    /// here as `None`, because the read above takes the variable as text.
+    fn stated_of(value: Option<&str>) -> Option<u16> {
+        value.and_then(|value| value.parse().ok())
+    }
+
+    /// The width to report, from what the environment states and what the
+    /// terminal reports.
+    ///
+    /// A statement wins. POSIX says a value of [`WIDTH_VARIABLE`] overrides the
+    /// width the system selects, and that is what makes the width of one run
+    /// something a caller can state rather than something the caller must
+    /// arrange a terminal to produce.
+    ///
+    /// A statement of zero columns is no statement, because no character of a
+    /// line prints into no column, so the terminal answers instead.
+    ///
+    /// The terminal arrives as a function rather than as an answer, and the
+    /// reason is a cost rather than a style. The read of the terminal opens
+    /// `/dev/tty`, and it spawns `tput` when that open fails. A run that states
+    /// its width pays for neither.
+    fn stated_or_measured(
+        stated: Option<u16>,
+        measure: impl FnOnce() -> Option<u16>,
+    ) -> Option<u16> {
+        Self::columns_of(stated).or_else(measure)
+    }
+
+    /// The width to report, from the answer that a source gave.
+    ///
+    /// The read of a source stands apart from this decision, so a test names
+    /// the answer of a terminal without a terminal to name it with.
+    /// [`answer`](Self::answer) reads both sources and hands the result here.
+    ///
+    /// `None` is a run that no source answered, and it stays `None`. A width
     /// of zero becomes `None` as well, because no character of a line prints
     /// into no column. A caller that gets `None` reaches the fallback it
     /// named, and a caller that gets a zero draws a progress bar into nothing.
     ///
-    /// `termsize` already gives `None` for a width of zero, so no zero reaches
-    /// this function through [`get`](Self::get). The rule stays here because
-    /// this function is where `termbar` states what it reports, and the test of
-    /// the rule is what keeps it true if the probe of [`get`](Self::get) ever
-    /// changes.
+    /// Neither source hands a zero here through [`get`](Self::get). `termsize`
+    /// already gives `None` for a width of zero, and
+    /// [`stated_or_measured`](Self::stated_or_measured) refuses a statement of
+    /// zero ahead of this call. The rule stays here because this function is
+    /// where `termbar` states what it reports, and the test of the rule is what
+    /// keeps it true if either probe ever changes.
     fn columns_of(answer: Option<u16>) -> Option<u16> {
         answer.filter(|columns| *columns > 0)
     }
 
-    /// The width to report with a fallback, from the answer that the terminal
-    /// gave.
+    /// The width to report with a fallback, from the answer that a source gave.
     ///
     /// This is the decision of [`get_or`](Self::get_or), and it stands apart
-    /// from the read of the terminal for the same reason that
+    /// from the read of either source for the same reason that
     /// [`columns_of`](Self::columns_of) does. An answer that
     /// [`columns_of`](Self::columns_of) refuses gives the fallback.
     fn columns_or(answer: Option<u16>, fallback: u16) -> u16 {
@@ -102,10 +171,14 @@ impl TerminalWidthWatcher {
     /// The watcher does not automatically listen for resize events;
     /// use [`with_sigwinch_channel`](Self::with_sigwinch_channel) for automatic resize detection.
     ///
-    /// The watcher reads the terminal through
-    /// [`TerminalWidth::get_or_default`], both here and on every resize, so a
-    /// terminal that reports no size gives [`DEFAULT_TERMINAL_WIDTH`] to every
-    /// subscriber.
+    /// The watcher reads the width through [`TerminalWidth::get_or_default`],
+    /// both here and on every resize, so a terminal that reports no size gives
+    /// [`DEFAULT_TERMINAL_WIDTH`] to every subscriber.
+    ///
+    /// An environment that states a width in [`WIDTH_VARIABLE`] therefore gives
+    /// that width to every subscriber, and a resize changes nothing. That is
+    /// the point of a statement: the caller stated a width, so the caller owns
+    /// it until the caller takes the statement away.
     #[must_use]
     pub fn new() -> Self {
         let initial_width = TerminalWidth::get_or_default();
@@ -248,6 +321,91 @@ mod tests {
     /// A fallback that no terminal reports, so a test that reads it back knows
     /// where the number came from.
     const FALLBACK: u16 = 77;
+
+    /// The width that the environment states in the tests below.
+    ///
+    /// Different from [`REAL`], so a test that reads a width back knows which
+    /// of the two sources gave it.
+    const STATED: u16 = 30;
+
+    /// A measurement that must never be taken.
+    ///
+    /// The tests that pass this read the width from a statement, and a run that
+    /// states its width must not pay for a read of the terminal. That read
+    /// opens `/dev/tty`, and `crossterm` spawns `tput` when the open fails.
+    ///
+    /// # Panics
+    /// Panics always, which is the assertion.
+    fn unmeasured() -> Option<u16> {
+        panic!("a run that states its width must not read the terminal")
+    }
+
+    #[test]
+    fn a_stated_width_is_the_width_that_is_reported() {
+        assert_eq!(
+            TerminalWidth::stated_or_measured(Some(STATED), || Some(REAL)),
+            Some(STATED),
+            "POSIX says a value of COLUMNS overrides the width the system selects, so a statement beats a measurement"
+        );
+        assert_eq!(
+            TerminalWidth::stated_or_measured(Some(STATED), unmeasured),
+            Some(STATED),
+            "a run that states its width must not read the terminal at all"
+        );
+    }
+
+    #[test]
+    fn a_run_that_states_no_width_reports_the_width_it_measured() {
+        assert_eq!(
+            TerminalWidth::stated_or_measured(None, || Some(REAL)),
+            Some(REAL),
+            "the terminal is the source that answers when the environment states nothing"
+        );
+        assert_eq!(
+            TerminalWidth::stated_or_measured(None, || None),
+            None,
+            "a run that states no width and measures no terminal holds no width, and reaches the fallback of its caller"
+        );
+    }
+
+    #[test]
+    fn a_statement_of_no_columns_is_no_statement() {
+        assert_eq!(
+            TerminalWidth::stated_or_measured(Some(0), || Some(REAL)),
+            Some(REAL),
+            "no character of a line prints into no column, so a statement of zero must not take the terminal out of play"
+        );
+    }
+
+    #[test]
+    fn a_value_that_names_a_width_states_it() {
+        assert_eq!(
+            TerminalWidth::stated_of(Some("120")),
+            Some(REAL),
+            "a value that names a number of columns states that many columns"
+        );
+        assert_eq!(
+            TerminalWidth::stated_of(Some("1")),
+            Some(1),
+            "one column holds one character, so the narrowest statement is still a statement"
+        );
+    }
+
+    #[test]
+    fn a_value_that_names_no_width_states_none() {
+        for value in ["", " ", "wide", "80 ", "-1", "12.5", "65536"] {
+            assert_eq!(
+                TerminalWidth::stated_of(Some(value)),
+                None,
+                "the value {value:?} names no number of columns, so the terminal has to answer instead"
+            );
+        }
+        assert_eq!(
+            TerminalWidth::stated_of(None),
+            None,
+            "an environment that holds no such variable states no width"
+        );
+    }
 
     #[test]
     fn a_real_width_comes_through() {
