@@ -64,6 +64,22 @@ const NO_CLIPBOARD_ENV: &str = "WN_NO_CLIPBOARD";
 /// turns the fallback off; this one says why it is there.
 const NO_CLIPBOARD: &str = "1";
 
+/// The variable that turns the run of `claude` off.
+///
+/// Every child of this file gets it, for the reason every child gets
+/// [`NO_CLIPBOARD_ENV`]: a run of the real `claude` would cost money, would
+/// need an account, and would give a different answer every time. The list of
+/// places it looks reaches outside the `PATH` this file builds — `/usr/local/
+/// bin/claude` is one — so no `PATH` can hold the run down on its own.
+///
+/// [`run_building`] takes it back out, and the tests of the run go through
+/// that helper and write a `claude` of their own.
+const NO_CLAUDE_ENV: &str = "WN_NO_CLAUDE";
+
+/// The value [`NO_CLAUDE_ENV`] carries. Any value with a character in it turns
+/// the run off; this one says why it is there.
+const NO_CLAUDE: &str = "1";
+
 /// The error of a run that no input gave a chain, and that had no clipboard to
 /// fall back on.
 ///
@@ -365,6 +381,95 @@ const WAITS_CYCLE: &str = "\
 | S0 — daemon leak | #96 | #91 |
 ";
 
+/// A plan written as JSON, the shape a program hands back.
+///
+/// The same file the reader of it reads in its own tests, so the document this
+/// file drives the binary with is the document that reader was written for.
+///
+/// It names two streams. `S0` holds `#96`. `S1` holds `#91`, which waits for
+/// `#96`, and then `#94`, whose work is the pull request `#102`.
+const JSON_PLAN: &str = include_str!("../fixtures/plan-parallel-work.json");
+
+/// What GitHub says about every number of [`JSON_PLAN`] when each of them is
+/// open.
+///
+/// Four numbers and three steps: the pull request and the issue it closes are
+/// one step, and the query asks about both of them.
+const JSON_ISSUES: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"OPEN","stateReason":null},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"OPEN","stateReason":null},
+"i102":{"__typename":"PullRequest","number":102,"title":"The shell init","state":"OPEN"},
+"i94":{"__typename":"Issue","number":94,"title":"The install","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`JSON_PLAN`] earns while every issue of it is open.
+///
+/// The report of a graph, because a JSON plan is a graph: one row for each
+/// step in the order of the work, and one start line for each issue somebody
+/// can begin now. `#96` is the one of them.
+const JSON_ANSWER: &str = concat!(
+    "→ #96         The daemon leak\n",
+    "· #91         The lifecycle    waits for #96\n",
+    "· #102 (#94)  The shell init   waits for #91\n",
+    "\n",
+    "Start #96 next with 'si 96'\n",
+);
+
+/// What GitHub says about the numbers of [`JSON_PLAN`] once `#96` is done.
+const JSON_ISSUES_ONE_DONE: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"CLOSED","stateReason":"COMPLETED"},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"OPEN","stateReason":null},
+"i102":{"__typename":"PullRequest","number":102,"title":"The shell init","state":"OPEN"},
+"i94":{"__typename":"Issue","number":94,"title":"The install","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`JSON_PLAN`] earns once `#96` is done: `#91` is free.
+const JSON_ANSWER_ONE_DONE: &str = concat!(
+    "✓ #96         The daemon leak\n",
+    "→ #91         The lifecycle\n",
+    "· #102 (#94)  The shell init   waits for #91\n",
+    "\n",
+    "Start #91 next with 'si 91'\n",
+);
+
+/// A JSON plan whose two streams wait for each other.
+///
+/// Neither of the two starts, so the plan names no work at all.
+const JSON_CYCLE: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "S1", "name": "lifecycle", "order": [{ "issue": 91, "waitsFor": [96] }] },
+    { "id": "S0", "name": "daemon leak", "order": [{ "issue": 96, "waitsFor": [91] }] }
+  ]
+}"#;
+
+/// A JSON plan whose `waitsFor` names a number the repository does not have.
+///
+/// `#999` is the typo. It stands in no `order` array, so the rows are the only
+/// place that can say the repository does not have it.
+const JSON_PLAN_WITH_A_TYPO: &str = r#"{
+  "version": 1,
+  "streams": [
+    { "id": "S0", "order": [{ "issue": 96 }] },
+    { "id": "S1", "order": [{ "issue": 91, "waitsFor": [96, 999] }] }
+  ]
+}"#;
+
+/// A JSON plan with no work in it at all.
+///
+/// Somebody ran the skill on a repository with nothing to do. That is not an
+/// error, and the answer says so.
+const JSON_EMPTY: &str = "{ \"version\": 1, \"streams\": [] }";
+
+/// The answer [`JSON_EMPTY`] earns.
+const JSON_EMPTY_ANSWER: &str = "The plan holds no work. Nothing to start.\n";
+
+/// The words of the message a text that is not an issue number earns.
+///
+/// The mark of the chain reader. A document that does not parse must never
+/// reach it, because a message about a token names the wrong problem.
+const NOT_AN_ISSUE: &str = "is not an issue number";
+
 /// The word a message about a drawing holds.
 ///
 /// A reader who wrote a table drew nothing, so the refusal of a plan must hold
@@ -378,6 +483,15 @@ const SUMMARY_HEADING: &str = "Take one from each stream:";
 /// The words that open the last column of a row of a picture, and thus the
 /// mark of an answer the picture reader wrote.
 const WAITS_FOR: &str = "waits for ";
+
+/// The file the fake `claude` records the arguments of every call in.
+///
+/// A file of its own, beside the one the fake `gh` writes, so a test can say
+/// that one of the two was never reached while the other was.
+const CLAUDE_ARGS_FILE: &str = "claude-args";
+
+/// The file the fake `claude` writes the prompt it was handed into.
+const PROMPT_FILE: &str = "prompt";
 
 /// The file the fake `gh` records the arguments of every call in.
 ///
@@ -425,6 +539,78 @@ exit {status}
         Self { dir }
     }
 
+    /// Write a `gh` that can name no repository for the current directory.
+    ///
+    /// The `repo view` of the real `gh` fails that way outside a checkout,
+    /// and it writes the reason on standard error.
+    fn without_repo() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let script = format!(
+            r#"#!/bin/sh
+for arg in "$@"; do
+    printf '%s\n' "$arg" >> '{args}'
+done
+printf 'not a git repository\n' >&2
+exit 1
+"#,
+            args = dir.path().join(ARGS_FILE).display(),
+        );
+        let gh = dir.path().join("gh");
+        std::fs::write(&gh, script).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self { dir }
+    }
+
+    /// Write a `claude` beside the `gh`.
+    ///
+    /// It answers `--version`, which is how the tool picks it, and it reads
+    /// the prompt off standard input into [`PROMPT_FILE`]. `body` is the shell
+    /// that runs after that, so each test says what its `claude` does and
+    /// nothing more.
+    ///
+    /// No test of this file runs the real `claude`. A run of it would cost
+    /// money, would need an account, and would give a different answer every
+    /// time.
+    fn with_claude(self, body: &str) -> Self {
+        let script = format!(
+            r#"#!/bin/sh
+for arg in "$@"; do
+    printf '%s\n' "$arg" >> '{args}'
+done
+if [ "$1" = "--version" ]; then
+    printf '2.0.0 (Claude Code)\n'
+    exit 0
+fi
+cat > '{prompt}'
+{body}
+"#,
+            args = self.dir.path().join(CLAUDE_ARGS_FILE).display(),
+            prompt = self.dir.path().join(PROMPT_FILE).display(),
+        );
+        let claude = self.dir.path().join("claude");
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        self
+    }
+
+    /// The arguments of every call of the fake `claude`, one to a line.
+    fn recorded_claude_args(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join(CLAUDE_ARGS_FILE)).unwrap()
+    }
+
+    /// The prompt the fake `claude` was handed on standard input.
+    fn recorded_prompt(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join(PROMPT_FILE)).unwrap()
+    }
+
+    /// Whether the tool ran the fake `claude` not even once.
+    ///
+    /// The script writes its arguments on every call, `--version` included, so
+    /// a file that never appeared is a run that never reached `claude`.
+    fn never_ran_claude(&self) -> bool {
+        !self.dir.path().join(CLAUDE_ARGS_FILE).exists()
+    }
+
     fn path(&self) -> &Path {
         self.dir.path()
     }
@@ -441,6 +627,15 @@ exit {status}
     /// that never reached `gh`.
     fn asked_nothing(&self) -> bool {
         !self.dir.path().join(ARGS_FILE).exists()
+    }
+
+    /// Whether the tool sent no query about any issue.
+    ///
+    /// A run that named the repository and stopped there sent no query. The
+    /// call that names the repository is one cheap round trip, and the query
+    /// is the one that costs a unit of the rate limit.
+    fn sent_no_query(&self) -> bool {
+        self.asked_nothing() || !self.recorded_args().contains("graphql")
     }
 }
 
@@ -524,7 +719,8 @@ fn wn(gh: &FakeGh, args: &[&str], columns: &str, color: bool, start: Option<&str
         .env_clear()
         .env("PATH", path)
         .env("COLUMNS", columns)
-        .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD);
+        .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD)
+        .env(NO_CLAUDE_ENV, NO_CLAUDE);
     if !color {
         command.env("NO_COLOR", "1");
     }
@@ -533,6 +729,39 @@ fn wn(gh: &FakeGh, args: &[&str], columns: &str, color: bool, start: Option<&str
     }
     command.args(args);
     command
+}
+
+/// Run `wn` with the environment every other child of this file gets, and
+/// with `env` on top of it.
+///
+/// The variables of the run of `claude` are read from the environment, and no
+/// other helper of this file sets one. [`NO_CLIPBOARD_ENV`] comes with the
+/// environment [`wn`] builds, so a child of this helper writes the clipboard
+/// of the machine no more than it reads it.
+fn run_building(gh: &FakeGh, args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = wn(gh, args, "80", false, None);
+    // The switch is on for every other child of this file. A test of the run
+    // takes it off and writes its own `claude`, and a test that wants the
+    // switch back names it in `env`.
+    command.env_remove(NO_CLAUDE_ENV);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().unwrap()
+}
+
+/// The document with its `generated` taken out.
+///
+/// A plan says its age under the answer, and the age of a fixture written on a
+/// fixed day grows every day this file lives. A test that states the whole
+/// answer therefore reads a plan that names no moment at all, which earns no
+/// such note. The tests of the note itself name the moment they want.
+fn undated(document: &str) -> String {
+    document
+        .lines()
+        .filter(|line| !line.contains("\"generated\""))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn stdout(output: &Output) -> String {
@@ -722,10 +951,10 @@ fn takes_the_chain_from_standard_input() {
 
 #[test]
 fn refuses_a_run_that_holds_no_chain_in_any_input() {
-    // The helper turns the clipboard off, so this is a machine with no
-    // clipboard to fall back on. The message is the message the tool printed
-    // before the clipboard was an input at all, because a run with the switch
-    // on asks for exactly that behavior.
+    // The helper turns the clipboard off and turns the run of `claude` off,
+    // so this is a machine with no input after the pipe. The message is the
+    // message the tool printed before either of them was an input at all,
+    // because a run with both switches on asks for exactly that behavior.
     let gh = FakeGh::new(THREE_ISSUES);
     let output = run(&gh, &["--repo", REPO], "80", false);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
@@ -740,7 +969,8 @@ fn refuses_a_run_that_holds_no_chain_in_any_input() {
 #[test]
 fn an_empty_pipe_reaches_the_clipboard_step() {
     // A pipe that holds nothing is not a chain of nothing. The run walks on to
-    // the clipboard, which the switch turned off, so it stops with the same
+    // the clipboard, which the switch turned off, and then to the run of
+    // `claude`, which the second switch turned off, so it stops with the same
     // message a run with no pipe at all stops with. A run that stopped at
     // standard input would report a chain error about empty text instead.
     let gh = FakeGh::new(THREE_ISSUES);
@@ -751,6 +981,7 @@ fn an_empty_pipe_reaches_the_clipboard_step() {
         .env("COLUMNS", "80")
         .env("NO_COLOR", "1")
         .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD)
+        .env(NO_CLAUDE_ENV, NO_CLAUDE)
         .env("WN", env!("CARGO_BIN_EXE_wn"))
         .arg("-c")
         .arg("printf '' | \"$WN\" --repo timmattison/tools")
@@ -936,6 +1167,43 @@ fn says_so_when_the_github_cli_is_not_installed() {
     assert!(
         stderr(&output).contains("GitHub CLI"),
         "the error says what is missing, in {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_machine_with_no_gh_is_not_told_to_name_a_repository() {
+    // The run names no repository, so it asks `gh` for the repository of this
+    // directory. `gh` is not on this PATH, so that call fails before it runs.
+    //
+    // The reason stands alone. Advice to name the repository with --repo
+    // cannot help a machine with no `gh`, because the query runs `gh` as well:
+    // a run with --repo fails one step later, at the query, with the same
+    // reason. Advice that leads the reader to a second failure is worse than
+    // no advice.
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
+        .env_clear()
+        .env("PATH", dir.path())
+        .env("COLUMNS", "80")
+        .env("NO_COLOR", "1")
+        // This test builds its own environment, so it states the switches as
+        // well: no child of this file reads the clipboard of the machine, and
+        // none of them runs `claude`.
+        .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD)
+        .env(NO_CLAUDE_ENV, NO_CLAUDE)
+        .args(["#277"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("GitHub CLI"),
+        "the error says what is missing, in {}",
+        stderr(&output)
+    );
+    assert!(
+        !stderr(&output).contains("--repo"),
+        "the error gives advice that cannot help, in {}",
         stderr(&output)
     );
 }
@@ -1634,4 +1902,384 @@ fn a_plan_with_no_waits_for_column_answers_as_it_always_did() {
         "no block of a plan carries the column of a graph, in {}",
         stdout(&output)
     );
+}
+
+#[test]
+fn answers_a_plan_written_as_json() {
+    // The fifth shape of input, and the one a program hands back. A JSON plan
+    // is a graph, so it earns the report a picture earns: one row for each
+    // step in the order of the work, and one start line for each issue
+    // somebody can begin now.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &undated(JSON_PLAN));
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+}
+
+#[test]
+fn a_finished_step_of_a_json_plan_frees_the_step_that_waited_for_it() {
+    let gh = FakeGh::new(JSON_ISSUES_ONE_DONE);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &undated(JSON_PLAN));
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER_ONE_DONE);
+}
+
+#[test]
+fn a_pull_request_of_a_json_step_is_the_pair_the_row_writes() {
+    // `"pr": 102` on the step of `#94` is the pair `PR#102 (#94)` writes, and
+    // the state of the row is the state of the pull request, because the pull
+    // request is the work.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(
+        answer.contains("#102 (#94)  The shell init"),
+        "the row writes the pair and the title of the work, in {answer}"
+    );
+}
+
+#[test]
+fn refuses_a_json_plan_whose_steps_wait_for_each_other() {
+    // The rule of a picture and of a `Waits for` column, unchanged: a cycle
+    // has no step to start, so the message names the numbers that hold the
+    // knot and the run costs no round trip.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let output = run_with_stdin(&gh, &[], "80", JSON_CYCLE);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    for number in ["#91", "#96"] {
+        assert!(
+            message.contains(number),
+            "the error names {number} of the cycle, in {message}"
+        );
+    }
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+    assert!(
+        gh.asked_nothing(),
+        "the run refused the plan before it asked GitHub, and it asked {}",
+        gh.recorded_args()
+    );
+}
+
+#[test]
+fn a_json_blocker_the_repository_does_not_have_still_earns_a_row() {
+    let gh = FakeGh::with_status(WAITS_ISSUES_WITH_A_TYPO, 1);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN_WITH_A_TYPO);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a number the repository does not have is a failed run, stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "→ #96   The daemon leak\n",
+            "? #999  (no such issue)\n",
+            "· #91   The lifecycle    waits for #96, #999\n",
+            "\n",
+            "#999 is not in timmattison/tools.\n",
+            "Start #96 next with 'si 96'\n",
+        )
+    );
+}
+
+#[test]
+fn a_json_plan_with_no_streams_in_it_is_no_error() {
+    // Somebody ran the skill on a repository with nothing to do. The answer
+    // says the plan is empty and the run exits 0, and it asks GitHub nothing:
+    // a query with no field in it is a syntax error, and there is nothing to
+    // ask about anyway.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_EMPTY);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_EMPTY_ANSWER);
+    assert!(
+        gh.asked_nothing(),
+        "an empty plan asks about nothing, and it asked {}",
+        gh.recorded_args()
+    );
+}
+
+#[test]
+fn a_document_that_does_not_parse_never_reaches_the_chain_reader() {
+    // A reader that fell through on a broken document would take a document
+    // with one missing brace to the chain reader, which would then report
+    // `"version" is not an issue number`. That message names the wrong
+    // problem.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let broken = JSON_PLAN.trim_end().trim_end_matches('}');
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", broken);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(
+        message.contains("is not a JSON document"),
+        "the error names the shape the reader pasted, in {message}"
+    );
+    assert!(
+        !message.contains(NOT_AN_ISSUE),
+        "the chain reader never saw it, in {message}"
+    );
+    assert!(
+        gh.asked_nothing(),
+        "the run refused the document before it asked GitHub, and it asked {}",
+        gh.recorded_args()
+    );
+}
+
+#[test]
+fn a_json_document_of_a_version_this_reader_does_not_know_is_refused() {
+    let gh = FakeGh::new(JSON_ISSUES);
+    let ahead = JSON_PLAN.replace("\"version\": 1", "\"version\": 2");
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &ahead);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(
+        message.contains("version 2") && message.contains("version 1"),
+        "the error names the version it read and the version it knows, in {message}"
+    );
+}
+
+#[test]
+fn a_json_document_that_is_not_the_schema_names_the_path() {
+    // The path is what says where to look, so the message walks the document
+    // rather than naming the key alone.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let text = JSON_PLAN.replace(
+        "{ \"issue\": 91, \"waitsFor\": [96] }",
+        "{ \"waitsFor\": [96] }",
+    );
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &text);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("streams[1].order[0].issue is missing"),
+        "the error names the path in the document, in {}",
+        stderr(&output)
+    );
+}
+
+/// The variable that names the seconds the run of `claude` may take.
+const PLAN_TIMEOUT_ENV: &str = "WN_PLAN_TIMEOUT";
+
+/// The shell of a fake `claude` that prints the document of [`JSON_PLAN`].
+///
+/// The plan names no moment, so its answer carries no note about its age. The
+/// tests of that note name the moment they want.
+fn prints_the_plan() -> String {
+    format!(
+        "cat <<'WN_FAKE_CLAUDE_PLAN'\n{}\nWN_FAKE_CLAUDE_PLAN\n",
+        undated(JSON_PLAN)
+    )
+}
+
+#[test]
+fn a_run_with_nothing_to_read_builds_a_plan_with_claude() {
+    // The fourth input. The argument, standard input, and the clipboard all
+    // hold nothing, so the tool builds the plan itself rather than stopping
+    // with "the clipboard is empty".
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+    // The line that says a run is happening goes to standard error, so the
+    // answer above reaches a pipe alone.
+    assert!(stderr(&output).contains("claude"), "{}", stderr(&output));
+}
+
+#[test]
+fn the_run_is_handed_the_prompt_and_the_tools_the_skill_needs() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(gh.recorded_prompt(), "/plan-parallel-work --json");
+    let args = gh.recorded_claude_args();
+    assert!(args.contains("--print"), "{args}");
+    assert!(args.contains("--allowed-tools"), "{args}");
+    assert!(args.contains("Bash"), "{args}");
+    assert!(
+        !args.contains("--dangerously-skip-permissions"),
+        "the run asks for the tools it needs and never for the bypass, in {args}"
+    );
+}
+
+#[test]
+fn an_argument_is_never_a_reason_to_run_claude() {
+    // The run is the quietest input of the four. A chain the reader typed
+    // outranks it, and a run that costs money must not happen beside one.
+    let gh = FakeGh::new(THREE_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO, ONE_OPEN_CHAIN], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("Start #278"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn refresh_builds_a_plan_even_when_an_argument_holds_one() {
+    // The one way past a plan that is still on the clipboard and no longer
+    // true. An argument is louder than a clipboard, so a run that outranks an
+    // argument outranks the clipboard as well.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--refresh", "--repo", REPO, ONE_OPEN_CHAIN], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+}
+
+#[test]
+fn the_variable_that_turns_the_run_off_leaves_the_error_the_tool_printed_before() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[(NO_CLAUDE_ENV, "1")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(stderr(&output).contains(NO_CHAIN), "{}", stderr(&output));
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn refresh_with_the_run_turned_off_names_the_variable() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--refresh", "--repo", REPO], &[(NO_CLAUDE_ENV, "1")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains(NO_CLAUDE_ENV),
+        "{}",
+        stderr(&output)
+    );
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn a_run_that_printed_nothing_names_claude() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude("exit 0\n");
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(stderr(&output).contains("claude"), "{}", stderr(&output));
+    assert!(
+        gh.sent_no_query(),
+        "a run with no plan asks about no issue, and it asked {}",
+        gh.recorded_args()
+    );
+}
+
+#[test]
+fn a_run_that_could_not_log_in_names_claude_login() {
+    let gh = FakeGh::new(JSON_ISSUES)
+        .with_claude("printf 'Invalid API key · Please run /login\\n' >&2\nexit 1\n");
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("claude login"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_reason_written_on_standard_output_reaches_the_reader() {
+    // A program writes a reason on standard error, and a run that mixes the
+    // two pipes writes it on standard output. The reason is the same reason,
+    // so the reader gets it whichever pipe carried it. A refusal that named
+    // `claude` and then stopped at the colon tells the reader nothing.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude("printf 'the model is overloaded\\n'\nexit 1\n");
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(message.contains("the model is overloaded"), "{message}");
+}
+
+#[test]
+fn a_document_the_run_built_that_does_not_parse_names_no_clipboard() {
+    // The refusal of the reader of a JSON plan, unchanged. A message that
+    // named the clipboard would send the reader to look at a clipboard that
+    // holds none of it.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude("printf '{ \"version\": 1\\n'\n");
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(message.contains("is not a JSON document"), "{message}");
+    assert!(!message.contains("clipboard"), "{message}");
+}
+
+#[test]
+fn a_run_that_outlives_its_deadline_is_killed_and_says_so() {
+    // The fake `claude` replaces itself with the sleep, so the process the
+    // tool kills is the process that waits. A run that left a sleep behind
+    // would outlive the test that started it.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude("exec sleep 30\n");
+    let started = std::time::Instant::now();
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "1")]);
+    let waited = started.elapsed();
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(message.contains("1 seconds"), "{message}");
+    assert!(message.contains(PLAN_TIMEOUT_ENV), "{message}");
+    assert!(
+        waited < std::time::Duration::from_secs(20),
+        "the run stopped at its deadline and did not wait for the sleep, in {waited:?}"
+    );
+}
+
+#[test]
+fn a_timeout_that_names_no_seconds_is_a_refusal_that_costs_no_run() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "10m")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains(PLAN_TIMEOUT_ENV),
+        "{}",
+        stderr(&output)
+    );
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn a_stale_plan_says_its_age_under_the_answer() {
+    // A plan is a claim about a backlog, and a backlog moves. The note costs
+    // one line and it is the only thing that would tell the reader.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let old = JSON_PLAN.replace("2026-09-02T14:03:11Z", "2020-01-01T00:00:00Z");
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &old);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(answer.starts_with(JSON_ANSWER), "{answer}");
+    assert!(answer.contains("This plan was built "), "{answer}");
+    assert!(
+        answer.contains("Run wn --refresh to build a new one."),
+        "{answer}"
+    );
+}
+
+#[test]
+fn a_plan_that_names_no_moment_says_nothing_about_its_age() {
+    let gh = FakeGh::new(JSON_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &undated(JSON_PLAN));
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        !stdout(&output).contains("This plan was built"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_directory_that_is_in_no_repository_costs_no_run() {
+    // The skill asks `gh` and `git` about the repository of the current
+    // directory, and its gather script turns a failure of either into a
+    // warning rather than a crash. So a run in such a directory would spend a
+    // minute and real money and would then answer that the plan holds no
+    // work. The refusal stands before the run, where it costs one cheap call.
+    let gh = FakeGh::without_repo().with_claude(&prints_the_plan());
+    let output = run_building(&gh, &[], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    // The reason `gh` gave is carried, and the advice it carries for the
+    // reader of a query is not. That advice reads "Name the repository with
+    // --repo owner/name", and this refusal stands on the line above it saying
+    // that naming one does not help. Two adjacent lines must not disagree.
+    assert!(message.contains("not a git repository"), "{message}");
+    assert!(!message.contains("Name the repository with"), "{message}");
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
 }

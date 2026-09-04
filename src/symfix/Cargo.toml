@@ -1,0 +1,16 @@
+[package]
+name = "symfix"
+version = "0.1.0"
+edition.workspace = true
+description = "Recursively finds and optionally repairs broken symlinks"
+
+[dependencies]
+buildinfo.workspace = true
+clap.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

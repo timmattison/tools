@@ -42,6 +42,7 @@ use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::chain::IssueNumber;
 use crate::report::{Entry, Status};
@@ -95,14 +96,63 @@ impl fmt::Display for Repo {
     }
 }
 
+/// Why `gh` named no repository for the current directory.
+///
+/// The two failures take different advice, so they are told apart here rather
+/// than at the caller. `--repo` names a repository for `wn` to ask about, and
+/// that answer stands only for a `gh` that ran: the query of [`fetch`] runs
+/// `gh` as well, so a machine with no `gh` fails one step later with the same
+/// reason. Advice that leads the reader to a second failure is worse than no
+/// advice.
+#[derive(Debug, Error)]
+pub enum NoRepo {
+    /// `gh` did not run at all. It is not installed, or it is not on `PATH`.
+    #[error("could not run `{GH}`. Is the GitHub CLI installed? {cause}")]
+    NotRun {
+        /// What the operating system said about the run.
+        cause: std::io::Error,
+    },
+    /// `gh` ran and named no repository. The directory is in none it can see,
+    /// or it answered something that is not `owner/name`.
+    #[error("{said}")]
+    Refused {
+        /// What `gh` said, with the space around it dropped.
+        said: String,
+    },
+}
+
 /// The repository of the current directory, as `gh` resolves it.
 ///
 /// # Errors
 ///
 /// Fails when `gh` is not installed, when the current directory is in no
 /// repository `gh` can name, or when `gh` answers something that is not
-/// `owner/name`.
+/// `owner/name`. The message names `--repo` only for a `gh` that ran, because
+/// naming a repository is the answer for a run that reached `gh` and got no
+/// repository from it. A machine with no `gh` gets the reason alone: the query
+/// runs `gh` as well, so `--repo` moves that failure and does not fix it.
 pub fn current_repo() -> Result<Repo> {
+    repo_of_here().map_err(|said| match said {
+        NoRepo::NotRun { .. } => anyhow!(said),
+        NoRepo::Refused { .. } => {
+            anyhow!("`{GH} repo view` failed. Name the repository with --repo owner/name.\n{said}")
+        }
+    })
+}
+
+/// The same, with the reason as `gh` gave it and no advice around it.
+///
+/// A caller writes the advice, and [`NoRepo`] says which advice fits. One
+/// caller wants a repository to ask GitHub about, and `--repo` answers that
+/// for a `gh` that ran. The other wants the repository of this directory,
+/// which `--repo` never names, so advice about `--repo` would contradict the
+/// sentence that caller writes above it.
+///
+/// # Errors
+///
+/// Gives [`NoRepo::NotRun`] for a `gh` that did not run, and
+/// [`NoRepo::Refused`] for a `gh` that ran and named no repository.
+pub fn repo_of_here() -> std::result::Result<Repo, NoRepo> {
     let output = Command::new(GH)
         .args([
             "repo",
@@ -113,16 +163,16 @@ pub fn current_repo() -> Result<Repo> {
             ".nameWithOwner",
         ])
         .output()
-        .with_context(|| format!("could not run `{GH}`. Is the GitHub CLI installed?"))?;
+        .map_err(|cause| NoRepo::NotRun { cause })?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "`{GH} repo view` failed. Name the repository with --repo owner/name.\n{}",
-            stderr.trim()
-        );
+        return Err(NoRepo::Refused {
+            said: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
     }
     let spec = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Repo::parse(&spec).with_context(|| format!("`{GH} repo view` answered {spec:?}"))
+    Repo::parse(&spec).map_err(|cause| NoRepo::Refused {
+        said: format!("`{GH} repo view` answered {spec:?}: {cause:#}"),
+    })
 }
 
 /// The alias one number of the chain carries in the query.
@@ -337,6 +387,13 @@ fn errors_of(answer: &Value) -> Option<String> {
 /// error, and a number GitHub could not answer for is an error rather than
 /// [`Status::Missing`]. The reason beside the `null` answer parts the two.
 pub fn fetch(repo: &Repo, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
+    // A plan with no work in it asks about nothing. The query would then carry
+    // no field at all, which GitHub refuses as a syntax error, and there is
+    // nothing to ask about anyway.
+    if numbers.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let query = build_query(numbers);
     let output = Command::new(GH)
         .arg("api")

@@ -278,48 +278,9 @@ fn main() {
 }
 ```
 
-### Go Tools
-
-Use the `internal/version` package:
-
-```go
-import (
-    "github.com/timmattison/tools/internal/version"
-)
-
-func main() {
-    var showVersion bool
-    flag.BoolVar(&showVersion, "version", false, "Show version information")
-    flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
-    flag.Parse()
-
-    if showVersion {
-        fmt.Println(version.String("toolname"))
-        os.Exit(0)
-    }
-    // ...
-}
-```
-
-**Important:** Always define version flags in `main()`, not in `init()`. This keeps all flag definitions in one place and makes the code more readable. All Go tools in this repository follow this pattern.
-
-**Build with ldflags** using `scripts/build-go.sh` to inject git info:
-
-```bash
-./scripts/build-go.sh           # Build all Go tools
-./scripts/build-go.sh symfix  # Build specific tools
-```
-
-The build script reads the version from the `VERSION` file at the repository root.
-
 ### Tools Currently Using buildinfo
 
 All Rust tools use buildinfo for version information.
-
-### Tools Currently Using internal/version
-
-All Go tools use internal/version:
-- `symfix` - Symlink Fix
 
 ## Lint Configuration
 
@@ -591,7 +552,7 @@ The repository includes a `.shellcheckrc` file that configures ShellCheck with s
 shellcheck scripts/*.sh test.sh
 
 # Check a specific script
-shellcheck scripts/build-go.sh
+shellcheck scripts/update-deps.sh
 ```
 
 ### Shell Script Style Guidelines

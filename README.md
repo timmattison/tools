@@ -1,7 +1,7 @@
 # Fun tools written by Tim Mattison
 
-I started this repo forever ago (2014!) to hold some tools I needed at the time. Now I'm converting the tools to ~~Golang~~ Rust
-for fun.
+I started this repo forever ago (2014!) to hold some tools I needed at the time. I converted the tools from ~~Golang~~
+to Rust for fun, and that conversion is now complete: no Go is left in this repository.
 
 > **In a hurry?** See [TLDR.md](./TLDR.md) for a one-line description of every tool.
 
@@ -300,10 +300,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       Works on macOS (using lsof), Linux (using /proc), and Windows (using system APIs). Supports JSON output and verbose mode.
     - To install: `cargo install --git https://github.com/timmattison/tools wu`
 - symfix
-    - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove
-      a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving
-      directories or restructuring projects.
-    - To install: `go install github.com/timmattison/tools/cmd/symfix@latest`
+    - Recursively scans directories for broken symlinks and optionally repairs them. Can prepend a string to, or
+      remove a prefix from, a broken symlink target. `--dry-run` prints every planned change and touches nothing.
+      Useful after moving directories or restructuring a project.
+    - To install: `cargo install --git https://github.com/timmattison/tools symfix`
 - diskhog
     - Shows per-process disk I/O usage on macOS in a continuously updating terminal UI. Displays disk bandwidth
       (read/write bytes per second) for all processes. When run with sudo, also shows IOPS (operations per second)
@@ -1136,13 +1136,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     without those strokes the run `──` reaches the chain reader as one token and earns a refusal.
     Quote the chain: a shell reads an unquoted `#` as the start of a comment.
   - The chain comes out of the first input that holds one: the argument, then standard input,
-    then the system clipboard. A chain almost always starts as text somebody copied out of a
-    plan, an issue, or a comment, so `wn` alone answers the chain you just copied. A pipe still
-    outranks the clipboard, because a pipe is explicit, and an empty pipe walks on to the
-    clipboard — a run whose parent handed it `/dev/null` did not ask for an empty chain. Set
-    `WN_NO_CLIPBOARD` to any value with a character in it to turn the clipboard off, which gives
-    back the error a run with no chain printed before. An empty value leaves the clipboard on,
-    because an exported but empty variable is a common accident.
+    then the system clipboard, then a run of `claude` that builds a plan. A chain almost always
+    starts as text somebody copied out of a plan, an issue, or a comment, so `wn` alone answers
+    the chain you just copied. A pipe still outranks the clipboard, because a pipe is explicit,
+    and an empty pipe walks on to the clipboard — a run whose parent handed it `/dev/null` did
+    not ask for an empty chain. Set `WN_NO_CLIPBOARD` to any value with a character in it to turn
+    the clipboard off. An empty value leaves the clipboard on, because an exported but empty
+    variable is a common accident. The clipboard is also the cache a run of `claude` writes its
+    plan to, so a reader who turns the clipboard off turns that cache off with it: every bare
+    `wn` then pays for a new run and keeps nothing.
   - The whole chain is one GraphQL query through `gh`, so a chain of six issues costs one round
     trip and one unit of the rate limit, and the credential is the one `gh` already holds. Pull
     request numbers work too: merged counts as done, and closed without a merge counts as
@@ -1232,7 +1234,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     and `PR#344 (#341)` is one step that holds a pair. A separator inside the cell says nothing
     about order. `Order` is a chain and `Waits for` is a set, so `#96 → #91` and `#96, #91` mean
     the same thing — both numbers must finish before the stream starts. Reading the cell as a
-    chain would claim an edge from `#96` to `#91` that the plan never wrote.
+    chain would claim an edge from `#96` to `#91` that the plan never wrote. A cell that names
+    the issue of a pair some `Order` writes reaches that pair. `#341` in a cell reaches the step
+    `PR#344 (#341)`, because the two numbers name one piece of work. One piece of work is one
+    row, and a wait on the issue of a pair names no second thing to start.
   - Every step of the cell comes before the first step of the stream, and before that step alone,
     because the steps inside the stream keep the edges `Order` already gives them. The plan above
     thus draws `#96 → #91`, `#96 → #89`, `#91 → #89`, and `#89 → #94`. That is a graph, and it is
@@ -1243,9 +1248,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     issue is open, and it names `#91` and `#86` once `#96` is closed.
   - An empty cell is a stream nothing outside it blocks, and it is the common case. An absent
     column is a plan with no cross-stream edge at all, which is every plan written before this
-    landed: such a plan still answers as one block for each stream under one summary, and nothing
-    about it changed. A cell that names the first step of its own stream draws no edge either,
-    because such an edge runs from a step to itself and says nothing.
+    landed: such a plan still answers as one block for each stream under one summary, and
+    nothing about it changed. A cell that names the first step of its own stream draws no edge
+    either, because such an edge runs from a step to itself and says nothing. A cell that names
+    the issue of that first step draws no edge for the same reason, because that issue names
+    that same step.
   - Three things are refused. A cell whose text is not a step earns the message a bad `Order` cell
     earns, naming the stream and the text: `after the leak lands` names no issue, and the reason a
     stream waits is prose that belongs in `Notes`. An order that returns to itself is a cycle, so
@@ -1287,22 +1294,22 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     prose of a port. `wn` reads the run and never the one character, so `a 30-line window` holds
     no wire, `(pass --hidden)` holds none, and `#1-->#2` holds one, because a digit and a `#` are
     no letters. A box-drawing character never stands inside a word, so it needs no such test.
-  - The readers are tried in one order: the record form and the table form of a plan first, the
-    picture second, and the chain last. A picture claims the text when one of its nets joins two
-    steps that stand on different lines. That rule is what keeps `#1 ──→ #2` a chain, because both
-    of its steps stand on one line. It claims the text as well when two nets or more each join a
-    step on their left to a step on their right, those nets do not all stand on one line, one of
-    them holds a box-drawing character, and no net of the text reaches a step on one side and
-    nothing on the other. That second rule is what reads `#242 ──→ #247` over `#246 ──→ #248` —
-    two streams that never join — as two rows of work rather than as one, because every wire of
-    such a picture stands on one line. Each of the three tests beside the count keeps a text the
-    chain reader answers: the lines keep `#1 ──→ #2 ──→ #3` a chain, the box-drawing character
-    keeps a page of prose out, and the net that reaches nothing on one side keeps a chain somebody
-    wrapped out — `#1 ──→ #2 ──→` with `#3 ──→ #4` under it, where the trailing `──→` says the
-    order runs on. The price is a chain wrapped after a box-drawn wire: `#1 ──→ #2,` with
-    `#3 ──→ #4` under it reads as two streams. A line with no wire and no step is ignored, so the
-    fence of a code block costs nothing, and a picture indented out of a Markdown list gives the
-    edges a picture at column zero gives.
+  - The readers are tried in one order: the JSON document first, the record form and the table
+    form of a plan second, the picture third, and the chain last. A picture claims the text
+    when one of its nets joins two steps that stand on different lines. That rule is what keeps
+    `#1 ──→ #2` a chain, because both of its steps stand on one line. It claims the text as
+    well when two nets or more each join a step on their left to a step on their right, those
+    nets do not all stand on one line, one of them holds a box-drawing character, and no net
+    of the text reaches a step on one side and nothing on the other. That second rule is what
+    reads `#242 ──→ #247` over `#246 ──→ #248` — two streams that never join — as two rows
+    of work rather than as one, because every wire of such a picture stands on one line. Each
+    of the three tests beside the count keeps a text the chain reader answers: the lines keep
+    `#1 ──→ #2 ──→ #3` a chain, the box-drawing character keeps a page of prose out, and the net
+    that reaches nothing on one side keeps a chain somebody wrapped out — `#1 ──→ #2 ──→` with
+    `#3 ──→ #4` under it, where the trailing `──→` says the order runs on. The price is a chain
+    wrapped after a box-drawn wire: `#1 ──→ #2,` with `#3 ──→ #4` under it reads as two streams.
+    A line with no wire and no step is ignored, so the fence of a code block costs nothing, and a
+    picture indented out of a Markdown list gives the edges a picture at column zero gives.
   - The answer names a state for every step. A step is ready when it is open and every step before
     it is finished, blocked when it is open and one step before it is not, and finished when it is
     done or dropped. `→` marks every ready step and `·` marks a blocked one, which is what those
@@ -1330,9 +1337,144 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     holds every number of the picture, `1` when the picture names a number the repository does not
     have, and `2` for a picture `wn` could not read and for a cycle. `wn` draws no graph back: the
     answer is the rows and what each row waits for, because a layout engine is a separate decision.
-  - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard), `wn "#230 → #315"`,
-    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole plan, or a plan drawn
-    as a picture), `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
+  - A plan written as JSON is a fifth shape of input, and it is the shape a program hands back.
+    The four written forms were each written for a person to read, and three of them carry layout
+    the reader has to undo — a column width, a border, a cell that wrapped onto a second line.
+    Layout is lossy. A box table that left a terminal 100 columns wide and arrives in one 80
+    columns wide has been re-wrapped by whatever pasted it, and a `Notes` cell that lost its
+    second line costs nothing while an `Order` cell that lost its second line costs a step. A
+    document carries no layout at all, so a program that writes a plan writes this one.
+
+    ```json
+    {
+      "version": 1,
+      "streams": [
+        { "id": "S0", "name": "daemon leak", "order": [{ "issue": 96, "waitsFor": [] }] },
+        { "id": "S1", "name": "lifecycle", "order": [
+          { "issue": 91, "waitsFor": [96] },
+          { "issue": 94, "pr": 102, "waitsFor": [] }
+        ] }
+      ]
+    }
+    ```
+  - `wn` reads `streams` and nothing else. The `order` array of a stream is a chain, so each step
+    of it comes before the step after it. In one step, `issue` is the issue number, `pr` is the
+    pull request that does the work of that issue — the same pair `PR#344 (#341)` writes, and it
+    reaches the report as the row `#102 (#94)` — and `waitsFor` is the set of numbers that come
+    before that step. `waitsFor` is the JSON spelling of the `Waits for` cell, and it reaches the
+    same graph. A cell writes the pair as `PR#102 (#94)` and a `waitsFor` holds bare numbers, so
+    a `waitsFor` that names the issue of a pair reaches that pair. One piece of work is one row
+    in both readers, and a wait on the issue of a pair names no second thing to start. It stands
+    on each step rather than on the stream, so a later step of a stream names its own blockers.
+    `housekeeping` and `warnings` are read past: they stand in the document because the person
+    who ran the skill wants them, and `wn` answers one question. The document above draws
+    `#96 → #91` and `#91 → #94`, so it names `#96` while every issue is open and `#91` once `#96`
+    is closed.
+  - JSON is tried first, before the tables and before the chain. A text whose first character
+    that is not a space is `{` is a JSON document, and nothing else `wn` reads starts that way, so
+    the claim is decided on one character and never on a partial parse. A text that starts with
+    `{` and does not parse is an error and never a walk on to the next reader: a document with one
+    missing brace would otherwise reach the chain reader, which would answer `"version" is not an
+    issue number`, and that message names the wrong problem.
+  - Three things are refused, and each of them exits `2`. A `version` that is not `1` stops the
+    run and names the version it read beside the version `wn` knows, because a consumer that
+    guesses at a schema it does not know answers with the wrong plan. A document that is not the
+    schema — a missing `streams`, a stream with no `order`, a step with no `issue`, a number that
+    is not a number — names the path in the document, so `streams[1].order[0].issue` says where to
+    look. A cycle names the numbers that hold the knot, as it does for a picture and for a `Waits
+    for` column. A `waitsFor` that names a step of its own stream is refused by none of those: it
+    is an edge `order` already carries.
+  - An empty `streams` array is a plan with no work in it, and that is not an error. The answer
+    reads `The plan holds no work. Nothing to start.` and the run exits `0`, and it asks GitHub
+    nothing at all. Every other JSON plan earns the report a picture earns: one row for each step
+    in the order of the work, `→` on every ready step and `·` on a blocked one, the work each
+    blocked row waits for, and one start line for each issue somebody can begin now. A JSON plan
+    is a graph, a table with a `Waits for` column is the same graph, and one report answers both,
+    because two reports of one question drift apart.
+  - A run of `claude` is the fourth input, after the argument, standard input, and the clipboard.
+    The reader who typed `wn` with an empty clipboard has a repository full of open issues and no
+    plan, that plan is one `claude` run away, and `wn` already knows the repository — so `wn`
+    builds it rather than stopping with `the clipboard is empty`. The order is still the order of
+    how loudly each input was asked for, and a run that costs money and about a minute of waiting
+    is the quietest of the four: it answers only when the other three did not.
+
+    ```
+    $ wn
+    wn: no plan to read. Building one with claude…
+    ⠹ plan-parallel-work: reading the backlog…
+
+    → #96  fix the daemon leak
+    · #91  archive a killed session   waits for #96
+    → #86  the keymap panel
+
+    Start #96 next with 'si 96'
+    Start #86 next with 'si 86'
+
+    The plan is on the clipboard. Run wn --refresh to build a new one.
+    ```
+  - The run is `claude --print --allowed-tools …` with the prompt `/plan-parallel-work --json` on
+    standard input, in the directory `wn` was run in, and `wn` reads the document it prints. It
+    looks for `claude` in `PATH`, then `~/.local/bin/claude`, then `~/.claude/local/claude`, then
+    `/usr/local/bin/claude`, and the first one that answers `--version` is the one. It names the
+    tools the skill needs rather than reaching for `--dangerously-skip-permissions`: a run under
+    `--print` has no terminal to answer a permission prompt with, and a tool that reaches for the
+    bypass on behalf of its reader has made a decision that is not its to make. The line that says
+    a run is happening and the spinner under it both go to standard error, so a pipe still gets the
+    document alone.
+  - The clipboard is the cache. A second `wn` a minute later must not pay for a second run, so the
+    document goes on the system clipboard and the next run reads it back through the clipboard
+    input that already stands. No second cache, no second reader, and no file to go stale in a
+    directory nobody looks in. **The run overwrites what is on the clipboard.** It happens only
+    when every other input was empty, and the tool says so on the line under the answer. Three
+    things follow, and all three are the right behavior: the plan lives exactly as long as the
+    reader does not copy anything else, and a plan somebody threw away was cheap to rebuild; a
+    plan on the clipboard is a plan the reader can paste, into an issue, into a comment, or into a
+    second terminal; and `wn` never runs `claude` twice in a row by accident, because the document
+    it wrote is the document the next run reads. A document that could not be read never reaches
+    the clipboard, because a bad plan there is a bad plan every later run reads. A clipboard that
+    could not be written earns a note and not a failure — the answer is right, and the one cost is
+    that the next run builds a new plan. On X11 a clipboard belongs to the process that set it, so
+    a machine there can lose the plan the moment `wn` exits, at that same cost. Holding `wn` open
+    until another program takes the clipboard is the only other answer, and a `wn` that does not
+    exit is worse than a plan that has to be built twice.
+  - `wn --refresh` runs `claude` whatever the other inputs hold, and it replaces the clipboard with
+    what comes back. It is the one way past a plan that is still on the clipboard and no longer
+    true. A plan older than a day says its age under the answer — `This plan was built 3 days ago.
+    Run wn --refresh to build a new one.` — because a plan is a claim about a backlog, a backlog
+    moves, and that note is the only thing that would tell the reader. `wn` reads the `generated`
+    field of the document for it, and a document that names no moment says nothing about its age.
+  - Set `WN_NO_CLAUDE` to any value with a character in it to turn the run off, which gives back
+    the error a run with no chain printed before. An empty value leaves it on, because an exported
+    but empty variable is a common accident. `WN_PLAN_TIMEOUT` names the seconds a run may take;
+    it is 600 by default, because a plan of a whole backlog is a longer run than a commit message.
+  - These things refuse, and each exits `2`. A directory that is in no repository `gh` can name is
+    refused before the run, not after it: the skill plans the repository of the directory `wn` was
+    run in, and its gather script turns a `gh` or a `git` failure into a warning rather than a
+    crash, so a run there would spend a minute and real money and would then answer that the plan
+    holds no work. One cheap `gh repo view` refuses it first. For the same reason `--repo` names
+    the repository `wn` asks about and never the one the run plans, so a build in one checkout
+    with `--repo` naming another gives numbers of two repositories. `wn --refresh` with
+    `WN_NO_CLAUDE` set asks for two things at once — `--refresh` builds a plan by running
+    `claude`, and the variable turns that run off — so the message names both and says to unset
+    the variable. A `WN_PLAN_TIMEOUT` that names no number of seconds is refused and named back:
+    `WN_PLAN_TIMEOUT=10m` is such a value, and so is `WN_PLAN_TIMEOUT=0`, because a zero is a
+    confusing way to spell `WN_NO_CLAUDE`. A `WN_PLAN_TIMEOUT` that names more seconds than a run
+    waits is refused as well, and the message names the cap of 31536000 seconds, which is one
+    year: a longer value names no run a person starts, and the largest of them build a deadline
+    the clock cannot hold. A machine with no `claude` earns a message naming the four paths it
+    looked in and naming `WN_NO_CLAUDE` for a reader who wants no run at all. A run that outlives
+    its deadline is killed and the message names the seconds and `WN_PLAN_TIMEOUT` — killed, and
+    not left behind, because a `claude` nobody waits for keeps spending. A `claude` with no
+    account earns a message naming `claude login`. A run that fails for a reason only `claude`
+    knows is named back with that reason, on whichever pipe carried it. A run that prints nothing
+    at all is named back as a run of `claude`. A document that is not the schema earns the refusal
+    of the JSON reader, unchanged and naming no clipboard, because a plan `wn` built is a plan
+    `wn` asked for.
+  - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard, and builds a plan when it holds
+    none), `wn --refresh`, `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole
+    plan, a plan drawn as a picture, or a plan written as JSON),
+    `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`,
+    `WN_NO_CLAUDE=1 wn`, `WN_PLAN_TIMEOUT=900 wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 
 ## dirhash
@@ -1688,59 +1830,115 @@ Verbose output groups processes by PID and shows all files each process has open
 
 ## symfix
 
-Recursively scans directories for broken symlinks and optionally fixes them by modifying the symlink targets.
+Recursively scans directories for broken symlinks and optionally repairs them by rewriting the symlink target.
+
+A symlink holds its target as text, and the text says nothing about whether the target is there. A tree that moved, an
+archive that unpacked somewhere else, or a checkout at a new prefix leaves links that name files which are not there.
+`symfix` finds them, and repairs the ones you tell it how to repair.
 
 ### Basic Usage
 
 ```
-symfix                                # Scan current directory for broken symlinks
-symfix -dir /path/to/scan             # Scan a specific directory
-symfix -prepend-to-fix ../            # Fix broken symlinks by prepending "../" to targets
-symfix -remove-to-fix /old/path/      # Fix broken symlinks by removing "/old/path/" prefix
+symfix                                 # Scan the current directory for broken symlinks
+symfix --dir /path/to/scan             # Scan a specific directory
+symfix --prepend-to-fix ../            # Repair by prepending "../" to the target
+symfix --remove-to-fix /old/path/      # Repair by removing the "/old/path/" prefix from the target
+symfix --prepend-to-fix ../ --dry-run  # Print the plan and change nothing
 ```
 
 ### Options
 
-- `-dir`: Directory to scan for broken symlinks (default: current directory)
-- `-prepend-to-fix`: String to prepend to broken symlink targets to attempt fixing them
-- `-remove-to-fix`: String to remove from the beginning of broken symlink targets
-- `-verbose`: Enable verbose output for debugging
-- `-help`: Show help message with usage information
+- `-d, --dir <DIR>`: The directory to scan (default: the current directory)
+- `--prepend-to-fix <STRING>`: Put this string in front of a broken symlink target
+- `--remove-to-fix <STRING>`: Take this string off the front of a broken symlink target
+- `-n, --dry-run`: Print every planned change and touch nothing
+- `--skip <NAME>`: Do not enter a directory with this name. Repeatable
+- `-v, --verbose`: Write the debug lines to standard error
+- `-h, --help`: Print the help
+- `-V, --version`: Print the version
+
+**The single-dash spellings are gone.** The Go version of this tool accepted `-dir` and `--dir` for the same flag.
+The Rust version reads `-dir` as the short flag `-d` carrying the value `ir`, and then refuses the directory that
+follows. Every flag now needs two dashes, except the short forms in the list above.
 
 ### Examples
 
-Find all broken symlinks in the current directory:
+Find every broken symlink in the current directory:
 
 ```
 symfix
 ```
 
-Find all broken symlinks in a specific directory:
+Find every broken symlink in a specific directory:
 
 ```
-symfix -dir ~/projects/my-website
+symfix --dir ~/projects/my-website
 ```
 
-Fix broken symlinks by prepending a string to their targets:
+Repair broken symlinks by prepending a string to the target:
 
 ```
-symfix -prepend-to-fix ../
+symfix --prepend-to-fix ../
 ```
 
-Fix broken symlinks by removing a prefix from their targets:
+Repair broken symlinks by removing a prefix from the target:
 
 ```
-symfix -remove-to-fix /old/path/prefix/
+symfix --remove-to-fix /old/path/prefix/
 ```
 
-Scan a specific directory and fix symlinks by prepending:
+Scan a specific directory and repair by prepending:
 
 ```
-symfix -dir ~/projects/my-website -prepend-to-fix ..
+symfix --dir ~/projects/my-website --prepend-to-fix ..
 ```
 
-When fixing symlinks, targets are resolved relative to the symlink's location. The tool will report all broken symlinks
-found and indicate which ones were fixed.
+See what a repair would do, and change nothing:
+
+```
+symfix --prepend-to-fix ../ --dry-run
+```
+
+Leave out the directories that hold no source:
+
+```
+symfix --skip node_modules --skip .git
+```
+
+Scan a directory, repair by prepending, and print the debug lines:
+
+```
+symfix --dir ~/projects/my-website --prepend-to-fix .. --verbose
+```
+
+### How a repair works
+
+`symfix` builds a new target, checks it, and writes it:
+
+1. It builds the new target as text. `--prepend-to-fix` puts the string in front of the old target.
+   `--remove-to-fix` takes the string off the front, and only when the old target starts with it and something is
+   left after it.
+2. It checks **the exact path the new link will resolve to**. A relative target resolves against the directory that
+   holds the link. An absolute target resolves against the root.
+3. It writes the new target **as it was built**. A relative target thus stays relative, and a tree you move again
+   keeps working.
+
+`--prepend-to-fix` is tried first. `--remove-to-fix` is tried only when the prepend did not repair the link.
+
+The replacement is atomic. `symfix` makes the new link under a name of its own in the same directory and renames it
+over the old one, so a run that is killed part way leaves either the old link or the new one, and never no link at all.
+
+### What `symfix` will not repair
+
+A link whose target cannot be resolved **for a reason that is not absence** is reported as an error and left alone.
+A directory you cannot traverse and a loop of links that point at each other both land here. `symfix` does not
+understand why such a link failed, so it cannot know that a rewrite would be an improvement, and rewriting one would
+destroy a link that works for everybody who can read the directory.
+
+A link whose whole target is the string `--remove-to-fix` names is left alone as well. That repair leaves no target
+at all, and a link with no target names no file, so it repairs nothing. `symfix` refuses it because the write is the
+end of the text: a symlink is the only place that holds its target, and a run that emptied one would take the name of
+the missing file away from the user who has to go and find it.
 
 ## rcc
 
