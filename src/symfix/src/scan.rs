@@ -245,13 +245,34 @@ fn report_unresolvable(path: &Path, error: &io::Error, err: &mut dyn Write, summ
 /// nothing to name in that line, so it drops the path and the colon and writes
 /// the error alone. The `Warning: ` prefix stays either way, because that is
 /// what a reader greps for.
+///
+/// This line names the path once. A `walkdir::Error` renders itself as `IO
+/// error for operation on {path}: {io error}`, so a line that named the path
+/// and then rendered the whole error would carry the path twice and read as
+/// though two paths were meant. [`walkdir::Error::io_error`] gives the error
+/// the operating system raised, which renders as its own message and nothing
+/// else, so the line reads `Warning: cannot read {path}: {message}`.
+///
+/// An error that carries a path and no inner [`io::Error`] is a loop of links,
+/// which only a walk that follows links can raise. This walk follows none, so
+/// nothing reaches that arm today; it renders the whole error rather than
+/// dropping the message, because a diagnostic that says less than the walk
+/// knows is worse than one that says a path twice.
 fn report_walk_error(err: &mut dyn Write, error: &walkdir::Error) {
-    match error.path() {
-        Some(path) => line(
+    let Some(path) = error.path() else {
+        line(err, format_args!("Warning: {error}"));
+        return;
+    };
+
+    match error.io_error() {
+        Some(io_error) => line(
+            err,
+            format_args!("Warning: cannot read {}: {io_error}", path.display()),
+        ),
+        None => line(
             err,
             format_args!("Warning: cannot read {}: {error}", path.display()),
         ),
-        None => line(err, format_args!("Warning: {error}")),
     }
 }
 
