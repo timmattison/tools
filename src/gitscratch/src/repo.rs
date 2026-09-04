@@ -80,7 +80,7 @@ impl Repo {
         // while somewhere outside every repository fails now rather than
         // halfway through a simulation.
         repo.git()
-            .run(&["rev-parse", "--git-dir"])
+            .run("rev-parse", &["--git-dir"])
             .with_context(|| format!("{} is not inside a git repository", path.display()))?;
 
         Ok(repo)
@@ -132,9 +132,9 @@ impl Repo {
     /// a replay needs no working tree, so a repository that cannot answer this
     /// question can still answer the expensive one.
     pub fn uncommitted_files(&self) -> Result<Uncommitted> {
-        let records =
-            self.git()
-                .nul_separated(&["status", "--porcelain", "--untracked-files=all"])?;
+        let records = self
+            .git()
+            .nul_separated("status", &["--porcelain", "--untracked-files=all"])?;
 
         // Not `records.len()`: a rename spends two fields on one file. See
         // `moved_from_elsewhere`.

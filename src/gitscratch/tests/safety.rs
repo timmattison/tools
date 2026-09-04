@@ -14,7 +14,7 @@ use gitscratch::{Conflicts, Files, Hunks, Repo, Scratch};
 fn replay(scratch: &Scratch, branch: &str, onto: &str) -> Conflicts {
     scratch
         .git()
-        .run(&["checkout", "-q", "--detach", branch])
+        .run("checkout", &["-q", "--detach", branch])
         .expect("check out the branch detached in the scratch worktree");
     scratch
         .replay_rebase(onto)
@@ -947,7 +947,7 @@ fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
     {
         let scratch = repo.scratch("main");
         let git = scratch.git();
-        git.run(&["checkout", "-q", "--detach", "right"])
+        git.run("checkout", &["-q", "--detach", "right"])
             .expect("check out the branch detached in the scratch worktree");
 
         // Deliberately not resolved. `try_run` hands back the failure instead of
@@ -955,7 +955,7 @@ fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
         // halted rebase and then drop it - the shape a consumer hits whenever a
         // replay gives up partway through and unwinds.
         let halted = git
-            .try_run(&["rebase", "left"])
+            .try_run("rebase", &["left"])
             .expect("run the rebase that conflicts");
         assert!(
             !halted.success,
@@ -967,7 +967,7 @@ fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
         // And prove the halt is real rather than merely a non-zero exit: git is
         // sitting on rebase state, in the worktree that is about to be dropped.
         let state = git
-            .run(&["rev-parse", "--git-path", "rebase-merge"])
+            .run("rev-parse", &["--git-path", "rebase-merge"])
             .expect("locate the scratch worktree's rebase state");
         let state = scratch.path().join(state);
         assert!(
@@ -1038,14 +1038,14 @@ fn replays_without_hanging_or_failing_when_commit_signing_is_enabled() {
         let scratch = Repo::open(repo)?.scratch("main")?;
 
         let git = scratch.git();
-        git.run(&["checkout", "-q", "--detach", "left"])?;
+        git.run("checkout", &["-q", "--detach", "left"])?;
         scratch.replay_rebase("main")?;
 
         // The replay that matters. `right` onto `left` genuinely conflicts, so
         // the rebase halts, the markers get staged, and the replay finishes the
         // commit with `rebase --continue` - which is the exact moment a signing
         // configuration would be consulted.
-        git.run(&["checkout", "-q", "--detach", "right"])?;
+        git.run("checkout", &["-q", "--detach", "right"])?;
         let conflicts = scratch.replay_rebase("left")?;
 
         // A signing failure does not have to arrive as an error, and that is the
@@ -1057,7 +1057,7 @@ fn replays_without_hanging_or_failing_when_commit_signing_is_enabled() {
         // asked to replay, and the caller gets a plausible-looking cost for work
         // that was never actually done. So "no error" is not enough: the
         // replayed commit has to still be there.
-        let replayed = git.run(&["log", "--format=%s", "left..HEAD"])?;
+        let replayed = git.run("log", &["--format=%s", "left..HEAD"])?;
         anyhow::ensure!(
             replayed.contains("right work"),
             "the replay finished without the commit it was replaying - \

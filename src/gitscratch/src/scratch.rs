@@ -107,14 +107,10 @@ impl Scratch {
             hooks,
         };
 
-        scratch.repo_git().run(&[
+        scratch.repo_git().run(
             "worktree",
-            "add",
-            "-q",
-            "--detach",
-            scratch.worktree_arg()?,
-            at,
-        ])?;
+            &["add", "-q", "--detach", scratch.worktree_arg()?, at],
+        )?;
 
         Ok(scratch)
     }
@@ -167,7 +163,7 @@ impl Scratch {
         let worktree = self.path();
 
         let mut cost = Conflicts::default();
-        let mut outcome = git.try_run(&["rebase", onto])?;
+        let mut outcome = git.try_run("rebase", &[onto])?;
         let mut rounds = 0;
 
         loop {
@@ -195,14 +191,14 @@ impl Scratch {
                         cost.add_file(file, hunks);
                     }
 
-                    git.run(&["add", "-A"])?;
-                    outcome = git.try_run(&["rebase", "--continue"])?;
+                    git.run("add", &["-A"])?;
+                    outcome = git.try_run("rebase", &["--continue"])?;
                 }
                 Halt::EmptyCommit { stopped } => {
                     // Nothing for a human to resolve and nothing lost by
                     // dropping it, so it costs nothing.
                     outcome = git
-                        .try_run(&["rebase", "--skip"])
+                        .try_run("rebase", &["--skip"])
                         .with_context(|| format!("could not skip the empty commit {stopped}"))?;
 
                     // Read here, before the loop can come round again, because
@@ -268,7 +264,7 @@ impl Drop for Scratch {
         if let Ok(path) = self.worktree_arg() {
             let _ = self
                 .repo_git()
-                .try_run(&["worktree", "remove", "--force", path]);
+                .try_run("worktree", &["remove", "--force", path]);
         }
     }
 }
@@ -475,14 +471,14 @@ enum Halt {
 /// answer, which is the safe direction: a dry run may say "expensive" or "I
 /// cannot answer", never "cheap" because it quietly discarded something.
 fn classify_halt(git: &Git) -> Result<Halt> {
-    let conflicted = git.nul_separated_paths(&["diff", "--name-only", "--diff-filter=U"])?;
+    let conflicted = git.nul_separated_paths("diff", &["--name-only", "--diff-filter=U"])?;
     if !conflicted.is_empty() {
         return Ok(Halt::Conflict(conflicted));
     }
 
     // Without REBASE_HEAD the loop cannot even name the commit it is about to
     // drop, so it has no business dropping it.
-    let Ok(stopped) = git.run(&["log", "-1", "--format=%h %s", "REBASE_HEAD"]) else {
+    let Ok(stopped) = git.run("log", &["-1", "--format=%h %s", "REBASE_HEAD"]) else {
         return Ok(Halt::UnwritableCommit {
             stopped: "a commit git would not name".to_owned(),
             evidence: "REBASE_HEAD does not resolve, so the replay cannot say which commit the \
@@ -496,8 +492,8 @@ fn classify_halt(git: &Git) -> Result<Halt> {
     // matching the index. Asked for the paths themselves, not as a `--quiet`
     // exit code, so git failing to answer is an error rather than a vote for
     // "empty".
-    let mut uncommitted = git.paths(&["diff", "--cached", "--name-only", "HEAD"])?;
-    uncommitted.extend(git.paths(&["diff", "--name-only"])?);
+    let mut uncommitted = git.paths("diff", &["--cached", "--name-only", "HEAD"])?;
+    uncommitted.extend(git.paths("diff", &["--name-only"])?);
     uncommitted.sort();
     uncommitted.dedup();
 
@@ -545,14 +541,16 @@ fn classify_halt(git: &Git) -> Result<Halt> {
 /// empty diff is what "the new base already has this" looks like, and the commit
 /// would be dropped for the one reason that is never allowed to be a guess.
 fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt> {
-    let touched = git.paths(&[
+    let touched = git.paths(
         "diff-tree",
-        "--no-commit-id",
-        "--name-only",
-        "-r",
-        "--root",
-        "REBASE_HEAD",
-    ])?;
+        &[
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "--root",
+            "REBASE_HEAD",
+        ],
+    )?;
 
     // Guarded before the diff below is built, because `git diff ... --` with an
     // empty pathspec is not "diff nothing", it is "diff everything" - which
@@ -562,9 +560,9 @@ fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt>
         return Ok(Halt::EmptyCommit { stopped });
     }
 
-    let mut diff = vec!["diff", "--name-only", "REBASE_HEAD", "HEAD", "--"];
+    let mut diff = vec!["--name-only", "REBASE_HEAD", "HEAD", "--"];
     diff.extend(touched.iter().map(String::as_str));
-    let missing = git.paths(&diff)?;
+    let missing = git.paths("diff", &diff)?;
 
     if missing.is_empty() {
         Ok(Halt::EmptyCommit { stopped })
@@ -582,7 +580,7 @@ fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt>
 /// Whether git is sitting in a halted rebase.
 fn rebase_in_progress(git: &Git, worktree: &Path) -> Result<bool> {
     for state_dir in ["rebase-merge", "rebase-apply"] {
-        let path = git.run(&["rev-parse", "--git-path", state_dir])?;
+        let path = git.run("rev-parse", &["--git-path", state_dir])?;
         if worktree.join(path).exists() {
             return Ok(true);
         }
@@ -645,7 +643,7 @@ mod tests {
         let scratch = repo.scratch("main");
         scratch
             .git()
-            .run(&["checkout", "-q", "--detach", "iterated"])
+            .run("checkout", &["-q", "--detach", "iterated"])
             .expect("check out the branch detached in the scratch worktree");
         scratch.replay_rebase_within("single", max_rounds)
     }

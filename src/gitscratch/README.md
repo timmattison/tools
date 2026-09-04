@@ -19,7 +19,7 @@ use gitscratch::Repo;
 let scratch = Repo::open(repo_path)?.scratch("main")?;
 
 // Check the candidate out detached, then replay it.
-scratch.git().run(&["checkout", "-q", "--detach", "feature"])?;
+scratch.git().run("checkout", &["-q", "--detach", "feature"])?;
 let conflicts = scratch.replay_rebase("main")?;
 
 if conflicts.is_clean() {
@@ -62,12 +62,23 @@ safety configuration, so there is no way to get a worktree from here without
 also getting the hardening — nor without first having established that the
 directory is a repository at all, which is the pre-flight's job below.
 
+Every reader on that `Git` takes the **subcommand as its own parameter**, ahead
+of the arguments, and that shape is a guard rather than a courtesy. Git reads
+whatever stands ahead of the subcommand as *its* options, and its rule for two
+`-c` pairs naming one key is that the last pair wins — so a caller whose
+arguments reached that position could re-pin every setting in the table below,
+`rebase.updateRefs=false` included, and could aim the runner at any repository
+on the machine with `-C`. Naming the subcommand separately puts every caller
+argument after it, where git reads it as an argument of the subcommand. The
+bypass therefore does not compile, rather than being refused at run time.
+
 That `Git` offers exactly one way to read a **list of paths** back out of git,
-`nul_separated_paths`, which inserts `-z`, splits stdout on NUL without trimming
-anything, and takes each field as the path those bytes spell:
+`nul_separated_paths`, which inserts `-z` right after the subcommand, splits
+stdout on NUL without trimming anything, and takes each field as the path those
+bytes spell:
 
 ```rust
-let conflicted = git.nul_separated_paths(&["diff", "--name-only", "--diff-filter=U"])?;
+let conflicted = git.nul_separated_paths("diff", &["--name-only", "--diff-filter=U"])?;
 ```
 
 The contract is byte-exact in both halves. `nul_separated` underneath it hands

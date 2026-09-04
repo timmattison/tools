@@ -159,10 +159,27 @@ impl Git {
     /// the safety configuration pinned, the editors pinned off — so a second way
     /// of reading git's answer cannot be a second, weaker way of asking the
     /// question.
-    fn command(&self, args: &[&str]) -> Command {
+    ///
+    /// **The subcommand is a parameter of its own, and that is a guard rather
+    /// than a convenience.** Everything ahead of the subcommand is git's own
+    /// option position, and a caller who reaches it undoes the rest of this
+    /// method: git's rule for two `-c` pairs naming one key is that the last
+    /// pair wins, so a smuggled pair re-pins any setting [`Git::safety_config`]
+    /// fixed — `rebase.updateRefs=false` included, which is the pin
+    /// `tests/safety.rs` proves stands between a replay and the developer's own
+    /// branch refs. A smuggled `-C` is the same hole aimed at a different
+    /// guarantee: it outranks the working directory set below, so a runner
+    /// documented as pinned to one repository answers about any repository on
+    /// the machine. Taking the subcommand separately puts every caller argument
+    /// after it, where git reads it as an argument of the subcommand and not as
+    /// one of its own. Pinned by
+    /// `an_argument_cannot_re_pin_a_setting_the_safety_config_fixed` and
+    /// `an_argument_cannot_aim_the_runner_at_another_repository`.
+    fn command(&self, subcommand: &str, args: &[&str]) -> Command {
         let mut command = Command::new("git");
         command
             .args(self.safety_config())
+            .arg(subcommand)
             .args(args)
             .current_dir(&self.cwd)
             // `cwd` is only where the repository is if nothing in the inherited
@@ -199,10 +216,10 @@ impl Git {
     /// [`Git::run`]) or deliberately does not ([`Git::nul_separated`],
     /// [`Git::nul_separated_paths`]), and which of those a caller wants is not a
     /// choice worth re-making per call site.
-    fn output(&self, args: &[&str]) -> Result<Output> {
-        self.command(args)
+    fn output(&self, subcommand: &str, args: &[&str]) -> Result<Output> {
+        self.command(subcommand, args)
             .output()
-            .with_context(|| format!("failed to run git {}", args.join(" ")))
+            .with_context(|| format!("failed to run git {}", invocation(subcommand, args)))
     }
 
     /// Run git, returning the outcome whether or not it succeeded.
@@ -215,8 +232,8 @@ impl Git {
     /// # Errors
     ///
     /// Returns an error only if git could not be spawned at all.
-    pub fn try_run(&self, args: &[&str]) -> Result<GitOutput> {
-        let output = self.output(args)?;
+    pub fn try_run(&self, subcommand: &str, args: &[&str]) -> Result<GitOutput> {
+        let output = self.output(subcommand, args)?;
 
         Ok(GitOutput {
             success: output.status.success(),
@@ -230,13 +247,13 @@ impl Git {
     /// # Errors
     ///
     /// Returns an error if git could not be spawned or exited non-zero.
-    pub fn run(&self, args: &[&str]) -> Result<String> {
-        let output = self.try_run(args)?;
+    pub fn run(&self, subcommand: &str, args: &[&str]) -> Result<String> {
+        let output = self.try_run(subcommand, args)?;
 
         anyhow::ensure!(
             output.success,
             "git {} failed:\n{}\n{}",
-            args.join(" "),
+            invocation(subcommand, args),
             output.stdout,
             output.stderr
         );
@@ -272,9 +289,12 @@ impl Git {
     /// fields are not paths: a `status --porcelain -z` record is `XY <path>`,
     /// so it is read as bytes and only its tail is ever a path.
     ///
-    /// `-z` goes in straight after the subcommand rather than on the end, so an
-    /// argument list that finishes with `--` and a pathspec still gets it as a
-    /// flag rather than as a path.
+    /// `-z` is the first argument after the subcommand, ahead of everything the
+    /// caller passed, so an argument list that finishes with `--` and a
+    /// pathspec still gets it as a flag rather than as a path. That position is
+    /// structural: [`Git::command`] takes the subcommand separately and puts it
+    /// first, so `-z` at the front of this slice is `-z` right after the
+    /// subcommand.
     ///
     /// Empty fields are dropped. Git terminates rather than separates, so the
     /// last NUL always leaves one; no path is ever the empty string, so nothing
@@ -287,16 +307,15 @@ impl Git {
     /// # Errors
     ///
     /// Returns an error if git could not be spawned or exited non-zero.
-    pub fn nul_separated(&self, args: &[&str]) -> Result<Vec<Vec<u8>>> {
-        let mut with_nul = args.to_vec();
-        with_nul.insert(args.len().min(1), "-z");
+    pub fn nul_separated(&self, subcommand: &str, args: &[&str]) -> Result<Vec<Vec<u8>>> {
+        let asked = with_nul_delimiters(args);
 
-        let output = self.output(&with_nul)?;
+        let output = self.output(subcommand, &asked)?;
 
         anyhow::ensure!(
             output.status.success(),
             "git {} failed:\n{}\n{}",
-            with_nul.join(" "),
+            invocation(subcommand, &asked),
             String::from_utf8_lossy(&output.stdout).trim(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
@@ -321,9 +340,9 @@ impl Git {
     /// # Errors
     ///
     /// Returns an error if git could not be spawned or exited non-zero.
-    pub fn nul_separated_paths(&self, args: &[&str]) -> Result<Vec<PathBuf>> {
+    pub fn nul_separated_paths(&self, subcommand: &str, args: &[&str]) -> Result<Vec<PathBuf>> {
         Ok(self
-            .nul_separated(args)?
+            .nul_separated(subcommand, args)?
             .into_iter()
             .map(path_from_git)
             .collect())
@@ -341,36 +360,27 @@ impl Git {
     /// matching nothing is indistinguishable from there being nothing to match.
     ///
     /// So the paths are asked for NUL-delimited instead, which is git's own
-    /// answer to this and turns the escaping off entirely. `-z` goes immediately
-    /// after the subcommand rather than at the end, because a command that
-    /// carries a pathspec ends in `-- <paths>` and everything after `--` is a
-    /// path, not an option.
+    /// answer to this and turns the escaping off entirely. `-z` is the first
+    /// argument after the subcommand, ahead of everything the caller passed,
+    /// because a command that carries a pathspec ends in `-- <paths>` and
+    /// everything after `--` is a path, not an option.
     ///
     /// # Errors
     ///
-    /// Returns an error if `args` is empty, if git could not be spawned, if it
-    /// exited non-zero, or if a path it printed is not valid UTF-8. That last one
-    /// is deliberately fatal: replacing an undecodable byte would substitute
-    /// U+FFFD and hand back a name that matches nothing, which is the very
-    /// silence this method exists to remove.
-    pub fn paths(&self, args: &[&str]) -> Result<Vec<String>> {
-        let (subcommand, rest) = args
-            .split_first()
-            .context("cannot ask git for paths without a subcommand")?;
-        let mut asked = Vec::with_capacity(args.len() + 1);
-        asked.push(*subcommand);
-        asked.push("-z");
-        asked.extend_from_slice(rest);
+    /// Returns an error if git could not be spawned, if it exited non-zero, or
+    /// if a path it printed is not valid UTF-8. That last one is deliberately
+    /// fatal: replacing an undecodable byte would substitute U+FFFD and hand
+    /// back a name that matches nothing, which is the very silence this method
+    /// exists to remove.
+    pub fn paths(&self, subcommand: &str, args: &[&str]) -> Result<Vec<String>> {
+        let asked = with_nul_delimiters(args);
 
-        let output = self
-            .command(&asked)
-            .output()
-            .with_context(|| format!("failed to run git {}", asked.join(" ")))?;
+        let output = self.output(subcommand, &asked)?;
 
         anyhow::ensure!(
             output.status.success(),
             "git {} failed:\n{}\n{}",
-            asked.join(" "),
+            invocation(subcommand, &asked),
             String::from_utf8_lossy(&output.stdout).trim(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
@@ -387,7 +397,7 @@ impl Git {
                 String::from_utf8(path.to_vec()).with_context(|| {
                     format!(
                         "git {} listed a path that is not valid UTF-8: {}",
-                        asked.join(" "),
+                        invocation(subcommand, &asked),
                         String::from_utf8_lossy(path)
                     )
                 })
@@ -401,7 +411,7 @@ impl Git {
     ///
     /// Returns an error if the revision does not name a commit.
     pub fn rev_parse(&self, revision: &str) -> Result<String> {
-        self.run(&["rev-parse", &format!("{revision}^{{commit}}")])
+        self.run("rev-parse", &[&format!("{revision}^{{commit}}")])
             .with_context(|| format!("could not resolve '{revision}' to a commit"))
     }
 
@@ -512,6 +522,31 @@ impl Git {
     }
 }
 
+/// How one invocation is spelled in a message: the subcommand, then the
+/// arguments after it, exactly in the order [`Git::command`] hands them to git.
+///
+/// The `-c` pairs are left out. They are the same on every invocation, they are
+/// long, and a caller reading a failure wants the command they asked for.
+fn invocation(subcommand: &str, args: &[&str]) -> String {
+    std::iter::once(subcommand)
+        .chain(args.iter().copied())
+        .collect::<Vec<&str>>()
+        .join(" ")
+}
+
+/// `args` with `-z` in front of it, which is the position right after the
+/// subcommand once [`Git::command`] builds the argv.
+///
+/// Front rather than back, because a command that carries a pathspec ends in
+/// `-- <paths>` and everything after `--` is a path. A `-z` on the end would be
+/// asked for as a file name.
+fn with_nul_delimiters<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut asked = Vec::with_capacity(args.len() + 1);
+    asked.push("-z");
+    asked.extend_from_slice(args);
+    asked
+}
+
 /// Take the bytes git wrote for one path as that path.
 ///
 /// Free rather than a `From` impl, and defined on both platforms with the one
@@ -586,7 +621,7 @@ mod tests {
         let smuggled = format!("{PINNED_SETTING}={SMUGGLED_VALUE}");
 
         assert_eq!(
-            git.run(&["config", "--get", PINNED_SETTING])
+            git.run("config", &["--get", PINNED_SETTING])
                 .expect("read back the setting the safety configuration pins"),
             "false",
             "the safety configuration has to pin `{PINNED_SETTING}=false`, or there is nothing \
@@ -607,7 +642,7 @@ mod tests {
             "git no longer lets the last `-c` pair win, so this test could only pass vacuously"
         );
 
-        let read_back = git.run(&["-c", &smuggled, "config", "--get", PINNED_SETTING]);
+        let read_back = git.run("config", &["-c", &smuggled, "--get", PINNED_SETTING]);
 
         if let Ok(setting) = read_back {
             assert_eq!(
@@ -642,7 +677,7 @@ mod tests {
         let their_path = elsewhere.path().to_str().expect("utf-8 fixture path");
 
         let ours = git
-            .run(&["rev-parse", "--absolute-git-dir"])
+            .run("rev-parse", &["--absolute-git-dir"])
             .expect("ask git which repository the runner is rooted in");
         let theirs = here.git(&["-C", their_path, "rev-parse", "--absolute-git-dir"]);
 
@@ -651,7 +686,7 @@ mod tests {
             "`-C` no longer moves git to another directory, so this test could only pass vacuously"
         );
 
-        let read_back = git.run(&["-C", their_path, "rev-parse", "--absolute-git-dir"]);
+        let read_back = git.run("rev-parse", &["-C", their_path, "--absolute-git-dir"]);
 
         if let Ok(answered) = read_back {
             assert_eq!(
@@ -685,7 +720,7 @@ mod tests {
         repo.git(&["add", "日本語.txt"]);
 
         let staged = Git::new(repo.path(), "")
-            .run(&["diff", "--cached", "--name-only"])
+            .run("diff", &["--cached", "--name-only"])
             .expect("list the staged path");
 
         assert_eq!(
@@ -756,7 +791,7 @@ mod tests {
         );
 
         let staged = Git::new(repo.path(), "")
-            .nul_separated(&["diff", "--cached", "--name-only"])
+            .nul_separated("diff", &["--cached", "--name-only"])
             .expect("list the staged path");
 
         assert_eq!(
@@ -771,11 +806,14 @@ mod tests {
         );
     }
 
-    /// Exactly the invocation `stopped_commit_is_already_in_head` makes to find
-    /// out which paths a halted commit touched, with the commit left off the
-    /// end. Spelled once so the tests below pin the call the replay actually
-    /// depends on rather than a plausible-looking neighbour of it.
-    const TOUCHED_PATHS: [&str; 5] = ["diff-tree", "--no-commit-id", "--name-only", "-r", "--root"];
+    /// The subcommand `stopped_commit_is_already_in_head` asks which paths a
+    /// halted commit touched. Spelled here, with the arguments below, so the
+    /// tests pin the call the replay actually depends on rather than a
+    /// plausible-looking neighbour of it.
+    const TOUCHED_PATHS_SUBCOMMAND: &str = "diff-tree";
+
+    /// The arguments that go after it, with the commit left off the end.
+    const TOUCHED_PATHS: [&str; 4] = ["--no-commit-id", "--name-only", "-r", "--root"];
 
     /// A path git cannot spell as UTF-8 has to stop the replay, not be repaired
     /// into one that matches nothing.
@@ -814,7 +852,7 @@ mod tests {
         let mut ordinary = TOUCHED_PATHS.to_vec();
         ordinary.push("HEAD");
         assert_eq!(
-            git.paths(&ordinary)
+            git.paths(TOUCHED_PATHS_SUBCOMMAND, &ordinary)
                 .expect("list the paths an ordinary commit touched"),
             ["ordinary.txt"],
             "the negative case below only means anything if this invocation reaches the decode \
@@ -832,7 +870,7 @@ mod tests {
         let mut listed = TOUCHED_PATHS.to_vec();
         listed.push(&undecodable);
 
-        let error = git.paths(&listed).expect_err(
+        let error = git.paths(TOUCHED_PATHS_SUBCOMMAND, &listed).expect_err(
             "a name git cannot spell as UTF-8 must stop the replay; decoding it lossily hands \
              back a U+FFFD name that matches nothing, and a pathspec matching nothing is how a \
              commit gets skipped and its work lost",
@@ -1347,7 +1385,7 @@ mod tests {
         let git = Git::new(std::env::temp_dir(), "");
 
         let ident = git
-            .run(&["var", "GIT_AUTHOR_IDENT"])
+            .run("var", &["GIT_AUTHOR_IDENT"])
             .expect("git var GIT_AUTHOR_IDENT");
 
         let expected = format!("{HARNESS_NAME} <{HARNESS_EMAIL}>");
@@ -1613,12 +1651,12 @@ mod tests {
     fn assert_the_inherited_environment_is_ignored() {
         let here = TempDir::new().expect("create the scratch stand-in");
         let git = Git::new(here.path(), "");
-        git.run(&["init", "-q", "-b", "main"])
+        git.run("init", &["-q", "-b", "main"])
             .expect("initialise the repository the runner is rooted in");
 
         for variable in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
             let ident = git
-                .run(&["var", variable])
+                .run("var", &[variable])
                 .expect("read the identity git would stamp");
             assert!(
                 ident.starts_with("gitscratch <gitscratch@localhost>"),
@@ -1631,7 +1669,7 @@ mod tests {
         // /var to /private/var, so the raw paths would never compare equal.
         let expected = std::fs::canonicalize(here.path()).expect("canonicalise the scratch path");
         let git_dir = git
-            .run(&["rev-parse", "--absolute-git-dir"])
+            .run("rev-parse", &["--absolute-git-dir"])
             .expect("ask git which repository it is operating on");
         assert!(
             std::fs::canonicalize(&git_dir)
@@ -1643,7 +1681,7 @@ mod tests {
         );
 
         let index = git
-            .run(&["rev-parse", "--git-path", "index"])
+            .run("rev-parse", &["--git-path", "index"])
             .expect("ask git which index it would write");
         assert!(
             !index.contains(THEIR_INDEX),

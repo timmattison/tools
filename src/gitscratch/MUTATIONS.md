@@ -37,6 +37,8 @@ not have to re-derive which guard belongs to which test.
 | `replays_without_hanging_or_failing_when_commit_signing_is_enabled` | `commit.gpgsign=false` | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `the_path_check_flags_the_work_tree_and_the_directory_above_it` | `path_at_or_above`, the matcher `gitnuke`, `nodenuke` and `repotidy` read a run's output with | `src/testing.rs`, `candidate_paths()` — keep the first candidate of each start instead of every one | narrow |
 | `the_ancestor_check_finds_the_repository_a_directory_sits_inside` | `ancestor_repository`, the precondition `DetachedGitDirRepo::init` refuses a fixture inside a repository with | `src/testing.rs`, `ancestor_repository()` — answer `None` for every directory | narrow |
+| `an_argument_cannot_re_pin_a_setting_the_safety_config_fixed` | The subcommand parameter, which keeps a caller's arguments out of git's own option position | `src/git.rs`, `Git::command` — take the subcommand back inside the argument slice, so a caller supplies it and can put arguments ahead of it | widen |
+| `an_argument_cannot_aim_the_runner_at_another_repository` | The same parameter, against `-C` rather than against `-c` | `src/git.rs`, `Git::command` — the same mutation | widen |
 
 ## What keeps each test honest
 
@@ -88,6 +90,8 @@ registry that reports everything as fine is worth less than no registry at all.
 | `never_touches_the_real_working_tree_or_index` | Three, all explicit: `!before_status.is_empty()`, `!before_index.is_empty()`, and `before_branch == "main"` so a stray detach is visible. Plus the `conflicts` assertions. | **Structural, and un-armable in-test by design.** The file dirtied on purpose is `shared.txt`, the exact file both replayed branches rewrite, so a replay that escaped its scratch would have to collide with it. Arming that in-test means performing the damage the test exists to forbid; the mutation record below is the out-of-band substitute, and it is the reason this row is acceptable rather than merely unfinished. |
 | `never_leaves_a_scratch_worktree_registered_in_the_real_repository` | `before.lines().count() == 1` and `describe_tree(&worktrees_dir) == ""` — "or a leak has somewhere to hide". | **Full, twice over.** While the first `Scratch` is alive, `while_alive.lines().count() == 2` and `assert_ne!(describe_tree(&worktrees_dir), "")` — "or this test can only pass vacuously" — prove the harness really registers what teardown must remove. The third scope arms its own harder case separately: `!halted.success` and the `rebase-merge` path existing prove the scratch really was dropped mid-rebase. That `rebase-merge` assertion is now the armed control for a second guard as well — the fixture arms `rebase.backend = apply` and leaves it standing, so the path the assertion names is the one `Git::safety_config`'s `rebase.backend=merge` chooses over the fixture's, and dropping that pin sends the state to `rebase-apply`. Only the first scope proves registration, though all three build a `Scratch` the same way. |
 | `replays_without_hanging_or_failing_when_commit_signing_is_enabled` | Implicit: `TestRepo::init` pins `commit.gpgsign=false` while building the fixture and signing is switched on afterwards, so the control below doubles as proof the config took. | **Full.** A plain `git commit --allow-empty` through the fixture must *fail* — `"commit signing is not armed ... a plain commit succeeded"` — and fail for the stated reason, `gpg failed to sign`. `--allow-empty` means arming leaves the fixture exactly as it found it. A second control lives inside `replay_under_signing`: the replayed commit must still be in `left..HEAD`, which catches a signing failure that came back disguised as a plausible answer. The hang branch cannot be armed at all — see the record below. |
+| `an_argument_cannot_re_pin_a_setting_the_safety_config_fixed` | The pinned setting is read back unmodified first and must be `false` — "the safety configuration has to pin `rebase.updateRefs=false`, or there is nothing here for an argument to undo and the assertion below is measured against nothing". | **Full.** Plain git, through the fixture, is handed two `-c` pairs naming one key and must answer with the second — "git no longer lets the last `-c` pair win, so this test could only pass vacuously". That is the hazard itself, demonstrated before the runner is asked anything. |
+| `an_argument_cannot_aim_the_runner_at_another_repository` | The runner is asked which repository it is rooted in, and that answer is what the closing assertion compares against, so a runner that could not answer at all fails here rather than passing below. | **Full.** Plain git, run in the first fixture with `-C` naming the second, must answer about the second — the two answers must differ — "`-C` no longer moves git to another directory, so this test could only pass vacuously". Both paths are spelled by git itself, so neither side has to canonicalise a path to compare it. |
 
 ### The rule for the next test
 
@@ -441,6 +445,39 @@ in `gitnuke`, `nodenuke` and `repotidy` alike. That spread is the point. The
 precondition belongs to the fixture rather than to one guard, so a destructive
 tool that takes the fixture next inherits it.
 
+### `an_argument_cannot_re_pin_a_setting_the_safety_config_fixed` and `an_argument_cannot_aim_the_runner_at_another_repository`
+
+Mutation: the shape `Git::command` had before these tests existed. It took one
+argument slice, spliced it in after the `-c` pairs and ahead of any subcommand,
+and left the caller to supply the subcommand as the first element. So every
+argument a caller passed landed in git's own option position. Both tests were
+written against that code and watched to fail there, which is why the mutation
+is recorded as a widening rather than as a removal: there is no line to delete,
+only a parameter to fold back into the slice.
+
+```text
+thread 'git::tests::an_argument_cannot_re_pin_a_setting_the_safety_config_fixed'
+panicked at src/gitscratch/src/git.rs:
+assertion `left == right` failed: an argument reached the position ahead of the
+subcommand, where git reads it as one of its own options, and the last `-c` pair
+wins.
+  left: "OVERRIDDEN"
+ right: "false"
+
+thread 'git::tests::an_argument_cannot_aim_the_runner_at_another_repository'
+panicked at src/gitscratch/src/git.rs:
+assertion `left == right` failed: an argument reached the position ahead of the
+subcommand, where `-C` moves git to another directory.
+  left: "/private/var/.../T/.tmpWFywDV/.git"
+ right: "/private/var/.../T/.tmpOFo44Y/.git"
+
+test result: FAILED. 31 passed; 2 failed
+```
+
+No collateral: the other 31 unit tests and every integration suite stayed green
+under the old shape, which is the point. The hole was open for the whole life of
+the crate and nothing else in the suite could see it.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
@@ -457,6 +494,9 @@ code moves. Three places are load-bearing for the whole table:
 - **`ancestor_repository` and the `init` that reads it** — the precondition every
   fixture in three other crates starts with, and the only one that runs before a
   destructive tool does.
+- **`Git::command`'s argument shape** — the subcommand is a parameter of its own
+  so that a caller's arguments land after it. Folding it back into the slice
+  reopens git's option position to the caller and undoes every row above it.
 
 Anyone touching those should re-run the relevant mutation and update this file
 with what they saw. A guard added without ever being watched to fail is back to

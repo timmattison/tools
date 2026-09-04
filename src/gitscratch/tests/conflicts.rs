@@ -20,7 +20,7 @@ use gitscratch::{Conflicts, Files, Hunks, Scratch, Stops};
 fn replay(scratch: &Scratch, branch: &str, onto: &str) -> Conflicts {
     scratch
         .git()
-        .run(&["checkout", "-q", "--detach", branch])
+        .run("checkout", &["-q", "--detach", branch])
         .expect("check out the branch detached in the scratch worktree");
     scratch
         .replay_rebase(onto)

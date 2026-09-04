@@ -212,7 +212,7 @@ impl Simulator {
         self.report(&format!("replaying {branch}"));
 
         // Detached, so the real branch ref is never moved.
-        git.run(&["checkout", "-q", "--detach", branch.as_str()])
+        git.run("checkout", &["-q", "--detach", branch.as_str()])
             .with_context(|| format!("could not check out '{branch}'"))?;
 
         let cost = scratch
@@ -237,13 +237,9 @@ fn into_score(conflicts: &Conflicts, order: Vec<BranchName>) -> OrderingScore {
 /// Collapse the checked-out (already rebased) branch into a single commit on
 /// top of `parent`, discarding its ancestry exactly as a squash merge does.
 fn squash_into(git: &Git, parent: &str, branch: &BranchName) -> Result<String> {
-    let tree = git.run(&["rev-parse", "HEAD^{tree}"])?;
-    git.run(&[
+    let tree = git.run("rev-parse", &["HEAD^{tree}"])?;
+    git.run(
         "commit-tree",
-        &tree,
-        "-p",
-        parent,
-        "-m",
-        &format!("squash {branch}"),
-    ])
+        &[&tree, "-p", parent, "-m", &format!("squash {branch}")],
+    )
 }

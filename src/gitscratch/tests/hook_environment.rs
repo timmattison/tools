@@ -48,7 +48,7 @@ fn replays_under_the_environment_a_git_hook_hands_down() {
 
     let scratch = repo.scratch("main");
     let git = scratch.git();
-    git.run(&["checkout", "-q", "--detach", "right"])
+    git.run("checkout", &["-q", "--detach", "right"])
         .expect("check out the branch detached in the scratch worktree");
 
     let conflicts = scratch
@@ -68,7 +68,7 @@ fn replays_under_the_environment_a_git_hook_hands_down() {
     // wrote the fixture's commit and says nothing about the harness. Who made
     // the new commit is the committer, and that is the harness.
     let committer = git
-        .run(&["log", "-1", "--format=%cn <%ce>"])
+        .run("log", &["-1", "--format=%cn <%ce>"])
         .expect("read the committer of the commit the replay wrote");
     assert_eq!(
         committer, "gitscratch <gitscratch@localhost>",
@@ -82,13 +82,13 @@ fn replays_under_the_environment_a_git_hook_hands_down() {
     // GIT_AUTHOR_DATE would sign with the developer's name and the timestamp of
     // whatever commit the hook was running for.
     let tree = git
-        .run(&["rev-parse", "HEAD^{tree}"])
+        .run("rev-parse", &["HEAD^{tree}"])
         .expect("read the replayed tree");
     let squashed = git
-        .run(&["commit-tree", &tree, "-m", "squash"])
+        .run("commit-tree", &[&tree, "-m", "squash"])
         .expect("make a commit the way a consumer squashes one in");
     let identity = git
-        .run(&["log", "-1", "--format=%an <%ae>|%cn <%ce>", &squashed])
+        .run("log", &["-1", "--format=%an <%ae>|%cn <%ce>", &squashed])
         .expect("read the identity on the squashed commit");
     assert_eq!(
         identity, "gitscratch <gitscratch@localhost>|gitscratch <gitscratch@localhost>",

@@ -35,7 +35,7 @@ fn rebase_in_progress(scratch: &Scratch) -> bool {
         .any(|state_dir| {
             let path = scratch
                 .git()
-                .run(&["rev-parse", "--git-path", state_dir])
+                .run("rev-parse", &["--git-path", state_dir])
                 .expect("ask git where the rebase state directory would be");
             scratch.path().join(path).exists()
         })
@@ -60,7 +60,7 @@ fn refuses_to_report_a_cost_when_a_staged_resolution_could_not_be_committed() {
     let scratch = repo.scratch("main");
     scratch
         .git()
-        .run(&["checkout", "-q", "--detach", "branch"])
+        .run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
     // Sealed only now: adding the worktree and checking out write no objects,
@@ -120,7 +120,7 @@ fn refuses_to_report_a_cost_when_a_clean_pick_could_not_be_committed() {
     let scratch = repo.scratch("main");
     scratch
         .git()
-        .run(&["checkout", "-q", "--detach", "alpha"])
+        .run("checkout", &["-q", "--detach", "alpha"])
         .expect("check out alpha detached in the scratch worktree");
 
     // Sealed only now: adding the worktree and checking out write no objects,
@@ -211,7 +211,7 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_commi
     let scratch = repo.scratch("main");
     scratch
         .git()
-        .run(&["checkout", "-q", "--detach", "branch"])
+        .run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
     // Sealed only now: adding the worktree and checking out write no objects,
@@ -314,7 +314,7 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not
     let scratch = repo.scratch("main");
     scratch
         .git()
-        .run(&["checkout", "-q", "--detach", "branch"])
+        .run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
     // Sealed only now: adding the worktree and checking out write no objects,
@@ -406,11 +406,11 @@ fn drops_a_commit_that_genuinely_became_empty_and_finishes_the_rebase() {
 
     let scratch = repo.scratch("main");
     let git = scratch.git();
-    git.run(&["checkout", "-q", "--detach", "branch"])
+    git.run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
     let started = git
-        .try_run(&["rebase", "--empty=stop", "main"])
+        .try_run("rebase", &["--empty=stop", "main"])
         .expect("run the rebase that should halt on the emptied commit");
 
     // Asserted, not assumed. A git that stopped halting here would otherwise let
@@ -424,7 +424,7 @@ fn drops_a_commit_that_genuinely_became_empty_and_finishes_the_rebase() {
         started.stderr
     );
     let unmerged = git
-        .paths(&["diff", "--name-only", "--diff-filter=U"])
+        .paths("diff", &["--name-only", "--diff-filter=U"])
         .expect("list unmerged paths at the halt");
     assert!(
         unmerged.is_empty(),
@@ -467,7 +467,7 @@ fn drops_a_commit_that_genuinely_became_empty_and_finishes_the_rebase() {
     // are NUL-separated on purpose and a general line reader beside them is the
     // door a future path-reading call site would walk through by mistake.
     let subjects: Vec<String> = git
-        .run(&["log", "--format=%s"])
+        .run("log", &["--format=%s"])
         .expect("read the replayed history")
         .lines()
         .map(str::trim)
@@ -530,11 +530,11 @@ fn refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped() {
 
     let scratch = repo.scratch("main");
     let git = scratch.git();
-    git.run(&["checkout", "-q", "--detach", "branch"])
+    git.run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
     let started = git
-        .try_run(&["rebase", "--empty=stop", "main"])
+        .try_run("rebase", &["--empty=stop", "main"])
         .expect("run the rebase that should halt on the emptied commit");
 
     // Asserted, not assumed: this test is about a *skip* failing, so it has to
@@ -548,7 +548,7 @@ fn refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped() {
         started.stderr
     );
     let unmerged = git
-        .paths(&["diff", "--name-only", "--diff-filter=U"])
+        .paths("diff", &["--name-only", "--diff-filter=U"])
         .expect("list unmerged paths at the halt");
     assert!(
         unmerged.is_empty(),
@@ -556,10 +556,10 @@ fn refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped() {
          unmerged, which is a conflict and a different code path"
     );
     let mut left_behind = git
-        .paths(&["diff", "--cached", "--name-only", "HEAD"])
+        .paths("diff", &["--cached", "--name-only", "HEAD"])
         .expect("list staged content at the halt");
     left_behind.extend(
-        git.paths(&["diff", "--name-only"])
+        git.paths("diff", &["--name-only"])
             .expect("list unstaged content at the halt"),
     );
     assert!(
