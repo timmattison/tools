@@ -295,7 +295,7 @@ func main() {
 
 ```bash
 ./scripts/build-go.sh           # Build all Go tools
-./scripts/build-go.sh dirc prgz  # Build specific tools
+./scripts/build-go.sh prgz procinfo  # Build specific tools
 ```
 
 The build script reads the version from the `VERSION` file at the repository root.
@@ -307,7 +307,6 @@ All Rust tools use buildinfo for version information.
 ### Tools Currently Using internal/version
 
 All Go tools use internal/version:
-- `dirc` - Directory Clipboard
 - `localnext` - Local Next.js Server
 - `prgz` - Progress Gzip
 - `subito` - AWS IoT Subscriber
