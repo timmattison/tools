@@ -2308,3 +2308,19 @@ fn a_directory_that_is_in_no_repository_costs_no_run() {
     assert!(!message.contains("Name the repository with"), "{message}");
     assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
 }
+
+#[test]
+fn the_report_of_the_run_goes_to_standard_error_and_the_plan_goes_to_standard_output() {
+    // The reader pays for the run, and the price is written on the pipe the
+    // spinner already writes on. The document goes to standard output, so a
+    // reader who pipes that output gets the answer alone.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+    assert!(
+        stderr(&output).contains("plan: $0.05 \u{b7} 1.8s"),
+        "{}",
+        stderr(&output)
+    );
+}
