@@ -401,10 +401,17 @@ fn reason_of(complained: &str, printed: &str, pipe: Option<&str>) -> String {
 /// could not log in is the one failure with an answer the reader can act on,
 /// so it is the one failure that is told apart. Every other one carries what
 /// `claude` said, because this tool cannot know what that is.
+///
+/// Every mark names a whole phrase: the name of the command, or the words a
+/// run writes when it turns the reader away. A bare `login` names none of
+/// those, because a reason that only holds those letters — the name of a
+/// login server, for one — is a failure of something else, and
+/// [`BuildError::NotAuthenticated`] carries no text, so such a run loses the
+/// reason it gave.
 fn refusal_of(said: &str) -> BuildError {
     let clause = said.trim();
     let lowered = clause.to_lowercase();
-    if ["not authenticated", "/login", "log in", "login"]
+    if ["not authenticated", "/login", "log in"]
         .iter()
         .any(|mark| lowered.contains(mark))
     {
