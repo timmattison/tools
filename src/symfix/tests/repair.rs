@@ -428,3 +428,54 @@ fn one_repair_among_two_broken_links_is_counted_alone() {
         "the link that could not be repaired was left alone"
     );
 }
+
+#[test]
+fn verbose_names_the_candidate_it_tried_and_the_one_that_was_not_there() {
+    // The two debug lines are the only account a user gets of a candidate the
+    // tool built and then refused, so they name the candidate and not just the
+    // link. The candidate that resolved gets the first line and not the second:
+    // a run that said `does not exist` about a target it went on to write would
+    // be worse than silence.
+    let dir = TempDir::new().unwrap();
+    let link = moved_up_one_directory(dir.path());
+    let hopeless = link_at(link.parent().unwrap(), "hopeless", "nowhere.txt");
+
+    let run = run_with(&Options {
+        verbose: true,
+        ..with_prepend(dir.path(), "../")
+    });
+
+    assert_eq!(run.summary.fixed, 1);
+    assert!(
+        run.err.contains(&format!(
+            "Attempting to fix by prepending: {}: target.txt -> ../target.txt\n",
+            link.display()
+        )),
+        "the candidate that resolved is named: {:?}",
+        run.err
+    );
+    assert!(
+        run.err.contains(&format!(
+            "Attempting to fix by prepending: {}: nowhere.txt -> ../nowhere.txt\n",
+            hopeless.display()
+        )),
+        "the candidate that did not resolve is named: {:?}",
+        run.err
+    );
+    assert!(
+        run.err.contains(&format!(
+            "Prepended target does not exist: {} -> ../nowhere.txt\n",
+            hopeless.display()
+        )),
+        "the candidate that did not resolve is called absent: {:?}",
+        run.err
+    );
+    assert!(
+        !run.err.contains(&format!(
+            "Prepended target does not exist: {} -> ../target.txt",
+            link.display()
+        )),
+        "the candidate that resolved is not called absent: {:?}",
+        run.err
+    );
+}
