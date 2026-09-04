@@ -186,6 +186,15 @@ mod tests {
     /// lines: one full line, and one short line that pads to the gutter.
     const EXPECTED_HEX_DUMP: &str = "00000000  48 65 6c 6c 6f 2c 20 68  65 78 20 64 75 6d 70 21  |Hello, hex dump!|\n00000010  00 01 02 ff                                       |....|";
 
+    /// Every character Unicode gives the property `Bidi_Control`: the three
+    /// marks, the five embeddings and overrides, and the four isolates. A
+    /// terminal that prints one of them puts the characters of the line in an
+    /// order the bytes do not have, so each one makes a hex dump.
+    const CHARACTERS_THAT_CONTROL_THE_DIRECTION_OF_THE_TEXT: [char; 12] = [
+        '\u{61c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}',
+        '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+    ];
+
     #[test]
     fn an_empty_payload_says_it_is_empty() {
         assert_eq!(format_payload(b"", false), "(empty)");
@@ -293,6 +302,30 @@ mod tests {
             format_payload("ab\u{2069}".as_bytes(), false),
             "00000000  61 62 e2 81 a9                                    |ab...|"
         );
+    }
+
+    /// The rule covers the Unicode property, and not the characters somebody
+    /// wrote down. An earlier round took the embeddings, the overrides and the
+    /// isolates, and left the three marks behind.
+    #[test]
+    fn every_character_that_controls_the_direction_of_the_text_makes_a_hex_dump() {
+        for character in CHARACTERS_THAT_CONTROL_THE_DIRECTION_OF_THE_TEXT {
+            let code_point = u32::from(character);
+
+            let payload = format!("a{character}b");
+            assert_eq!(
+                format_payload(payload.as_bytes(), false),
+                hex_dump(payload.as_bytes()),
+                "the payload that holds U+{code_point:04X} comes back as text"
+            );
+
+            let topic = format!("sensors/{character}12/34");
+            assert_eq!(
+                format_topic(&topic),
+                hex_dump(topic.as_bytes()),
+                "the topic that holds U+{code_point:04X} comes back as text"
+            );
+        }
     }
 
     #[test]
