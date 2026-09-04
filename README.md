@@ -74,7 +74,11 @@ genuinely needs says so by name instead, as `Conflicts::nothing_replayed()`. And
 `Display`, so a count renders only through `phrase()` (`4 hunks`, with the noun and its plural coming from the
 counter) or `digits()` (a table cell whose heading carries the noun) — with a `Display` on them,
 `format!("{} across {}", hunks, files)` compiles and prints `4 across 2`, which is the wording failure the
-newtypes exist to stop. Inside the crate, the runner takes the git subcommand as a parameter of its own, so a
+newtypes exist to stop. A fourth holds the door the answer's *words* come through: `Report::for_tool` names the
+tool and hands back an `UnwordedReport`, which cannot render at all, and the action arrives through
+`describing`, which is what builds the `Report` — so a report with a hole where the action belongs
+(`grind: clean -  hit no conflicts`, two spaces and no phrase) is a value nobody can build rather than a line
+nobody reads until it ships. Inside the crate, the runner takes the git subcommand as a parameter of its own, so a
 caller's arguments always land after it rather than in git's own option position, where one more `-c` pair
 would undo any of the pins above (git's rule is that the last pair naming a key wins) and a `-C` would aim the
 whole run at another repository. A revision the caller

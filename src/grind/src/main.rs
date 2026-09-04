@@ -159,8 +159,12 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     )?;
     repo.resolve(&args.branch)?;
 
+    // The tool's name alone. The note below reads nothing else, and the verdict
+    // adds the action on the next line. `UnwordedReport` is `Copy`, so one
+    // value serves both.
+    let unworded = Report::for_tool(TOOL);
     let action = format!("replaying HEAD onto {}", args.branch);
-    let report = Report::for_tool(TOOL).describing(&action);
+    let report = unworded.describing(&action);
 
     // Before the verdict, and on stderr rather than stdout: a reader has to see
     // the caveat before the sentence it qualifies, and a caller piping stdout
@@ -174,9 +178,9 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     // Propagating that made the cheap pre-flight query *stricter* than the
     // expensive replay it exists to spare the user - exit 2 and a raw git
     // complaint about a query they never asked for, in place of a right answer.
-    // A default count is a clean tree, which `Report::dirty_note` already words
-    // as no note at all.
-    if let Some(note) = report.dirty_note(repo.uncommitted_files().unwrap_or_default()) {
+    // A default count is a clean tree, which `UnwordedReport::dirty_note`
+    // already words as no note at all.
+    if let Some(note) = unworded.dirty_note(repo.uncommitted_files().unwrap_or_default()) {
         console.note(&note);
     }
 

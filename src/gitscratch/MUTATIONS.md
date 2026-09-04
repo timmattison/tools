@@ -1138,7 +1138,89 @@ consumer's hands, a clean verdict for a replay that never happened, a miscounted
 rename that reads as an ordinary number. What a `Display` on a counter costs is
 `4 across 2` printed on a developer's screen, which is the same visibility that
 keeps the two render-boundary tests in `src/report.rs` out of this map. The
-README carries the record for it, beside the account of the other two.
+README carries the record for it, beside the account of the other three.
+
+### The ` ```compile_fail ` doc-test on the unworded report, and why it is not in the map
+
+`src/report.rs` carries a fourth block of the same shape. It writes
+`Report::for_tool("grind").render(…)` and passes only while `for_tool` hands
+back an `UnwordedReport`, which owns `describing` and `dirty_note` and no
+renderer at all.
+
+Mutation: a `render` was put on `UnwordedReport`, wording the report with an
+empty action — the behaviour the crate had when the finding was written, where
+`for_tool` seeded `action: ""` and returned a report that could already print.
+
+```text
+running 9 tests
+test src/gitscratch/src/scratch.rs - scratch::Conflicts (line 492) - compile ... ok
+test src/gitscratch/src/git.rs - git::shed_inherited_git_environment (line 118) - compile ... ok
+test src/gitscratch/src/scratch.rs - scratch::Scratch (line 95) - compile ... ok
+test src/gitscratch/src/metrics.rs - metrics (line 37) - compile fail ... ok
+test src/gitscratch/src/scratch.rs - scratch::Scratch (line 111) - compile fail ... ok
+test src/gitscratch/src/scratch.rs - scratch::Conflicts (line 503) - compile fail ... ok
+test src/gitscratch/src/report.rs - report::Report (line 177) - compile fail ... FAILED
+test src/gitscratch/src/metrics.rs - metrics (line 29) ... ok
+test src/gitscratch/src/report.rs - report::Report (line 168) ... ok
+
+---- src/gitscratch/src/report.rs - report::Report (line 177) stdout ----
+Test compiled successfully, but it's marked `compile_fail`.
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Red for the stated reason: the block compiled, and compiling is the whole of
+what it forbids. No collateral — the run was `cargo test --no-fail-fast -p
+gitscratch -p grind -p grist`, and exactly one test target of the three crates
+reported `FAILED`, the doc-tests, with this one test inside it. The control
+beside the guard stayed green through the mutation, which is what says the two
+blocks differ by the one line.
+
+**Which error the block gets was read rather than assumed**, for the reason the
+sections above give. A temporary target under `tests/` — out-of-crate in the
+same way a doc-test is — was given the same two lines with the source in its
+shipping state.
+
+```text
+error[E0599]: no method named `render` found for struct `UnwordedReport<'a>` in the current scope
+ --> src/gitscratch/tests/zz-probe.rs:4:26
+  |
+4 |     let verdict = report.render(&gitscratch::Conflicts::nothing_replayed());
+  |                          ^^^^^^ method not found in `UnwordedReport<'_>`
+```
+
+The refusal is the type `for_tool` hands back and nothing else.
+
+The same target read the second half of the finding, which needed no guard of
+its own. Wording one report twice used to keep the last action in silence, and
+after the split it names a method the worded type does not have.
+
+```text
+error[E0599]: no method named `describing` found for struct `gitscratch::Report<'a>` in the current scope
+ --> src/gitscratch/tests/zz-probe.rs:5:10
+  |
+3 |       let report = gitscratch::Report::for_tool("grind")
+  |                    -------------------------------------
+  |                    |
+  |  __________________method `describing` is available on `UnwordedReport<'_>`
+  | |
+4 | |         .describing("replaying HEAD onto main")
+5 | |         .describing("merging feature into HEAD");
+  | |         -^^^^^^^^^^ method not found in `gitscratch::Report<'_>`
+```
+
+That refusal comes free with the split, so nothing pins it separately. A caller
+that genuinely wants two wordings of one tool calls `describing` twice on the
+same `UnwordedReport`, which is `Copy`, and holds both results.
+
+It is deliberately absent from the map above, on the same basis as the counter
+guard. That map is for a guard whose failure is a plausible wrong answer or
+damage nobody sees. What an unworded report costs is
+`grind: clean -  hit no conflicts` printed on a developer's screen — two spaces
+and a missing phrase, in the one line the tool exists to print — which is the
+visibility that keeps the two render-boundary tests in `src/report.rs` out of
+this map as well. The README carries the record for it, beside the account of
+the other three.
 
 ## This is not a one-time ritual
 
@@ -1210,6 +1292,13 @@ code moves. Every place below is load-bearing for the whole table:
   `default()`, in the way a new `pub fn` returning a runner would reopen the one
   above. `from_files` is behind the `testing` feature for the same reason
   `testing_git` is.
+- **`Report`'s two types** — `Report::for_tool` hands back an `UnwordedReport`,
+  and `describing` is the only thing that turns one into a `Report`. The
+  doc-test forbids one spelling of a report that renders an action nobody gave
+  it. Any renderer added to `UnwordedReport`, any second constructor of a
+  `Report` that takes no action, or a `describing` on `Report` itself reopens
+  the door whatever the block says about `render`, in the way a new `pub fn`
+  returning a runner would reopen the one above.
 - **The parent count ahead of those two invocations** — both of them answer
   about a single-parent commit, and `git diff-tree` answers about a merge with
   silence rather than with a refusal. The count is what turns that silence into

@@ -16,6 +16,13 @@
 //! The only difference the two tools are allowed is captured by
 //! [`Report::without_stops`] - a merge halts exactly once, so printing the
 //! number would be noise.
+//!
+//! Two types, because a verdict is worded in two steps and only the second step
+//! makes something to print. [`Report::for_tool`] names the tool and hands back
+//! an [`UnwordedReport`]. [`UnwordedReport::describing`] says what the tool did
+//! and hands back a [`Report`], which is the only type that renders. So an
+//! unfinished sentence is a value a caller cannot print, rather than a hole in
+//! the one line the tool exists to print.
 
 use std::path::Path;
 
@@ -42,27 +49,108 @@ const FILE_INDENT: &str = "  ";
 /// that takes a row of its own - see [`Report::render_within`].
 const COUNT_GAP: usize = 4;
 
-/// A conflict verdict, and how to word it for one particular tool.
+/// A tool that has named itself and has not yet said what it did.
 ///
-/// Three `Copy` fields, so the type is `Copy` too - which is what lets every
-/// builder method take `self` without the value it was called on being spent.
-/// `Debug` is here for the reason the API guidelines give: a consumer holding
-/// one has to be able to derive `Debug` on the struct that holds it, and an
-/// assertion that fails while comparing two renderings has to be able to say
-/// which report produced them.
+/// This is what [`Report::for_tool`] hands back, and the only thing it can
+/// become is a [`Report`], through [`describing`]. It renders nothing, because
+/// there is nothing yet to render: half a sentence is not a verdict. See
+/// **An unworded report cannot render** on [`Report`] for what that buys and
+/// for the block that holds it.
+///
+/// One `Copy` field, so the type is `Copy` too - which lets a caller word one
+/// tool's name two ways without naming the tool twice. `Debug` is here for the
+/// reason the API guidelines give: a consumer holding one has to be able to
+/// derive `Debug` on the struct that holds it.
+///
+/// [`describing`]: UnwordedReport::describing
+#[derive(Debug, Clone, Copy)]
+pub struct UnwordedReport<'a> {
+    tool: &'a str,
+}
+
+impl<'a> UnwordedReport<'a> {
+    /// Say what was replayed, and get the report that can word it.
+    ///
+    /// `action` is a present participle phrase - `"replaying HEAD onto main"`,
+    /// `"merging feature into HEAD"` - so it reads correctly in both the clean
+    /// sentence and the conflict header, which are the only two places it
+    /// lands.
+    ///
+    /// This is the only door to a [`Report`], and a [`Report`] has no
+    /// `describing` of its own. So a caller cannot word one report twice and
+    /// keep the second wording in silence: the second call names a method the
+    /// worded type does not have, and the build stops. A caller that wants two
+    /// wordings of one tool calls this twice on the same [`UnwordedReport`],
+    /// which is `Copy`, and holds both results.
+    #[must_use]
+    pub fn describing(self, action: &'a str) -> Report<'a> {
+        Report {
+            tool: self.tool,
+            action,
+            show_stops: true,
+        }
+    }
+
+    /// The stderr note warning that uncommitted work is not covered, or `None`
+    /// when there is none to warn about.
+    ///
+    /// A replay only ever sees committed work, so a `clean` verdict on a dirty
+    /// tree is true and still misleading. The note exists so it cannot be
+    /// misread.
+    ///
+    /// It lives here rather than on [`Report`] because it reads the tool's name
+    /// and nothing else. A caller prints it before the replay runs, and before
+    /// it has built the action string at all. Nothing about the note has to
+    /// wait for the wording, so nothing about it belongs to the worded type.
+    ///
+    /// `None` rather than an empty string, so a caller cannot print a blank
+    /// line for a tree that had nothing worth warning about: there either is a
+    /// note or there is not.
+    #[must_use]
+    pub fn dirty_note(&self, uncommitted: Uncommitted) -> Option<String> {
+        if uncommitted == Uncommitted::new(0) {
+            return None;
+        }
+
+        // The noun and its plural are [`Uncommitted`]'s business, so all that
+        // is left here is the verb that has to agree with the number the
+        // counter is about to word.
+        let verb = if uncommitted == Uncommitted::new(1) {
+            "is"
+        } else {
+            "are"
+        };
+
+        Some(format!(
+            "{}: note: {} {verb} not included; simulating from HEAD",
+            self.tool,
+            uncommitted.phrase()
+        ))
+    }
+}
+
+/// A conflict verdict, worded for one particular tool.
+///
+/// Three `Copy` fields, so the type is `Copy` too - which is what lets
+/// [`without_stops`] take `self` without the value it was called on being
+/// spent. `Debug` is here for the reason the API guidelines give: a consumer
+/// holding one has to be able to derive `Debug` on the struct that holds it,
+/// and an assertion that fails while comparing two renderings has to say which
+/// report produced them.
 ///
 /// # An unworded report cannot render
 ///
 /// A report says two things, and they arrive in two calls: the tool's own name,
-/// and what the tool did. A report that got only the first one has a hole in
-/// the middle of its sentence, and the hole reaches the screen as
+/// and what the tool did. A report that got only the first one would have a
+/// hole in the middle of its sentence, and the hole reaches the screen as
 /// `grind: clean -  hit no conflicts`, with two spaces where the action
 /// belongs. Nothing but a reader's eye catches that, and the first call site
 /// that forgets the second call is the one that finds out.
 ///
-/// So the first call hands back a report that cannot render. [`render`],
-/// [`render_within`] and [`without_stops`] arrive with the action, through
-/// [`describing`], and there is no other route to them.
+/// So the first call hands back an [`UnwordedReport`], which has no [`render`],
+/// no [`render_within`] and no [`without_stops`]. Its one route to the words is
+/// [`describing`], and [`describing`] is what builds this type. There is no
+/// other route to it.
 ///
 /// A worded report renders:
 ///
@@ -80,7 +168,7 @@ const COUNT_GAP: usize = 4;
 /// let verdict = report.render(&gitscratch::Conflicts::nothing_replayed());
 /// ```
 ///
-/// [`describing`]: Report::describing
+/// [`describing`]: UnwordedReport::describing
 /// [`render`]: Report::render
 /// [`render_within`]: Report::render_within
 /// [`without_stops`]: Report::without_stops
@@ -99,36 +187,20 @@ impl<'a> Report<'a> {
     /// identifies itself in a pipeline.
     ///
     /// The other half of the sentence arrives through [`describing`] rather
-    /// than as a second argument here, and the split is the whole point: two
+    /// than as a second argument here, and the split shuts two doors. Two
     /// adjacent `&str` parameters can be handed over the wrong way round in
     /// perfect silence, and the result is not a compile error but a report
     /// prefixed with `"replaying HEAD onto main"` and indented to the width of
-    /// it. Named calls cannot be transposed, so the mistake stops being
-    /// available rather than merely being documented against.
+    /// it. Named calls cannot be transposed. And what comes back from here is
+    /// an [`UnwordedReport`] rather than a [`Report`], so the second call is
+    /// not a step a caller can leave out either - a report with no action does
+    /// not exist to be rendered. Both mistakes stop being available rather than
+    /// being documented against.
     ///
-    /// A report that is never given an action words itself with an empty one -
-    /// visibly wrong at a glance, and reachable only by not finishing the
-    /// sentence, which no call site does.
-    ///
-    /// [`describing`]: Report::describing
+    /// [`describing`]: UnwordedReport::describing
     #[must_use]
-    pub fn for_tool(tool: &'a str) -> Self {
-        Self {
-            tool,
-            action: "",
-            show_stops: true,
-        }
-    }
-
-    /// Say what was replayed.
-    ///
-    /// `action` is a present participle phrase - `"replaying HEAD onto main"`,
-    /// `"merging feature into HEAD"` - so it reads correctly in both the clean
-    /// sentence and the conflict header, which are the only two places it
-    /// lands.
-    #[must_use]
-    pub fn describing(self, action: &'a str) -> Self {
-        Self { action, ..self }
+    pub fn for_tool(tool: &'a str) -> UnwordedReport<'a> {
+        UnwordedReport { tool }
     }
 
     /// Drop the stop count from the summary.
@@ -257,38 +329,6 @@ impl<'a> Report<'a> {
         }
 
         lines.join("\n")
-    }
-
-    /// The stderr note warning that uncommitted work is not covered, or `None`
-    /// when there is none to warn about.
-    ///
-    /// A replay only ever sees committed work, so a `clean` verdict on a dirty
-    /// tree is true and still misleading. The note exists so it cannot be
-    /// misread.
-    ///
-    /// `None` rather than an empty string, so a caller cannot print a blank
-    /// line for a tree that had nothing worth warning about: there either is a
-    /// note or there is not.
-    #[must_use]
-    pub fn dirty_note(&self, uncommitted: Uncommitted) -> Option<String> {
-        if uncommitted == Uncommitted::new(0) {
-            return None;
-        }
-
-        // The noun and its plural are [`Uncommitted`]'s business, so all that
-        // is left here is the verb that has to agree with the number the
-        // counter is about to word.
-        let verb = if uncommitted == Uncommitted::new(1) {
-            "is"
-        } else {
-            "are"
-        };
-
-        Some(format!(
-            "{}: note: {} {verb} not included; simulating from HEAD",
-            self.tool,
-            uncommitted.phrase()
-        ))
     }
 }
 
@@ -848,10 +888,10 @@ mod tests {
     /// something about zero files".
     #[test]
     fn a_clean_tree_gets_no_dirty_note() {
-        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let grind = Report::for_tool("grind");
 
-        assert_eq!(report.dirty_note(Uncommitted::new(0)), None);
-        assert_eq!(report.dirty_note(Uncommitted::default()), None);
+        assert_eq!(grind.dirty_note(Uncommitted::new(0)), None);
+        assert_eq!(grind.dirty_note(Uncommitted::default()), None);
     }
 
     /// The note exists so a `clean` verdict is never misread as covering work
@@ -863,14 +903,14 @@ mod tests {
     /// different places and still have to agree about the number.
     #[test]
     fn the_dirty_note_agrees_with_itself_about_how_many_files_there_are() {
-        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let grind = Report::for_tool("grind");
 
         assert_eq!(
-            report.dirty_note(Uncommitted::new(1)).as_deref(),
+            grind.dirty_note(Uncommitted::new(1)).as_deref(),
             Some("grind: note: 1 uncommitted file is not included; simulating from HEAD")
         );
         assert_eq!(
-            report.dirty_note(Uncommitted::new(3)).as_deref(),
+            grind.dirty_note(Uncommitted::new(3)).as_deref(),
             Some("grind: note: 3 uncommitted files are not included; simulating from HEAD")
         );
     }

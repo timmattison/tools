@@ -229,11 +229,14 @@ on exactly the details that make the two answers comparable at a glance:
 use gitscratch::Report;
 use termbar::TerminalWidth;
 
-let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+// The tool's name alone, because the note below reads nothing else.
+let unworded = Report::for_tool("grind");
 
-if let Some(note) = report.dirty_note(repo.uncommitted_files()?) {
+if let Some(note) = unworded.dirty_note(repo.uncommitted_files()?) {
     eprintln!("{note}");
 }
+
+let report = unworded.describing("replaying HEAD onto main");
 let columns = usize::from(TerminalWidth::get_or_default());
 println!("{}", report.render_within(&conflicts, columns));
 ```
@@ -242,8 +245,24 @@ The tool name and the action arrive through two differently-named calls rather
 than as two arguments to one constructor, because both are `&str`: passing them
 the wrong way round would compile, and produce a report prefixed with `replaying
 HEAD onto main` and indented to the width of it. Named calls cannot be
-transposed. `Report` is `Copy`, so neither `describing` nor `without_stops`
-spends the value it was called on.
+transposed.
+
+The first call also hands back a *different type*, and that is what closes the
+other half of the same defect. `Report::for_tool` returns an `UnwordedReport`,
+which has no `render`, no `render_within` and no `without_stops`. Its one route
+to the words is `describing`, and `describing` is what builds the `Report`. So
+the second call is not a step a caller can leave out: a report carrying half a
+sentence has no type to be. One used to, and it printed `grind: clean -  hit no
+conflicts`, with two spaces where the action belongs — a hole only whoever reads
+the output ever sees. The split takes a second silent mistake away with it: a
+`Report` has no `describing`, so calling it twice and keeping the last wording
+in silence names a method the worded type does not have. A `compile_fail`
+doc-test holds the door — see **Testing** below.
+
+`dirty_note` sits on the unworded type rather than on `Report`, because it reads
+the tool's name and nothing else. A caller prints that caveat before it has an
+action string at all, which is the order `grind` uses. Both types are `Copy`, so
+neither `describing` nor `without_stops` spends the value it was called on.
 
 ```console
 grind: conflicts - replaying HEAD onto main
@@ -606,11 +625,11 @@ both raw dates. It re-executes its own test binary with a hook's identity
 variables set on the *child* for the reason the two above do — the same mechanism
 `tests/isolation.rs` reaches for.
 
-**Three properties are pinned by doc-tests**, because each is about what a
+**Four properties are pinned by doc-tests**, because each is about what a
 consumer can *compile* and no ordinary test can state that. Rustdoc compiles a
 doc-test as a program outside this crate, which is exactly the seat a consumer
 sits in, so a ` ```compile_fail ` block is the only place such a property can be
-written down. Each of the three was watched to fail before it was believed —
+written down. Each of the four was watched to fail before it was believed —
 rustdoc reports `Test compiled successfully, but it's marked compile_fail` —
 and each refusal was then read, because a block that failed over a typo, a
 renamed method or a missing import reports exactly the same green forever.
@@ -627,22 +646,30 @@ renamed method or a missing import reports exactly the same green forever.
   `format!("{hunks}")`, and it passes only while the counters have no `Display`.
   Watched to fail with the `Display` impl put back on the counter macro, and the
   refusal read as `error[E0277]: Hunks doesn't implement std::fmt::Display`.
+- **The unfinished sentence**, on `Report`. The block writes
+  `Report::for_tool("grind").render(…)`, and it passes only while `for_tool`
+  hands back an `UnwordedReport` that cannot render. Watched to fail with a
+  `render` put back on the unworded type, and the refusal read as
+  `error[E0599]: no method named render found for struct UnwordedReport<'a>`.
 
 A block asserting that something does *not* compile passes just as readily when
 it never compiled for an unrelated reason, so each guard carries a control: a
 block beside it that has to compile and that differs by exactly the line under
 test. `Scratch`'s control puts the named operations in place of the reach.
 `Conflicts`'s control puts a measured `replay_rebase` in place of the derive.
-The counter's control puts `hunks.phrase()` in place of `{}`. One line differs,
-so the one line is what each ` ```compile_fail ` block measures.
+The counter's control puts `hunks.phrase()` in place of `{}`. `Report`'s control
+puts `describing` back on the first of the two lines. One line differs, so the
+one line is what each ` ```compile_fail ` block measures.
 
 Each mutation reddens its own guard and nothing else across `gitscratch`,
-`grind` and `grist`. [`MUTATIONS.md`](./MUTATIONS.md) records the first two,
-whose failure is a plausible wrong answer nobody sees: a runner in a consumer's
-hands, and a clean verdict for a replay that never happened. The third is
-recorded here instead, on the basis the two render-boundary tests in
-`src/report.rs` set — what a `Display` on a counter costs is a sentence a reader
-sees on screen.
+`grind` and `grist`. [`MUTATIONS.md`](./MUTATIONS.md) records the first two in
+its map, because what each of them costs is a plausible wrong answer nobody
+sees: a runner in a consumer's hands, and a clean verdict for a replay that
+never happened. The other two are out of that map, on the basis the two
+render-boundary tests in `src/report.rs` set — a `Display` on a counter costs
+`4 across 2` and an unworded report costs `grind: clean -  hit no conflicts`,
+and both of those are sentences a reader sees on screen. Each still carries its
+own record, in `MUTATIONS.md` under a heading that says why it is not a map row.
 
 The rest are about this document rather than about the code.
 `every_guard_the_safety_config_pins_is_named_in_the_readme_inventory` asks
