@@ -58,6 +58,24 @@ const EQUAL_HUNKS_VERDICT: &str = r"grind: conflicts - replaying HEAD onto two
 /// person deletes.
 const PINNED_LOCALE: [(&str, &str); 2] = [("LC_ALL", "C"), ("LANG", "C")];
 
+/// The variable that states how many columns wide the terminal is.
+///
+/// `grind` lays its breakdown out for the width it is given, and every run this
+/// file starts states that width rather than measuring one. The measurement is
+/// of the *controlling terminal*, which is the window of the developer who
+/// typed `cargo test`. A golden that depends on it holds in an ordinary window
+/// and breaks in a narrow one, and it breaks on the machine of whoever has the
+/// narrow window rather than on the machine of whoever wrote it.
+const WIDTH_VARIABLE: &str = "COLUMNS";
+
+/// The width every run in this file states.
+///
+/// Wide enough that no breakdown in this file is clamped, so each golden below
+/// is the layout with no right-hand edge in it. `controlling-terminal.rs` is
+/// where a clamped layout is read back, because a test of the clamp has to hold
+/// a terminal of its own.
+const STATED_WIDTH: &str = "200";
+
 /// A `grind` run in `repo`, built and not yet started.
 ///
 /// Handed back rather than run, because three call sites below put one more
@@ -83,9 +101,10 @@ fn grind_command(repo: &Path, args: &[&str]) -> Command {
     // After the scrub, and for the reason `TestRepo::try_git` applies a
     // caller's own variables after its own: the rule the scrub applies is the
     // `GIT_` prefix, so anything set ahead of it that wears that prefix comes
-    // straight back off. Neither name below wears it, and stating the order
-    // here is what spares the next reader who adds one that does.
+    // straight back off. No name below wears it, and stating the order here is
+    // what spares the next reader who adds one that does.
     command.envs(PINNED_LOCALE);
+    command.env(WIDTH_VARIABLE, STATED_WIDTH);
 
     command
 }
@@ -134,6 +153,28 @@ fn every_run_is_pinned_to_one_locale_so_gits_own_words_arrive_untranslated() {
              them fails for a reason it is not about"
         );
     }
+}
+
+/// Every run in this file states the width of its terminal, and the statement
+/// is asserted here rather than left to the one test that reads a clamped
+/// layout back.
+///
+/// Read off the built command for the reason the locale pin is: the machine
+/// this suite is written on cannot show the failure. Its window is wide, so
+/// every golden below holds whether or not the width is stated. The failure is
+/// live on a narrow window, which is exactly the shape a test has to pin rather
+/// than reproduce.
+#[test]
+fn every_run_states_the_width_of_its_terminal_so_no_golden_reads_the_window() {
+    let command = grind_command(Path::new("."), &["main"]);
+
+    assert_eq!(
+        environment_value(&command, WIDTH_VARIABLE).as_deref(),
+        Some(STATED_WIDTH),
+        "a run that measures the developer's window lays its breakdown out for \
+         a width the test never chose, and every golden here then holds in a \
+         wide window and breaks in a narrow one"
+    );
 }
 
 /// Everything a test wants to look at, gathered once so an assertion failure
@@ -1347,6 +1388,12 @@ fn a_leaked_repository_location_does_not_redirect_the_replay() {
         .env("GIT_DIR", &git_dir)
         .env("GIT_WORK_TREE", hooks_repo.path())
         .env("GIT_PREFIX", "")
+        // The verdict below is a golden with a breakdown in it, so this run
+        // states its width for the reason every run built by `grind_command`
+        // does. The command is built by hand here to leave the rest of the
+        // ambient environment in play, and the width is no part of what this
+        // test is about.
+        .env(WIDTH_VARIABLE, STATED_WIDTH)
         .output()
         .expect("failed to run grind");
     let (code, stdout, stderr) = streams(&output);
@@ -1394,6 +1441,10 @@ fn a_leaked_index_file_is_neither_read_from_nor_written_to() {
         .arg("two")
         .current_dir(repo.path())
         .env("GIT_INDEX_FILE", &index)
+        // Stated for the same reason as the run above: this test asserts a
+        // golden with a breakdown in it, and a breakdown is laid out for a
+        // width.
+        .env(WIDTH_VARIABLE, STATED_WIDTH)
         .output()
         .expect("failed to run grind");
     let (code, stdout, stderr) = streams(&output);

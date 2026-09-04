@@ -18,6 +18,12 @@ termbar.workspace = true
 
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }
+# So a test of the layout can hold a terminal of a size it chose. `cargo test`
+# gives the test binary the terminal of whoever started the run, and a test that
+# read that terminal would answer one way in a wide window and another way in a
+# narrow one. `openpty` makes a sized pseudo-terminal, and `TIOCSCTTY` gives it
+# to the child as its own.
+libc.workspace = true
 # So a test asserting that a column lines up measures the same thing the
 # renderer does. Byte length and character count both disagree with what a
 # terminal shows for a CJK name, and a test using either would call a ragged
