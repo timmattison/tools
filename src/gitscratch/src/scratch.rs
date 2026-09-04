@@ -713,9 +713,26 @@ fn stopped_commit_parent_count(git: &Git) -> Result<usize> {
 }
 
 /// Whether git is sitting in a halted rebase.
+///
+/// The state directory is read through [`Git::path`], not through `Git::run`,
+/// because the answer is a path and this asks the filesystem about it. In a
+/// linked worktree git builds that answer out of the *developer's* own
+/// repository path, so bytes nobody here chose sit in the middle of it. A byte
+/// outside UTF-8 among them comes back from `run` as U+FFFD, since that reader
+/// decodes lossily, and the result names a directory nothing holds. `exists()`
+/// is then false, the loop reports no rebase, and the caller says "the rebase
+/// failed without leaving a rebase to resolve" - which names the wrong cause
+/// for a real halt.
+///
+/// `run` trims as well, and that half cannot reach *this* answer: `--git-path`
+/// glues the state directory name onto the end, so the repository's own last
+/// character never lands at either end of what git prints. It reaches any
+/// answer that does end there, `rev-parse --show-toplevel` among them. Both
+/// losses live in the one reader, so the call site takes the right reader
+/// rather than reasoning about which loss its own question is open to.
 fn rebase_in_progress(git: &Git, worktree: &Path) -> Result<bool> {
     for state_dir in ["rebase-merge", "rebase-apply"] {
-        let path = git.run("rev-parse", &["--git-path", state_dir])?;
+        let path = git.path("rev-parse", &["--git-path", state_dir])?;
         if worktree.join(path).exists() {
             return Ok(true);
         }

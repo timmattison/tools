@@ -98,8 +98,37 @@ and strips `U+3000` as readily as a space. Either way the path cannot be opened,
 and in this crate a conflicted file that cannot be opened is floored at one hunk
 — a wrong total that looks entirely plausible. `-z` is the one mode with no
 quoting and a separator no path can contain, so the reader that uses it is the
-only reader there is. `run` and `try_run` trim *and* decode lossily, and are for
-output meant for a human.
+only reader for a *list*.
+
+**One** path is a different question, and it has the other of the two path
+readers, `path`. `rev-parse` has no `-z` at all — it prints the flag back as an
+unknown option and exits 0, so a NUL-delimited read of it hands back `-z` and
+the path as two fields — and a single answer needs no separator anyway, since
+the end of stdout ends the path. So `path` takes git's raw stdout, strips
+exactly one trailing newline, and hands the rest to the same byte-for-byte
+conversion:
+
+```rust
+let state = git.path("rev-parse", &["--git-path", "rebase-merge"])?;
+```
+
+One newline rather than a trim, because every other byte of that answer belongs
+to the name. `run` and `try_run` trim *and* decode lossily, and are for output
+meant for a human. Reading a path back through either of them is a bug, and the
+replay read the halted rebase's state directory that way for a while: in a
+linked worktree git builds that answer out of the *developer's* own repository
+path, so a byte outside UTF-8 anywhere in that path came back as `U+FFFD` and
+named a directory nothing holds. `exists()` was then false, the replay reported
+no rebase in progress, and a real halt was announced as "the rebase failed
+without leaving a rebase to resolve".
+
+The two losses do not reach the same answers, which is exactly why the guard is
+one reader rather than a rule per call site. `--git-path` glues a state
+directory name onto the end of its answer, so the repository's own last
+character sits in the middle and no trim reaches it there — while
+`rev-parse --show-toplevel` ends on that character, and a trimming reader takes
+it off. A call site that reasoned about which loss its own question is open to
+would have to be right twice, every time. Taking the reader is right once.
 
 ## The pre-flight
 
@@ -277,7 +306,7 @@ because it quietly discarded the work.
 | `rebase.rebaseMerges=false` | A rebase that keeps merges puts a merge commit on the replay's todo list, and a merge commit at a halt is a commit the replay cannot measure: `git diff-tree` prints no path at all for one unless it is asked for `-c`, `--cc` or `-m`, and the empty-commit probe asks for none of them. That probe would read the halt as a commit that changes nothing, and `rebase --skip` would drop a whole side of history. Git 2.55 was watched to re-create the merge commit under `rebase.rebaseMerges=true`, so this is a developer's own configuration rather than a hypothetical. The probe refuses a multi-parent stopped commit outright as well, which holds whatever a later setting does; this pin closes the one route into it that exists today. |
 | `-z` on the way out, `--literal-pathspecs` on the way in | Git C-quotes a non-ASCII name whenever it prints a path on a line, and a name that begins or ends with whitespace survives git only to lose that whitespace to a trimming reader. `-z` turns the escaping off and separates on the one byte a path cannot contain, so a path comes back as the bytes it is stored under. `--literal-pathspecs` covers the other direction, where a path handed back to git stops being a path and becomes a pathspec: a leading `:` is magic, and `*`, `?` and `[` are wildcards. A pathspec that matches *nothing* is the mild half — it can only add to the paths a probe finds missing, and that only ever buys a refusal nobody needed. The half worth the guard is one that matches the *wrong* file: `:/foo.txt` read as magic means from the top of the working tree, so it silently answers about the root `foo.txt`. No call site in this crate hands a path back to git today — the empty-commit probe intersects two path lists in Rust instead — so the pin protects the next call site that does, at the cost of one argument on the single door every git call goes through. |
 | `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. The config half settles nothing on its own: an identity variable outranks every config source, `-c` included, which is why the row above sheds the whole inherited environment first. |
-| `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job (above); this narrows what a call site that reaches around it can get wrong. |
+| `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job and reading one path is `Git::path`'s (both above), and this narrows what a call site that reaches around them can get wrong. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the
@@ -378,13 +407,15 @@ hazard that is already gone.
 the same guard, because a reader that refuses every revision passes the test
 above and breaks every caller.
 
-Two more cover the readers themselves, one per policy, because this crate has
-two of them and they answer an undecodable name differently on purpose.
+Three more cover the readers themselves. The first two are about an undecodable
+name, which the readers answer differently on purpose, and the third is about
+the ends of a path, where a reader that trims takes a character off a name that
+had one.
 `a_non_ascii_path_read_back_through_run_is_not_octal_escaped` pins
 **`core.quotePath=false`**, a row above, against `Git::run`. That setting used to
 be pinned from the other direction, by `tests/conflicts.rs` asserting the
 *answer* a non-ASCII path produces, and it stopped testing this setting the
-moment `nul_separated_paths` became the path reader: `-z` output is unquoted
+moment `nul_separated_paths` became the path-list reader: `-z` output is unquoted
 whatever `quotePath` says, so removing the pin today leaves every integration
 test green — verified. `Git::run` is the surface it still covers, and the one a
 future call site would reach for by mistake.
@@ -404,7 +435,12 @@ spells that character as the last character of its own path, and
 nothing holds, and every question asked of that path is then answered about
 nothing. The test carries an armed control: the same answer, read back through
 `Git::run`, must be missing exactly that character, or the assertion under it
-stands against a loss that is already gone.
+stands against a loss that is already gone. `--show-toplevel` rather than the
+`--git-path` the replay reads, and the limit is worth stating: `--git-path`
+glues a state directory name onto the end, so no trim reaches the repository's
+own last character there, and the loss that does reach it — a byte outside UTF-8
+— is a name APFS refuses to hold at all. One reader carries both losses, so the
+half a fixture on this machine can arm pins the reader.
 
 Two more pin **the position a caller's arguments land in**, which is what keeps
 every row of the table above from being undone by the caller. Git reads the

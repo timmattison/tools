@@ -79,8 +79,13 @@ impl Repo {
         // from `path` itself - so a subdirectory of a repository opens fine,
         // while somewhere outside every repository fails now rather than
         // halfway through a simulation.
+        //
+        // Only the exit status is read here, and the answer is dropped. It goes
+        // through `Git::path` all the same, because what git prints is a path,
+        // and a path read back through `Git::run` is a bug this crate keeps no
+        // examples of. A reader that copies this line gets the right one.
         repo.git()
-            .run("rev-parse", &["--git-dir"])
+            .path("rev-parse", &["--git-dir"])
             .with_context(|| format!("{} is not inside a git repository", path.display()))?;
 
         Ok(repo)

@@ -975,8 +975,13 @@ fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
 
         // And prove the halt is real rather than merely a non-zero exit: git is
         // sitting on rebase state, in the worktree that is about to be dropped.
+        // `path` rather than `run`, because the answer is a path and the line
+        // below asks the filesystem about it. `run` decodes lossily, so a byte
+        // outside UTF-8 in the repository's own path comes back as U+FFFD and
+        // names a directory nothing holds - which this assertion would read as
+        // "the rebase is not halted".
         let state = git
-            .run("rev-parse", &["--git-path", "rebase-merge"])
+            .path("rev-parse", &["--git-path", "rebase-merge"])
             .expect("locate the scratch worktree's rebase state");
         let state = scratch.path().join(state);
         assert!(

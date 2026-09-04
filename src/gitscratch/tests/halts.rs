@@ -27,6 +27,12 @@ use gitscratch::{Files, Hunks, Scratch, Stops};
 /// runs in, which for a linked worktree is nowhere near the repository's own
 /// `.git`. Both backends are checked because the replay checks both.
 ///
+/// The answer comes back through `Git::path` for the reason the replay reads it
+/// that way: it is a path, and this asks the filesystem about it. `Git::run`
+/// decodes lossily, so a byte outside UTF-8 anywhere in the developer's own
+/// repository path comes back as U+FFFD and names a directory nothing holds -
+/// which a check of this shape reads as "no rebase".
+///
 /// # Panics
 ///
 /// Panics if git cannot say where the state directory would live.
@@ -36,7 +42,7 @@ fn rebase_in_progress(scratch: &Scratch) -> bool {
         .any(|state_dir| {
             let path = scratch
                 .git()
-                .run("rev-parse", &["--git-path", state_dir])
+                .path("rev-parse", &["--git-path", state_dir])
                 .expect("ask git where the rebase state directory would be");
             scratch.path().join(path).exists()
         })
@@ -587,9 +593,10 @@ fn drops_a_commit_that_genuinely_became_empty_and_finishes_the_rebase() {
     );
 
     // Subjects, not paths, so a line-oriented read is the right one - and it is
-    // spelled here rather than on `Git`, because this crate's only path readers
-    // are NUL-separated on purpose and a general line reader beside them is the
-    // door a future path-reading call site would walk through by mistake.
+    // spelled here rather than on `Git`, because this crate's path readers each
+    // answer one shaped question on purpose - a NUL-separated list, or one
+    // whole answer - and a general line reader beside them is the door a future
+    // path-reading call site would walk through by mistake.
     let subjects: Vec<String> = git
         .run("log", &["--format=%s"])
         .expect("read the replayed history")

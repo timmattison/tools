@@ -214,8 +214,8 @@ impl Git {
     /// Private because raw output is a footgun in the one way this crate cares
     /// about: everything public either trims it deliberately ([`Git::try_run`],
     /// [`Git::run`]) or deliberately does not ([`Git::nul_separated`],
-    /// [`Git::nul_separated_paths`]), and which of those a caller wants is not a
-    /// choice worth re-making per call site.
+    /// [`Git::nul_separated_paths`], [`Git::path`]), and which of those a caller
+    /// wants is not a choice worth re-making per call site.
     fn output(&self, subcommand: &str, args: &[&str]) -> Result<Output> {
         self.command(subcommand, args)
             .output()
@@ -226,8 +226,10 @@ impl Git {
     ///
     /// Both streams come back trimmed, and lossily decoded, which is what a
     /// caller reporting them to a human wants and what every caller of this
-    /// method does with them. A caller reading *paths* wants the opposite on
-    /// both counts and must use [`Git::nul_separated_paths`].
+    /// method does with them. A caller reading a *path* wants the opposite on
+    /// both counts, and there are two readers for that: a list of paths comes
+    /// back through [`Git::nul_separated_paths`], and one path through
+    /// [`Git::path`].
     ///
     /// # Errors
     ///
@@ -410,11 +412,51 @@ impl Git {
 
     /// Run git and return the one path it printed, as the bytes git wrote.
     ///
+    /// **The reader a call site reading a single path must use.** [`Git::run`]
+    /// is wrong for a path in two ways, and neither loss announces itself. It
+    /// trims, and `str::trim` is Unicode-aware, so it eats a trailing space and
+    /// a trailing U+3000 alike - and a repository directory named with one of
+    /// those spells that character as the last character of its own path. It
+    /// also decodes lossily, so every byte outside UTF-8 becomes U+FFFD, and on
+    /// unix a path is an arbitrary byte string with no encoding promised. Both
+    /// losses hand back a name that opens no file, and a caller reads that as
+    /// an absence: `exists()` is false, so the thing asked about reports as not
+    /// there rather than as unreadable.
+    ///
+    /// **One newline, never a trim.** Git terminates one answer with a single
+    /// `\n`, and every other byte of that answer belongs to the path. So this
+    /// strips exactly that one byte and hands the rest to the same conversion
+    /// [`Git::nul_separated_paths`] uses, which takes bytes as the path they
+    /// spell rather than decoding them. Trimming instead is the defect above,
+    /// arriving by a different door.
+    ///
+    /// **`-z` is not available here, which is why this reader exists.**
+    /// [`Git::nul_separated_paths`] reads a path list by asking git for NUL
+    /// delimiters, and `rev-parse` has no such flag: it prints `-z` back as an
+    /// unknown option and exits 0, so the reader hands back `-z` and the path
+    /// as two fields. A single answer needs no separator anyway - the end of
+    /// stdout ends the path - so the two questions take two readers.
+    ///
     /// # Errors
     ///
     /// Returns an error if git could not be spawned or exited non-zero.
     pub fn path(&self, subcommand: &str, args: &[&str]) -> Result<PathBuf> {
-        todo!("read one path back as bytes: git {}", invocation(subcommand, args))
+        let output = self.output(subcommand, args)?;
+
+        anyhow::ensure!(
+            output.status.success(),
+            "git {} failed:\n{}\n{}",
+            invocation(subcommand, args),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        let mut printed = output.stdout;
+        if printed.last() == Some(&b'\n') {
+            printed.pop();
+        }
+
+        Ok(path_from_git(printed))
     }
 
     /// Resolve a revision to a full commit id.
@@ -561,12 +603,13 @@ impl Git {
             // thoroughly as by an octal escape.
             //
             // Kept anyway, because it costs one `-c` and it narrows what a
-            // future call site can do wrong. Anything reading a path back
-            // through `run` rather than `nul_separated_paths` is a bug, but with
-            // this pinned it is a bug that survives the common case instead of
-            // mangling every non-ASCII name in the repository. Pinning it on
-            // the single door every git call goes through is what makes that
-            // free.
+            // future call site can do wrong. There are two readers for a path
+            // and `run` is neither of them: a list of paths goes through
+            // `nul_separated_paths`, one path goes through `path`, and reading
+            // either back through `run` is a bug. With this pinned it is a bug
+            // that survives the common case instead of mangling every
+            // non-ASCII name in the repository. Pinning it on the single door
+            // every git call goes through is what makes that free.
             "core.quotePath=false",
         ]
         .iter()
@@ -673,7 +716,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        Git, NoInheritedGitEnvironment, GIT_ENVIRONMENT_PREFIX, HARNESS_EMAIL, HARNESS_NAME,
+        Git, NoInheritedGitEnvironment, PathBuf, GIT_ENVIRONMENT_PREFIX, HARNESS_EMAIL,
+        HARNESS_NAME,
     };
     use crate::testing::TestRepo;
 
@@ -769,16 +813,17 @@ mod tests {
         let their_path = elsewhere.path().to_str().expect("utf-8 fixture path");
 
         let ours = git
-            .run("rev-parse", &["--absolute-git-dir"])
+            .path("rev-parse", &["--absolute-git-dir"])
             .expect("ask git which repository the runner is rooted in");
-        let theirs = here.git(&["-C", their_path, "rev-parse", "--absolute-git-dir"]);
+        let theirs =
+            PathBuf::from(here.git(&["-C", their_path, "rev-parse", "--absolute-git-dir"]));
 
         assert_ne!(
             ours, theirs,
             "`-C` no longer moves git to another directory, so this test could only pass vacuously"
         );
 
-        let read_back = git.run("rev-parse", &["-C", their_path, "--absolute-git-dir"]);
+        let read_back = git.path("rev-parse", &["-C", their_path, "--absolute-git-dir"]);
 
         if let Ok(answered) = read_back {
             assert_eq!(
@@ -900,8 +945,8 @@ mod tests {
     ///
     /// It used to be pinned indirectly, by `tests/conflicts.rs` asserting the
     /// answer a non-ASCII conflicted path produces. That stopped being a test of
-    /// this setting the moment [`Git::nul_separated_paths`] became the only path
-    /// reader: `-z` output is unquoted whatever `quotePath` says, so removing
+    /// this setting the moment a `-z` reader became the way a path list comes
+    /// back: `-z` output is unquoted whatever `quotePath` says, so removing
     /// the pin would leave every one of those tests green. A guard nothing can
     /// fail is a guard that quietly stops working, so this asserts it against
     /// the surface it still covers — [`Git::run`], the reader a future call site
@@ -1010,8 +1055,10 @@ mod tests {
     /// is the one a developer types by accident. U+3000 is the one nobody
     /// expects a trimmer to touch, and Rust's trimmer is Unicode-aware, so it
     /// takes that one just as readily.
-    const TRAILING_WHITESPACE: [(&str, char); 2] =
-        [("a space", ' '), ("U+3000, the ideographic space", '\u{3000}')];
+    const TRAILING_WHITESPACE: [(&str, char); 2] = [
+        ("a space", ' '),
+        ("U+3000, the ideographic space", '\u{3000}'),
+    ];
 
     /// A path git printed has to come back with its last character still on it,
     /// and a repository whose own directory name ends in whitespace is where
@@ -1073,8 +1120,7 @@ mod tests {
                 .expect("read the repository root back as the bytes git printed");
 
             assert_eq!(
-                read,
-                expected,
+                read, expected,
                 "a reader for one path has to hand back the bytes git printed. A repository \
                  directory named with {spelling} on the end spells that character as the last \
                  character of its own path, and a trimmed answer names a directory nothing \
@@ -2035,23 +2081,25 @@ mod tests {
         // /var to /private/var, so the raw paths would never compare equal.
         let expected = std::fs::canonicalize(here.path()).expect("canonicalise the scratch path");
         let git_dir = git
-            .run("rev-parse", &["--absolute-git-dir"])
+            .path("rev-parse", &["--absolute-git-dir"])
             .expect("ask git which repository it is operating on");
         assert!(
             std::fs::canonicalize(&git_dir)
                 .expect("canonicalise git's answer")
                 .starts_with(&expected),
             "the runner must operate on the repository it is rooted in ({}), not the one an \
-             inherited GIT_DIR names ({git_dir})",
-            expected.display()
+             inherited GIT_DIR names ({})",
+            expected.display(),
+            git_dir.display()
         );
 
         let index = git
-            .run("rev-parse", &["--git-path", "index"])
+            .path("rev-parse", &["--git-path", "index"])
             .expect("ask git which index it would write");
         assert!(
-            !index.contains(THEIR_INDEX),
-            "an inherited GIT_INDEX_FILE must not become the index a replay stages into: {index}"
+            !index.to_string_lossy().contains(THEIR_INDEX),
+            "an inherited GIT_INDEX_FILE must not become the index a replay stages into: {}",
+            index.display()
         );
     }
 }

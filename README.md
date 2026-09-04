@@ -52,17 +52,24 @@ silently floored at "1 hunk" — a plausible-looking wrong total. `core.quotePat
 common case, but it only governs non-ASCII, so the fix that actually holds is that the runner offers exactly one
 way to read a list of paths — `-z`, split on NUL, never trimmed, and handed back as the bytes git wrote rather
 than as text, since a path is a byte string on unix and decoding one lossily replaces exactly the names this
-exists to preserve — and no line-oriented alternative to forget it for. A scratch worktree can only be built
-through `Scratch`, and a `Scratch` only hands out a git runner that already carries that configuration, so no
-tool can drift onto a weaker version of it. That runner takes the git subcommand as a parameter of its own, so a
-caller's arguments always land after it rather than in git's own option position, where one more `-c` pair would
-undo any of the pins above (git's rule is that the last pair naming a key wins) and a `-C` would aim the whole
-run at another repository. A revision the caller supplies is kept out of that position too: `rev-parse` is asked
-with `--verify` and `--end-of-options`, and the commit-ish of `worktree add` and the upstream of `rebase` carry
-the same separator — because a bare `git rev-parse --root` prints its own argument back and exits 0, which read
-as a commit and let `grind` answer `clean` for a branch that does not exist. Teardown removes the scratch
-worktree by path and deliberately never runs the repo-wide `git worktree prune`, which would delete the
-administrative state of any worktree whose directory is merely missing right now. Used by `grist` and `grind`.
+exists to preserve — and no line-oriented alternative to forget it for. One path is the other reader, because
+`rev-parse` has no `-z` to ask with: it takes git's raw stdout, strips exactly one trailing newline, and hands
+back the rest as bytes. Never a trim, since `str::trim` is Unicode-aware and eats a trailing space or U+3000 off
+the end of a name that had one, and never a lossy decode, which turns any byte outside UTF-8 into a name that
+opens no file. The replay read the halted rebase's state directory through a reader that does both, and in a
+linked worktree git builds that answer out of the developer's own repository path — so a repository path holding
+such a byte reported no rebase in progress, and a real halt came out as "the rebase failed without leaving a
+rebase to resolve". A scratch worktree can only be built through `Scratch`, and a `Scratch` only hands out a git
+runner that already carries that configuration, so no tool can drift onto a weaker version of it. That runner
+takes the git subcommand as a parameter of its own, so a caller's arguments always land after it rather than in
+git's own option position, where one more `-c` pair would undo any of the pins above (git's rule is that the
+last pair naming a key wins) and a `-C` would aim the whole run at another repository. A revision the caller
+supplies is kept out of that position too: `rev-parse` is asked with `--verify` and `--end-of-options`, and the
+commit-ish of `worktree add` and the upstream of `rebase` carry the same separator — because a bare `git
+rev-parse --root` prints its own argument back and exits 0, which read as a commit and let `grind` answer
+`clean` for a branch that does not exist. Teardown removes the scratch worktree by path and deliberately never
+runs the repo-wide `git worktree prune`, which would delete the administrative state of any worktree whose
+directory is merely missing right now. Used by `grist` and `grind`.
 
 See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of guarantees.
 

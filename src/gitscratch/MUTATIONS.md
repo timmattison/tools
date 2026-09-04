@@ -48,6 +48,7 @@ not have to re-derive which guard belongs to which test.
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | `rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo list | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` (`src/scratch.rs`) | The parent count read ahead of both probes, which refuses a merge commit at a halt whatever the configuration says | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the `stopped_commit_parent_count` call and the `ensure!` under it | remove |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` (`tests/halts.rs`) | `--ignore-submodules=none` on the porcelain half of the empty-commit probe, which is what makes both halves read one tree under one set of rules | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the argument from the `git diff` invocation | remove |
+| `a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact` | `Git::path`, the byte-for-byte read of the one path git printed | `src/git.rs`, `Git::path` — read the answer the way `Git::run` reads one, `String::from_utf8_lossy(&output.stdout).trim()` in place of the one-newline strip | redirect |
 
 ## What keeps each test honest
 
@@ -109,6 +110,7 @@ registry that reports everything as fine is worth less than no registry at all.
 | `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | The fixture sets `maintenance.auto true` in its own repository, and the value is read back before the runner is asked anything. | **Full.** That read-back *is* the arming: plain git, through the fixture, must answer `true` — "the fixture does not hold `maintenance.auto=true`, so there is nothing here for the runner to override and the assertion below is measured against nothing". A key the fixture never took is a key the runner cannot be shown to override. What is **not** armed, and cannot be here, is the damage: the chain from git's `run_auto_maintenance` to a prefetch that writes `refs/prefetch/*` is read from git's source, and arming it would need a developer who has run `git maintenance start` and a remote to fetch from. This test pins the pin, not the consequence, and says so. |
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | The fixture sets `core.fsmonitor .git/hooks/fsmonitor-watchman`, the classic watchman spelling, and the value is read back first. | **Full, for the pin.** Plain git must answer with that path before the runner is asked. The same limit as the row above applies to the *consequence*: proving git would execute the named program means letting a replay execute a program on the developer's machine, which no fixture here may do. `tests/safety.rs` cannot cover this route either — its planted hooks all live under `core.hooksPath`, and this program is executed directly — which is the reason the pin is asserted here at all. |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | The fixture sets `rebase.rebaseMerges true` and the value is read back first. | **Full, and the consequence was executed out of band.** The read-back arms the pin. The hazard behind it was watched by hand on git 2.55: a branch carrying a merge, rebased onto a moved base under `-c rebase.rebaseMerges=true`, comes out still carrying the merge (`git rev-list --min-parents=2 --count` answers 1), so a developer's own configuration really does put a merge commit on a replay's todo list. That demonstration is a shell session rather than an assertion, because a merge on the todo list only becomes a halt in a repository built to conflict at it, and the reviewer who found this could not construct one. |
+| `a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact` | The fixture repository is built at a directory whose own name ends in the whitespace under test, and `git init` through the runner panics if git refuses, so the repository provably sits at a path whose last character is the one at stake. | **Full.** The same answer is read back through `Git::run` first and must be missing exactly that character — `assert_eq!(format!("{through_run}{trailing}"), expected.to_string_lossy())`, "`run` no longer eats a space off the end of git's answer, so the assertion below could only pass vacuously". The trimming *is* the hazard, demonstrated before the new reader is asked anything. Both spellings `str::trim` eats get their own fixture: a space, and U+3000, which a Unicode-aware trimmer takes just as readily. |
 | `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` | The stopped commit is read back through plain git and must list three fields — its own id and two parents — "or there is nothing here to refuse". | **Full.** `git diff-tree`, asked through the runner with the arguments the probe really uses, must answer with nothing for that merge — "`diff-tree` no longer stays silent about a merge commit, so this test could only pass vacuously; that silence is what makes an unguarded probe read a merge as a commit that changes nothing". The silence *is* the hazard, demonstrated before the probe is asked anything. A closing control runs the other way: the same probe, pointed at a single-parent commit, must answer rather than refuse, so a probe that refused everything cannot pass. What the test does not build is a real halt — see the record below, and the row above it. |
 
 ### The rule for the next test
@@ -734,6 +736,51 @@ state a halt leaves behind — a merge commit, with `REBASE_HEAD` pointing at it
 — and asks the probe the question a halt asks it. What that cannot cover is the
 path from `replay_rebase_within` to the probe. That path is exercised by every
 other halt test in `tests/halts.rs`, none of which this refusal changes.
+
+### `a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact`
+
+Mutation: `Git::path` was made to read its answer the way `Git::run` reads one —
+`String::from_utf8_lossy(&output.stdout).trim()` in place of the one-newline
+strip and the byte-for-byte conversion.
+
+```text
+thread 'git::tests::a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact'
+panicked at src/gitscratch/src/git.rs:
+assertion `left == right` failed: a reader for one path has to hand back the
+bytes git printed. A repository directory named with a space on the end spells
+that character as the last character of its own path, and a trimmed answer
+names a directory nothing holds.
+  left: ".../T/.tmpZ4IVds/repository"
+ right: ".../T/.tmpZ4IVds/repository "
+
+test result: FAILED. 40 passed; 1 failed
+```
+
+Red for the stated reason: the trailing space is the whole difference between
+the two paths. No collateral either — the run was `cargo test --no-fail-fast -p
+gitscratch -p grind -p grist`, and this is the only test of the three crates
+that the mutation reddens. Every other fixture sits at a temporary directory
+whose generated name ends in no whitespace at all.
+
+**The call site cannot be mutated on this machine, and that is worth writing
+down rather than leaving implied.** Second mutation: `rebase_in_progress` in
+`src/scratch.rs` was put back the way the finding found it, reading the rebase
+state directory through `Git::run`. The same three-crate run stayed entirely
+green.
+
+That is the finding, not a failure to find one. `rev-parse --git-path <name>`
+glues the state directory name onto the end of its answer, so the repository's
+own last character lands in the *middle* of the path and no trim reaches it
+there. What reaches it there is the other half of the same defect — the lossy
+decode, which replaces a byte outside UTF-8 wherever it sits — and no fixture on
+this machine can arm that: APFS refuses such a name outright, with `EILSEQ`,
+before git is involved. The same repository is ordinary on a Linux filesystem,
+which is where the call site is reachable.
+
+So the guard is pinned at the reader, where both halves of the loss live and one
+of them can be built here, and the call sites are held to it by review. There is
+one reader for a path list and one for a single path, and `Git::run` is
+neither of them.
 
 ## This is not a one-time ritual
 
