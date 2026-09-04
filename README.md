@@ -46,11 +46,50 @@ Answering "would this rebase conflict, and how badly?" means actually performing
 repository, which is only safe because of a set of pinned settings — `rebase.updateRefs=false` so the replay
 doesn't rewrite the very branches being simulated, `rerere.enabled=false` so a simulated resolution never poisons
 the shared `rr-cache`, hooks redirected at an empty directory, `gc.auto=0`, `commit.gpgsign=false`, and an editor
-environment a halted rebase can't hang on. A scratch worktree can only be built through `Scratch`, and a `Scratch`
-only hands out a git runner that already carries that configuration, so no tool can drift onto a weaker version of
-it. Teardown removes the scratch worktree by path and deliberately never runs the repo-wide `git worktree prune`,
-which would delete the administrative state of any worktree whose directory is merely missing right now. Used by
-`grist`.
+environment a halted rebase can't hang on. Path *names* get the same treatment: git will C-quote and octal-escape
+a name, which then matches no file on disk, so a conflicted `日本語.txt` came back under a name nobody typed *and*
+silently floored at "1 hunk" — a plausible-looking wrong total. `core.quotePath=false` is pinned against the
+common case, but it only governs non-ASCII, so the fix that actually holds is that every reader of a path asks
+git for `-z` — split on NUL, never trimmed — and no line-oriented alternative stands beside them to forget it
+for. A list of paths comes back through one of two readers, and what separates them is a name that is not valid
+UTF-8: `nul_separated_paths` hands over the bytes git wrote, since a path is a byte string on unix and decoding
+one lossily replaces exactly the names this exists to preserve, while `paths` decodes to text and refuses such a
+name outright rather than repairing it into one that opens no file. One path is a third reader, because
+`rev-parse` has no `-z` to ask with: it takes git's raw stdout, strips exactly one trailing newline, and hands
+back the rest as bytes. Never a trim, since `str::trim` is Unicode-aware and eats a trailing space or U+3000 off
+the end of a name that had one, and never a lossy decode, which turns any byte outside UTF-8 into a name that
+opens no file. The replay read the halted rebase's state directory through a reader that does both, and in a
+linked worktree git builds that answer out of the developer's own repository path — so a repository path holding
+such a byte reported no rebase in progress, and a real halt came out as "the rebase failed without leaving a
+rebase to resolve". A scratch worktree can only be built through `Scratch`, and a `Scratch` answers the
+operations it names — check out detached, replay a rebase, read the HEAD tree, write a squash commit — each
+under that configuration, so no tool can drift onto a weaker version of it. The runner that makes those calls
+never leaves the crate, and both halves of that are needed: nothing outside can build one, because `Git::new`
+is crate-private, and nothing outside is handed one, because a `Scratch` answers with the operation rather than
+with the thing that performs it. The second half matters because a scratch worktree is a *linked* worktree of
+the real repository and the hardening is configuration — it says nothing about `branch -D`, `update-ref`,
+`config --local` or `push`, so a runner in a consumer's hands reaches all of them. A `compile_fail` doc-test
+holds that door shut. Two more hold the doors the *answer* comes through. `Conflicts` has no `Default` derive,
+because the value a derive hands out — no files, no stops — is the clean verdict, the one that renders "hit no
+conflicts" and exits 0, and a derive puts it behind the spelling every caller reaches for first. The seed a fold
+genuinely needs says so by name instead, as `Conflicts::nothing_replayed()`. And the count newtypes have no
+`Display`, so a count renders only through `phrase()` (`4 hunks`, with the noun and its plural coming from the
+counter) or `digits()` (a table cell whose heading carries the noun) — with a `Display` on them,
+`format!("{} across {}", hunks, files)` compiles and prints `4 across 2`, which is the wording failure the
+newtypes exist to stop. A fourth holds the door the answer's *words* come through: `Report::for_tool` names the
+tool and hands back an `UnwordedReport`, which cannot render at all, and the action arrives through
+`describing`, which is what builds the `Report` — so a report with a hole where the action belongs
+(`grind: clean -  hit no conflicts`, two spaces and no phrase) is a value nobody can build rather than a line
+nobody reads until it ships. Inside the crate, the runner takes the git subcommand as a parameter of its own, so a
+caller's arguments always land after it rather than in git's own option position, where one more `-c` pair
+would undo any of the pins above (git's rule is that the last pair naming a key wins) and a `-C` would aim the
+whole run at another repository. A revision the caller
+supplies is kept out of that position too: `rev-parse` is asked with `--verify` and `--end-of-options`, and the
+commit-ish of `worktree add` and the upstream of `rebase` carry the same separator — because a bare `git
+rev-parse --root` prints its own argument back and exits 0, which read as a commit and let `grind` answer
+`clean` for a branch that does not exist. Teardown removes the scratch worktree by path and deliberately never
+runs the repo-wide `git worktree prune`, which would delete the administrative state of any worktree whose
+directory is merely missing right now. Used by `grist` and `grind`.
 
 See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of guarantees.
 
@@ -619,7 +658,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - To install: `cargo install --git https://github.com/timmattison/tools install-bin`. Because it's
     a single binary with no runtime dependency, it can also install itself:
     `cargo build --release -p install-bin && ./target/release/install-bin ./target/release/install-bin`.
-- grist
+- grist (git ranks its squash trials)
   - Ranks the orders you could squash-merge a set of branches in, cheapest conflicts first. Squash
     merging destroys commit identity, so whichever branch lands second replays work that already
     landed and collides — and the bill is not symmetric. `grist` replays every ordering against a
@@ -639,6 +678,22 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Usage: `zth <PATH>`, `zth -j 32 /mnt/backups` (more readers for a network or spinning-rust
     volume; defaults to the machine's core count).
   - To install: `cargo install --git https://github.com/timmattison/tools zth`
+- grind (git rebase in another dimension)
+  - Answers "would rebasing HEAD onto that branch conflict, and by how much?" without touching your
+    repository. It replays your commits onto the branch in a detached scratch worktree in a temp
+    directory, walks the *whole* rebase instead of bailing at the first collision, and reports the
+    conflict hunks, the files they land in, and how many times the rebase would stop — the number a
+    merge can't give you, and the reason a branch that rewrote one region across three commits is
+    visibly more expensive than one that landed the same change in a single commit. The exit code is
+    the answer: 0 clean, 1 conflicts, 2 couldn't tell you (bad ref, not a repository, git failed with
+    nothing to measure). A dirty tree isn't an error — it notes on stderr that uncommitted work isn't
+    included and leaves the verdict alone. Nothing in your repo moves; the safety guarantees are the
+    shared `gitscratch` harness's, not a second copy of them.
+  - Usage: `grind <BRANCH>`, `grind -q main && git rebase main`. `-q` silences everything grind
+    says, on both streams, since the exit code is the whole answer — but it stops at the argument
+    parser, so `grind -q` with no branch still prints a usage error and `grind -q --version` still
+    prints the version.
+  - To install: `cargo install --git https://github.com/timmattison/tools grind`
 
 - krt (Knights of the Round Trip)
   - Records the network path to a destination, hop by hop. `krt` accepts one destination and the

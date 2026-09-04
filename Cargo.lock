@@ -2734,6 +2734,7 @@ dependencies = [
  "gitscratch",
  "pulldown-cmark",
  "tempfile",
+ "unicode-width",
 ]
 
 [[package]]
@@ -3709,6 +3710,19 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "grind"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buildinfo",
+ "clap",
+ "gitscratch",
+ "libc",
+ "termbar",
+ "unicode-width",
 ]
 
 [[package]]

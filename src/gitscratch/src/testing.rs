@@ -6,12 +6,32 @@
 //! rebuilt per crate and drifting apart.
 //!
 //! Every repo lives in its own `TempDir`, so concurrent `cargo test` runs (the
-//! pre-commit hook's and yours) never share a path.
+//! pre-commit hook's and yours) never share a path. A private path is only half
+//! of it, though: a `cargo test` run *from* the pre-commit hook inherits the
+//! hook's git environment, which names the developer's real repository, so every
+//! spawn here goes through [`NoInheritedGitEnvironment`] as well.
+//!
+//! The same hook exports who is committing, and an identity variable outranks
+//! the `user.name` [`TestRepo::init`] configures — so a fixture built under a
+//! hand-typed `git commit` would otherwise stamp the developer's own name, and
+//! one timestamp, on every commit it makes. The one sweep takes that second set
+//! off too, because the rule it applies is the `GIT_` prefix rather than a list
+//! of names.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use tempfile::TempDir;
+
+use crate::git::NoInheritedGitEnvironment;
+use crate::repo::Repo;
+use crate::scratch::Scratch;
+
+/// The name every fixture commit is authored and committed under.
+const FIXTURE_USER_NAME: &str = "gitscratch test";
+
+/// The email every fixture commit is authored and committed under.
+const FIXTURE_USER_EMAIL: &str = "gitscratch@example.com";
 
 /// A throwaway repository that deletes itself when dropped.
 pub struct TestRepo {
@@ -30,8 +50,8 @@ impl TestRepo {
         let repo = Self { dir };
 
         repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.email", "gitscratch@example.com"]);
-        repo.git(&["config", "user.name", "gitscratch test"]);
+        repo.git(&["config", "user.email", FIXTURE_USER_EMAIL]);
+        repo.git(&["config", "user.name", FIXTURE_USER_NAME]);
         // A commit-signing config in the developer's global gitconfig would
         // otherwise make every fixture commit prompt or fail.
         repo.git(&["config", "commit.gpgsign", "false"]);
@@ -56,17 +76,17 @@ impl TestRepo {
 
     fn git_in(&self, cwd: &Path, args: &[&str]) -> String {
         let mut command = Command::new("git");
-        // The same immunity the runner has, from the same list, because a
-        // fixture is not exempt from an inherited environment just because it is
-        // only building something to test with. A test suite run from inside a
-        // git hook inherits a *relative* `GIT_INDEX_FILE`, and a linked
-        // worktree's `.git` is a file, so a fixture that keeps it cannot add one
-        // at all - it fails before the code under test is ever reached.
-        crate::git::shed_inherited_git_environment(&mut command);
-
         let output = command
             .args(args)
             .current_dir(cwd)
+            // The same immunity the runner has, from the same rule, because a
+            // fixture is not exempt from an inherited environment just because
+            // it is only building something to test with. A test suite run from
+            // inside a git hook inherits a *relative* `GIT_INDEX_FILE`, and a
+            // linked worktree's `.git` is a file, so a fixture that keeps it
+            // cannot add one at all - it fails before the code under test is
+            // ever reached.
+            .without_inherited_git_environment()
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
 
@@ -78,6 +98,67 @@ impl TestRepo {
         );
 
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Run a git command in the repo and hand its outcome back whatever that
+    /// outcome is, with `env` applied on top.
+    ///
+    /// The spawn [`TestRepo::git`] cannot be. That one raises a non-zero exit
+    /// as a panic, which is right while a fixture is being built and wrong for
+    /// a *control* — a command run to demonstrate that some hazard really is
+    /// armed, whose failure is the demonstration and therefore has to come back
+    /// to be read rather than be raised.
+    ///
+    /// It exists so that permission need not be bought by reaching around the
+    /// fixture for a raw [`Command`], which is where the scrub gets lost:
+    /// `current_dir` does not settle which repository git uses, because
+    /// `GIT_DIR` outranks the working directory, so an unscrubbed control run
+    /// from a `pre-push` gate, `git bisect run`, `rebase --exec` or a git hook
+    /// merges, or commits, in the developer's own repository instead of in the
+    /// fixture. This spawn sheds the inherited git environment exactly as
+    /// [`TestRepo::git`] does; only the assertion is gone.
+    ///
+    /// `env` is applied **after** that sweep, and the order is load-bearing: the
+    /// rule the sweep applies is the `GIT_` prefix, so a `GIT_TERMINAL_PROMPT`
+    /// set beforehand would be taken straight back off by the very call meant to
+    /// leave it standing. Anything a control's own assertions depend on goes
+    /// here — `GIT_TERMINAL_PROMPT=0` so a command expected to fail fails
+    /// instead of stopping on a prompt, `LC_ALL`/`LANG` pinned for a control
+    /// that matches git's own words rather than their translation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `git` cannot be spawned at all — most likely because it is not
+    /// installed. A non-zero exit is not a panic; it is the answer.
+    pub fn try_git(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let mut command = Command::new("git");
+        command
+            .args(args)
+            .current_dir(self.dir.path())
+            .without_inherited_git_environment();
+
+        // After the sweep, never before it - see the note above on why the
+        // order decides whether a caller's `GIT_`-prefixed variable survives.
+        for (name, value) in env {
+            command.env(name, value);
+        }
+
+        command
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"))
+    }
+
+    /// Write `contents` to `name` and leave it there uncommitted.
+    ///
+    /// Dirties the working tree the way a developer mid-edit does - a tracked
+    /// file modified, or a new file never added - which is the state a replay
+    /// cannot see, because it simulates from HEAD.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fixture file cannot be written.
+    pub fn write_file(&self, name: &str, contents: &str) {
+        std::fs::write(self.dir.path().join(name), contents).expect("write fixture file");
     }
 
     /// Write `contents` to `name` and commit it.
@@ -97,7 +178,7 @@ impl TestRepo {
     /// Panics if a fixture file cannot be written or if git fails.
     pub fn commit_files(&self, files: &[(&str, &str)], message: &str) {
         for (name, contents) in files {
-            std::fs::write(self.dir.path().join(name), contents).expect("write fixture file");
+            self.write_file(name, contents);
             self.git(&["add", name]);
         }
         self.git(&["commit", "-q", "-m", message]);
@@ -153,14 +234,15 @@ impl TestRepo {
         use std::io::Write as _;
 
         let mut command = Command::new("git");
-        // The same immunity `git_in` takes, for the same reason: a fixture that
-        // inherits a redirected `GIT_DIR` or `GIT_INDEX_FILE` writes its
-        // objects into the developer's real repository instead of this one.
-        crate::git::shed_inherited_git_environment(&mut command);
-
         let mut child = command
             .args(args)
             .current_dir(self.dir.path())
+            // The same immunity `git_in` takes, in the same words and for the
+            // same reason: a fixture that inherits a redirected `GIT_DIR` or
+            // `GIT_INDEX_FILE` writes its objects into the developer's real
+            // repository instead of this one. `tests/isolation.rs` reaches this
+            // spawn through `commit_file_named_by_bytes`.
+            .without_inherited_git_environment()
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -235,6 +317,147 @@ impl TestRepo {
         ]);
         path
     }
+
+    /// A bare clone of this fixture, standing on `head`.
+    ///
+    /// The one repository shape where the cheap questions and the expensive ones
+    /// part company. `git worktree add --detach HEAD` succeeds against a bare
+    /// repository, so a replay can be run in it and measured exactly as usual,
+    /// while `git status` cannot run at all — there is no working tree to take a
+    /// status of. A pre-flight that treats an informational query as fatal
+    /// therefore refuses a question it could have answered, which is a stricter
+    /// failure than the replay it was meant to guard against.
+    ///
+    /// A clone rather than `git init --bare`, so the branches and the conflict
+    /// shape are the fixture's own and the answer can be compared against the
+    /// one the same fixture gives through its working tree. It lives in a
+    /// temporary directory of its own rather than under the source's worktree,
+    /// so it neither dirties the source nor moves the numbers a caller is about
+    /// to assert on.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the temporary directory cannot be created, if either path is
+    /// not valid UTF-8, or if git fails — most likely because `head` does not
+    /// name a branch of this fixture.
+    pub fn bare_clone(&self, head: &str) -> BareRepo {
+        let dir = TempDir::new().expect("create temp dir");
+        let bare = BareRepo { dir };
+
+        self.git(&[
+            "clone",
+            "-q",
+            "--bare",
+            self.dir.path().to_str().expect("utf-8 fixture path"),
+            bare.path().to_str().expect("utf-8 bare clone path"),
+        ]);
+        // A clone copies the source's HEAD, and what makes this shape worth
+        // building is standing somewhere specific.
+        self.git_in(
+            bare.path(),
+            &["symbolic-ref", "HEAD", &format!("refs/heads/{head}")],
+        );
+        // The fixture proves its own premise: a bare HEAD that resolves is the
+        // whole point, so a `head` that names nothing fails here rather than
+        // surfacing later as a replay that could not start.
+        self.git_in(bare.path(), &["rev-parse", "HEAD^{commit}"]);
+
+        bare
+    }
+
+    /// A scratch worktree of this fixture, checked out at `at`.
+    ///
+    /// Deliberately routed through [`Repo::open`] rather than straight at
+    /// `Scratch`'s own crate-private constructor, even though this module lives
+    /// inside the crate and could reach either. Two reasons, and the second is
+    /// the important one.
+    /// It spares every consumer the two-step incantation; and it means the
+    /// suites exercise the entrance a real consumer is now obliged to use,
+    /// rather than a shortcut only in-crate code can spell. A door nothing
+    /// knocks on is a door that stops working quietly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fixture is somehow not a repository, or if git refuses to
+    /// add the worktree — most likely because `at` does not name a commit.
+    pub fn scratch(&self, at: &str) -> Scratch {
+        Repo::open(self.dir.path())
+            .expect("a fixture is a git repository")
+            .scratch(at)
+            .expect("create the scratch worktree")
+    }
+}
+
+/// A bare repository — refs and objects, and no working tree at all.
+///
+/// Built by [`TestRepo::bare_clone`], and mirroring [`NotARepo`]'s shape — a
+/// `TempDir` behind a `path()` — so a consumer never has to name `tempfile`'s
+/// types or remember to keep the guard alive for the right reason.
+pub struct BareRepo {
+    dir: TempDir,
+}
+
+impl BareRepo {
+    /// The repository directory, which for a bare repository is the git
+    /// directory itself.
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// A directory that is not inside any git repository, so a tool can be run
+/// somewhere it has no question to answer.
+///
+/// Mirrors [`TestRepo`]'s shape - a `TempDir` behind a `path()` - so a consumer
+/// never has to name `tempfile`'s types or remember to keep the guard alive for
+/// the right reason.
+pub struct NotARepo {
+    dir: TempDir,
+}
+
+impl NotARepo {
+    /// The directory, guaranteed to sit outside every repository.
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// A throwaway directory that is emphatically not a repository.
+///
+/// The premise is checked rather than assumed: a developer whose `TMPDIR` sits
+/// inside a git repository would otherwise get a test that fails somewhere far
+/// away from the reason, so the fixture proves its own claim up front and
+/// panics with the offending path if it cannot.
+///
+/// The probe takes the repository scrub like every other spawn here, and for a
+/// sharper reason than most: an inherited `GIT_DIR` makes `rev-parse` succeed
+/// from *anywhere*,
+/// so the check would fail on a perfectly good directory and blame it for the
+/// hook's environment.
+///
+/// # Panics
+///
+/// Panics if the temporary directory cannot be created, if `git` is not
+/// installed, or if the temporary directory turns out to be inside a
+/// repository after all.
+pub fn not_a_repository() -> NotARepo {
+    let dir = TempDir::new().expect("create temp dir");
+
+    let probe = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(dir.path())
+        .without_inherited_git_environment()
+        .output()
+        .expect("failed to spawn git rev-parse --git-dir");
+
+    assert!(
+        !probe.status.success(),
+        "{} is inside a git repository, so it cannot stand in for somewhere that is not: {}",
+        dir.path().display(),
+        String::from_utf8_lossy(&probe.stdout).trim(),
+    );
+
+    NotARepo { dir }
 }
 
 #[cfg(unix)]
@@ -256,15 +479,36 @@ impl TestRepo {
     /// mode is restored on drop, which the temporary directory's own removal
     /// depends on.
     ///
+    /// The guard is built before the walk rather than out of what the walk
+    /// hands back, and the walk fills the guard's own list. The walk raises
+    /// every I/O error as a panic, so a panic partway through it has to unwind
+    /// through a live guard: built afterwards, the guard is never built at all
+    /// on that path, and the directories stripped up to that point keep the
+    /// modes the walk gave them.
+    ///
+    /// One end still leaves the tree stripped, and it is the end no `Drop` can
+    /// reach: a signal that terminates without unwinding. `Ctrl-C` during
+    /// `cargo test` is that signal. The repair is
+    /// `chmod -R u+w` on the temporary directory the run left behind, and it is
+    /// needed before anything can delete that directory — `rm -rf` answers
+    /// permission denied on the files and directory not empty on the parents.
+    /// Every fixture owns a temporary directory of its own, so such a tree is
+    /// litter on the disk rather than a hazard to a later run.
+    ///
     /// # Panics
     ///
     /// Panics if the object database cannot be walked or its permissions cannot
     /// be changed.
     #[must_use]
     pub fn seal_object_store(&self) -> SealedObjectStore {
-        let mut restore = Vec::new();
-        seal_directories_under(&self.dir.path().join(".git").join("objects"), &mut restore);
-        SealedObjectStore { restore }
+        let mut sealed = SealedObjectStore {
+            restore: Vec::new(),
+        };
+        seal_directories_under(
+            &self.dir.path().join(".git").join("objects"),
+            &mut sealed.restore,
+        );
+        sealed
     }
 }
 
@@ -291,6 +535,29 @@ impl Drop for SealedObjectStore {
     }
 }
 
+/// The directory name that makes the seal walk panic, so the guard's own unwind
+/// can be pinned.
+///
+/// The walk raises every I/O error as a panic, and a panic partway through it
+/// is the one failure the guard has to survive: the directories already
+/// stripped have to come back. Nothing a test can plant on disk makes the walk
+/// panic *after* a seal and before its own end. The walk seals a directory only
+/// once every directory under it is sealed, so the first failure a planted
+/// unreadable directory can raise arrives before anything is stripped, and
+/// which of two directories the walk meets first is the file system's choice
+/// rather than the test's.
+///
+/// A directory of this name is therefore the seam. It sits one level above a
+/// directory of its own, so the walk seals that one, meets this name on the way
+/// back up, and panics with exactly one directory stripped, in every order a
+/// file system can hand its entries back in.
+///
+/// The check exists in this crate's own test build alone, so no consumer's
+/// fixture carries it, and no object database git builds holds a directory of
+/// this name.
+#[cfg(all(unix, test))]
+const SEAL_PANIC_DIRECTORY: &str = "gitscratch-seal-panic";
+
 /// Strip the write bits from `path` and every directory beneath it, recording
 /// what each one had so the guard can put it back.
 #[cfg(unix)]
@@ -311,6 +578,16 @@ fn seal_directories_under(path: &Path, restore: &mut Vec<(PathBuf, std::fs::Perm
             seal_directories_under(&entry.path(), restore);
         }
     }
+
+    // The planted panic, and the seat it has to sit in: after the children of
+    // this directory are stripped, so the unwind has something to put back.
+    #[cfg(test)]
+    assert!(
+        !path.ends_with(SEAL_PANIC_DIRECTORY),
+        "the seal walk stops at the planted {}, which is how a panic partway \
+         through the walk is put under test",
+        path.display()
+    );
 
     let mut sealed = original.clone();
     sealed.set_mode(original.mode() & !0o222);
@@ -463,6 +740,222 @@ pub fn independent_branches_repo() -> TestRepo {
     repo
 }
 
+/// A conflict in a file named `日本語.txt` beside one named `readme.md`, on
+/// branches named `left-左` and `right-右`.
+///
+/// Three separate things go wrong with a non-ASCII name, and this one shape is
+/// built to expose all three at once rather than needing a fixture apiece.
+///
+/// **The name has to survive git.** Under git's default `core.quotePath`, a
+/// path outside ASCII comes back from `git diff --name-only` C-quoted and
+/// octal-escaped - `"\346\227\245\346\234\254\350\252\236.txt"` rather than
+/// `日本語.txt` - so a replay that takes git at its word goes looking for a file
+/// that does not exist and reports a name nobody typed.
+///
+/// **The hunk count has to survive it too**, which is why `日本語.txt` is
+/// contested in *two* regions while `readme.md` is contested in one. A
+/// conflicted file that cannot be read is floored at a single hunk, so a fixture
+/// whose real answer were also one would report the right number by accident and
+/// let an escaped name hide behind a correct total.
+///
+/// **The column has to line up.** `readme.md` is 9 bytes, 9 characters and 9
+/// terminal columns; `日本語.txt` is 13 bytes, 7 characters and 10 columns. The
+/// two names disagree about which is wider depending on which of the three
+/// measures you ask for, so a breakdown padded by anything except display width
+/// comes out visibly ragged - and, being a pair, they say so on one screen.
+///
+/// The branch names carry multi-byte characters for the same reason: a branch
+/// name is echoed back in the verdict, so it travels the same path a file name
+/// does, and mixing scripts within one name catches a truncation that a purely
+/// non-ASCII name would not.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn multi_byte_names_repo() -> TestRepo {
+    /// The one region `readme.md` is contested in.
+    const ASCII_LINE: usize = 15;
+    /// The two regions `日本語.txt` is contested in, far enough apart that
+    /// git's 3-line diff context cannot merge them into one conflict.
+    const WIDE_LINES: [usize; 2] = [5, 25];
+
+    let repo = TestRepo::init();
+    let base = numbered_lines(30);
+    repo.commit_files(&[("readme.md", &base), ("日本語.txt", &base)], "base");
+
+    // Both branches make the same three edits with different content, so every
+    // one of them collides and the two branches are otherwise symmetric.
+    for (branch, edit) in [("left-左", "左-edit"), ("right-右", "右-edit")] {
+        repo.checkout("main");
+        repo.branch(branch);
+
+        let mut wide = base.clone();
+        for line in WIDE_LINES {
+            wide = replace_line(&wide, line, edit);
+        }
+
+        repo.commit_files(
+            &[
+                ("readme.md", &replace_line(&base, ASCII_LINE, edit)),
+                ("日本語.txt", &wide),
+            ],
+            &format!("{branch} rewrites both files"),
+        );
+    }
+
+    repo.checkout("main");
+    repo
+}
+
+/// A conflict in five files whose names a line of git output cannot carry
+/// intact, beside a `plain.txt` that it can.
+///
+/// [`multi_byte_names_repo`] covers the one class `core.quotePath=false` fixes.
+/// These are the classes it does not, and they split into two mechanisms that a
+/// single fixture is cheaper to hold than two:
+///
+/// **Git quotes these whatever `core.quotePath` says.** `quote_c_style` escapes
+/// a double quote and a backslash independently of that setting - `quotePath`
+/// only governs bytes at or above `0x80` - so `back\slash.txt` comes back as
+/// `"back\\slash.txt"` and `quo"te.txt` as `"quo\"te.txt"`, wrapped in the
+/// quotes git added. Those names open no file on disk.
+///
+/// **A reader that trims kills the rest.** Nothing quotes a path that merely
+/// begins or ends with whitespace, so git hands the real name over and a
+/// whitespace-trimming reader is what destroys it. `\u{3000}wide.txt ` opens
+/// with an IDEOGRAPHIC SPACE, which Rust's Unicode-aware `str::trim` strips as
+/// readily as the ASCII spaces on ` lead.txt` and `trail.txt `.
+///
+/// Where each name lands in git's byte-sorted output is load-bearing, because a
+/// reader can trim per line, or trim the whole of stdout once, or both, and only
+/// the middle of the list survives the second. ` lead.txt` sorts first, so its
+/// leading space is the first byte of stdout; `\u{3000}wide.txt ` sorts last, so
+/// its trailing space is the last. `trail.txt ` sits between them, reachable
+/// only by a per-line trim. All three have to come back for the reader to be
+/// doing no trimming at all, which is the only thing that is correct.
+///
+/// Every file is contested in the *same two regions*, for the reason
+/// [`multi_byte_names_repo`] contests its wide name twice: a conflicted file
+/// that cannot be opened is floored at one hunk, so a one-region fixture would
+/// report the right number by accident and let a mangled name pass. Uniformity
+/// is the rest of it - the expected answer is "two hunks each", so the only
+/// thing a failure can be about is the name.
+///
+/// Unix-only. A name containing `"` or `\` is illegal on Windows, so the fixture
+/// could not be built there to be tested at all.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+#[cfg(unix)]
+pub fn awkward_names_repo() -> TestRepo {
+    /// The two regions every file is contested in, far enough apart that git's
+    /// 3-line diff context cannot merge them into one conflict.
+    const CONTESTED_LINES: [usize; 2] = [5, 25];
+    /// In git's byte-sorted order, which is what puts a leading space at the
+    /// very front of stdout and a trailing one at the very back.
+    const AWKWARD_NAMES: [&str; 6] = [
+        " lead.txt",
+        "back\\slash.txt",
+        "plain.txt",
+        "quo\"te.txt",
+        "trail.txt ",
+        "\u{3000}wide.txt ",
+    ];
+
+    let repo = TestRepo::init();
+    let base = numbered_lines(30);
+    let files: Vec<(&str, &str)> = AWKWARD_NAMES
+        .iter()
+        .map(|name| (*name, base.as_str()))
+        .collect();
+    repo.commit_files(&files, "base");
+
+    // Both branches rewrite both regions of every file with different content,
+    // so all six collide and the two branches are otherwise symmetric.
+    for (branch, edit) in [("left", "left-edit"), ("right", "right-edit")] {
+        repo.checkout("main");
+        repo.branch(branch);
+
+        let mut contested = base.clone();
+        for line in CONTESTED_LINES {
+            contested = replace_line(&contested, line, edit);
+        }
+
+        let files: Vec<(&str, &str)> = AWKWARD_NAMES
+            .iter()
+            .map(|name| (*name, contested.as_str()))
+            .collect();
+        repo.commit_files(&files, &format!("{branch} rewrites every file"));
+    }
+
+    repo.checkout("main");
+    repo
+}
+
+/// A conflict in `sub/nested/shared.txt` beside one in `shared.txt`, so a tool
+/// can be run from `sub/nested` — a committed subdirectory, two levels down.
+///
+/// [`Repo::open`] takes whichever directory a tool was run in, which for a
+/// developer is hardly ever the repository root, and every other fixture here is
+/// only ever opened at its own root. The two ways a subdirectory run goes wrong
+/// are both silent, and this shape is built so that each one shows up as a
+/// different wrong answer:
+///
+/// **A name can lose its prefix.** `sub/nested/shared.txt` is how git names the
+/// conflicted file, relative to the repository root, and that has to be what a
+/// breakdown prints no matter which directory the run started in. A reader that
+/// named paths relative to the cwd instead would print `shared.txt` — a real
+/// file, in the wrong place, indistinguishable from the root one at a glance.
+///
+/// **A file can vanish.** `shared.txt` conflicts *outside* the subdirectory the
+/// run started in, so anything that scoped git's answers to the cwd — a
+/// `diff --relative`, a pathspec of `.` — would drop it from the count entirely
+/// and report less work than there is. Both files conflict in the same single
+/// region, so the expected answer is one hunk each and the only thing a failure
+/// can be about is which files were seen and what they were called.
+///
+/// Two levels rather than one because a prefix is a path, not a name: a
+/// single-component subdirectory cannot distinguish a reader that keeps the whole
+/// prefix from one that keeps only its last component.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, the subdirectory not
+/// creatable, or a command failing.
+pub fn nested_conflict_repo() -> TestRepo {
+    const CONTESTED_LINE: usize = 15;
+    /// The conflicted file at the repository root, outside the subdirectory a
+    /// run starts in.
+    const ROOT_FILE: &str = "shared.txt";
+    /// The conflicted file inside it, named with the whole prefix git reports.
+    const NESTED_FILE: &str = "sub/nested/shared.txt";
+
+    let repo = TestRepo::init();
+    std::fs::create_dir_all(repo.path().join("sub").join("nested"))
+        .expect("create the fixture's nested directory");
+
+    let base = numbered_lines(30);
+    repo.commit_files(&[(ROOT_FILE, &base), (NESTED_FILE, &base)], "base");
+
+    // Both branches rewrite the same region of both files with different
+    // content, so each of them collides and the two branches are otherwise
+    // symmetric.
+    for (branch, edit) in [("left", "left-edit"), ("right", "right-edit")] {
+        repo.checkout("main");
+        repo.branch(branch);
+
+        let contested = replace_line(&base, CONTESTED_LINE, edit);
+        repo.commit_files(
+            &[(ROOT_FILE, &contested), (NESTED_FILE, &contested)],
+            &format!("{branch} rewrites both files"),
+        );
+    }
+
+    repo.checkout("main");
+    repo
+}
+
 /// A branch that modifies the file main deleted, so replaying `branch` onto
 /// `main` is a modify/delete conflict.
 ///
@@ -531,14 +1024,19 @@ pub fn branches_behind_main_repo() -> TestRepo {
 /// ` leading space.txt`, which git prints as it is but which any trimming of
 /// that line silently shortens.
 ///
-/// Both are here because a replay reads paths out of one git invocation and
-/// feeds them straight back into the next as pathspecs, and git does not dequote
-/// a pathspec — so a name that changed on the way out matches nothing on the way
-/// back in, and a commit whose work is nowhere in the new base looks like a
-/// commit that adds nothing to it. Neither name is plainly spelled,
-/// deliberately: one ordinary path in the same commit would come back matching,
-/// the probe would find *its* work missing and refuse on that alone, and the
-/// silence of the other two would never show.
+/// Both are here because a replay classifies a halt from the paths git prints,
+/// and a name it prints wrongly is a name the classification reasons about
+/// wrongly. The empty-commit probe used to feed those paths back to git as
+/// pathspecs, where a mangled spelling matched nothing and a commit whose work
+/// is nowhere in the new base read as a commit that adds nothing to it; it now
+/// intersects two path lists in Rust, so the two lists are mangled the same way
+/// and the intersection survives. What this fixture pins today is the whole
+/// answer, end to end: such a commit must never be called empty, and the names
+/// the refusal shows must be the names the developer gave.
+///
+/// Neither name is plainly spelled, deliberately: one ordinary path in the same
+/// commit comes back matching, the probe finds *its* work missing and refuses on
+/// that alone, and the silence of the other two never shows.
 ///
 /// # Panics
 ///
@@ -570,26 +1068,31 @@ pub fn branches_behind_main_with_quoted_and_space_led_paths_repo() -> TestRepo {
 /// quotes it nor leaves anything for a trim to eat — and that is the point. The
 /// mangling happens on the way back in, because a pathspec is not a path: a
 /// leading `:` is pathspec magic, and `:/` specifically means *from the top of
-/// the working tree*. Fed back as a pathspec the name therefore asks about the
-/// root `foo.txt` instead of the one the commit added, and `foo.txt` at the root
-/// is exactly what this fixture puts there — committed in the base, touched by
-/// neither side afterwards, and so identical in the replayed commit and the new
-/// base. A probe asking whether the commit's work is already in the new base
-/// gets an empty diff back, the honest answer about the *other* file, and reads
-/// it as yes.
+/// the working tree*. Handed back as a pathspec the name therefore asks about
+/// the root `foo.txt` instead of the one the commit added, and `foo.txt` at the
+/// root is exactly what this fixture puts there — committed in the base, touched
+/// by neither side afterwards, and so identical in the replayed commit and the
+/// new base. A probe built that way gets an empty diff back, the honest answer
+/// about the *other* file, and reads it as yes.
 ///
 /// That points the opposite way from the quoted names in
 /// [`branches_behind_main_with_quoted_and_space_led_paths_repo`], which is why
 /// it is worth a fixture of its own. A pathspec that matches nothing can only
 /// grow the set of paths a probe finds missing, and a bigger set only ever
 /// produces a refusal nobody needed; a pathspec that matches the *wrong* file
-/// can shrink that set to empty, which is a commit reclassified as adding
-/// nothing to the new base, skipped, and gone.
+/// shrinks that set to empty, which is a commit reclassified as adding nothing
+/// to the new base, skipped, and gone.
+///
+/// The empty-commit probe no longer builds a pathspec out of a name git printed,
+/// so the trap this shape was built for is disarmed at the source. The fixture
+/// stays because the answer it asks for stays: a commit that adds a file the new
+/// base has never seen is not an empty commit, whatever a name inside it reads
+/// as somewhere else.
 ///
 /// The branch's commit touches no plainly-spelled path at all, for the same
-/// reason that one does not: one ordinary file alongside would come back
-/// matching, the probe would find *its* work missing and refuse on that alone,
-/// and the magic name's silence would never show.
+/// reason that one does not: one ordinary file alongside comes back matching,
+/// the probe finds *its* work missing and refuses on that alone, and the magic
+/// name's silence never shows.
 ///
 /// # Panics
 ///
@@ -631,41 +1134,89 @@ pub fn branches_behind_main_with_a_pathspec_magic_path_repo() -> TestRepo {
     repo
 }
 
-/// [`conflicting_repo`]'s shape, moved into `café.txt` and stretched to two
-/// contested regions: both branches rewrite line 10 and line 22 of the same
-/// file, twelve lines apart so git's 3-line diff context cannot merge them into
-/// one hunk.
+/// [`branches_behind_main_repo`]'s shape with the branch's work moved into a
+/// submodule pointer, in a repository that sets `diff.ignoreSubmodules=all`.
 ///
-/// Two regions rather than one is the whole point. A conflicted file is counted
-/// by reading it back off disk by the name git reported, so a name git quoted on
-/// the way out names nothing on disk — and the count falls back to the one
-/// decision a file with no readable content still costs. One contested region
-/// would score one either way; two makes the fallback visible.
+/// A submodule is a `.gitmodules` entry beside a gitlink, and a commit that
+/// moves the submodule on changes the gitlink and nothing else. Git reports
+/// that path from `diff-tree`, which is plumbing, and hides it from `git diff`,
+/// which is porcelain and reads `diff.ignoreSubmodules`. So a probe that asks
+/// one command which paths the commit touched and the other command whether the
+/// new base holds them reads one tree under two sets of rules: the first
+/// command finds work, the second finds none, and a commit whose pointer is
+/// nowhere in the new base looks like a commit that adds nothing to it.
+///
+/// The setting lives in this fixture's own configuration rather than in the
+/// developer's `~/.gitconfig`, so the hazard is armed on every machine and on
+/// none of them by accident. A local key outranks a global one, so a developer
+/// who already sets it gets the same fixture as one who does not.
+///
+/// The bump commit touches the gitlink alone, deliberately. `.gitmodules` goes
+/// into the base commit with the pointer's first value, exactly as a real
+/// superproject records a submodule once and moves it afterwards - and a
+/// `.gitmodules` in the bump commit would be an ordinary file the porcelain
+/// reports whatever the setting says, so it would carry the refusal on its own
+/// and the pointer's silence would never show.
+///
+/// The two values the pointer takes are commits of this repository's own object
+/// database, made with `commit-tree` on an empty tree and referenced by nothing
+/// else. Git records a gitlink as an opaque commit id and never resolves it, so
+/// no second repository has to be cloned, kept alive, or reached over the file
+/// protocol - and a scratch worktree gets no submodule checked out in any case,
+/// which is the repository the probes actually run in.
 ///
 /// # Panics
 ///
 /// Panics if the repository cannot be built — git missing, or a command failing.
-pub fn two_region_conflict_in_a_quoted_path_repo() -> TestRepo {
-    const FIRST_CONTESTED_LINE: usize = 10;
-    const SECOND_CONTESTED_LINE: usize = 22;
-    const CONTESTED_FILE: &str = "café.txt";
+pub fn branches_behind_main_with_a_submodule_pointer_bump_repo() -> TestRepo {
+    /// Where the submodule sits in the superproject, named distinctly enough
+    /// that a test can look for it in a message.
+    const SUBMODULE_PATH: &str = "vendored";
+    /// The mode git records a gitlink under.
+    const GITLINK_MODE: &str = "160000";
 
     let repo = TestRepo::init();
-    let base = numbered_lines(30);
-    repo.commit_file(CONTESTED_FILE, &base, "base");
+    // The hostile setting, armed here rather than inherited, so this fixture
+    // reproduces the hazard on a machine whose developer has never heard of it.
+    repo.git(&["config", "diff.ignoreSubmodules", "all"]);
 
-    repo.branch("left");
-    let left = replace_line(&base, FIRST_CONTESTED_LINE, "left-edit-first");
-    let left = replace_line(&left, SECOND_CONTESTED_LINE, "left-edit-second");
-    repo.commit_file(CONTESTED_FILE, &left, "left work");
+    // An empty tree, and two commits on it to stand for the submodule's own
+    // history. The messages differ, so the two ids differ.
+    let empty_tree = repo.git_with_stdin(&["mktree"], b"");
+    let before = repo.git(&["commit-tree", &empty_tree, "-m", "the submodule, before"]);
+    let after = repo.git(&["commit-tree", &empty_tree, "-m", "the submodule, after"]);
+
+    repo.write_file("shared.txt", &numbered_lines(30));
+    repo.write_file(
+        ".gitmodules",
+        &format!(
+            "[submodule \"{SUBMODULE_PATH}\"]\n\tpath = {SUBMODULE_PATH}\n\turl = \
+             ../{SUBMODULE_PATH}\n"
+        ),
+    );
+    repo.git(&["add", "shared.txt", ".gitmodules"]);
+    // `git add` cannot stage a gitlink for a submodule that was never cloned,
+    // so the index entry is written directly. Nothing has to exist on disk at
+    // `SUBMODULE_PATH` for that, and nothing does.
+    repo.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("{GITLINK_MODE},{before},{SUBMODULE_PATH}"),
+    ]);
+    repo.git(&["commit", "-q", "-m", "base"]);
+
+    repo.branch("branch");
+    repo.git(&[
+        "update-index",
+        "--cacheinfo",
+        &format!("{GITLINK_MODE},{after},{SUBMODULE_PATH}"),
+    ]);
+    repo.git(&["commit", "-q", "-m", "branch moves the submodule on"]);
 
     repo.checkout("main");
-    repo.branch("right");
-    let right = replace_line(&base, FIRST_CONTESTED_LINE, "right-edit-first");
-    let right = replace_line(&right, SECOND_CONTESTED_LINE, "right-edit-second");
-    repo.commit_file(CONTESTED_FILE, &right, "right work");
+    repo.commit_file("main.txt", "main moved on\n", "main moves ahead");
 
-    repo.checkout("main");
     repo
 }
 
@@ -704,6 +1255,47 @@ pub fn commit_emptied_by_main_repo() -> TestRepo {
     repo.commit_file("x.txt", "x2\n", "main steps x to x2");
     repo.commit_file("x.txt", "x3\n", "main steps x to x3");
 
+    repo
+}
+
+/// A branch that shares no history at all with `main`: `unrelated` is a root
+/// commit of its own, and replaying it onto `main` replays that root commit.
+///
+/// A root commit is the one shape the empty-commit probe reads through a flag
+/// rather than through a path. `git diff-tree` prints no path at all for a commit
+/// with no parent unless it is asked for `--root`, so a probe that leaves the
+/// flag off finds an empty touched set, reads the halt as a commit that changes
+/// nothing, and `rebase --skip` drops the whole history the replay was asked to
+/// measure.
+///
+/// The two histories name their files differently — `main.txt` and
+/// `unrelated.txt` — so the pick applies cleanly rather than colliding. That is
+/// what puts the halt on the probe rather than on a conflict: seal the object
+/// database with [`TestRepo::seal_object_store`] and git rolls the index back,
+/// leaving the rebase halted with nothing unmerged and nothing dirty, exactly as
+/// [`branches_behind_main_repo`] does.
+///
+/// `git checkout --orphan` is what builds the second history. It starts a branch
+/// with no parent and keeps the index and the working tree of the branch it left,
+/// so `git rm -r -f .` empties both and the commit that follows carries a tree of
+/// its own.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn unrelated_histories_repo() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit_file("main.txt", &numbered_lines(30), "base");
+
+    repo.git(&["checkout", "-q", "--orphan", "unrelated"]);
+    repo.git(&["rm", "-r", "-q", "-f", "."]);
+    repo.commit_file(
+        "unrelated.txt",
+        "the other history's work\n",
+        "the unrelated history's own work",
+    );
+
+    repo.checkout("main");
     repo
 }
 
@@ -936,15 +1528,19 @@ impl DetachedGitDirRepo {
     /// Run git in `cwd`, panicking on failure.
     fn run(&self, cwd: &Path, args: &[&str]) -> String {
         let mut command = Command::new("git");
-        // The same immunity `TestRepo::git_in` takes, for the same reason. A
-        // fixture that inherits a redirected `GIT_DIR` or `GIT_INDEX_FILE`
-        // builds its repository somewhere else. This suite runs under a
-        // pre-commit hook that exports both.
-        crate::git::shed_inherited_git_environment(&mut command);
-
         let output = command
             .args(args)
             .current_dir(cwd)
+            // The same immunity `TestRepo::git_in` takes, in the same words and
+            // for the same reason: a fixture that inherits a redirected
+            // `GIT_DIR` or `GIT_INDEX_FILE` builds its repository somewhere
+            // else. This suite runs under a pre-commit hook that exports both.
+            // `--git-dir` and `--work-tree` on this command line outrank the
+            // first two variables, and nothing on it outranks `GIT_INDEX_FILE`,
+            // so the sweep is the whole of the guard against this fixture's own
+            // `git add` landing in the developer's index. `tests/isolation.rs`
+            // reaches this spawn.
+            .without_inherited_git_environment()
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
 
@@ -1105,11 +1701,313 @@ fn separates_a_path(character: char) -> bool {
     character.is_whitespace() || TRIMMED_PUNCTUATION.contains(character)
 }
 
+/// Printed by a child half that ran its own body to the end, and required by
+/// [`run_child_half`] before it calls the run a pass.
+///
+/// A zero exit is not evidence that anything ran, and neither is libtest's
+/// count. libtest exits zero when a filter matches no test, and it counts a
+/// child that ran some *other* test exactly as it counts the right one — one
+/// test, passed. A stale filter therefore hands the parent the exit status and
+/// the count of a good run. Only a child that reached the end of its own body
+/// prints this line, so the parent reads proof of the work it asked for instead
+/// of absence of failure.
+///
+/// The value is a token no libtest output holds, because the parent looks for
+/// it in the whole of that output. A sentinel that a test name or a progress
+/// line can spell reports the work of libtest as the work of the child.
+pub const CHILD_RAN: &str = "GITSCRATCH_CHILD_HALF_RAN";
+
+/// Say that this child half ran its own body.
+///
+/// Call it at the end of a child branch, after its assertions hold. The line
+/// goes to standard output, which [`run_child_half`] reads: `--nocapture` is
+/// already on the child's command line, so no other plumbing is needed.
+pub fn child_ran() {
+    println!("{CHILD_RAN}");
+}
+
+/// Re-execute this test binary on the one test `filter` names, under an
+/// environment `configure` sets, and report what the child wrote when the run
+/// failed.
+///
+/// A test needing an environment of its own cannot set it in place. An
+/// environment is process-wide, `std::env::set_var` is `unsafe` for that
+/// reason, and Rust runs a binary's tests as threads of one process — so a
+/// mutation reaches every sibling test and every concurrent run of the suite.
+/// The way that stays parallel-safe is a whole child process whose environment
+/// says what the test needs, which is also the leak shape verbatim for the
+/// suites that pin a leaked git environment. Anything the child needs beyond
+/// the filter goes in `configure`: the marker variable its own branch reads,
+/// and the variables under test.
+///
+/// A run counts only when the child exits zero **and** prints
+/// [`CHILD_RAN`]. That second half is the whole point of one helper rather than
+/// a copy per suite: `filter` is a string, nothing ties it to the test it
+/// names, and both ways of pointing it at nothing useful are runs libtest calls
+/// a success. It matches no test, which libtest reports as zero failures. Or it
+/// matches a *neighbouring* test, which passes and counts as one test passed.
+/// See `a_child_half_that_matched_no_test_is_a_failure_not_a_pass` and
+/// `a_child_half_that_ran_another_test_is_not_taken_for_the_one_that_was_named`
+/// in this module.
+///
+/// # Errors
+///
+/// Returns the child's own output as the message when the child exits non-zero,
+/// and when the child prints no [`CHILD_RAN`] line.
+///
+/// # Panics
+///
+/// Panics if the path of the running test binary cannot be read, or if the
+/// child cannot be spawned.
+pub fn run_child_half(filter: &str, configure: impl FnOnce(&mut Command)) -> Result<(), String> {
+    let mut child = Command::new(std::env::current_exe().expect("path of the running test binary"));
+    child.args([filter, "--exact", "--nocapture"]);
+    configure(&mut child);
+
+    let output = child.output().expect("re-run this test binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        return Err(format!("the child half failed:\n{stdout}{stderr}"));
+    }
+
+    if !stdout.contains(CHILD_RAN) {
+        return Err(format!(
+            "`{filter}` did not run the test it names, so this guard checked nothing. The child \
+             exited 0 and printed no `{CHILD_RAN}` line. libtest calls a filter that matched no \
+             test a success, and it counts a child that ran some other test exactly as it counts \
+             this one, so neither the exit status nor the count tells those runs apart. The child \
+             prints `{CHILD_RAN}` when it reaches the end of its body. Point the filter back at \
+             the test it names.\n{stdout}{stderr}"
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
 
-    use super::{ancestor_repository, canonical, path_at_or_above, DetachedGitDirRepo, TestRepo};
+    use super::{
+        ancestor_repository, canonical, child_ran, path_at_or_above, run_child_half,
+        DetachedGitDirRepo, TestRepo, FIXTURE_USER_EMAIL, FIXTURE_USER_NAME,
+    };
+
+    /// Marks the re-executed child half of
+    /// [`a_fixture_commits_under_its_own_identity_in_a_hook_environment`].
+    const CHILD_MARKER: &str = "GITSCRATCH_FIXTURE_IDENTITY_CHILD";
+
+    /// libtest's exact filter for the one test the child half runs. The
+    /// compiler never checks this string against the test it names, so
+    /// [`run_child_half`] requires the child to say that it ran rather than
+    /// trusting this constant to stay current.
+    const IDENTITY_TEST_PATH: &str =
+        "testing::tests::a_fixture_commits_under_its_own_identity_in_a_hook_environment";
+
+    /// A timestamp no run of this suite can produce on its own, so a commit
+    /// carrying it can only have taken it from the environment.
+    ///
+    /// Written in git's raw `<epoch> <timezone>` form, which `--date=raw`
+    /// prints back byte for byte. Every other spelling git accepts here it
+    /// also reformats on the way out — an ISO date set as `+00:00` comes back
+    /// as `Z` — so an assertion against one of those could only ever fail to
+    /// match, which is a test that passes for the wrong reason.
+    const LEAKED_DATE: &str = "1000000000 +0000";
+
+    /// Everything git tells a hook about who is committing, carrying values
+    /// that stand in for a consuming tool's own identity.
+    ///
+    /// All six, not just the four that name a person. A fixture builder that
+    /// scrubbed only the names would still let every commit it makes share one
+    /// timestamp, which is how a fixture that depends on commit order stops
+    /// meaning what it says.
+    const HOOK_ENVIRONMENT: [(&str, &str); 6] = [
+        ("GIT_AUTHOR_NAME", "Consuming Tool"),
+        ("GIT_AUTHOR_EMAIL", "consumer@example.invalid"),
+        ("GIT_AUTHOR_DATE", LEAKED_DATE),
+        ("GIT_COMMITTER_NAME", "Consuming Tool"),
+        ("GIT_COMMITTER_EMAIL", "consumer@example.invalid"),
+        ("GIT_COMMITTER_DATE", LEAKED_DATE),
+    ];
+
+    /// Build a fixture, commit into it, and assert the commit carries the
+    /// fixture's own identity rather than whatever the environment holds.
+    ///
+    /// Read back through `git log` rather than `git var`, because the question
+    /// here is what a fixture commit actually ends up stamped with — the
+    /// identity has to survive [`TestRepo::init`]'s `git config` *and* the
+    /// commit that follows it.
+    fn assert_fixture_identity() {
+        let repo = TestRepo::init();
+        repo.commit_file("seed.txt", "seed\n", "seed");
+
+        let stamped = repo.git(&[
+            "log",
+            "-1",
+            "--date=raw",
+            "--format=%an|%ae|%cn|%ce|%ad|%cd",
+        ]);
+
+        let expected = format!(
+            "{FIXTURE_USER_NAME}|{FIXTURE_USER_EMAIL}|{FIXTURE_USER_NAME}|{FIXTURE_USER_EMAIL}|"
+        );
+        assert!(
+            stamped.starts_with(&expected),
+            "a fixture commit must be authored and committed by the fixture, not \
+             by whichever tool is driving the suite.\n  \
+             expected: {expected}...\n  \
+             got:      {stamped}\n\
+             An identity variable outranks every config source, so the `git config \
+             user.name` TestRepo::init sets loses to a GIT_AUTHOR_NAME the process \
+             inherited — and git exports all six of them into every hook it runs."
+        );
+        assert!(
+            !stamped.contains(LEAKED_DATE),
+            "a fixture commit must be timestamped when it was made, not when an \
+             inherited GIT_AUTHOR_DATE and GIT_COMMITTER_DATE say: {stamped}"
+        );
+    }
+
+    /// [`TestRepo::git`] raises a failed git command as a panic, which is the
+    /// right answer while a fixture is being built and the wrong one for a
+    /// control — a command run to demonstrate that some hazard is armed, and
+    /// which therefore has to be *allowed* to fail so that its failure can be
+    /// read. [`TestRepo::try_git`] is that spawn, so the permission a control
+    /// needs is available without reaching around the fixture for a raw
+    /// `Command` and losing the environment scrub with it.
+    ///
+    /// A repository with no commits, because an unborn `HEAD` is a failure git
+    /// produces identically everywhere and with nothing else set up.
+    #[test]
+    fn try_git_hands_back_a_failure_instead_of_raising_it() {
+        let repo = TestRepo::init();
+
+        let refused = repo.try_git(&["rev-parse", "--verify", "HEAD"], &[]);
+
+        assert!(
+            !refused.status.success(),
+            "an unborn HEAD does not resolve, so this command had to fail:\n{}",
+            String::from_utf8_lossy(&refused.stdout)
+        );
+        assert!(
+            !refused.stderr.is_empty(),
+            "the caller must get git's own account of the failure back"
+        );
+    }
+
+    /// A consuming tool invoked from a git hook inherits `GIT_AUTHOR_NAME` and
+    /// its five siblings, and those variables outrank the `user.name` this
+    /// module's fixture builder configures. `.husky/pre-commit` in this
+    /// repository is such a hook, and it runs `cargo test --workspace`, so
+    /// this is the environment a hand-typed commit hands the whole suite.
+    ///
+    /// The environment belongs to a re-executed child of this test binary
+    /// rather than to this process. `std::env::set_var` would leak into every
+    /// other test in the binary, and a child process keeps concurrent runs of
+    /// this suite isolated from each other.
+    #[test]
+    fn a_fixture_commits_under_its_own_identity_in_a_hook_environment() {
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            assert_fixture_identity();
+            // Reached only when the assertions above held, and read by the
+            // parent as the one proof that this branch ran at all.
+            child_ran();
+            return;
+        }
+
+        let outcome = run_child_half(IDENTITY_TEST_PATH, |child| {
+            child.env(CHILD_MARKER, "1");
+            for (name, value) in HOOK_ENVIRONMENT {
+                child.env(name, value);
+            }
+        });
+
+        if let Err(report) = outcome {
+            panic!("a fixture commit did not survive a hook environment:\n{report}");
+        }
+    }
+
+    /// A libtest filter naming a test this file does not define, which is what
+    /// a renamed test looks like from the parent's side.
+    const UNMATCHED_TEST_PATH: &str = "testing::tests::no_test_in_this_file_carries_this_name";
+
+    /// A filter is a string, and nothing ties a string to the test it names.
+    /// Rename the test, the `tests` module or the `testing` module and the
+    /// filter stays as it was, so the child matches nothing — and libtest exits
+    /// 0 when a filter matches nothing. A parent that reads the exit status
+    /// alone therefore calls the rename a pass, and every guard built on
+    /// [`run_child_half`] checks nothing from that commit on, in silence.
+    ///
+    /// So the child runner has to refuse a child that ran no test, and this
+    /// pins that it does. The rename that breaks a filter is the rename that
+    /// hides the breakage, which is why the refusal cannot live in the filter
+    /// constants themselves.
+    #[test]
+    fn a_child_half_that_matched_no_test_is_a_failure_not_a_pass() {
+        let outcome = run_child_half(UNMATCHED_TEST_PATH, |_| {});
+
+        let report = outcome.expect_err(
+            "a child that matched no test must be a failure: libtest exits 0 on an empty filter, \
+             so accepting that exit means a renamed test reports a pass while nothing runs",
+        );
+        assert!(
+            report.contains(UNMATCHED_TEST_PATH),
+            "the refusal has to name the filter that matched nothing, because the filter is the \
+             thing that went stale: {report}"
+        );
+        assert!(
+            report.contains("did not run the test it names"),
+            "the refusal has to say what went wrong - a child that ran nothing, not a child that \
+             failed - or a reader repairs the wrong half: {report}"
+        );
+    }
+
+    /// A test of this file that no child half names, so a run of it stands for
+    /// a filter pointed at the wrong test.
+    ///
+    /// It runs a git command of its own and returns, and it spawns no child, so
+    /// the child that runs it costs one repository and stops there.
+    const DECOY_TEST_PATH: &str =
+        "testing::tests::try_git_hands_back_a_failure_instead_of_raising_it";
+
+    /// A filter is a string, and nothing ties a string to the test it names.
+    /// A rename that leaves a filter pointed at a *neighbouring* test — the
+    /// copied constant, the renamed function, the test split in two — hands the
+    /// parent a child that ran, passed, and never touched the assertions the
+    /// parent is reading the run for.
+    ///
+    /// libtest's own count cannot tell those two runs apart, because both of
+    /// them are one test passing. Only the child can: a line it prints from the
+    /// end of its own body is proof of *which* work was done, where a count is
+    /// proof that some work was done.
+    ///
+    /// So this pins that the child runner refuses a child that ran another
+    /// test. The rename that breaks a filter is the rename that hides the
+    /// breakage, which is why the refusal cannot live in the filter constants
+    /// themselves.
+    #[test]
+    fn a_child_half_that_ran_another_test_is_not_taken_for_the_one_that_was_named() {
+        let outcome = run_child_half(DECOY_TEST_PATH, |_| {});
+
+        let report = outcome.expect_err(
+            "a child that ran some other test must be a failure: it passes, and libtest counts \
+             it exactly as it counts the test that was meant to run, so accepting that count \
+             means a filter pointed at a neighbour reports a pass while the assertions the \
+             parent needs never run",
+        );
+        assert!(
+            report.contains(DECOY_TEST_PATH),
+            "the refusal has to name the filter that ran the wrong test, because the filter is \
+             the thing that went stale: {report}"
+        );
+        assert!(
+            report.contains("did not run the test it names"),
+            "the refusal has to say what went wrong - a child that ran another test, not a child \
+             that failed - or a reader repairs the wrong half: {report}"
+        );
+    }
 
     /// The name of the planted directory that holds a space.
     const SPACED_DIRECTORY: &str = "directory with a space";
@@ -1117,24 +2015,6 @@ mod tests {
     /// The work tree of the plant that holds a space, one level under it.
     const SPACED_WORK_TREE: &str = "home";
 
-    /// Prove the path check can fail, before a clean answer from it is trusted.
-    ///
-    /// Three tools rest on this one function - `gitnuke`, `nodenuke` and
-    /// `repotidy` each assert that it answers `None` for the output of a run -
-    /// and a matcher that never matches answers `None` for every input. A guard
-    /// that reports clean for the wrong reason is the defect those three files
-    /// exist to stop, so the check gets the same treatment it gives the tools.
-    ///
-    /// Five plants: the work tree, the directory above it, the same work tree
-    /// inside quotation marks and before a comma, a directory whose name holds
-    /// a space, and the git directory, which the nested shape keeps under the
-    /// work tree. The first four must match and the last one must not.
-    ///
-    /// The plant that holds a space carries a work tree of its own, because
-    /// every directory above the work tree of the fixture has a name of one
-    /// word. It is the parent of that second work tree, so the check must flag
-    /// it. A scan of white-space-separated tokens reads the first word of that
-    /// name alone and finds nothing.
     /// The name of the directory the ancestor check runs from, one level under
     /// the repository that holds it.
     const DIRECTORY_INSIDE_A_REPOSITORY: &str = "inside";
@@ -1179,6 +2059,24 @@ mod tests {
         );
     }
 
+    /// Prove the path check can fail, before a clean answer from it is trusted.
+    ///
+    /// Three tools rest on this one function - `gitnuke`, `nodenuke` and
+    /// `repotidy` each assert that it answers `None` for the output of a run -
+    /// and a matcher that never matches answers `None` for every input. A guard
+    /// that reports clean for the wrong reason is the defect those three files
+    /// exist to stop, so the check gets the same treatment it gives the tools.
+    ///
+    /// Five plants: the work tree, the directory above it, the same work tree
+    /// inside quotation marks and before a comma, a directory whose name holds
+    /// a space, and the git directory, which the nested shape keeps under the
+    /// work tree. The first four must match and the last one must not.
+    ///
+    /// The plant that holds a space carries a work tree of its own, because
+    /// every directory above the work tree of the fixture has a name of one
+    /// word. It is the parent of that second work tree, so the check must flag
+    /// it. A scan of white-space-separated tokens reads the first word of that
+    /// name alone and finds nothing.
     #[test]
     fn the_path_check_flags_the_work_tree_and_the_directory_above_it() {
         let repo = DetachedGitDirRepo::nested();
@@ -1222,6 +2120,120 @@ mod tests {
             ),
             None,
             "the check must pass a directory under the work tree"
+        );
+    }
+
+    /// The directory the walk strips before the planted panic stops it. It sits
+    /// under [`super::SEAL_PANIC_DIRECTORY`], which is what makes the order the
+    /// file system hands its entries back in irrelevant.
+    #[cfg(unix)]
+    const SEALED_BEFORE_THE_PANIC: &str = "stripped-first";
+
+    /// The owner's write bit, the one bit the seal takes off a directory.
+    #[cfg(unix)]
+    const OWNER_WRITE: u32 = 0o200;
+
+    /// Every directory at or under `path`, with the mode it carries now.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a directory cannot be listed or a mode cannot be read.
+    #[cfg(unix)]
+    fn directory_modes(path: &std::path::Path) -> Vec<(std::path::PathBuf, u32)> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mode = std::fs::metadata(path)
+            .unwrap_or_else(|e| panic!("read permissions of {}: {e}", path.display()))
+            .permissions()
+            .mode();
+        let mut modes = vec![(path.to_path_buf(), mode)];
+
+        for entry in std::fs::read_dir(path)
+            .unwrap_or_else(|e| panic!("list {}: {e}", path.display()))
+            .flatten()
+        {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                modes.extend(directory_modes(&entry.path()));
+            }
+        }
+
+        modes
+    }
+
+    /// Put the owner's write bit back on `path` and every directory beneath it.
+    ///
+    /// The test repairs the tree itself rather than leaving the repair to the
+    /// guard, because whether the guard repaired it is the thing under test. A
+    /// tree that keeps its stripped write bits stops its own `TempDir` from
+    /// deleting itself, and the litter that leaves needs a `chmod -R u+w` by
+    /// hand.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a mode cannot be read or set.
+    #[cfg(unix)]
+    fn unseal_directories_under(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for (directory, mode) in directory_modes(path) {
+            let mut permissions = std::fs::metadata(&directory)
+                .unwrap_or_else(|e| panic!("read permissions of {}: {e}", directory.display()))
+                .permissions();
+            permissions.set_mode(mode | OWNER_WRITE);
+            std::fs::set_permissions(&directory, permissions)
+                .unwrap_or_else(|e| panic!("unseal {}: {e}", directory.display()));
+        }
+    }
+
+    /// The seal walk raises every I/O error as a panic, and the guard that puts
+    /// the modes back is what makes the fixture's own temporary directory
+    /// deletable again.
+    ///
+    /// So the guard has to be alive while the walk runs. Built after the walk
+    /// returns, it is never built at all when the walk panics partway: the
+    /// directories stripped up to that point keep their modes, `TempDir` cannot
+    /// delete the tree it owns, and the litter it leaves is a tree `rm -rf`
+    /// refuses — permission denied on the files, directory not empty on the
+    /// parents — until somebody runs `chmod -R u+w` on it by hand.
+    ///
+    /// The panic is planted rather than provoked, because nothing a test can
+    /// put on disk makes the walk fail *after* it has stripped something. See
+    /// [`super::SEAL_PANIC_DIRECTORY`].
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_inside_the_seal_walk_puts_back_the_directories_it_already_stripped() {
+        let repo = TestRepo::init();
+        repo.commit_file("seed.txt", "seed\n", "seed");
+
+        let objects = repo.path().join(".git").join("objects");
+        let stripped_first = objects
+            .join(super::SEAL_PANIC_DIRECTORY)
+            .join(SEALED_BEFORE_THE_PANIC);
+        std::fs::create_dir_all(&stripped_first)
+            .expect("plant the directory the walk strips before it panics");
+
+        let outcome = std::panic::catch_unwind(|| drop(repo.seal_object_store()));
+
+        // Read before the repair, and repaired before the assertions, so a
+        // failing run leaves no tree behind that the next developer has to
+        // chmod their way out of.
+        let modes = directory_modes(&objects);
+        unseal_directories_under(&objects);
+
+        outcome.expect_err(
+            "the planted directory has to stop the walk, or this test watches an unwind that \
+             never happened and reports that the guard survived it",
+        );
+        let held: Vec<String> = modes
+            .iter()
+            .filter(|(_, mode)| mode & OWNER_WRITE == 0)
+            .map(|(directory, mode)| format!("{} ({mode:o})", directory.display()))
+            .collect();
+        assert!(
+            held.is_empty(),
+            "a panic inside the seal walk has to unwind through a live guard, so every directory \
+             it had already stripped comes back writable. These kept the mode the walk gave \
+             them: {held:?}"
         );
     }
 }

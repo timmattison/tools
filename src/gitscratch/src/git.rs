@@ -5,9 +5,16 @@
 //! through [`Git`], which pins the configuration that makes simulation
 //! non-destructive — most importantly `rebase.updateRefs=false`, which would
 //! otherwise move the very branch refs being simulated.
+//!
+//! The other half of "against the right repository" is the *environment*, which
+//! [`NoInheritedGitEnvironment`] strips, because a git invocation obeys it
+//! before it obeys the directory it was pointed at. The same sweep takes the
+//! rest of what a hook hands its children — who is committing, and when —
+//! because an environment variable outranks every config source, so the
+//! identity pinned here only holds once they are gone.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
 
 use anyhow::{Context, Result};
 
@@ -18,28 +25,31 @@ const HARNESS_NAME: &str = "gitscratch";
 const HARNESS_EMAIL: &str = "gitscratch@localhost";
 
 /// The prefix that makes a variable git's, and therefore one
-/// [`shed_inherited_git_environment`] removes.
+/// [`NoInheritedGitEnvironment`] removes.
 const GIT_ENVIRONMENT_PREFIX: &str = "GIT_";
 
-/// Detach `command` from whatever git environment this process inherited.
+/// The key that says where git looks a hook up.
 ///
-/// Every git invocation this crate makes goes through here, the runner's and the
-/// test fixtures' alike: a fixture that inherits a redirected index cannot even
-/// build the repository the runner is supposed to replay, so both need the same
-/// immunity and neither should be describing the danger in its own words.
+/// Spelled once because [`Git::safety_config`] pins it and the README inventory
+/// check reads it back: the value is computed per run, so the key alone is the
+/// whole of what a document can quote, and two spellings that drifted apart
+/// would leave that check asking about a key nothing pins.
+const HOOKS_PATH_KEY: &str = "core.hooksPath";
+
+/// Spawn a command that takes its repository, and its identity, from nothing it
+/// inherited.
 ///
 /// **The rule is the `GIT_` prefix, and never a list of names.** A list strips
 /// nothing new the day git adds a variable, and from then on it returns the same
-/// clean-looking answer as a list that works. This function was a fifteen-name
-/// list once, and `GIT_CONFIG_PARAMETERS` walked straight through it — a
-/// variable git exports to every hook, which injects arbitrary configuration
-/// (`user.email`, `core.bare`, `core.hooksPath`) into every git this crate
-/// spawns. It is not a location variable, so no amount of adding location names
-/// would have caught it. Enumerating [`std::env::vars_os`] sweeps whatever git
-/// invents next without anyone editing this file. Pinned by
-/// `tests/inherited-environment.rs`.
+/// clean-looking answer as a list that works. This scrub was a fifteen-name list
+/// once, and `GIT_CONFIG_PARAMETERS` walked straight through it — a variable git
+/// exports to every hook, which injects arbitrary configuration (`user.email`,
+/// `core.bare`, `core.hooksPath`) into every git this crate spawns. It is not a
+/// location variable, so no amount of adding location names would have caught
+/// it. Enumerating [`std::env::vars_os`] sweeps whatever git invents next
+/// without anyone editing this file. Pinned by `tests/inherited-environment.rs`.
 ///
-/// Three families the old list named are worth keeping in mind, because the
+/// Three families the old lists named are worth keeping in mind, because the
 /// prefix now covers all of them. The location variables — `GIT_DIR`,
 /// `GIT_WORK_TREE`, `GIT_INDEX_FILE` and their kin — aim git at a repository
 /// other than the one the runner is rooted in, and git hands several of them to
@@ -47,22 +57,64 @@ const GIT_ENVIRONMENT_PREFIX: &str = "GIT_";
 /// whatever directory each command runs in. The attribution variables —
 /// `GIT_AUTHOR_NAME` and its five siblings — are read in preference to `-c`
 /// *and* to `git config`, so leaving them in place re-attributes anything this
-/// crate commits. The configuration variables — `GIT_CONFIG_PARAMETERS`,
-/// `GIT_CONFIG_COUNT`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` — hand the
-/// caller a way to set any key at all.
+/// crate commits, and the two `DATE` variables are the quieter half: left in
+/// place, every commit a run makes carries one identical timestamp. The
+/// configuration variables — `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`,
+/// `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` — hand the caller a way to set any
+/// key at all.
 ///
 /// Removing `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` costs nothing, because
 /// removing a variable is not the same as pinning it to `/dev/null`: with them
 /// gone git falls back to the host's `~/.gitconfig` and `/etc/gitconfig` exactly
 /// as it does in a normal shell.
 ///
-/// Keys are compared through [`std::ffi::OsStr::to_string_lossy`]: lossy
-/// conversion replaces invalid bytes with U+FFFD, so it can never manufacture a
-/// `GIT_` prefix out of bytes that did not spell one.
+/// One trait rather than one per family, because the prefix cannot tell the
+/// families apart, and any split back into halves is a list again. A call site
+/// that asked for the location half alone would be asking for the shape this
+/// crate stopped trusting.
 ///
-/// A caller that wants one of these variables set does so *after* calling this,
-/// and wins — which is how [`Git::command`] pins `GIT_EDITOR` and the harness
-/// identity on top of a swept command.
+/// Public, and an extension trait rather than a private helper, because the
+/// commands that need it are not all git: a consumer's test suite spawning its
+/// own binary inherits exactly the same environment, and a second copy of this
+/// rule living in a test file is the drift this exists to prevent.
+pub trait NoInheritedGitEnvironment {
+    /// Remove every `GIT_`-prefixed variable from the environment this command
+    /// will be spawned with.
+    ///
+    /// A no-op in normal use — nothing sets these outside a hook or a replay —
+    /// which is precisely why it has to be unconditional. The one run where it
+    /// matters is the one nobody is watching.
+    ///
+    /// A caller that wants one of these variables set — or wants it gone
+    /// whatever this process holds — does so *after* calling this, and wins.
+    /// That is how `Git::command` pins `GIT_EDITOR` and the four identity
+    /// names on top of a swept command, and takes the two identity dates off it
+    /// again: this sweep removes only what the process carries, so a restated
+    /// removal is what makes the second guard hold on its own.
+    ///
+    /// Keys are compared through [`std::ffi::OsStr::to_string_lossy`]: lossy
+    /// conversion replaces invalid bytes with U+FFFD, so it can never
+    /// manufacture a `GIT_` prefix out of bytes that did not spell one.
+    fn without_inherited_git_environment(&mut self) -> &mut Self;
+}
+
+impl NoInheritedGitEnvironment for Command {
+    fn without_inherited_git_environment(&mut self) -> &mut Self {
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with(GIT_ENVIRONMENT_PREFIX) {
+                self.env_remove(&key);
+            }
+        }
+
+        self
+    }
+}
+
+/// Detach `command` from every part of the git environment this process
+/// inherited: the repository it names and the identity it carries, in one call.
+///
+/// The free-function spelling of [`NoInheritedGitEnvironment`], for a call site
+/// that holds a `&mut Command` rather than a builder chain.
 ///
 /// Public because the danger is not this crate's alone. Anything in this
 /// repository that spawns git - a tool that adds a worktree, a test that builds
@@ -70,22 +122,16 @@ const GIT_ENVIRONMENT_PREFIX: &str = "GIT_";
 /// the rule for what to shed is worth keeping in one reusable place rather than
 /// copied into each of them to drift.
 ///
-/// That is an offer, not a guarantee. Most of the repository's git spawns still
-/// build their own command and inherit whatever this process was handed, and
-/// nothing - no lint, no type, no guard - obliges them to call this. Immunity
-/// holds where this is called and nowhere else, so anyone who wants it
-/// repository-wide has to enforce it first.
+/// That is an offer, not a guarantee. Nothing - no lint, no type, no guard -
+/// obliges a git spawn in this repository to call this, so immunity holds where
+/// it is called and nowhere else.
 ///
 /// ```no_run
 /// let mut command = std::process::Command::new("git");
 /// gitscratch::shed_inherited_git_environment(&mut command);
 /// ```
 pub fn shed_inherited_git_environment(command: &mut Command) {
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with(GIT_ENVIRONMENT_PREFIX) {
-            command.env_remove(&key);
-        }
-    }
+    command.without_inherited_git_environment();
 }
 
 /// The outcome of one git invocation.
@@ -102,18 +148,53 @@ pub struct Git {
 }
 
 impl Git {
-    /// Run git in `cwd`, with hooks redirected to the empty `hooks_path`.
+    /// Run git in `cwd`, with hook lookups redirected to `hooks_path`.
     ///
     /// Crate-private on purpose. A caller outside this crate could otherwise
     /// build a runner rooted in the developer's real repository, with a
-    /// `hooks_path` that redirects nothing — an empty one still resolves hook
-    /// lookups, relative to `cwd`. Both guards are established by
-    /// [`Scratch::create`](crate::Scratch::create), so it stays the only way in.
+    /// `hooks_path` that fires the hooks sitting in it. The two paths this
+    /// crate redirects to are established for it: a real empty directory by
+    /// [`Scratch::create`](crate::Scratch::create), and
+    /// [`PREFLIGHT_HOOKS_PATH`](crate::repo::PREFLIGHT_HOOKS_PATH), a relative
+    /// path this crate never creates, by the read-only pre-flight.
+    ///
+    /// This closes one of the two routes to a runner, and it is worth naming
+    /// which. It stops a consumer *building* one. What stops a consumer being
+    /// *handed* one is that [`Scratch`](crate::Scratch) answers with the
+    /// operation rather than with the runner — see its own documentation, which
+    /// says what a runner in a consumer's hands can do to a real repository.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `hooks_path` is empty. An empty `core.hooksPath` is not "hooks
+    /// off": git joins the configured directory onto the hook name, so an empty
+    /// directory resolves `pre-commit` to `/pre-commit`, at the root of the file
+    /// system. That is one hooks directory shared by every repository on the
+    /// machine, where an unset key resolves the same hook inside the repository
+    /// and the pre-flight's relative path resolves it under the git directory.
+    /// So the empty value is not a redirect that reaches nothing; it is the
+    /// widest redirect there is.
+    ///
+    /// A panic rather than a `Result`, because the value belongs to this crate
+    /// and never to a caller: both real call sites compute it, and no argument
+    /// a user types reaches it. `debug_assert` is the wrong strength for the
+    /// same reason the guard exists — a consumer runs a release build against
+    /// their real repository, and that is the build the refusal has to hold in.
     #[must_use]
     pub(crate) fn new(cwd: impl Into<PathBuf>, hooks_path: impl Into<String>) -> Self {
+        let hooks_path = hooks_path.into();
+
+        assert!(
+            !hooks_path.is_empty(),
+            "a runner's hooks path cannot be empty. Git joins the configured directory onto the \
+             hook name, so an empty `{HOOKS_PATH_KEY}` resolves `pre-commit` to `/pre-commit` at \
+             the root of the file system - one hooks directory for every repository on the \
+             machine. Name a directory that holds no hook instead."
+        );
+
         Self {
             cwd: cwd.into(),
-            hooks_path: hooks_path.into(),
+            hooks_path,
         }
     }
 
@@ -124,39 +205,97 @@ impl Git {
     /// the safety configuration pinned, the editors pinned off — so a second way
     /// of reading git's answer cannot be a second, weaker way of asking the
     /// question.
-    fn command(&self, args: &[&str]) -> Command {
+    ///
+    /// **The subcommand is a parameter of its own, and that is a guard rather
+    /// than a convenience.** Everything ahead of the subcommand is git's own
+    /// option position, and a caller who reaches it undoes the rest of this
+    /// method: git's rule for two `-c` pairs naming one key is that the last
+    /// pair wins, so a smuggled pair re-pins any setting [`Git::safety_config`]
+    /// fixed — `rebase.updateRefs=false` included, which is the pin
+    /// `tests/safety.rs` proves stands between a replay and the developer's own
+    /// branch refs. A smuggled `-C` is the same hole aimed at a different
+    /// guarantee: it outranks the working directory set below, so a runner
+    /// documented as pinned to one repository answers about any repository on
+    /// the machine. Taking the subcommand separately puts every caller argument
+    /// after it, where git reads it as an argument of the subcommand and not as
+    /// one of its own. Pinned by
+    /// `an_argument_cannot_re_pin_a_setting_the_safety_config_fixed` and
+    /// `an_argument_cannot_aim_the_runner_at_another_repository`.
+    fn command(&self, subcommand: &str, args: &[&str]) -> Command {
         let mut command = Command::new("git");
-        shed_inherited_git_environment(&mut command);
         command
             .args(self.safety_config())
+            .arg(subcommand)
             .args(args)
             .current_dir(&self.cwd)
+            // `cwd` is only where the repository is if nothing in the inherited
+            // environment says otherwise. Run from inside a git hook - a
+            // pre-push gate, `git bisect run`, `rebase --exec` - something does.
+            // Config alone does not settle the identity either: a hook exports
+            // the identity into the environment, and every commit that rebase,
+            // cherry-pick, or am replays exports it again - and those variables
+            // outrank the `user.name` pinned in safety_config. Left in place
+            // they put the developer's own name on scratch commits, which is
+            // the single thing the pin exists to prevent. Both halves leave
+            // with the one sweep, because the rule is the `GIT_` prefix.
+            .without_inherited_git_environment()
             // A rebase that stops would otherwise try to open an editor and
             // hang forever on a commit message or a todo list.
             .env("GIT_EDITOR", "true")
             .env("GIT_SEQUENCE_EDITOR", "true")
             .env("GIT_TERMINAL_PROMPT", "0")
-            // Belt to the configuration's braces. Shedding the inherited
-            // attribution above already leaves `-c user.name` to decide, but
-            // saying it twice means the identity survives either guard being
-            // edited away, and git resolves the environment first.
+            // Belt to the configuration's braces, over all six variables git
+            // hands a hook rather than over the four that name a person.
+            // Shedding the inherited attribution above already leaves
+            // `-c user.name` to decide, but saying it twice means the identity
+            // survives either guard being edited away, and git resolves the
+            // environment first. The redundancy is only real where it covers
+            // all six: with the two dates left to the sweep alone, a sweep
+            // edited away holds the name and lets both dates through, and every
+            // commit a run makes then carries one identical timestamp.
             .env("GIT_AUTHOR_NAME", HARNESS_NAME)
             .env("GIT_AUTHOR_EMAIL", HARNESS_EMAIL)
             .env("GIT_COMMITTER_NAME", HARNESS_NAME)
-            .env("GIT_COMMITTER_EMAIL", HARNESS_EMAIL);
+            .env("GIT_COMMITTER_EMAIL", HARNESS_EMAIL)
+            // The two dates leave rather than get pinned, and that difference
+            // is the whole of what they add. A pinned date stamps every commit
+            // of one run with one identical time, which is the cost of a leaked
+            // date arriving by this crate's own hand. Removed, the clock gives
+            // each commit its own time, exactly as it does in a shell that
+            // holds nothing. Pinned by
+            // `every_identity_variable_is_settled_on_the_command_the_runner_builds`.
+            .env_remove("GIT_AUTHOR_DATE")
+            .env_remove("GIT_COMMITTER_DATE");
         command
+    }
+
+    /// Spawn git and hand back its output untouched.
+    ///
+    /// Private because raw output is a footgun in the one way this crate cares
+    /// about: everything public either trims it deliberately ([`Git::try_run`],
+    /// [`Git::run`]) or deliberately does not ([`Git::nul_separated`],
+    /// [`Git::nul_separated_paths`], [`Git::path`]), and which of those a caller
+    /// wants is not a choice worth re-making per call site.
+    fn output(&self, subcommand: &str, args: &[&str]) -> Result<Output> {
+        self.command(subcommand, args)
+            .output()
+            .with_context(|| format!("failed to run git {}", invocation(subcommand, args)))
     }
 
     /// Run git, returning the outcome whether or not it succeeded.
     ///
+    /// Both streams come back trimmed, and lossily decoded, which is what a
+    /// caller reporting them to a human wants and what every caller of this
+    /// method does with them. A caller reading a *path* wants the opposite on
+    /// both counts, and there are two readers for that: a list of paths comes
+    /// back through [`Git::nul_separated_paths`], and one path through
+    /// [`Git::path`].
+    ///
     /// # Errors
     ///
     /// Returns an error only if git could not be spawned at all.
-    pub fn try_run(&self, args: &[&str]) -> Result<GitOutput> {
-        let output = self
-            .command(args)
-            .output()
-            .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+    pub fn try_run(&self, subcommand: &str, args: &[&str]) -> Result<GitOutput> {
+        let output = self.output(subcommand, args)?;
 
         Ok(GitOutput {
             success: output.status.success(),
@@ -170,13 +309,13 @@ impl Git {
     /// # Errors
     ///
     /// Returns an error if git could not be spawned or exited non-zero.
-    pub fn run(&self, args: &[&str]) -> Result<String> {
-        let output = self.try_run(args)?;
+    pub fn run(&self, subcommand: &str, args: &[&str]) -> Result<String> {
+        let output = self.try_run(subcommand, args)?;
 
         anyhow::ensure!(
             output.success,
             "git {} failed:\n{}\n{}",
-            args.join(" "),
+            invocation(subcommand, args),
             output.stdout,
             output.stderr
         );
@@ -184,67 +323,127 @@ impl Git {
         Ok(output.stdout)
     }
 
-    /// Run git and return stdout split into non-empty lines.
+    /// Run git with `-z` and return stdout split on NUL, byte for byte.
     ///
-    /// Not for a list of paths — use [`Git::paths`]. Git escapes a path on its
-    /// way out of a line-oriented listing and the trimming here finishes the
-    /// job, so a name can come back spelled differently from the file it names.
+    /// The one reader that keeps git's output intact, and the base of the only
+    /// way to read a list of paths out of git, because the line-oriented
+    /// alternative it replaced could not be made correct. `-z` is the single
+    /// output mode in which git prints a path exactly as it is stored: no
+    /// C-quoting, no octal escaping, and no ambiguity about where one path ends,
+    /// since NUL is the one byte a path cannot contain. That last part is why
+    /// nothing here trims. A path may legitimately begin or end with a space -
+    /// or with U+3000, which Rust's Unicode-aware `str::trim` eats just as
+    /// readily - and a separator that cannot occur inside a path means there is
+    /// nothing to trim *for*.
+    ///
+    /// **Bytes, not text.** A field comes back as the bytes git wrote, because
+    /// on unix that is what a path *is* - an arbitrary byte string with no
+    /// encoding promised - and a lossy conversion to `String` destroys exactly
+    /// the names this reader exists to preserve: every byte outside UTF-8
+    /// becomes U+FFFD, which prints a name nobody typed and opens no file on
+    /// disk. That is the same two-part failure C-quoting causes, arriving by a
+    /// different door, and the second half is the quiet one - in this crate a
+    /// conflicted file that cannot be opened is floored at one hunk, so a file
+    /// contested in two regions reports one and the total still looks plausible.
+    ///
+    /// A caller reading a list of *paths* wants one of the two readers built
+    /// on this: [`Git::nul_separated_paths`], which is this plus one
+    /// conversion, or [`Git::paths`], which decodes and refuses a name that is
+    /// not valid UTF-8. This one is for output whose fields are not paths: a
+    /// `status --porcelain -z` record is `XY <path>`, so it is read as bytes
+    /// and only its tail is ever a path.
+    ///
+    /// `-z` is the first argument after the subcommand, ahead of everything the
+    /// caller passed, so an argument list that finishes with `--` and a
+    /// pathspec still gets it as a flag rather than as a path. That position is
+    /// structural: `Git::command` takes the subcommand separately and puts it
+    /// first, so `-z` at the front of this slice is `-z` right after the
+    /// subcommand.
+    ///
+    /// Empty fields are dropped. Git terminates rather than separates, so the
+    /// last NUL always leaves one; no path is ever the empty string, so nothing
+    /// real is lost with it.
     ///
     /// # Errors
     ///
     /// Returns an error if git could not be spawned or exited non-zero.
-    pub fn lines(&self, args: &[&str]) -> Result<Vec<String>> {
+    pub fn nul_separated(&self, subcommand: &str, args: &[&str]) -> Result<Vec<Vec<u8>>> {
+        let asked = with_nul_delimiters(args);
+
+        let output = self.output(subcommand, &asked)?;
+
+        anyhow::ensure!(
+            output.status.success(),
+            "git {} failed:\n{}\n{}",
+            invocation(subcommand, &asked),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        Ok(output
+            .stdout
+            .split(|byte| *byte == b'\0')
+            .filter(|field| !field.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect())
+    }
+
+    /// The same NUL-separated fields, read as the paths they name.
+    ///
+    /// **The reader a call site reading a path list must use.** Everything
+    /// [`Git::nul_separated`] says about `-z`, about trimming and about bytes
+    /// applies here unchanged; this adds the one conversion that turns those
+    /// bytes into a path, and it is a conversion rather than a parse - on unix
+    /// the bytes *are* the path, so nothing is interpreted, validated or
+    /// replaced on the way.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned or exited non-zero.
+    pub fn nul_separated_paths(&self, subcommand: &str, args: &[&str]) -> Result<Vec<PathBuf>> {
         Ok(self
-            .run(args)?
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
+            .nul_separated(subcommand, args)?
+            .into_iter()
+            .map(path_from_git)
             .collect())
     }
 
     /// Run git and return the paths it listed, as the developer spelled them.
     ///
-    /// [`Git::lines`] cannot be used for a path, because git's line-oriented
+    /// [`Git::run`] cannot be used for a path, because git's line-oriented
     /// output is not a faithful rendering of one. A name with a byte outside
     /// printable ASCII comes back C-quoted - `café.txt` as `"caf\303\251.txt"` -
     /// and a name with a leading or trailing space comes back intact only to
-    /// lose it to trimming. Neither loss announces itself, and a path read out of
-    /// one invocation is usually fed straight back into the next as a pathspec,
-    /// which git does not dequote: the mangled spelling matches nothing, and
-    /// matching nothing is indistinguishable from there being nothing to match.
+    /// lose it to trimming. Neither loss announces itself. A caller then reports
+    /// a name nobody typed, and a name nobody typed opens no file on disk - so
+    /// anything that goes on to read the path falls back to whatever it does for
+    /// a file it cannot read. In this crate that is one hunk for a conflicted
+    /// file, which undercounts the work and still looks plausible. A caller that
+    /// hands the spelling back to git as a pathspec pays twice, because git
+    /// dequotes nothing on the way in.
     ///
     /// So the paths are asked for NUL-delimited instead, which is git's own
-    /// answer to this and turns the escaping off entirely. `-z` goes immediately
-    /// after the subcommand rather than at the end, because a command that
-    /// carries a pathspec ends in `-- <paths>` and everything after `--` is a
-    /// path, not an option.
+    /// answer to this and turns the escaping off entirely. `-z` is the first
+    /// argument after the subcommand, ahead of everything the caller passed,
+    /// because a command that carries a pathspec ends in `-- <paths>` and
+    /// everything after `--` is a path, not an option.
     ///
     /// # Errors
     ///
-    /// Returns an error if `args` is empty, if git could not be spawned, if it
-    /// exited non-zero, or if a path it printed is not valid UTF-8. That last one
-    /// is deliberately fatal: replacing an undecodable byte would substitute
-    /// U+FFFD and hand back a name that matches nothing, which is the very
-    /// silence this method exists to remove.
-    pub fn paths(&self, args: &[&str]) -> Result<Vec<String>> {
-        let (subcommand, rest) = args
-            .split_first()
-            .context("cannot ask git for paths without a subcommand")?;
-        let mut asked = Vec::with_capacity(args.len() + 1);
-        asked.push(*subcommand);
-        asked.push("-z");
-        asked.extend_from_slice(rest);
+    /// Returns an error if git could not be spawned, if it exited non-zero, or
+    /// if a path it printed is not valid UTF-8. That last one is deliberately
+    /// fatal: replacing an undecodable byte substitutes U+FFFD and hands back a
+    /// name no file has, which is the very silence this method exists to
+    /// remove.
+    pub fn paths(&self, subcommand: &str, args: &[&str]) -> Result<Vec<String>> {
+        let asked = with_nul_delimiters(args);
 
-        let output = self
-            .command(&asked)
-            .output()
-            .with_context(|| format!("failed to run git {}", asked.join(" ")))?;
+        let output = self.output(subcommand, &asked)?;
 
         anyhow::ensure!(
             output.status.success(),
             "git {} failed:\n{}\n{}",
-            asked.join(" "),
+            invocation(subcommand, &asked),
             String::from_utf8_lossy(&output.stdout).trim(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
@@ -261,7 +460,7 @@ impl Git {
                 String::from_utf8(path.to_vec()).with_context(|| {
                     format!(
                         "git {} listed a path that is not valid UTF-8: {}",
-                        asked.join(" "),
+                        invocation(subcommand, &asked),
                         String::from_utf8_lossy(path)
                     )
                 })
@@ -269,14 +468,93 @@ impl Git {
             .collect()
     }
 
-    /// Resolve a revision to a full commit id.
+    /// Run git and return the one path it printed, as the bytes git wrote.
+    ///
+    /// **The reader a call site reading a single path must use.** [`Git::run`]
+    /// is wrong for a path in two ways, and neither loss announces itself. It
+    /// trims, and `str::trim` is Unicode-aware, so it eats a trailing space and
+    /// a trailing U+3000 alike - and a repository directory named with one of
+    /// those spells that character as the last character of its own path. It
+    /// also decodes lossily, so every byte outside UTF-8 becomes U+FFFD, and on
+    /// unix a path is an arbitrary byte string with no encoding promised. Both
+    /// losses hand back a name that opens no file, and a caller reads that as
+    /// an absence: `exists()` is false, so the thing asked about reports as not
+    /// there rather than as unreadable.
+    ///
+    /// **One newline, never a trim.** Git terminates one answer with a single
+    /// `\n`, and every other byte of that answer belongs to the path. So this
+    /// strips exactly that one byte and hands the rest to the same conversion
+    /// [`Git::nul_separated_paths`] uses, which takes bytes as the path they
+    /// spell rather than decoding them. Trimming instead is the defect above,
+    /// arriving by a different door.
+    ///
+    /// **`-z` is not available here, which is why this reader exists.**
+    /// [`Git::nul_separated_paths`] reads a path list by asking git for NUL
+    /// delimiters, and `rev-parse` has no such flag: it prints `-z` back as an
+    /// unknown option and exits 0, so the reader hands back `-z` and the path
+    /// as two fields. A single answer needs no separator anyway - the end of
+    /// stdout ends the path - so the two questions take two readers.
     ///
     /// # Errors
     ///
-    /// Returns an error if the revision does not name a commit.
+    /// Returns an error if git could not be spawned or exited non-zero.
+    pub fn path(&self, subcommand: &str, args: &[&str]) -> Result<PathBuf> {
+        let output = self.output(subcommand, args)?;
+
+        anyhow::ensure!(
+            output.status.success(),
+            "git {} failed:\n{}\n{}",
+            invocation(subcommand, args),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        let mut printed = output.stdout;
+        if printed.last() == Some(&b'\n') {
+            printed.pop();
+        }
+
+        Ok(path_from_git(printed))
+    }
+
+    /// Resolve a revision to a full commit id.
+    ///
+    /// **Both flags are the question, not decoration.** A bare
+    /// `git rev-parse <revision>` reads a dash-leading argument as an option it
+    /// does not know, prints the argument back, and exits 0 - rev-parse passes
+    /// an option it cannot place through to rev-list rather than refusing it.
+    /// This method is the whole pre-flight, so that exit code becomes "the
+    /// revision names a commit", and a name that names nothing starts a full
+    /// replay. `grind -- --root` answered `clean` for a branch that does not
+    /// exist, which is the one answer this crate exists never to give.
+    ///
+    /// `--verify` makes git refuse a revision it cannot resolve. It reports
+    /// exactly one object id or it fails, so an argument that resolves to
+    /// nothing exits 128 instead of exiting 0 with the argument echoed back.
+    ///
+    /// `--end-of-options` ends git's own option position, so the revision
+    /// arrives as a revision whatever git learns to recognise next. `--verify`
+    /// alone catches every dash-leading revision git knows today, because an
+    /// option prints no object id and `--verify` demands one. That is a fact
+    /// about today's option list rather than a rule, and this crate takes the
+    /// rule: the same reasoning that makes [`NoInheritedGitEnvironment`] match
+    /// a prefix instead of a list of names.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the revision does not name a commit. The message
+    /// names the revision, because that name is what the caller typed and has
+    /// to correct.
     pub fn rev_parse(&self, revision: &str) -> Result<String> {
-        self.run(&["rev-parse", &format!("{revision}^{{commit}}")])
-            .with_context(|| format!("could not resolve '{revision}' to a commit"))
+        self.run(
+            "rev-parse",
+            &[
+                "--verify",
+                "--end-of-options",
+                &format!("{revision}^{{commit}}"),
+            ],
+        )
+        .with_context(|| format!("could not resolve '{revision}' to a commit"))
     }
 
     /// Configuration that keeps a simulation from touching anything real, plus
@@ -309,11 +587,107 @@ impl Git {
             "rebase.backend=merge",
             "rebase.autoStash=false",
             "rebase.autosquash=false",
+            // A rebase that keeps merges puts a merge commit on its todo list,
+            // and a merge commit at a halt is a commit the replay cannot
+            // measure: `diff-tree` prints no path at all for one unless it is
+            // asked for `-c`, `--cc` or `-m`, and the empty-commit probe asks
+            // for none of them. That probe would read the halt as a commit that
+            // changes nothing, and `rebase --skip` would drop a whole side of
+            // history. Executed rather than reasoned: git 2.55 was watched to
+            // re-create the merge commit under `rebase.rebaseMerges=true`, so
+            // the developer's own configuration is what opens this route.
+            // `stopped_commit_is_already_in_head` refuses a multi-parent
+            // stopped commit as well, and that refusal holds whatever a later
+            // setting does; this pin closes the one route into it that exists
+            // today.
+            "rebase.rebaseMerges=false",
             // Simulated mains are loose commits nothing references yet; an
             // opportunistic gc mid-run could collect one out from under us.
+            // This entry covers the gc task and nothing else - the switch on
+            // the rest of automatic maintenance is the entry below it.
             "gc.auto=0",
+            // Git's `run_auto_maintenance` starts the maintenance tasks unless
+            // this key is explicitly false, and the default is to run them.
+            // Every resolved conflict runs `rebase --continue`, which commits,
+            // and a commit reaches that call. On a developer who has run
+            // `git maintenance start` the incremental strategy turns the
+            // prefetch task on, and prefetch carries no auto-condition of its
+            // own, so `--auto` does not hold it back. Prefetch fetches from
+            // every remote and writes `refs/prefetch/*` into the real
+            // repository, because a linked scratch worktree shares the common
+            // dir. A dry run that reaches the network and writes refs is the
+            // class `gc.auto=0` was added for. The chain from
+            // `run_auto_maintenance` to prefetch is read from git's source
+            // rather than executed.
+            "maintenance.auto=false",
+            // The filesystem monitor names a program git runs itself rather
+            // than one it resolves through the hooks directory, so the
+            // redirected `core.hooksPath` does not take it away. The classic
+            // watchman integration is spelled
+            // `core.fsmonitor=.git/hooks/fsmonitor-watchman`, a path that
+            // survives the redirect verbatim, and every index refresh a replay
+            // performs would run it - in the developer's repository and in the
+            // scratch worktree both. `core.fsmonitor=true` costs more than
+            // that: git starts a daemon that watches a temporary directory the
+            // replay is about to delete. A freshly created scratch worktree
+            // gains nothing from a monitor, so the pin costs the replay
+            // nothing. Read from git's settings resolution rather than
+            // executed.
+            "core.fsmonitor=false",
             "commit.gpgsign=false",
             "gpg.format=openpgp",
+            // Git's default is to C-quote and octal-escape any path outside
+            // ASCII, so `日本語.txt` comes back from `diff --name-only` as
+            // `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a
+            // caller twice: it reports a name nobody typed, and the escaped
+            // string names no file on disk, so anything that then opens the
+            // path quietly falls back to whatever it does for a file it cannot
+            // read - in this crate, flooring a conflicted file at one hunk and
+            // undercounting the work.
+            //
+            // This is the belt, not the braces. `quotePath` governs exactly one
+            // class - bytes at or above 0x80 - and git's `quote_c_style` quotes
+            // a double quote, a backslash and any control character no matter
+            // what it is set to. So `back\slash.txt` and `quo"te.txt` come back
+            // quoted and escaped with this pinned, and are just as unopenable,
+            // and cost just as many uncounted hunks, as a Japanese name would
+            // be without it. A path list therefore cannot be read off git's
+            // lines under any setting, which is why both readers this type
+            // offers for one - [`Git::nul_separated_paths`] and [`Git::paths`]
+            // - ask git for `-z`: it turns quoting off outright and separates
+            // on the one byte a path cannot contain. `nul_separated_paths`
+            // then takes the bytes between two separators as the path they
+            // spell, without decoding them on the way - a path on unix is
+            // bytes, and a name that is not valid UTF-8 is destroyed by a
+            // lossy conversion exactly as thoroughly as by an octal escape.
+            // `paths` decodes and refuses such a name outright rather than
+            // repairing it into one that opens no file.
+            //
+            // Kept anyway, because it costs one `-c` and it narrows what a
+            // future call site can do wrong. There are three readers for a
+            // path and `run` is none of them: a list of paths goes through
+            // `nul_separated_paths` or through `paths`, one path goes through
+            // `path`, and reading any of them back through `run` is a bug.
+            // With this pinned it is a bug that survives the common case
+            // instead of mangling every non-ASCII name in the repository.
+            // Pinning it on the single door every git call goes through is
+            // what makes that free.
+            "core.quotePath=false",
+            // The conflict style decides what git writes into a conflicted
+            // file, and that file is what the hunk counter reads. All three
+            // styles open and close a region with the same markers, so a
+            // region whose two sides carry no bracket line of their own costs
+            // the same under any of them. What `diff3` and `zdiff3` add is the
+            // *base* version of the region, between a `|||||||` line and the
+            // `=======` one. A base carrying a line that reads as a marker
+            // therefore lands inside the region under those two and outside it
+            // under `merge`, and the same replay measures a different file on
+            // a developer who set the key. The count is then self-consistent
+            // within one run and different across machines, and `grist` ranks
+            // candidates on it, so two developers comparing the same branches
+            // read two orders and neither is told why. Read out of a real
+            // merge rather than from git's documentation.
+            "merge.conflictStyle=merge",
         ]
         .iter()
         .map(|setting| (*setting).to_string())
@@ -321,49 +695,561 @@ impl Git {
         // it, so every consumer's scratch commits are attributable to the
         // harness that actually made them.
         .chain([
+            // These two settle the identity only in company with
+            // `NoInheritedGitEnvironment`, which takes back off the identity
+            // variables that would otherwise outrank them.
             format!("user.name={HARNESS_NAME}"),
             format!("user.email={HARNESS_EMAIL}"),
-            format!("core.hooksPath={}", self.hooks_path),
+            format!("{HOOKS_PATH_KEY}={}", self.hooks_path),
         ])
         .flat_map(|setting| ["-c".to_string(), setting])
         .collect();
 
-        // Paths read out of one invocation are fed straight back into the next
-        // as pathspecs, and a pathspec is not a path: a leading `:` is pathspec
-        // magic, and `*`, `?` and `[` are wildcards. Without this a file
-        // genuinely called `star*.txt` matches `starOTHER.txt` too, so a probe
-        // asking whether *this* path's content is in the new base quietly
-        // answers about some other file's. A main option rather than a `-c`
-        // pair, so it belongs here with them, ahead of the subcommand.
+        // A path read out of one invocation and handed back to the next is not
+        // a path any more, it is a pathspec: a leading `:` is pathspec magic,
+        // and `*`, `?` and `[` are wildcards. Without this a file genuinely
+        // called `star*.txt` matches `starOTHER.txt` too, so a question asked
+        // about *this* path quietly gets answered about some other file's. A
+        // main option rather than a `-c` pair, so it belongs here with them,
+        // ahead of the subcommand.
         //
-        // Over-matching like that is the mild half. It can only add to the set
-        // of paths a probe finds missing, and a bigger set only ever buys a
-        // refusal nobody needed. The half worth the guard is `:/foo.txt`, a
-        // `foo.txt` in a directory named `:`: read as magic its `:/` means from
-        // the top of the working tree, so it answers about the root `foo.txt`
-        // instead, and if that one is unchanged the diff comes back empty. An
-        // empty diff is a commit that adds nothing to the new base, which is a
-        // `rebase --skip`, which is the work gone and a cost of zero reported
-        // for a branch that was never replayed. Pinned by tests/halts.rs.
+        // Over-matching like that is the mild half. The half worth the guard is
+        // `:/foo.txt`, a `foo.txt` in a directory named `:`: read as magic its
+        // `:/` means from the top of the working tree, so git answers about the
+        // root `foo.txt` instead. An answer about the wrong file is an answer
+        // nothing downstream can tell from the right one.
+        //
+        // **No call site in this crate hands a path back to git today.** The
+        // empty-commit probe was the one that did, and it now intersects the two
+        // path lists in Rust instead - which is bounded by no argv and reads a
+        // name as a name. So this pin currently protects a call site nobody has
+        // written yet, and nothing in the suite can be made to fail by removing
+        // it; `MUTATIONS.md` records that removal being run and watched to change
+        // nothing. It stays because it costs one argument at the single door
+        // every git call in this crate goes through, and because the next call
+        // site that reads a path list back is one edit away.
         arguments.push("--literal-pathspecs".to_string());
 
         arguments
     }
 }
 
+/// How one invocation is spelled in a message: the subcommand, then the
+/// arguments after it, exactly in the order [`Git::command`] hands them to git.
+///
+/// The `-c` pairs are left out. They are the same on every invocation, they are
+/// long, and a caller reading a failure wants the command they asked for.
+fn invocation(subcommand: &str, args: &[&str]) -> String {
+    std::iter::once(subcommand)
+        .chain(args.iter().copied())
+        .collect::<Vec<&str>>()
+        .join(" ")
+}
+
+/// `args` with `-z` in front of it, which is the position right after the
+/// subcommand once [`Git::command`] builds the argv.
+///
+/// Front rather than back, because a command that carries a pathspec ends in
+/// `-- <paths>` and everything after `--` is a path. A `-z` on the end would be
+/// asked for as a file name.
+fn with_nul_delimiters<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut asked = Vec::with_capacity(args.len() + 1);
+    asked.push("-z");
+    asked.extend_from_slice(args);
+    asked
+}
+
+/// Take the bytes git wrote for one path as that path.
+///
+/// Free rather than a `From` impl, and defined on both platforms with the one
+/// call site in [`Git::nul_separated_paths`], because the alternative shape - a
+/// function on unix and an inline conversion elsewhere - is how the two halves
+/// drift apart unnoticed: nothing on this platform can warn that the other one
+/// is wrong, since it is never compiled here.
+///
+/// On unix a path is an arbitrary byte string, so this is a move rather than a
+/// conversion: no encoding is assumed and no byte is replaced.
+#[cfg(unix)]
+fn path_from_git(field: Vec<u8>) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+
+    PathBuf::from(std::ffi::OsString::from_vec(field))
+}
+
+/// Take the bytes git wrote for one path as that path.
+///
+/// Windows filenames are Unicode - the kernel stores them as UTF-16, and git
+/// writes them out as UTF-8 - so the lossy conversion loses nothing real here.
+/// A byte sequence this replaces is one no Windows filesystem could have been
+/// holding a name for in the first place.
+#[cfg(not(unix))]
+fn path_from_git(field: Vec<u8>) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(&field).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::ffi::{OsStr, OsString};
+
     use pulldown_cmark::{Event, Parser, Tag};
     use tempfile::TempDir;
 
-    use super::{Git, GIT_ENVIRONMENT_PREFIX, HARNESS_EMAIL, HARNESS_NAME};
-    use crate::testing::TestRepo;
+    use super::{
+        Git, NoInheritedGitEnvironment, PathBuf, GIT_ENVIRONMENT_PREFIX, HARNESS_EMAIL,
+        HARNESS_NAME, HOOKS_PATH_KEY,
+    };
+    use crate::repo::PREFLIGHT_HOOKS_PATH;
+    use crate::testing::{child_ran, run_child_half, TestRepo};
 
-    /// Exactly the invocation `stopped_commit_is_already_in_head` makes to find
-    /// out which paths a halted commit touched, with the commit left off the
-    /// end. Spelled once so the tests below pin the call the replay actually
-    /// depends on rather than a plausible-looking neighbour of it.
-    const TOUCHED_PATHS: [&str; 5] = ["diff-tree", "--no-commit-id", "--name-only", "-r", "--root"];
+    /// The setting the two tests below try to undo. It stands for every pin
+    /// [`Git::safety_config`] makes, because git resolves them all by one rule,
+    /// and it is the pin that costs the most: `tests/safety.rs` proves that a
+    /// replay rewrites the developer's own branch refs when this setting is on.
+    const PINNED_SETTING: &str = "rebase.updateRefs";
+
+    /// The value a smuggled `-c` pair puts in place of the pinned one. It is
+    /// not a boolean, so no reader can take it for another spelling of `false`.
+    const SMUGGLED_VALUE: &str = "OVERRIDDEN";
+
+    /// An argument the caller hands the runner must not reach the position
+    /// ahead of the subcommand, because that position belongs to git.
+    ///
+    /// Git reads the arguments ahead of the subcommand as its own options, and
+    /// its rule for two `-c` pairs that name one key is that the last pair
+    /// wins. An argument list that lands there therefore undoes every pin
+    /// [`Git::safety_config`] makes, one `-c` pair at a time.
+    ///
+    /// The runner keeps the caller out of that position by taking the
+    /// subcommand as a parameter of its own. An argument can only land after
+    /// the subcommand, where git reads it as an argument of the subcommand
+    /// rather than as one of its own. So the read below either fails, because
+    /// `config` refuses a `-c` it does not know, or hands back the pinned
+    /// value. Both of those are the guard holding.
+    ///
+    /// Two controls stand ahead of the assertion, because an assertion that
+    /// something did not happen passes just as readily when it was never
+    /// possible. The first proves the pin is real and readable. The second
+    /// proves git still lets the last `-c` pair win, which is the hazard.
+    #[test]
+    fn an_argument_cannot_re_pin_a_setting_the_safety_config_fixed() {
+        let repo = TestRepo::init();
+        let git = Git::new(repo.path(), PREFLIGHT_HOOKS_PATH);
+        let smuggled = format!("{PINNED_SETTING}={SMUGGLED_VALUE}");
+
+        assert_eq!(
+            git.run("config", &["--get", PINNED_SETTING])
+                .expect("read back the setting the safety configuration pins"),
+            "false",
+            "the safety configuration has to pin `{PINNED_SETTING}=false`, or there is nothing \
+             here for an argument to undo and the assertion below is measured against nothing"
+        );
+
+        assert_eq!(
+            repo.git(&[
+                "-c",
+                &format!("{PINNED_SETTING}=false"),
+                "-c",
+                &smuggled,
+                "config",
+                "--get",
+                PINNED_SETTING,
+            ]),
+            SMUGGLED_VALUE,
+            "git no longer lets the last `-c` pair win, so this test could only pass vacuously"
+        );
+
+        let read_back = git.run("config", &["-c", &smuggled, "--get", PINNED_SETTING]);
+
+        if let Ok(setting) = read_back {
+            assert_eq!(
+                setting, "false",
+                "an argument reached the position ahead of the subcommand, where git reads it as \
+                 one of its own options, and the last `-c` pair wins. Every guard the safety \
+                 configuration pins is off for that invocation, `{PINNED_SETTING}=false` \
+                 included, and that one costs the developer the branch under replay."
+            );
+        }
+    }
+
+    /// The same position also carries `-C`, which moves git to another
+    /// directory, so the guard has to hold for where the runner works as well
+    /// as for what it pins.
+    ///
+    /// `-C` outranks the working directory [`Git::command`] sets, so an
+    /// argument that reaches the position ahead of the subcommand aims a runner
+    /// documented as pinned to one working directory at any repository on the
+    /// machine. The developer's own repository is the one that matters.
+    ///
+    /// Both fixtures answer through git itself, so the two paths are spelled
+    /// the way git spells them and nothing here has to canonicalise a path to
+    /// compare it. The difference between the two answers is the armed control:
+    /// it proves `-C` really does move git, and therefore that the assertion
+    /// below has a hazard to defend against.
+    #[test]
+    fn an_argument_cannot_aim_the_runner_at_another_repository() {
+        let here = TestRepo::init();
+        let elsewhere = TestRepo::init();
+        let git = Git::new(here.path(), PREFLIGHT_HOOKS_PATH);
+        let their_path = elsewhere.path().to_str().expect("utf-8 fixture path");
+
+        let ours = git
+            .path("rev-parse", &["--absolute-git-dir"])
+            .expect("ask git which repository the runner is rooted in");
+        let theirs =
+            PathBuf::from(here.git(&["-C", their_path, "rev-parse", "--absolute-git-dir"]));
+
+        assert_ne!(
+            ours, theirs,
+            "`-C` no longer moves git to another directory, so this test could only pass vacuously"
+        );
+
+        let read_back = git.path("rev-parse", &["-C", their_path, "--absolute-git-dir"]);
+
+        if let Ok(answered) = read_back {
+            assert_eq!(
+                answered, ours,
+                "an argument reached the position ahead of the subcommand, where `-C` moves git \
+                 to another directory. A runner pinned to one working directory answered about a \
+                 repository nobody pointed it at, and the developer's own repository is reachable \
+                 the same way."
+            );
+        }
+    }
+
+    /// Read one setting back twice: once through plain git, which has to answer
+    /// with the repository's own value, and once through the runner, which has
+    /// to answer with the pinned one.
+    ///
+    /// The first read is the armed control. A setting the fixture never took is
+    /// a setting the runner cannot be shown to override, so an assertion that
+    /// the pinned value came back would pass on a repository where nothing was
+    /// ever at stake. The fixture arms the opposite value, and plain git reports
+    /// it, before the runner is asked anything.
+    ///
+    /// `setting` is spelled the way [`Git::safety_config`] spells it, `key=value`
+    /// and nothing else, so the test names the pin rather than a paraphrase of
+    /// it.
+    fn assert_the_runner_pins(setting: &str, over: &str) {
+        let (key, pinned) = setting
+            .split_once('=')
+            .expect("a pinned setting is spelled `key=value`");
+
+        let repo = TestRepo::init();
+        repo.git(&["config", key, over]);
+
+        assert_eq!(
+            repo.git(&["config", "--get", key]),
+            over,
+            "the fixture does not hold `{key}={over}`, so there is nothing here for the runner to \
+             override and the assertion below is measured against nothing"
+        );
+
+        assert_eq!(
+            Git::new(repo.path(), PREFLIGHT_HOOKS_PATH)
+                .run("config", &["--get", key])
+                .unwrap_or_else(|error| panic!("read `{key}` back through the runner: {error:#}")),
+            pinned,
+            "`{setting}` is not pinned, so git reads `{key}` out of the developer's own \
+             configuration and acts on it for the length of a replay"
+        );
+    }
+
+    /// Automatic maintenance is a second switch beside `gc.auto=0`, and the half
+    /// it leaves open reaches the network.
+    ///
+    /// `gc.auto=0` stops the gc task alone. `maintenance.auto` governs the whole
+    /// set, and git's `run_auto_maintenance` returns early only when that key is
+    /// explicitly false - the default is to run. Every resolved conflict runs
+    /// `rebase --continue`, which commits, and a commit reaches that call. On a
+    /// developer who has run `git maintenance start` the incremental strategy
+    /// turns the prefetch task on, and prefetch carries no auto-condition of its
+    /// own, so `--auto` does not hold it back. Prefetch fetches from every
+    /// remote and writes `refs/prefetch/*` into the real repository, because a
+    /// linked scratch worktree shares the common dir. A dry run that reaches the
+    /// network and writes refs is the class `gc.auto=0` was added for.
+    ///
+    /// The chain from `run_auto_maintenance` to prefetch is read from git's
+    /// source rather than executed. What this test executes is the pin: the
+    /// fixture turns the key on, and the runner has to report it off.
+    #[test]
+    fn pins_automatic_maintenance_off_even_when_the_repository_turns_it_on() {
+        assert_the_runner_pins("maintenance.auto=false", "true");
+    }
+
+    /// The filesystem monitor names a program git runs itself, so the redirected
+    /// `core.hooksPath` does not disable it.
+    ///
+    /// The classic watchman integration is spelled
+    /// `core.fsmonitor=.git/hooks/fsmonitor-watchman`. Git executes that path
+    /// directly rather than resolving it through the hooks directory, so the
+    /// redirect leaves it standing and every index refresh a replay performs
+    /// runs it - in the real repository and in the scratch worktree both.
+    /// `core.fsmonitor=true` costs more than that: git starts a daemon that
+    /// watches a temporary directory the replay is about to delete.
+    ///
+    /// `tests/safety.rs` states the guarantee as "no replay fires anything", and
+    /// the hooks it plants cannot reach this route at all, so the pin is
+    /// asserted here instead. A freshly created scratch worktree gains nothing
+    /// from a monitor, so the pin costs the replay nothing.
+    ///
+    /// Git's resolution of the setting is read from its source rather than
+    /// executed. What this test executes is the pin.
+    #[test]
+    fn pins_the_filesystem_monitor_off_even_when_the_repository_names_one() {
+        assert_the_runner_pins("core.fsmonitor=false", ".git/hooks/fsmonitor-watchman");
+    }
+
+    /// A merge-preserving rebase puts a merge commit on the replay's todo list,
+    /// and a merge commit at a halt is a commit the replay cannot measure.
+    ///
+    /// `diff-tree` prints no path at all for a merge commit unless it is asked
+    /// for `-c`, `--cc` or `-m`. The probe that decides whether a halted commit
+    /// adds anything to the new base asks for none of them, so an unguarded
+    /// probe reads a merge as a commit that changes nothing, and `rebase --skip`
+    /// drops a whole side of history. Git 2.55 was watched to re-create the
+    /// merge commit under `rebase.rebaseMerges=true`, so the developer's own
+    /// configuration is what opens this route.
+    ///
+    /// The probe refuses a stopped commit with more than one parent as well, and
+    /// that refusal holds whatever a later setting does. This pin closes the one
+    /// route into it that exists today. Both halves are wanted: the pin keeps
+    /// the replay away from a state it cannot measure, and the refusal makes the
+    /// classification correct if it ever arrives there anyway.
+    #[test]
+    fn pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on() {
+        assert_the_runner_pins("rebase.rebaseMerges=false", "true");
+    }
+
+    /// The conflict style decides what git writes into a conflicted file, and
+    /// the file is what the hunk counter measures.
+    ///
+    /// `diff3` and `zdiff3` open and close a region with the same markers
+    /// `merge` does, so the count holds for a region whose two sides carry no
+    /// bracket line. What they add is the **base** version, between a
+    /// `|||||||` line and the `=======` one. A base that carries a line of its
+    /// own that reads as a marker therefore lands inside the region under those
+    /// two styles and outside it under `merge`, and the same replay then
+    /// measures a different file on a developer who set the key.
+    ///
+    /// The cost is a count that is self-consistent within one run and different
+    /// across machines. `grist` ranks candidates on that count, so two
+    /// developers comparing the same branches read two orders and neither is
+    /// told why. Pinning the style makes the measured file the same everywhere.
+    ///
+    /// The style git writes under each setting was read out of a real merge
+    /// rather than from git's documentation. What this test executes is the
+    /// pin: the fixture asks for `diff3`, and the runner has to report `merge`.
+    #[test]
+    fn pins_the_conflict_style_even_when_the_repository_asks_for_diff3() {
+        assert_the_runner_pins("merge.conflictStyle=merge", "diff3");
+    }
+
+    /// `core.quotePath=false` needs its own test now that it protects nothing a
+    /// caller can otherwise observe.
+    ///
+    /// It used to be pinned indirectly, by `tests/conflicts.rs` asserting the
+    /// answer a non-ASCII conflicted path produces. That stopped being a test of
+    /// this setting the moment a `-z` reader became the way a path list comes
+    /// back: `-z` output is unquoted whatever `quotePath` says, so removing
+    /// the pin would leave every one of those tests green. A guard nothing can
+    /// fail is a guard that quietly stops working, so this asserts it against
+    /// the surface it still covers — [`Git::run`], the reader a future call site
+    /// would reach for by mistake, where an escaped name would be silent.
+    ///
+    /// `diff --cached --name-only` rather than a conflict, because the escaping
+    /// is a property of how git prints a path and needs no conflict to show it.
+    #[test]
+    fn a_non_ascii_path_read_back_through_run_is_not_octal_escaped() {
+        let repo = TestRepo::init();
+        repo.write_file("日本語.txt", "staged\n");
+        repo.git(&["add", "日本語.txt"]);
+
+        let staged = Git::new(repo.path(), PREFLIGHT_HOOKS_PATH)
+            .run("diff", &["--cached", "--name-only"])
+            .expect("list the staged path");
+
+        assert_eq!(
+            staged, "日本語.txt",
+            "git must report the path as it is stored, not C-quoted and \
+             octal-escaped"
+        );
+    }
+
+    /// A file name git can carry that is not valid UTF-8: `bad-`, two bytes no
+    /// UTF-8 sequence may begin with, and `.txt`.
+    ///
+    /// `0xff` and `0xfe` are the two bytes the encoding never uses at all, so
+    /// nothing here depends on a lossy conversion's taste in replacement
+    /// boundaries: whatever it does with them, it cannot hand these two back.
+    const BAD_NAME: &[u8] = b"bad-\xff\xfe.txt";
+
+    /// A path is a string of bytes on unix, not a string of characters, and git
+    /// reports one as it is stored. So the reader has to hand those bytes back
+    /// untouched, and a lossy conversion is exactly the defect
+    /// `core.quotePath=false` and `-z` were pinned to remove: the name comes
+    /// back with U+FFFD where the bytes were, which prints a name nobody typed
+    /// and opens no file on disk - and in this crate a conflicted file that
+    /// cannot be opened is floored at one hunk, so a file contested in two
+    /// regions reports one and the total still looks plausible.
+    ///
+    /// The name never touches the filesystem. APFS refuses one outright
+    /// (`Errno 92`, illegal byte sequence), so a fixture that wrote the file
+    /// could not run on the machine this crate is developed on; git will carry
+    /// the name in the *index* on any platform, which is all the reader needs to
+    /// be asked about.
+    ///
+    /// `update-index --index-info` reads its records from stdin and
+    /// [`TestRepo::git`] passes none, so that one spawn is made directly here -
+    /// scrubbed through [`NoInheritedGitEnvironment`] like every other spawn in this
+    /// crate, because an inherited `GIT_INDEX_FILE` would otherwise stage this
+    /// name into whichever repository the hook that started the run belongs to.
+    #[test]
+    fn a_path_git_reports_comes_back_byte_for_byte_even_when_it_is_not_utf8() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let repo = TestRepo::init();
+        repo.commit_file("seed.txt", "seed\n", "base");
+        // Any blob will do - the index entry is about the name, not the content.
+        let blob = repo.git(&["hash-object", "-w", "seed.txt"]);
+
+        let mut record = format!("100644 {blob}\t").into_bytes();
+        record.extend_from_slice(BAD_NAME);
+        record.push(0);
+
+        let mut child = Command::new("git")
+            .args(["update-index", "-z", "--index-info"])
+            .current_dir(repo.path())
+            .without_inherited_git_environment()
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("spawn git update-index");
+        child
+            .stdin
+            .take()
+            .expect("the piped stdin of the child just spawned")
+            .write_all(&record)
+            .expect("hand git the index record");
+        assert!(
+            child.wait().expect("wait for git update-index").success(),
+            "git could not be made to hold a non-UTF-8 name in its index"
+        );
+
+        let staged = Git::new(repo.path(), PREFLIGHT_HOOKS_PATH)
+            .nul_separated("diff", &["--cached", "--name-only"])
+            .expect("list the staged path");
+
+        assert_eq!(
+            staged.len(),
+            1,
+            "exactly one path is staged beyond HEAD, got {staged:?}"
+        );
+        assert_eq!(
+            staged[0], BAD_NAME,
+            "git reports a path as it is stored, so the reader must carry those \
+             bytes back untouched rather than replacing them"
+        );
+    }
+
+    /// The stem every fixture repository of the test below is named with. The
+    /// whitespace goes on the end of it.
+    const REPOSITORY_STEM: &str = "repository";
+
+    /// The two spellings of trailing whitespace that `str::trim` eats. A space
+    /// is the one a developer types by accident. U+3000 is the one nobody
+    /// expects a trimmer to touch, and Rust's trimmer is Unicode-aware, so it
+    /// takes that one just as readily.
+    const TRAILING_WHITESPACE: [(&str, char); 2] = [
+        ("a space", ' '),
+        ("U+3000, the ideographic space", '\u{3000}'),
+    ];
+
+    /// A path git printed has to come back with its last character still on it,
+    /// and a repository whose own directory name ends in whitespace is where
+    /// that character is at risk.
+    ///
+    /// [`Git::run`] trims, and `str::trim` is Unicode-aware, so it eats a
+    /// trailing space and a trailing U+3000 alike. A path read back through it
+    /// therefore names a directory that does not exist, and every question
+    /// asked of that path is answered about nothing: `exists()` is false, an
+    /// open fails, and the caller reads the loss as an absence. Nothing says a
+    /// character went missing.
+    ///
+    /// `rev-parse --show-toplevel` is asked rather than the `--git-path` the
+    /// replay asks for, and the difference is worth stating. `--git-path` glues
+    /// a state directory name onto the end of its answer, so the repository's
+    /// own last character lands in the middle of the path and the trimmer
+    /// cannot reach it. What reaches it there is the other half of the same
+    /// defect - the lossy decode, which replaces every byte outside UTF-8 with
+    /// U+FFFD wherever it sits. APFS refuses a name with such a byte outright,
+    /// so no fixture on this machine can hold one, and `--show-toplevel` is the
+    /// answer whose last character is the repository's own. The reader is one
+    /// reader for both halves, so pinning the half that can be built here pins
+    /// the reader.
+    ///
+    /// The armed control runs first. It reads the same answer back through
+    /// [`Git::run`] and requires exactly the trailing character to be missing,
+    /// so the assertion below stands against a live loss rather than against a
+    /// trimmer that already leaves the path alone.
+    #[test]
+    fn a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact() {
+        for (spelling, trailing) in TRAILING_WHITESPACE {
+            let parent = TempDir::new().expect("create the directory the fixture sits in");
+            let root = parent.path().join(format!("{REPOSITORY_STEM}{trailing}"));
+            std::fs::create_dir(&root).unwrap_or_else(|error| {
+                panic!("create a repository directory whose name ends in {spelling}: {error}")
+            });
+
+            let git = Git::new(&root, PREFLIGHT_HOOKS_PATH);
+            git.run("init", &["-q", "-b", "main"])
+                .expect("initialise the fixture repository");
+
+            // Git resolves symlinks on its way to an answer, and macOS puts a
+            // temporary directory behind one - `/var` for `/private/var` - so
+            // the two paths agree only after the same resolution.
+            let expected = std::fs::canonicalize(&root).expect("canonicalise the fixture path");
+
+            let through_run = git
+                .run("rev-parse", &["--show-toplevel"])
+                .expect("read the repository root back through the trimming reader");
+            assert_eq!(
+                format!("{through_run}{trailing}"),
+                expected.to_string_lossy(),
+                "`run` no longer eats {spelling} off the end of git's answer, so the assertion \
+                 below could only pass vacuously"
+            );
+
+            let read = git
+                .path("rev-parse", &["--show-toplevel"])
+                .expect("read the repository root back as the bytes git printed");
+
+            assert_eq!(
+                read, expected,
+                "a reader for one path has to hand back the bytes git printed. A repository \
+                 directory named with {spelling} on the end spells that character as the last \
+                 character of its own path, and a trimmed answer names a directory nothing \
+                 holds."
+            );
+        }
+    }
+
+    /// The subcommand `stopped_commit_is_already_in_head` asks which paths a
+    /// halted commit touched. Spelled here, with the arguments below, so the
+    /// tests pin the call the replay actually depends on rather than a
+    /// plausible-looking neighbour of it.
+    const TOUCHED_PATHS_SUBCOMMAND: &str = "diff-tree";
+
+    /// The arguments that go after it, with the commit left off the end.
+    /// `--ignore-submodules=none` is one of them because the probe asks both of
+    /// its invocations for it, so that a submodule pointer reads the same way to
+    /// the plumbing command and to the porcelain one.
+    const TOUCHED_PATHS: [&str; 5] = [
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "--root",
+        "--ignore-submodules=none",
+    ];
 
     /// A path git cannot spell as UTF-8 has to stop the replay, not be repaired
     /// into one that matches nothing.
@@ -373,12 +1259,18 @@ mod tests {
     /// delimiters and the original bytes come back — but a byte that is not
     /// valid UTF-8 has no `String` to come back *as*. Decoding it lossily, the
     /// way [`Git::try_run`] decodes git's output everywhere else, substitutes
-    /// U+FFFD and yields a name no file has. That name goes straight back into
-    /// the next invocation as a pathspec, matches nothing, and leaves the
-    /// `missing` set empty — which is what "the new base already has this
-    /// commit's work" looks like, so the commit is skipped and the work is
-    /// gone. Every other test in this suite would still pass, because no other
-    /// fixture holds a name git has to refuse.
+    /// U+FFFD and yields a name no file has. The replay then shows a developer a
+    /// path they cannot find in their own repository, and anything that opens
+    /// the path fails — which in this crate floors a conflicted file at one hunk
+    /// and undercounts the work while the total still looks plausible. Every
+    /// other test in this suite stays green, because no other fixture holds a
+    /// name git has to refuse.
+    ///
+    /// The classification is safe from this one, and it is worth saying which
+    /// half is which. `stopped_commit_is_already_in_head` reads both of its path
+    /// lists through this method, so a lossy decode mangles the two lists the
+    /// same way and their intersection is unchanged. What a repaired name still
+    /// costs is the report.
     ///
     /// So the guard is pinned here, at [`Git::paths`], rather than end-to-end
     /// through a sealed-object-store replay. Such a replay would need the
@@ -397,12 +1289,12 @@ mod tests {
     fn refuses_a_path_that_is_not_valid_utf_8_rather_than_replacing_the_byte() {
         let repo = TestRepo::init();
         repo.commit_file("ordinary.txt", "ordinary work\n", "ordinary work");
-        let git = Git::new(repo.path(), "");
+        let git = Git::new(repo.path(), PREFLIGHT_HOOKS_PATH);
 
         let mut ordinary = TOUCHED_PATHS.to_vec();
         ordinary.push("HEAD");
         assert_eq!(
-            git.paths(&ordinary)
+            git.paths(TOUCHED_PATHS_SUBCOMMAND, &ordinary)
                 .expect("list the paths an ordinary commit touched"),
             ["ordinary.txt"],
             "the negative case below only means anything if this invocation reaches the decode \
@@ -420,15 +1312,86 @@ mod tests {
         let mut listed = TOUCHED_PATHS.to_vec();
         listed.push(&undecodable);
 
-        let error = git.paths(&listed).expect_err(
+        let error = git.paths(TOUCHED_PATHS_SUBCOMMAND, &listed).expect_err(
             "a name git cannot spell as UTF-8 must stop the replay; decoding it lossily hands \
-             back a U+FFFD name that matches nothing, and a pathspec matching nothing is how a \
-             commit gets skipped and its work lost",
+             back a U+FFFD name that names no file, which is a path the developer cannot find \
+             and a file nothing can open",
         );
         assert!(
             format!("{error:#}").contains("listed a path that is not valid UTF-8"),
             "the refusal has to name what went wrong, since the developer's next move is to look \
              at the path git could not hand over: {error:#}"
+        );
+    }
+
+    /// A revision that starts with a dash and names no commit in any fixture.
+    ///
+    /// `--root` is the one that costs the most, because git accepts it as an
+    /// option of `rebase`: a replay handed this name rebases the whole history
+    /// onto nothing, hits no conflict, and answers "clean" for a branch that
+    /// does not exist.
+    const DASH_LEADING_REVISION: &str = "--root";
+
+    /// A revision that starts with a dash is a revision, and the runner has to
+    /// hand it to git as one.
+    ///
+    /// Plain `git rev-parse <revision>` reads a dash-leading argument as an
+    /// option it does not know, prints the argument back, and exits 0. The
+    /// pre-flight reads that exit code as "this revision names a commit", so
+    /// the one check between a name that names nothing and a full replay lets
+    /// the run through. `grind -- --root` then printed a clean verdict for a
+    /// branch that does not exist, which is the cheap answer this crate exists
+    /// never to give.
+    ///
+    /// The armed control runs first. It proves that plain git still prints the
+    /// argument back at exit 0, so the refusal below stands against a live
+    /// hazard rather than against a git that already refuses.
+    #[test]
+    fn refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back() {
+        let repo = TestRepo::init();
+        repo.commit_file("seed.txt", "seed\n", "seed");
+        let asked = format!("{DASH_LEADING_REVISION}^{{commit}}");
+
+        assert_eq!(
+            repo.git(&["rev-parse", &asked]),
+            asked,
+            "git no longer prints a dash-leading argument back at exit 0, so this test could \
+             only pass vacuously"
+        );
+
+        let error = Git::new(repo.path(), PREFLIGHT_HOOKS_PATH)
+            .rev_parse(DASH_LEADING_REVISION)
+            .expect_err(
+                "a revision that names no commit has to be refused. Accepting it lets a replay \
+                 start on a name that names nothing, and `--root` is a `rebase` option, so the \
+                 replay finishes and reports a clean verdict for a branch nobody has",
+            );
+
+        assert!(
+            format!("{error:#}").contains(DASH_LEADING_REVISION),
+            "the refusal has to name the revision that did not resolve, because that name is \
+             what the developer typed and has to correct: {error:#}"
+        );
+    }
+
+    /// The refusal above must refuse only what it cannot resolve.
+    ///
+    /// A guard that answers "no" to every revision passes the test above and
+    /// breaks every caller, and the two failures look nothing alike from the
+    /// outside: one is a run that stops, the other is a tool nobody can use.
+    /// So the reader is asked for a revision that does name a commit, and its
+    /// answer is compared with git's own.
+    #[test]
+    fn resolves_a_revision_that_names_a_commit_to_its_full_id() {
+        let repo = TestRepo::init();
+        repo.commit_file("seed.txt", "seed\n", "seed");
+
+        assert_eq!(
+            Git::new(repo.path(), PREFLIGHT_HOOKS_PATH)
+                .rev_parse("HEAD")
+                .expect("resolve a revision that names a commit"),
+            repo.rev_parse("HEAD"),
+            "the reader has to agree with git about where HEAD points"
         );
     }
 
@@ -521,11 +1484,14 @@ mod tests {
     /// reader most needs is the one nobody wrote down. `--literal-pathspecs` is
     /// how this test came to exist. It went into [`Git::safety_config`] as the
     /// guard between a path git printed and the pathspec that path becomes on
-    /// the way back in, it is load-bearing enough that removing it makes a
-    /// `tests/halts.rs` case misclassify a commit as adding nothing to the new
-    /// base — the silent skip that throws work away — and it reached the table
-    /// in neither the row list nor the prose beneath it. Nothing failed. The
-    /// inventory just quietly became a subset.
+    /// the way back in, it was load-bearing enough at the time that removing it
+    /// made a `tests/halts.rs` case misclassify a commit as adding nothing to
+    /// the new base — the silent skip that throws work away — and it reached the
+    /// table in neither the row list nor the prose beneath it. Nothing failed.
+    /// The inventory just quietly became a subset. The empty-commit probe stopped
+    /// handing paths back to git afterwards, so that mutation reddens nothing
+    /// today, which is the other half of the reason this check earns its place: a
+    /// guard whose own test has gone quiet still has to be a row.
     ///
     /// So the completeness of the table is checked here rather than maintained
     /// by care. What is asserted is only that: completeness, not correctness.
@@ -550,10 +1516,9 @@ mod tests {
 
         let inventory = section_under(README, INVENTORY_HEADING);
 
-        // The hooks path is deliberately empty: this runner exists only to be
-        // asked what it would pin, and an empty value is what makes the
-        // computed-value rule below observable.
-        let settings = Git::new(std::env::temp_dir(), "").safety_config();
+        // This runner exists only to be asked what it would pin, so it takes
+        // the pre-flight's hooks path like every other read-only runner here.
+        let settings = Git::new(std::env::temp_dir(), PREFLIGHT_HOOKS_PATH).safety_config();
         assert!(
             !settings.is_empty(),
             "safety_config pins nothing at all, so there is no guard for the inventory to be \
@@ -562,20 +1527,26 @@ mod tests {
 
         for argument in settings.iter().filter(|argument| argument.as_str() != "-c") {
             let named = match argument.split_once('=') {
-                // `core.hooksPath`'s value is a per-run temporary directory, so
-                // no document could quote it and the key alone is the whole
-                // promise. Anything else with a computed value lands here too
-                // and fails on the key rather than passing on a coincidence,
-                // which is the safe direction: a new guard the README has never
-                // heard of stops the build instead of slipping past it.
-                Some((key, "")) => key,
+                // The hooks path is a per-run temporary directory in a replay
+                // and a relative path in the pre-flight, so no document can
+                // quote it and the key alone is the whole promise. Named here
+                // rather than read off the value, because the rule that took an
+                // *empty* value for a computed one needed this runner to carry
+                // an empty hooks path - and an empty hooks path resolves a hook
+                // at the root of the file system, which is the one value
+                // `Git::new` refuses.
+                Some((key, _)) if key == HOOKS_PATH_KEY => key,
                 // A settled value is part of the guarantee - `gpg.format=ssh`
                 // is a different promise from `gpg.format=openpgp` - so the
-                // whole `key=value` has to be the thing the table says.
-                Some(_) => argument.as_str(),
-                // Not a `-c` setting at all, so there is no key to fall back
-                // to: the option is its own name. `--literal-pathspecs` today.
-                None => argument.as_str(),
+                // whole `key=value` has to be the thing the table says. An
+                // option that is not a `-c` setting at all has no key to fall
+                // back to: it is its own name, `--literal-pathspecs` today. Any
+                // further guard with a computed value lands here too and fails
+                // on the whole `key=value` rather than passing on a
+                // coincidence, which is the safe direction: a new guard the
+                // README has never heard of stops the build instead of
+                // slipping past it.
+                _ => argument.as_str(),
             };
 
             assert!(
@@ -932,10 +1903,10 @@ mod tests {
     /// `temp_dir` is only ever a cwd here — nothing is created in it, so
     /// concurrent test runs cannot collide.
     fn assert_scratch_identity() {
-        let git = Git::new(std::env::temp_dir(), "");
+        let git = Git::new(std::env::temp_dir(), PREFLIGHT_HOOKS_PATH);
 
         let ident = git
-            .run(&["var", "GIT_AUTHOR_IDENT"])
+            .run("var", &["GIT_AUTHOR_IDENT"])
             .expect("git var GIT_AUTHOR_IDENT");
 
         let expected = format!("{HARNESS_NAME} <{HARNESS_EMAIL}>");
@@ -946,9 +1917,10 @@ mod tests {
              got:         {ident}\n  \
              inherited:   {}\n\
              An identity variable outranks every config source, `-c` included, so \
-             Git::try_run pins the four name and email variables to the harness and \
-             drops the two dates before it spawns git. git exports them into every \
-             hook it runs, and into every commit that rebase, cherry-pick, or am \
+             NoInheritedGitEnvironment removes every `GIT_` variable and \
+             Git::command pins the four name and email variables back to the \
+             harness before git is spawned. git exports them into every hook it \
+             runs, and into every commit that rebase, cherry-pick, or am \
              replays.",
             inherited_git_environment()
         );
@@ -959,120 +1931,6 @@ mod tests {
     #[test]
     fn commits_under_the_crate_s_own_identity_not_a_consuming_tool_s() {
         assert_scratch_identity();
-    }
-
-    /// Printed by a child half that ran its assertions and returned, and
-    /// required by [`run_child_half`] before it calls the run a pass.
-    ///
-    /// A zero exit is not evidence that anything ran. libtest exits 0 when a
-    /// filter matches no test, so a filter gone stale hands the parent exactly
-    /// the exit status a passing child hands it. Only a child that reached the
-    /// end of its body prints this line, so the parent reads proof of work
-    /// instead of absence of failure. `--nocapture` is already on the child's
-    /// command line, so the line arrives in the child's stdout with no more
-    /// plumbing.
-    ///
-    /// The value is a token no libtest output holds, because the parent looks
-    /// for it in the whole of that output. A sentinel that a test name or a
-    /// progress line could spell would report the work of libtest as the work
-    /// of the child.
-    const CHILD_RAN: &str = "GITSCRATCH_CHILD_HALF_RAN";
-
-    /// Re-execute this test binary on one test, under an environment
-    /// `configure` sets, and report what the child wrote when the run failed.
-    ///
-    /// Two tests here need an environment of their own, and an environment is
-    /// process-wide: `std::env::set_var` in either one reaches every sibling
-    /// test in the binary and every concurrent run of the suite. So each of
-    /// them re-executes this binary with `marker` set, and its own child branch
-    /// recognises the marker and does the asserting.
-    ///
-    /// The two parents differ in nothing but the environment they set, so one
-    /// helper decides what counts as a run rather than two copies of the same
-    /// `Command` construction deciding it apart from each other. The
-    /// environment arrives as a closure because the two spell their values
-    /// differently: the hook test holds `&str` and the redirected test holds
-    /// `PathBuf`.
-    ///
-    /// A run counts only when the child exits 0 **and** prints
-    /// [`CHILD_RAN`](CHILD_RAN). The second half is the whole point of the one
-    /// helper: `filter` is a string, nothing ties it to the test it names, and
-    /// a rename leaves it matching nothing - which libtest reports as a
-    /// success. See
-    /// [`a_child_half_that_matched_no_test_is_a_failure_not_a_pass`].
-    fn run_child_half(
-        marker: &str,
-        filter: &str,
-        configure: impl FnOnce(&mut std::process::Command),
-    ) -> Result<(), String> {
-        let mut child = std::process::Command::new(
-            std::env::current_exe().expect("path of the running test binary"),
-        );
-        child
-            .args([filter, "--exact", "--nocapture"])
-            .env(marker, "1");
-        configure(&mut child);
-
-        let output = child.output().expect("re-run this test binary");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if !output.status.success() {
-            return Err(format!("the child half failed:\n{stdout}{stderr}"));
-        }
-
-        if !stdout.contains(CHILD_RAN) {
-            return Err(format!(
-                "`{filter}` matched no test, so the child exited 0 with nothing run and this \
-                 guard checked nothing. libtest calls an empty filter a success, so the exit \
-                 status cannot tell the two apart; the child prints `{CHILD_RAN}` when it \
-                 reaches the end of its body, and it printed nothing. Point the filter back at \
-                 the test it names.\n{stdout}{stderr}"
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Marks the child of
-    /// [`a_child_half_that_matched_no_test_is_a_failure_not_a_pass`]. Nothing
-    /// ever reads it: the filter that child runs under matches no test, so no
-    /// child branch runs to look for it.
-    const UNMATCHED_CHILD_MARKER: &str = "GITSCRATCH_UNMATCHED_FILTER_CHILD";
-
-    /// A libtest filter naming a test this file does not define, which is what
-    /// a renamed test looks like from the parent's side.
-    const UNMATCHED_TEST_PATH: &str = "git::tests::no_test_in_this_file_carries_this_name";
-
-    /// A filter is a string, and nothing ties a string to the test it names.
-    /// Rename the test, the `tests` module or the `git` module and the filter
-    /// stays as it was, so the child matches nothing — and libtest exits 0 when
-    /// a filter matches nothing. A parent that reads the exit status alone
-    /// therefore calls the rename a pass, and the two guards below check
-    /// nothing from that commit on, in silence.
-    ///
-    /// So [`run_child_half`] has to refuse a child that ran no test, and this
-    /// pins that it does. The rename that breaks a filter is the rename that
-    /// hides the breakage, which is why the refusal cannot live in the filter
-    /// constants themselves.
-    #[test]
-    fn a_child_half_that_matched_no_test_is_a_failure_not_a_pass() {
-        let outcome = run_child_half(UNMATCHED_CHILD_MARKER, UNMATCHED_TEST_PATH, |_| {});
-
-        let report = outcome.expect_err(
-            "a child that matched no test must be a failure: libtest exits 0 on an empty filter, \
-             so accepting that exit means a renamed test reports a pass while nothing runs",
-        );
-        assert!(
-            report.contains(UNMATCHED_TEST_PATH),
-            "the refusal has to name the filter that matched nothing, because the filter is the \
-             thing that went stale: {report}"
-        );
-        assert!(
-            report.contains("matched no test"),
-            "the refusal has to say what went wrong - a child that ran nothing, not a child that \
-             failed - or a reader repairs the wrong half: {report}"
-        );
     }
 
     /// Marks the re-executed child half of
@@ -1111,11 +1969,12 @@ mod tests {
             assert_scratch_identity();
             // Reached only when the assertion above held, and read by the
             // parent as the one proof that this branch ran at all.
-            println!("{CHILD_RAN}");
+            child_ran();
             return;
         }
 
-        let outcome = run_child_half(CHILD_MARKER, HOOK_TEST_PATH, |child| {
+        let outcome = run_child_half(HOOK_TEST_PATH, |child| {
+            child.env(CHILD_MARKER, "1");
             for (name, value) in HOOK_ENVIRONMENT {
                 child.env(name, value);
             }
@@ -1152,7 +2011,7 @@ mod tests {
             assert_the_inherited_environment_is_ignored();
             // Reached only when the assertions above held, and read by the
             // parent as the one proof that this branch ran at all.
-            println!("{CHILD_RAN}");
+            child_ran();
             return;
         }
 
@@ -1161,8 +2020,9 @@ mod tests {
         // parent, and outlives the child because the parent blocks on it.
         let elsewhere = TempDir::new().expect("create the stand-in for a real repository");
 
-        let outcome = run_child_half(REDIRECTED_CHILD_MARKER, REDIRECTED_TEST_PATH, |child| {
+        let outcome = run_child_half(REDIRECTED_TEST_PATH, |child| {
             child
+                .env(REDIRECTED_CHILD_MARKER, "1")
                 .env("GIT_AUTHOR_NAME", "A Developer")
                 .env("GIT_AUTHOR_EMAIL", "developer@example.com")
                 .env("GIT_COMMITTER_NAME", "A Developer")
@@ -1199,13 +2059,13 @@ mod tests {
     /// another repository, and pin that neither reached git.
     fn assert_the_inherited_environment_is_ignored() {
         let here = TempDir::new().expect("create the scratch stand-in");
-        let git = Git::new(here.path(), "");
-        git.run(&["init", "-q", "-b", "main"])
+        let git = Git::new(here.path(), PREFLIGHT_HOOKS_PATH);
+        git.run("init", &["-q", "-b", "main"])
             .expect("initialise the repository the runner is rooted in");
 
         for variable in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
             let ident = git
-                .run(&["var", variable])
+                .run("var", &[variable])
                 .expect("read the identity git would stamp");
             assert!(
                 ident.starts_with("gitscratch <gitscratch@localhost>"),
@@ -1218,23 +2078,215 @@ mod tests {
         // /var to /private/var, so the raw paths would never compare equal.
         let expected = std::fs::canonicalize(here.path()).expect("canonicalise the scratch path");
         let git_dir = git
-            .run(&["rev-parse", "--absolute-git-dir"])
+            .path("rev-parse", &["--absolute-git-dir"])
             .expect("ask git which repository it is operating on");
         assert!(
             std::fs::canonicalize(&git_dir)
                 .expect("canonicalise git's answer")
                 .starts_with(&expected),
             "the runner must operate on the repository it is rooted in ({}), not the one an \
-             inherited GIT_DIR names ({git_dir})",
-            expected.display()
+             inherited GIT_DIR names ({})",
+            expected.display(),
+            git_dir.display()
         );
 
         let index = git
-            .run(&["rev-parse", "--git-path", "index"])
+            .path("rev-parse", &["--git-path", "index"])
             .expect("ask git which index it would write");
         assert!(
-            !index.contains(THEIR_INDEX),
-            "an inherited GIT_INDEX_FILE must not become the index a replay stages into: {index}"
+            !index.to_string_lossy().contains(THEIR_INDEX),
+            "an inherited GIT_INDEX_FILE must not become the index a replay stages into: {}",
+            index.display()
         );
+    }
+    /// Marks the re-executed child half of
+    /// [`every_identity_variable_is_settled_on_the_command_the_runner_builds`].
+    const SETTLED_CHILD_MARKER: &str = "GITSCRATCH_SETTLED_IDENTITY_CHILD";
+
+    /// libtest's exact filter for the one test the child half runs. The
+    /// compiler never checks this string against the test it names, and a
+    /// rename that leaves it matching nothing is a run libtest calls a success,
+    /// so [`run_child_half`] requires the child to say it ran rather than
+    /// trusting this constant to stay current.
+    const SETTLED_TEST_PATH: &str =
+        "git::tests::every_identity_variable_is_settled_on_the_command_the_runner_builds";
+
+    /// The six variables git hands a hook to say who is committing, and what
+    /// [`Git::command`] has to do with each one before git reads it.
+    ///
+    /// `Some(value)` is a pin, `None` is a removal, and the difference is the
+    /// point. The four that name a person are pinned to the harness, because a
+    /// scratch commit has to be attributable to the harness that made it. The
+    /// two that carry a time are taken off instead: a pinned date would give
+    /// every commit of one run the same timestamp, which is the defect the
+    /// crate names for a *leaked* date, arriving by the crate's own hand.
+    ///
+    /// Spelled here as literals rather than read out of the source, so a name
+    /// misspelled in [`Git::command`] fails this test instead of agreeing with
+    /// it.
+    const SETTLED_IDENTITY: [(&str, Option<&str>); 6] = [
+        ("GIT_AUTHOR_NAME", Some(HARNESS_NAME)),
+        ("GIT_AUTHOR_EMAIL", Some(HARNESS_EMAIL)),
+        ("GIT_COMMITTER_NAME", Some(HARNESS_NAME)),
+        ("GIT_COMMITTER_EMAIL", Some(HARNESS_EMAIL)),
+        ("GIT_AUTHOR_DATE", None),
+        ("GIT_COMMITTER_DATE", None),
+    ];
+
+    /// The child half: with the process holding none of the six, read back what
+    /// the runner puts on the command it builds.
+    ///
+    /// The armed control comes first, and it is what makes the assertion mean
+    /// anything. [`NoInheritedGitEnvironment`] schedules a removal for every
+    /// `GIT_` variable the process *holds*, so a run started from a git hook
+    /// would see both date variables removed from the command whether or not
+    /// [`Git::command`] says anything about them. Under a process that holds
+    /// none of the six, every entry the command carries was put there by the
+    /// runner.
+    fn assert_the_identity_is_settled() {
+        for (name, _) in SETTLED_IDENTITY {
+            assert!(
+                std::env::var_os(name).is_none(),
+                "the child half must hold none of the six identity variables, or the sweep \
+                 schedules the removals this test reads and the assertions below are measured \
+                 against the sweep rather than against the pin: `{name}` is set"
+            );
+        }
+
+        let command = Git::new(std::env::temp_dir(), PREFLIGHT_HOOKS_PATH)
+            .command("var", &["GIT_AUTHOR_IDENT"]);
+        let settled: Vec<(OsString, Option<OsString>)> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(std::ffi::OsStr::to_os_string)))
+            .collect();
+
+        for (name, pinned) in SETTLED_IDENTITY {
+            let (_, carried) = settled
+                .iter()
+                .find(|(key, _)| key == OsStr::new(name))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`{name}` is not settled on the command at all. Git reads an identity \
+                         variable ahead of every configuration source, `-c` included, so the \
+                         runner has to say what each of the six is - and it has to say it \
+                         whatever the process happens to hold, because the sweep covers only \
+                         what is there to sweep. The command carries {settled:?}"
+                    )
+                });
+
+            match pinned {
+                Some(value) => assert_eq!(
+                    carried.as_deref(),
+                    Some(OsStr::new(value)),
+                    "`{name}` has to be pinned to the harness, so the identity holds even with \
+                     the sweep edited away"
+                ),
+                None => assert!(
+                    carried.is_none(),
+                    "`{name}` has to be removed rather than pinned. A removal leaves the clock to \
+                     give each commit its own timestamp; a pin would give every commit of one run \
+                     one identical time, which is the cost the crate names for a leaked date"
+                ),
+            }
+        }
+    }
+
+    /// Every one of the six identity variables is settled on the command the
+    /// runner builds, and settled there whatever the process holds.
+    ///
+    /// The sweep and the pins are two guards over one hazard, and the crate
+    /// keeps both so the identity survives either one being edited away. That
+    /// redundancy is only real where it is complete: with four of the six
+    /// restated and two left to the sweep alone, a sweep that was edited away
+    /// would hold the name and the address and let both dates through - and
+    /// every commit a run makes would carry one identical timestamp, which is
+    /// the cost the crate already names at [`NoInheritedGitEnvironment`].
+    ///
+    /// Read off the command rather than out of a commit, because the question
+    /// is what the runner says rather than what git resolves. A commit made in
+    /// a fixture answers the same either way: the sweep alone already keeps a
+    /// leaked date out of it, which is exactly why this second guard cannot be
+    /// seen from there.
+    ///
+    /// The environment belongs to a re-executed child of this test binary. The
+    /// child is handed the six variables removed, so the process holds none of
+    /// them and no removal on the command can have come from the sweep. Doing
+    /// that in this process instead would mean [`std::env::set_var`], which
+    /// mutates a global while sibling tests run.
+    #[test]
+    fn every_identity_variable_is_settled_on_the_command_the_runner_builds() {
+        if std::env::var_os(SETTLED_CHILD_MARKER).is_some() {
+            assert_the_identity_is_settled();
+            // Reached only when the assertions above held, and read by the
+            // parent as the one proof that this branch ran at all.
+            child_ran();
+            return;
+        }
+
+        let outcome = run_child_half(SETTLED_TEST_PATH, |child| {
+            child.env(SETTLED_CHILD_MARKER, "1");
+            for (name, _) in SETTLED_IDENTITY {
+                child.env_remove(name);
+            }
+        });
+
+        if let Err(report) = outcome {
+            panic!("the settled-identity guard did not report a pass:\n{report}");
+        }
+    }
+
+    /// The hook lookup an empty `core.hooksPath` resolves to, which is what
+    /// makes the empty value worse than no redirect at all.
+    ///
+    /// Git joins the configured directory onto the hook name, so an empty
+    /// directory joins to an absolute path at the root of the file system. With
+    /// the key unset git answers `.git/hooks/pre-commit`, inside the repository;
+    /// with it empty it answers this, which is one path for every repository on
+    /// the machine.
+    const HOOK_AT_THE_FILESYSTEM_ROOT: &str = "/pre-commit";
+
+    /// The hook a repository fires first and most often, used here only as the
+    /// name git resolves.
+    const A_HOOK: &str = "hooks/pre-commit";
+
+    /// A hooks path of nothing is refused, because an empty `core.hooksPath` is
+    /// not "no hooks" - it is one hooks directory shared by the whole machine.
+    ///
+    /// Git resolves a hook by joining the configured directory onto the hook
+    /// name. An empty directory therefore resolves `pre-commit` to
+    /// `/pre-commit`, at the root of the file system, where an unset key would
+    /// have resolved it inside the repository and where the relative path the
+    /// pre-flight names resolves it to a directory this crate never creates. So
+    /// the empty value does not point hook lookups at nothing; it points every
+    /// repository's hook lookups at one place, and at a place outside every
+    /// repository.
+    ///
+    /// The runner is crate-private, so nothing outside can reach this. What the
+    /// refusal removes is the shape a call site inside the crate can still
+    /// write: a runner whose hooks redirect reads as "hooks off" and is not.
+    ///
+    /// The armed control runs first, through plain git, because the assertion
+    /// below says the runner refuses a value and that is worth nothing if the
+    /// value were harmless. It reads the two resolutions back and requires them
+    /// to differ, so the refusal stands against a live hazard.
+    #[test]
+    #[should_panic(expected = "hooks path")]
+    fn refuses_an_empty_hooks_path_rather_than_resolving_a_hook_outside_the_repository() {
+        let repo = TestRepo::init();
+
+        assert_eq!(
+            repo.git(&["-c", "core.hooksPath=", "rev-parse", "--git-path", A_HOOK]),
+            HOOK_AT_THE_FILESYSTEM_ROOT,
+            "git no longer resolves a hook against an empty `core.hooksPath` at the root of the \
+             file system, so the refusal below stands against nothing"
+        );
+        assert_eq!(
+            repo.git(&["rev-parse", "--git-path", A_HOOK]),
+            format!(".git/{A_HOOK}"),
+            "git no longer resolves a hook inside the repository when the key is unset, so the \
+             two answers this control tells apart are no longer different"
+        );
+
+        let _refused = Git::new(repo.path(), "");
     }
 }

@@ -1,0 +1,36 @@
+[package]
+name = "grind"
+version = "0.1.0"
+edition.workspace = true
+description = "Reports whether rebasing HEAD onto a branch would conflict, and by how much"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+gitscratch.workspace = true
+# The one entrance to the width of a terminal, and the one place that decides
+# between the two sources of it. A width the environment states in `COLUMNS`
+# wins, and the controlling terminal answers when the environment states none.
+# A terminal that carries no window answers the `TIOCGWINSZ` ioctl with zero
+# columns and the ioctl succeeds, so a caller that reads the raw answer lays the
+# breakdown out at no columns at all. `TerminalWidth::get_or_default` is where
+# that answer is refused and the fallback of 80 columns stands instead.
+termbar.workspace = true
+
+[dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
+# So a test of the layout can hold a terminal of a size it chose. `cargo test`
+# gives the test binary the terminal of whoever started the run, and a test that
+# read that terminal would answer one way in a wide window and another way in a
+# narrow one. `openpty` makes a sized pseudo-terminal, and `TIOCSCTTY` gives it
+# to the child as its own.
+libc.workspace = true
+# So a test asserting that a column lines up measures the same thing the
+# renderer does. Byte length and character count both disagree with what a
+# terminal shows for a CJK name, and a test using either would call a ragged
+# column aligned.
+unicode-width.workspace = true
+
+[lints]
+workspace = true

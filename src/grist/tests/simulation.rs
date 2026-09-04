@@ -1,5 +1,7 @@
-use gitscratch::testing::{contested_region_repo, numbered_lines, stacked_branches_repo, TestRepo};
-use grist::{BranchName, Files, Hunks, Simulator, Stops};
+use gitscratch::testing::{
+    contested_region_repo, not_a_repository, numbered_lines, stacked_branches_repo, TestRepo,
+};
+use grist::{orderings_to_simulate, BranchName, Files, Hunks, Simulator, Stops};
 
 fn order(names: &[&str]) -> Vec<BranchName> {
     names.iter().map(|n| BranchName::new(*n)).collect()
@@ -20,7 +22,7 @@ fn scores_an_ordering_with_no_overlap_as_free() {
 
     repo.checkout("main");
 
-    let simulator = Simulator::new(repo.path(), "main");
+    let simulator = Simulator::new(repo.path(), "main").expect("open the fixture repository");
     let score = simulator
         .score(&order(&["alpha", "beta"]))
         .expect("simulation runs");
@@ -35,7 +37,7 @@ fn scores_an_ordering_with_no_overlap_as_free() {
 #[test]
 fn charges_more_when_the_heavily_iterated_branch_lands_second() {
     let repo = contested_region_repo();
-    let simulator = Simulator::new(repo.path(), "main");
+    let simulator = Simulator::new(repo.path(), "main").expect("open the fixture repository");
 
     let iterated_first = simulator
         .score(&order(&["iterated", "single"]))
@@ -51,8 +53,8 @@ fn charges_more_when_the_heavily_iterated_branch_lands_second() {
     assert!(
         iterated_second.hunks() > iterated_first.hunks(),
         "expected landing the iterated branch second to cost more hunks, got {} vs {}",
-        iterated_second.hunks(),
-        iterated_first.hunks()
+        iterated_second.hunks().phrase(),
+        iterated_first.hunks().phrase()
     );
 }
 
@@ -65,7 +67,7 @@ fn charges_more_when_the_heavily_iterated_branch_lands_second() {
 #[test]
 fn landing_a_stacked_branch_first_strands_the_branch_beneath_it() {
     let repo = stacked_branches_repo();
-    let simulator = Simulator::new(repo.path(), "main");
+    let simulator = Simulator::new(repo.path(), "main").expect("open the fixture repository");
 
     let groundwork_first = simulator
         .score(&order(&["groundwork", "built-on-top"]))
@@ -89,7 +91,7 @@ fn landing_a_stacked_branch_first_strands_the_branch_beneath_it() {
 #[test]
 fn ranks_the_cheaper_ordering_first_regardless_of_input_order() {
     let repo = contested_region_repo();
-    let simulator = Simulator::new(repo.path(), "main");
+    let simulator = Simulator::new(repo.path(), "main").expect("open the fixture repository");
 
     let ranked = simulator
         .evaluate(&order(&["single", "iterated"]))
@@ -109,7 +111,7 @@ fn ranks_the_cheaper_ordering_first_regardless_of_input_order() {
 #[test]
 fn memoised_evaluation_agrees_with_scoring_each_ordering_independently() {
     let repo = contested_region_repo();
-    let simulator = Simulator::new(repo.path(), "main");
+    let simulator = Simulator::new(repo.path(), "main").expect("open the fixture repository");
 
     let ranked = simulator
         .evaluate(&order(&["iterated", "single"]))
@@ -128,18 +130,23 @@ fn memoised_evaluation_agrees_with_scoring_each_ordering_independently() {
 /// finish. The refusal has to survive counts whose factorial does not fit in a
 /// `usize`: deriving the ordering count before checking the limit makes the very
 /// guard that exists to produce a friendly error the thing that blows up.
+///
+/// Asked of `orderings_to_simulate` rather than of a `Simulator`, because that
+/// function *is* the guard, and because asking it directly is the only way left
+/// to show what rejecting an over-limit list costs: no repository, no scratch
+/// worktree, not one git process. This test used to make that point by handing a
+/// `Simulator` a path that does not exist — if any git work had preceded the
+/// check, the error would have been about the missing path instead. That
+/// tripwire has moved: `Simulator::new` now opens the repository, so a
+/// nonexistent path is refused by the constructor and never reaches a branch
+/// list at all (see the pre-flight test below). Pointing straight at the guard
+/// keeps the property pinned somewhere it is still visible.
 #[test]
 fn refuses_more_branches_than_the_limit_instead_of_overflowing_the_ordering_count() {
     let names: Vec<String> = (1..=25).map(|n| format!("br{n}")).collect();
     let branches: Vec<BranchName> = names.iter().map(BranchName::new).collect();
 
-    // No repository needed: the branch list is validated before any git work,
-    // which is also why an over-limit run costs nothing to reject.
-    let simulator = Simulator::new("/grist-does-not-exist", "main");
-
-    let error = simulator
-        .evaluate(&branches)
-        .expect_err("25 branches is far past the limit");
+    let error = orderings_to_simulate(&branches).expect_err("25 branches is far past the limit");
 
     let message = error.to_string();
     assert!(
@@ -157,11 +164,20 @@ fn refuses_more_branches_than_the_limit_instead_of_overflowing_the_ordering_coun
 /// readily as ranking something - it yields the single empty ordering - and a
 /// caller handed that empty-but-successful result reads it as "your branches are
 /// already in the best order" rather than "you named no branches".
+///
+/// Asked of `evaluate`, against a real repository, which is what makes this a
+/// test of the guard being *applied* rather than merely existing: take the
+/// `orderings_to_simulate` call out of `evaluate` and nothing errors at all —
+/// the empty ordering is scored cheerfully and `expect_err` below fails. The
+/// repository is a real one because `Simulator::new` now insists on one, and
+/// that is no loss: an empty list is still refused before a scratch worktree is
+/// built, since ranking nothing is decided before there is anything to rank.
 #[test]
 fn refuses_an_empty_branch_list_rather_than_ranking_nothing() {
-    // No repository needed: the branch list is validated before any git work,
-    // the same reason an over-limit list costs nothing to reject.
-    let simulator = Simulator::new("/grist-does-not-exist", "main");
+    let repo = TestRepo::init();
+    repo.commit_file("base.txt", "base\n", "base");
+
+    let simulator = Simulator::new(repo.path(), "main").expect("open the fixture repository");
 
     let error = simulator
         .evaluate(&[])
@@ -171,6 +187,37 @@ fn refuses_an_empty_branch_list_rather_than_ranking_nothing() {
     assert!(
         message.contains("no branches to order"),
         "expected the error to say there was nothing to order, got: {message}"
+    );
+}
+
+/// Somewhere outside every repository there is nothing to simulate, and that has
+/// to be settled when the `Simulator` is built rather than when it first runs.
+///
+/// `tests/cli.rs` pins what a user sees — the refusal reaching stderr before any
+/// run is announced. This pins the structural reason it can: the constructor
+/// carries `gitscratch`'s pre-flight, so a `Simulator` that exists is one with
+/// somewhere to run, and no caller can be holding one that was never going to
+/// work. Left to the first replay, the same fact arrives as git's own complaint
+/// from inside `worktree add`, naming `.git` instead of the directory that was
+/// actually wrong.
+#[test]
+fn refuses_to_simulate_against_a_directory_that_is_not_a_repository() {
+    let elsewhere = not_a_repository();
+
+    // `.err()` rather than `expect_err`, which would want a `Debug` on
+    // `Simulator` that exists for no other reason than this line.
+    let error = Simulator::new(elsewhere.path(), "main")
+        .err()
+        .expect("a directory outside every repository has no orderings to rank");
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("is not inside a git repository"),
+        "the refusal has to be the pre-flight's, not a failed simulation's, got: {message}"
+    );
+    assert!(
+        message.contains(&elsewhere.path().display().to_string()),
+        "the refusal has to name the directory it was pointed at, got: {message}"
     );
 }
 
@@ -204,7 +251,7 @@ fn refuses_to_score_an_ordering_whose_replay_could_not_be_carried_out() {
     let dropped_sha = repo.git(&["log", "-1", "--format=%h", "alpha"]);
     let dropped_subject = repo.git(&["log", "-1", "--format=%s", "alpha"]);
 
-    let simulator = Simulator::new(repo.path(), "main");
+    let simulator = Simulator::new(repo.path(), "main").expect("open the fixture repository");
     let branches = order(&["alpha", "beta"]);
 
     // Sealed only around the calls themselves: building the repository and
@@ -252,6 +299,57 @@ fn refuses_to_score_an_ordering_whose_replay_could_not_be_carried_out() {
     }
 }
 
+/// A branch name that starts with a dash is a branch name, and the checkout
+/// that puts the replay on it has to read it as one.
+///
+/// `git checkout -q --detach --progress` is a complete and valid command. Git
+/// reads `--progress` as its own option, finds no branch left to check out, and
+/// detaches HEAD where it already stands - exit 0, no complaint. So the scratch
+/// worktree stayed on the base, the rebase found nothing to replay, and the
+/// ordering scored zero: a free ordering for a branch nobody replayed. Zero is
+/// also what a genuinely free ordering scores, so nothing downstream can tell
+/// the two apart.
+///
+/// `--progress` rather than a name nobody would type, because it is the shape
+/// that succeeds. A dash-leading name git does not know fails either way, and
+/// `-b` cannot be used with `--detach` at all; this one is the name that used
+/// to be obeyed.
+///
+/// The control at the end scores an ordering of real branches and requires it
+/// to cost something. Without it a simulator that refused every branch, or one
+/// that could not replay anything on this fixture, would pass here.
+#[test]
+fn refuses_a_branch_whose_name_starts_with_a_dash_rather_than_scoring_a_replay_it_never_did() {
+    let repo = contested_region_repo();
+    let simulator = Simulator::new(repo.path(), "main").expect("open the fixture repository");
+
+    let error = simulator
+        .score(&order(&["--progress"]))
+        .map(|score| format!("{score:?}"))
+        .expect_err(
+            "a branch name that names no branch has to stop the run. Reading it as an option \
+             leaves the scratch worktree on the base, so the ordering scores zero for work that \
+             was never replayed",
+        );
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("--progress"),
+        "the refusal has to name the branch it could not check out: {message}"
+    );
+
+    let control = simulator
+        .score(&order(&["single", "iterated"]))
+        .expect("score an ordering of branches the fixture really has");
+
+    assert!(
+        control.hunks() > Hunks::new(0),
+        "the fixture has to cost something, or the refusal above proves only that this \
+         simulator answers nothing at all, got {}",
+        control.hunks().phrase()
+    );
+}
+
 /// Replaying dozens of commits takes real time, so the caller needs to be told
 /// what is happening rather than staring at a silent terminal.
 #[test]
@@ -264,6 +362,7 @@ fn reports_progress_for_each_branch_it_lands() {
 
     let recorder = Rc::clone(&seen);
     let simulator = Simulator::new(repo.path(), "main")
+        .expect("open the fixture repository")
         .with_progress(move |message| recorder.borrow_mut().push(message.to_owned()));
 
     simulator

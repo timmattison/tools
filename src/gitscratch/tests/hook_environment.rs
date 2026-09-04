@@ -12,7 +12,11 @@
 //! Git resolves that environment in preference to `-c` and to `git config`, so
 //! it walks straight through the harness's pinned configuration. This suite runs
 //! a whole replay with that environment set and pins the two things that must
-//! survive it: the replay works at all, and it stays attributed to the harness.
+//! survive it: the replay works at all, and it stays attributed to the harness -
+//! by the name on the commit and by the time the commit carries. Both halves of
+//! the attribution travel in the same six variables, and the date half is the
+//! one that leaks quietly: it stamps every commit of a run with one identical
+//! timestamp, which reads as an ordinary date.
 //!
 //! It is its own test binary on purpose. The environment is process-wide, so
 //! polluting it deliberately is only safe where nothing else is running — one
@@ -20,7 +24,17 @@
 //! which is exactly that guarantee.
 
 use gitscratch::testing::conflicting_repo;
-use gitscratch::{Files, Scratch};
+use gitscratch::Files;
+
+/// A timestamp no run of this suite can produce on its own, so a commit that
+/// carries it can only have taken it from the environment.
+///
+/// Written in git's raw `<epoch> <timezone>` form, which is the form
+/// `--date=raw` prints back byte for byte. Git reformats every other spelling
+/// it accepts on the way out - an ISO date set as `+00:00` comes back as `Z` -
+/// so an assertion against one of those could only fail to match, which is a
+/// test that passes for the wrong reason.
+const LEAKED_DATE: &str = "1700000000 +0000";
 
 #[test]
 fn replays_under_the_environment_a_git_hook_hands_down() {
@@ -31,7 +45,7 @@ fn replays_under_the_environment_a_git_hook_hands_down() {
     // one fails with "not a directory".
     std::env::set_var("GIT_AUTHOR_NAME", "A Developer");
     std::env::set_var("GIT_AUTHOR_EMAIL", "developer@example.com");
-    std::env::set_var("GIT_AUTHOR_DATE", "@1700000000 +0000");
+    std::env::set_var("GIT_AUTHOR_DATE", LEAKED_DATE);
     std::env::set_var("GIT_INDEX_FILE", ".git/index");
     std::env::set_var("GIT_PREFIX", "");
     // A pre-commit hook is handed the author half only, but the committer half
@@ -39,6 +53,7 @@ fn replays_under_the_environment_a_git_hook_hands_down() {
     // git reads both ahead of any configuration.
     std::env::set_var("GIT_COMMITTER_NAME", "A Developer");
     std::env::set_var("GIT_COMMITTER_EMAIL", "developer@example.com");
+    std::env::set_var("GIT_COMMITTER_DATE", LEAKED_DATE);
 
     // The fixtures build repositories by running git too, so they have to be as
     // immune as the harness is - a fixture that inherits the environment cannot
@@ -46,9 +61,9 @@ fn replays_under_the_environment_a_git_hook_hands_down() {
     let repo = conflicting_repo();
     let _elsewhere = repo.add_worktree("left");
 
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
-    let git = scratch.git();
-    git.run(&["checkout", "-q", "--detach", "right"])
+    let scratch = repo.scratch("main");
+    let git = scratch.testing_git();
+    git.run("checkout", &["-q", "--detach", "right"])
         .expect("check out the branch detached in the scratch worktree");
 
     let conflicts = scratch
@@ -67,13 +82,24 @@ fn replays_under_the_environment_a_git_hook_hands_down() {
     // original author across by design, so the author here belongs to whoever
     // wrote the fixture's commit and says nothing about the harness. Who made
     // the new commit is the committer, and that is the harness.
+    //
+    // The date is read back beside the name, because a hook hands down all six
+    // identity variables and the two that carry a time are the quiet half. A
+    // name that leaks is visible in `git log`; a date that leaks stamps every
+    // commit of a run with one identical timestamp, which reads as an ordinary
+    // date and orders nothing.
     let committer = git
-        .run(&["log", "-1", "--format=%cn <%ce>"])
+        .run("log", &["-1", "--date=raw", "--format=%cn <%ce>|%cd"])
         .expect("read the committer of the commit the replay wrote");
-    assert_eq!(
-        committer, "gitscratch <gitscratch@localhost>",
+    assert!(
+        committer.starts_with("gitscratch <gitscratch@localhost>|"),
         "a replay must stay attributable to the harness that made it, even when the environment \
-         it inherited names the developer"
+         it inherited names the developer: {committer}"
+    );
+    assert!(
+        !committer.contains(LEAKED_DATE),
+        "a replay must timestamp its commits when it made them, not when an inherited \
+         GIT_COMMITTER_DATE says: {committer}"
     );
 
     // A commit the harness makes from nothing has no original author to
@@ -82,16 +108,30 @@ fn replays_under_the_environment_a_git_hook_hands_down() {
     // GIT_AUTHOR_DATE would sign with the developer's name and the timestamp of
     // whatever commit the hook was running for.
     let tree = git
-        .run(&["rev-parse", "HEAD^{tree}"])
+        .run("rev-parse", &["HEAD^{tree}"])
         .expect("read the replayed tree");
     let squashed = git
-        .run(&["commit-tree", &tree, "-m", "squash"])
+        .run("commit-tree", &[&tree, "-m", "squash"])
         .expect("make a commit the way a consumer squashes one in");
     let identity = git
-        .run(&["log", "-1", "--format=%an <%ae>|%cn <%ce>", &squashed])
+        .run(
+            "log",
+            &[
+                "-1",
+                "--date=raw",
+                "--format=%an <%ae>|%cn <%ce>|%ad|%cd",
+                &squashed,
+            ],
+        )
         .expect("read the identity on the squashed commit");
-    assert_eq!(
-        identity, "gitscratch <gitscratch@localhost>|gitscratch <gitscratch@localhost>",
-        "a commit the harness creates is entirely its own, author included"
+    assert!(
+        identity
+            .starts_with("gitscratch <gitscratch@localhost>|gitscratch <gitscratch@localhost>|"),
+        "a commit the harness creates is entirely its own, author included: {identity}"
+    );
+    assert!(
+        !identity.contains(LEAKED_DATE),
+        "a commit the harness creates carries the time it was made, on both halves, rather than \
+         the timestamp of whatever commit the hook was running for: {identity}"
     );
 }

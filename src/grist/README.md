@@ -1,12 +1,14 @@
 # grist
 
-Work out which order to squash-merge branches in, before you commit to one.
+Git Ranks Its Squash Trials — work out which order to squash-merge branches in,
+before you commit to one. A trial is one ordering, replayed and costed.
 
-`grime` (does a merge conflict?) and `grind` (does a rebase conflict?) are
-planned siblings — neither exists yet, so don't go looking for them. `grist` is
-the one that's here, and it answers the question they can't: when you have
-several branches to land and each one makes the next one harder, **which order
-costs the least?**
+If your question is about *one* branch — would rebasing HEAD onto it conflict,
+and by how much? — that's [`grind`](../grind/README.md), which ships alongside
+this and answers with its exit code. `grime` (does a *merge* conflict?) is still
+a planned sibling and does not exist yet. `grist` answers the question neither of
+them can: when you have several branches to land and each one makes the next one
+harder, **which order costs the least?**
 
 ```console
 $ grist issue-130 issue-120
@@ -16,12 +18,13 @@ Simulating 2 orderings of 2 branches onto HEAD...
   replaying issue-120
   replaying issue-130
 
-┌───┬─────────────────────────┬───────┬───────┬───────┐
-│   ┆ Order                   ┆ Hunks ┆ Stops ┆ Files │
-╞═══╪═════════════════════════╪═══════╪═══════╪═══════╡
-│ ✓ ┆ issue-130 → issue-120   ┆ 2     ┆ 1     ┆ 1     │
-│   ┆ issue-120 → issue-130   ┆ 9     ┆ 4     ┆ 3     │
-└───┴─────────────────────────┴───────┴───────┴───────┘
+┌───┬───────────────────────┬───────┬───────┬───────┐
+│   ┆ Order                 ┆ Hunks ┆ Stops ┆ Files │
+╞═══╪═══════════════════════╪═══════╪═══════╪═══════╡
+│ ✓ ┆ issue-130 → issue-120 ┆ 3     ┆ 1     ┆ 3     │
+├╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┤
+│   ┆ issue-120 → issue-130 ┆ 9     ┆ 3     ┆ 3     │
+└───┴───────────────────────┴───────┴───────┴───────┘
 
 Land them in this order: issue-130 issue-120
 ```
@@ -56,6 +59,22 @@ $ for branch in $(grist -q issue-130 issue-120); do echo "next: $branch"; done
 Up to six branches (720 orderings) — past that, waiting for the answer costs
 more than picking one and finding out.
 
+Run it somewhere that is not a git repository and it says so, by name, before it
+starts anything. That refusal is `gitscratch`'s pre-flight, which `grist` now
+reaches through the only door there is to a scratch worktree — so a wrong
+directory reads as the bad argument it is, rather than arriving as git's own
+`not a git repository … .git` from inside `worktree add`, after a run has already
+been announced.
+
+A branch name that starts with a dash is a branch name too, and it used to be
+read as an option. `git checkout -q --detach --progress` is a complete and valid
+command: git reads `--progress` as its own option, finds no branch left to check
+out, and detaches HEAD where it already stands. So the scratch worktree stayed on
+the base, the rebase found nothing to replay, and the ordering scored zero — the
+same zero a genuinely free ordering scores. Every revision `grist` hands to git
+now arrives after `--end-of-options`, so git refuses the name rather than obeying
+it.
+
 ## The three numbers
 
 | Column | What it counts |
@@ -79,8 +98,14 @@ directory, which is torn down afterwards. Specifically:
 - **`rerere` is disabled.** A simulated conflict resolution would otherwise be
   recorded in the shared `rr-cache` and silently pre-resolve your real merges
   later.
-- **Hooks are disabled** and `gc.auto` is off, so nothing fires and nothing
-  collects the simulated commits mid-run.
+- **Nothing of yours runs, and nothing of yours is collected.** Hooks are
+  redirected at an empty directory, and `core.fsmonitor` is pinned off beside
+  them — the filesystem monitor names a program git executes directly, so the
+  hooks redirect alone would leave it running. `gc.auto` and `maintenance.auto`
+  are both off, which is two switches rather than one: `gc.auto` holds back the
+  gc task, while `maintenance.auto` holds back the rest of automatic
+  maintenance, including a prefetch that would otherwise fetch from every remote
+  and write refs into your repository.
 - **Branches checked out in other worktrees work fine** — the usual case, and
   the one where a plain `git checkout` refuses outright.
 
@@ -97,6 +122,13 @@ It is still a model. Treat the totals as a **cost index for comparing orderings
 measured under identical rules**, not as a prediction of exactly how many
 conflict markers you'll see. The ranking is the product; the absolute numbers
 are supporting evidence.
+
+A hunk is a closed conflict region — an opening marker, and the closing marker
+after it — and both are matched exactly, so a line of file content that merely
+begins with brackets is not one. `merge.conflictStyle` is pinned beside that
+rule, because `diff3` and `zdiff3` put the base version inside the region: the
+file the markers are counted in is then the same file on every machine, and two
+developers ranking the same branches read the same order.
 
 What it will not do is guess. If git cannot carry a replay out — it refuses to
 write a commit because the object database is full or read-only, say — `grist`
@@ -128,11 +160,17 @@ broken, since both report green forever.
 lives, guard by guard, alongside the failure output captured at the time.
 
 `grist` keeps a `tests/safety.rs` of its own for the part `gitscratch` cannot
-see: that a full simulation, composed the way `grist` composes it — `checkout
---detach` → `replay_rebase` → `squash_into`, once per branch of every ordering —
-leaves every real branch ref where it found it. That detach belongs to `grist`,
-not to the harness, so dropping it would move a developer's real branches while
-every `gitscratch` test still passed.
+see: that a full simulation, composed the way `grist` composes it —
+`check_out_detached` → `replay_rebase` → `squash_into`, once per branch of every
+ordering — leaves every real branch ref where it found it. The composition is
+`grist`'s, and so is the detach it depends on, even though the harness now spells
+that checkout. `gitscratch`'s own `tests/safety.rs` writes its checkout out by
+hand rather than calling `check_out_detached`, because that detach is one of the
+guards under test and a guard read through the code it guards proves nothing —
+so a `check_out_detached` that lost `--detach` leaves every `gitscratch` test
+green and reddens this one. Watched, not assumed: the mutation reddens
+`a_full_simulation_never_moves_real_branch_refs` here and two more `grist`
+tests, and nothing in `gitscratch`.
 
 What is left over is small and worth naming: `gc.auto=0`, the
 `rebase.autoStash`/`autosquash` pair and `gpg.format` are established by

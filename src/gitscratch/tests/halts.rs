@@ -16,8 +16,9 @@
 
 use gitscratch::testing::{
     branches_behind_main_repo, branches_behind_main_with_a_pathspec_magic_path_repo,
+    branches_behind_main_with_a_submodule_pointer_bump_repo,
     branches_behind_main_with_quoted_and_space_led_paths_repo, commit_emptied_by_main_repo,
-    modify_delete_repo,
+    modify_delete_repo, unrelated_histories_repo,
 };
 use gitscratch::{Files, Hunks, Scratch, Stops};
 
@@ -25,6 +26,12 @@ use gitscratch::{Files, Hunks, Scratch, Stops};
 /// `rev-parse --git-path` resolves the state directory for whichever worktree it
 /// runs in, which for a linked worktree is nowhere near the repository's own
 /// `.git`. Both backends are checked because the replay checks both.
+///
+/// The answer comes back through `Git::path` for the reason the replay reads it
+/// that way: it is a path, and this asks the filesystem about it. `Git::run`
+/// decodes lossily, so a byte outside UTF-8 anywhere in the developer's own
+/// repository path comes back as U+FFFD and names a directory nothing holds -
+/// which a check of this shape reads as "no rebase".
 ///
 /// # Panics
 ///
@@ -34,8 +41,8 @@ fn rebase_in_progress(scratch: &Scratch) -> bool {
         .into_iter()
         .any(|state_dir| {
             let path = scratch
-                .git()
-                .run(&["rev-parse", "--git-path", state_dir])
+                .testing_git()
+                .path("rev-parse", &["--git-path", state_dir])
                 .expect("ask git where the rebase state directory would be");
             scratch.path().join(path).exists()
         })
@@ -57,10 +64,10 @@ fn refuses_to_report_a_cost_when_a_staged_resolution_could_not_be_committed() {
     let objects = std::fs::canonicalize(repo.path().join(".git").join("objects"))
         .expect("canonicalize the object database path");
 
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
     scratch
-        .git()
-        .run(&["checkout", "-q", "--detach", "branch"])
+        .testing_git()
+        .run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
     // Sealed only now: adding the worktree and checking out write no objects,
@@ -117,10 +124,10 @@ fn refuses_to_report_a_cost_when_a_clean_pick_could_not_be_committed() {
     let objects = std::fs::canonicalize(repo.path().join(".git").join("objects"))
         .expect("canonicalize the object database path");
 
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
     scratch
-        .git()
-        .run(&["checkout", "-q", "--detach", "alpha"])
+        .testing_git()
+        .run("checkout", &["-q", "--detach", "alpha"])
         .expect("check out alpha detached in the scratch worktree");
 
     // Sealed only now: adding the worktree and checking out write no objects,
@@ -180,16 +187,21 @@ fn refuses_to_report_a_cost_when_a_clean_pick_could_not_be_committed() {
 /// answer backwards instead of not answering at all.
 ///
 /// The probe asks git which paths the stopped commit touched and then asks
-/// whether the new base already holds that commit's content *at those paths*, so
-/// the paths make a round trip: out of one invocation as output, back into the
-/// next as pathspecs. Git does not spell a path the same way in both directions.
-/// It C-quotes a non-ASCII name into `"caf\303\251.txt"` when it prints one per
-/// line, and a leading space survives git only to be eaten by anything that
-/// trims the line — and it dequotes neither on the way back in. A pathspec that
-/// no longer names the file matches nothing, so a commit whose work is nowhere
-/// in the new base reads as a commit that adds nothing to it — and the replay
-/// reaches for `rebase --skip`, which is how the work gets thrown away and a
-/// cost of zero gets reported for a branch that was never replayed.
+/// whether the new base already holds that commit's content at those paths. Git
+/// does not spell a path the same way in every direction. It C-quotes a
+/// non-ASCII name into `"caf\303\251.txt"` when it prints one per line, and a
+/// leading space survives git only to be eaten by anything that trims the line.
+/// A probe that reads either spelling reasons about a file nobody has, and a
+/// commit whose work is nowhere in the new base reads as a commit that adds
+/// nothing to it — after which the replay reaches for `rebase --skip`, which is
+/// how the work gets thrown away and a cost of zero gets reported for a branch
+/// that was never replayed.
+///
+/// The probe used to hand those paths back to git as pathspecs, where a mangled
+/// spelling matched nothing; it now intersects two path lists in Rust, so both
+/// lists carry any mangling equally and the intersection holds. That closes one
+/// route to the wrong answer and leaves this test pinning the answer itself: the
+/// classification, and the names the refusal shows a developer.
 ///
 /// So the assertions below are about the *classification*, not merely about
 /// getting an error out. A sealed object database happens to refuse the skip too,
@@ -208,10 +220,10 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_commi
     let dropped_sha = repo.git(&["log", "-1", "--format=%h", "branch"]);
     let dropped_subject = repo.git(&["log", "-1", "--format=%s", "branch"]);
 
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
     scratch
-        .git()
-        .run(&["checkout", "-q", "--detach", "branch"])
+        .testing_git()
+        .run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
     // Sealed only now: adding the worktree and checking out write no objects,
@@ -253,8 +265,8 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_commi
     // Both names, in the spelling the developer gave them. Whatever the replay
     // shows a human has to be findable in their own repository, and the C-quoted
     // form is not that - it is the artefact of having read git's output the wrong
-    // way, so seeing it here would mean the round trip is still broken and the
-    // refusal above happened for some other reason.
+    // way, so seeing it here means the reader is broken and the refusal above
+    // happened for some other reason.
     assert!(
         error.contains("café.txt"),
         "the error should name the quoted file whose change would have been lost, as it is \
@@ -280,18 +292,18 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_commi
     );
 }
 
-/// The same clean-pick failure a third time, in the half of the round trip the
-/// test above cannot reach: the way back in.
+/// The same clean-pick failure a third time, in the shape a probe that hands
+/// paths back to git reads as an answer about another file entirely.
 ///
-/// That test is about names git will not hand back verbatim. This one is about a
-/// name it hands back perfectly and then refuses to read back the same way,
-/// because the path leaving git is a path and the pathspec going in is not one.
-/// `:/foo.txt` — a `foo.txt` in a directory literally named `:` — is plain
-/// ASCII, so it survives git's output untouched; as a pathspec its leading `:/`
-/// is magic meaning *from the top of the working tree*, and it quietly names the
-/// root `foo.txt` instead. The fixture keeps an untouched `foo.txt` at the root
-/// for it to name, so the probe's diff comes back empty: a true answer about a
-/// file nobody asked about.
+/// The test above is about names git will not hand back verbatim. This one is
+/// about a name it hands back perfectly and a caller that reads back
+/// differently, because the path leaving git is a path and a pathspec going in
+/// is not one. `:/foo.txt` — a `foo.txt` in a directory literally named `:` — is
+/// plain ASCII, so it survives git's output untouched; as a pathspec its leading
+/// `:/` is magic meaning *from the top of the working tree*, and it quietly
+/// names the root `foo.txt` instead. The fixture keeps an untouched `foo.txt` at
+/// the root for it to name, so a probe built that way gets an empty diff back: a
+/// true answer about a file nobody asked about.
 ///
 /// Which is why this shape is the more dangerous of the two and gets pinned
 /// separately. A mangled pathspec matching nothing can only *add* to the paths a
@@ -299,10 +311,13 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_commi
 /// needed. A pathspec matching the wrong file *removes* them — here down to
 /// none — and no paths missing is the halt reading as a commit that adds nothing
 /// to the new base, which is `rebase --skip`, which is the work gone and a cost
-/// of zero reported for a branch that was never replayed. So the assertions
-/// below are about the classification: not that something went wrong, but that
-/// the commit was never called empty and that the path whose work was at stake
-/// is named as the developer spelled it.
+/// of zero reported for a branch that was never replayed.
+///
+/// The probe builds no pathspec today: it intersects the two path lists in Rust,
+/// so this name cannot resolve to anything but itself. What the test keeps is
+/// the answer, asserted end to end — a commit that adds a file the new base has
+/// never seen is never called empty, and the path whose work was at stake is
+/// named as the developer spelled it.
 #[test]
 fn refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not_be_committed() {
     let repo = branches_behind_main_with_a_pathspec_magic_path_repo();
@@ -311,10 +326,10 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not
     let dropped_sha = repo.git(&["log", "-1", "--format=%h", "branch"]);
     let dropped_subject = repo.git(&["log", "-1", "--format=%s", "branch"]);
 
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
     scratch
-        .git()
-        .run(&["checkout", "-q", "--detach", "branch"])
+        .testing_git()
+        .run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
     // Sealed only now: adding the worktree and checking out write no objects,
@@ -373,6 +388,278 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not
     );
 }
 
+/// The same clean-pick failure a fourth time, in the shape where the two probes
+/// disagree because they read one tree under two sets of rules.
+///
+/// The first probe asks `diff-tree`, which is plumbing. The second asked
+/// `git diff`, which is porcelain and reads `diff.ignoreSubmodules` out of the
+/// developer's own configuration. A commit that moves a submodule pointer and
+/// touches nothing else is therefore work to the first command and nothing at
+/// all to the second: the touched set holds the submodule, so the empty-set
+/// guard does not fire, and the missing set comes back empty, which is what "the
+/// new base already has this commit's work" looks like. The replay then reaches
+/// for `rebase --skip`, which is the pointer gone and a cost of zero reported
+/// for a branch that was never replayed.
+///
+/// So the assertions below are about the *classification* rather than about
+/// getting an error out. A sealed object database refuses the skip as well, so
+/// the replay stops either way; what it stops and says is the whole difference
+/// between naming the submodule whose work is at stake and calling the commit
+/// empty on the way to a skip that happened to fail.
+///
+/// Two controls stand ahead of the replay. The first proves the stopped commit
+/// touches nothing but the pointer, since one ordinary path beside it would come
+/// back from the porcelain and carry the refusal on its own. The second proves
+/// the hazard is live: under the fixture's own `diff.ignoreSubmodules=all`, the
+/// porcelain has to report nothing for a commit the plumbing reports a path for.
+#[test]
+fn refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed() {
+    let repo = branches_behind_main_with_a_submodule_pointer_bump_repo();
+    // Read the abbreviation from the same object database the implementation
+    // will abbreviate against, so `%h` here and `%h` there agree.
+    let dropped_sha = repo.git(&["log", "-1", "--format=%h", "branch"]);
+    let dropped_subject = repo.git(&["log", "-1", "--format=%s", "branch"]);
+
+    // The start-state control, and the source of the path this test looks for:
+    // the fixture names the submodule, not this file.
+    let bumped = repo.git(&["diff-tree", "--no-commit-id", "--name-only", "-r", "branch"]);
+    assert_eq!(
+        bumped.lines().count(),
+        1,
+        "the stopped commit has to touch the submodule pointer and nothing else; an ordinary \
+         path beside it comes back from the porcelain whatever the setting says, carries the \
+         refusal on its own, and leaves what the pointer costs invisible: {bumped:?}"
+    );
+
+    // The armed control. `diff.ignoreSubmodules` is what makes the two probes
+    // disagree, so a git that stopped honouring it - or a fixture that stopped
+    // setting it - would leave this test passing against a hazard that is gone.
+    let porcelain = repo.git(&["diff", "--name-only", "branch~1", "branch"]);
+    assert!(
+        porcelain.is_empty(),
+        "`diff.ignoreSubmodules=all` is not hiding the pointer from `git diff`, so this test \
+         could only pass vacuously; the porcelain reported {porcelain:?} for a commit the \
+         plumbing reports {bumped:?} for"
+    );
+
+    let scratch = repo.scratch("main");
+    scratch
+        .testing_git()
+        .run("checkout", &["-q", "--detach", "branch"])
+        .expect("check out the branch detached in the scratch worktree");
+
+    // Sealed only now: adding the worktree and checking out write no objects,
+    // but everything before this point would fail against a read-only store.
+    let sealed = repo.seal_object_store();
+    let result = scratch.replay_rebase("main");
+    // Released before a single assertion runs, so a failing one cannot leave a
+    // read-only directory behind for the temporary directory to trip over.
+    drop(sealed);
+
+    let error = match result {
+        Ok(conflicts) => panic!(
+            "the replay reported a cost for a commit git never wrote: {conflicts:?}\n\
+             a submodule pointer the porcelain hides is still work that would be thrown away"
+        ),
+        Err(error) => format!("{error:#}"),
+    };
+
+    assert!(
+        error.contains(&dropped_sha),
+        "the error should name the commit that was about to be dropped ({dropped_sha}): {error}"
+    );
+    assert!(
+        error.contains(&dropped_subject),
+        "the error should carry the dropped commit's subject ({dropped_subject}): {error}"
+    );
+
+    // The classification itself, pinned separately from the fact that something
+    // went wrong. This commit moves the submodule somewhere the new base has
+    // never had it, so calling it a commit that adds nothing to the new base is
+    // simply false - and it is the false half, not the failed skip that follows
+    // from it, that would cost a developer their work in a repository where the
+    // skip succeeds.
+    assert!(
+        !error.contains("adds nothing to the new base"),
+        "a commit that moves a submodule the new base has at another commit is not an empty \
+         commit, whatever `diff.ignoreSubmodules` hides from the porcelain: {error}"
+    );
+
+    // The path itself, so the refusal is about the pointer rather than about
+    // something else that went wrong on the way.
+    assert!(
+        error.contains(&bumped),
+        "the error should name the submodule whose pointer would have been lost ({bumped}): \
+         {error}"
+    );
+
+    // The rollback left the repository pristine, so there is no uncommitted
+    // content for the other probe to find; the only thing that proves the commit
+    // was lost is that its change is absent from the new base.
+    assert!(
+        !error.contains("uncommitted"),
+        "nothing was left uncommitted - git rolled the index back - so the evidence must come \
+         from the commit's content being absent from the new base: {error}"
+    );
+}
+
+/// The same clean-pick failure a fifth time, in the shape where the probe is
+/// asked about a commit that has no parent at all.
+///
+/// The four tests above are about what git *calls* a path. This one is about
+/// whether git names a path here at all. `git diff-tree` prints nothing for a
+/// root commit unless it is asked for `--root`, so a probe without that flag
+/// finds an empty touched set, states the answer the empty set states — this
+/// commit changes nothing — and reaches for `rebase --skip`. The commit it drops
+/// is the first commit of a whole history.
+///
+/// A root commit is reachable in production rather than contrived: replaying a
+/// branch onto one that shares no history with it replays every commit of that
+/// branch, its root commit included. `git checkout --orphan` is how the fixture
+/// builds the pair.
+///
+/// The parent count that stands ahead of both probes answers correctly here and
+/// has to: `git rev-list --no-walk --parents` prints one field for a root commit
+/// — its own id, and no parent — so the count is zero and the refusal of a merge
+/// commit stays out of the way. What this test pins is the flag under it.
+///
+/// So the assertions are about the *classification* rather than about getting an
+/// error out. A sealed object database refuses the skip as well, so the replay
+/// stops either way; what it stops and says is the whole difference between
+/// naming the work that is at stake and calling a whole history an empty commit
+/// on the way to a skip that happened to fail. In a repository where the skip
+/// succeeds, that misclassification finishes the rebase and reports a cost of
+/// zero for a branch that was never replayed.
+///
+/// Two controls stand ahead of the replay. The first proves the branch's commit
+/// really is a root commit. The second proves the hazard is live: `diff-tree`
+/// really does stay silent about that commit until it is asked for `--root`.
+#[test]
+fn refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed() {
+    /// The path the root commit adds, which the new base has never held.
+    const ROOT_COMMIT_PATH: &str = "unrelated.txt";
+
+    let repo = unrelated_histories_repo();
+    // Read the abbreviation from the same object database the implementation
+    // will abbreviate against, so `%h` here and `%h` there agree.
+    let dropped_sha = repo.git(&["log", "-1", "--format=%h", "unrelated"]);
+    let dropped_subject = repo.git(&["log", "-1", "--format=%s", "unrelated"]);
+    let objects = std::fs::canonicalize(repo.path().join(".git").join("objects"))
+        .expect("canonicalize the object database path");
+
+    // The start-state control. `rev-list --parents` prints the commit's own id
+    // first and its parents after it, so one field is one commit with no parent.
+    // A commit with a parent is a commit `--root` changes no answer for, and this
+    // test would then pin nothing.
+    let listed = repo.git(&["rev-list", "--no-walk", "--parents", "unrelated"]);
+    assert_eq!(
+        listed.split_whitespace().count(),
+        1,
+        "the branch's only commit has to be a root commit - its own id and no parent - or there \
+         is nothing here for `--root` to be load-bearing about: {listed:?}"
+    );
+
+    // The armed control, in both directions. The silence *is* the hazard: it is
+    // the whole of what an unguarded probe learns about this commit.
+    let without_root = repo.git(&[
+        "diff-tree",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "--ignore-submodules=none",
+        "unrelated",
+    ]);
+    assert!(
+        without_root.is_empty(),
+        "`diff-tree` no longer stays silent about a root commit, so this test could only pass \
+         vacuously; that silence is what makes a probe without `--root` read a whole history as \
+         a commit that changes nothing: {without_root:?}"
+    );
+    let with_root = repo.git(&[
+        "diff-tree",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "--root",
+        "--ignore-submodules=none",
+        "unrelated",
+    ]);
+    assert_eq!(
+        with_root, ROOT_COMMIT_PATH,
+        "`--root` is what makes `diff-tree` name the paths a root commit adds, and those paths \
+         are the whole of what the probe reasons about: {with_root:?}"
+    );
+
+    let scratch = repo.scratch("main");
+    scratch
+        .testing_git()
+        .run("checkout", &["-q", "--detach", "unrelated"])
+        .expect("check out the unrelated history detached in the scratch worktree");
+
+    // Sealed only now: adding the worktree and checking out write no objects,
+    // but everything before this point would fail against a read-only store.
+    let sealed = repo.seal_object_store();
+    let result = scratch.replay_rebase("main");
+    // Released before a single assertion runs, so a failing one cannot leave a
+    // read-only directory behind for the temporary directory to trip over.
+    drop(sealed);
+
+    let error = match result {
+        Ok(conflicts) => panic!(
+            "the replay reported a cost for a commit git never wrote: {conflicts:?}\n\
+             a commit with no parent is still a commit whose work would be thrown away"
+        ),
+        Err(error) => format!("{error:#}"),
+    };
+
+    assert!(
+        error.contains(&dropped_sha),
+        "the error should name the commit that was about to be dropped ({dropped_sha}): {error}"
+    );
+    assert!(
+        error.contains(&dropped_subject),
+        "the error should carry the dropped commit's subject ({dropped_subject}): {error}"
+    );
+
+    // The classification itself, pinned separately from the fact that something
+    // went wrong. This commit adds a file the new base has never seen, so calling
+    // it a commit that adds nothing to the new base is simply false - and it is
+    // the false half, not the failed skip that follows from it, that would cost a
+    // developer a whole history in a repository where the skip succeeds.
+    assert!(
+        !error.contains("adds nothing to the new base"),
+        "a root commit whose file is absent from the new base is not an empty commit, whatever \
+         `diff-tree` says about a commit it was not asked for `--root` about: {error}"
+    );
+
+    // The path itself, so the refusal is about the root commit's work rather than
+    // about something else that went wrong on the way.
+    assert!(
+        error.contains(ROOT_COMMIT_PATH),
+        "the error should name the file whose change would have been lost: {error}"
+    );
+
+    // The rollback left the repository pristine, so there is no uncommitted
+    // content for the other probe to find; the only thing that proves the commit
+    // was lost is that its change is absent from the new base.
+    assert!(
+        !error.contains("uncommitted"),
+        "nothing was left uncommitted - git rolled the index back - so the evidence must come \
+         from the commit's content being absent from the new base: {error}"
+    );
+
+    // git says: "error: insufficient permission for adding an object to
+    // repository database <path>". The path is interpolated rather than
+    // translated, so matching on it is locale-independent - and it is the
+    // canonicalized one because macOS resolves a temp dir's /var/... to
+    // /private/var/....
+    let objects = objects.display().to_string();
+    assert!(
+        error.contains(&objects),
+        "the error should carry git's own message, which names {objects}: {error}"
+    );
+}
+
 /// The counterweight to the two tests above, and the reason it is worth having.
 /// Both of the probes those tests pin exist to stop a commit git could not write
 /// from being dropped — and either of them could start answering "unwritable" for
@@ -404,13 +691,13 @@ fn drops_a_commit_that_genuinely_became_empty_and_finishes_the_rebase() {
     let emptied_subject = repo.git(&["log", "-1", "--format=%s", "branch~1"]);
     let real_subject = repo.git(&["log", "-1", "--format=%s", "branch"]);
 
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
-    let git = scratch.git();
-    git.run(&["checkout", "-q", "--detach", "branch"])
+    let scratch = repo.scratch("main");
+    let git = scratch.testing_git();
+    git.run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
     let started = git
-        .try_run(&["rebase", "--empty=stop", "main"])
+        .try_run("rebase", &["--empty=stop", "main"])
         .expect("run the rebase that should halt on the emptied commit");
 
     // Asserted, not assumed. A git that stopped halting here would otherwise let
@@ -424,7 +711,7 @@ fn drops_a_commit_that_genuinely_became_empty_and_finishes_the_rebase() {
         started.stderr
     );
     let unmerged = git
-        .paths(&["diff", "--name-only", "--diff-filter=U"])
+        .paths("diff", &["--name-only", "--diff-filter=U"])
         .expect("list unmerged paths at the halt");
     assert!(
         unmerged.is_empty(),
@@ -462,9 +749,19 @@ fn drops_a_commit_that_genuinely_became_empty_and_finishes_the_rebase() {
         "the replay should have walked the rebase all the way to the end, not left it halted"
     );
 
-    let subjects = git
-        .lines(&["log", "--format=%s"])
-        .expect("read the replayed history");
+    // Subjects, not paths, so a line-oriented read is the right one - and it is
+    // spelled here rather than on `Git`, because this crate's path readers each
+    // answer one shaped question on purpose - a NUL-separated list, or one
+    // whole answer - and a general line reader beside them is the door a future
+    // path-reading call site would walk through by mistake.
+    let subjects: Vec<String> = git
+        .run("log", &["--format=%s"])
+        .expect("read the replayed history")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
     assert!(
         subjects.contains(&real_subject),
         "the branch's real commit ({real_subject}) has to survive a replay that drops the \
@@ -519,13 +816,13 @@ fn refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped() {
     let objects = std::fs::canonicalize(repo.path().join(".git").join("objects"))
         .expect("canonicalize the object database path");
 
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
-    let git = scratch.git();
-    git.run(&["checkout", "-q", "--detach", "branch"])
+    let scratch = repo.scratch("main");
+    let git = scratch.testing_git();
+    git.run("checkout", &["-q", "--detach", "branch"])
         .expect("check out the branch detached in the scratch worktree");
 
     let started = git
-        .try_run(&["rebase", "--empty=stop", "main"])
+        .try_run("rebase", &["--empty=stop", "main"])
         .expect("run the rebase that should halt on the emptied commit");
 
     // Asserted, not assumed: this test is about a *skip* failing, so it has to
@@ -539,7 +836,7 @@ fn refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped() {
         started.stderr
     );
     let unmerged = git
-        .paths(&["diff", "--name-only", "--diff-filter=U"])
+        .paths("diff", &["--name-only", "--diff-filter=U"])
         .expect("list unmerged paths at the halt");
     assert!(
         unmerged.is_empty(),
@@ -547,10 +844,10 @@ fn refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped() {
          unmerged, which is a conflict and a different code path"
     );
     let mut left_behind = git
-        .paths(&["diff", "--cached", "--name-only", "HEAD"])
+        .paths("diff", &["--cached", "--name-only", "HEAD"])
         .expect("list staged content at the halt");
     left_behind.extend(
-        git.paths(&["diff", "--name-only"])
+        git.paths("diff", &["--name-only"])
             .expect("list unstaged content at the halt"),
     );
     assert!(
