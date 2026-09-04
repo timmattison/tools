@@ -29,6 +29,7 @@ mod chain;
 mod github;
 mod graph;
 mod input;
+mod json;
 mod plan;
 mod render;
 mod report;
