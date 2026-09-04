@@ -1172,6 +1172,43 @@ fn says_so_when_the_github_cli_is_not_installed() {
 }
 
 #[test]
+fn a_machine_with_no_gh_is_not_told_to_name_a_repository() {
+    // The run names no repository, so it asks `gh` for the repository of this
+    // directory. `gh` is not on this PATH, so that call fails before it runs.
+    //
+    // The reason stands alone. Advice to name the repository with --repo
+    // cannot help a machine with no `gh`, because the query runs `gh` as well:
+    // a run with --repo fails one step later, at the query, with the same
+    // reason. Advice that leads the reader to a second failure is worse than
+    // no advice.
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_wn"))
+        .env_clear()
+        .env("PATH", dir.path())
+        .env("COLUMNS", "80")
+        .env("NO_COLOR", "1")
+        // This test builds its own environment, so it states the switches as
+        // well: no child of this file reads the clipboard of the machine, and
+        // none of them runs `claude`.
+        .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD)
+        .env(NO_CLAUDE_ENV, NO_CLAUDE)
+        .args(["#277"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("GitHub CLI"),
+        "the error says what is missing, in {}",
+        stderr(&output)
+    );
+    assert!(
+        !stderr(&output).contains("--repo"),
+        "the error gives advice that cannot help, in {}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn cuts_a_long_title_to_the_window() {
     let body = r#"{"data":{"repository":{
 "i1":{"__typename":"Issue","number":1,"title":"A title that is far too long for the window it has to fit in","state":"OPEN","stateReason":null}
