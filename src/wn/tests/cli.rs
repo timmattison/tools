@@ -2228,11 +2228,60 @@ fn a_reason_written_on_standard_output_reaches_the_reader() {
     // two pipes writes it on standard output. The reason is the same reason,
     // so the reader gets it whichever pipe carried it. A refusal that named
     // `claude` and then stopped at the colon tells the reader nothing.
+    //
+    // This run prints no envelope at all, which is the shape the pipes are
+    // still read for. A run that prints one is the test below.
     let gh = FakeGh::new(JSON_ISSUES).with_claude("printf 'the model is overloaded\\n'\nexit 1\n");
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
     let message = stderr(&output);
     assert!(message.contains("the model is overloaded"), "{message}");
+}
+
+#[test]
+fn the_envelope_of_a_failing_run_carries_the_reason_and_the_pipes_do_not() {
+    // A run that names a model that does not exist exits 1, and it prints an
+    // envelope all the same. That envelope carries the sentence a reader can
+    // act on, and standard error carries a machine tag on the same mistake.
+    // So the envelope stands in front of the pipes.
+    //
+    // The run also spent money before it failed, and the report of what it
+    // cost is the one place a reader reads the price.
+    let said = "There's an issue with the selected model (no-such-model-xyz). It may not exist \
+                or you may not have access to it. Run --model to pick a different model.";
+    let refused = serde_json::json!({
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": true,
+        "result": said,
+        "total_cost_usd": 0.054_637_9,
+        "duration_ms": 1886,
+        "num_turns": 1,
+    })
+    .to_string();
+    let body = format!(
+        "cat <<'WN_FAKE_CLAUDE_ENVELOPE'\n{refused}\nWN_FAKE_CLAUDE_ENVELOPE\n\
+         printf '[claude-code:unrecognized_model] \
+         {{\"model\":\"no-such-model-xyz\",\"query_source\":\"sdk\"}}\\n' >&2\n\
+         exit 1\n"
+    );
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&body);
+    let output = run_building(
+        &gh,
+        &["--repo", REPO],
+        &[(PLAN_MODEL_ENV, "no-such-model-xyz")],
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(
+        message.contains("There's an issue with the selected model"),
+        "{message}"
+    );
+    // The machine tag names the mistake and says nothing a reader acts on, so
+    // it must not stand in front of the sentence.
+    assert!(!message.contains("unrecognized_model"), "{message}");
+    // The run cost money before it failed, and the reader paid for it.
+    assert!(message.contains("plan: $0.05"), "{message}");
 }
 
 #[test]
