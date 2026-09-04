@@ -1093,8 +1093,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     and wrong — a label wraps as readily as a chain. The header names the column count, so a row
     that splits into another one holds a bar nobody escaped, and `wn` prints that row and exits
     `2` rather than reading its `Notes` as a chain.
-  - Only the `Order` field is a chain. `Stream`, `Zone`, and `Notes` are never read for numbers,
-    and that rule is what makes the feature work: `Notes` is prose about code, and prose about
+  - Two fields are read for numbers: `Order`, which is a chain, and `Waits for`, which is a set
+    and stands below. `Stream`, `Zone`, and `Notes` are never read for numbers, and that rule is
+    what makes the feature work: `Notes` is prose about code, and prose about
     code is full of numbers. `main.rs:1566-1650` is not `#1566` and `#1650`, and `265 lines apart
     in a 5113-line file` is not `#265` — though `#265` is a real issue of this repository, and in
     one plan it is the first step of another stream of that same plan. The digits alone cannot
