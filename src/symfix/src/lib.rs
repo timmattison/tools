@@ -91,6 +91,20 @@ pub fn run(options: &Options, out: &mut dyn Write, err: &mut dyn Write) -> Summa
             out,
             format_args!("Found {} broken symlink(s).", summary.broken),
         );
+
+        // A run that was never asked to repair anything says nothing about
+        // repairs. The last line answers a question the caller asked, so a
+        // caller who asked no question gets no answer: `No symlinks could be
+        // fixed` under a run with no fix flag would read as a failure of a
+        // tool that was only ever asked to look.
+        if summary.fixed > 0 {
+            line(out, format_args!("Fixed {} symlink(s).", summary.fixed));
+        } else if options.prepend.is_some() || options.remove.is_some() {
+            line(
+                out,
+                format_args!("No symlinks could be fixed with the provided options."),
+            );
+        }
     }
 
     summary

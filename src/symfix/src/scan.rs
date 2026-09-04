@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use crate::{line, Options, Summary};
+use crate::{line, repair, Options, Summary};
 
 /// What the operating system says about the target of one symbolic link.
 #[derive(Debug)]
@@ -79,7 +79,7 @@ pub(crate) fn scan(
         match classify(path) {
             LinkState::Intact => {}
             LinkState::Unresolvable(error) => report_unresolvable(path, &error, err, summary),
-            LinkState::Broken => report_broken(path, out, err, summary),
+            LinkState::Broken => report_broken(options, path, out, err, summary),
         }
     }
 }
@@ -110,12 +110,28 @@ fn read_target(path: &Path, err: &mut dyn Write) -> Option<PathBuf> {
     }
 }
 
-/// Reports one broken link and counts it.
+/// Reports one broken link, counts it, and repairs it when the options give
+/// the tool a way to.
 ///
-/// This is where a repair goes. The link that reaches this function is the one
-/// link the operating system says is absent, which is the one state a rewrite
-/// can improve, and its target is already in hand.
-fn report_broken(path: &Path, out: &mut dyn Write, err: &mut dyn Write, summary: &mut Summary) {
+/// This is where the repair sits. The link that reaches this function is the
+/// one link the operating system says is absent, which is the one state a
+/// rewrite can improve, and its target is already in hand.
+///
+/// The report names the broken link before the repair runs, thus a reader sees
+/// every link the tool found even when a repair fails, and a run that repairs
+/// everything still says what was wrong.
+///
+/// A repair that fails writes its warning to the error stream and counts
+/// nothing. The link is still broken, the report already says so, and a count
+/// of repairs that included the ones that did not happen would be a number a
+/// reader cannot act on.
+fn report_broken(
+    options: &Options,
+    path: &Path,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    summary: &mut Summary,
+) {
     let Some(target) = read_target(path, err) else {
         return;
     };
@@ -125,6 +141,29 @@ fn report_broken(path: &Path, out: &mut dyn Write, err: &mut dyn Write, summary:
         format_args!("Broken symlink: {} -> {}", path.display(), target.display()),
     );
     summary.broken += 1;
+
+    let Some(plan) = repair::plan(options, path, target.as_os_str(), err) else {
+        return;
+    };
+
+    match repair::apply(path, &plan.target) {
+        Ok(()) => {
+            line(
+                out,
+                format_args!(
+                    "Fixed symlink by {}: {} -> {}",
+                    plan.strategy.phrase(),
+                    path.display(),
+                    Path::new(&plan.target).display()
+                ),
+            );
+            summary.fixed += 1;
+        }
+        Err(error) => line(
+            err,
+            format_args!("Warning: cannot replace {}: {error}", path.display()),
+        ),
+    }
 }
 
 /// Reports one link the operating system refused to resolve, and counts it.
