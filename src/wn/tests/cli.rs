@@ -539,6 +539,28 @@ exit {status}
         Self { dir }
     }
 
+    /// Write a `gh` that can name no repository for the current directory.
+    ///
+    /// The `repo view` of the real `gh` fails that way outside a checkout,
+    /// and it writes the reason on standard error.
+    fn without_repo() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let script = format!(
+            r#"#!/bin/sh
+for arg in "$@"; do
+    printf '%s\n' "$arg" >> '{args}'
+done
+printf 'not a git repository\n' >&2
+exit 1
+"#,
+            args = dir.path().join(ARGS_FILE).display(),
+        );
+        let gh = dir.path().join("gh");
+        std::fs::write(&gh, script).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self { dir }
+    }
+
     /// Write a `claude` beside the `gh`.
     ///
     /// It answers `--version`, which is how the tool picks it, and it reads
@@ -2042,7 +2064,11 @@ fn an_argument_is_never_a_reason_to_run_claude() {
     let gh = FakeGh::new(THREE_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO, ONE_OPEN_CHAIN], &[]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
-    assert!(stdout(&output).contains("Start #278"), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("Start #278"),
+        "{}",
+        stdout(&output)
+    );
     assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
 }
 
@@ -2071,7 +2097,11 @@ fn refresh_with_the_run_turned_off_names_the_variable() {
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--refresh", "--repo", REPO], &[(NO_CLAUDE_ENV, "1")]);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
-    assert!(stderr(&output).contains(NO_CLAUDE_ENV), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(NO_CLAUDE_ENV),
+        "{}",
+        stderr(&output)
+    );
     assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
 }
 
@@ -2138,7 +2168,11 @@ fn a_timeout_that_names_no_seconds_is_a_refusal_that_costs_no_run() {
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "10m")]);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
-    assert!(stderr(&output).contains(PLAN_TIMEOUT_ENV), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(PLAN_TIMEOUT_ENV),
+        "{}",
+        stderr(&output)
+    );
     assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
 }
 
@@ -2164,5 +2198,27 @@ fn a_plan_that_names_no_moment_says_nothing_about_its_age() {
     let gh = FakeGh::new(JSON_ISSUES);
     let output = run_with_stdin(&gh, &["--repo", REPO], "80", &undated(JSON_PLAN));
     assert!(output.status.success(), "stderr: {}", stderr(&output));
-    assert!(!stdout(&output).contains("This plan was built"), "{}", stdout(&output));
+    assert!(
+        !stdout(&output).contains("This plan was built"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_directory_that_is_in_no_repository_costs_no_run() {
+    // The skill asks `gh` and `git` about the repository of the current
+    // directory, and its gather script turns a failure of either into a
+    // warning rather than a crash. So a run in such a directory would spend a
+    // minute and real money and would then answer that the plan holds no
+    // work. The refusal stands before the run, where it costs one cheap call.
+    let gh = FakeGh::without_repo().with_claude(&prints_the_plan());
+    let output = run_building(&gh, &[], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("repo view"),
+        "the error names what could not answer, in {}",
+        stderr(&output)
+    );
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
 }
