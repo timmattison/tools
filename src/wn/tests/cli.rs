@@ -468,6 +468,15 @@ const SUMMARY_HEADING: &str = "Take one from each stream:";
 /// mark of an answer the picture reader wrote.
 const WAITS_FOR: &str = "waits for ";
 
+/// The file the fake `claude` records the arguments of every call in.
+///
+/// A file of its own, beside the one the fake `gh` writes, so a test can say
+/// that one of the two was never reached while the other was.
+const CLAUDE_ARGS_FILE: &str = "claude-args";
+
+/// The file the fake `claude` writes the prompt it was handed into.
+const PROMPT_FILE: &str = "prompt";
+
 /// The file the fake `gh` records the arguments of every call in.
 ///
 /// It appears on the first call, so its absence is a run that never reached
@@ -512,6 +521,56 @@ exit {status}
         std::fs::write(&gh, script).unwrap();
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
         Self { dir }
+    }
+
+    /// Write a `claude` beside the `gh`.
+    ///
+    /// It answers `--version`, which is how the tool picks it, and it reads
+    /// the prompt off standard input into [`PROMPT_FILE`]. `body` is the shell
+    /// that runs after that, so each test says what its `claude` does and
+    /// nothing more.
+    ///
+    /// No test of this file runs the real `claude`. A run of it would cost
+    /// money, would need an account, and would give a different answer every
+    /// time.
+    fn with_claude(self, body: &str) -> Self {
+        let script = format!(
+            r#"#!/bin/sh
+for arg in "$@"; do
+    printf '%s\n' "$arg" >> '{args}'
+done
+if [ "$1" = "--version" ]; then
+    printf '2.0.0 (Claude Code)\n'
+    exit 0
+fi
+cat > '{prompt}'
+{body}
+"#,
+            args = self.dir.path().join(CLAUDE_ARGS_FILE).display(),
+            prompt = self.dir.path().join(PROMPT_FILE).display(),
+        );
+        let claude = self.dir.path().join("claude");
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        self
+    }
+
+    /// The arguments of every call of the fake `claude`, one to a line.
+    fn recorded_claude_args(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join(CLAUDE_ARGS_FILE)).unwrap()
+    }
+
+    /// The prompt the fake `claude` was handed on standard input.
+    fn recorded_prompt(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join(PROMPT_FILE)).unwrap()
+    }
+
+    /// Whether the tool ran the fake `claude` not even once.
+    ///
+    /// The script writes its arguments on every call, `--version` included, so
+    /// a file that never appeared is a run that never reached `claude`.
+    fn never_ran_claude(&self) -> bool {
+        !self.dir.path().join(CLAUDE_ARGS_FILE).exists()
     }
 
     fn path(&self) -> &Path {
@@ -622,6 +681,35 @@ fn wn(gh: &FakeGh, args: &[&str], columns: &str, color: bool, start: Option<&str
     }
     command.args(args);
     command
+}
+
+/// Run `wn` with the environment every other child of this file gets, and
+/// with `env` on top of it.
+///
+/// The variables of the run of `claude` are read from the environment, and no
+/// other helper of this file sets one. [`NO_CLIPBOARD_ENV`] comes with the
+/// environment [`wn`] builds, so a child of this helper writes the clipboard
+/// of the machine no more than it reads it.
+fn run_building(gh: &FakeGh, args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = wn(gh, args, "80", false, None);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().unwrap()
+}
+
+/// The document with its `generated` taken out.
+///
+/// A plan says its age under the answer, and the age of a fixture written on a
+/// fixed day grows every day this file lives. A test that states the whole
+/// answer therefore reads a plan that names no moment at all, which earns no
+/// such note. The tests of the note itself name the moment they want.
+fn undated(document: &str) -> String {
+    document
+        .lines()
+        .filter(|line| !line.contains("\"generated\""))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn stdout(output: &Output) -> String {
@@ -1732,7 +1820,7 @@ fn answers_a_plan_written_as_json() {
     // step in the order of the work, and one start line for each issue
     // somebody can begin now.
     let gh = FakeGh::new(JSON_ISSUES);
-    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &undated(JSON_PLAN));
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), JSON_ANSWER);
 }
@@ -1740,7 +1828,7 @@ fn answers_a_plan_written_as_json() {
 #[test]
 fn a_finished_step_of_a_json_plan_frees_the_step_that_waited_for_it() {
     let gh = FakeGh::new(JSON_ISSUES_ONE_DONE);
-    let output = run_with_stdin(&gh, &["--repo", REPO], "80", JSON_PLAN);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &undated(JSON_PLAN));
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), JSON_ANSWER_ONE_DONE);
 }
@@ -1878,4 +1966,183 @@ fn a_json_document_that_is_not_the_schema_names_the_path() {
         "the error names the path in the document, in {}",
         stderr(&output)
     );
+}
+
+/// The variable that turns the run of `claude` off.
+const NO_CLAUDE_ENV: &str = "WN_NO_CLAUDE";
+
+/// The variable that names the seconds the run of `claude` may take.
+const PLAN_TIMEOUT_ENV: &str = "WN_PLAN_TIMEOUT";
+
+/// The shell of a fake `claude` that prints the document of [`JSON_PLAN`].
+///
+/// The plan names no moment, so its answer carries no note about its age. The
+/// tests of that note name the moment they want.
+fn prints_the_plan() -> String {
+    format!(
+        "cat <<'WN_FAKE_CLAUDE_PLAN'\n{}\nWN_FAKE_CLAUDE_PLAN\n",
+        undated(JSON_PLAN)
+    )
+}
+
+#[test]
+fn a_run_with_nothing_to_read_builds_a_plan_with_claude() {
+    // The fourth input. The argument, standard input, and the clipboard all
+    // hold nothing, so the tool builds the plan itself rather than stopping
+    // with "the clipboard is empty".
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+    // The line that says a run is happening goes to standard error, so the
+    // answer above reaches a pipe alone.
+    assert!(stderr(&output).contains("claude"), "{}", stderr(&output));
+}
+
+#[test]
+fn the_run_is_handed_the_prompt_and_the_tools_the_skill_needs() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(gh.recorded_prompt(), "/plan-parallel-work --json");
+    let args = gh.recorded_claude_args();
+    assert!(args.contains("--print"), "{args}");
+    assert!(args.contains("--allowed-tools"), "{args}");
+    assert!(args.contains("Bash"), "{args}");
+    assert!(
+        !args.contains("--dangerously-skip-permissions"),
+        "the run asks for the tools it needs and never for the bypass, in {args}"
+    );
+}
+
+#[test]
+fn an_argument_is_never_a_reason_to_run_claude() {
+    // The run is the quietest input of the four. A chain the reader typed
+    // outranks it, and a run that costs money must not happen beside one.
+    let gh = FakeGh::new(THREE_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO, ONE_OPEN_CHAIN], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("Start #278"), "{}", stdout(&output));
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn refresh_builds_a_plan_even_when_an_argument_holds_one() {
+    // The one way past a plan that is still on the clipboard and no longer
+    // true. An argument is louder than a clipboard, so a run that outranks an
+    // argument outranks the clipboard as well.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--refresh", "--repo", REPO, ONE_OPEN_CHAIN], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+}
+
+#[test]
+fn the_variable_that_turns_the_run_off_leaves_the_error_the_tool_printed_before() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[(NO_CLAUDE_ENV, "1")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(stderr(&output).contains(NO_CHAIN), "{}", stderr(&output));
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn refresh_with_the_run_turned_off_names_the_variable() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--refresh", "--repo", REPO], &[(NO_CLAUDE_ENV, "1")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(stderr(&output).contains(NO_CLAUDE_ENV), "{}", stderr(&output));
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn a_run_that_printed_nothing_names_claude() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude("exit 0\n");
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(stderr(&output).contains("claude"), "{}", stderr(&output));
+    assert!(
+        gh.asked_nothing(),
+        "a run with no plan asks GitHub nothing, and it asked {}",
+        gh.recorded_args()
+    );
+}
+
+#[test]
+fn a_run_that_could_not_log_in_names_claude_login() {
+    let gh = FakeGh::new(JSON_ISSUES)
+        .with_claude("printf 'Invalid API key · Please run /login\\n' >&2\nexit 1\n");
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains("claude login"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_document_the_run_built_that_does_not_parse_names_no_clipboard() {
+    // The refusal of the reader of a JSON plan, unchanged. A message that
+    // named the clipboard would send the reader to look at a clipboard that
+    // holds none of it.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude("printf '{ \"version\": 1\\n'\n");
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(message.contains("is not a JSON document"), "{message}");
+    assert!(!message.contains("clipboard"), "{message}");
+}
+
+#[test]
+fn a_run_that_outlives_its_deadline_is_killed_and_says_so() {
+    // The fake `claude` replaces itself with the sleep, so the process the
+    // tool kills is the process that waits. A run that left a sleep behind
+    // would outlive the test that started it.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude("exec sleep 30\n");
+    let started = std::time::Instant::now();
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "1")]);
+    let waited = started.elapsed();
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(message.contains("1 seconds"), "{message}");
+    assert!(message.contains(PLAN_TIMEOUT_ENV), "{message}");
+    assert!(
+        waited < std::time::Duration::from_secs(20),
+        "the run stopped at its deadline and did not wait for the sleep, in {waited:?}"
+    );
+}
+
+#[test]
+fn a_timeout_that_names_no_seconds_is_a_refusal_that_costs_no_run() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "10m")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(stderr(&output).contains(PLAN_TIMEOUT_ENV), "{}", stderr(&output));
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn a_stale_plan_says_its_age_under_the_answer() {
+    // A plan is a claim about a backlog, and a backlog moves. The note costs
+    // one line and it is the only thing that would tell the reader.
+    let gh = FakeGh::new(JSON_ISSUES);
+    let old = JSON_PLAN.replace("2026-09-02T14:03:11Z", "2020-01-01T00:00:00Z");
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &old);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    assert!(answer.starts_with(JSON_ANSWER), "{answer}");
+    assert!(answer.contains("This plan was built "), "{answer}");
+    assert!(
+        answer.contains("Run wn --refresh to build a new one."),
+        "{answer}"
+    );
+}
+
+#[test]
+fn a_plan_that_names_no_moment_says_nothing_about_its_age() {
+    let gh = FakeGh::new(JSON_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", &undated(JSON_PLAN));
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(!stdout(&output).contains("This plan was built"), "{}", stdout(&output));
 }
