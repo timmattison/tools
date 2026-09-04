@@ -666,3 +666,160 @@ fn help_opens_with_the_summary_the_source_carries_rather_than_the_manifest_one()
         "-h and --help are two spellings of one switch, not two renderings"
     );
 }
+
+/// Assert `-q` printed nothing whatsoever and still answered with `expected`.
+///
+/// Both streams, because the answer being silent is only useful if the *whole*
+/// run is: a caller redirecting stdout to `/dev/null` and getting a note or an
+/// error message on the terminal anyway has not been given a quiet tool.
+fn assert_silent(output: &Output, expected: i32, path: &str) {
+    let (code, stdout, stderr) = streams(output);
+
+    assert_eq!(
+        code,
+        Some(expected),
+        "-q must not change the answer on the {path} path\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "-q printed to stdout on the {path} path:\n{stdout}"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "-q printed to stderr on the {path} path:\n{stderr}"
+    );
+}
+
+/// Unlike a tool that prints a value, `grime` has no answer to pipe - the
+/// answer *is* the exit code. So a scripted caller asking for quiet wants
+/// silence, not a terser rendering, and gets it on the happy path first.
+#[test]
+fn quiet_prints_nothing_when_the_merge_is_clean() {
+    let repo = independent_branches_repo();
+
+    let output = run_raw(&repo, "alpha", &["-q", "beta"]);
+
+    assert_silent(&output, CLEAN, "clean");
+}
+
+/// Deliberately measured over a *dirty* tree, because the verdict is not the
+/// only thing `-q` has to swallow. A quiet mode that silences the report and
+/// leaves the uncommitted-work note on stderr would pass a clean-tree test and
+/// still spray output into a script's terminal.
+#[test]
+fn quiet_prints_nothing_when_the_merge_conflicts_over_a_dirty_tree() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let output = run_raw(&repo, "one", &["-q", "two"]);
+
+    assert_silent(&output, CONFLICTS, "conflicts");
+}
+
+/// The error message is the last thing that could leak, and the one most
+/// easily forgotten, because it is printed from `main` rather than from the
+/// code that does the work.
+#[test]
+fn quiet_prints_nothing_when_the_run_cannot_answer_at_all() {
+    let repo = independent_branches_repo();
+
+    let output = run_raw(&repo, "alpha", &["-q", "nonexistent-branch"]);
+
+    assert_silent(&output, ERROR, "error");
+}
+
+/// `-q` and `--quiet` are two spellings of one switch, and the file already
+/// holds that standard: the version test asserts `-V` and `--version` are
+/// byte-identical rather than merely both present.
+///
+/// The three tests above all reach for the short spelling, so the long one runs
+/// nowhere. Asserted byte for byte against the short run rather than against
+/// silence alone, because "both spellings print nothing" is also true of a
+/// binary that refuses the long one - clap prints its refusal to stderr, which
+/// [`assert_silent`] catches, and the comparison catches an exit code that
+/// moved.
+///
+/// The conflict path carries it, because that is the path with the most to
+/// swallow: a verdict on stdout, and an uncommitted-work note on stderr.
+#[test]
+fn the_long_spelling_of_quiet_answers_exactly_as_the_short_one_does() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let short = run_raw(&repo, "one", &["-q", "two"]);
+    let long = run_raw(&repo, "one", &["--quiet", "two"]);
+
+    assert_silent(&long, CONFLICTS, "conflicts");
+    assert_eq!(
+        (long.status.code(), &long.stdout, &long.stderr),
+        (short.status.code(), &short.stdout, &short.stderr),
+        "one switch has one behaviour, whichever way a caller spells it"
+    );
+}
+
+/// `-q` reaches every write `grime` owns, and stops at the argument parser,
+/// which answers before `grime` starts.
+///
+/// `Args::parse` runs ahead of the `Console` that carries the switch, so a
+/// command line clap refuses is answered by clap. That is the right place for
+/// it: silencing the refusal leaves a caller with a bare number and no way to
+/// learn which argument is missing, and the missing `BRANCH` is the likely one
+/// in the very script the README prints.
+///
+/// The code is [`ERROR`], which already means "I could not tell you". A command
+/// line `grime` cannot read is one more way to get no answer.
+///
+/// Run outside every repository, which is what shows the parser answered first:
+/// there is no repository here to answer from.
+#[test]
+fn quiet_leaves_the_usage_error_to_the_parser_that_answers_before_grime_starts() {
+    let elsewhere = not_a_repository();
+
+    let (code, stdout, stderr) = streams(&grime(elsewhere.path(), &["-q"]));
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a command line grime cannot read is a run that cannot answer, so \
+         {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("<BRANCH>"),
+        "the refusal has to name the argument that is missing:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "",
+        "the refusal belongs on stderr, where it cannot contaminate a pipeline"
+    );
+}
+
+/// `--version` answers about the binary rather than about a merge, so `-q`
+/// leaves it alone.
+///
+/// Asserted byte for byte against the same run without `-q`, because the claim
+/// is that the switch does not reach this path at all.
+///
+/// The exit code is `0` without a merge behind it, and that is the better
+/// trade. Every script that asks a tool which build it is reads that number, so
+/// moving the version off `0` to keep one table simple costs more than it buys.
+#[test]
+fn quiet_leaves_the_version_alone_because_it_answers_about_the_tool() {
+    let elsewhere = not_a_repository();
+
+    let quiet = streams(&grime(elsewhere.path(), &["-q", "--version"]));
+    let loud = streams(&grime(elsewhere.path(), &["--version"]));
+
+    assert_eq!(
+        quiet.0,
+        Some(0),
+        "asking for the version is not a question about conflicts, so it \
+         succeeds\nstdout:\n{}\nstderr:\n{}",
+        quiet.1,
+        quiet.2
+    );
+    assert_version_line(&quiet.1);
+    assert_eq!(
+        quiet, loud,
+        "-q silences what grime says about a merge, and the version is not that"
+    );
+}
