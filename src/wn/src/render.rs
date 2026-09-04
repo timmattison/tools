@@ -1347,6 +1347,22 @@ mod tests {
     }
 
     #[test]
+    fn a_graph_with_no_work_in_it_says_the_plan_is_empty() {
+        // A JSON plan whose `streams` array is empty is a plan somebody ran
+        // the skill for and found nothing to do in. It is not an error, and
+        // "every issue is closed" would be the opposite of the truth: no issue
+        // stands in it at all. A picture and a table never reach this
+        // sentence, because a picture names two steps or it claims no text,
+        // and a table with no row earns a message about its `Order` field.
+        let graph = crate::graph::of_parts(Vec::new(), &[]).expect("no step waits for another");
+        let report = Report::of_graph(&graph, &States::of(Vec::new()));
+        assert_eq!(
+            graph_glyphs(&report, 80),
+            "The plan holds no work. Nothing to start."
+        );
+    }
+
+    #[test]
     fn the_plan_carries_color_and_strips_back_to_the_glyphs() {
         let painted = testcolor::with_forced_ansi(|| {
             render_plan(&a_plan(), REPO, 80, &StartCommand::new(None))
