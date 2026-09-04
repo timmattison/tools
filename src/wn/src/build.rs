@@ -526,6 +526,16 @@ mod tests {
         // The gather script of the skill is a program, and Bash is what runs
         // it.
         assert!(ALLOWED_TOOLS.contains("Bash"), "{ALLOWED_TOOLS}");
+        // The skill dispatches a subagent when the backlog holds eight open
+        // issues or more, which is the case this tool is built for. That tool
+        // is named Agent in a current `claude` and Task in an older one, and
+        // `wn` names the versions of `claude` it finds rather than the one it
+        // was built beside. A name the run does not know is read past, and a
+        // name it needs and does not carry is a permission prompt no run under
+        // --print can answer.
+        for spelling in ["Agent", "Task"] {
+            assert!(ALLOWED_TOOLS.contains(spelling), "{ALLOWED_TOOLS}");
+        }
     }
 
     #[test]
