@@ -148,10 +148,14 @@ fn assert_finds_no_repository(repo: &DetachedGitDirRepo) {
 /// reports clean for the wrong reason is the defect this whole file exists to
 /// stop, so the check gets the same treatment it gives the tool.
 ///
-/// Four plants: the work tree, the directory above it, the same work tree
-/// inside quotes and before a comma, and the git directory, which the nested
-/// shape keeps under the work tree. The first three must match and the last one
-/// must not.
+/// Five plants: the work tree, the directory above it, the same work tree
+/// inside quotes and before a comma, a directory whose name holds a space, and
+/// the git directory, which the nested shape keeps under the work tree. The
+/// first four must match and the last one must not.
+///
+/// The plant that holds a space carries a work tree of its own, because every
+/// directory above the work tree of the fixture has a name of one word. It is
+/// the parent of that second work tree, so the check must flag it.
 #[test]
 fn the_path_check_flags_the_work_tree_and_the_directory_above_it() {
     let repo = DetachedGitDirRepo::nested();
@@ -160,6 +164,10 @@ fn the_path_check_flags_the_work_tree_and_the_directory_above_it() {
         .parent()
         .expect("the work tree has a parent")
         .to_path_buf();
+    let spaced = above.join("directory with a space");
+    let spaced_work_tree = spaced.join("home");
+    std::fs::create_dir_all(&spaced_work_tree)
+        .expect("create the work tree under a directory whose name holds a space");
 
     assert_eq!(
         path_at_or_above(&format!("root: {}", work_tree.display()), repo.work_tree()),
@@ -178,6 +186,11 @@ fn the_path_check_flags_the_work_tree_and_the_directory_above_it() {
         ),
         Some(work_tree),
         "the check must flag a path that carries punctuation on either end"
+    );
+    assert_eq!(
+        path_at_or_above(&format!("root: {}", spaced.display()), &spaced_work_tree),
+        Some(canonical(&spaced)),
+        "the check must flag a path whose name holds a space"
     );
     assert_eq!(
         path_at_or_above(
