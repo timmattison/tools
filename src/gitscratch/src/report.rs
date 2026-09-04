@@ -492,6 +492,33 @@ mod tests {
         );
     }
 
+    /// The count is the last thing on a rendered row, so [`count_column`] has
+    /// to read the last place the count appears and not the first.
+    ///
+    /// A file name holds every byte but NUL, which is the premise the `-z`
+    /// reader rests on, and `11 hunks.txt` is a name a repository can carry. A
+    /// helper that stops at the first occurrence answers 2 for the first row
+    /// below - the column the *name* starts in - and every alignment assertion
+    /// in this module rests on this helper, so each of them would then pass or
+    /// fail for a reason that has nothing to do with alignment.
+    ///
+    /// The second row is the ordinary one, and it is here as the control: a
+    /// helper that answered the last occurrence of something else would satisfy
+    /// the first assertion and break every real caller.
+    #[test]
+    fn the_count_column_is_read_from_the_last_place_the_count_appears() {
+        assert_eq!(
+            count_column("  11 hunks.txt    11 hunks", "11 hunks"),
+            18,
+            "a name that spells the count is not the count"
+        );
+        assert_eq!(
+            count_column("  readme.md    1 hunk", "1 hunk"),
+            15,
+            "an ordinary row still reads as the column its count starts in"
+        );
+    }
+
     /// A CJK file name occupies two terminal columns per character while being
     /// one character - and three bytes - wide, so padding by either of the two
     /// numbers Rust hands you for free produces a ragged column. Only display

@@ -6,6 +6,7 @@
 //! "something went wrong", so a test that only checked the words on stdout
 //! would pass for a binary that answers every question with the same number.
 
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -42,22 +43,90 @@ const EQUAL_HUNKS_VERDICT: &str = r"grind: conflicts - replaying HEAD onto two
   x.txt    1 hunk
   y.txt    1 hunk";
 
-/// Run `grind` in `repo`, with the ambient git environment taken back off.
+/// The locale every `grind` this file starts is pinned to, and the two
+/// variables that pin it.
+///
+/// One assertion in this file matches git's own words rather than grind's, and
+/// git wraps its words in gettext. A git built with the translations answers a
+/// developer whose shell carries `LC_ALL=de_DE` in German, and that assertion
+/// then fails for a reason that has nothing to do with the rebase it is about.
+/// `LC_ALL` is the variable that decides. `LANG` stands beside it because it
+/// costs nothing and spares the next reader the precedence rule.
+///
+/// A constant rather than two literals inside the builder, because the test
+/// below reads it back off the command: a pin nothing asserts is a pin the next
+/// person deletes.
+const PINNED_LOCALE: [(&str, &str); 2] = [("LC_ALL", "C"), ("LANG", "C")];
+
+/// A `grind` run in `repo`, built and not yet started.
+///
+/// Handed back rather than run, because three call sites below put one more
+/// thing on the command first - a `TMPDIR` of their own, or a stream pointed at
+/// a pipe that nobody reads. Each of them gets the environment of an ordinary
+/// run, which is the reason the command is built in one place.
 ///
 /// The scrub is belt to the binary's braces. `grind` reaches git only through
 /// `gitscratch`, which scrubs at the single place it spawns one, so a leak
 /// cannot reach the tool - but a test suite that let one through would be
 /// asserting against a run nobody could reproduce, and the two tests at the
-/// bottom of this file set these variables *deliberately*. Leaving the ambient
-/// environment in play everywhere else is what keeps those two the only place
-/// the answer depends on it.
-fn grind(repo: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_grind"))
+/// bottom of this file set these variables *deliberately*. Those two build
+/// their command by hand for that reason. Leaving the ambient environment in
+/// play nowhere else is what keeps them the only place the answer depends on
+/// it.
+fn grind_command(repo: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_grind"));
+    command
         .args(args)
         .current_dir(repo)
-        .without_inherited_git_environment()
+        .without_inherited_git_environment();
+
+    command
+}
+
+/// Run `grind` in `repo` and hand back everything it left behind.
+fn grind(repo: &Path, args: &[&str]) -> Output {
+    grind_command(repo, args)
         .output()
         .expect("failed to run grind")
+}
+
+/// What `command` gives the child for `name`, or `None` when it gives it
+/// nothing of its own.
+///
+/// [`Command::get_envs`] reports a variable the caller removed as a `None`
+/// value against its name, so the two answers this flattens together - never
+/// mentioned, and mentioned to be taken away - are the same answer to the
+/// question asked here.
+fn environment_value(command: &Command, name: &str) -> Option<String> {
+    command
+        .get_envs()
+        .find(|(key, _)| *key == OsStr::new(name))
+        .and_then(|(_, value)| value)
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
+/// Every run in this file is pinned to one locale, and the pin is asserted here
+/// rather than left to the one test that depends on it.
+///
+/// Read off the built command rather than out of a run, because the machine
+/// this suite is written on cannot show the failure: its git ships no
+/// `share/git-core/locale`, so it answers in English whatever the environment
+/// says. The risk is latent here and live on any machine or CI image that
+/// carries git's translations, which is exactly the shape a test has to pin
+/// rather than reproduce.
+#[test]
+fn every_run_is_pinned_to_one_locale_so_gits_own_words_arrive_untranslated() {
+    let command = grind_command(Path::new("."), &["main"]);
+
+    for (name, value) in PINNED_LOCALE {
+        assert_eq!(
+            environment_value(&command, name).as_deref(),
+            Some(value),
+            "a run that takes {name} from the developer's shell reads git's \
+             words in the developer's language, and the assertion that matches \
+             them fails for a reason it is not about"
+        );
+    }
 }
 
 /// Everything a test wants to look at, gathered once so an assertion failure
@@ -205,6 +274,32 @@ fn count_column(line: &str, count: &str) -> usize {
         .next()
         .expect("splitting always yields at least one piece")
         .width()
+}
+
+/// The count is the last thing on a breakdown row, so [`count_column`] has to
+/// read the last place the count appears and not the first.
+///
+/// A file name holds every byte but NUL, and `11 hunks.txt` is a name a
+/// repository can carry. A helper that stops at the first occurrence answers 2
+/// for the first row below - the column the *name* starts in - and every
+/// alignment assertion built on it then passes or fails for a reason that has
+/// nothing to do with alignment.
+///
+/// The second row is the ordinary one, and it is here as the control: a helper
+/// that answered the last occurrence of something else would satisfy the first
+/// assertion and break every real caller.
+#[test]
+fn the_count_column_is_read_from_the_last_place_the_count_appears() {
+    assert_eq!(
+        count_column("  11 hunks.txt    11 hunks", "11 hunks"),
+        18,
+        "a name that spells the count is not the count"
+    );
+    assert_eq!(
+        count_column("  readme.md    1 hunk", "1 hunk"),
+        15,
+        "an ordinary row still reads as the column its count starts in"
+    );
 }
 
 /// The breakdown lines, which are everything after the blank line that
@@ -384,10 +479,7 @@ fn grind_with_nowhere_to_put_a_scratch(
     // cannot name the same path - and never created, so it stays missing.
     let missing = repo.path().join("tmpdir-that-does-not-exist");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_grind"))
-        .arg(branch)
-        .current_dir(repo.path())
-        .without_inherited_git_environment()
+    let output = grind_command(repo.path(), &[branch])
         .env("TMPDIR", missing)
         .output()
         .expect("failed to run grind");
@@ -547,10 +639,7 @@ fn a_head_with_no_commit_on_it_is_refused_in_grinds_own_words_and_costs_no_workt
     let scratch_tmp = repo.path().join("scratch-tmp");
     std::fs::create_dir(&scratch_tmp).expect("create the scratch TMPDIR");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_grind"))
-        .arg("beta")
-        .current_dir(repo.path())
-        .without_inherited_git_environment()
+    let output = grind_command(repo.path(), &["beta"])
         .env("TMPDIR", &scratch_tmp)
         .output()
         .expect("failed to run grind");
@@ -879,6 +968,35 @@ fn quiet_prints_nothing_when_the_run_cannot_answer_at_all() {
     assert_silent(&output, ERROR, "error");
 }
 
+/// `-q` and `--quiet` are two spellings of one switch, and the file already
+/// holds that standard: the version test asserts `-V` and `--version` are
+/// byte-identical rather than merely both present.
+///
+/// The three tests above all reach for the short spelling, so the long one runs
+/// nowhere. Asserted byte for byte against the short run rather than against
+/// silence alone, because "both spellings print nothing" is also true of a
+/// binary that refuses the long one - clap prints its refusal to stderr, which
+/// [`assert_silent`] catches, and the comparison catches an exit code that
+/// moved.
+///
+/// The conflict path carries it, because that is the path with the most to
+/// swallow: a verdict on stdout, and an uncommitted-work note on stderr.
+#[test]
+fn the_long_spelling_of_quiet_answers_exactly_as_the_short_one_does() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let short = run_raw(&repo, "one", &["-q", "two"]);
+    let long = run_raw(&repo, "one", &["--quiet", "two"]);
+
+    assert_silent(&long, CONFLICTS, "conflicts");
+    assert_eq!(
+        (long.status.code(), &long.stdout, &long.stderr),
+        (short.status.code(), &short.stdout, &short.stderr),
+        "one switch has one behaviour, whichever way a caller spells it"
+    );
+}
+
 /// Which of `grind`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {
@@ -912,11 +1030,7 @@ fn grind_into_an_unread_pipe(repo: &Path, args: &[&str], unread: Unread) -> (Opt
     // reader and cannot acquire one.
     drop(reader);
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_grind"));
-    command
-        .args(args)
-        .current_dir(repo)
-        .without_inherited_git_environment();
+    let mut command = grind_command(repo, args);
     match unread {
         Unread::Stdout => {
             command.stdout(Stdio::from(writer)).stderr(Stdio::piped());

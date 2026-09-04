@@ -45,7 +45,10 @@ struct Args {
     branch: String,
 
     /// Print nothing; the exit code is the answer
-    #[clap(short, long)]
+    // MUTATION, deliberate, and the next commit takes it back out: `long` is
+    // removed, so clap derives `-q` alone and refuses `--quiet`. The new test
+    // that runs the long spelling is here to catch exactly that.
+    #[clap(short)]
     quiet: bool,
 }
 
