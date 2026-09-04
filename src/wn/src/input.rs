@@ -254,15 +254,31 @@ pub struct Sources<'a> {
 }
 
 impl Sources<'_> {
-    /// The chain, out of the first input that holds one.
+    /// The chain, out of the first input that holds one. `refresh` is the one
+    /// way past that order: it takes the chain out of a new run of `claude`,
+    /// whatever the other inputs hold.
     ///
     /// # Errors
     ///
+    /// Gives [`InputError::RefreshWithoutClaude`] when the reader asked for a
+    /// new plan and turned the run that builds one off.
+    ///
     /// Gives [`InputError::Stdin`] when standard input could not be read at
-    /// all, [`InputError::Unavailable`] when the clipboard could not be opened,
-    /// [`InputError::EmptyClipboard`] when the clipboard was the last input and
-    /// holds no text, and [`InputError::NoChain`] when the clipboard was not
-    /// tried and no other input answered.
+    /// all.
+    ///
+    /// Gives [`InputError::EmptyClipboard`] when the clipboard was read, it
+    /// holds no text, and there is no run of `claude` to reach after it.
+    ///
+    /// Gives [`InputError::Unavailable`] when the clipboard could not be
+    /// opened, and there is no run of `claude` to reach after it.
+    ///
+    /// Gives [`InputError::NoChain`] when no input answered, and neither the
+    /// clipboard nor the run was one of the inputs.
+    ///
+    /// Gives [`InputError::NoPlan`] when the run could not build a plan. It
+    /// carries the [`BuildError`] the run gave.
+    ///
+    /// Gives [`InputError::EmptyPlan`] when the run printed nothing at all.
     pub fn chain(&self) -> Result<Chain, InputError> {
         if self.refresh {
             let Some(build) = self.plan else {
@@ -322,8 +338,11 @@ impl Sources<'_> {
 ///
 /// # Errors
 ///
-/// Gives [`InputError::EmptyPlan`] for a run that printed nothing at all, and
-/// [`InputError::NoPlan`] for a run that could not happen.
+/// Gives [`InputError::EmptyPlan`] for a run that printed nothing at all.
+///
+/// Gives [`InputError::NoPlan`] for a run that could not build a plan. It
+/// carries the [`BuildError`] the run gave. A run that could not start and a
+/// run that started and failed both arrive there.
 fn built(build: &dyn Fn() -> PlanBuild) -> Result<Chain, InputError> {
     match build() {
         Ok(document) if !document.trim().is_empty() => Ok(Chain::new(document, Source::Plan)),
@@ -335,7 +354,8 @@ fn built(build: &dyn Fn() -> PlanBuild) -> Result<Chain, InputError> {
 /// Why no input gave a chain.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum InputError {
-    /// No input holds a chain, and the clipboard was not one of the inputs.
+    /// No input holds a chain, and neither the clipboard nor the run of
+    /// `claude` was one of the inputs.
     #[error("no chain given. {PASS_IT_AS_AN_ARGUMENT}")]
     NoChain,
     /// The clipboard was the last input, and it holds no text.
