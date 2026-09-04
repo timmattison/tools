@@ -9,6 +9,12 @@ anyhow.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 gitscratch.workspace = true
+# The one entrance to the width of a terminal. A terminal that carries no
+# window answers the `TIOCGWINSZ` ioctl with zero columns and the ioctl
+# succeeds, so a caller that reads the raw answer lays the breakdown out at no
+# columns at all. `TerminalWidth::get_or_default` is where that answer is
+# refused and the fallback of 80 columns stands instead.
+termbar.workspace = true
 
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }

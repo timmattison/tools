@@ -205,13 +205,15 @@ on exactly the details that make the two answers comparable at a glance:
 
 ```rust
 use gitscratch::Report;
+use termbar::TerminalWidth;
 
 let report = Report::for_tool("grind").describing("replaying HEAD onto main");
 
 if let Some(note) = report.dirty_note(repo.uncommitted_files()?) {
     eprintln!("{note}");
 }
-println!("{}", report.render(&conflicts));
+let columns = usize::from(TerminalWidth::get_or_default());
+println!("{}", report.render_within(&conflicts, columns));
 ```
 
 The tool name and the action arrive through two differently-named calls rather
@@ -239,6 +241,46 @@ note is the shape of that last rule: `dirty_note` takes an `Uncommitted` and
 chooses only the verb, because "1 uncommitted file **is**" and "3 uncommitted
 files **are**" are one agreement written in two places, and the half that names
 the thing being counted belongs to the counter.
+
+Two things about a file name are the renderer's to handle, and both of them
+happen once, ahead of the measurement and ahead of the print, so the string that
+was measured is the string that reaches the screen.
+
+The first is that a name holds every byte but NUL — which is the premise the
+`-z` reader rests on — so a newline, a carriage return and an ESC are all legal
+in one. `render_within` spells every control character out as `\u{...}`. A raw
+newline would split one row of this line-oriented layout in two and strand the
+count on the second row, and a raw ESC would hand an escape sequence out of the
+repository straight to the terminal of whoever ran the tool. The rule is
+`char::is_control` and nothing wider, so a leading space, a trailing space,
+U+3000, a backslash, a double quote and an emoji all arrive unchanged — every
+one of them names a real file, and this crate went to some trouble to carry them
+here intact.
+
+The second is that a name has no bound. The count column sits past the widest
+name, and one deeply nested path — an ordinary thing to have — carries the
+counts of every row off the right-hand edge of the terminal, which then wraps
+each of them. `render_within` takes the width of the terminal and clamps the
+name column to what is left after the indent, the gap and the widest count. A
+name too wide for the clamp takes a row of its own and its count takes the next
+row, in the same column as every other count. Here, on a terminal 40 columns
+wide:
+
+```console
+grind: conflicts - replaying HEAD onto main
+       4 hunks across 2 files, 2 stops
+
+  readme.md                      1 hunk
+  src/a/very/deeply/nested/directory/with/a/long/name/module.rs
+                                 3 hunks
+```
+
+The name is never cut short, because a truncated path opens no file. The width
+arrives as a parameter and is never read here, because measuring a terminal is
+a decision about one program's output and this crate renders for every consumer
+that asks. `Report::render` is the same layout with no right-hand edge, for a
+caller that has no terminal to name — a test, or anything building this text for
+somewhere other than a screen.
 
 This is a deliberate, spec-sanctioned acceptance of a little presentation logic
 in a library crate. The alternative is two copies of it.

@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
 use gitscratch::{Repo, Report};
+use termbar::TerminalWidth;
 
 /// The tool's own name, on every line it prints and on the report it renders.
 ///
@@ -182,7 +183,21 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     let scratch = repo.scratch("HEAD")?;
     let conflicts = scratch.replay_rebase(&args.branch)?;
 
-    console.verdict(&report.render(&conflicts));
+    // The breakdown lines its hunk counts up in one column, and past the
+    // right-hand edge of the terminal there is no such column: the terminal
+    // wraps every one of those lines instead. So the width goes to the
+    // renderer, which clamps the name column to fit and gives a name too wide
+    // for the clamp a line of its own. Reading the terminal is this tool's job
+    // rather than the library's, because it is a decision about this program's
+    // own output and `gitscratch` renders for every consumer that asks.
+    //
+    // Through `TerminalWidth` rather than off the ioctl, because a terminal
+    // that carries no window answers that ioctl with zero columns and succeeds.
+    // A run laid out at zero columns puts every name on a line of its own for
+    // no reason. `get_or_default` refuses the zero and stands the fallback of
+    // 80 columns in its place.
+    console
+        .verdict(&report.render_within(&conflicts, usize::from(TerminalWidth::get_or_default())));
 
     // Read off the same fact the report was rendered from, so the words and the
     // number a script acts on cannot tell two different stories.

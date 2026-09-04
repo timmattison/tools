@@ -17,6 +17,8 @@
 //! [`Report::without_stops`] - a merge halts exactly once, so printing the
 //! number would be noise.
 
+use std::path::Path;
+
 use unicode_width::UnicodeWidthStr;
 
 use crate::metrics::Uncommitted;
@@ -32,8 +34,12 @@ const LABEL_SEPARATOR_WIDTH: usize = 2;
 /// Indent for every line of the per-file breakdown.
 const FILE_INDENT: &str = "  ";
 
-/// Columns between the widest file name and the hunk counts, so the counts form
-/// a column of their own instead of butting up against the longest name.
+/// Columns between the name column and the hunk counts, so the counts form a
+/// column of their own instead of butting up against the longest name.
+///
+/// The name column is as wide as the widest name that fits the terminal, which
+/// on a terminal wide enough is the widest name there is. A name wider than
+/// that takes a row of its own - see [`Report::render_within`].
 const COUNT_GAP: usize = 4;
 
 /// A conflict verdict, and how to word it for one particular tool.
@@ -114,19 +120,37 @@ impl<'a> Report<'a> {
     /// Returned rather than printed so the caller decides where it goes - and
     /// so `-q` can decide it goes nowhere - without this having to know about
     /// streams.
+    ///
+    /// This is the unbounded layout: the count column goes wherever the widest
+    /// name puts it. That is right for a caller writing to a file, to a pipe or
+    /// to an assertion, all of which have no right-hand edge. A caller writing
+    /// to a terminal has one, and reaches for [`Report::render_within`].
     #[must_use]
     pub fn render(&self, conflicts: &Conflicts) -> String {
         self.render_within(conflicts, usize::MAX)
     }
 
-    /// The same verdict, laid out for a terminal of `columns` columns.
+    /// The same verdict, laid out for a terminal `columns` columns wide.
+    ///
+    /// The counts share one column, and the whole reason to measure a name in
+    /// display width is so that column is the same one on every row. Past the
+    /// right-hand edge of the terminal there is no such column: the terminal
+    /// wraps each of those rows at a point of its own choosing, and the result
+    /// reads worse than a breakdown nobody tried to align. One deeply nested
+    /// path is enough to do it, and a deeply nested path is ordinary.
+    ///
+    /// So the name column is clamped to what `columns` leaves after the indent,
+    /// the gap and the widest count. A name too wide for the clamp takes a row
+    /// of its own and its count takes the next row, still in the shared column,
+    /// so an over-long name costs one extra row rather than the alignment of
+    /// every row. The name itself is never cut short, because a truncated path
+    /// opens no file.
     ///
     /// Nothing here reads the terminal. The number arrives as a parameter so
     /// the library stays a library, and each binary answers the question with
     /// `termbar::TerminalWidth::get_or_default`.
     #[must_use]
     pub fn render_within(&self, conflicts: &Conflicts, columns: usize) -> String {
-        let _ = columns;
         if conflicts.is_clean() {
             return format!("{}: clean - {} hit no conflicts", self.tool, self.action);
         }
@@ -136,20 +160,40 @@ impl<'a> Report<'a> {
         // name is one character and three bytes per glyph but two terminal
         // columns - and only the third is what a reader sees line up.
         //
-        // `to_string_lossy` is the one place a name stops being the bytes git
+        // `printable` is the one place a name stops being the bytes git
         // reported, and it is here rather than anywhere upstream on purpose: a
         // terminal can only be handed text, so a name that is not valid UTF-8
-        // has to become U+FFFD to be printed at all. Converting it any earlier
-        // would put that name back into the map, where it names no file and
-        // costs the file its real hunk count. The measurement and the printing
-        // both read the same converted name, so the column a reader sees is the
-        // column the padding was computed for.
+        // has to become U+FFFD to be printed at all, and a name holding a
+        // control character has to have that character spelled out. Converting
+        // it any earlier would put that name back into the map, where it names
+        // no file and costs the file its real hunk count. Each name is
+        // converted once, here, and the same converted string is both measured
+        // and printed - so the column a reader sees is the column the padding
+        // was computed for, and no name can measure one width and print
+        // another.
         let indent = " ".repeat(self.tool.width() + LABEL_SEPARATOR_WIDTH);
-        let widest = conflicts
+        let rows: Vec<(String, String)> = conflicts
             .file_hunks()
-            .map(|(name, _)| name.to_string_lossy().width())
+            .map(|(name, hunks)| (printable(name), hunks.phrase()))
+            .collect();
+
+        // What the terminal leaves for a name: everything but the indent, the
+        // gap and the widest count. `saturating_sub` because a terminal narrow
+        // enough to leave nothing is still a terminal, and it gets every name
+        // on a row of its own.
+        let widest_count = rows
+            .iter()
+            .map(|(_, count)| count.width())
             .max()
             .unwrap_or_default();
+        let room = columns.saturating_sub(FILE_INDENT.width() + COUNT_GAP + widest_count);
+        let widest = rows
+            .iter()
+            .map(|(name, _)| name.width())
+            .max()
+            .unwrap_or_default()
+            .min(room);
+        let count_column = " ".repeat(FILE_INDENT.width() + widest + COUNT_GAP);
 
         let mut summary = format!(
             "{indent}{} across {}",
@@ -168,10 +212,14 @@ impl<'a> Report<'a> {
             String::new(),
         ];
 
-        for (name, hunks) in conflicts.file_hunks() {
-            let name = name.to_string_lossy();
-            let gap = " ".repeat(widest.saturating_sub(name.width()) + COUNT_GAP);
-            lines.push(format!("{FILE_INDENT}{name}{gap}{}", hunks.phrase()));
+        for (name, count) in &rows {
+            if name.width() > widest {
+                lines.push(format!("{FILE_INDENT}{name}"));
+                lines.push(format!("{count_column}{count}"));
+            } else {
+                let gap = " ".repeat(widest - name.width() + COUNT_GAP);
+                lines.push(format!("{FILE_INDENT}{name}{gap}{count}"));
+            }
         }
 
         lines.join("\n")
@@ -208,6 +256,52 @@ impl<'a> Report<'a> {
             uncommitted.phrase()
         ))
     }
+}
+
+/// `name` as text a terminal can be handed, with every control character
+/// spelled out.
+///
+/// Two losses happen here and nowhere earlier. The first is the lossy decode: a
+/// name that is not valid UTF-8 becomes U+FFFD, because a terminal takes text
+/// and nothing else. The second is this escape: NUL is the only byte a path
+/// cannot hold, which is the premise the `-z` reader rests on, so a newline, a
+/// carriage return and an ESC are all legal in a name and none of them can be
+/// printed as itself. A newline splits one row of a line-oriented layout in
+/// two. An ESC hands an escape sequence out of the repository straight to the
+/// terminal of whoever ran the tool. And `unicode-width` measures every one of
+/// them as no columns at all, so a name holding one is measured shorter than it
+/// prints and moves the count column of every other row with it.
+///
+/// The rule is [`char::is_control`] and nothing wider, which is what keeps this
+/// from undoing the names the crate went to trouble to carry intact. A leading
+/// space, a trailing space and U+3000 IDEOGRAPHIC SPACE are all printable
+/// characters, so all three arrive unchanged - and so do a backslash, a double
+/// quote and an emoji, each of which [`char::escape_debug`] would have escaped
+/// into a name that names no file. `escape_debug` would take U+3000 as well:
+/// it is a space separator rather than a printable character, by the table that
+/// function reads.
+///
+/// Every control character comes out in the one form, `\u{...}`, rather than in
+/// the short spellings `\n` and `\t`. The short forms read more easily and are
+/// the more ambiguous of the two: a path really can hold a backslash followed
+/// by an `n`, and this escape leaves that backslash alone, so `\n` on screen
+/// would name two different files. `\u{a}` names one.
+fn printable(name: &Path) -> String {
+    let text = name.to_string_lossy();
+    if !text.contains(char::is_control) {
+        return text.into_owned();
+    }
+
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() {
+            escaped.push_str(&format!("\\u{{{:x}}}", character as u32));
+        } else {
+            escaped.push(character);
+        }
+    }
+
+    escaped
 }
 
 #[cfg(test)]

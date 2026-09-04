@@ -3719,6 +3719,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "gitscratch",
+ "termbar",
  "unicode-width",
 ]
 

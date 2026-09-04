@@ -156,6 +156,18 @@ The per-file breakdown is part of the answer rather than decoration: "4 hunks
 across 2 files" tells you how much work is coming, not where it lands, and those
 are different planning problems.
 
+The counts all start in the same terminal column, which is the whole reason the
+names are measured in display width rather than in bytes or characters. `grind`
+measures your terminal and keeps that column on screen: a path too wide to pad
+takes a row of its own and its count takes the next row, still in the shared
+column. The path itself is never cut short, because a truncated path opens no
+file. The measurement is of your terminal itself rather than of where stdout
+goes, so `grind main | less` lays the breakdown out for the window you are
+sitting at; a run that holds no terminal at all, such as one under a CI job,
+lays it out for 80 columns. A control character in a name is spelled out as
+`\u{...}`, so a name holding a newline stays one row and a name holding an ESC
+cannot write an escape sequence to your terminal.
+
 ## Uncommitted work
 
 ```console
