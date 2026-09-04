@@ -7,9 +7,9 @@
 use std::path::Path;
 
 use gitscratch::testing::{
-    conflicting_repo, independent_branches_repo, unrelated_histories_repo,
+    conflicting_repo, independent_branches_repo, multi_byte_names_repo, unrelated_histories_repo,
 };
-use gitscratch::{Hunks, Stops};
+use gitscratch::{Files, Hunks, Stops};
 
 /// The verdict every tool built on this crate prints is "clean" or
 /// "conflicts", so a merge that has nothing to argue about has to come back
@@ -137,5 +137,56 @@ fn a_merge_git_refuses_outright_is_an_error_rather_than_a_verdict() {
     assert!(
         words.contains("refusing to merge unrelated histories"),
         "the error has to carry git's own account of the refusal, got: {words}"
+    );
+}
+
+/// A file name outside ASCII has to come back out of a merge replay as the
+/// developer typed it, carrying the hunks it really contributed.
+///
+/// Both halves break together, which is why both are asserted here. Git's
+/// default `core.quotePath` hands `git diff --name-only` a C-quoted,
+/// octal-escaped path, so the breakdown reports a name nobody typed *and* the
+/// count collapses: the escaped name resolves to no file on disk, and a
+/// conflicted file that cannot be read is floored at a single hunk. The second
+/// failure is the quiet one - it looks like a plausible answer.
+///
+/// `日本語.txt` is contested in two regions precisely so that undercount is
+/// visible. With one region the swallowed answer and the true answer would
+/// both be 1, and the defect would pass this test.
+///
+/// The branch names carry multi-byte characters for the same reason: a branch
+/// name travels into the merge as an argument and back out in the verdict, so
+/// it takes the same road a file name does.
+#[test]
+fn a_conflicted_non_ascii_path_survives_a_merge_by_name_and_by_count() {
+    let repo = multi_byte_names_repo();
+    let scratch = repo.scratch("left-左");
+
+    let conflicts = scratch
+        .replay_merge("right-右")
+        .expect("replay a merge of a branch that rewrites both files");
+
+    // The shape first, so the breakdown below cannot pass by having replayed
+    // something other than the collision this fixture is built to produce.
+    assert_eq!(
+        conflicts.stops(),
+        Stops::new(1),
+        "a merge halts once or not at all, so a merge that conflicted halted \
+         exactly once: {conflicts:?}"
+    );
+    assert_eq!(
+        conflicts.files(),
+        Files::new(2),
+        "both files are contested, so both should be reported: {conflicts:?}"
+    );
+
+    assert_eq!(
+        conflicts.file_hunks().collect::<Vec<_>>(),
+        vec![
+            (Path::new("readme.md"), Hunks::new(1)),
+            (Path::new("日本語.txt"), Hunks::new(2))
+        ],
+        "a non-ASCII path must survive the round trip through git by name and \
+         by count"
     );
 }
