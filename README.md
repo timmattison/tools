@@ -1096,10 +1096,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Two fields are read for numbers: `Order`, which is a chain, and `Waits for`, which is a set
     and stands below. `Stream`, `Zone`, and `Notes` are never read for numbers, and that rule is
     what makes the feature work: `Notes` is prose about code, and prose about code is full of
-    numbers. `main.rs:1566-1650` is not `#1566` and `#1650`, and `265 lines apart
-    in a 5113-line file` is not `#265` — though `#265` is a real issue of this repository, and in
-    one plan it is the first step of another stream of that same plan. The digits alone cannot
-    part a count of lines from the number of an issue. Only the field they stand in can.
+    numbers. `main.rs:1566-1650` is not `#1566` and `#1650`, and `265 lines apart in a 5113-line
+    file` is not `#265` — though `#265` is a real issue of this repository, and in one plan it is
+    the first step of another stream of that same plan. The digits alone cannot part a count of
+    lines from the number of an issue. Only the field they stand in can.
   - A pull request and the issue it closes are one step, not two. `PR#344 (#341)` gets one row,
     `#344 (#341)`, and the state of that row is the state of the pull request, because the pull
     request is the work. `wn` asks GitHub about both numbers, and a pair whose two states disagree
