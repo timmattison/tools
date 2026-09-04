@@ -9,6 +9,11 @@
 //! argument was typed on purpose, a pipe was built on purpose, and the
 //! clipboard was neither. A run that costs money and a minute of waiting is
 //! quieter still, so it answers only when the other three did not.
+//!
+//! The run says what it cost, because a reader who pays for one must learn the
+//! price. `--output-format json` wraps the plan in an envelope that carries
+//! that price beside it, and [`crate::envelope`] writes one line of it on
+//! standard error.
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};

@@ -1447,6 +1447,22 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the error a run with no chain printed before. An empty value leaves it on, because an exported
     but empty variable is a common accident. `WN_PLAN_TIMEOUT` names the seconds a run may take;
     it is 600 by default, because a plan of a whole backlog is a longer run than a commit message.
+  - The run says what it cost. One line follows it on standard error, beside the spinner:
+    `plan: $0.28 · claude-opus-5[1m], claude-haiku-4-5 at effort high · 32 in, 420 out, 94k cache
+    read, 61k cache write · 1.3s`. The document still goes to standard output alone, so a reader
+    who pipes that output gets the plan and nothing else. The numbers cover the subagents the skill
+    dispatches: one measured run of a parent and a subagent on two different models carried both
+    models in its `modelUsage`, and its `total_cost_usd` was the sum of the two to the last digit.
+    The token counts come out of `modelUsage` for that same reason — the top-level `usage` of that
+    run counted the last turn of the parent alone, 10 input tokens against the 30 the parent really
+    read. Every count is cut and never rounded, so a written number never names more than the run
+    reached. A number the run leaves out costs its clause of the line and never the plan, because
+    the plan is already paid for.
+  - `WN_PLAN_EFFORT` names the level the run asks for, one of `low`, `medium`, `high`, `xhigh` and
+    `max`. It is also the level the report names: the envelope carries no field that names one, so
+    a report can only name the level the run asked for, and a line that named a level nobody chose
+    would be worth nothing. `WN_PLAN_MODEL` names the model, such as `opus` or `claude-haiku-4-5`.
+    A run that names neither asks for neither, and `claude` picks both as it always did.
   - These things refuse, and each exits `2`. A directory that is in no repository `gh` can name is
     refused before the run, not after it: the skill plans the repository of the directory `wn` was
     run in, and its gather script turns a `gh` or a `git` failure into a warning rather than a
@@ -1469,12 +1485,20 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     knows is named back with that reason, on whichever pipe carried it. A run that prints nothing
     at all is named back as a run of `claude`. A document that is not the schema earns the refusal
     of the JSON reader, unchanged and naming no clipboard, because a plan `wn` built is a plan
-    `wn` asked for.
+    `wn` asked for. A run that answers with something that is no JSON envelope is refused before
+    that reader ever sees it, and the message names what the run printed: the fault is in the run
+    and a refusal that named the plan would send the reader to look in the wrong place. A
+    `WN_PLAN_EFFORT` that names none of the five levels is refused and named back, and the message
+    names the five. A `WN_PLAN_MODEL` that opens with a dash is refused, because such a value is a
+    flag: a variable that can put a flag on the command line of the run decides what the run may
+    do, and that decision is yours and never this tool's. Both refusals stand before the run, so
+    a mistake in either variable costs no money.
   - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard, and builds a plan when it holds
     none), `wn --refresh`, `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole
     plan, a plan drawn as a picture, or a plan written as JSON),
     `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`,
-    `WN_NO_CLAUDE=1 wn`, `WN_PLAN_TIMEOUT=900 wn`
+    `WN_NO_CLAUDE=1 wn`, `WN_PLAN_TIMEOUT=900 wn`, `WN_PLAN_EFFORT=high wn`,
+    `WN_PLAN_MODEL=opus wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 
 ## dirhash
