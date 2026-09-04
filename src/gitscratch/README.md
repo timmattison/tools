@@ -117,6 +117,17 @@ let dirty = repo.uncommitted_files()?; // an `Uncommitted`: staged + unstaged + 
 let scratch = repo.scratch(&onto)?;    // the only way to a worktree
 ```
 
+`Repo::resolve` puts the question to git in the one form git can refuse. A bare
+`git rev-parse <revision>` prints an argument it cannot place straight back and
+exits **0**, so a name that names no commit passed the very check that exists to
+catch it, and `grind -- --root` answered `clean` for a branch that does not
+exist. The question carries `--verify`, so git answers with one commit id or
+fails, and `--end-of-options`, so a revision that starts with a dash arrives as a
+revision rather than as a flag. The same separator stands ahead of every other
+caller-supplied revision this crate hands to git — the commit-ish of
+`worktree add` and the upstream of `rebase` — because each of those is a place
+where git accepts an option and answers cheaply instead of refusing.
+
 These live here rather than in each consuming tool for the same reason as
 everything else: `Git::new` is crate-private, so a repository-rooted runner can
 only be built from inside this crate. The queries are all reads, which fire no
@@ -519,7 +530,12 @@ that does not resolve both have to fail there, by name. The premise for the
 first of those comes from `not_a_repository()` rather than from a bare
 `TempDir`, so a `TMPDIR` that turns out to sit inside a repository is reported
 where the mistake is instead of as the pre-flight accepting a directory it
-should have refused.
+should have refused. `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head`
+covers the revision that reaches the worktree rather than the reader:
+`git worktree add -q --detach <path> --force` is a complete and valid command,
+so without `--end-of-options` git reads `--force` as its own flag and builds the
+worktree at HEAD at exit 0 — a scratch of a revision nobody asked for, and every
+number measured in it about another branch.
 
 It also pins the other half of `Repo::open`'s contract: the directory it is
 handed may be any directory *inside* the repository, which is what every run

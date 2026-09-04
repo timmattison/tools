@@ -65,6 +65,15 @@ directory reads as the bad argument it is, rather than arriving as git's own
 `not a git repository … .git` from inside `worktree add`, after a run has already
 been announced.
 
+A branch name that starts with a dash is a branch name too, and it used to be
+read as an option. `git checkout -q --detach --progress` is a complete and valid
+command: git reads `--progress` as its own option, finds no branch left to check
+out, and detaches HEAD where it already stands. So the scratch worktree stayed on
+the base, the rebase found nothing to replay, and the ordering scored zero — the
+same zero a genuinely free ordering scores. Every revision `grist` hands to git
+now arrives after `--end-of-options`, so git refuses the name rather than obeying
+it.
+
 ## The three numbers
 
 | Column | What it counts |

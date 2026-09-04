@@ -407,12 +407,42 @@ impl Git {
 
     /// Resolve a revision to a full commit id.
     ///
+    /// **Both flags are the question, not decoration.** A bare
+    /// `git rev-parse <revision>` reads a dash-leading argument as an option it
+    /// does not know, prints the argument back, and exits 0 - rev-parse passes
+    /// an option it cannot place through to rev-list rather than refusing it.
+    /// This method is the whole pre-flight, so that exit code becomes "the
+    /// revision names a commit", and a name that names nothing starts a full
+    /// replay. `grind -- --root` answered `clean` for a branch that does not
+    /// exist, which is the one answer this crate exists never to give.
+    ///
+    /// `--verify` makes git refuse a revision it cannot resolve. It reports
+    /// exactly one object id or it fails, so an argument that resolves to
+    /// nothing exits 128 instead of exiting 0 with the argument echoed back.
+    ///
+    /// `--end-of-options` ends git's own option position, so the revision
+    /// arrives as a revision whatever git learns to recognise next. `--verify`
+    /// alone catches every dash-leading revision git knows today, because an
+    /// option prints no object id and `--verify` demands one. That is a fact
+    /// about today's option list rather than a rule, and this crate takes the
+    /// rule: the same reasoning that makes [`NoInheritedGitEnvironment`] match
+    /// a prefix instead of a list of names.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the revision does not name a commit.
+    /// Returns an error if the revision does not name a commit. The message
+    /// names the revision, because that name is what the caller typed and has
+    /// to correct.
     pub fn rev_parse(&self, revision: &str) -> Result<String> {
-        self.run("rev-parse", &[&format!("{revision}^{{commit}}")])
-            .with_context(|| format!("could not resolve '{revision}' to a commit"))
+        self.run(
+            "rev-parse",
+            &[
+                "--verify",
+                "--end-of-options",
+                &format!("{revision}^{{commit}}"),
+            ],
+        )
+        .with_context(|| format!("could not resolve '{revision}' to a commit"))
     }
 
     /// Configuration that keeps a simulation from touching anything real, plus

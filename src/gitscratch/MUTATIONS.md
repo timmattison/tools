@@ -39,6 +39,10 @@ not have to re-derive which guard belongs to which test.
 | `the_ancestor_check_finds_the_repository_a_directory_sits_inside` | `ancestor_repository`, the precondition `DetachedGitDirRepo::init` refuses a fixture inside a repository with | `src/testing.rs`, `ancestor_repository()` — answer `None` for every directory | narrow |
 | `an_argument_cannot_re_pin_a_setting_the_safety_config_fixed` | The subcommand parameter, which keeps a caller's arguments out of git's own option position | `src/git.rs`, `Git::command` — take the subcommand back inside the argument slice, so a caller supplies it and can put arguments ahead of it | widen |
 | `an_argument_cannot_aim_the_runner_at_another_repository` | The same parameter, against `-C` rather than against `-c` | `src/git.rs`, `Git::command` — the same mutation | widen |
+| `resolves_a_revision_that_names_a_commit_to_its_full_id` | `--verify`, which makes git answer with one commit id or fail | `src/git.rs`, `Git::rev_parse` — drop the `"--verify"` argument | remove |
+| `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back` | The pair `--verify --end-of-options`, which is how the pre-flight asks a question git can refuse | `src/git.rs`, `Git::rev_parse` — drop both arguments | remove |
+| `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` (`tests/repo.rs`) | `--end-of-options` ahead of the two positionals of `worktree add` | `src/scratch.rs`, `Scratch::create` — drop the argument | remove |
+| `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | `--end-of-options` ahead of the upstream of `rebase` | `src/scratch.rs`, `Scratch::replay_rebase_within` — drop the argument | remove |
 
 ## What keeps each test honest
 
@@ -92,6 +96,10 @@ registry that reports everything as fine is worth less than no registry at all.
 | `replays_without_hanging_or_failing_when_commit_signing_is_enabled` | Implicit: `TestRepo::init` pins `commit.gpgsign=false` while building the fixture and signing is switched on afterwards, so the control below doubles as proof the config took. | **Full.** A plain `git commit --allow-empty` through the fixture must *fail* — `"commit signing is not armed ... a plain commit succeeded"` — and fail for the stated reason, `gpg failed to sign`. `--allow-empty` means arming leaves the fixture exactly as it found it. A second control lives inside `replay_under_signing`: the replayed commit must still be in `left..HEAD`, which catches a signing failure that came back disguised as a plausible answer. The hang branch cannot be armed at all — see the record below. |
 | `an_argument_cannot_re_pin_a_setting_the_safety_config_fixed` | The pinned setting is read back unmodified first and must be `false` — "the safety configuration has to pin `rebase.updateRefs=false`, or there is nothing here for an argument to undo and the assertion below is measured against nothing". | **Full.** Plain git, through the fixture, is handed two `-c` pairs naming one key and must answer with the second — "git no longer lets the last `-c` pair win, so this test could only pass vacuously". That is the hazard itself, demonstrated before the runner is asked anything. |
 | `an_argument_cannot_aim_the_runner_at_another_repository` | The runner is asked which repository it is rooted in, and that answer is what the closing assertion compares against, so a runner that could not answer at all fails here rather than passing below. | **Full.** Plain git, run in the first fixture with `-C` naming the second, must answer about the second — the two answers must differ — "`-C` no longer moves git to another directory, so this test could only pass vacuously". Both paths are spelled by git itself, so neither side has to canonicalise a path to compare it. |
+| `resolves_a_revision_that_names_a_commit_to_its_full_id` | The fixture commits a file, so HEAD provably names a commit, and the expected id is read back through the fixture's own git rather than written down. | **Structural.** The hazard is the reader answering *wrongly* rather than answering at all, so there is nothing to arm: the assertion compares the reader's answer with git's own, and any extra line, any missing line, and any other commit all fail it. Dropping `--verify` is what makes git prepend `--end-of-options` to its own output, which this test is the only thing in the suite that sees. |
+| `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back` | The fixture commits a file, so the repository is one a revision could resolve in, and the refusal cannot be a refusal of everything - `resolves_a_revision_that_names_a_commit_to_its_full_id` holds that side. | **Full.** Plain git, through the fixture, is asked for `--root^{commit}` and must print that argument straight back — "git no longer prints a dash-leading argument back at exit 0, so this test could only pass vacuously". That echo *is* the hazard: it exits 0, and the pre-flight reads an exit of 0 as a commit. |
+| `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` | None beyond the fixture, which `conflicting_repo` builds with a `main` that resolves. | **Missing.** The hazard is that `git worktree add -q --detach <path> --force` succeeds and checks out HEAD, and arming it in-test means building the wrong scratch on purpose and then removing it. Asserting the wrong-scratch HEAD under a deliberately unseparated call closes it. The mutation record below is the out-of-band substitute. |
+| `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | The scratch worktree is checked out at `iterated`, through a call that panics if git refuses, so the replay provably starts somewhere a rebase can run. | **Full, as a control on the other side.** The same scratch then replays onto `single` and must cost `CONTESTED_ROUNDS` stops, so a replay that refused every upstream, or one that could not replay this fixture at all, fails there instead of passing on the refusal above. What is not armed is the halt itself: nothing states that plain `git rebase --root` succeeds on this fixture, and the mutation record below is what stands in for it. |
 
 ### The rule for the next test
 
@@ -478,10 +486,78 @@ No collateral: the other 31 unit tests and every integration suite stayed green
 under the old shape, which is the point. The hole was open for the whole life of
 the crate and nothing else in the suite could see it.
 
+### The dash-leading revision, across `Git::rev_parse`, `Scratch::create` and `Scratch::replay_rebase`
+
+One defect in three places: a revision arrives from a caller, reaches a git
+argv with nothing between it and git's option position, and git reads it as an
+option of its own. Each site was mutated on its own.
+
+**`--verify`, removed from `Git::rev_parse`.** Git then prints its own
+`--end-of-options` back as a flag ahead of the commit id, so the reader hands
+its caller two lines where one was asked for:
+
+```text
+thread 'git::tests::resolves_a_revision_that_names_a_commit_to_its_full_id'
+panicked at src/gitscratch/src/git.rs:
+assertion `left == right` failed: the reader has to agree with git about where
+HEAD points
+  left: "--end-of-options\n1959a5be9e7225501d6b1de7b4732ae1c7d885e8"
+ right: "1959a5be9e7225501d6b1de7b4732ae1c7d885e8"
+
+test result: FAILED. 35 passed; 1 failed
+```
+
+**`--end-of-options`, removed from `Git::rev_parse`.** Nothing goes red, and
+the row stays in the table anyway. `--verify` catches every dash-leading
+revision git recognises today, because an option prints no object id and
+`--verify` demands exactly one. That is a fact about today's option list rather
+than a rule, and the rule is what this crate takes — the same reasoning that
+makes the environment scrub match a prefix instead of a list of names. Recorded
+here as unfalsifiable rather than dropped, because a guard nobody can watch fail
+is exactly what this file exists to say out loud.
+
+**`--end-of-options`, removed from `Scratch::create`.** `git worktree add -q
+--detach <path> --force` is then a complete and valid command: git reads
+`--force` as its own flag, finds no commit-ish left, and builds the worktree at
+HEAD at exit 0. So the caller gets a scratch of a revision it never asked for,
+and every number measured in it is about another branch:
+
+```text
+thread 'scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head'
+panicked at src/gitscratch/tests/repo.rs:
+a revision that names no commit has to be refused, or the scratch is checked out
+somewhere the caller never asked about and every measurement taken in it is
+about another branch: ()
+
+test result: FAILED. 0 passed; 1 failed
+```
+
+**`--end-of-options`, removed from `Scratch::replay_rebase_within`.** Git knows
+`--root` as an option of `rebase`, so the replay rebases the whole history onto
+nothing, finishes without a single conflict, and reports the cheapest answer
+there is for a revision that names no commit:
+
+```text
+thread 'scratch::tests::refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root'
+panicked at src/gitscratch/src/scratch.rs:
+an upstream that names no commit has to stop the replay. Git knows `--root` as
+an option of `rebase`, so reading it as one replays the whole history onto
+nothing, hits no conflict, and reports a cost of zero for a revision nobody
+has: "Conflicts { stops: 0, files: {} }"
+
+test result: FAILED. 35 passed; 1 failed
+```
+
+No collateral on any of the four: each mutation reddened its own test and left
+every other unit test and every integration suite green. That is the finding
+rather than a footnote. The whole class was open for the life of the crate, and
+`grind -- --root` printed `grind: clean - replaying HEAD onto --root hit no
+conflicts` at exit 0 while every one of these suites passed.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
-code moves. Three places are load-bearing for the whole table:
+code moves. Every place below is load-bearing for the whole table:
 
 - **`Git::safety_config()`** — five of the nine guards are entries in that
   list. Adding, reordering, or removing one changes what the suite covers.
@@ -497,6 +573,11 @@ code moves. Three places are load-bearing for the whole table:
 - **`Git::command`'s argument shape** — the subcommand is a parameter of its own
   so that a caller's arguments land after it. Folding it back into the slice
   reopens git's option position to the caller and undoes every row above it.
+- **The separator ahead of every caller-supplied revision** — `--verify` and
+  `--end-of-options` in `Git::rev_parse`, and `--end-of-options` in
+  `Scratch::create` and `Scratch::replay_rebase_within`. Drop one and git reads
+  a revision as an option of its own, which is how a name that names no commit
+  buys a clean verdict.
 
 Anyone touching those should re-run the relevant mutation and update this file
 with what they saw. A guard added without ever being watched to fail is back to

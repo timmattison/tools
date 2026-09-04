@@ -107,9 +107,25 @@ impl Scratch {
             hooks,
         };
 
+        // `--end-of-options` ahead of both positionals, because `at` arrives
+        // from a caller and a caller can spell a revision that starts with a
+        // dash. Without it `git worktree add -q --detach <path> --force` is a
+        // complete and valid command: git reads `--force` as its own flag,
+        // finds no commit-ish left, and builds the worktree at HEAD - exit 0,
+        // no complaint. The caller then measures a branch nobody asked about,
+        // which is the cheap answer this crate exists never to give. With it,
+        // both positionals are read in order and git refuses the revision by
+        // name. Pinned by `tests/repo.rs`.
         scratch.repo_git().run(
             "worktree",
-            &["add", "-q", "--detach", scratch.worktree_arg()?, at],
+            &[
+                "add",
+                "-q",
+                "--detach",
+                "--end-of-options",
+                scratch.worktree_arg()?,
+                at,
+            ],
         )?;
 
         Ok(scratch)
@@ -163,7 +179,15 @@ impl Scratch {
         let worktree = self.path();
 
         let mut cost = Conflicts::default();
-        let mut outcome = git.try_run("rebase", &[onto])?;
+        // `--end-of-options` ahead of `onto`, because `onto` arrives from a
+        // caller and git knows `--root` as an option of `rebase`. Without it a
+        // replay onto `--root` rebases the whole history onto nothing, finishes
+        // without a single conflict, and reports a cost of zero for a revision
+        // that names no commit. Zero is what a genuinely free replay reports
+        // too, so nothing downstream tells the two apart. With it git refuses
+        // the upstream by name. Pinned by
+        // `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root`.
+        let mut outcome = git.try_run("rebase", &["--end-of-options", onto])?;
         let mut rounds = 0;
 
         loop {

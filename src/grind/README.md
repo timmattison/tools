@@ -55,17 +55,39 @@ typo fails in milliseconds and can never be mistaken for a conflict:
 
 ```console
 $ grind mian
-grind: error: could not resolve 'mian' to a commit: git rev-parse mian^{commit} failed:
-mian^{commit}
-fatal: ambiguous argument 'mian^{commit}': unknown revision or path not in the working tree.
-Use '--' to separate paths from revisions, like this:
-'git <command> [<revision>...] -- [<file>...]'
+grind: error: could not resolve 'mian' to a commit: git rev-parse --verify --end-of-options mian^{commit} failed:
+
+fatal: Needed a single revision
 $ echo $?
 2
 ```
 
 Errors carry git's own explanation through to you, because that is usually the
-only part of the message that says what actually went wrong.
+only part of the message that says what actually went wrong. Git is terse when
+it refuses a revision, so `grind` names the revision itself in the sentence
+ahead of git's.
+
+The question is put to git in the one form git can refuse. A bare
+`git rev-parse mian^{commit}` prints its argument back and exits **0**, because
+rev-parse passes an argument it cannot place through to rev-list rather than
+refusing it — so the check that is supposed to catch a typo passed every one of
+them. `--verify` makes git answer with one commit id or fail, and
+`--end-of-options` ends git's own option position so a branch whose name starts
+with a dash arrives as a revision rather than as a flag:
+
+```console
+$ grind -- --root
+grind: error: could not resolve '--root' to a commit: git rev-parse --verify --end-of-options --root^{commit} failed:
+
+fatal: Needed a single revision
+$ echo $?
+2
+```
+
+That name is the one that cost the most. Git knows `--root` as an option of
+`rebase`, so a replay handed it rebased the whole history onto nothing, hit no
+conflict, and reported `grind: clean` at exit 0 — a clean verdict for a branch
+that does not exist.
 
 **Both** revisions are resolved up front, not just the one you typed. A replay
 starts from `HEAD`, so an empty repository or a fresh `git checkout --orphan` has
@@ -74,9 +96,9 @@ worktree get built for a rebase that could never have started:
 
 ```console
 $ grind main
-grind: error: a replay starts from HEAD, and there is no commit at HEAD to start from - an empty repository, or a branch nothing has been committed to yet: could not resolve 'HEAD' to a commit: git rev-parse HEAD^{commit} failed:
-HEAD^{commit}
-fatal: ambiguous argument 'HEAD^{commit}': unknown revision or path not in the working tree.
+grind: error: a replay starts from HEAD, and there is no commit at HEAD to start from - an empty repository, or a branch nothing has been committed to yet: could not resolve 'HEAD' to a commit: git rev-parse --verify --end-of-options HEAD^{commit} failed:
+
+fatal: Needed a single revision
 $ echo $?
 2
 ```

@@ -212,8 +212,22 @@ impl Simulator {
         self.report(&format!("replaying {branch}"));
 
         // Detached, so the real branch ref is never moved.
-        git.run("checkout", &["-q", "--detach", branch.as_str()])
-            .with_context(|| format!("could not check out '{branch}'"))?;
+        //
+        // `--end-of-options` ahead of the name, because a `BranchName` carries
+        // whatever the caller put in it and a branch name can start with a
+        // dash. Without it `git checkout -q --detach --progress` is a complete
+        // and valid command: git reads `--progress` as its own option, finds no
+        // branch left to check out, and detaches HEAD where it already stands -
+        // exit 0, no complaint. The scratch worktree then stays on the base,
+        // the rebase finds nothing to replay, and the ordering scores zero for
+        // work nobody did. A plain `--` is the wrong separator here: `checkout`
+        // reads everything after it as a pathspec, so `--detach -- <branch>`
+        // refuses the branches that do exist. Pinned by `tests/simulation.rs`.
+        git.run(
+            "checkout",
+            &["-q", "--detach", "--end-of-options", branch.as_str()],
+        )
+        .with_context(|| format!("could not check out '{branch}'"))?;
 
         let cost = scratch
             .replay_rebase(onto)

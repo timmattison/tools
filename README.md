@@ -57,7 +57,10 @@ through `Scratch`, and a `Scratch` only hands out a git runner that already carr
 tool can drift onto a weaker version of it. That runner takes the git subcommand as a parameter of its own, so a
 caller's arguments always land after it rather than in git's own option position, where one more `-c` pair would
 undo any of the pins above (git's rule is that the last pair naming a key wins) and a `-C` would aim the whole
-run at another repository. Teardown removes the scratch
+run at another repository. A revision the caller supplies is kept out of that position too: `rev-parse` is asked
+with `--verify` and `--end-of-options`, and the commit-ish of `worktree add` and the upstream of `rebase` carry
+the same separator — because a bare `git rev-parse --root` prints its own argument back and exits 0, which read
+as a commit and let `grind` answer `clean` for a branch that does not exist. Teardown removes the scratch
 worktree by path and deliberately never runs the repo-wide `git worktree prune`, which would delete the
 administrative state of any worktree whose directory is merely missing right now. Used by `grist` and `grind`.
 
