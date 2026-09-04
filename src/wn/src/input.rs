@@ -70,6 +70,9 @@ pub type ClipboardRead = Result<Option<String>, ClipboardUnavailable>;
 /// never what is in it.
 pub type PlanBuild = Result<String, BuildError>;
 
+/// What a write of the clipboard gave back.
+pub type ClipboardWrite = Result<(), ClipboardUnavailable>;
+
 /// The clipboard could not be opened at all.
 ///
 /// A newtype over the cause rather than the cause itself, because the cause is
@@ -144,6 +147,41 @@ impl Chain {
         &self.text
     }
 
+    /// Keep a plan this run built, so the next run reads it back rather than
+    /// paying for a second one. Gives the note the reader earns, when they
+    /// earn one.
+    ///
+    /// The clipboard is the cache. It needs no second reader, because the
+    /// clipboard fallback of this module already is one, and no file goes
+    /// stale in a directory nobody looks in. A reader who copies a line of
+    /// code throws the plan away, and a plan somebody threw away was cheap to
+    /// rebuild.
+    ///
+    /// Nothing is kept but a plan this run built. A chain that came from an
+    /// argument, from a pipe, or from the clipboard is text the reader already
+    /// has, and writing it back would overwrite their clipboard for nothing.
+    ///
+    /// `read` is whether the reader of the document could read it. A document
+    /// that could not be read is never kept: a bad plan on the clipboard is a
+    /// bad plan every later run reads, and the reader would have to copy
+    /// something else to get out of it.
+    ///
+    /// `write` is `None` when [`NO_CLIPBOARD_ENV`] turns the clipboard off. A
+    /// reader who turned the clipboard off turned the cache off with it, so
+    /// nothing is written and nothing is said.
+    ///
+    /// A write that fails is a note and never a failure. The answer over it is
+    /// right, and the one cost is that the next run builds a new plan.
+    #[must_use]
+    pub fn keep(
+        &self,
+        read: bool,
+        write: Option<&dyn Fn(&str) -> ClipboardWrite>,
+    ) -> Option<String> {
+        let _ = (read, write);
+        None
+    }
+
     /// The reason the text could not be read, with an invisible input named.
     ///
     /// Text that came from an argument or from a pipe is text the reader can
@@ -183,6 +221,9 @@ impl Chain {
         }
     }
 }
+
+/// The note a run that kept its plan earns.
+const KEPT: &str = "The plan is on the clipboard. Run wn --refresh to build a new one.";
 
 /// Every input a chain can come out of, in the order `wn` tries them.
 pub struct Sources<'a> {
@@ -339,6 +380,21 @@ pub fn system_clipboard() -> ClipboardRead {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|cause| ClipboardUnavailable::new(&cause))?;
     from_arboard(clipboard.get_text())
+}
+
+/// Write `text` to the system clipboard.
+///
+/// # Errors
+///
+/// Gives [`ClipboardUnavailable`] when the clipboard could not be opened or
+/// could not be written. A machine with no display is such a machine, and so
+/// is a session over SSH.
+pub fn write_system_clipboard(text: &str) -> ClipboardWrite {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|cause| ClipboardUnavailable::new(&cause))?;
+    clipboard
+        .set_text(text)
+        .map_err(|cause| ClipboardUnavailable::new(&cause))
 }
 
 /// The read `result` as a [`ClipboardRead`].
@@ -737,6 +793,87 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
             assert!(message.contains("clipboard"), "{message}");
             assert!(!message.contains(text.trim()), "{message}");
         }
+    }
+
+    /// A writer of the clipboard that must never run.
+    fn unwritten_clipboard(_text: &str) -> ClipboardWrite {
+        panic!("the clipboard was written for a text this run did not build")
+    }
+
+    /// The chain of a run whose only input was a run of `claude` that gave
+    /// `text` back.
+    fn built_chain(text: &str) -> Chain {
+        let plan = || -> PlanBuild { Ok(text.to_string()) };
+        Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back")
+    }
+
+    #[test]
+    fn a_plan_this_run_built_reaches_the_clipboard_whole() {
+        let written = std::cell::RefCell::new(String::new());
+        let write = |text: &str| -> ClipboardWrite {
+            written.borrow_mut().push_str(text);
+            Ok(())
+        };
+        let note = built_chain(DOCUMENT).keep(true, Some(&write));
+        assert_eq!(written.into_inner(), DOCUMENT);
+        assert_eq!(note, Some(KEPT.to_string()));
+        let note = note.expect("a plan that was kept earns a note");
+        assert!(note.contains("clipboard"), "{note}");
+        assert!(note.contains("--refresh"), "{note}");
+    }
+
+    #[test]
+    fn a_plan_that_could_not_be_read_never_reaches_the_clipboard() {
+        // A bad plan on the clipboard is a bad plan every later run reads.
+        assert_eq!(
+            built_chain(DOCUMENT).keep(false, Some(&unwritten_clipboard)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_chain_the_reader_already_has_never_reaches_the_clipboard() {
+        let argument = arguments(&[CHAIN]);
+        let typed = Sources {
+            argument: &argument,
+            stdin: None,
+            clipboard: None,
+            plan: None,
+            refresh: false,
+        }
+        .chain()
+        .expect("the argument holds the chain");
+        assert_eq!(typed.keep(true, Some(&unwritten_clipboard)), None);
+        assert_eq!(
+            clipboard_chain(CHAIN).keep(true, Some(&unwritten_clipboard)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_clipboard_that_is_off_keeps_nothing_and_says_nothing() {
+        assert_eq!(built_chain(DOCUMENT).keep(true, None), None);
+    }
+
+    #[test]
+    fn a_clipboard_that_could_not_be_written_earns_a_note_and_not_a_failure() {
+        let write = |_: &str| -> ClipboardWrite { Err(ClipboardUnavailable::new(&"no display")) };
+        let note = built_chain(DOCUMENT)
+            .keep(true, Some(&write))
+            .expect("a write that failed earns a note");
+        assert_eq!(
+            note,
+            "The plan could not be written to the clipboard (no display). \
+The next run builds a new one."
+        );
     }
 
     #[test]
