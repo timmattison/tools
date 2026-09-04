@@ -1203,6 +1203,47 @@ pub fn commit_emptied_by_main_repo() -> TestRepo {
     repo
 }
 
+/// A branch that shares no history at all with `main`: `unrelated` is a root
+/// commit of its own, and replaying it onto `main` replays that root commit.
+///
+/// A root commit is the one shape the empty-commit probe reads through a flag
+/// rather than through a path. `git diff-tree` prints no path at all for a commit
+/// with no parent unless it is asked for `--root`, so a probe that leaves the
+/// flag off finds an empty touched set, reads the halt as a commit that changes
+/// nothing, and `rebase --skip` drops the whole history the replay was asked to
+/// measure.
+///
+/// The two histories name their files differently — `main.txt` and
+/// `unrelated.txt` — so the pick applies cleanly rather than colliding. That is
+/// what puts the halt on the probe rather than on a conflict: seal the object
+/// database with [`TestRepo::seal_object_store`] and git rolls the index back,
+/// leaving the rebase halted with nothing unmerged and nothing dirty, exactly as
+/// [`branches_behind_main_repo`] does.
+///
+/// `git checkout --orphan` is what builds the second history. It starts a branch
+/// with no parent and keeps the index and the working tree of the branch it left,
+/// so `git rm -r -f .` empties both and the commit that follows carries a tree of
+/// its own.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn unrelated_histories_repo() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit_file("main.txt", &numbered_lines(30), "base");
+
+    repo.git(&["checkout", "-q", "--orphan", "unrelated"]);
+    repo.git(&["rm", "-r", "-q", "-f", "."]);
+    repo.commit_file(
+        "unrelated.txt",
+        "the other history's work\n",
+        "the unrelated history's own work",
+    );
+
+    repo.checkout("main");
+    repo
+}
+
 /// Two branches that both rewrite the same line, so the simulation is
 /// guaranteed to actually conflict and resolve rather than no-op.
 ///

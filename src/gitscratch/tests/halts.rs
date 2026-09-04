@@ -18,7 +18,7 @@ use gitscratch::testing::{
     branches_behind_main_repo, branches_behind_main_with_a_pathspec_magic_path_repo,
     branches_behind_main_with_a_submodule_pointer_bump_repo,
     branches_behind_main_with_quoted_and_space_led_paths_repo, commit_emptied_by_main_repo,
-    modify_delete_repo,
+    modify_delete_repo, unrelated_histories_repo,
 };
 use gitscratch::{Files, Hunks, Scratch, Stops};
 
@@ -500,6 +500,163 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_b
         !error.contains("uncommitted"),
         "nothing was left uncommitted - git rolled the index back - so the evidence must come \
          from the commit's content being absent from the new base: {error}"
+    );
+}
+
+/// The same clean-pick failure a fifth time, in the shape where the probe is
+/// asked about a commit that has no parent at all.
+///
+/// The four tests above are about what git *calls* a path. This one is about
+/// whether git names a path here at all. `git diff-tree` prints nothing for a
+/// root commit unless it is asked for `--root`, so a probe without that flag
+/// finds an empty touched set, states the answer the empty set states — this
+/// commit changes nothing — and reaches for `rebase --skip`. The commit it drops
+/// is the first commit of a whole history.
+///
+/// A root commit is reachable in production rather than contrived: replaying a
+/// branch onto one that shares no history with it replays every commit of that
+/// branch, its root commit included. `git checkout --orphan` is how the fixture
+/// builds the pair.
+///
+/// The parent count that stands ahead of both probes answers correctly here and
+/// has to: `git rev-list --no-walk --parents` prints one field for a root commit
+/// — its own id, and no parent — so the count is zero and the refusal of a merge
+/// commit stays out of the way. What this test pins is the flag under it.
+///
+/// So the assertions are about the *classification* rather than about getting an
+/// error out. A sealed object database refuses the skip as well, so the replay
+/// stops either way; what it stops and says is the whole difference between
+/// naming the work that is at stake and calling a whole history an empty commit
+/// on the way to a skip that happened to fail. In a repository where the skip
+/// succeeds, that misclassification finishes the rebase and reports a cost of
+/// zero for a branch that was never replayed.
+///
+/// Two controls stand ahead of the replay. The first proves the branch's commit
+/// really is a root commit. The second proves the hazard is live: `diff-tree`
+/// really does stay silent about that commit until it is asked for `--root`.
+#[test]
+fn refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed() {
+    /// The path the root commit adds, which the new base has never held.
+    const ROOT_COMMIT_PATH: &str = "unrelated.txt";
+
+    let repo = unrelated_histories_repo();
+    // Read the abbreviation from the same object database the implementation
+    // will abbreviate against, so `%h` here and `%h` there agree.
+    let dropped_sha = repo.git(&["log", "-1", "--format=%h", "unrelated"]);
+    let dropped_subject = repo.git(&["log", "-1", "--format=%s", "unrelated"]);
+    let objects = std::fs::canonicalize(repo.path().join(".git").join("objects"))
+        .expect("canonicalize the object database path");
+
+    // The start-state control. `rev-list --parents` prints the commit's own id
+    // first and its parents after it, so one field is one commit with no parent.
+    // A commit with a parent is a commit `--root` changes no answer for, and this
+    // test would then pin nothing.
+    let listed = repo.git(&["rev-list", "--no-walk", "--parents", "unrelated"]);
+    assert_eq!(
+        listed.split_whitespace().count(),
+        1,
+        "the branch's only commit has to be a root commit - its own id and no parent - or there \
+         is nothing here for `--root` to be load-bearing about: {listed:?}"
+    );
+
+    // The armed control, in both directions. The silence *is* the hazard: it is
+    // the whole of what an unguarded probe learns about this commit.
+    let without_root = repo.git(&[
+        "diff-tree",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "--ignore-submodules=none",
+        "unrelated",
+    ]);
+    assert!(
+        without_root.is_empty(),
+        "`diff-tree` no longer stays silent about a root commit, so this test could only pass \
+         vacuously; that silence is what makes a probe without `--root` read a whole history as \
+         a commit that changes nothing: {without_root:?}"
+    );
+    let with_root = repo.git(&[
+        "diff-tree",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "--root",
+        "--ignore-submodules=none",
+        "unrelated",
+    ]);
+    assert_eq!(
+        with_root, ROOT_COMMIT_PATH,
+        "`--root` is what makes `diff-tree` name the paths a root commit adds, and those paths \
+         are the whole of what the probe reasons about: {with_root:?}"
+    );
+
+    let scratch = repo.scratch("main");
+    scratch
+        .testing_git()
+        .run("checkout", &["-q", "--detach", "unrelated"])
+        .expect("check out the unrelated history detached in the scratch worktree");
+
+    // Sealed only now: adding the worktree and checking out write no objects,
+    // but everything before this point would fail against a read-only store.
+    let sealed = repo.seal_object_store();
+    let result = scratch.replay_rebase("main");
+    // Released before a single assertion runs, so a failing one cannot leave a
+    // read-only directory behind for the temporary directory to trip over.
+    drop(sealed);
+
+    let error = match result {
+        Ok(conflicts) => panic!(
+            "the replay reported a cost for a commit git never wrote: {conflicts:?}\n\
+             a commit with no parent is still a commit whose work would be thrown away"
+        ),
+        Err(error) => format!("{error:#}"),
+    };
+
+    assert!(
+        error.contains(&dropped_sha),
+        "the error should name the commit that was about to be dropped ({dropped_sha}): {error}"
+    );
+    assert!(
+        error.contains(&dropped_subject),
+        "the error should carry the dropped commit's subject ({dropped_subject}): {error}"
+    );
+
+    // The classification itself, pinned separately from the fact that something
+    // went wrong. This commit adds a file the new base has never seen, so calling
+    // it a commit that adds nothing to the new base is simply false - and it is
+    // the false half, not the failed skip that follows from it, that would cost a
+    // developer a whole history in a repository where the skip succeeds.
+    assert!(
+        !error.contains("adds nothing to the new base"),
+        "a root commit whose file is absent from the new base is not an empty commit, whatever \
+         `diff-tree` says about a commit it was not asked for `--root` about: {error}"
+    );
+
+    // The path itself, so the refusal is about the root commit's work rather than
+    // about something else that went wrong on the way.
+    assert!(
+        error.contains(ROOT_COMMIT_PATH),
+        "the error should name the file whose change would have been lost: {error}"
+    );
+
+    // The rollback left the repository pristine, so there is no uncommitted
+    // content for the other probe to find; the only thing that proves the commit
+    // was lost is that its change is absent from the new base.
+    assert!(
+        !error.contains("uncommitted"),
+        "nothing was left uncommitted - git rolled the index back - so the evidence must come \
+         from the commit's content being absent from the new base: {error}"
+    );
+
+    // git says: "error: insufficient permission for adding an object to
+    // repository database <path>". The path is interpolated rather than
+    // translated, so matching on it is locale-independent - and it is the
+    // canonicalized one because macOS resolves a temp dir's /var/... to
+    // /private/var/....
+    let objects = objects.display().to_string();
+    assert!(
+        error.contains(&objects),
+        "the error should carry git's own message, which names {objects}: {error}"
     );
 }
 

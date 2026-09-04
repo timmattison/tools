@@ -768,13 +768,18 @@ fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt>
          adds anything to the new base cannot answer about it."
     );
 
+    // MUTATION, deliberate, and the next commit takes it back out: `--root` is
+    // gone from the probe. Without it `diff-tree` prints no path at all for a
+    // commit with no parent, so the touched set comes back empty, the guard
+    // below reads the halt as a commit that changes nothing, and `rebase --skip`
+    // drops a whole history. That is what the new test in `tests/halts.rs` is
+    // here to catch.
     let touched = git.paths(
         "diff-tree",
         &[
             "--no-commit-id",
             "--name-only",
             "-r",
-            "--root",
             "--ignore-submodules=none",
             "REBASE_HEAD",
         ],
@@ -1094,11 +1099,13 @@ mod tests {
     /// [`stopped_commit_is_already_in_head`] asks for them. Spelled here so the
     /// control below demonstrates the hazard with the invocation the probe
     /// really makes, rather than with a plausible-looking neighbour of it.
-    const TOUCHED_PATHS: [&str; 6] = [
+    // MUTATION, deliberate, and the next commit takes it back out: this constant
+    // spells the probe's own invocation, so it loses `--root` alongside it. The
+    // test that reads it answers the same either way, which the record says.
+    const TOUCHED_PATHS: [&str; 5] = [
         "--no-commit-id",
         "--name-only",
         "-r",
-        "--root",
         "--ignore-submodules=none",
         "REBASE_HEAD",
     ];
