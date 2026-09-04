@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Reject commits that fail formatting, linting, or the test suite, for both
-# languages in this repo: Rust first, then Go. Each language's gates only run
-# when a staged change touches that language's files (see the trigger regexes
-# below), so a Go-only commit never pays for the Rust toolchain and vice versa.
+# Reject commits that fail formatting, linting, or the test suite. The gates
+# only run when a staged change touches a Rust file (see the trigger regex
+# below), so a commit that touches no Rust never pays for the Rust toolchain.
 # The tool-index block below is the one deliberate exception: a commit that
 # stages README.md or TLDR.md and no Rust file runs one Rust test target,
 # because the guard that protects the two Markdown indexes lives in the Rust
@@ -95,44 +94,14 @@ fi
 #
 # It runs the one test target rather than the workspace suite, so it costs a
 # fraction of the Rust block. The rust_gate_ran guard keeps a commit that
-# touches both languages from running the same test twice.
+# touches Rust and an index from running the same test twice.
 #
 # --diff-filter carries D on top of ACMR: deleting an index outright is the
-# fault this catches, not only editing one. The same git-env scrub as the gates
-# above keeps the three symmetric.
+# fault this catches, not only editing one. The same git-env scrub as the gate
+# above keeps the two symmetric.
 if [ "${rust_gate_ran:-}" != yes ] &&
     git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^(README|TLDR)\.md$'; then
     echo "pre-commit: running cargo test -p repo-guards --test tool_index_coverage"
     env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
         cargo test -p repo-guards --test tool_index_coverage
-fi
-
-# The Go module gets the same treatment, again cheapest-first:
-#   1. gofmt -l   - format check; no compile, so it is fastest. gofmt -l lists
-#                   any file whose formatting differs; a non-empty list fails.
-#   2. go vet     - compiles + runs the static analysers (printf mismatches,
-#                   unreachable code, etc.).
-#   3. go test    - compiles + runs the suite. Slowest, so it runs last.
-#
-# These run in Go's default readonly module mode. That mode does not modify
-# go.sum, so a fresh worktree with a COLD module cache may report
-# "missing go.sum entry" on the first Go commit. The module cache lives at
-# $GOPATH/pkg/mod and is shared across every worktree, so warming it once with
-# `go mod download all` fixes this for all of them.
-if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.go$|(^|/)go\.(mod|sum)$'; then
-    echo "pre-commit: running gofmt -l (format check)"
-    gofmt_unformatted=$(gofmt -l .)
-    if [ -n "$gofmt_unformatted" ]; then
-        printf 'gofmt: these files are not formatted (run: gofmt -w .):\n%s\n' "$gofmt_unformatted" >&2
-        exit 1
-    fi
-    echo "pre-commit: running go vet ./..."
-    go vet ./...
-    echo "pre-commit: running go test ./..."
-    # Same git-env scrub as the Rust gate above: git exports GIT_DIR/
-    # GIT_WORK_TREE/GIT_INDEX_FILE/GIT_PREFIX into the hook, and `go test`
-    # inherits them. No Go test shells out to git against a temp repo today, but
-    # scrubbing keeps the two gates symmetric so a future one can't silently
-    # target THIS repo instead of its fixture.
-    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX go test ./...
 fi

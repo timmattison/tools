@@ -1,37 +1,23 @@
 #!/bin/bash
-# Run all tests for Go and Rust programs in this repository
+# Run the test suite for this repository.
 #
 # Usage:
 #   ./test.sh           # Run all tests
-#   ./test.sh --go      # Run only Go tests
-#   ./test.sh --rust    # Run only Rust tests
 
 set -e
 
 cd "$(dirname "$0")"
 
-run_go=true
-run_rust=true
-
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --go)
-            run_rust=false
-            shift
-            ;;
-        --rust)
-            run_go=false
-            shift
-            ;;
         --help|-h)
-            echo "Usage: $0 [--go] [--rust]"
+            echo "Usage: $0"
+            echo ""
+            echo "Runs the Rust workspace test suite."
             echo ""
             echo "Options:"
-            echo "  --go    Run only Go tests"
-            echo "  --rust  Run only Rust tests"
-            echo ""
-            echo "If no options are specified, all tests are run."
+            echo "  -h, --help  Show this help message"
             exit 0
             ;;
         *)
@@ -42,46 +28,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-exit_code=0
+echo "========================================="
+echo "Running Rust tests..."
+echo "========================================="
 
-if [ "$run_go" = true ]; then
-    echo "========================================="
-    echo "Running Go tests..."
-    echo "========================================="
-    if go test ./... -v; then
-        echo ""
-        echo "[PASS] Go tests passed"
-    else
-        echo ""
-        echo "[FAIL] Go tests failed"
-        exit_code=1
-    fi
+if cargo test --workspace; then
     echo ""
-fi
-
-if [ "$run_rust" = true ]; then
-    echo "========================================="
-    echo "Running Rust tests..."
-    echo "========================================="
-    if cargo test --workspace; then
-        echo ""
-        echo "[PASS] Rust tests passed"
-    else
-        echo ""
-        echo "[FAIL] Rust tests failed"
-        exit_code=1
-    fi
-    echo ""
-fi
-
-if [ $exit_code -eq 0 ]; then
     echo "========================================="
     echo "All tests passed!"
     echo "========================================="
 else
+    echo ""
     echo "========================================="
     echo "Some tests failed!"
     echo "========================================="
+    exit 1
 fi
-
-exit $exit_code
