@@ -2062,6 +2062,12 @@ fn a_json_document_that_is_not_the_schema_names_the_path() {
 /// The variable that names the seconds the run of `claude` may take.
 const PLAN_TIMEOUT_ENV: &str = "WN_PLAN_TIMEOUT";
 
+/// The variable that names the level of effort the run asks for.
+const PLAN_EFFORT_ENV: &str = "WN_PLAN_EFFORT";
+
+/// The variable that names the model the run asks for.
+const PLAN_MODEL_ENV: &str = "WN_PLAN_MODEL";
+
 /// The envelope a run of `claude --print --output-format json` prints, with
 /// `document` in its `result`.
 ///
@@ -2323,4 +2329,80 @@ fn the_report_of_the_run_goes_to_standard_error_and_the_plan_goes_to_standard_ou
         "{}",
         stderr(&output)
     );
+}
+
+#[test]
+fn the_level_the_environment_named_reaches_the_run_and_the_report() {
+    // The envelope carries no field that names a level, so the report can
+    // only name the level the run asked for. The variable is that level, and
+    // it is the lever a reader who thinks the plan cost too much pulls.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_EFFORT_ENV, "high")]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let args = gh.recorded_claude_args();
+    assert!(args.contains("--effort"), "{args}");
+    assert!(args.contains("high"), "{args}");
+    assert!(
+        stderr(&output).contains("at effort high"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_level_that_is_not_one_of_the_five_is_a_refusal_that_costs_no_run() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_EFFORT_ENV, "quick")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains(PLAN_EFFORT_ENV),
+        "{}",
+        stderr(&output)
+    );
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn the_model_the_environment_named_reaches_the_run() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(
+        &gh,
+        &["--repo", REPO],
+        &[(PLAN_MODEL_ENV, "claude-haiku-4-5")],
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let args = gh.recorded_claude_args();
+    assert!(args.contains("--model"), "{args}");
+    assert!(args.contains("claude-haiku-4-5"), "{args}");
+}
+
+#[test]
+fn a_model_that_opens_with_a_dash_is_a_refusal_that_costs_no_run() {
+    // A variable that can put a flag on the command line of the run decides
+    // what the run may do, and that decision is the reader's.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(
+        &gh,
+        &["--repo", REPO],
+        &[(PLAN_MODEL_ENV, "--dangerously-skip-permissions")],
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains(PLAN_MODEL_ENV),
+        "{}",
+        stderr(&output)
+    );
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn a_run_that_names_neither_a_level_nor_a_model_asks_for_neither() {
+    // The two variables cost the reader who sets neither of them nothing at
+    // all, so `claude` picks both as it always did.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let args = gh.recorded_claude_args();
+    assert!(!args.contains("--effort"), "{args}");
+    assert!(!args.contains("--model"), "{args}");
 }

@@ -30,6 +30,91 @@ pub const NO_CLAUDE_ENV: &str = "WN_NO_CLAUDE";
 /// The variable that names the seconds a run may take.
 pub const TIMEOUT_ENV: &str = "WN_PLAN_TIMEOUT";
 
+/// The variable that names the level of effort a run asks for.
+pub const EFFORT_ENV: &str = "WN_PLAN_EFFORT";
+
+/// The variable that names the model a run asks for.
+pub const MODEL_ENV: &str = "WN_PLAN_MODEL";
+
+/// The levels of effort a run may ask for.
+///
+/// The envelope of a run carries no field that names one, so the report can
+/// only name the level the run asked for. That is why the level is read here
+/// and passed on, rather than taken out of the answer.
+const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// The level of effort a run asks for.
+///
+/// A newtype rather than a `String`, because the value holds one rule every
+/// reader of it depends on: it is one of [`EFFORT_LEVELS`]. A level the run
+/// does not know is a run that stops before it starts, and the report would
+/// then name a level nothing ran at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Effort(String);
+
+/// The model a run asks for.
+///
+/// A newtype rather than a `String`, for the rule it holds: the value is not
+/// empty, and it does not open with a dash. A value that opens with a dash is
+/// a flag, and a variable that can put a flag on the command line of the run
+/// decides what the run is allowed to do. That decision belongs to the reader
+/// and never to a variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelName(String);
+
+impl Effort {
+    /// The level `value`, the value of [`EFFORT_ENV`], names.
+    ///
+    /// An absent value gives `None`, and so does a value of nothing but
+    /// whitespace: an exported but empty variable is a common accident. The
+    /// run then asks for no level and the report names none, because a report
+    /// that named a level nobody chose is worth nothing.
+    ///
+    /// The case of the value is the reader's to choose, so `HIGH` is `high`.
+    ///
+    /// # Errors
+    ///
+    /// Gives [`BuildError::BadEffort`] for a value that is not one of
+    /// [`EFFORT_LEVELS`]. A reader who wrote `WN_PLAN_EFFORT=quick` and got
+    /// the default back would learn nothing about why the plan still cost what
+    /// it cost.
+    pub fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
+        let _ = value;
+        Ok(None)
+    }
+
+    /// The level, as the command line and the report write it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ModelName {
+    /// The model `value`, the value of [`MODEL_ENV`], names.
+    ///
+    /// An absent value gives `None`, and so does a value of nothing but
+    /// whitespace. The run then asks for no model, and the report names the
+    /// models the answer says the run really used.
+    ///
+    /// # Errors
+    ///
+    /// Gives [`BuildError::BadModel`] for a value that opens with a dash.
+    /// Every other value goes through: the models of `claude` are named by
+    /// `claude` and not by this tool, so a list here would refuse a model that
+    /// shipped after this build.
+    pub fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
+        let _ = value;
+        Ok(None)
+    }
+
+    /// The model, as the command line writes it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The seconds a run may take when the environment names none.
 ///
 /// `inscribe` waits 120 seconds for a commit message. A plan of a whole
@@ -87,6 +172,17 @@ const ARGUMENTS: [&str; 5] = [
     "--allowed-tools",
     ALLOWED_TOOLS,
 ];
+
+/// The arguments of one run: [`ARGUMENTS`], and the level and the model the
+/// environment named.
+///
+/// A run that names neither gets [`ARGUMENTS`] and nothing more, so the two
+/// variables cost the reader who sets neither of them nothing at all.
+#[must_use]
+pub fn arguments(effort: Option<&Effort>, model: Option<&ModelName>) -> Vec<String> {
+    let _ = (effort, model);
+    ARGUMENTS.iter().map(ToString::to_string).collect()
+}
 
 /// How often a waiting run is asked whether it is finished.
 const POLL: Duration = Duration::from_millis(100);
@@ -509,6 +605,25 @@ pub enum BuildError {
         /// What said the directory is in no repository.
         said: String,
     },
+    /// The value of [`EFFORT_ENV`] is not one of [`EFFORT_LEVELS`].
+    #[error(
+        "{EFFORT_ENV} names {value:?}, and it names one of {}: {EFFORT_ENV}=high",
+        EFFORT_LEVELS.join(", ")
+    )]
+    BadEffort {
+        /// The value the environment named, with the space around it dropped.
+        value: String,
+    },
+    /// The value of [`MODEL_ENV`] opens with a dash, so it names a flag.
+    #[error(
+        "{MODEL_ENV} names {value:?}, which opens with a dash, and a model is no flag. A variable \
+         that can put a flag on the command line of the run decides what the run may do, and that \
+         decision is yours: {MODEL_ENV}=claude-opus-5"
+    )]
+    BadModel {
+        /// The value the environment named, with the space around it dropped.
+        value: String,
+    },
     /// The run printed something that is no envelope.
     ///
     /// The run is asked for `--output-format json`, so what it prints is one
@@ -877,5 +992,121 @@ plans.\n`gh repo view` failed."
             matches!(refused, BuildError::TimedOut { .. }),
             "{refused:?}"
         );
+    }
+
+    #[test]
+    fn the_five_levels_are_the_levels_a_run_may_ask_for() {
+        for level in ["low", "medium", "high", "xhigh", "max"] {
+            assert_eq!(
+                Effort::new(Some(level))
+                    .expect("the level stands")
+                    .map(|effort| effort.as_str().to_string()),
+                Some(level.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn an_environment_that_names_no_level_asks_for_none() {
+        // A report that named a level nobody chose is worth nothing, so a run
+        // that asked for none says nothing about one.
+        for value in [None, Some(""), Some("  \t ")] {
+            assert_eq!(Effort::new(value), Ok(None), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_level_that_is_not_one_of_the_five_is_a_refusal() {
+        let refused = Effort::new(Some("quick")).expect_err("quick is no level");
+        assert_eq!(
+            refused,
+            BuildError::BadEffort {
+                value: "quick".to_string()
+            }
+        );
+        let message = refused.to_string();
+        assert!(message.contains(EFFORT_ENV), "{message}");
+        for level in EFFORT_LEVELS {
+            assert!(message.contains(level), "{message}");
+        }
+    }
+
+    #[test]
+    fn the_case_of_a_level_is_the_readers_to_choose() {
+        assert_eq!(
+            Effort::new(Some(" HIGH "))
+                .expect("the level stands")
+                .map(|effort| effort.as_str().to_string()),
+            Some("high".to_string())
+        );
+    }
+
+    #[test]
+    fn the_model_the_environment_names_is_the_model() {
+        assert_eq!(
+            ModelName::new(Some(" claude-opus-5 "))
+                .expect("the model stands")
+                .map(|model| model.as_str().to_string()),
+            Some("claude-opus-5".to_string())
+        );
+    }
+
+    #[test]
+    fn an_environment_that_names_no_model_asks_for_none() {
+        for value in [None, Some(""), Some("  ")] {
+            assert_eq!(ModelName::new(value), Ok(None), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_model_that_opens_with_a_dash_is_a_refusal() {
+        // A variable that can put a flag on the command line of the run
+        // decides what the run may do, and this file already says that
+        // decision is the reader's and never this tool's.
+        let refused =
+            ModelName::new(Some("--dangerously-skip-permissions")).expect_err("a flag is no model");
+        assert_eq!(
+            refused,
+            BuildError::BadModel {
+                value: "--dangerously-skip-permissions".to_string()
+            }
+        );
+        assert!(refused.to_string().contains(MODEL_ENV), "{refused}");
+    }
+
+    #[test]
+    fn a_run_that_names_neither_carries_the_arguments_and_nothing_more() {
+        assert_eq!(
+            arguments(None, None),
+            ARGUMENTS
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_level_and_the_model_reach_the_command_line_of_the_run() {
+        let effort = Effort::new(Some("high"))
+            .expect("the level stands")
+            .expect("a level was named");
+        let model = ModelName::new(Some("claude-opus-5"))
+            .expect("the model stands")
+            .expect("a model was named");
+        let carried = arguments(Some(&effort), Some(&model));
+        for pair in [["--effort", "high"], ["--model", "claude-opus-5"]] {
+            let at = carried
+                .iter()
+                .position(|argument| argument == pair[0])
+                .unwrap_or_else(|| panic!("{} stands in {carried:?}", pair[0]));
+            assert_eq!(carried.get(at + 1).map(String::as_str), Some(pair[1]));
+        }
+        // The arguments that were always there are still there.
+        for argument in ARGUMENTS {
+            assert!(
+                carried.iter().any(|carried| carried == argument),
+                "{argument} in {carried:?}"
+            );
+        }
     }
 }
