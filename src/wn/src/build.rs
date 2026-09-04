@@ -94,6 +94,40 @@ pub fn candidate_paths(home: Option<&str>) -> Vec<String> {
     paths
 }
 
+/// The `claude` at `path`, when it answers `--version`.
+///
+/// The probe every run uses. [`find`] takes it as an argument so a test of the
+/// order of the paths spawns nothing at all: a test that ran this probe would
+/// answer differently on a machine that has `claude` and on one that does not,
+/// which is a test of the machine rather than of the code.
+#[must_use]
+pub fn answers_version(path: &str) -> bool {
+    std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .is_ok_and(|answer| answer.status.success())
+}
+
+/// The first path of `paths` that `answers` names as a working `claude`.
+///
+/// # Errors
+///
+/// Gives [`BuildError::NotInstalled`] when no path answers. The message names
+/// every path it looked in, and it names [`NO_CLAUDE_ENV`] for a reader who
+/// wants no run at all.
+pub fn find(paths: &[String], answers: &dyn Fn(&str) -> bool) -> Result<String, BuildError> {
+    let _ = (paths, answers);
+    Err(BuildError::NotInstalled {
+        looked_in: Vec::new(),
+    })
+}
+
+/// The paths of a refusal, one to a line and indented under it.
+fn looked_in_lines(paths: &[String]) -> String {
+    let _ = paths;
+    String::new()
+}
+
 /// Why no plan came back.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BuildError {
@@ -105,6 +139,17 @@ pub enum BuildError {
     BadTimeout {
         /// The value the environment named, with the space around it dropped.
         value: String,
+    },
+    /// No path holds a `claude` that answers `--version`.
+    #[error(
+        "claude is not installed, and wn builds a plan by running it.\n\nIt looked in:\n{}\n\n\
+         Install it from https://claude.ai/code, or set {NO_CLAUDE_ENV} to any value to turn the \
+         run off.",
+        looked_in_lines(.looked_in)
+    )]
+    NotInstalled {
+        /// Every path that was tried, in the order they were tried.
+        looked_in: Vec<String>,
     },
 }
 
@@ -160,6 +205,66 @@ mod tests {
                 value: "0".to_string()
             })
         );
+    }
+
+    /// The paths of a machine that has `claude` under its home directory.
+    fn paths() -> Vec<String> {
+        candidate_paths(Some("/Users/x"))
+    }
+
+    #[test]
+    fn the_first_path_that_answers_is_the_one() {
+        let paths = paths();
+        let found = find(&paths, &|path| path == "/Users/x/.claude/local/claude")
+            .expect("one path answers");
+        assert_eq!(found, "/Users/x/.claude/local/claude");
+    }
+
+    #[test]
+    fn a_path_earlier_in_the_list_wins() {
+        let paths = paths();
+        let found = find(&paths, &|_| true).expect("every path answers");
+        assert_eq!(found, "claude");
+    }
+
+    #[test]
+    fn no_path_is_tried_after_the_one_that_answered() {
+        let paths = paths();
+        let tried = std::cell::RefCell::new(Vec::new());
+        let found = find(&paths, &|path| {
+            tried.borrow_mut().push(path.to_string());
+            path == "/Users/x/.local/bin/claude"
+        })
+        .expect("one path answers");
+        assert_eq!(found, "/Users/x/.local/bin/claude");
+        assert_eq!(
+            tried.into_inner(),
+            vec![
+                "claude".to_string(),
+                "/Users/x/.local/bin/claude".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_machine_with_no_claude_names_every_path_and_the_variable() {
+        let paths = paths();
+        let refused = find(&paths, &|_| false).expect_err("no path answers");
+        assert_eq!(
+            refused,
+            BuildError::NotInstalled {
+                looked_in: paths.clone()
+            }
+        );
+        let message = refused.to_string();
+        for path in &paths {
+            assert!(message.contains(path.as_str()), "{message}");
+        }
+        // The bare name is the one entry that is no path at all, so the
+        // message says where it was looked for.
+        assert!(message.contains("claude (on PATH)"), "{message}");
+        assert!(message.contains(NO_CLAUDE_ENV), "{message}");
+        assert!(message.contains("https://claude.ai/code"), "{message}");
     }
 
     #[test]
