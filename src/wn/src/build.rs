@@ -251,7 +251,9 @@ fn spinner() -> ProgressBar {
 /// # Errors
 ///
 /// Gives [`BuildError::TimedOut`] when the run outlives `waited`, and the
-/// refusals of [`refusal_of`] for a run that ended with a failure.
+/// refusals of [`refusal_of`] for a run that ended with a failure. Such a
+/// refusal carries the reason [`reason_of`] picks out of the two pipes and
+/// out of the write of the prompt.
 fn ask(path: &str, waited: Duration) -> Result<String, BuildError> {
     let mut child = Command::new(path)
         .args(ARGUMENTS)
@@ -263,31 +265,44 @@ fn ask(path: &str, waited: Duration) -> Result<String, BuildError> {
             said: cause.to_string(),
         })?;
 
+    // Both pipes are drained on threads of their own, and they are taken
+    // before the prompt is written. A pipe nobody reads fills up, and a child
+    // that writes into a full pipe blocks there until the deadline. A write
+    // that fails must find the two readers in place as well, because what the
+    // run said is the reason to report and the error of the pipe is not.
+    let printed = child.stdout.take().map(read_whole);
+    let complained = child.stderr.take().map(read_whole);
+
     // The pipe is closed as soon as the prompt is in it. A `claude` that reads
     // standard input waits for the end of it, so a pipe left open is a run
     // that never starts and then dies at the deadline.
+    //
+    // A write that fails ends nothing here. A `claude` that exits before it
+    // reads the prompt closes the read end, and the write then fails with a
+    // broken pipe — which names the pipe and never the reason the run went. So
+    // the error is kept as one candidate reason, and the child is waited for
+    // as every other child is: no run is left behind, and the deadline stands.
+    let mut pipe = None;
     if let Some(mut mouth) = child.stdin.take() {
-        mouth
-            .write_all(PROMPT.as_bytes())
-            .map_err(|cause| BuildError::Failed {
-                said: cause.to_string(),
-            })?;
+        if let Err(cause) = mouth.write_all(PROMPT.as_bytes()) {
+            pipe = Some(cause.to_string());
+        }
     }
-
-    // Both pipes are drained on threads of their own, and they are drained
-    // while the run works. A pipe nobody reads fills up, and a child that
-    // writes into a full pipe blocks there until the deadline.
-    let printed = child.stdout.take().map(read_whole);
-    let complained = child.stderr.take().map(read_whole);
 
     let status = wait_for(&mut child, waited)?;
     let printed = printed.map_or_else(String::new, joined);
     let complained = complained.map_or_else(String::new, joined);
 
     if status.success() {
+        // A run that answered with a plan says the write of the prompt got
+        // there. An error of that pipe is then worth nothing, so it is dropped.
         Ok(printed)
     } else {
-        Err(refusal_of(&complained))
+        Err(refusal_of(&reason_of(
+            &complained,
+            &printed,
+            pipe.as_deref(),
+        )))
     }
 }
 
@@ -355,11 +370,37 @@ fn wait_for(child: &mut Child, waited: Duration) -> Result<ExitStatus, BuildErro
     }
 }
 
-/// The refusal a run that failed earns, out of what it wrote on standard error.
+/// The reason a run that failed gave, out of the pipes and the write.
 ///
-/// A run that could not log in is the one failure with an answer the reader
-/// can act on, so it is the one failure that is told apart. Every other one
-/// carries what `claude` said, because this tool cannot know what that is.
+/// `complained` is what the run wrote on standard error, `printed` is what it
+/// wrote on standard output, and `pipe` is the error of the write of the
+/// prompt, for a write that failed.
+///
+/// The order is the order in which a candidate names the run. Standard error
+/// is where a program writes a reason, so it stands first. Standard output is
+/// where a run that mixes the two writes it, so it stands next. The error of
+/// the pipe describes this tool and not the run — a broken pipe says the run
+/// was gone before it read the prompt, and never why it went — so it stands
+/// last.
+///
+/// A candidate counts only when it holds a character that is not whitespace.
+/// A pipe that carried one newline carried nothing, and it must not stand in
+/// front of the pipe that carried the reason.
+fn reason_of(complained: &str, printed: &str, pipe: Option<&str>) -> String {
+    [complained, printed]
+        .into_iter()
+        .chain(pipe)
+        .find(|candidate| !candidate.trim().is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The refusal a run that failed earns, out of the reason it gave.
+///
+/// [`reason_of`] picks that reason out of the pipes of the run. A run that
+/// could not log in is the one failure with an answer the reader can act on,
+/// so it is the one failure that is told apart. Every other one carries what
+/// `claude` said, because this tool cannot know what that is.
 fn refusal_of(said: &str) -> BuildError {
     let clause = said.trim();
     let lowered = clause.to_lowercase();
@@ -441,8 +482,8 @@ pub enum BuildError {
     /// The run failed for a reason only `claude` knows.
     #[error("claude could not build a plan: {said}")]
     Failed {
-        /// What the run wrote on standard error, with the space around it
-        /// dropped.
+        /// The reason the run gave, on whichever pipe carried it, with the
+        /// space around it dropped.
         said: String,
     },
 }
@@ -614,6 +655,52 @@ mod tests {
         let message = refused.to_string();
         assert!(message.contains("claude"), "{message}");
         assert!(message.contains("the model is overloaded."), "{message}");
+    }
+
+    #[test]
+    fn standard_error_is_the_first_place_a_reason_is_read_from() {
+        // A program writes a reason on standard error, so that pipe outranks
+        // the document the run printed and outranks the error of the pipe the
+        // prompt went into.
+        assert_eq!(
+            reason_of(
+                "the model is overloaded",
+                "half a plan",
+                Some("Broken pipe (os error 32)")
+            ),
+            "the model is overloaded"
+        );
+    }
+
+    #[test]
+    fn standard_output_stands_when_standard_error_held_nothing() {
+        // A run that mixes the two pipes writes its reason on standard output.
+        // A standard error of one newline carried nothing, and it must not
+        // stand in front of the pipe that carried the reason.
+        assert_eq!(
+            reason_of(
+                " \n ",
+                "the model is overloaded",
+                Some("Broken pipe (os error 32)")
+            ),
+            "the model is overloaded"
+        );
+    }
+
+    #[test]
+    fn the_error_of_the_pipe_stands_only_when_both_pipes_held_nothing() {
+        // It describes this tool and not the run, so it is the last thing
+        // read. It is still better than a refusal that stops at the colon.
+        assert_eq!(
+            reason_of("", "\n", Some("Broken pipe (os error 32)")),
+            "Broken pipe (os error 32)"
+        );
+    }
+
+    #[test]
+    fn a_run_that_said_nothing_anywhere_gives_no_reason() {
+        assert_eq!(reason_of("", "", None), "");
+        assert_eq!(reason_of("  ", " \n ", Some("  \t ")), "");
     }
 
     #[test]
