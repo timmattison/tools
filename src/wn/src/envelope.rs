@@ -70,6 +70,18 @@ impl Envelope {
     pub fn document(&self) -> &str {
         &self.document
     }
+
+    /// The one line that says what the run cost, or nothing for an envelope
+    /// that carries no number at all.
+    ///
+    /// `effort` is the level the run was asked for, which the envelope does
+    /// not carry: no field of it names one, so the caller passes the level it
+    /// asked for and a run that asked for none earns no such words.
+    #[must_use]
+    pub fn report(&self, effort: Option<&str>) -> Option<String> {
+        let _ = effort;
+        None
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +184,161 @@ mod tests {
         assert_eq!(
             Envelope::read(&said).expect_err("no account is no plan"),
             BuildError::NotAuthenticated
+        );
+    }
+
+    /// The envelope of one measured run, with a plan in its `result`.
+    ///
+    /// A recorded run and not a hand-written one, so a field this reader takes
+    /// is a field a real `claude` really wrote. Only three values of it were
+    /// changed: the `result`, which held the word `4`, and the two ids of the
+    /// run, which name a session of one machine.
+    ///
+    /// The run was a parent on `claude-haiku-4-5` that dispatched a subagent
+    /// on `opus`, so its `modelUsage` carries two models and its
+    /// `total_cost_usd` is the sum over both.
+    const MEASURED: &str = include_str!("../fixtures/claude-envelope.json");
+
+    /// The envelope of [`MEASURED`].
+    fn measured() -> Envelope {
+        Envelope::read(MEASURED).expect("the measured envelope reads")
+    }
+
+    #[test]
+    fn the_report_names_the_dollars_the_models_the_tokens_and_the_seconds() {
+        // The whole line, from a recorded envelope. The reader pays for the
+        // run and this line is the only place the price is written.
+        assert_eq!(
+            measured().report(Some("low")),
+            Some(
+                "plan: $0.28 · claude-opus-5[1m], claude-haiku-4-5 at effort low · \
+                 32 in, 420 out, 94k cache read, 61k cache write · 1.3s"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn an_envelope_of_two_models_names_both_the_dearest_first() {
+        // A run that dispatched a subagent used two models, and the reader who
+        // thinks the plan cost too much reads the expensive one first.
+        let line = measured()
+            .report(None)
+            .expect("the envelope carries numbers");
+        let opus = line.find("claude-opus-5[1m]").expect("the subagent model");
+        let haiku = line.find("claude-haiku-4-5").expect("the parent model");
+        assert!(opus < haiku, "{line}");
+    }
+
+    #[test]
+    fn a_run_that_asked_for_no_effort_earns_no_such_words() {
+        // The envelope carries no effort field, so the level is the caller's
+        // to name. A line that named a level nobody chose is worth nothing.
+        let line = measured()
+            .report(None)
+            .expect("the envelope carries numbers");
+        assert!(!line.contains("effort"), "{line}");
+    }
+
+    #[test]
+    fn a_run_that_cost_less_than_a_cent_keeps_the_digits_of_its_price() {
+        // Two decimal places write such a run as $0.00, which reads as a run
+        // that was free.
+        let said = serde_json::json!({ "result": "x", "total_cost_usd": 0.004_637_9 }).to_string();
+        assert_eq!(
+            Envelope::read(&said)
+                .expect("the envelope reads")
+                .report(None),
+            Some("plan: $0.0046".to_string())
+        );
+    }
+
+    #[test]
+    fn a_run_of_minutes_is_written_in_minutes_and_seconds() {
+        for (milliseconds, written) in [
+            (1_886_u64, "1.9s"),
+            (59_900, "59.9s"),
+            (60_000, "1m 0s"),
+            (192_000, "3m 12s"),
+            (3_852_000, "1h 4m 12s"),
+        ] {
+            let said =
+                serde_json::json!({ "result": "x", "duration_ms": milliseconds }).to_string();
+            assert_eq!(
+                Envelope::read(&said)
+                    .expect("the envelope reads")
+                    .report(None),
+                Some(format!("plan: {written}")),
+                "{milliseconds} milliseconds"
+            );
+        }
+    }
+
+    #[test]
+    fn a_count_of_a_thousand_and_up_is_written_short() {
+        // A run reads tens of thousands of tokens out of the cache, and six
+        // digits of them say nothing a reader acts on.
+        let said = serde_json::json!({
+            "result": "x",
+            "modelUsage": {
+                "claude-opus-5": {
+                    "costUSD": 1.5,
+                    "inputTokens": 118_000,
+                    "outputTokens": 9_400,
+                    "cacheReadInputTokens": 1_200_000,
+                    "cacheCreationInputTokens": 999,
+                }
+            }
+        })
+        .to_string();
+        assert_eq!(
+            Envelope::read(&said)
+                .expect("the envelope reads")
+                .report(None),
+            Some(
+                "plan: claude-opus-5 · 118k in, 9.4k out, 1.2M cache read, 999 cache write"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_token_count_of_zero_is_left_out() {
+        // A run always reads the cache and writes it, and a zero there is a
+        // number the reader has no use for.
+        let said = serde_json::json!({
+            "result": "x",
+            "modelUsage": { "claude-opus-5": { "costUSD": 1.5, "inputTokens": 12, "outputTokens": 34 } }
+        })
+        .to_string();
+        assert_eq!(
+            Envelope::read(&said)
+                .expect("the envelope reads")
+                .report(None),
+            Some("plan: claude-opus-5 · 12 in, 34 out".to_string())
+        );
+    }
+
+    #[test]
+    fn an_envelope_that_carries_no_number_at_all_earns_no_line() {
+        // A report is a courtesy. A missing number costs a clause, and a
+        // missing everything costs the line, and neither costs the plan the
+        // reader already paid for.
+        assert_eq!(
+            Envelope::read(r#"{"result":"the plan"}"#)
+                .expect("the envelope reads")
+                .report(None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_run_that_asked_for_an_effort_and_carries_no_model_still_names_the_level() {
+        assert_eq!(
+            Envelope::read(r#"{"result":"the plan"}"#)
+                .expect("the envelope reads")
+                .report(Some("high")),
+            Some("plan: effort high".to_string())
         );
     }
 }
