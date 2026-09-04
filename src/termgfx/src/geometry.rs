@@ -158,10 +158,10 @@ pub fn cell_pixels() -> Option<(u32, u32)> {
 /// the answer of a probe without a terminal to state it with.
 ///
 /// The cells and the pixels of one window come off one file descriptor in one
-/// ioctl, so this division always divides the pixels of a window by the cells of
-/// that same window. The arithmetic took the two halves from two probes before,
-/// and a run whose standard output was a pipe and whose standard error was a
-/// terminal then divided the pixels of one window by the cells of another.
+/// ioctl, so this division always divides the pixels of a window by the cells
+/// of that same window. The two halves came from two probes before, and the
+/// pixel probe read standard output alone. A run whose standard output was a
+/// pipe therefore measured no pixel size, and `ic` drew at a guess.
 ///
 /// # Arguments
 /// * `window` - The window that the probe measured, or `None` when the probe

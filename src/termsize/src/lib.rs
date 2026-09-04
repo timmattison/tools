@@ -79,13 +79,11 @@
 //!
 //! That division is only a measure of a cell when both halves name one
 //! terminal, and one whole `winsize` off one file descriptor is how this crate
-//! promises that. `termgfx` made the other choice and shows the cost. It read
-//! the pixel size from standard output and the cell counts from
-//! [`stdout_size`], which reads standard output, then standard error, then
-//! standard input. A run whose standard output is a pipe and whose standard
-//! error is a terminal therefore divided the pixels of one window by the cells
-//! of another, and a run whose standard output is a pipe measured neither and
-//! drew at a guess. GitHub issue #350 reports the second of those two.
+//! promises that. `termgfx` made the other choice. It read the cell counts
+//! from [`stdout_size`], and it took the pixel size from an ioctl on standard
+//! output alone. A run whose standard output was a pipe therefore measured no
+//! pixel size. Such a run took an estimate of 10 pixels by 20, and it drew the
+//! picture at a guessed size. GitHub issue #350 reports that defect.
 
 /// The window of a terminal: its size in character cells, and its size in
 /// pixels when the terminal reports one.
