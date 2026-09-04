@@ -560,6 +560,23 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_in_no_repository_says_that_naming_one_does_not_help() {
+        // The reader of this message has often passed --repo already, and the
+        // message the repository reader writes tells them to pass it. --repo
+        // names the repository `wn` asks about and never the one a run plans,
+        // so the message says which of the two failed.
+        let refused = BuildError::NoRepository {
+            said: "`gh repo view` failed.".to_string(),
+        };
+        assert_eq!(
+            refused.to_string(),
+            "a plan is built for the repository of this directory, and gh can name none for it. \
+Run wn inside a checkout — --repo names the repository wn asks about and never the one a run \
+plans.\n`gh repo view` failed."
+        );
+    }
+
+    #[test]
     fn a_run_that_outlived_its_deadline_names_the_seconds_and_the_variable() {
         let refused = BuildError::TimedOut { seconds: 600 };
         let message = refused.to_string();
