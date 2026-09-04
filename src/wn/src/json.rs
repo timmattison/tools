@@ -865,6 +865,23 @@ mod tests {
     }
 
     #[test]
+    fn a_step_that_waits_for_a_later_step_of_its_own_stream_is_a_cycle() {
+        // The chain of the stream says that `#1` comes before `#2`, and the
+        // `waitsFor` of `#1` says that `#2` comes before `#1`. That is a
+        // contradiction and not a true thing said twice, so the reader that
+        // drops the edge answers one half of what the document wrote. This
+        // module refuses rather than guesses everywhere else, and the refusal
+        // names the two numbers that hold the knot.
+        assert_eq!(
+            refusal(&document_of(
+                "[ { \"issue\": 1, \"waitsFor\": [2] }, { \"issue\": 2 } ]"
+            ))
+            .to_string(),
+            "the order returns to #1 and #2, so this text names no step to start first"
+        );
+    }
+
+    #[test]
     fn a_step_that_waits_for_itself_draws_no_edge() {
         // Such an edge runs from a step to itself and says nothing, which is
         // the rule a `Waits for` cell that names the first step of its own
