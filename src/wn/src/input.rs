@@ -393,6 +393,14 @@ pub fn system_clipboard() -> ClipboardRead {
 
 /// Write `text` to the system clipboard.
 ///
+/// A write that answers `Ok` is a write the machine took. On X11 a clipboard
+/// belongs to the process that set it, so a tool that exits at once can lose
+/// what it wrote, and the read of the next run then finds nothing. That costs
+/// the reader one more run of `claude` and nothing else, which is the cost of
+/// a write that failed. The alternative is to hold the process open until
+/// another program takes the clipboard, and a `wn` that does not exit is
+/// worse than a plan that has to be built twice.
+///
 /// # Errors
 ///
 /// Gives [`ClipboardUnavailable`] when the clipboard could not be opened or

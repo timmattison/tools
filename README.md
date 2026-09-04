@@ -1376,7 +1376,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     it wrote is the document the next run reads. A document that could not be read never reaches
     the clipboard, because a bad plan there is a bad plan every later run reads. A clipboard that
     could not be written earns a note and not a failure — the answer is right, and the one cost is
-    that the next run builds a new plan.
+    that the next run builds a new plan. On X11 a clipboard belongs to the process that set it, so
+    a machine there can lose the plan the moment `wn` exits, at that same cost. Holding `wn` open
+    until another program takes the clipboard is the only other answer, and a `wn` that does not
+    exit is worse than a plan that has to be built twice.
   - `wn --refresh` runs `claude` whatever the other inputs hold, and it replaces the clipboard with
     what comes back. It is the one way past a plan that is still on the clipboard and no longer
     true. A plan older than a day says its age under the answer — `This plan was built 3 days ago.
