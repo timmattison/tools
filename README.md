@@ -1457,9 +1457,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     models in its `modelUsage`, and its `total_cost_usd` was the sum of the two to the last digit.
     The token counts come out of `modelUsage` for that same reason — the top-level `usage` of that
     run counted the last turn of the parent alone, 10 input tokens against the 30 the parent really
-    read. Every count is cut and never rounded, so a written number never names more than the run
-    reached. A number the run leaves out costs its clause of the line and never the plan, because
-    the plan is already paid for.
+    read. The token counts and the seconds are cut and never rounded, so neither of them names more
+    than the run reached. The dollars are rounded to the place they are written at, so the price is
+    not a ceiling. A number the run leaves out costs its clause of the line and never the plan,
+    because the plan is already paid for.
   - `WN_PLAN_EFFORT` names the level the run asks for, one of `low`, `medium`, `high`, `xhigh` and
     `max`. It is also the level the report names: the envelope carries no field that names one, so
     a report can only name the level the run asked for, and a line that named a level nobody chose
