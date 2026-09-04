@@ -9655,6 +9655,7 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "indicatif",
  "serde_json",
  "tempfile",
  "termsize",

@@ -10,8 +10,12 @@
 //! clipboard was neither. A run that costs money and a minute of waiting is
 //! quieter still, so it answers only when the other three did not.
 
-use std::time::Duration;
+use std::io::{Read, Write};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use thiserror::Error;
 
 /// The variable that turns the run off.
@@ -39,6 +43,28 @@ pub const PROMPT: &str = "/plan-parallel-work --json";
 
 /// The name of the binary, as `PATH` carries it.
 const CLAUDE: &str = "claude";
+
+/// The tools the run is allowed to reach for.
+///
+/// The skill runs its `gather.ts` script, which shells out to `gh` and to
+/// `git`, and it reads the repository to place each issue in a zone. A run
+/// under `--print` has no terminal to answer a permission prompt with, so a
+/// tool it needs and cannot reach hangs the run until the timeout and then
+/// reports nothing.
+///
+/// The list names those tools and stops there. `--dangerously-skip-permissions`
+/// would answer every prompt of every tool, and a tool that reaches for the
+/// bypass on behalf of its reader has made a decision that is not its to make.
+const ALLOWED_TOOLS: &str = "";
+
+/// The arguments the run is given. The prompt goes on standard input.
+const ARGUMENTS: [&str; 0] = [];
+
+/// How often a waiting run is asked whether it is finished.
+const POLL: Duration = Duration::from_millis(100);
+
+/// The words the spinner writes while the run works.
+const WORKING: &str = "plan-parallel-work: reading the backlog…";
 
 /// Whether `value`, the value of [`NO_CLAUDE_ENV`], turns the run off.
 ///
@@ -143,6 +169,17 @@ fn looked_in_lines(paths: &[String]) -> String {
         .join("\n")
 }
 
+/// The refusal a run that failed earns, out of what it wrote on standard error.
+///
+/// A run that could not log in is the one failure with an answer the reader
+/// can act on, so it is the one failure that is told apart. Every other one
+/// carries what `claude` said, because this tool cannot know what that is.
+fn refusal_of(said: &str) -> BuildError {
+    BuildError::Failed {
+        said: String::new(),
+    }
+}
+
 /// Why no plan came back.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BuildError {
@@ -165,6 +202,22 @@ pub enum BuildError {
     NotInstalled {
         /// Every path that was tried, in the order they were tried.
         looked_in: Vec<String>,
+    },
+    /// The run took longer than it was given.
+    #[error("PLACEHOLDER {seconds}")]
+    TimedOut {
+        /// The seconds it was given.
+        seconds: u64,
+    },
+    /// `claude` has no account to run under.
+    #[error("PLACEHOLDER")]
+    NotAuthenticated,
+    /// The run failed for a reason only `claude` knows.
+    #[error("PLACEHOLDER {said}")]
+    Failed {
+        /// What the run wrote on standard error, with the space around it
+        /// dropped.
+        said: String,
     },
 }
 
@@ -280,6 +333,71 @@ mod tests {
         assert!(message.contains("claude (on PATH)"), "{message}");
         assert!(message.contains(NO_CLAUDE_ENV), "{message}");
         assert!(message.contains("https://claude.ai/code"), "{message}");
+    }
+
+    #[test]
+    fn the_run_names_the_tools_the_skill_needs_and_never_the_bypass() {
+        // A run under --print has no terminal to answer a permission prompt
+        // with, so a tool the skill needs and cannot reach hangs the run. The
+        // bypass flag answers every prompt of every tool, and that decision is
+        // the reader\'s to make and not this tool\'s.
+        assert!(ARGUMENTS.contains(&"--print"), "{ARGUMENTS:?}");
+        assert!(ARGUMENTS.contains(&"--allowed-tools"), "{ARGUMENTS:?}");
+        assert!(ARGUMENTS.contains(&ALLOWED_TOOLS), "{ARGUMENTS:?}");
+        assert!(
+            !ARGUMENTS.contains(&"--dangerously-skip-permissions"),
+            "{ARGUMENTS:?}"
+        );
+        // The gather script of the skill is a program, and Bash is what runs
+        // it.
+        assert!(ALLOWED_TOOLS.contains("Bash"), "{ALLOWED_TOOLS}");
+    }
+
+    #[test]
+    fn a_run_that_could_not_log_in_names_claude_login() {
+        for said in [
+            "Invalid API key · Please run /login",
+            "Error: not authenticated",
+            "You must log in first",
+        ] {
+            let refused = refusal_of(said);
+            assert_eq!(refused, BuildError::NotAuthenticated, "{said}");
+            assert!(refused.to_string().contains("claude login"), "{refused}");
+        }
+    }
+
+    #[test]
+    fn every_other_failure_carries_what_claude_said() {
+        let refused = refusal_of("  the model is overloaded.\n");
+        assert_eq!(
+            refused,
+            BuildError::Failed {
+                said: "the model is overloaded.".to_string()
+            }
+        );
+        let message = refused.to_string();
+        assert!(message.contains("claude"), "{message}");
+        assert!(message.contains("the model is overloaded."), "{message}");
+    }
+
+    #[test]
+    fn a_failure_that_said_nothing_still_names_claude() {
+        let refused = refusal_of("   \n ");
+        assert_eq!(
+            refused,
+            BuildError::Failed {
+                said: String::new()
+            }
+        );
+        assert!(refused.to_string().contains("claude"), "{refused}");
+    }
+
+    #[test]
+    fn a_run_that_outlived_its_deadline_names_the_seconds_and_the_variable() {
+        let refused = BuildError::TimedOut { seconds: 600 };
+        let message = refused.to_string();
+        assert!(message.contains("600"), "{message}");
+        assert!(message.contains(TIMEOUT_ENV), "{message}");
     }
 
     #[test]
