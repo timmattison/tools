@@ -627,7 +627,10 @@ mod tests {
         // A document that names no schema is a document this reader cannot
         // know it reads correctly.
         let refused = refusal(&edited("\"version\": 1,", ""));
-        assert_eq!(refused.to_string(), "version is missing, and the schema of a plan names it");
+        assert_eq!(
+            refused.to_string(),
+            "version is missing, and the schema of a plan names it"
+        );
     }
 
     #[test]
@@ -703,7 +706,10 @@ mod tests {
             "streams[0].order[0].pr is not an issue number"
         );
         assert_eq!(
-            refusal(&document_of("[ { \"issue\": 1, \"waitsFor\": [2, \"3\"] } ]")).to_string(),
+            refusal(&document_of(
+                "[ { \"issue\": 1, \"waitsFor\": [2, \"3\"] } ]"
+            ))
+            .to_string(),
             "streams[0].order[0].waitsFor[1] is not an issue number"
         );
     }

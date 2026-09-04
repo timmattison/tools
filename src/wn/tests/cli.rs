@@ -1867,7 +1867,10 @@ fn a_json_document_that_is_not_the_schema_names_the_path() {
     // The path is what says where to look, so the message walks the document
     // rather than naming the key alone.
     let gh = FakeGh::new(JSON_ISSUES);
-    let text = JSON_PLAN.replace("{ \"issue\": 91, \"waitsFor\": [96] }", "{ \"waitsFor\": [96] }");
+    let text = JSON_PLAN.replace(
+        "{ \"issue\": 91, \"waitsFor\": [96] }",
+        "{ \"waitsFor\": [96] }",
+    );
     let output = run_with_stdin(&gh, &["--repo", REPO], "80", &text);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
     assert!(

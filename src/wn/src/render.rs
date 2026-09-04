@@ -122,6 +122,17 @@ const NO_ISSUE_OPEN: &str = "no issue is open";
 /// The answer of a picture where every step is finished.
 const GRAPH_CLOSED: &str = "Every issue in the graph is closed. Nothing to start.";
 
+/// The answer of a plan that holds no work at all.
+///
+/// A JSON plan whose `streams` array is empty is a plan somebody ran the skill
+/// for and found nothing to do in. "Every issue is closed" would be the
+/// opposite of the truth there, because no issue stands in the plan at all.
+///
+/// A picture and a table never reach this sentence: a picture names two steps
+/// or it claims no text, and a table with no row earns a message about its
+/// missing `Order` field.
+const GRAPH_EMPTY: &str = "The plan holds no work. Nothing to start.";
+
 /// The answer of a picture where nothing is open and something could not be
 /// read.
 const GRAPH_NOT_OPEN: &str = "No issue in the graph is open.";
@@ -404,6 +415,13 @@ fn start_line(number: IssueNumber, start: &StartCommand) -> String {
 #[must_use]
 pub fn render_graph(report: &Report, repo: &str, width: usize, start: &StartCommand) -> String {
     let entries = report.entries();
+    // A plan with no work in it has no row to paint and no note to earn, so
+    // the sentence is the whole answer. It stands here rather than falling
+    // through the rows, because the blank line under an empty block would open
+    // the text with a line nobody wrote.
+    if entries.is_empty() {
+        return nothing_to_start(report);
+    }
     let number_width = entries
         .iter()
         .map(|entry| UnicodeWidthStr::width(entry.label().as_str()))
@@ -490,14 +508,18 @@ fn graph_answer(report: &Report, start: &StartCommand) -> Vec<String> {
 
 /// What the answer of a picture says when no step of it is ready.
 ///
-/// A picture with every step finished is a plan somebody finished, and the
-/// answer says so. A picture that still holds an open step says why nobody
-/// starts it, because every one of those steps waits for work that is missing
-/// or dropped. A picture with nothing open and a step nobody could read is not
-/// finished, and saying it is would be a guess about the number nobody could
-/// read.
+/// A plan with no step at all holds nothing to finish, and the answer says
+/// that rather than that everything is done. A picture with every step
+/// finished is a plan somebody finished, and the answer says so. A picture that
+/// still holds an open step says why nobody starts it, because every one of
+/// those steps waits for work that is missing or dropped. A picture with
+/// nothing open and a step nobody could read is not finished, and saying it is
+/// would be a guess about the number nobody could read.
 fn nothing_to_start(report: &Report) -> String {
     let entries = report.entries();
+    if entries.is_empty() {
+        return GRAPH_EMPTY.dimmed().to_string();
+    }
     if entries.iter().all(|entry| entry.status.is_finished()) {
         return GRAPH_CLOSED.dimmed().to_string();
     }

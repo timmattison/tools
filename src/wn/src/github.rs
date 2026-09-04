@@ -337,6 +337,13 @@ fn errors_of(answer: &Value) -> Option<String> {
 /// error, and a number GitHub could not answer for is an error rather than
 /// [`Status::Missing`]. The reason beside the `null` answer parts the two.
 pub fn fetch(repo: &Repo, numbers: &[IssueNumber]) -> Result<Vec<Entry>> {
+    // A plan with no work in it asks about nothing. The query would then carry
+    // no field at all, which GitHub refuses as a syntax error, and there is
+    // nothing to ask about anyway.
+    if numbers.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let query = build_query(numbers);
     let output = Command::new(GH)
         .arg("api")
