@@ -466,6 +466,7 @@ impl Scratch {
     /// it at all.
     pub fn replay_merge(&self, branch: &str) -> Result<Conflicts> {
         let git = self.git();
+        let worktree = self.path();
 
         // `--no-ff`, because git takes a merge whose branch is strictly ahead
         // as a fast-forward, and a fast-forward merges no trees at all. It
@@ -483,12 +484,40 @@ impl Scratch {
         // answer then describes a command nobody asked for. Every other
         // caller-supplied revision in this file carries the separator for the
         // same reason.
-        git.try_run(
+        let outcome = git.try_run(
             "merge",
             &["--no-commit", "--no-ff", "--end-of-options", branch],
         )?;
 
-        Ok(Conflicts::nothing_replayed())
+        let mut cost = Conflicts::nothing_replayed();
+        if outcome.success {
+            return Ok(cost);
+        }
+
+        // The same two readers the rebase replay takes, because a conflicted
+        // path costs the same to mis-read whichever operation produced it.
+        // `nul_separated_paths` keeps the bytes git printed, so a name git
+        // would otherwise C-quote still opens the file it names, and
+        // `count_conflict_hunks` reads the regions out of that file. A second
+        // reader beside either one would be a second place for the count to go
+        // wrong.
+        let conflicted = git.nul_separated_paths("diff", &["--name-only", "--diff-filter=U"])?;
+
+        if !conflicted.is_empty() {
+            // Once, whatever the merge left behind. A merge makes one
+            // three-way merge and stops at it, so the stop count is one for
+            // every conflicted merge and carries no information beyond
+            // "conflicted". The rebase replay increments the same counter once
+            // per halt, which is where the number does say something.
+            cost.stops.increment();
+
+            for file in conflicted {
+                let hunks = count_conflict_hunks(&worktree.join(&file))?;
+                cost.add_file(file, hunks);
+            }
+        }
+
+        Ok(cost)
     }
 
     fn worktree_arg(&self) -> Result<&str> {
