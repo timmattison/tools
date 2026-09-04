@@ -1081,13 +1081,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     without those strokes the run `──` reaches the chain reader as one token and earns a refusal.
     Quote the chain: a shell reads an unquoted `#` as the start of a comment.
   - The chain comes out of the first input that holds one: the argument, then standard input,
-    then the system clipboard. A chain almost always starts as text somebody copied out of a
-    plan, an issue, or a comment, so `wn` alone answers the chain you just copied. A pipe still
-    outranks the clipboard, because a pipe is explicit, and an empty pipe walks on to the
-    clipboard — a run whose parent handed it `/dev/null` did not ask for an empty chain. Set
-    `WN_NO_CLIPBOARD` to any value with a character in it to turn the clipboard off, which gives
-    back the error a run with no chain printed before. An empty value leaves the clipboard on,
-    because an exported but empty variable is a common accident.
+    then the system clipboard, then a run of `claude` that builds a plan. A chain almost always
+    starts as text somebody copied out of a plan, an issue, or a comment, so `wn` alone answers
+    the chain you just copied. A pipe still outranks the clipboard, because a pipe is explicit,
+    and an empty pipe walks on to the clipboard — a run whose parent handed it `/dev/null` did
+    not ask for an empty chain. Set `WN_NO_CLIPBOARD` to any value with a character in it to turn
+    the clipboard off. An empty value leaves the clipboard on, because an exported but empty
+    variable is a common accident. The clipboard is also the cache a run of `claude` writes its
+    plan to, so a reader who turns the clipboard off turns that cache off with it: every bare
+    `wn` then pays for a new run and keeps nothing.
   - The whole chain is one GraphQL query through `gh`, so a chain of six issues costs one round
     trip and one unit of the rate limit, and the credential is the one `gh` already holds. Pull
     request numbers work too: merged counts as done, and closed without a merge counts as
@@ -1334,10 +1336,90 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     blocked row waits for, and one start line for each issue somebody can begin now. A JSON plan
     is a graph, a table with a `Waits for` column is the same graph, and one report answers both,
     because two reports of one question drift apart.
-  - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard), `wn "#230 → #315"`,
-    `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole plan, a plan drawn
-    as a picture, or a plan written as JSON),
-    `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`
+  - A run of `claude` is the fourth input, after the argument, standard input, and the clipboard.
+    The reader who typed `wn` with an empty clipboard has a repository full of open issues and no
+    plan, that plan is one `claude` run away, and `wn` already knows the repository — so `wn`
+    builds it rather than stopping with `the clipboard is empty`. The order is still the order of
+    how loudly each input was asked for, and a run that costs money and about a minute of waiting
+    is the quietest of the four: it answers only when the other three did not.
+
+    ```
+    $ wn
+    wn: no plan to read. Building one with claude…
+    ⠹ plan-parallel-work: reading the backlog…
+
+    → #96  fix the daemon leak
+    · #91  archive a killed session   waits for #96
+    → #86  the keymap panel
+
+    Start #96 next with 'si 96'
+    Start #86 next with 'si 86'
+
+    The plan is on the clipboard. Run wn --refresh to build a new one.
+    ```
+  - The run is `claude --print --allowed-tools …` with the prompt `/plan-parallel-work --json` on
+    standard input, in the directory `wn` was run in, and `wn` reads the document it prints. It
+    looks for `claude` in `PATH`, then `~/.local/bin/claude`, then `~/.claude/local/claude`, then
+    `/usr/local/bin/claude`, and the first one that answers `--version` is the one. It names the
+    tools the skill needs rather than reaching for `--dangerously-skip-permissions`: a run under
+    `--print` has no terminal to answer a permission prompt with, and a tool that reaches for the
+    bypass on behalf of its reader has made a decision that is not its to make. The line that says
+    a run is happening and the spinner under it both go to standard error, so a pipe still gets the
+    document alone.
+  - The clipboard is the cache. A second `wn` a minute later must not pay for a second run, so the
+    document goes on the system clipboard and the next run reads it back through the clipboard
+    input that already stands. No second cache, no second reader, and no file to go stale in a
+    directory nobody looks in. **The run overwrites what is on the clipboard.** It happens only
+    when every other input was empty, and the tool says so on the line under the answer. Three
+    things follow, and all three are the right behavior: the plan lives exactly as long as the
+    reader does not copy anything else, and a plan somebody threw away was cheap to rebuild; a
+    plan on the clipboard is a plan the reader can paste, into an issue, into a comment, or into a
+    second terminal; and `wn` never runs `claude` twice in a row by accident, because the document
+    it wrote is the document the next run reads. A document that could not be read never reaches
+    the clipboard, because a bad plan there is a bad plan every later run reads. A clipboard that
+    could not be written earns a note and not a failure — the answer is right, and the one cost is
+    that the next run builds a new plan. On X11 a clipboard belongs to the process that set it, so
+    a machine there can lose the plan the moment `wn` exits, at that same cost. Holding `wn` open
+    until another program takes the clipboard is the only other answer, and a `wn` that does not
+    exit is worse than a plan that has to be built twice.
+  - `wn --refresh` runs `claude` whatever the other inputs hold, and it replaces the clipboard with
+    what comes back. It is the one way past a plan that is still on the clipboard and no longer
+    true. A plan older than a day says its age under the answer — `This plan was built 3 days ago.
+    Run wn --refresh to build a new one.` — because a plan is a claim about a backlog, a backlog
+    moves, and that note is the only thing that would tell the reader. `wn` reads the `generated`
+    field of the document for it, and a document that names no moment says nothing about its age.
+  - Set `WN_NO_CLAUDE` to any value with a character in it to turn the run off, which gives back
+    the error a run with no chain printed before. An empty value leaves it on, because an exported
+    but empty variable is a common accident. `WN_PLAN_TIMEOUT` names the seconds a run may take;
+    it is 600 by default, because a plan of a whole backlog is a longer run than a commit message.
+  - These things refuse, and each exits `2`. A directory that is in no repository `gh` can name is
+    refused before the run, not after it: the skill plans the repository of the directory `wn` was
+    run in, and its gather script turns a `gh` or a `git` failure into a warning rather than a
+    crash, so a run there would spend a minute and real money and would then answer that the plan
+    holds no work. One cheap `gh repo view` refuses it first. For the same reason `--repo` names
+    the repository `wn` asks about and never the one the run plans, so a build in one checkout
+    with `--repo` naming another gives numbers of two repositories. `wn --refresh` with
+    `WN_NO_CLAUDE` set asks for two things at once — `--refresh` builds a plan by running
+    `claude`, and the variable turns that run off — so the message names both and says to unset
+    the variable. A `WN_PLAN_TIMEOUT` that names no number of seconds is refused and named back:
+    `WN_PLAN_TIMEOUT=10m` is such a value, and so is `WN_PLAN_TIMEOUT=0`, because a zero is a
+    confusing way to spell `WN_NO_CLAUDE`. A `WN_PLAN_TIMEOUT` that names more seconds than a run
+    waits is refused as well, and the message names the cap of 31536000 seconds, which is one
+    year: a longer value names no run a person starts, and the largest of them build a deadline
+    the clock cannot hold. A machine with no `claude` earns a message naming the four paths it
+    looked in and naming `WN_NO_CLAUDE` for a reader who wants no run at all. A run that outlives
+    its deadline is killed and the message names the seconds and `WN_PLAN_TIMEOUT` — killed, and
+    not left behind, because a `claude` nobody waits for keeps spending. A `claude` with no
+    account earns a message naming `claude login`. A run that fails for a reason only `claude`
+    knows is named back with that reason, on whichever pipe carried it. A run that prints nothing
+    at all is named back as a run of `claude`. A document that is not the schema earns the refusal
+    of the JSON reader, unchanged and naming no clipboard, because a plan `wn` built is a plan
+    `wn` asked for.
+  - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard, and builds a plan when it holds
+    none), `wn --refresh`, `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole
+    plan, a plan drawn as a picture, or a plan written as JSON),
+    `WN_START_COMMAND='gh issue develop' wn "#277 → #278"`, `WN_NO_CLIPBOARD=1 wn`,
+    `WN_NO_CLAUDE=1 wn`, `WN_PLAN_TIMEOUT=900 wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
 
 ## dirhash

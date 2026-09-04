@@ -7,10 +7,16 @@
 //!
 //! # The order of the inputs
 //!
-//! An argument first, then standard input, then the clipboard. The order is the
-//! order of how loudly each input was asked for. An argument was typed on
-//! purpose. A pipe was built on purpose. The clipboard was neither, so it
-//! answers only when nothing else did.
+//! An argument first, then standard input, then the clipboard, then a run of
+//! `claude` that builds a plan. The order is the order of how loudly each
+//! input was asked for. An argument was typed on purpose. A pipe was built on
+//! purpose. The clipboard was neither, so it answers only when nothing else
+//! did. A run that costs money and a minute of waiting is quieter still, so it
+//! answers only when the other three did not.
+//!
+//! `refresh` is the one way past that order. A plan that is still on the
+//! clipboard and no longer true would otherwise answer every run, and the
+//! reader has no way to say so.
 //!
 //! An EMPTY standard input falls through to the clipboard, and this is the one
 //! rule that is not obvious. A parent that redirects standard input from
@@ -36,6 +42,8 @@ use std::fmt;
 
 use thiserror::Error;
 
+use crate::build::{BuildError, NO_CLAUDE_ENV};
+
 /// The variable that turns the clipboard fallback off. Any value with a
 /// character in it turns it off.
 pub const NO_CLIPBOARD_ENV: &str = "WN_NO_CLIPBOARD";
@@ -54,6 +62,16 @@ const PASS_IT_AS_AN_ARGUMENT: &str = "Pass it as an argument, in quotes: wn \"#2
 /// clipboard that holds an image are the same thing to a tool that wants a
 /// chain, so both arrive here.
 pub type ClipboardRead = Result<Option<String>, ClipboardUnavailable>;
+
+/// What a run of `claude` gave back.
+///
+/// `Ok` is the plan it printed, which one of the readers then takes. The plan
+/// is not read here: this module knows where a text came from and never what
+/// is in it.
+pub type PlanBuild = Result<String, BuildError>;
+
+/// What a write of the clipboard gave back.
+pub type ClipboardWrite = Result<(), ClipboardUnavailable>;
 
 /// The clipboard could not be opened at all.
 ///
@@ -104,6 +122,8 @@ enum Source {
     Stdin,
     /// The system clipboard.
     Clipboard,
+    /// A run of `claude` on the `plan-parallel-work` skill.
+    Plan,
 }
 
 /// The chain, and the input it came out of.
@@ -125,6 +145,51 @@ impl Chain {
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Keep a plan this run built, so the next run reads it back rather than
+    /// paying for a second one. Gives the note the reader earns, when they
+    /// earn one.
+    ///
+    /// The clipboard is the cache. It needs no second reader, because the
+    /// clipboard fallback of this module already is one, and no file goes
+    /// stale in a directory nobody looks in. A reader who copies a line of
+    /// code throws the plan away, and a plan somebody threw away was cheap to
+    /// rebuild.
+    ///
+    /// Nothing is kept but a plan this run built. A chain that came from an
+    /// argument, from a pipe, or from the clipboard is text the reader already
+    /// has, and writing it back would overwrite their clipboard for nothing.
+    ///
+    /// `read` is whether one of the readers could read the text, whichever
+    /// shape the run wrote the plan in. A plan that no reader could read is
+    /// never kept: a bad plan on the clipboard is a bad plan every later run
+    /// reads, and the reader would have to copy something else to get out of
+    /// it.
+    ///
+    /// `write` is `None` when [`NO_CLIPBOARD_ENV`] turns the clipboard off. A
+    /// reader who turned the clipboard off turned the cache off with it, so
+    /// nothing is written and nothing is said.
+    ///
+    /// A write that fails is a note and never a failure. The answer over it is
+    /// right, and the one cost is that the next run builds a new plan.
+    #[must_use]
+    pub fn keep(
+        &self,
+        read: bool,
+        write: Option<&dyn Fn(&str) -> ClipboardWrite>,
+    ) -> Option<String> {
+        if self.source != Source::Plan || !read {
+            return None;
+        }
+        let write = write?;
+        match write(&self.text) {
+            Ok(()) => Some(KEPT.to_string()),
+            Err(cause) => Some(format!(
+                "The plan could not be written to the clipboard ({cause}). \
+The next run builds a new one."
+            )),
+        }
     }
 
     /// The reason the text could not be read, with an invisible input named.
@@ -157,11 +222,18 @@ impl Chain {
         E: std::error::Error + Send + Sync + 'static,
     {
         match self.source {
-            Source::Argument | Source::Stdin => anyhow::Error::new(err),
+            // A plan `wn` built is a plan `wn` asked for, and the reason it
+            // could not be read is the reason of the reader of it, unchanged.
+            // Naming the run would tell a reader to look at their clipboard,
+            // which holds none of it.
+            Source::Argument | Source::Stdin | Source::Plan => anyhow::Error::new(err),
             Source::Clipboard => anyhow::anyhow!("wn cannot read the clipboard: {err}"),
         }
     }
 }
+
+/// The note a run that kept its plan earns.
+const KEPT: &str = "The plan is on the clipboard. Run wn --refresh to build a new one.";
 
 /// Every input a chain can come out of, in the order `wn` tries them.
 pub struct Sources<'a> {
@@ -174,19 +246,47 @@ pub struct Sources<'a> {
     /// Reads the system clipboard. `None` when [`NO_CLIPBOARD_ENV`] turns the
     /// fallback off.
     pub clipboard: Option<&'a dyn Fn() -> ClipboardRead>,
+    /// Builds a plan by running `claude`. `None` when [`NO_CLAUDE_ENV`] turns
+    /// the run off.
+    pub plan: Option<&'a dyn Fn() -> PlanBuild>,
+    /// Whether the reader asked for a new plan whatever the other inputs hold.
+    pub refresh: bool,
 }
 
 impl Sources<'_> {
-    /// The chain, out of the first input that holds one.
+    /// The chain, out of the first input that holds one. `refresh` is the one
+    /// way past that order: it takes the chain out of a new run of `claude`,
+    /// whatever the other inputs hold.
     ///
     /// # Errors
     ///
+    /// Gives [`InputError::RefreshWithoutClaude`] when the reader asked for a
+    /// new plan and turned the run that builds one off.
+    ///
     /// Gives [`InputError::Stdin`] when standard input could not be read at
-    /// all, [`InputError::Unavailable`] when the clipboard could not be opened,
-    /// [`InputError::EmptyClipboard`] when the clipboard was the last input and
-    /// holds no text, and [`InputError::NoChain`] when the clipboard was not
-    /// tried and no other input answered.
+    /// all.
+    ///
+    /// Gives [`InputError::EmptyClipboard`] when the clipboard was read, it
+    /// holds no text, and there is no run of `claude` to reach after it.
+    ///
+    /// Gives [`InputError::Unavailable`] when the clipboard could not be
+    /// opened, and there is no run of `claude` to reach after it.
+    ///
+    /// Gives [`InputError::NoChain`] when no input answered, and neither the
+    /// clipboard nor the run was one of the inputs.
+    ///
+    /// Gives [`InputError::NoPlan`] when the run could not build a plan. It
+    /// carries the [`BuildError`] the run gave.
+    ///
+    /// Gives [`InputError::EmptyPlan`] when the run printed nothing at all.
     pub fn chain(&self) -> Result<Chain, InputError> {
+        if self.refresh {
+            let Some(build) = self.plan else {
+                return Err(InputError::RefreshWithoutClaude);
+            };
+            return built(build);
+        }
+
         if !self.argument.is_empty() {
             // A shell splits an unquoted chain into one argument for each
             // word, and a quoted one into a single argument. Joining with a
@@ -202,23 +302,60 @@ impl Sources<'_> {
             }
         }
 
-        let Some(read) = self.clipboard else {
+        // A clipboard that holds no chain and a clipboard that could not be
+        // opened both say the same thing to the input after them: this input
+        // did not answer. So the run is reached from either, and the two
+        // errors stand only when there is no run to reach.
+        if let Some(read) = self.clipboard {
+            match read() {
+                Ok(Some(copied)) if !copied.trim().is_empty() => {
+                    return Ok(Chain::new(copied, Source::Clipboard));
+                }
+                Ok(_) => {
+                    if self.plan.is_none() {
+                        return Err(InputError::EmptyClipboard);
+                    }
+                }
+                Err(cause) => {
+                    if self.plan.is_none() {
+                        return Err(InputError::Unavailable(cause));
+                    }
+                }
+            }
+        }
+
+        let Some(build) = self.plan else {
+            // The clipboard was not one of the inputs, and no other input
+            // answered. This is the message the tool printed before the run
+            // stood beside them.
             return Err(InputError::NoChain);
         };
-        match read() {
-            Ok(Some(copied)) if !copied.trim().is_empty() => {
-                Ok(Chain::new(copied, Source::Clipboard))
-            }
-            Ok(_) => Err(InputError::EmptyClipboard),
-            Err(cause) => Err(InputError::Unavailable(cause)),
-        }
+        built(build)
+    }
+}
+
+/// The chain a run of `claude` gave back.
+///
+/// # Errors
+///
+/// Gives [`InputError::EmptyPlan`] for a run that printed nothing at all.
+///
+/// Gives [`InputError::NoPlan`] for a run that could not build a plan. It
+/// carries the [`BuildError`] the run gave. A run that could not start and a
+/// run that started and failed both arrive there.
+fn built(build: &dyn Fn() -> PlanBuild) -> Result<Chain, InputError> {
+    match build() {
+        Ok(document) if !document.trim().is_empty() => Ok(Chain::new(document, Source::Plan)),
+        Ok(_) => Err(InputError::EmptyPlan),
+        Err(cause) => Err(InputError::NoPlan(cause)),
     }
 }
 
 /// Why no input gave a chain.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum InputError {
-    /// No input holds a chain, and the clipboard was not one of the inputs.
+    /// No input holds a chain, and neither the clipboard nor the run of
+    /// `claude` was one of the inputs.
     #[error("no chain given. {PASS_IT_AS_AN_ARGUMENT}")]
     NoChain,
     /// The clipboard was the last input, and it holds no text.
@@ -230,6 +367,22 @@ pub enum InputError {
     /// Standard input could not be read.
     #[error("could not read the chain from standard input: {0}")]
     Stdin(String),
+    /// The run of `claude` did not give a plan back.
+    #[error(transparent)]
+    NoPlan(BuildError),
+    /// The run of `claude` gave nothing back at all.
+    #[error(
+        "claude gave no plan back. Run it yourself to see what it says: \
+         claude --print '{}'",
+        crate::build::PROMPT
+    )]
+    EmptyPlan,
+    /// The reader asked for a new plan and turned the run that builds one off.
+    #[error(
+        "wn --refresh builds a plan by running claude, and {NO_CLAUDE_ENV} turns that run off. \
+         Unset it to build one. {PASS_IT_AS_AN_ARGUMENT}"
+    )]
+    RefreshWithoutClaude,
 }
 
 /// Whether `value`, the value of [`NO_CLIPBOARD_ENV`], turns the fallback off.
@@ -257,6 +410,29 @@ pub fn system_clipboard() -> ClipboardRead {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|cause| ClipboardUnavailable::new(&cause))?;
     from_arboard(clipboard.get_text())
+}
+
+/// Write `text` to the system clipboard.
+///
+/// A write that answers `Ok` is a write the machine took. On X11 a clipboard
+/// belongs to the process that set it, so a tool that exits at once can lose
+/// what it wrote, and the read of the next run then finds nothing. That costs
+/// the reader one more run of `claude` and nothing else, which is the cost of
+/// a write that failed. The alternative is to hold the process open until
+/// another program takes the clipboard, and a `wn` that does not exit is
+/// worse than a plan that has to be built twice.
+///
+/// # Errors
+///
+/// Gives [`ClipboardUnavailable`] when the clipboard could not be opened or
+/// could not be written. A machine with no display is such a machine, and so
+/// is a session over SSH.
+pub fn write_system_clipboard(text: &str) -> ClipboardWrite {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|cause| ClipboardUnavailable::new(&cause))?;
+    clipboard
+        .set_text(text)
+        .map_err(|cause| ClipboardUnavailable::new(&cause))
 }
 
 /// The read `result` as a [`ClipboardRead`].
@@ -298,6 +474,22 @@ mod tests {
         panic!("the clipboard was read after an earlier input gave the chain")
     }
 
+    /// A run of `claude` that must never happen.
+    ///
+    /// The run costs money and a minute of waiting, so it is the one input
+    /// this file must prove is never touched on speculation.
+    fn unbuilt_plan() -> PlanBuild {
+        panic!("claude was run after an earlier input gave the chain")
+    }
+
+    /// The document a run of `claude` gives back in these tests.
+    const DOCUMENT: &str = "{\"version\": 1, \"streams\": []}";
+
+    /// A run of `claude` that gives [`DOCUMENT`] back.
+    fn built_plan() -> PlanBuild {
+        Ok(DOCUMENT.to_string())
+    }
+
     /// The arguments of a command line that typed `words`.
     fn arguments(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_string()).collect()
@@ -311,6 +503,8 @@ mod tests {
             argument: &[],
             stdin: None,
             clipboard: Some(&clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the clipboard holds text")
@@ -323,6 +517,8 @@ mod tests {
             argument: &argument,
             stdin: None,
             clipboard: Some(&unread_clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the argument holds the chain");
@@ -336,6 +532,8 @@ mod tests {
             argument: &argument,
             stdin: Some(&unread_stdin),
             clipboard: None,
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the argument holds the chain");
@@ -349,6 +547,8 @@ mod tests {
             argument: &[],
             stdin: Some(&stdin),
             clipboard: Some(&unread_clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the pipe holds the chain");
@@ -366,6 +566,8 @@ mod tests {
                 argument: &[],
                 stdin: Some(&stdin),
                 clipboard: Some(&clipboard),
+                plan: None,
+                refresh: false,
             }
             .chain()
             .expect("the clipboard holds the chain");
@@ -385,6 +587,8 @@ mod tests {
             argument: &argument,
             stdin: None,
             clipboard: None,
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the argument holds the chain");
@@ -398,6 +602,8 @@ mod tests {
             argument: &argument,
             stdin: None,
             clipboard: None,
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the arguments hold the chain");
@@ -411,6 +617,8 @@ mod tests {
             argument: &[],
             stdin: None,
             clipboard: Some(&clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect_err("the clipboard holds nothing");
@@ -428,6 +636,8 @@ mod tests {
             argument: &[],
             stdin: None,
             clipboard: Some(&clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect_err("the clipboard holds no chain");
@@ -441,6 +651,8 @@ mod tests {
             argument: &[],
             stdin: None,
             clipboard: Some(&clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect_err("the clipboard could not be opened");
@@ -492,6 +704,8 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
             argument: &[],
             stdin: None,
             clipboard: None,
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect_err("no input holds a chain");
@@ -514,6 +728,8 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
             argument: &[],
             stdin: Some(&stdin),
             clipboard: Some(&unread_clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect_err("standard input could not be read");
@@ -581,6 +797,8 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
             argument: &argument,
             stdin: None,
             clipboard: None,
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the argument holds text");
@@ -613,6 +831,312 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
             assert!(message.contains("clipboard"), "{message}");
             assert!(!message.contains(text.trim()), "{message}");
         }
+    }
+
+    /// A writer of the clipboard that must never run.
+    fn unwritten_clipboard(_text: &str) -> ClipboardWrite {
+        panic!("the clipboard was written for a text this run did not build")
+    }
+
+    /// The chain of a run whose only input was a run of `claude` that gave
+    /// `text` back.
+    fn built_chain(text: &str) -> Chain {
+        let plan = || -> PlanBuild { Ok(text.to_string()) };
+        Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back")
+    }
+
+    #[test]
+    fn a_plan_this_run_built_reaches_the_clipboard_whole() {
+        let written = std::cell::RefCell::new(String::new());
+        let write = |text: &str| -> ClipboardWrite {
+            written.borrow_mut().push_str(text);
+            Ok(())
+        };
+        let note = built_chain(DOCUMENT).keep(true, Some(&write));
+        assert_eq!(written.into_inner(), DOCUMENT);
+        assert_eq!(note, Some(KEPT.to_string()));
+        let note = note.expect("a plan that was kept earns a note");
+        assert!(note.contains("clipboard"), "{note}");
+        assert!(note.contains("--refresh"), "{note}");
+    }
+
+    #[test]
+    fn a_plan_that_could_not_be_read_never_reaches_the_clipboard() {
+        // A bad plan on the clipboard is a bad plan every later run reads.
+        assert_eq!(
+            built_chain(DOCUMENT).keep(false, Some(&unwritten_clipboard)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_chain_the_reader_already_has_never_reaches_the_clipboard() {
+        let argument = arguments(&[CHAIN]);
+        let typed = Sources {
+            argument: &argument,
+            stdin: None,
+            clipboard: None,
+            plan: None,
+            refresh: false,
+        }
+        .chain()
+        .expect("the argument holds the chain");
+        assert_eq!(typed.keep(true, Some(&unwritten_clipboard)), None);
+        assert_eq!(
+            clipboard_chain(CHAIN).keep(true, Some(&unwritten_clipboard)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_clipboard_that_is_off_keeps_nothing_and_says_nothing() {
+        assert_eq!(built_chain(DOCUMENT).keep(true, None), None);
+    }
+
+    #[test]
+    fn a_clipboard_that_could_not_be_written_earns_a_note_and_not_a_failure() {
+        let write = |_: &str| -> ClipboardWrite { Err(ClipboardUnavailable::new(&"no display")) };
+        let note = built_chain(DOCUMENT)
+            .keep(true, Some(&write))
+            .expect("a write that failed earns a note");
+        assert_eq!(
+            note,
+            "The plan could not be written to the clipboard (no display). \
+The next run builds a new one."
+        );
+    }
+
+    #[test]
+    fn the_plan_is_built_only_when_the_other_three_inputs_held_nothing() {
+        let clipboard = || -> ClipboardRead { Ok(Some(CHAIN.to_string())) };
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: Some(&clipboard),
+            plan: Some(&unbuilt_plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the clipboard holds the chain");
+        assert_eq!(chain.text(), CHAIN);
+    }
+
+    #[test]
+    fn an_argument_and_a_pipe_both_outrank_the_run() {
+        let argument = arguments(&[CHAIN]);
+        assert_eq!(
+            Sources {
+                argument: &argument,
+                stdin: None,
+                clipboard: None,
+                plan: Some(&unbuilt_plan),
+                refresh: false,
+            }
+            .chain()
+            .expect("the argument holds the chain")
+            .text(),
+            CHAIN
+        );
+        let stdin = || -> std::io::Result<String> { Ok(CHAIN.to_string()) };
+        assert_eq!(
+            Sources {
+                argument: &[],
+                stdin: Some(&stdin),
+                clipboard: None,
+                plan: Some(&unbuilt_plan),
+                refresh: false,
+            }
+            .chain()
+            .expect("the pipe holds the chain")
+            .text(),
+            CHAIN
+        );
+    }
+
+    #[test]
+    fn an_empty_clipboard_builds_the_plan() {
+        let clipboard = || -> ClipboardRead { Ok(None) };
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: Some(&clipboard),
+            plan: Some(&built_plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        assert_eq!(chain.text(), DOCUMENT);
+    }
+
+    #[test]
+    fn a_clipboard_that_could_not_be_opened_builds_the_plan() {
+        // A machine with no clipboard is a machine, not a mistake. The run is
+        // the next input, and it answers.
+        let clipboard = || -> ClipboardRead { Err(ClipboardUnavailable::new(&"no display")) };
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: Some(&clipboard),
+            plan: Some(&built_plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        assert_eq!(chain.text(), DOCUMENT);
+    }
+
+    #[test]
+    fn a_clipboard_that_is_off_builds_the_plan() {
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&built_plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        assert_eq!(chain.text(), DOCUMENT);
+    }
+
+    #[test]
+    fn refresh_builds_the_plan_even_when_the_clipboard_holds_one() {
+        let clipboard = || -> ClipboardRead { panic!("refresh does not read the clipboard") };
+        let argument = arguments(&[CHAIN]);
+        let chain = Sources {
+            argument: &argument,
+            stdin: Some(&unread_stdin),
+            clipboard: Some(&clipboard),
+            plan: Some(&built_plan),
+            refresh: true,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        assert_eq!(chain.text(), DOCUMENT);
+    }
+
+    #[test]
+    fn refresh_with_the_run_turned_off_is_a_refusal() {
+        let clipboard = || -> ClipboardRead { Ok(Some(CHAIN.to_string())) };
+        let err = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: Some(&clipboard),
+            plan: None,
+            refresh: true,
+        }
+        .chain()
+        .expect_err("the run is off and refresh asks for one");
+        assert_eq!(err, InputError::RefreshWithoutClaude);
+        // Two sentences, each a real option. The instruction is a sentence of
+        // its own in the three other messages that carry it, so a clause in
+        // front of it has to close before it starts.
+        assert_eq!(
+            err.to_string(),
+            "wn --refresh builds a plan by running claude, and WN_NO_CLAUDE turns that run off. \
+Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
+        );
+    }
+
+    #[test]
+    fn a_run_that_gives_nothing_back_names_claude() {
+        for given in ["", "   \n\t "] {
+            let plan = || -> PlanBuild { Ok(given.to_string()) };
+            let err = Sources {
+                argument: &[],
+                stdin: None,
+                clipboard: None,
+                plan: Some(&plan),
+                refresh: false,
+            }
+            .chain()
+            .expect_err("the run gave nothing back");
+            assert_eq!(err, InputError::EmptyPlan);
+            assert!(err.to_string().contains("claude"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_run_that_failed_carries_its_reason() {
+        let plan = || -> PlanBuild {
+            Err(BuildError::BadTimeout {
+                value: "10m".to_string(),
+            })
+        };
+        let err = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&plan),
+            refresh: false,
+        }
+        .chain()
+        .expect_err("the run failed");
+        assert_eq!(
+            err,
+            InputError::NoPlan(BuildError::BadTimeout {
+                value: "10m".to_string()
+            })
+        );
+        assert!(err.to_string().contains("WN_PLAN_TIMEOUT"), "{err}");
+    }
+
+    #[test]
+    fn the_run_that_is_off_leaves_the_two_errors_the_tool_printed_before() {
+        let empty = || -> ClipboardRead { Ok(None) };
+        assert_eq!(
+            Sources {
+                argument: &[],
+                stdin: None,
+                clipboard: Some(&empty),
+                plan: None,
+                refresh: false,
+            }
+            .chain()
+            .expect_err("the clipboard holds nothing"),
+            InputError::EmptyClipboard
+        );
+        assert_eq!(
+            Sources {
+                argument: &[],
+                stdin: None,
+                clipboard: None,
+                plan: None,
+                refresh: false,
+            }
+            .chain()
+            .expect_err("no input holds a chain"),
+            InputError::NoChain
+        );
+    }
+
+    #[test]
+    fn a_plan_that_cannot_be_read_is_blamed_on_no_input_at_all() {
+        // A plan `wn` built is a plan `wn` asked for. A message that named the
+        // clipboard would send the reader to look at a clipboard that holds
+        // none of it.
+        let plan = || -> PlanBuild { Ok("#277 an #278".to_string()) };
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        let err = parse_chain(chain.text()).expect_err("the word is not an issue number");
+        let message = chain.blame(err).to_string();
+        assert_eq!(message, "\"an\" is not an issue number");
+        assert!(!message.contains("clipboard"), "{message}");
     }
 
     #[test]

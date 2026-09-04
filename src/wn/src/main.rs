@@ -30,7 +30,16 @@
 //! layout is lossy: a table re-wrapped by whatever pasted it can lose the
 //! second line of an `Order` cell, which costs a step. A document carries no
 //! layout, so `wn` reads it first and claims it on one character.
+//!
+//! The reader who has no plan at all has a repository full of open issues
+//! instead. That plan is one `claude` run away, and `wn` already knows the
+//! repository, so `wn` builds it: the run is the fourth input, after the
+//! argument, standard input, and the clipboard. The plan it gives back goes on
+//! the clipboard, whichever of the five shapes it wrote the plan in, and the
+//! clipboard is the cache the next run reads through the clipboard input that
+//! already stands.
 
+mod build;
 mod chain;
 mod github;
 mod graph;
@@ -45,9 +54,11 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use buildinfo::version_string;
+use chrono::Utc;
 use clap::Parser;
 use colored::Colorize;
 use termwindow::{effective_terminal_width, should_force_colors};
+use thiserror::Error;
 
 use crate::chain::parse_chain;
 use crate::github::Repo;
@@ -146,18 +157,34 @@ and nothing else `wn` reads starts that way. A document that does not parse is a
 a walk on to the next reader.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
-the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
-because a pipe is explicit. Set WN_NO_CLIPBOARD to any value with a character in it to turn the \
-clipboard off, which gives back the error a run with no chain printed before. An empty value \
-leaves the clipboard on, because an exported but empty variable is a common accident.\n\n\
+the system clipboard, then a run of claude that builds a plan. So `wn` alone answers the chain \
+you just copied, and a pipe still wins, because a pipe is explicit. Set WN_NO_CLIPBOARD to any \
+value with a character in it to turn the clipboard off. An empty value leaves the clipboard on, \
+because an exported but empty variable is a common accident.\n\n\
+The run of claude is the last input and the quietest one. It happens only when the other three \
+held nothing, it costs money and about a minute, and it runs the plan-parallel-work skill in the \
+repository of the current directory. The plan it prints goes on the clipboard, whichever shape it \
+wrote the plan in, so a second `wn` a minute later reads it back rather than paying for a second \
+run — and copying anything else throws the plan away, which is what makes a plan cheap to \
+rebuild. CAUTION: THE RUN \
+OVERWRITES WHAT IS ON THE CLIPBOARD. It happens only when every other input was empty, and the \
+tool says so on the line under the answer.\n\n\
+`wn --refresh` runs claude whatever the other inputs hold, and it replaces the clipboard with \
+what comes back. It is the one way past a plan that is still on the clipboard and no longer \
+true. A plan older than a day says its age under the answer, because a plan is a claim about a \
+backlog and a backlog moves.\n\n\
+Set WN_NO_CLAUDE to any value with a character in it to turn the run off, which gives back the \
+error a run with no chain printed before. Set WN_PLAN_TIMEOUT to a number of seconds to wait \
+something other than 600 for it.\n\n\
 The answer names the command that starts the work: `si 278`. This tool ships no `si` — it is a \
 shell function you supply. Set WN_START_COMMAND to name a different one, for example \
 `export WN_START_COMMAND='gh issue develop'`."
 )]
 struct Cli {
     /// The chain, for example "#277 → #278 ∥ #279", or a whole plan of
-    /// parallel work. Read from standard input when it is not given, and from
-    /// the clipboard when neither gives one.
+    /// parallel work. Read from standard input when it is not given, from the
+    /// clipboard when neither gives one, and built by running claude when
+    /// none of the three does.
     #[arg(value_name = "CHAIN")]
     chain: Vec<String>,
 
@@ -166,9 +193,30 @@ struct Cli {
     #[arg(short = 'R', long, value_name = "OWNER/NAME")]
     repo: Option<String>,
 
+    /// Build a new plan by running claude, whatever the other inputs hold,
+    /// and replace the clipboard with it.
+    #[arg(long)]
+    refresh: bool,
+
     /// Write no color.
     #[arg(long)]
     no_color: bool,
+}
+
+/// What the environment said about the two inputs `wn` reaches for on its own.
+///
+/// One struct rather than four arguments, because every one of them is a read
+/// of process-global state and `main` is the one place that reads it. The
+/// functions under it take values, so a test of them touches no environment.
+struct Environment {
+    /// Whether [`input::NO_CLIPBOARD_ENV`] turns the clipboard off.
+    clipboard_off: bool,
+    /// Whether [`build::NO_CLAUDE_ENV`] turns the run of `claude` off.
+    claude_off: bool,
+    /// The value of [`build::TIMEOUT_ENV`].
+    timeout: Option<String>,
+    /// The value of `HOME`, which says where `claude` can stand.
+    home: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -200,10 +248,16 @@ fn main() -> ExitCode {
     );
 
     let start = StartCommand::new(std::env::var(START_COMMAND_ENV).ok().as_deref());
-    let clipboard_off =
-        input::clipboard_is_off(std::env::var(input::NO_CLIPBOARD_ENV).ok().as_deref());
+    let environment = Environment {
+        clipboard_off: input::clipboard_is_off(
+            std::env::var(input::NO_CLIPBOARD_ENV).ok().as_deref(),
+        ),
+        claude_off: build::claude_is_off(std::env::var(build::NO_CLAUDE_ENV).ok().as_deref()),
+        timeout: std::env::var(build::TIMEOUT_ENV).ok(),
+        home: std::env::var("HOME").ok(),
+    };
 
-    match run(&cli, width, &start, clipboard_off) {
+    match run(&cli, width, &start, &environment) {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{} {err:#}", "wn:".red().bold());
@@ -217,6 +271,148 @@ fn main() -> ExitCode {
 /// `clipboard_off` is what [`input::clipboard_is_off`] said about the
 /// environment, which `main` reads. The order of the inputs, and the rule that
 /// only the input that answers is read, both live in [`input::Sources`].
+///
+/// [`read_and_keep`] is the one entrance to the readers, so no path of this
+/// function can answer a text and keep no plan. [`reading_of`] states which
+/// reader takes which text.
+///
+/// The repository is resolved after the text is read, in every path. A text
+/// nobody can read is a mistake the reader made, and reporting it costs no
+/// call to `gh`. A plan whose streams wait for each other is such a mistake,
+/// so that refusal costs no call either.
+fn run(
+    cli: &Cli,
+    width: usize,
+    start: &StartCommand,
+    environment: &Environment,
+) -> Result<ExitCode> {
+    // Each input is a function rather than its text, so an input that a nearer
+    // input already answered for is never touched. This matters for the
+    // clipboard, which is one shared resource of the whole machine.
+    let piped: &dyn Fn() -> std::io::Result<String> = &|| {
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text)?;
+        Ok(text)
+    };
+    let copied: &dyn Fn() -> input::ClipboardRead = &input::system_clipboard;
+    let paths = build::candidate_paths(environment.home.as_deref());
+    // The line stands before the spinner, because a reader who typed `wn` and
+    // waits a minute must know what is happening. It goes to standard error,
+    // so a pipe still gets the answer alone.
+    let announcement = if cli.refresh {
+        "building a new plan with claude…"
+    } else {
+        "no plan to read. Building one with claude…"
+    };
+    let built: &dyn Fn() -> input::PlanBuild = &|| {
+        // The skill plans the repository of the directory `wn` was run in, and
+        // its gather script turns a `gh` or a `git` failure into a warning
+        // rather than a crash. A run in a directory that is in no repository
+        // would therefore spend a minute and real money and would then answer
+        // that the plan holds no work. One cheap call refuses it first.
+        github::repo_of_here().map_err(|said| build::BuildError::NoRepository {
+            said: said.to_string(),
+        })?;
+        eprintln!("{} {announcement}", "wn:".bold());
+        build::plan(
+            &paths,
+            &build::answers_version,
+            environment.timeout.as_deref(),
+        )
+    };
+    let write: &dyn Fn(&str) -> input::ClipboardWrite = &input::write_system_clipboard;
+
+    let chain = input::Sources {
+        argument: &cli.chain,
+        // A terminal on standard input is a run with nothing piped into it.
+        stdin: (!std::io::stdin().is_terminal()).then_some(piped),
+        clipboard: (!environment.clipboard_off).then_some(copied),
+        plan: (!environment.claude_off).then_some(built),
+        refresh: cli.refresh,
+    }
+    .chain()?;
+
+    let (reading, kept) = read_and_keep(&chain, (!environment.clipboard_off).then_some(write));
+    let reading = reading.map_err(|err| chain.blame(err))?;
+    let repo = repo_of(cli)?;
+
+    let (code, age) = match &reading {
+        // Only a plan written as JSON carries the moment it was built, so only
+        // this arm asks for a note about the age of the plan.
+        Reading::Document(document) => (
+            answer_graph(document.graph(), &repo, width, start)?,
+            document.age_note(Utc::now()),
+        ),
+        Reading::Plan(plan) => (answer_plan(plan, &repo, width, start)?, None),
+        Reading::Picture(graph) => (answer_graph(graph, &repo, width, start)?, None),
+        Reading::Chain(numbers) => {
+            let entries = github::fetch(&repo, numbers)?;
+            let report = Report::build(entries);
+            println!(
+                "{}",
+                render::render(&report, &repo.to_string(), width, start)
+            );
+            (exit_status(report.missing().is_empty()), None)
+        }
+    };
+
+    for note in age.into_iter().chain(kept) {
+        println!();
+        println!("{note}");
+    }
+
+    Ok(code)
+}
+
+/// What a text was read as.
+///
+/// One variant for each reader `wn` holds, and each one carries what that
+/// reader gave back. So a text is read once, and [`run`] answers a reading
+/// rather than reaching for a reader of its own.
+///
+/// A plan of streams arrives as one of two of them. A plan whose `Waits for`
+/// cells join one stream to another draws the graph a picture of the same plan
+/// draws, so it arrives as a picture. A plan whose cells join no stream to
+/// another is a plan of streams that stand apart, and it arrives as a plan.
+enum Reading {
+    /// A plan written as JSON.
+    Document(json::Document),
+    /// A plan of streams that stand apart.
+    Plan(plan::Plan),
+    /// A plan drawn as a picture, and a plan of streams that join.
+    Picture(graph::Graph),
+    /// One chain of numbers.
+    Chain(Vec<chain::IssueNumber>),
+}
+
+/// Why no reader could take the text.
+///
+/// One variant for each reader, and each one carries the reason of that reader
+/// unchanged. Every reader already names what it refused — a message about a
+/// stream came out of the plan reader, and a message about a wire came out of
+/// the picture — so this type writes no words of its own.
+///
+/// [`input::Chain::blame`] takes the reason and names the input the text came
+/// out of. It takes any error that is `Send` and `Sync`, which is what this
+/// type is.
+#[derive(Debug, Error)]
+enum ReadError {
+    /// The JSON reader refused the document.
+    #[error(transparent)]
+    Json(#[from] json::JsonError),
+    /// The plan reader refused the page.
+    #[error(transparent)]
+    Plan(#[from] plan::PlanError),
+    /// The picture reader refused the drawing, or the streams of a plan wait
+    /// for each other.
+    #[error(transparent)]
+    Picture(#[from] graph::GraphError),
+    /// The chain reader refused the line.
+    #[error(transparent)]
+    Chain(#[from] chain::ChainError),
+}
+
+/// What `text` is, as the reader that takes it reads it.
 ///
 /// The shape of the text says which reader takes it. A text whose first
 /// character that is not a space is `{` is a plan written as JSON, a page that
@@ -247,64 +443,61 @@ fn main() -> ExitCode {
 /// steps and stand on lines of their own. [`graph::read`] states the whole
 /// rule.
 ///
-/// The repository is resolved after the text is read, in every path. A text
-/// nobody can read is a mistake the reader made, and reporting it costs no
-/// call to `gh`. A plan whose streams wait for each other is such a mistake,
-/// so that refusal costs no call either.
-fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Result<ExitCode> {
-    // Each input is a function rather than its text, so an input that a nearer
-    // input already answered for is never touched. This matters for the
-    // clipboard, which is one shared resource of the whole machine.
-    let piped: &dyn Fn() -> std::io::Result<String> = &|| {
-        let mut text = String::new();
-        std::io::stdin().read_to_string(&mut text)?;
-        Ok(text)
-    };
-    let copied: &dyn Fn() -> input::ClipboardRead = &input::system_clipboard;
-
-    let chain = input::Sources {
-        argument: &cli.chain,
-        // A terminal on standard input is a run with nothing piped into it.
-        stdin: (!std::io::stdin().is_terminal()).then_some(piped),
-        clipboard: (!clipboard_off).then_some(copied),
-    }
-    .chain()?;
-
-    if let Some(graph) = json::read(chain.text()) {
-        let graph = graph.map_err(|err| chain.blame(err))?;
-        let repo = repo_of(cli)?;
-        return answer_graph(&graph, &repo, width, start);
+/// # Errors
+///
+/// Gives the reason of whichever reader took the text, in the variant of
+/// [`ReadError`] that names that reader.
+fn reading_of(text: &str) -> Result<Reading, ReadError> {
+    if let Some(document) = json::read(text) {
+        return Ok(Reading::Document(document?));
     }
 
-    if plan::looks_like_a_plan(chain.text()) {
-        let plan = plan::parse(chain.text()).map_err(|err| chain.blame(err))?;
-        let graph = graph::of_plan(&plan)
-            .transpose()
-            .map_err(|err| chain.blame(err))?;
-        let repo = repo_of(cli)?;
-        return match graph {
-            Some(graph) => answer_graph(&graph, &repo, width, start),
-            None => answer_plan(&plan, &repo, width, start),
-        };
+    if plan::looks_like_a_plan(text) {
+        let plan = plan::parse(text)?;
+        return Ok(match graph::of_plan(&plan).transpose()? {
+            Some(graph) => Reading::Picture(graph),
+            None => Reading::Plan(plan),
+        });
     }
 
-    if let Some(graph) = graph::read(chain.text()) {
-        let graph = graph.map_err(|err| chain.blame(err))?;
-        let repo = repo_of(cli)?;
-        return answer_graph(&graph, &repo, width, start);
+    if let Some(graph) = graph::read(text) {
+        return Ok(Reading::Picture(graph?));
     }
 
-    let numbers = parse_chain(chain.text()).map_err(|err| chain.blame(err))?;
-    let repo = repo_of(cli)?;
+    Ok(Reading::Chain(parse_chain(text)?))
+}
 
-    let entries = github::fetch(&repo, &numbers)?;
-    let report = Report::build(entries);
-    println!(
-        "{}",
-        render::render(&report, &repo.to_string(), width, start)
-    );
-
-    Ok(exit_status(report.missing().is_empty()))
+/// Read the text of `chain`, and keep the plan a run of `claude` built.
+///
+/// One entrance to the readers, and the one place a plan reaches the
+/// clipboard. The reading and the note the run earned come back together, so a
+/// caller cannot reach a reader around the keep. A run of `claude` costs money
+/// and about a minute, and a plan that never reaches the clipboard makes the
+/// next `wn` pay for a second run.
+///
+/// A plan is kept whatever shape it came back in. `claude` answers with the
+/// shape it chose, so a run gives back a JSON document, a Markdown table, a
+/// box-drawn table, a picture, or one chain, and every one of them costs the
+/// same money and the same minute.
+///
+/// The plan is kept before the repository is resolved and before GitHub is
+/// asked. A run that read the plan and then could not reach GitHub still built
+/// a plan, and the reader must not pay for a second one.
+///
+/// [`input::Chain::keep`] holds the two rules of what is kept: nothing is kept
+/// but a plan this run built, and a text no reader could read is never kept.
+///
+/// `write` is `None` when [`input::NO_CLIPBOARD_ENV`] turns the clipboard off.
+fn read_and_keep(
+    chain: &input::Chain,
+    write: Option<&dyn Fn(&str) -> input::ClipboardWrite>,
+) -> (Result<Reading, ReadError>, Option<String>) {
+    let reading = reading_of(chain.text());
+    // Every reading is kept, because `claude` answers with the shape it chose.
+    // A run that came back as a table, as a picture, or as one chain costs the
+    // same money and the same minute as a run that came back as a document.
+    let kept = chain.keep(reading.is_ok(), write);
+    (reading, kept)
 }
 
 /// The repository the command line names, or the repository of the current
@@ -439,5 +632,160 @@ mod tests {
     #[test]
     fn the_space_around_a_command_is_dropped() {
         assert_eq!(StartCommand::new(Some("  start  ")).as_str(), "start");
+    }
+
+    /// A plan of two streams, written as a Markdown table.
+    const TABLE_PLAN: &str = "\
+| Stream | Order |
+| --- | --- |
+| S1 gitscratch | #344 → #330 |
+| S2 wn | #411 |
+";
+
+    /// The report of the `plan-parallel-work` skill, as it arrives on the
+    /// clipboard: a plan of four streams, drawn as a box table.
+    const BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work.txt");
+
+    /// A plan drawn as a picture: two streams that join.
+    const PICTURE: &str = "\
+#242 ──→ #247 ──┐
+                ├──→ #249  (gallery)
+#246 ──→ #248 ──┘
+";
+
+    /// One chain of numbers, which is the shape `wn` read before every other
+    /// one stood.
+    const CHAIN: &str = "#277 → #278";
+
+    /// A plan written as JSON, which is the shape a program hands back.
+    const DOCUMENT: &str = "{\"version\": 1, \"streams\": []}";
+
+    /// A page of prose, which no reader of `wn` can take.
+    const PROSE: &str = "the notes of a meeting, and no plan of work at all";
+
+    /// A writer of the clipboard that must never run.
+    fn unwritten_clipboard(_text: &str) -> input::ClipboardWrite {
+        panic!("the clipboard was written for a text this run did not build")
+    }
+
+    /// What [`read_and_keep`] gives for a plan a run of `claude` built as
+    /// `text`, with every text it wrote to the clipboard.
+    ///
+    /// The write is a function of this test and never the system clipboard.
+    /// The clipboard is one shared resource of the whole machine, and a test
+    /// that writes it destroys what the person at the keyboard copied.
+    fn built_and_kept(text: &str) -> (Result<Reading, ReadError>, Option<String>, Vec<String>) {
+        let written = std::cell::RefCell::new(Vec::new());
+        let write = |kept: &str| -> input::ClipboardWrite {
+            written.borrow_mut().push(kept.to_string());
+            Ok(())
+        };
+        let build = || -> input::PlanBuild { Ok(text.to_string()) };
+        let chain = input::Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&build),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan");
+        let (reading, kept) = read_and_keep(&chain, Some(&write));
+        (reading, kept, written.into_inner())
+    }
+
+    /// The note a run that kept its plan earns names the clipboard and the way
+    /// to build a new plan.
+    fn names_the_clipboard(kept: Option<String>) {
+        let note = kept.expect("a plan that was kept earns a note");
+        assert!(note.contains("clipboard"), "{note}");
+        assert!(note.contains("--refresh"), "{note}");
+    }
+
+    #[test]
+    fn a_plan_written_as_a_table_reaches_the_clipboard() {
+        let (reading, kept, written) = built_and_kept(TABLE_PLAN);
+        assert!(
+            matches!(reading, Ok(Reading::Plan(_))),
+            "a Markdown table of streams is a plan"
+        );
+        assert_eq!(written, vec![TABLE_PLAN.to_string()]);
+        names_the_clipboard(kept);
+    }
+
+    #[test]
+    fn the_box_drawn_table_of_a_plan_reaches_the_clipboard() {
+        let (reading, kept, written) = built_and_kept(BOX_TABLE);
+        assert!(
+            matches!(reading, Ok(Reading::Plan(_))),
+            "a box-drawn table of streams is a plan"
+        );
+        assert_eq!(written, vec![BOX_TABLE.to_string()]);
+        names_the_clipboard(kept);
+    }
+
+    #[test]
+    fn a_plan_drawn_as_a_picture_reaches_the_clipboard() {
+        let (reading, kept, written) = built_and_kept(PICTURE);
+        assert!(
+            matches!(reading, Ok(Reading::Picture(_))),
+            "wires that join steps draw a picture"
+        );
+        assert_eq!(written, vec![PICTURE.to_string()]);
+        names_the_clipboard(kept);
+    }
+
+    #[test]
+    fn a_chain_of_numbers_reaches_the_clipboard() {
+        let (reading, kept, written) = built_and_kept(CHAIN);
+        assert!(
+            matches!(reading, Ok(Reading::Chain(_))),
+            "a line of numbers is one chain"
+        );
+        assert_eq!(written, vec![CHAIN.to_string()]);
+        names_the_clipboard(kept);
+    }
+
+    #[test]
+    fn a_plan_written_as_json_reaches_the_clipboard() {
+        let (reading, kept, written) = built_and_kept(DOCUMENT);
+        assert!(
+            matches!(reading, Ok(Reading::Document(_))),
+            "a text that opens with a brace is a document"
+        );
+        assert_eq!(written, vec![DOCUMENT.to_string()]);
+        names_the_clipboard(kept);
+    }
+
+    #[test]
+    fn a_text_no_reader_can_read_never_reaches_the_clipboard() {
+        // A bad plan on the clipboard is a bad plan every later run reads, and
+        // the reader would have to copy something else to get out of it.
+        let (reading, kept, written) = built_and_kept(PROSE);
+        assert!(reading.is_err(), "prose is no plan and no chain");
+        assert!(written.is_empty(), "{written:?}");
+        assert_eq!(kept, None);
+    }
+
+    #[test]
+    fn a_chain_from_the_clipboard_is_never_written_back() {
+        // The reader already has this text. A write of it would overwrite
+        // their clipboard for nothing.
+        let clipboard = || -> input::ClipboardRead { Ok(Some(CHAIN.to_string())) };
+        let chain = input::Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: Some(&clipboard),
+            plan: None,
+            refresh: false,
+        }
+        .chain()
+        .expect("the clipboard holds the chain");
+        let (reading, kept) = read_and_keep(&chain, Some(&unwritten_clipboard));
+        assert!(
+            matches!(reading, Ok(Reading::Chain(_))),
+            "a line of numbers is one chain"
+        );
+        assert_eq!(kept, None);
     }
 }
