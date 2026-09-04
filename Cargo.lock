@@ -3721,6 +3721,7 @@ dependencies = [
  "clap",
  "gitscratch",
  "termbar",
+ "unicode-width",
 ]
 
 [[package]]

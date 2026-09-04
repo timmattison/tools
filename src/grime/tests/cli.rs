@@ -11,10 +11,11 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use gitscratch::testing::{
-    equal_hunks_unequal_stops_repo, independent_branches_repo, not_a_repository,
-    unrelated_histories_repo, TestRepo,
+    equal_hunks_unequal_stops_repo, independent_branches_repo, multi_byte_names_repo,
+    not_a_repository, unrelated_histories_repo, TestRepo,
 };
 use gitscratch::NoInheritedGitEnvironment;
+use unicode_width::UnicodeWidthStr;
 
 /// Exit code for a replay that hit no conflicts.
 const CLEAN: i32 = 0;
@@ -821,5 +822,140 @@ fn quiet_leaves_the_version_alone_because_it_answers_about_the_tool() {
     assert_eq!(
         quiet, loud,
         "-q silences what grime says about a merge, and the version is not that"
+    );
+}
+
+/// A file name and a branch name that are both outside ASCII, end to end
+/// through the binary.
+///
+/// Three things a developer would notice go wrong here, and the verdict is
+/// asserted as one block because it pins all three together: the header echoes
+/// the branch name back, so `right-右` has to arrive unmangled; the breakdown
+/// names the file, so `日本語.txt` must not come back as the C-quoted octal
+/// escape git hands out by default; and the counts have to be the real ones,
+/// because an escaped name resolves to no file on disk and a conflicted file
+/// that cannot be read is silently floored at one hunk.
+///
+/// The panic check is separate from all of that and cheap to keep: byte-slicing
+/// a path is the classic way this code goes wrong, and a binary that died on a
+/// multi-byte name would otherwise be reported here as a plain assertion
+/// mismatch rather than as the crash it is.
+#[test]
+fn a_conflict_in_a_multi_byte_named_file_on_a_multi_byte_branch_survives_intact() {
+    let repo = multi_byte_names_repo();
+
+    let (code, stdout, stderr) = run(&repo, "left-左", "right-右");
+
+    assert!(
+        !stderr.contains("panicked"),
+        "a multi-byte name must not crash the binary:\n{stderr}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "a conflicting merge must exit {CONFLICTS}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout,
+        r"grime: conflicts - merging right-右 into HEAD
+       3 hunks across 2 files
+
+  readme.md     1 hunk
+  日本語.txt    2 hunks",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// Which terminal column `count` starts in on `line`.
+///
+/// Measured in display width, because that is the only one of the three lengths
+/// Rust will hand you for a path that corresponds to what a reader sees. A
+/// helper that used `len` or `chars().count()` would agree with a renderer that
+/// made the same mistake and call a ragged column aligned.
+///
+/// Read from the *last* place `count` appears, because the count is the last
+/// thing on the row. A name can spell the count itself - `11 hunks.txt` is a
+/// legal file name - and the first occurrence is then the name rather than the
+/// count.
+///
+/// # Panics
+///
+/// Panics when `count` is nowhere on `line`, because a count the renderer never
+/// printed is a failure of the renderer rather than of the search.
+fn count_column(line: &str, count: &str) -> usize {
+    let start = line
+        .rfind(count)
+        .unwrap_or_else(|| panic!("no {count:?} on the row {line:?}"));
+    let (prefix, _) = line.split_at(start);
+
+    prefix.width()
+}
+
+/// The count is the last thing on a breakdown row, so [`count_column`] has to
+/// read the last place the count appears and not the first.
+///
+/// A file name holds every byte but NUL, and `11 hunks.txt` is a name a
+/// repository can carry. A helper that stops at the first occurrence answers 2
+/// for the first row below - the column the *name* starts in - and every
+/// alignment assertion built on it then passes or fails for a reason that has
+/// nothing to do with alignment.
+///
+/// The second row is the ordinary one, and it is here as the control: a helper
+/// that answered the last occurrence of something else would satisfy the first
+/// assertion and break every real caller.
+#[test]
+fn the_count_column_is_read_from_the_last_place_the_count_appears() {
+    assert_eq!(
+        count_column("  11 hunks.txt    11 hunks", "11 hunks"),
+        18,
+        "a name that spells the count is not the count"
+    );
+    assert_eq!(
+        count_column("  readme.md    1 hunk", "1 hunk"),
+        15,
+        "an ordinary row still reads as the column its count starts in"
+    );
+}
+
+/// The breakdown lines, which are everything after the blank line that
+/// separates them from the summary.
+fn breakdown(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .skip_while(|line| !line.is_empty())
+        .skip(1)
+        .collect()
+}
+
+/// The counts have to start in the same terminal column whether or not a name
+/// is multi-byte, which is a different claim from the block above rather than a
+/// restatement of it.
+///
+/// The block is a golden string: someone who broke the padding and re-ran with
+/// the output pasted back in would leave it green. This measures the property
+/// instead, against a name git itself produced - `日本語.txt` is 13 bytes, 7
+/// characters and 10 columns, so padding by either of the two measures Rust
+/// offers for free lands the two counts in different columns, in opposite
+/// directions.
+#[test]
+fn the_per_file_counts_line_up_by_display_width_when_a_name_is_multi_byte() {
+    let repo = multi_byte_names_repo();
+
+    let (_, stdout, stderr) = run(&repo, "left-左", "right-右");
+
+    let lines = breakdown(&stdout);
+    let ascii = lines
+        .iter()
+        .find(|line| line.contains("readme.md"))
+        .unwrap_or_else(|| panic!("no breakdown line for readme.md in:\n{stdout}\n{stderr}"));
+    let wide = lines
+        .iter()
+        .find(|line| line.contains("日本語.txt"))
+        .unwrap_or_else(|| panic!("no breakdown line for 日本語.txt in:\n{stdout}\n{stderr}"));
+
+    assert_eq!(
+        count_column(ascii, "1 hunk"),
+        count_column(wide, "2 hunks"),
+        "the counts must start in the same terminal column:\n{stdout}"
     );
 }
