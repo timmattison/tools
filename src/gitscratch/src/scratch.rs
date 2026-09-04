@@ -483,7 +483,7 @@ impl Drop for Scratch {
 /// stops. A derive puts that value behind the spelling every caller reaches for
 /// first, and behind every generic route to it besides -
 /// `..Default::default()`, `unwrap_or_default`, a collection filled with
-/// `Default::default`. [`Conflicts::from_files`] is compiled only for tests and
+/// `Default::default`. `Conflicts::from_files` is compiled only for tests and
 /// for the `testing` feature on the grounds that a released binary has no
 /// business stating a cost that nothing measured, and a derive beside it makes
 /// that gate a form of words.
@@ -668,7 +668,7 @@ impl Conflicts {
     /// is the primary fact: a conflict is something that happened *to a file*,
     /// and the numbers are summaries of it. The three measures cannot disagree,
     /// and that holds by construction on every route in rather than on the
-    /// replay path alone. [`Conflicts::add_file`] is the only door into the
+    /// replay path alone. `Conflicts::add_file` is the only door into the
     /// set and it floors each entry at one hunk, so hunks are non-zero exactly
     /// when the set is non-empty. Stops track the set for two different
     /// reasons: the replay only ever adds a file from inside a stop, and

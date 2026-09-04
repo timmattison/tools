@@ -87,7 +87,7 @@ pub trait NoInheritedGitEnvironment {
     ///
     /// A caller that wants one of these variables set — or wants it gone
     /// whatever this process holds — does so *after* calling this, and wins.
-    /// That is how [`Git::command`] pins `GIT_EDITOR` and the four identity
+    /// That is how `Git::command` pins `GIT_EDITOR` and the four identity
     /// names on top of a swept command, and takes the two identity dates off it
     /// again: this sweep removes only what the process carries, so a restated
     /// removal is what makes the second guard hold on its own.
