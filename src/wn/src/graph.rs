@@ -2554,4 +2554,51 @@ Notes: Disjoint.";
         assert_eq!(edges(&graph), vec![(96, 91)]);
         assert_eq!(named(&graph), vec![91, 96]);
     }
+
+    #[test]
+    fn a_cell_that_names_the_issue_of_a_pair_reaches_that_pair() {
+        // A `Waits for` cell holds work, and the work of `PR#102 (#94)` is one
+        // piece of work under two numbers. A reader who waits for it writes
+        // the pair or writes the issue of it, and both name that pair. So the
+        // cell reaches the pair, and the plan holds no second node for work
+        // `#102` already does.
+        let graph = graph_of_plan(&table_of(&[("S0", "PR#102 (#94)", ""), ("S1", "#91", "#94")]));
+        assert_eq!(nodes(&graph), vec![91, 102]);
+        assert_eq!(edges(&graph), vec![(102, 91)]);
+    }
+
+    #[test]
+    fn the_pair_of_a_blocker_stands_however_the_streams_stand() {
+        // The work of `#94` reaches the waiting stream as a blocker, and a
+        // blocker is a node like any other. So the node of `#102` carries the
+        // issue that pull request closes whichever stream the plan writes
+        // first. A report that read `#102` in one order and `#102 (#94)` in
+        // the other would answer one plan two ways.
+        let pair = ("S0", "PR#102 (#94)", "");
+        let waiting = ("S1", "#91", "#94");
+        for rows in [[pair, waiting], [waiting, pair]] {
+            let graph = graph_of_plan(&table_of(&rows));
+            assert_eq!(nodes(&graph), vec![91, 102], "with {rows:?}");
+            assert_eq!(edges(&graph), vec![(102, 91)], "with {rows:?}");
+            let work = graph
+                .steps()
+                .iter()
+                .find(|step| step.number().get() == 102)
+                .expect("the plan names the pull request");
+            assert_eq!(
+                work.closes().map(IssueNumber::get),
+                Some(94),
+                "with {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cell_that_names_the_issue_of_the_first_step_of_its_own_stream_draws_no_edge() {
+        // The issue of a pair names the work of that pair, so this cell names
+        // the first step of its own stream. The edge would run from a step to
+        // itself and say nothing, and a plan whose one cell draws no edge is a
+        // plan of streams that stand apart.
+        assert!(of_plan(&plan_of(&table_of(&[("S1", "PR#102 (#94)", "#94")]))).is_none());
+    }
 }
