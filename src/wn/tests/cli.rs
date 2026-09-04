@@ -2178,6 +2178,19 @@ fn a_run_that_could_not_log_in_names_claude_login() {
 }
 
 #[test]
+fn a_reason_written_on_standard_output_reaches_the_reader() {
+    // A program writes a reason on standard error, and a run that mixes the
+    // two pipes writes it on standard output. The reason is the same reason,
+    // so the reader gets it whichever pipe carried it. A refusal that named
+    // `claude` and then stopped at the colon tells the reader nothing.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude("printf 'the model is overloaded\\n'\nexit 1\n");
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(message.contains("the model is overloaded"), "{message}");
+}
+
+#[test]
 fn a_document_the_run_built_that_does_not_parse_names_no_clipboard() {
     // The refusal of the reader of a JSON plan, unchanged. A message that
     // named the clipboard would send the reader to look at a clipboard that
