@@ -18,6 +18,12 @@
 //! and a table cannot: two streams that join. `wn` follows the wires from left
 //! to right and names every issue that is ready, because two streams are two
 //! people who work at the same time.
+//!
+//! A plan says that same thing in words with a `Waits for` column. A cell of
+//! it names the work of other streams that comes before the stream, so a plan
+//! that names one blocker or more is one graph and answers as a picture
+//! answers. An empty cell and an absent column are the common case, and such a
+//! plan answers as it always did.
 
 mod chain;
 mod github;
@@ -119,6 +125,12 @@ A plan drawn as a picture is a third shape of input. Two streams that join are t
 work at the same time, and no chain and no table says that. `wn` follows the wires from left to \
 right and names every issue that is ready to start now. A picture drawn from right to left is \
 refused, because a guess at the order sends somebody to the wrong issue.\n\n\
+A plan says that same thing in words, with a `Waits for` column beside its streams. A cell of it \
+names the work of other streams that comes before the first step of that stream. The cell is a \
+set and not a chain, so `#96, #91` names two blockers and says nothing about which of the two \
+comes first. An empty cell and a plan with no such column are the common case and no error. A \
+plan that names one blocker or more is one graph, so its answer is one row for each step, in the \
+order of the work, and one start line for each issue somebody can begin now.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard. So `wn` alone answers the chain you just copied, and a pipe still wins, \
@@ -199,6 +211,13 @@ fn main() -> ExitCode {
 /// every other text is one chain. So a reader pipes or pastes what they have,
 /// and no flag stands between them and the answer.
 ///
+/// A plan is read twice: once as a set of streams, and once as the graph its
+/// `Waits for` cells draw. A plan that draws one cross-stream edge or more
+/// answers as a picture answers, because one step of one stream then blocks
+/// another stream and a block for each stream says nothing about that. A plan
+/// that draws none keeps the reader of streams, and that is every plan a
+/// reader wrote before the column stood.
+///
 /// The picture is read after the plan and before the chain. A box-drawn table
 /// of a plan reaches its own reader first, and a chain that holds an arrow on
 /// one line reaches the chain reader, because a picture claims a text only
@@ -207,9 +226,10 @@ fn main() -> ExitCode {
 /// steps and stand on lines of their own. [`graph::read`] states the whole
 /// rule.
 ///
-/// The repository is resolved after the text is read, in both paths. A text
+/// The repository is resolved after the text is read, in every path. A text
 /// nobody can read is a mistake the reader made, and reporting it costs no
-/// call to `gh`.
+/// call to `gh`. A plan whose streams wait for each other is such a mistake,
+/// so that refusal costs no call either.
 fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Result<ExitCode> {
     // Each input is a function rather than its text, so an input that a nearer
     // input already answered for is never touched. This matters for the
@@ -231,8 +251,14 @@ fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Re
 
     if plan::looks_like_a_plan(chain.text()) {
         let plan = plan::parse(chain.text()).map_err(|err| chain.blame(err))?;
+        let graph = graph::of_plan(&plan)
+            .transpose()
+            .map_err(|err| chain.blame(err))?;
         let repo = repo_of(cli)?;
-        return answer_plan(&plan, &repo, width, start);
+        return match graph {
+            Some(graph) => answer_graph(&graph, &repo, width, start),
+            None => answer_plan(&plan, &repo, width, start),
+        };
     }
 
     if let Some(graph) = graph::read(chain.text()) {

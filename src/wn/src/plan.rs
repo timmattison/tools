@@ -6,16 +6,28 @@
 //! is written as a record for each stream, or as one table row for each stream.
 //! This module reads both, and it gives back the same streams either way.
 //!
-//! # Why only the `Order` field holds a chain
+//! # Why only two fields hold numbers
 //!
 //! A stream carries prose as well as a chain. The prose is about code, and
 //! prose about code is full of numbers: `main.rs:1566-1650` names two lines of
 //! a file, and `265 lines apart in a 5113-line file` names a distance and a
 //! length. None of them is an issue.
 //!
-//! So this module reads the `Order` field and it reads nothing else. `Stream`,
-//! `Zone`, and `Notes` never give a number to a chain. A reader who writes a
-//! note about line 5113 gets the issues of the plan, and not issue 5113.
+//! So this module reads the `Order` field and the `Waits for` field, and it
+//! reads nothing else. `Stream`, `Zone`, and `Notes` never give a number to a
+//! chain. A reader who writes a note about line 5113 gets the issues of the
+//! plan, and not issue 5113.
+//!
+//! The `Waits for` field is as safe to read as the `Order` field, because a
+//! reader writes steps in it and nothing else: it names the work of other
+//! streams that comes before the first step of this one. The reason a stream
+//! waits is prose, and the prose of a stream belongs in `Notes`.
+//!
+//! The two fields are read the same way and they mean different things.
+//! `Order` is a chain, so the order of its steps is the order of the work.
+//! `Waits for` is a set, so `#96 → #91` and `#96, #91` say the same thing:
+//! both pieces of work come first, and the stream starts when both are
+//! finished.
 //!
 //! # The pair
 //!
@@ -140,6 +152,13 @@ pub struct Stream {
     label: String,
     /// The steps of the stream, in the order the plan writes them.
     steps: Vec<Step>,
+    /// The steps of other streams that come before the first step of this
+    /// one, in the order the plan writes them.
+    ///
+    /// A set and not a chain. The plan names the work that finishes first, and
+    /// the order it names that work in says nothing: a stream that waits for
+    /// two pieces of work waits for both of them.
+    waits_for: Vec<Step>,
 }
 
 impl Stream {
@@ -153,6 +172,16 @@ impl Stream {
     #[must_use]
     pub fn steps(&self) -> &[Step] {
         &self.steps
+    }
+
+    /// The steps that come before the first step of the stream, in the order
+    /// the plan writes them.
+    ///
+    /// [`crate::graph::of_plan`] reads them, because a plan that names what a
+    /// stream waits for is a graph.
+    #[must_use]
+    pub fn waits_for(&self) -> &[Step] {
+        &self.waits_for
     }
 }
 
@@ -176,10 +205,19 @@ impl Plan {
     /// the pull request is the work and the issue is what the work finishes.
     /// A number that stands in two streams arrives once, so one query to
     /// GitHub answers the whole plan.
+    ///
+    /// The chain of a stream comes first and the work it waits for after it.
+    /// The work a stream waits for is sometimes the work of no stream of the
+    /// plan, and it stands here all the same: a reader who is told to wait is
+    /// owed the state of the work they wait for.
     #[must_use]
     pub fn numbers(&self) -> Vec<IssueNumber> {
         let mut numbers: Vec<IssueNumber> = Vec::new();
-        for step in self.streams.iter().flat_map(Stream::steps) {
+        for step in self
+            .streams
+            .iter()
+            .flat_map(|stream| stream.steps.iter().chain(&stream.waits_for))
+        {
             for number in [Some(step.number), step.closes].into_iter().flatten() {
                 if !numbers.contains(&number) {
                     numbers.push(number);
@@ -210,6 +248,15 @@ pub enum PlanError {
     /// The `Order` field of a stream holds no number at all.
     #[error("stream {0:?}: the Order field holds no issue number")]
     NoIssues(Snippet),
+    /// The `Waits for` field of a stream holds text and no number at all.
+    ///
+    /// A field that holds nothing is a stream that waits for nothing, and that
+    /// is the common case. This is the other one: a reader wrote a hyphen or a
+    /// separator, and the field names no work to wait for. One message for
+    /// each field, because a message that named the `Order` field would send
+    /// the reader to a cell that reads.
+    #[error("stream {0:?}: the Waits for field holds no issue number")]
+    NoBlockers(Snippet),
     /// A group stands before the first step of a stream, so it attaches to
     /// nothing.
     #[error("stream {stream:?}: {token:?} stands before any issue number")]
@@ -250,13 +297,17 @@ pub enum PlanError {
     },
 }
 
-/// The four fields a stream of a plan is written with.
+/// The five fields a stream of a plan is written with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
     /// The name of the stream.
     Stream,
-    /// The chain of the stream. The one field this module reads for numbers.
+    /// The chain of the stream. One of the two fields this module reads for
+    /// numbers.
     Order,
+    /// The work of other streams that comes before the first step of this one.
+    /// The other field this module reads for numbers.
+    WaitsFor,
     /// The part of the repository the stream works in.
     Zone,
     /// The prose of the stream.
@@ -264,14 +315,21 @@ enum Key {
 }
 
 impl Key {
-    /// The four keys, to read a line against.
-    const ALL: [Self; 4] = [Self::Stream, Self::Order, Self::Zone, Self::Notes];
+    /// The five keys, to read a line against.
+    const ALL: [Self; 5] = [
+        Self::Stream,
+        Self::Order,
+        Self::WaitsFor,
+        Self::Zone,
+        Self::Notes,
+    ];
 
     /// The word the key is written with.
     fn word(self) -> &'static str {
         match self {
             Self::Stream => "Stream",
             Self::Order => "Order",
+            Self::WaitsFor => "Waits for",
             Self::Zone => "Zone",
             Self::Notes => "Notes",
         }
@@ -304,9 +362,12 @@ pub fn looks_like_a_plan(text: &str) -> bool {
 /// [`PlanError::StreamWithoutOrder`] for one stream that names none while
 /// another one does,
 /// [`PlanError::NoIssues`] for an `Order` field with no number in it,
-/// [`PlanError::NotAnIssue`] for a token of an `Order` field that names no
-/// issue, and [`PlanError::UnattachedPair`] or [`PlanError::SecondPair`] for a
-/// group that attaches to no step or to a step that already holds one.
+/// [`PlanError::NoBlockers`] for a `Waits for` field that holds text and no
+/// number,
+/// [`PlanError::NotAnIssue`] for a token of an `Order` field or a `Waits for`
+/// field that names no issue, and [`PlanError::UnattachedPair`] or
+/// [`PlanError::SecondPair`] for a group that attaches to no step or to a step
+/// that already holds one.
 pub fn parse(text: &str) -> Result<Plan, PlanError> {
     let streams = match find_header(text) {
         Some((body, header)) => table_streams(text, body, &header)?,
@@ -323,14 +384,19 @@ pub fn parse(text: &str) -> Result<Plan, PlanError> {
 
 /// One stream of a plan, as the record form writes it.
 ///
-/// The two fields this module reads. `Zone` and `Notes` open a field and close
-/// the field before it, and the text of them goes nowhere.
+/// The three fields this module reads. `Zone` and `Notes` open a field and
+/// close the field before it, and the text of them goes nowhere.
 #[derive(Default)]
 struct Record {
     /// The text of the `Stream` field, when the record holds one.
     label: Option<String>,
     /// The text of the `Order` field, when the record holds one.
     order: Option<String>,
+    /// The text of the `Waits for` field, when the record holds one.
+    ///
+    /// A record that holds none waits for nothing, which is what a record with
+    /// an empty field says as well.
+    waits: Option<String>,
 }
 
 /// The streams the record form of `text` writes.
@@ -351,7 +417,14 @@ fn record_streams(text: &str) -> Result<Vec<Stream>, PlanError> {
     records
         .iter()
         .enumerate()
-        .map(|(place, record)| stream_of(record.label.as_deref(), place, record.order.as_deref()))
+        .map(|(place, record)| {
+            stream_of(
+                record.label.as_deref(),
+                place,
+                record.order.as_deref(),
+                record.waits.as_deref(),
+            )
+        })
         .collect()
 }
 
@@ -361,6 +434,13 @@ fn record_streams(text: &str) -> Result<Vec<Stream>, PlanError> {
 /// record to go into or that meets a record which already holds one. A plan
 /// written with no `Stream` field at all is therefore still a plan of several
 /// streams.
+///
+/// A `Waits for` field carries the same rule, because a record holds one of
+/// each. A reader writes the two fields in whichever order they like, so a
+/// `Waits for` that stands before the `Order` of its own record must open that
+/// record rather than close the one before it. A field that landed in the
+/// record before it would take the blockers of one stream away and give them
+/// to another, and no message would say so.
 fn records_of(text: &str) -> Vec<Record> {
     let mut records: Vec<Record> = Vec::new();
     let mut open: Option<Record> = None;
@@ -386,6 +466,7 @@ fn records_of(text: &str) -> Vec<Record> {
         let starts_a_record = match key {
             Key::Stream => true,
             Key::Order => open.as_ref().is_none_or(|record| record.order.is_some()),
+            Key::WaitsFor => open.as_ref().is_none_or(|record| record.waits.is_some()),
             Key::Zone | Key::Notes => false,
         };
         if starts_a_record {
@@ -407,6 +488,7 @@ fn close_field(field: &mut Option<(Key, String)>, open: &mut Option<Record>) {
     match key {
         Key::Stream => open.get_or_insert_with(Record::default).label = Some(text),
         Key::Order => open.get_or_insert_with(Record::default).order = Some(text),
+        Key::WaitsFor => open.get_or_insert_with(Record::default).waits = Some(text),
         Key::Zone | Key::Notes => {}
     }
 }
@@ -473,8 +555,10 @@ fn is_rule_mark(c: char) -> bool {
 ///
 /// Gives the line the body of the table starts on, and the cells of the header
 /// itself. A row that names a `Stream` column or an `Order` column is the
-/// header, because those are the two columns this module reads. The `┌─┬─┐` a
-/// box table opens with is a rule and never a header.
+/// header, because a plan names its streams or the work in them. A `Waits for`
+/// column stands beside those two and never alone: a table of blockers and no
+/// work of its own is a table of nothing to start. The `┌─┬─┐` a box table
+/// opens with is a rule and never a header.
 fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
     text.lines().enumerate().find_map(|(place, line)| {
         if is_rule(line) {
@@ -495,15 +579,21 @@ fn find_header(text: &str) -> Option<(usize, Vec<&str>)> {
 /// Gives [`PlanError::NoOrder`] for a table with no `Order` column, the error
 /// of [`table_body`] for the lines under the header, and the errors of
 /// [`stream_of`] for one row of it.
+///
+/// A table with no `Waits for` column names no blocker, and that is a plan of
+/// streams that stand apart. So the column is optional, and its absence reads
+/// as an empty cell in every row.
 fn table_streams(text: &str, body: usize, header: &[&str]) -> Result<Vec<Stream>, PlanError> {
     let order_at = column_of(header, Key::Order).ok_or(PlanError::NoOrder)?;
     let stream_at = column_of(header, Key::Stream);
+    let waits_at = column_of(header, Key::WaitsFor);
     let rows = rows_of(&table_body(text, body, header)?, order_at);
     rows.iter()
         .enumerate()
         .map(|(place, row)| {
             let named = stream_at.and_then(|at| row.get(at)).map(String::as_str);
-            stream_of(named, place, row.get(order_at).map(String::as_str))
+            let waits = waits_at.and_then(|at| row.get(at)).map(String::as_str);
+            stream_of(named, place, row.get(order_at).map(String::as_str), waits)
         })
         .collect()
 }
@@ -768,18 +858,29 @@ fn column_of(header: &[&str], key: Key) -> Option<usize> {
 /// The stream one record or one row writes.
 ///
 /// `named` is the text of the `Stream` field or cell, `place` is the place of
-/// the stream in the plan, and `order` is the text of the `Order` field or
-/// cell.
+/// the stream in the plan, `order` is the text of the `Order` field or cell,
+/// and `waits` is the text of the `Waits for` field or cell.
 ///
 /// # Errors
 ///
 /// Gives [`PlanError::StreamWithoutOrder`] when the stream names no `Order`
-/// field at all, and the errors of [`read_order`] for the chain in one.
-fn stream_of(named: Option<&str>, place: usize, order: Option<&str>) -> Result<Stream, PlanError> {
+/// field at all, the errors of [`read_order`] for the chain in one, and the
+/// errors of [`read_waits`] for the blockers of the stream.
+fn stream_of(
+    named: Option<&str>,
+    place: usize,
+    order: Option<&str>,
+    waits: Option<&str>,
+) -> Result<Stream, PlanError> {
     let label = label_of(named, place);
     let order = order.ok_or_else(|| PlanError::StreamWithoutOrder(Snippet::new(&label)))?;
     let steps = read_order(order, &label)?;
-    Ok(Stream { label, steps })
+    let waits_for = read_waits(waits, &label)?;
+    Ok(Stream {
+        label,
+        steps,
+        waits_for,
+    })
 }
 
 /// The name of the stream at `place`.
@@ -859,6 +960,44 @@ fn read_order(order: &str, label: &str) -> Result<Vec<Step>, PlanError> {
         return Err(PlanError::NoIssues(Snippet::new(label)));
     }
     Ok(readings.into_iter().map(|reading| reading.step).collect())
+}
+
+/// Read one `Waits for` field into the steps the stream waits for.
+///
+/// `waits` is the text of the field or the cell, and `label` names the stream
+/// every message repeats back.
+///
+/// A stream that waits for nothing writes an empty cell, and a plan whose
+/// streams all stand apart writes no column at all. Both are the common case
+/// and neither is an error, so a text of spaces alone and an absent text each
+/// give no steps. A drawn cell is padded to the width of its column, which is
+/// why the spaces are asked about.
+///
+/// Every other text is steps, and [`read_order`] is what reads a step. The
+/// order the steps arrive in says nothing: `Order` is a chain and `Waits for`
+/// is a set, so `#96 → #91` and `#96, #91` name the same two blockers and the
+/// stream starts when both are finished.
+///
+/// # Errors
+///
+/// Gives the errors of [`read_order`], so a cell of prose earns
+/// [`PlanError::NotAnIssue`] with the name of the stream and the word that
+/// names no issue.
+///
+/// The one error of [`read_order`] that names a field is
+/// [`PlanError::NoIssues`], and it names the `Order` field. A cell here that
+/// holds text and no number earns [`PlanError::NoBlockers`] in its place,
+/// which names this field: a reader of a Markdown table writes a hyphen for a
+/// cell that holds nothing, and a message about the `Order` field would send
+/// that reader to a cell that reads.
+fn read_waits(waits: Option<&str>, label: &str) -> Result<Vec<Step>, PlanError> {
+    match waits.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => read_order(text, label).map_err(|error| match error {
+            PlanError::NoIssues(stream) => PlanError::NoBlockers(stream),
+            other => other,
+        }),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// The one step `text` writes, or `None` when it writes none or more than one.
@@ -1250,6 +1389,71 @@ Notes: Independent of everything above.";
     /// each row of this table ends.
     const NARROW_BOX_TABLE: &str = include_str!("../fixtures/plan-parallel-work-narrow-order.txt");
 
+    /// A plan of four streams, three of which name what they wait for.
+    ///
+    /// The `Waits for` cell of S1 holds one step and the cell of S2 holds two,
+    /// written with the comma a reader types. S0 and S3 wait for nothing, and
+    /// an empty cell is how a plan writes that.
+    const WAITS_TABLE: &str = "\
+| Stream | Order | Waits for | Zone | Notes |
+|--------|-------|-----------|------|-------|
+| S0 — daemon leak | #96 | | crates/tsm (serve.rs) | Do first, solo. |
+| S1 — lifecycle | #91 | #96 | crates/tsm (kill.rs) | |
+| S2 — install | #89 → #94 | #96, #91 | crates/tsm (shell-init) | Same hotspot as S1. |
+| S3 — keymap | #86 | | packages/web | Disjoint. |";
+
+    /// The same four streams, as a record for each one.
+    ///
+    /// S0 writes an empty `Waits for` field and S3 writes none at all, because
+    /// a stream that waits for nothing is written both ways and the two say
+    /// the same thing.
+    const WAITS_RECORDS: &str = "\
+Stream: S0 — daemon leak
+Order: #96
+Waits for:
+Zone: crates/tsm (serve.rs)
+Notes: Do first, solo.
+────────────────────────────────────────
+Stream: S1 — lifecycle
+Order: #91
+Waits for: #96
+Zone: crates/tsm (kill.rs)
+────────────────────────────────────────
+Stream: S2 — install
+Order: #89 → #94
+Waits for: #96, #91
+Zone: crates/tsm (shell-init)
+Notes: Same hotspot as S1.
+────────────────────────────────────────
+Stream: S3 — keymap
+Order: #86
+Zone: packages/web
+Notes: Disjoint.";
+
+    /// The same four streams, drawn as a box table.
+    ///
+    /// The form a reader copies out of a terminal. The `Waits for` cells of S0
+    /// and S3 are a run of spaces here, because a drawn cell is padded to the
+    /// width of its column.
+    const WAITS_BOX_TABLE: &str = "\
+┌──────────────────┬───────────┬───────────┬─────────────────────────┬─────────────────────┐
+│ Stream           │ Order     │ Waits for │ Zone                    │ Notes               │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S0 — daemon leak │ #96       │           │ crates/tsm (serve.rs)   │ Do first, solo.     │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S1 — lifecycle   │ #91       │ #96       │ crates/tsm (kill.rs)    │                     │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S2 — install     │ #89 → #94 │ #96, #91  │ crates/tsm (shell-init) │ Same hotspot as S1. │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S3 — keymap      │ #86       │           │ packages/web            │ Disjoint.           │
+└──────────────────┴───────────┴───────────┴─────────────────────────┴─────────────────────┘";
+
+    /// The label of the one stream of [`table_that_waits_for`].
+    ///
+    /// Every message about that stream repeats it back, so the tests that read
+    /// a message name the stream from here.
+    const ONE_STREAM_LABEL: &str = "S1";
+
     /// The numbers of one step: the work, and the issue the work closes.
     type StepNumbers = (u64, Option<u64>);
 
@@ -1280,6 +1484,47 @@ Notes: Independent of everything above.";
                 .get(index)
                 .expect("the plan holds this stream"),
         )
+    }
+
+    /// The numbers of every step `stream` waits for, the pair second.
+    fn waits_of(stream: &Stream) -> Vec<StepNumbers> {
+        stream
+            .waits_for()
+            .iter()
+            .map(|step| (step.number().get(), step.closes().map(IssueNumber::get)))
+            .collect()
+    }
+
+    /// The numbers of every step the stream at `index` waits for.
+    fn waits_at(plan: &Plan, index: usize) -> Vec<StepNumbers> {
+        waits_of(
+            plan.streams()
+                .get(index)
+                .expect("the plan holds this stream"),
+        )
+    }
+
+    /// A table of one stream, whose `Waits for` cell holds `waits`.
+    ///
+    /// One row of three columns, so a test about that one cell writes the cell
+    /// and nothing else. The stream is named [`ONE_STREAM_LABEL`], because a
+    /// message about the cell repeats the name of the stream back.
+    fn table_that_waits_for(waits: &str) -> String {
+        format!(
+            "| Stream | Order | Waits for |\n\
+             | --- | --- | --- |\n\
+             | {ONE_STREAM_LABEL} | #1 | {waits} |"
+        )
+    }
+
+    /// A record for one stream, whose `Waits for` field is written with `key`
+    /// and holds `waits`.
+    ///
+    /// The key is an argument because a reader writes it in whatever case they
+    /// type, and one record read twice is what says the two spellings are one
+    /// field.
+    fn record_that_waits_for(key: &str, waits: &str) -> String {
+        format!("Stream: {ONE_STREAM_LABEL}\nOrder: #1\n{key}: {waits}")
     }
 
     /// [`BOX_TABLE`], drawn with `+---+` and `|`.
@@ -2030,5 +2275,220 @@ Notes: Independent of everything above.";
         let cut: String = label.chars().take(crate::chain::SNIPPET_CHARS).collect();
         assert!(!message.contains(&label), "{message}");
         assert!(message.contains(&format!("\"{cut}…\"")), "{message}");
+    }
+
+    #[test]
+    fn a_waits_for_column_gives_the_steps_each_stream_waits_for() {
+        // The fifth column of a plan. S1 waits for the stream that stands
+        // alone, and S2 waits for both of the streams above it.
+        let plan = plan_of(WAITS_TABLE);
+        assert_eq!(
+            shape(&plan),
+            vec![
+                ("S0 — daemon leak", vec![(96, None)]),
+                ("S1 — lifecycle", vec![(91, None)]),
+                ("S2 — install", vec![(89, None), (94, None)]),
+                ("S3 — keymap", vec![(86, None)]),
+            ]
+        );
+        assert_eq!(waits_at(&plan, 1), vec![(96, None)]);
+        assert_eq!(waits_at(&plan, 2), vec![(96, None), (91, None)]);
+    }
+
+    #[test]
+    fn a_box_drawn_waits_for_column_gives_the_same_waits() {
+        // How a table is drawn says nothing about the plan in it, so the box
+        // form of these four streams is the Markdown form of them.
+        assert_eq!(plan_of(WAITS_BOX_TABLE), plan_of(WAITS_TABLE));
+        assert_eq!(
+            waits_at(&plan_of(WAITS_BOX_TABLE), 2),
+            vec![(96, None), (91, None)]
+        );
+    }
+
+    #[test]
+    fn an_arrow_in_a_waits_for_cell_writes_a_set_and_not_a_chain() {
+        // `Order` is a chain and `Waits for` is a set. So an arrow between two
+        // blockers names no order between them: the stream waits for both, and
+        // it starts when both are finished.
+        assert_eq!(
+            waits_at(&plan_of(&table_that_waits_for("#96 → #91")), 0),
+            vec![(96, None), (91, None)]
+        );
+        assert_eq!(
+            plan_of(&table_that_waits_for("#96 → #91")),
+            plan_of(&table_that_waits_for("#96, #91")),
+            "the two separators write the same set of blockers"
+        );
+    }
+
+    #[test]
+    fn a_pair_in_a_waits_for_cell_is_one_step() {
+        // A stream waits for a piece of work, and one piece of work is
+        // sometimes a pull request and the issue that pull request closes.
+        // Both spellings of the pair read here as they read in an `Order`
+        // cell, because one function reads both cells.
+        assert_eq!(
+            waits_at(&plan_of(&table_that_waits_for("PR#344 (#341)")), 0),
+            vec![(344, Some(341))]
+        );
+        assert_eq!(
+            waits_at(&plan_of(&table_that_waits_for("#4 (in flight, PR #15)")), 0),
+            vec![(15, Some(4))]
+        );
+    }
+
+    #[test]
+    fn an_empty_waits_for_cell_gives_a_stream_that_waits_for_nothing() {
+        // The common case, and no error. A plan of parallel work is a plan of
+        // streams that stand apart, and most of them wait for nothing at all.
+        assert!(waits_at(&plan_of(&table_that_waits_for("")), 0).is_empty());
+        assert!(
+            waits_at(&plan_of(&table_that_waits_for("   ")), 0).is_empty(),
+            "a drawn cell is padded to the width of its column"
+        );
+    }
+
+    #[test]
+    fn a_plan_with_no_waits_for_column_reads_the_way_it_always_did() {
+        // The fifth column is new, and every plan written before it stands.
+        // The report of the skill names no blocker at all, so it holds the
+        // four streams it always held and each one waits for nothing.
+        let plan = plan_of(BOX_TABLE);
+        assert_eq!(
+            shape(&plan),
+            vec![
+                ("A — visualizers", vec![(15, Some(4)), (7, None)]),
+                ("B — audio engine", vec![(11, None), (5, None), (13, None)]),
+                ("C — MIDI array", vec![(9, None), (10, None), (12, None)]),
+                ("D — manifest", vec![(6, None)]),
+            ]
+        );
+        for form in [BOX_TABLE, TABLE, RECORDS, NARROW_BOX_TABLE] {
+            assert!(
+                plan_of(form)
+                    .streams()
+                    .iter()
+                    .all(|stream| waits_of(stream).is_empty()),
+                "no stream of this plan names a blocker"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_row_that_carries_no_waits_for_cell() {
+        // A header of five columns and a row of four put every cell after the
+        // missing one under the wrong column, so the `Zone` of the row would
+        // be the work it waits for. The width of the row answers first, and it
+        // repeats the row back.
+        let row = "| S1 | #1 | src/a | fine |";
+        assert_eq!(
+            parse(&format!(
+                "| Stream | Order | Waits for | Zone | Notes |\n\
+                 | --- | --- | --- | --- | --- |\n\
+                 {row}"
+            )),
+            Err(PlanError::RowWidth {
+                cells: 4,
+                header: 5,
+                line: Snippet::new(row),
+            })
+        );
+    }
+
+    #[test]
+    fn the_numbers_of_a_plan_hold_a_blocker_that_stands_in_no_order_field() {
+        // One query answers the whole plan, so every number of the plan is in
+        // this list. A blocker is sometimes the work of no stream of the plan,
+        // and a reader that walks the chains alone leaves that number out. The
+        // answer then says nothing about the work a stream waits for.
+        assert_eq!(
+            numbers_of(&plan_of(&table_that_waits_for("#96"))),
+            vec![1, 96]
+        );
+        assert_eq!(
+            numbers_of(&plan_of(&table_that_waits_for("PR#344 (#341)"))),
+            vec![1, 344, 341],
+            "the number of a step comes before the number the step closes"
+        );
+        assert_eq!(
+            numbers_of(&plan_of(WAITS_TABLE)),
+            vec![96, 91, 89, 94, 86],
+            "a blocker that is the work of another stream arrives once"
+        );
+    }
+
+    #[test]
+    fn the_record_form_gives_the_waits_of_the_table_form() {
+        // The record form writes the column as a field, and the two forms give
+        // one plan. A `Waits for` field opens no stream of its own, the way a
+        // `Zone` field opens none: the record it stands in already has a name
+        // and a chain.
+        let plan = plan_of(WAITS_RECORDS);
+        assert_eq!(plan.streams().len(), 4);
+        assert_eq!(waits_at(&plan, 1), vec![(96, None)]);
+        assert_eq!(waits_at(&plan, 2), vec![(96, None), (91, None)]);
+        assert_eq!(plan, plan_of(WAITS_TABLE));
+    }
+
+    #[test]
+    fn a_record_with_no_waits_for_field_waits_for_nothing() {
+        // An absent field and an empty one say the same thing, the way an
+        // absent column and an empty cell do.
+        assert!(waits_at(&plan_of("Stream: S1\nOrder: #1"), 0).is_empty());
+        assert!(waits_at(&plan_of(&record_that_waits_for("Waits for", "")), 0).is_empty());
+    }
+
+    #[test]
+    fn a_waits_for_key_is_read_whatever_its_case() {
+        // The four keys of a record are read with the case ignored, and the
+        // fifth one is read the same way.
+        let plan = plan_of(&record_that_waits_for("Waits for", "#96"));
+        assert_eq!(waits_at(&plan, 0), vec![(96, None)]);
+        assert_eq!(plan, plan_of(&record_that_waits_for("waits for", "#96")));
+        assert_eq!(plan, plan_of(&record_that_waits_for("WAITS FOR", "#96")));
+    }
+
+    #[test]
+    fn a_waits_for_field_before_its_own_order_stays_with_that_record() {
+        // A record form with no `Stream` field cuts one record from the next
+        // at the `Order` field, and a `Waits for` field that stands before the
+        // `Order` of its own record must go into that record all the same. A
+        // field that landed in the record before it would take the blockers of
+        // one stream away and give them to another, and no message would say
+        // so.
+        let plan = plan_of("Waits for: #2\nOrder: #1\nWaits for: #4\nOrder: #3");
+        assert_eq!(plan.streams().len(), 2);
+        assert_eq!(waits_at(&plan, 0), vec![(2, None)]);
+        assert_eq!(waits_at(&plan, 1), vec![(4, None)]);
+    }
+
+    #[test]
+    fn a_waits_for_cell_of_no_number_at_all_names_the_waits_for_field() {
+        // A reader of a Markdown table writes a hyphen for a cell that holds
+        // nothing. The cell names no work to wait for, so the plan is refused,
+        // and the message must name the cell that is wrong. A message that
+        // named the `Order` field would send the reader to a cell that reads.
+        let message = parse(&table_that_waits_for("-"))
+            .expect_err("a cell of no number at all is a refusal")
+            .to_string();
+        assert!(message.contains("Waits for"), "{message}");
+        assert!(!message.contains("Order"), "{message}");
+        assert!(message.contains(ONE_STREAM_LABEL), "{message}");
+    }
+
+    #[test]
+    fn refuses_a_waits_for_cell_that_names_no_issue() {
+        // The reason a stream waits is prose, and the prose of a stream
+        // belongs in `Notes`. So a cell of prose here names no work to wait
+        // for, and it earns the message a bad `Order` cell earns: the stream,
+        // and the word.
+        assert_eq!(
+            parse(&table_that_waits_for("after the leak lands")),
+            Err(PlanError::NotAnIssue {
+                stream: Snippet::new(ONE_STREAM_LABEL),
+                token: Snippet::new("after"),
+            })
+        );
     }
 }

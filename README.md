@@ -1093,12 +1093,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     and wrong — a label wraps as readily as a chain. The header names the column count, so a row
     that splits into another one holds a bar nobody escaped, and `wn` prints that row and exits
     `2` rather than reading its `Notes` as a chain.
-  - Only the `Order` field is a chain. `Stream`, `Zone`, and `Notes` are never read for numbers,
-    and that rule is what makes the feature work: `Notes` is prose about code, and prose about
-    code is full of numbers. `main.rs:1566-1650` is not `#1566` and `#1650`, and `265 lines apart
-    in a 5113-line file` is not `#265` — though `#265` is a real issue of this repository, and in
-    one plan it is the first step of another stream of that same plan. The digits alone cannot
-    part a count of lines from the number of an issue. Only the field they stand in can.
+  - Two fields are read for numbers: `Order`, which is a chain, and `Waits for`, which is a set
+    and stands below. `Stream`, `Zone`, and `Notes` are never read for numbers, and that rule is
+    what makes the feature work: `Notes` is prose about code, and prose about code is full of
+    numbers. `main.rs:1566-1650` is not `#1566` and `#1650`, and `265 lines apart in a 5113-line
+    file` is not `#265` — though `#265` is a real issue of this repository, and in one plan it is
+    the first step of another stream of that same plan. The digits alone cannot part a count of
+    lines from the number of an issue. Only the field they stand in can.
   - A pull request and the issue it closes are one step, not two. `PR#344 (#341)` gets one row,
     `#344 (#341)`, and the state of that row is the state of the pull request, because the pull
     request is the work. `wn` asks GitHub about both numbers, and a pair whose two states disagree
@@ -1121,6 +1122,50 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     streams is asked about once and reported in both. A stream that names a number the repository
     does not have keeps its row and its note, the other streams still answer, and the run exits
     `1`.
+  - A fifth column carries the one edge a table of streams could not: one stream that waits for a
+    step of another. `Waits for` stands beside `Stream`, `Order`, `Zone`, and `Notes`, it is
+    matched with the case ignored as those four are, and the record form writes it as the field
+    `Waits for:`.
+
+    ```
+    | Stream | Order | Waits for | Zone | Notes |
+    |--------|-------|-----------|------|-------|
+    | S0 — daemon leak | #96 | | crates/tsm (serve.rs) | Do first, solo. |
+    | S1 — lifecycle | #91 | #96 | crates/tsm (kill.rs) | |
+    | S2 — install | #89 → #94 | #96, #91 | crates/tsm (shell-init) | Same hotspot as S1. |
+    | S3 — keymap | #86 | | packages/web | Disjoint. |
+    ```
+
+    A plan that wrote that edge in a callout above the table instead sends two of three readers at
+    work that is blocked, and the answer is wrong in the one direction that costs a morning. The
+    plan did not lie. The table carried no edge.
+  - The cell holds steps, in the shape `Order` holds them: `#96` is one step, `#96, #91` is two,
+    and `PR#344 (#341)` is one step that holds a pair. A separator inside the cell says nothing
+    about order. `Order` is a chain and `Waits for` is a set, so `#96 → #91` and `#96, #91` mean
+    the same thing — both numbers must finish before the stream starts. Reading the cell as a
+    chain would claim an edge from `#96` to `#91` that the plan never wrote.
+  - Every step of the cell comes before the first step of the stream, and before that step alone,
+    because the steps inside the stream keep the edges `Order` already gives them. The plan above
+    thus draws `#96 → #91`, `#96 → #89`, `#91 → #89`, and `#89 → #94`. That is a graph, and it is
+    the graph a picture draws, so a plan that carries such an edge answers the way a picture
+    answers and earns no second report: one row for each step in a topological order, `→` on every
+    ready step and `·` on a blocked one, `waits for #96, #91` on the row of `#89`, and one start
+    line for each issue somebody can begin now. The plan above names `#96` and `#86` while every
+    issue is open, and it names `#91` and `#86` once `#96` is closed.
+  - An empty cell is a stream nothing outside it blocks, and it is the common case. An absent
+    column is a plan with no cross-stream edge at all, which is every plan written before this
+    landed: such a plan still answers as one block for each stream under one summary, and nothing
+    about it changed. A cell that names the first step of its own stream draws no edge either,
+    because such an edge runs from a step to itself and says nothing.
+  - Three things are refused. A cell whose text is not a step earns the message a bad `Order` cell
+    earns, naming the stream and the text: `after the leak lands` names no issue, and the reason a
+    stream waits is prose that belongs in `Notes`. An order that returns to itself is a cycle, so
+    `wn` names the numbers that hold the knot and exits `2` without asking GitHub anything. Two
+    streams that wait for each other are the common shape of one, and a cell that names a later
+    step of its own stream is another: that cell says the step comes before the first step of the
+    stream while `Order` says the opposite, and one half of a contradiction is no answer. A
+    blocker the repository does not have keeps its row and its note, and the run exits `1`,
+    because a blocker that is a typo is a stream that waits forever.
   - A plan drawn as a picture is a third shape of input, and it says the one thing that no chain
     and no table says: two streams that join.
 

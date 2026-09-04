@@ -231,6 +231,146 @@ const PICTURE_ANSWER: &str = concat!(
     "Start #246 next with 'si 246'\n",
 );
 
+/// A plan of four streams whose `Waits for` cells join three of them.
+///
+/// The paste of issue #436. `S0` comes before `S1`, and both of them come
+/// before `S2`. `S3` waits for nothing, and an empty cell is how a plan writes
+/// that. So the plan draws the edges `#96 → #91`, `#96 → #89`, `#91 → #89`,
+/// and `#89 → #94`, and the last of those is the chain of `S2` itself.
+const WAITS_PLAN: &str = "\
+| Stream | Order | Waits for | Zone | Notes |
+|--------|-------|-----------|------|-------|
+| S0 — daemon leak | #96 | | crates/tsm (serve.rs) | Do first, solo. |
+| S1 — lifecycle | #91 | #96 | crates/tsm (kill.rs) | |
+| S2 — install | #89 → #94 | #96, #91 | crates/tsm (shell-init) | Same hotspot as S1. |
+| S3 — keymap | #86 | | packages/web | Disjoint. |
+";
+
+/// What GitHub says about every number of [`WAITS_PLAN`] when each of them is
+/// open.
+const WAITS_ISSUES: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"OPEN","stateReason":null},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"OPEN","stateReason":null},
+"i89":{"__typename":"Issue","number":89,"title":"The install","state":"OPEN","stateReason":null},
+"i94":{"__typename":"Issue","number":94,"title":"The shell init","state":"OPEN","stateReason":null},
+"i86":{"__typename":"Issue","number":86,"title":"The keymap","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// The answer [`WAITS_PLAN`] earns while every issue of it is open.
+///
+/// One row for each step, in the order of the work rather than the order of
+/// the plan, and one start line for each of the two streams that are ready.
+/// `#91`, `#89`, and `#94` each wait for work that is open, so no line of the
+/// answer names them.
+const WAITS_ANSWER: &str = concat!(
+    "→ #96  The daemon leak\n",
+    "· #91  The lifecycle    waits for #96\n",
+    "· #89  The install      waits for #96, #91\n",
+    "· #94  The shell init   waits for #89\n",
+    "→ #86  The keymap\n",
+    "\n",
+    "Start #96 next with 'si 96'\n",
+    "Start #86 next with 'si 86'\n",
+);
+
+/// The same four streams as [`WAITS_PLAN`], with no `Waits for` column at all.
+///
+/// The plan every reader wrote before that column stood. The streams stand
+/// apart, so the answer is one block for each of them under one summary.
+const WAITS_PLAN_WITHOUT_THE_COLUMN: &str = "\
+| Stream | Order | Zone | Notes |
+|--------|-------|------|-------|
+| S0 — daemon leak | #96 | crates/tsm (serve.rs) | Do first, solo. |
+| S1 — lifecycle | #91 | crates/tsm (kill.rs) | |
+| S2 — install | #89 → #94 | crates/tsm (shell-init) | Same hotspot as S1. |
+| S3 — keymap | #86 | packages/web | Disjoint. |
+";
+
+/// The answer [`WAITS_PLAN_WITHOUT_THE_COLUMN`] earns: one block for each of
+/// the four streams, and one summary that names an issue to start in each of
+/// them.
+const WAITS_BLOCK_ANSWER: &str = concat!(
+    "S0 — daemon leak\n",
+    "  → #96  The daemon leak\n",
+    "\n",
+    "S1 — lifecycle\n",
+    "  → #91  The lifecycle\n",
+    "\n",
+    "S2 — install\n",
+    "  → #89  The install\n",
+    "  · #94  The shell init\n",
+    "\n",
+    "S3 — keymap\n",
+    "  → #86  The keymap\n",
+    "\n",
+    "Take one from each stream:\n",
+    "  S0 — daemon leak  → #96  si 96\n",
+    "  S1 — lifecycle    → #91  si 91\n",
+    "  S2 — install      → #89  si 89\n",
+    "  S3 — keymap       → #86  si 86\n",
+);
+
+/// What GitHub says about the numbers of [`WAITS_PLAN`] once `#96` is done.
+///
+/// The one step of `S0` is finished, so `S1` is free. `S2` waits for `S1` as
+/// well, so it is not.
+const WAITS_ISSUES_ONE_DONE: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"CLOSED","stateReason":"COMPLETED"},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"OPEN","stateReason":null},
+"i89":{"__typename":"Issue","number":89,"title":"The install","state":"OPEN","stateReason":null},
+"i94":{"__typename":"Issue","number":94,"title":"The shell init","state":"OPEN","stateReason":null},
+"i86":{"__typename":"Issue","number":86,"title":"The keymap","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// What GitHub says about the numbers of [`WAITS_PLAN`] once `#96` and `#91`
+/// are done.
+///
+/// Both blockers of `S2` are finished, so its first step is free at last.
+const WAITS_ISSUES_TWO_DONE: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"CLOSED","stateReason":"COMPLETED"},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"CLOSED","stateReason":"COMPLETED"},
+"i89":{"__typename":"Issue","number":89,"title":"The install","state":"OPEN","stateReason":null},
+"i94":{"__typename":"Issue","number":94,"title":"The shell init","state":"OPEN","stateReason":null},
+"i86":{"__typename":"Issue","number":86,"title":"The keymap","state":"OPEN","stateReason":null}
+}}}"#;
+
+/// A plan whose `Waits for` cell names a number the repository does not have.
+///
+/// `#999` is the typo. It stands in no `Order` field, so the rows are the only
+/// place that can say the repository does not have it.
+const WAITS_PLAN_WITH_A_TYPO: &str = "\
+| Stream | Order | Waits for |
+|--------|-------|-----------|
+| S0 — daemon leak | #96 | |
+| S1 — lifecycle | #91 | #96, #999 |
+";
+
+/// What GitHub says about [`WAITS_PLAN_WITH_A_TYPO`]: two issues, and a
+/// refusal for the number nobody has.
+const WAITS_ISSUES_WITH_A_TYPO: &str = r#"{"data":{"repository":{
+"i96":{"__typename":"Issue","number":96,"title":"The daemon leak","state":"OPEN","stateReason":null},
+"i91":{"__typename":"Issue","number":91,"title":"The lifecycle","state":"OPEN","stateReason":null},
+"i999":null
+}},"errors":[{"type":"NOT_FOUND","path":["repository","i999"],"message":"Could not resolve to an issue or pull request with the number of 999."}]}"#;
+
+/// A plan of two streams that wait for each other.
+///
+/// Neither of the two starts, so the plan names no work at all. It carries the
+/// two fields a cycle is made of and no others, because a `Zone` and a `Notes`
+/// say nothing about the order.
+const WAITS_CYCLE: &str = "\
+| Stream | Order | Waits for |
+|--------|-------|-----------|
+| S1 — lifecycle | #91 | #96 |
+| S0 — daemon leak | #96 | #91 |
+";
+
+/// The word a message about a drawing holds.
+///
+/// A reader who wrote a table drew nothing, so the refusal of a plan must hold
+/// none of it. One graph carries both forms, so one message answers for both.
+const PICTURE_WORD: &str = "picture";
+
 /// The line that opens the summary of a plan, and thus the mark of an answer
 /// the plan reader wrote.
 const SUMMARY_HEADING: &str = "Take one from each stream:";
@@ -238,6 +378,12 @@ const SUMMARY_HEADING: &str = "Take one from each stream:";
 /// The words that open the last column of a row of a picture, and thus the
 /// mark of an answer the picture reader wrote.
 const WAITS_FOR: &str = "waits for ";
+
+/// The file the fake `gh` records the arguments of every call in.
+///
+/// It appears on the first call, so its absence is a run that never reached
+/// `gh` at all.
+const ARGS_FILE: &str = "args";
 
 /// A fake `gh` in a temporary directory of its own.
 struct FakeGh {
@@ -256,16 +402,16 @@ impl FakeGh {
     /// number the repository does not have produces.
     fn with_status(body: &str, status: i32) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let args_file = dir.path().join("args");
+        let args_file = dir.path().join(ARGS_FILE);
         let script = format!(
             r#"#!/bin/sh
+for arg in "$@"; do
+    printf '%s\n' "$arg" >> '{args}'
+done
 if [ "$1" = "repo" ]; then
     printf '%s\n' '{REPO}'
     exit 0
 fi
-for arg in "$@"; do
-    printf '%s\n' "$arg" >> '{args}'
-done
 cat <<'WN_FAKE_GH_BODY'
 {body}
 WN_FAKE_GH_BODY
@@ -283,9 +429,18 @@ exit {status}
         self.dir.path()
     }
 
-    /// The arguments of the last GraphQL call, one to a line.
+    /// The arguments of every call, one to a line.
     fn recorded_args(&self) -> String {
-        std::fs::read_to_string(self.dir.path().join("args")).unwrap()
+        std::fs::read_to_string(self.dir.path().join(ARGS_FILE)).unwrap()
+    }
+
+    /// Whether the tool asked `gh` nothing at all.
+    ///
+    /// The script writes the file on its first call of any kind, the call that
+    /// names the repository included, so a file that never appeared is a run
+    /// that never reached `gh`.
+    fn asked_nothing(&self) -> bool {
+        !self.dir.path().join(ARGS_FILE).exists()
     }
 }
 
@@ -1179,7 +1334,7 @@ fn refuses_a_picture_whose_wires_return_to_a_step_before_them() {
     );
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
     assert!(
-        stderr(&output).contains("the wires return to #1 and #2"),
+        stderr(&output).contains("the order returns to #1 and #2"),
         "the error names the numbers of the cycle, in {}",
         stderr(&output)
     );
@@ -1315,4 +1470,168 @@ fn a_picture_inside_a_fenced_code_block_reads_the_same_way() {
     let output = run_with_stdin(&gh, &["--repo", REPO], "80", &pasted);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), PICTURE_ANSWER);
+}
+
+#[test]
+fn a_plan_that_names_a_blocker_answers_as_one_graph() {
+    // The headline of the `Waits for` column: one step of one stream blocks
+    // another stream, and no block of a plan says that. So a plan that names
+    // one crosses to the answer a picture earns — one row for each step, in
+    // the order of the work, and one start line for each stream that is ready.
+    // `#96` and `#86` are the two people who start now.
+    let gh = FakeGh::new(WAITS_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), WAITS_ANSWER);
+}
+
+#[test]
+fn refuses_a_plan_whose_streams_wait_for_each_other() {
+    // Two streams that wait for each other leave no work to start between
+    // them, and an answer of "nothing is ready" hides the reason. So the run
+    // stops and the message names the two numbers.
+    //
+    // The reader of this message wrote a table and drew no picture, so the
+    // words of it name the order rather than a drawing. One graph carries the
+    // table and the picture both, and one message answers for both of them.
+    //
+    // The run names no repository, and the fake `gh` records every call it is
+    // given. So a run that reached `gh` at all wrote the file, and a mistake
+    // in the text of the reader costs no round trip.
+    let gh = FakeGh::new(WAITS_ISSUES);
+    let output = run_with_stdin(&gh, &[], "80", WAITS_CYCLE);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    for number in ["#91", "#96"] {
+        assert!(
+            message.contains(number),
+            "the error names {number} of the cycle, in {message}"
+        );
+    }
+    assert!(
+        !message.contains(PICTURE_WORD),
+        "the error of a plan names no drawing, in {message}"
+    );
+    assert_eq!(stdout(&output), "", "nothing was printed as an answer");
+    assert!(
+        gh.asked_nothing(),
+        "the run refused the plan before it asked GitHub, and it asked {}",
+        gh.recorded_args()
+    );
+}
+
+#[test]
+fn a_finished_blocker_frees_the_stream_that_waited_for_it() {
+    // `#96` is done, so `S1` starts. `S2` waits for `S1` as well, so `#89` is
+    // still blocked and no line of the answer names it. An answer that read
+    // the cell as a chain would name `#89` here, because the first blocker of
+    // it is finished.
+    let gh = FakeGh::new(WAITS_ISSUES_ONE_DONE);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "✓ #96  The daemon leak\n",
+            "→ #91  The lifecycle\n",
+            "· #89  The install      waits for #91\n",
+            "· #94  The shell init   waits for #89\n",
+            "→ #86  The keymap\n",
+            "\n",
+            "Start #91 next with 'si 91'\n",
+            "Start #86 next with 'si 86'\n",
+        )
+    );
+}
+
+#[test]
+fn a_stream_starts_when_every_blocker_of_it_is_finished() {
+    // `#96` and `#91` are both done, so the whole cell of `S2` is finished and
+    // `#89` is free. `#94` comes after it in the chain of that stream, so it
+    // waits for `#89` alone.
+    let gh = FakeGh::new(WAITS_ISSUES_TWO_DONE);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "✓ #96  The daemon leak\n",
+            "✓ #91  The lifecycle\n",
+            "→ #89  The install\n",
+            "· #94  The shell init   waits for #89\n",
+            "→ #86  The keymap\n",
+            "\n",
+            "Start #89 next with 'si 89'\n",
+            "Start #86 next with 'si 86'\n",
+        )
+    );
+}
+
+#[test]
+fn a_blocked_row_names_every_step_it_waits_for() {
+    // A `Waits for` cell is a set and not a chain, so a row that named the
+    // first blocker alone would tell a reader to start work that two other
+    // people still hold. `#89` waits for `#96` and for `#91`, and the row says
+    // both.
+    let gh = FakeGh::new(WAITS_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let answer = stdout(&output);
+    let row = answer
+        .lines()
+        .find(|line| line.contains("#89"))
+        .unwrap_or_else(|| panic!("the answer holds a row of #89, in {answer}"))
+        .to_string();
+    assert!(
+        row.ends_with("waits for #96, #91"),
+        "the row names each step it waits for, in {row:?}"
+    );
+}
+
+#[test]
+fn a_blocker_the_repository_does_not_have_still_earns_a_row() {
+    // The typo stands in no `Order` field, so a row of the answer is the one
+    // place that can say the repository does not have it. The rows around it
+    // read as they always did, and the run exits 1.
+    let gh = FakeGh::with_status(WAITS_ISSUES_WITH_A_TYPO, 1);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN_WITH_A_TYPO);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a number the repository does not have is a failed run, stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "→ #96   The daemon leak\n",
+            "? #999  (no such issue)\n",
+            "· #91   The lifecycle    waits for #96, #999\n",
+            "\n",
+            "#999 is not in timmattison/tools.\n",
+            "Start #96 next with 'si 96'\n",
+        )
+    );
+}
+
+#[test]
+fn a_plan_with_no_waits_for_column_answers_as_it_always_did() {
+    // The plan every reader wrote before this column stood. Its streams stand
+    // apart, so the answer is one block for each of them under one summary,
+    // and no row of it names work it waits for. A run that read every plan as
+    // a graph would take that answer away from them.
+    let gh = FakeGh::new(WAITS_ISSUES);
+    let output = run_with_stdin(&gh, &["--repo", REPO], "80", WAITS_PLAN_WITHOUT_THE_COLUMN);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), WAITS_BLOCK_ANSWER);
+    assert!(
+        stdout(&output).contains(SUMMARY_HEADING),
+        "the plan reader answered, in {}",
+        stdout(&output)
+    );
+    assert!(
+        !stdout(&output).contains(WAITS_FOR),
+        "no block of a plan carries the column of a graph, in {}",
+        stdout(&output)
+    );
 }

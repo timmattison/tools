@@ -1,8 +1,8 @@
-//! Reading a plan drawn as a picture.
+//! Reading a plan as a graph.
 //!
 //! A chain says one order, and a table of streams says one order for each
-//! stream. A picture says the one thing that neither of them says: two streams
-//! that join.
+//! stream. A plan that joins two streams says the thing neither of them says,
+//! and a reader writes that in two ways. One is a picture:
 //!
 //! ```text
 //! #242 ──→ #247 ──┐
@@ -10,11 +10,30 @@
 //! #246 ──→ #248 ──┘
 //! ```
 //!
-//! The meaning of a picture is its geometry. So this module builds a grid of
-//! the text and it walks the grid. A reader of tokens and a reader of lines
-//! both miss the one thing the picture says, because the corner of the first
-//! line and the corner of the third line reach the same bus and no line holds
-//! both of them.
+//! The other is a `Waits for` column beside the streams of a table:
+//!
+//! ```text
+//! | Stream | Order     | Waits for |
+//! |--------|-----------|-----------|
+//! | S0     | #96       |           |
+//! | S1     | #91       | #96       |
+//! | S2     | #89 → #94 | #96, #91  |
+//! ```
+//!
+//! Both forms say one thing: which work comes before which other work. So both
+//! of them are read into one [`Graph`], and one report answers either of them.
+//! The rows, the marks, the order of the rows, and the work a blocked row
+//! waits for all come out of that one model. Two models of one plan drift
+//! apart, and a reader then reads two answers to one question.
+//!
+//! Most of this module reads the picture, because the meaning of a picture is
+//! its geometry. [`of_plan`] reads the table, and it is short for the same
+//! reason: a `Waits for` cell states an edge in words.
+//!
+//! So this module builds a grid of the text and it walks the grid. A reader of
+//! tokens and a reader of lines both miss the one thing the picture says,
+//! because the corner of the first line and the corner of the third line reach
+//! the same bus and no line holds both of them.
 //!
 //! # The four rules
 //!
@@ -110,6 +129,32 @@
 //! number in the prose of a page that draws no picture still reaches the chain
 //! reader.
 //!
+//! # A plan of streams says the same thing in words
+//!
+//! Each stream of a plan is a chain, so its `Order` field draws an edge from
+//! each step to the step after it. The `Waits for` cell names the work of
+//! other streams that comes before the first step of the stream, and it draws
+//! one edge into that first step for each of them. The steps inside the stream
+//! keep their own chain, so the second step waits for the first one and never
+//! for the whole cell.
+//!
+//! A node is keyed on the number of its step, as it is for a picture, so a
+//! number that stands in two streams is one node. A number a `Waits for` cell
+//! names and no `Order` field holds is a node all the same: a blocker the
+//! repository does not have must reach the rows and turn the run red, and a
+//! row of the answer is the only place that says so.
+//!
+//! A cell that names the first step of its own stream draws no edge, because
+//! such an edge runs from a step to itself and says nothing. A cell that names
+//! a later step of its own stream draws one: it says that step comes before
+//! the first one, and `Order` says the opposite, so the plan is a cycle and
+//! this reader refuses it.
+//!
+//! [`of_plan`] claims a plan that draws one such edge or more, and it claims no
+//! other. A plan whose streams wait for nothing is the plan every reader wrote
+//! before this column stood, and the reader of streams answers it exactly as it
+//! always did.
+//!
 //! # What it refuses
 //!
 //! A claimed picture that this reader cannot follow is a refusal and never a
@@ -124,6 +169,9 @@
 //! Every refusal stands after the claim. A text this reader does not claim
 //! gives `None` and no message, whatever it is drawn with, because the chain
 //! reader answers such a text next.
+//!
+//! A plan earns the cycle and nothing else. The four other refusals are about
+//! a drawing, and a plan draws nothing.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
@@ -133,7 +181,7 @@ use thiserror::Error;
 use unicode_width::UnicodeWidthChar;
 
 use crate::chain::{list, IssueNumber, Snippet};
-use crate::plan::{one_step, Step};
+use crate::plan::{one_step, Plan, Step};
 
 /// The list a position outside the graph gives.
 ///
@@ -971,6 +1019,44 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// The graph `steps` and `edges` draw.
+    ///
+    /// `steps` holds one step for each node, in the order the reader wrote
+    /// them, and each edge names the number of the step before and the number
+    /// of the step after. The two readers of this module each say what the
+    /// edges of their form are, and one function turns those edges into a
+    /// graph, so a picture and a plan can never draw one shape two ways.
+    ///
+    /// One edge stands between two nodes, however many times the input writes
+    /// it. A step that two rows of a bus reach comes before the step on the
+    /// other side of that bus one time, and a list that named it twice would
+    /// tell a reader to wait for it twice.
+    ///
+    /// An edge that names a number no step of `steps` holds joins nothing, and
+    /// it is dropped. A step that reaches itself stays, so [`Self::cycle`]
+    /// finds it: a graph with the knot taken out of it would name a step
+    /// nobody can start.
+    fn of_edges(steps: Vec<Step>, edges: &[(IssueNumber, IssueNumber)]) -> Self {
+        let positions: BTreeMap<IssueNumber, usize> = steps
+            .iter()
+            .enumerate()
+            .map(|(position, step)| (step.number(), position))
+            .collect();
+        let mut before: Vec<Vec<usize>> = vec![Vec::new(); steps.len()];
+        for (earlier, later) in edges {
+            let (Some(&from), Some(&to)) = (positions.get(earlier), positions.get(later)) else {
+                continue;
+            };
+            if !before[to].contains(&from) {
+                before[to].push(from);
+            }
+        }
+        for positions in &mut before {
+            positions.sort_unstable();
+        }
+        Self { steps, before }
+    }
+
     /// The steps of the picture, in a topological order.
     ///
     /// Every step stands after each step it waits for, and a tie goes to the
@@ -1190,13 +1276,19 @@ pub enum GraphError {
     /// nothing and earns no refusal.
     #[error("{0:?} holds a diagonal wire, and a diagonal touches no side of a cell")]
     Diagonal(Snippet),
-    /// The wires of the picture return to a step that comes before them.
+    /// The order returns to a step that comes before it.
     ///
     /// The numbers are the steps of one real cycle, in the order a walk of the
-    /// wires meets them. A cycle has no step to start, and an answer of
+    /// graph meets them. A cycle has no step to start, and an answer of
     /// "nothing is ready" hides the reason, so the message names the steps that
     /// wait for each other.
-    #[error("the wires return to {}, so this picture names no step to start first", list(.0))]
+    ///
+    /// One message answers for both forms of a plan. A picture draws the cycle
+    /// with its wires, and a plan of streams writes it in the `Waits for`
+    /// cells of two of them. So the words name the order and never the
+    /// drawing: the reader of a table drew no picture, and a message about one
+    /// would send that reader looking for a page they never wrote.
+    #[error("the order returns to {}, so this text names no step to start first", list(.0))]
     Cycle(Vec<IssueNumber>),
 }
 
@@ -1308,35 +1400,129 @@ fn build(wirings: &[Wiring], lone: &[Port]) -> Graph {
     let mut order: Vec<(Place, Step)> = nodes.into_values().collect();
     order.sort_by_key(|(place, _)| *place);
     let steps: Vec<Step> = order.iter().map(|(_, step)| *step).collect();
-    let positions: BTreeMap<IssueNumber, usize> = steps
-        .iter()
-        .enumerate()
-        .map(|(position, step)| (step.number(), position))
-        .collect();
-
-    let mut before: Vec<Vec<usize>> = vec![Vec::new(); steps.len()];
+    let mut edges: Vec<(IssueNumber, IssueNumber)> = Vec::new();
     for wiring in wirings {
-        for after in wiring.after.iter().filter_map(|port| port.step) {
-            let Some(&to) = positions.get(&after.number()) else {
-                continue;
-            };
-            for earlier in wiring.before.iter().filter_map(|port| port.step) {
-                let Some(&from) = positions.get(&earlier.number()) else {
-                    continue;
-                };
-                if !before[to].contains(&from) {
-                    before[to].push(from);
-                }
+        for earlier in wiring.before.iter().filter_map(|port| port.step) {
+            for after in wiring.after.iter().filter_map(|port| port.step) {
+                edges.push((earlier.number(), after.number()));
             }
         }
     }
-    // A step that reaches itself stays, so [`Graph::cycle`] finds it. A build
-    // that dropped it would hand back a picture with the knot taken out of it,
-    // and the answer would then name a step nobody can start.
-    for positions in &mut before {
-        positions.sort_unstable();
+    Graph::of_edges(steps, &edges)
+}
+
+/// The graph a plan of streams draws, or `None` when it draws none.
+///
+/// A plan whose `Waits for` cells join one stream to another is a graph, and
+/// it is the graph a picture of the same plan draws. So both forms are read
+/// into one model, and one report answers either of them.
+///
+/// `None` says that no cell of the plan draws an edge: every stream waits for
+/// nothing, or each cell names the first step of its own stream. Such a plan
+/// is the plan every reader wrote before this column
+/// stood, and the reader of streams answers it exactly as it always did.
+///
+/// # Errors
+///
+/// Gives [`GraphError::Cycle`] for streams that wait for each other. It is the
+/// one refusal a plan earns: the four others are about a drawing, and a plan
+/// draws nothing. A cycle names no step to start, and an answer of "nothing is
+/// ready" hides the reason, so the message names the numbers that wait for
+/// each other.
+pub fn of_plan(plan: &Plan) -> Option<Result<Graph, GraphError>> {
+    // The claim and the read share all of their work, as they do for a
+    // picture, so one function does both. The edges of the cells are what
+    // claim the plan, and they are edges of the graph after that.
+    let crossings = crossings_of(plan);
+    if crossings.is_empty() {
+        return None;
     }
-    Graph { steps, before }
+    let mut edges = chains_of(plan);
+    edges.extend(crossings);
+    Some(
+        Graph::of_edges(nodes_of(plan), &edges)
+            .refuse_cycle()
+            .map(Graph::in_topological_order),
+    )
+}
+
+/// The steps of `plan`, one for each number, in the order the plan writes
+/// them.
+///
+/// The walk takes the streams in the order of the plan, and inside a stream it
+/// takes the chain first and the work the stream waits for after it. A number
+/// that stands in two places is one node, and the step of the first place
+/// stands: a reader who wrote the pair of a step once wrote it where the step
+/// first appears. [`build`] states the same rule for a picture, because a node
+/// is a node whichever form named it.
+///
+/// A step of a `Waits for` cell that stands in no `Order` field is a node all
+/// the same. A blocker the repository does not have must reach the rows and
+/// turn the run red, and a row of the answer is the only place that says so.
+fn nodes_of(plan: &Plan) -> Vec<Step> {
+    let mut steps: Vec<Step> = Vec::new();
+    for &step in plan
+        .streams()
+        .iter()
+        .flat_map(|stream| stream.steps().iter().chain(stream.waits_for()))
+    {
+        if !steps.iter().any(|held| held.number() == step.number()) {
+            steps.push(step);
+        }
+    }
+    steps
+}
+
+/// The edges the `Order` field of each stream draws.
+///
+/// A stream is a chain, so each step of it comes before the step after it.
+fn chains_of(plan: &Plan) -> Vec<(IssueNumber, IssueNumber)> {
+    plan.streams()
+        .iter()
+        .flat_map(|stream| {
+            stream
+                .steps()
+                .iter()
+                .zip(stream.steps().iter().skip(1))
+                .map(|(earlier, later)| (earlier.number(), later.number()))
+        })
+        .collect()
+}
+
+/// The edges the `Waits for` cell of each stream draws.
+///
+/// Every step of the cell comes before the first step of the stream, and
+/// before that step alone. The steps inside the stream keep the chain their
+/// `Order` field gives them, so the second step waits for the first one and
+/// never for the whole cell.
+///
+/// A blocker whose number is the number of the first step of that same stream
+/// draws no edge, because such an edge runs from a step to itself and says
+/// nothing.
+///
+/// Every other blocker keeps its edge, a later step of that same stream
+/// included. Such a cell says the later step comes before the first one, and
+/// the `Order` field says the opposite. That is a contradiction and not a true
+/// thing said twice, so the edge stands and the reader refuses the plan as a
+/// cycle. A reader that dropped it would answer one half of what the reader
+/// wrote and say nothing about the other half.
+///
+/// A stream with no step at all draws nothing here, because there is no first
+/// step to reach. [`crate::plan::parse`] refuses such a stream, so this arm is
+/// the one a reader never meets.
+fn crossings_of(plan: &Plan) -> Vec<(IssueNumber, IssueNumber)> {
+    let mut edges: Vec<(IssueNumber, IssueNumber)> = Vec::new();
+    for stream in plan.streams() {
+        let Some(first) = stream.steps().first() else {
+            continue;
+        };
+        for blocker in stream.waits_for() {
+            if blocker.number() != first.number() {
+                edges.push((blocker.number(), first.number()));
+            }
+        }
+    }
+    edges
 }
 
 #[cfg(test)]
@@ -1639,6 +1825,114 @@ A ──→ #4 ──┐
             .collect();
         numbers.sort_unstable();
         numbers
+    }
+
+    /// Every number `graph` names, sorted.
+    ///
+    /// Sorted for the reason [`nodes`] is sorted: the order of this list is
+    /// the order of the steps, and a test of what the list holds must read the
+    /// same before and after a topological sort.
+    fn named(graph: &Graph) -> Vec<u64> {
+        let mut numbers: Vec<u64> = graph.numbers().iter().map(|number| number.get()).collect();
+        numbers.sort_unstable();
+        numbers
+    }
+
+    /// The plan of issue #436, as a Markdown table.
+    ///
+    /// Four streams, and the three shapes a `Waits for` cell is written in: an
+    /// empty cell, one blocker, and two of them. S1 waits for the one step of
+    /// S0, and S2 waits for a step of S0 and a step of S1, so the plan draws
+    /// an edge into the first step of a stream from one stream and from two.
+    const WAITS_TABLE: &str = "\
+| Stream | Order | Waits for | Zone | Notes |
+|--------|-------|-----------|------|-------|
+| S0 — daemon leak | #96 | | crates/tsm (serve.rs) | Do first, solo. |
+| S1 — lifecycle | #91 | #96 | crates/tsm (kill.rs) | |
+| S2 — install | #89 → #94 | #96, #91 | crates/tsm (shell-init) | Same hotspot as S1. |
+| S3 — keymap | #86 | | packages/web | Disjoint. |";
+
+    /// The same four streams, as a record for each one.
+    ///
+    /// S0 writes an empty `Waits for` field and S3 writes none at all, because
+    /// a stream that waits for nothing is written both ways and the two say
+    /// the same thing.
+    const WAITS_RECORDS: &str = "\
+Stream: S0 — daemon leak
+Order: #96
+Waits for:
+Zone: crates/tsm (serve.rs)
+Notes: Do first, solo.
+────────────────────────────────────────
+Stream: S1 — lifecycle
+Order: #91
+Waits for: #96
+Zone: crates/tsm (kill.rs)
+────────────────────────────────────────
+Stream: S2 — install
+Order: #89 → #94
+Waits for: #96, #91
+Zone: crates/tsm (shell-init)
+Notes: Same hotspot as S1.
+────────────────────────────────────────
+Stream: S3 — keymap
+Order: #86
+Zone: packages/web
+Notes: Disjoint.";
+
+    /// The same four streams, drawn as a box table.
+    ///
+    /// The form a reader copies out of a terminal. The `Waits for` cells of S0
+    /// and S3 hold a run of spaces here, because a drawn cell is padded to the
+    /// width of its column.
+    const WAITS_BOX_TABLE: &str = "\
+┌──────────────────┬───────────┬───────────┬─────────────────────────┬─────────────────────┐
+│ Stream           │ Order     │ Waits for │ Zone                    │ Notes               │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S0 — daemon leak │ #96       │           │ crates/tsm (serve.rs)   │ Do first, solo.     │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S1 — lifecycle   │ #91       │ #96       │ crates/tsm (kill.rs)    │                     │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S2 — install     │ #89 → #94 │ #96, #91  │ crates/tsm (shell-init) │ Same hotspot as S1. │
+├──────────────────┼───────────┼───────────┼─────────────────────────┼─────────────────────┤
+│ S3 — keymap      │ #86       │           │ packages/web            │ Disjoint.           │
+└──────────────────┴───────────┴───────────┴─────────────────────────┴─────────────────────┘";
+
+    /// The plan `text` writes.
+    fn plan_of(text: &str) -> Plan {
+        crate::plan::parse(text).expect("the text is a plan")
+    }
+
+    /// The graph the plan `text` writes.
+    fn graph_of_plan(text: &str) -> Graph {
+        of_plan(&plan_of(text))
+            .expect("the plan draws a graph")
+            .expect("the plan reads")
+    }
+
+    /// The refusal the plan `text` earns.
+    ///
+    /// A [`Graph`] writes no `Debug` of itself, so this reads the error out of
+    /// the answer rather than through `expect_err`, exactly as [`refusal`]
+    /// does for a picture.
+    fn plan_refusal(text: &str) -> GraphError {
+        match of_plan(&plan_of(text)).expect("the plan draws a graph") {
+            Ok(_) => panic!("the plan reads, and this plan is a refusal"),
+            Err(error) => error,
+        }
+    }
+
+    /// A plan of the streams `rows` names, as a Markdown table.
+    ///
+    /// Each row is the label of a stream, the text of its `Order` cell, and
+    /// the text of its `Waits for` cell. Three columns and no prose, so a test
+    /// about one cell writes that cell and nothing around it.
+    fn table_of(rows: &[(&str, &str, &str)]) -> String {
+        let mut text = String::from("| Stream | Order | Waits for |\n| --- | --- | --- |\n");
+        for (label, order, waits) in rows {
+            text.push_str(&format!("| {label} | {order} | {waits} |\n"));
+        }
+        text
     }
 
     #[test]
@@ -2106,11 +2400,139 @@ A ──→ #4 ──┐
         // the type and not the plan.
         assert_eq!(
             refusal(CYCLE_OF_TWO).to_string(),
-            "the wires return to #1 and #2, so this picture names no step to start first"
+            "the order returns to #1 and #2, so this text names no step to start first"
         );
         assert_eq!(
             refusal(CYCLE_OF_THREE).to_string(),
-            "the wires return to #1, #2 and #3, so this picture names no step to start first"
+            "the order returns to #1, #2 and #3, so this text names no step to start first"
         );
+    }
+
+    #[test]
+    fn a_plan_that_names_a_blocker_draws_the_nodes_and_the_edges_of_it() {
+        // The nodes stand in the order the plan writes them: the streams in
+        // the order of the plan, and the chain of a stream inside it. The
+        // edges are the chain of each stream, and one edge into the first step
+        // of a stream for each blocker its cell names. `#94` waits for `#89`
+        // alone, because the steps inside a stream keep their own chain.
+        let graph = graph_of_plan(WAITS_TABLE);
+        assert_eq!(order(&graph), vec![96, 91, 89, 94, 86]);
+        assert_eq!(edges(&graph), vec![(89, 94), (91, 89), (96, 89), (96, 91)]);
+    }
+
+    #[test]
+    fn the_three_written_forms_of_one_plan_give_one_graph() {
+        // A reader writes the plan as a table, as a record for each stream, or
+        // as the box table a terminal draws. The plan is the same plan, so the
+        // graph is the same graph.
+        for form in [WAITS_RECORDS, WAITS_BOX_TABLE] {
+            assert_eq!(
+                order(&graph_of_plan(form)),
+                order(&graph_of_plan(WAITS_TABLE))
+            );
+            assert_eq!(
+                edges(&graph_of_plan(form)),
+                edges(&graph_of_plan(WAITS_TABLE))
+            );
+        }
+    }
+
+    #[test]
+    fn a_number_that_stands_in_two_streams_of_a_plan_is_one_node() {
+        // Two streams that name the same issue join there, as they do in a
+        // picture. The node carries the edges of both places, and it carries
+        // each of them once: the chain of S1 and the cell of S2 both say that
+        // `#1` comes before `#2`, and a list that named it twice would tell a
+        // reader to wait for it twice.
+        let graph = graph_of_plan(&table_of(&[("S1", "#1 → #2", ""), ("S2", "#2 → #3", "#1")]));
+        assert_eq!(nodes(&graph), vec![1, 2, 3]);
+        assert_eq!(edges(&graph), vec![(1, 2), (2, 3)]);
+    }
+
+    #[test]
+    fn a_plan_whose_streams_wait_for_nothing_is_no_graph() {
+        // Every plan a reader wrote before this column stood is such a plan.
+        // Its streams stand apart, so the reader of streams answers it, and
+        // the answer for it must not change. `None` is how this reader says
+        // that the caller keeps the reader it has.
+        assert!(of_plan(&plan_of(BOX_TABLE)).is_none());
+        assert!(of_plan(&plan_of(&table_of(&[
+            ("S1", "#1 → #2", ""),
+            ("S2", "#3", ""),
+        ])))
+        .is_none());
+    }
+
+    #[test]
+    fn two_streams_that_wait_for_each_other_are_a_cycle() {
+        // Two streams that wait for each other have no work to start between
+        // them, and an answer of "nothing is ready" hides the reason. So the
+        // message names the numbers that wait for each other, exactly as it
+        // does for a picture whose wires return to a step.
+        let plan = table_of(&[("S1", "#91", "#96"), ("S2", "#96", "#91")]);
+        assert_eq!(
+            plan_refusal(&plan),
+            GraphError::Cycle(numbers_of(&[91, 96]))
+        );
+        assert_eq!(
+            plan_refusal(&plan).to_string(),
+            "the order returns to #91 and #96, so this text names no step to start first"
+        );
+    }
+
+    #[test]
+    fn a_cell_that_names_the_first_step_of_its_own_stream_draws_no_edge() {
+        // The edge would run from a step to itself, and an edge like that says
+        // nothing. S2 waits for the work of another stream, so the plan is a
+        // graph all the same.
+        let graph = graph_of_plan(&table_of(&[("S1", "#1 → #2", "#1"), ("S2", "#3", "#1")]));
+        assert_eq!(nodes(&graph), vec![1, 2, 3]);
+        assert_eq!(edges(&graph), vec![(1, 2), (1, 3)]);
+
+        // A cell that draws no edge changes nothing at all, and which reader
+        // answers the plan is part of that. A plan whose one cell names the
+        // first step of its own stream is a plan of streams that stand apart.
+        assert!(of_plan(&plan_of(&table_of(&[("S1", "#1 → #2", "#1")]))).is_none());
+    }
+
+    #[test]
+    fn a_cell_that_names_a_later_step_of_its_own_stream_is_a_cycle() {
+        // The cell of `S1` says that `#2` comes before `#1`, and the `Order`
+        // field of `S1` says that `#1` comes before `#2`. That is a
+        // contradiction and not a true thing said twice, so the reader that
+        // drops the edge answers one half of what the reader wrote. This
+        // module refuses rather than guesses everywhere else, and the refusal
+        // names the two numbers that hold the knot.
+        assert_eq!(
+            plan_refusal(&table_of(&[("S1", "#1 → #2", "#2"), ("S2", "#3", "#1")])),
+            GraphError::Cycle(numbers_of(&[1, 2]))
+        );
+    }
+
+    #[test]
+    fn the_steps_of_a_plan_stand_in_a_topological_order() {
+        // A plan names the work that comes first wherever the reader put it,
+        // so the rows of the answer are no order of the plan. S1 waits for the
+        // one step of S2, and the row a reader reads first is the row of the
+        // work to do first.
+        //
+        // The rows carry the answer as well as the order: the report walks
+        // them once and reads what stands before each step out of the rows
+        // over it.
+        let graph = graph_of_plan(&table_of(&[("S1", "#10", "#20"), ("S2", "#20", "")]));
+        assert_eq!(order(&graph), vec![20, 10]);
+        assert!(graph.before(0).is_empty());
+        assert_eq!(graph.before(1), [0]);
+    }
+
+    #[test]
+    fn a_blocker_that_stands_in_no_order_field_is_a_node_of_its_own() {
+        // A blocker the repository does not have must reach the rows and turn
+        // the run red, and a row of the answer is the only place that says so.
+        // So the number is a node, and the one query names it.
+        let graph = graph_of_plan(&table_of(&[("S1", "#91", "#96")]));
+        assert_eq!(nodes(&graph), vec![91, 96]);
+        assert_eq!(edges(&graph), vec![(96, 91)]);
+        assert_eq!(named(&graph), vec![91, 96]);
     }
 }
