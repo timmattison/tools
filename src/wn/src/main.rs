@@ -268,6 +268,8 @@ fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Re
         // A terminal on standard input is a run with nothing piped into it.
         stdin: (!std::io::stdin().is_terminal()).then_some(piped),
         clipboard: (!clipboard_off).then_some(copied),
+        plan: None,
+        refresh: false,
     }
     .chain()?;
 

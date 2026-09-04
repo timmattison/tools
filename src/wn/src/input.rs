@@ -7,10 +7,16 @@
 //!
 //! # The order of the inputs
 //!
-//! An argument first, then standard input, then the clipboard. The order is the
-//! order of how loudly each input was asked for. An argument was typed on
-//! purpose. A pipe was built on purpose. The clipboard was neither, so it
-//! answers only when nothing else did.
+//! An argument first, then standard input, then the clipboard, then a run of
+//! `claude` that builds a plan. The order is the order of how loudly each
+//! input was asked for. An argument was typed on purpose. A pipe was built on
+//! purpose. The clipboard was neither, so it answers only when nothing else
+//! did. A run that costs money and a minute of waiting is quieter still, so it
+//! answers only when the other three did not.
+//!
+//! `refresh` is the one way past that order. A plan that is still on the
+//! clipboard and no longer true would otherwise answer every run, and the
+//! reader has no way to say so.
 //!
 //! An EMPTY standard input falls through to the clipboard, and this is the one
 //! rule that is not obvious. A parent that redirects standard input from
@@ -36,6 +42,8 @@ use std::fmt;
 
 use thiserror::Error;
 
+use crate::build::{BuildError, NO_CLAUDE_ENV};
+
 /// The variable that turns the clipboard fallback off. Any value with a
 /// character in it turns it off.
 pub const NO_CLIPBOARD_ENV: &str = "WN_NO_CLIPBOARD";
@@ -54,6 +62,13 @@ const PASS_IT_AS_AN_ARGUMENT: &str = "Pass it as an argument, in quotes: wn \"#2
 /// clipboard that holds an image are the same thing to a tool that wants a
 /// chain, so both arrive here.
 pub type ClipboardRead = Result<Option<String>, ClipboardUnavailable>;
+
+/// What a run of `claude` gave back.
+///
+/// `Ok` is the document it printed, which the JSON reader then takes. The
+/// document is not read here: this module knows where a text came from and
+/// never what is in it.
+pub type PlanBuild = Result<String, BuildError>;
 
 /// The clipboard could not be opened at all.
 ///
@@ -104,6 +119,8 @@ enum Source {
     Stdin,
     /// The system clipboard.
     Clipboard,
+    /// A run of `claude` on the `plan-parallel-work` skill.
+    Plan,
 }
 
 /// The chain, and the input it came out of.
@@ -157,7 +174,11 @@ impl Chain {
         E: std::error::Error + Send + Sync + 'static,
     {
         match self.source {
-            Source::Argument | Source::Stdin => anyhow::Error::new(err),
+            // A plan `wn` built is a plan `wn` asked for, and the reason it
+            // could not be read is the reason of the reader of it, unchanged.
+            // Naming the run would tell a reader to look at their clipboard,
+            // which holds none of it.
+            Source::Argument | Source::Stdin | Source::Plan => anyhow::Error::new(err),
             Source::Clipboard => anyhow::anyhow!("wn cannot read the clipboard: {err}"),
         }
     }
@@ -174,6 +195,11 @@ pub struct Sources<'a> {
     /// Reads the system clipboard. `None` when [`NO_CLIPBOARD_ENV`] turns the
     /// fallback off.
     pub clipboard: Option<&'a dyn Fn() -> ClipboardRead>,
+    /// Builds a plan by running `claude`. `None` when [`NO_CLAUDE_ENV`] turns
+    /// the run off.
+    pub plan: Option<&'a dyn Fn() -> PlanBuild>,
+    /// Whether the reader asked for a new plan whatever the other inputs hold.
+    pub refresh: bool,
 }
 
 impl Sources<'_> {
@@ -230,6 +256,22 @@ pub enum InputError {
     /// Standard input could not be read.
     #[error("could not read the chain from standard input: {0}")]
     Stdin(String),
+    /// The run of `claude` did not give a plan back.
+    #[error(transparent)]
+    NoPlan(BuildError),
+    /// The run of `claude` gave nothing back at all.
+    #[error(
+        "claude gave no plan back. Run it yourself to see what it says: \
+         claude --print '{}'",
+        crate::build::PROMPT
+    )]
+    EmptyPlan,
+    /// The reader asked for a new plan and turned the run that builds one off.
+    #[error(
+        "wn --refresh builds a plan by running claude, and {NO_CLAUDE_ENV} turns that run off. \
+         Unset {NO_CLAUDE_ENV}, or {PASS_IT_AS_AN_ARGUMENT}"
+    )]
+    RefreshWithoutClaude,
 }
 
 /// Whether `value`, the value of [`NO_CLIPBOARD_ENV`], turns the fallback off.
@@ -298,6 +340,22 @@ mod tests {
         panic!("the clipboard was read after an earlier input gave the chain")
     }
 
+    /// A run of `claude` that must never happen.
+    ///
+    /// The run costs money and a minute of waiting, so it is the one input
+    /// this file must prove is never touched on speculation.
+    fn unbuilt_plan() -> PlanBuild {
+        panic!("claude was run after an earlier input gave the chain")
+    }
+
+    /// The document a run of `claude` gives back in these tests.
+    const DOCUMENT: &str = "{\"version\": 1, \"streams\": []}";
+
+    /// A run of `claude` that gives [`DOCUMENT`] back.
+    fn built_plan() -> PlanBuild {
+        Ok(DOCUMENT.to_string())
+    }
+
     /// The arguments of a command line that typed `words`.
     fn arguments(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_string()).collect()
@@ -311,6 +369,8 @@ mod tests {
             argument: &[],
             stdin: None,
             clipboard: Some(&clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the clipboard holds text")
@@ -323,6 +383,8 @@ mod tests {
             argument: &argument,
             stdin: None,
             clipboard: Some(&unread_clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the argument holds the chain");
@@ -336,6 +398,8 @@ mod tests {
             argument: &argument,
             stdin: Some(&unread_stdin),
             clipboard: None,
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the argument holds the chain");
@@ -349,6 +413,8 @@ mod tests {
             argument: &[],
             stdin: Some(&stdin),
             clipboard: Some(&unread_clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the pipe holds the chain");
@@ -366,6 +432,8 @@ mod tests {
                 argument: &[],
                 stdin: Some(&stdin),
                 clipboard: Some(&clipboard),
+                plan: None,
+                refresh: false,
             }
             .chain()
             .expect("the clipboard holds the chain");
@@ -385,6 +453,8 @@ mod tests {
             argument: &argument,
             stdin: None,
             clipboard: None,
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the argument holds the chain");
@@ -398,6 +468,8 @@ mod tests {
             argument: &argument,
             stdin: None,
             clipboard: None,
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the arguments hold the chain");
@@ -411,6 +483,8 @@ mod tests {
             argument: &[],
             stdin: None,
             clipboard: Some(&clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect_err("the clipboard holds nothing");
@@ -428,6 +502,8 @@ mod tests {
             argument: &[],
             stdin: None,
             clipboard: Some(&clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect_err("the clipboard holds no chain");
@@ -441,6 +517,8 @@ mod tests {
             argument: &[],
             stdin: None,
             clipboard: Some(&clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect_err("the clipboard could not be opened");
@@ -492,6 +570,8 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
             argument: &[],
             stdin: None,
             clipboard: None,
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect_err("no input holds a chain");
@@ -514,6 +594,8 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
             argument: &[],
             stdin: Some(&stdin),
             clipboard: Some(&unread_clipboard),
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect_err("standard input could not be read");
@@ -581,6 +663,8 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
             argument: &argument,
             stdin: None,
             clipboard: None,
+            plan: None,
+            refresh: false,
         }
         .chain()
         .expect("the argument holds text");
@@ -613,6 +697,224 @@ Pass it as an argument, in quotes: wn \"#277 → #278\""
             assert!(message.contains("clipboard"), "{message}");
             assert!(!message.contains(text.trim()), "{message}");
         }
+    }
+
+    #[test]
+    fn the_plan_is_built_only_when_the_other_three_inputs_held_nothing() {
+        let clipboard = || -> ClipboardRead { Ok(Some(CHAIN.to_string())) };
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: Some(&clipboard),
+            plan: Some(&unbuilt_plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the clipboard holds the chain");
+        assert_eq!(chain.text(), CHAIN);
+    }
+
+    #[test]
+    fn an_argument_and_a_pipe_both_outrank_the_run() {
+        let argument = arguments(&[CHAIN]);
+        assert_eq!(
+            Sources {
+                argument: &argument,
+                stdin: None,
+                clipboard: None,
+                plan: Some(&unbuilt_plan),
+                refresh: false,
+            }
+            .chain()
+            .expect("the argument holds the chain")
+            .text(),
+            CHAIN
+        );
+        let stdin = || -> std::io::Result<String> { Ok(CHAIN.to_string()) };
+        assert_eq!(
+            Sources {
+                argument: &[],
+                stdin: Some(&stdin),
+                clipboard: None,
+                plan: Some(&unbuilt_plan),
+                refresh: false,
+            }
+            .chain()
+            .expect("the pipe holds the chain")
+            .text(),
+            CHAIN
+        );
+    }
+
+    #[test]
+    fn an_empty_clipboard_builds_the_plan() {
+        let clipboard = || -> ClipboardRead { Ok(None) };
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: Some(&clipboard),
+            plan: Some(&built_plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        assert_eq!(chain.text(), DOCUMENT);
+    }
+
+    #[test]
+    fn a_clipboard_that_could_not_be_opened_builds_the_plan() {
+        // A machine with no clipboard is a machine, not a mistake. The run is
+        // the next input, and it answers.
+        let clipboard = || -> ClipboardRead { Err(ClipboardUnavailable::new(&"no display")) };
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: Some(&clipboard),
+            plan: Some(&built_plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        assert_eq!(chain.text(), DOCUMENT);
+    }
+
+    #[test]
+    fn a_clipboard_that_is_off_builds_the_plan() {
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&built_plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        assert_eq!(chain.text(), DOCUMENT);
+    }
+
+    #[test]
+    fn refresh_builds_the_plan_even_when_the_clipboard_holds_one() {
+        let clipboard = || -> ClipboardRead { panic!("refresh does not read the clipboard") };
+        let argument = arguments(&[CHAIN]);
+        let chain = Sources {
+            argument: &argument,
+            stdin: Some(&unread_stdin),
+            clipboard: Some(&clipboard),
+            plan: Some(&built_plan),
+            refresh: true,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        assert_eq!(chain.text(), DOCUMENT);
+    }
+
+    #[test]
+    fn refresh_with_the_run_turned_off_is_a_refusal() {
+        let clipboard = || -> ClipboardRead { Ok(Some(CHAIN.to_string())) };
+        let err = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: Some(&clipboard),
+            plan: None,
+            refresh: true,
+        }
+        .chain()
+        .expect_err("the run is off and refresh asks for one");
+        assert_eq!(err, InputError::RefreshWithoutClaude);
+        assert!(err.to_string().contains(NO_CLAUDE_ENV), "{err}");
+    }
+
+    #[test]
+    fn a_run_that_gives_nothing_back_names_claude() {
+        for given in ["", "   \n\t "] {
+            let plan = || -> PlanBuild { Ok(given.to_string()) };
+            let err = Sources {
+                argument: &[],
+                stdin: None,
+                clipboard: None,
+                plan: Some(&plan),
+                refresh: false,
+            }
+            .chain()
+            .expect_err("the run gave nothing back");
+            assert_eq!(err, InputError::EmptyPlan);
+            assert!(err.to_string().contains("claude"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_run_that_failed_carries_its_reason() {
+        let plan = || -> PlanBuild {
+            Err(BuildError::BadTimeout {
+                value: "10m".to_string(),
+            })
+        };
+        let err = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&plan),
+            refresh: false,
+        }
+        .chain()
+        .expect_err("the run failed");
+        assert_eq!(
+            err,
+            InputError::NoPlan(BuildError::BadTimeout {
+                value: "10m".to_string()
+            })
+        );
+        assert!(err.to_string().contains("WN_PLAN_TIMEOUT"), "{err}");
+    }
+
+    #[test]
+    fn the_run_that_is_off_leaves_the_two_errors_the_tool_printed_before() {
+        let empty = || -> ClipboardRead { Ok(None) };
+        assert_eq!(
+            Sources {
+                argument: &[],
+                stdin: None,
+                clipboard: Some(&empty),
+                plan: None,
+                refresh: false,
+            }
+            .chain()
+            .expect_err("the clipboard holds nothing"),
+            InputError::EmptyClipboard
+        );
+        assert_eq!(
+            Sources {
+                argument: &[],
+                stdin: None,
+                clipboard: None,
+                plan: None,
+                refresh: false,
+            }
+            .chain()
+            .expect_err("no input holds a chain"),
+            InputError::NoChain
+        );
+    }
+
+    #[test]
+    fn a_plan_that_cannot_be_read_is_blamed_on_no_input_at_all() {
+        // A plan `wn` built is a plan `wn` asked for. A message that named the
+        // clipboard would send the reader to look at a clipboard that holds
+        // none of it.
+        let plan = || -> PlanBuild { Ok("#277 an #278".to_string()) };
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        let err = parse_chain(chain.text()).expect_err("the word is not an issue number");
+        let message = chain.blame(err).to_string();
+        assert_eq!(message, "\"an\" is not an issue number");
+        assert!(!message.contains("clipboard"), "{message}");
     }
 
     #[test]
