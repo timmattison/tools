@@ -355,6 +355,15 @@ developer's own configuration opens; the refusal is the structural half, and it
 reads the shape of the commit rather than a setting, so it holds whatever a
 later setting does.
 
+That same silence has a second cause, and a flag rather than a refusal answers
+it. `git diff-tree` compares a commit against its parent, so it prints no path
+for a **root commit** either. Probe 2 therefore asks for `--root`, which compares
+such a commit against nothing and names every path it adds. A root commit reaches
+a halt in ordinary use: replaying a branch onto one that shares no history with
+it replays every commit of that branch, its root commit included. The parent
+count lets it through, correctly — a root commit has no parent at all, so the
+count is zero.
+
 A refused `git rebase --skip` fails the replay immediately, carrying git's own
 message, rather than being re-issued until the round limit runs out.
 
@@ -681,7 +690,12 @@ conflict whose commit cannot be written, a clean pick whose commit cannot be
 written, a commit that genuinely became empty, and a `--skip` git refuses — by
 making the object database unwritable, which is the only cause of a failed
 commit write still reachable through the harness once signing, hooks and the
-editor are pinned off. It is Unix-only for that reason.
+editor are pinned off. It is Unix-only for that reason. The last of those four
+states is named for what the replay believes about it rather than for what git
+did: `git rebase --skip` exits non-zero whenever the rebase is left unfinished,
+so the replay cannot tell a skip git refused from a skip that worked and halted
+again. [`MUTATIONS.md`](./MUTATIONS.md) records that, and records why it is
+written down rather than fixed here.
 
 Three of those clean picks are there for what the probe reads a path *as*, and
 every one of them asserts the *classification* rather than merely that something
@@ -705,6 +719,20 @@ nothing". Both invocations now ask for `--ignore-submodules=none`, and the test
 carries an armed control proving the setting really does hide the pointer from
 the porcelain, so a git that stopped honouring it fails the test rather than
 quietly emptying it.
+
+A fourth clean pick asks a different question: whether git names a path there at
+all.
+`refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed`
+puts a **root commit** at the halt, on a fixture whose second history was started
+with `git checkout --orphan`. `diff-tree` compares a commit against its parent,
+so it prints nothing for a commit that has none until it is asked for `--root`,
+and a probe without the flag reads the first commit of a whole history as a
+commit that changes nothing. Two controls stand ahead of the replay: the branch's
+only commit really has no parent, read back through `rev-list --parents`, and
+`diff-tree` really is silent about that commit until the flag is added. The
+parent count that refuses a merge commit is not the guard here and must not be —
+a root commit has no parent, so the count is zero and the refusal passes it
+through.
 
 The first two of those were written when the probe handed its paths back to git
 as pathspecs, and that round trip is gone — `missing` is now the intersection of
@@ -839,9 +867,19 @@ parameter — and spend it on `contested_region_repo()`, whose three colliding
 commits take exactly three rounds. Both sides of the boundary are asserted:
 three rounds must produce the answer, two must still refuse. Noticing that the
 rebase has *finished* costs no round, so a fully-measured replay is never
-reported as one the harness gave up on. A `--skip` round does cost one, because
-a `--skip` that leaves the rebase halted and still empty is exactly the runaway
-the bound exists to catch.
+reported as one the harness gave up on.
+
+A `--skip` round costs one too, and that half is pinned by nothing, because
+nothing can pin it. The skip arm reads git's outcome the moment it comes back and
+stops the replay unless git exited zero, and `git rebase --skip` exits zero only
+when it has finished the rebase — git 2.55 exits 1 for a skip that worked and
+then met a conflict, and again for one that worked and then met a second empty
+commit. So no round can follow a skip round, and moving the charge into the
+conflict arm alone changes no answer this suite can produce. The charge stays at
+the top of the loop because the rule is that a round of work costs a round, and a
+charge written into one arm leaves the next arm uncounted.
+[`MUTATIONS.md`](./MUTATIONS.md) records it as unfalsifiable rather than as a
+guard somebody watched fail.
 
 **That a `Conflicts` cannot contradict its own accessors** is pinned by three
 further unit tests in `src/scratch.rs`, which need no repository either. One
@@ -924,6 +962,7 @@ in.
 | `branches_behind_main_with_quoted_and_space_led_paths_repo()` | The same shape with the branch's work in `café.txt`, which git C-quotes whenever it prints a path alone on a line, and ` leading space.txt`, which any trim of that line silently shortens. Neither path is plainly spelled, deliberately: an ordinary sibling in the same commit would come back matching and carry the refusal on its own, leaving what the mangled names cost invisible. |
 | `branches_behind_main_with_a_pathspec_magic_path_repo()` | The same shape again, with the branch's work in `:/foo.txt` and a decoy `foo.txt` committed at the root. Nothing mangles on the way out; the leading `:` is pathspec magic on the way back in, so the name asks about the decoy neither side touched — the direction that *shrinks* the set of paths a probe finds missing to empty, which is a halt read as a commit to skip. The probe builds no pathspec today, so what this fixture asks for now is the answer: such a commit is never called empty. Unix only, because the filesystem has to hold a directory named `:`. |
 | `branches_behind_main_with_a_submodule_pointer_bump_repo()` | The same shape once more, with the branch's work in a submodule pointer and `diff.ignoreSubmodules=all` set in the fixture's own configuration. `diff-tree` reports the moved gitlink and `git diff` reports nothing, so a probe that asks one command what the commit touched and the other whether the new base holds it reads one tree under two sets of rules — and calls a commit empty because the porcelain declined to mention its only path. The pointer's two values are commits of this repository's own object database, so no second repository is cloned or kept alive; a `.gitmodules` entry sits in the base commit, where a real superproject records one, leaving the bump commit touching the gitlink alone. |
+| `unrelated_histories_repo()` | `main` and `unrelated` share no commit at all: `git checkout --orphan` gives the second branch a root commit of its own, and the two histories name their files differently so the pick applies cleanly. Replaying `unrelated` onto `main` therefore puts a **root commit** at a halt, which is where `diff-tree` prints no path until it is asked for `--root`. Every other fixture here starts from a base commit both branches share, so this is the one shape that reaches that question. Sealing the object database halts the pick with nothing unmerged and nothing dirty, as `branches_behind_main_repo()` does for a commit with a parent. |
 | `commit_emptied_by_main_repo()` | A branch whose first commit reaches content `main` arrived at by a different route, followed by a second commit that is real work. No commit shares a patch id with one on the other side, so git cannot drop the first early: under `--empty=stop` the rebase halts on it legitimately, and the second still has to survive. |
 | `multi_byte_names_repo()` | Branches `left-左` and `right-右` colliding in `readme.md` and `日本語.txt` — a name git would escape, a hunk count that collapses when it does, and two names whose byte, character and column widths disagree. |
 | `awkward_names_repo()` | Conflicts in names git C-quotes whatever `core.quotePath` says — a backslash, a double quote — beside names with leading and trailing whitespace, including U+3000. Each is contested in two regions, so a mangled name floors at one hunk and the count fails, not just the spelling. Unix only, because the filesystem has to hold the names. |

@@ -49,6 +49,8 @@ not have to re-derive which guard belongs to which test.
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | `rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo list | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing` (`src/scratch.rs`) | The parent count read ahead of both probes, which refuses a merge commit at a halt whatever the configuration says | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the `stopped_commit_parent_count` call and the `ensure!` under it | remove |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` (`tests/halts.rs`) | `--ignore-submodules=none` on the porcelain half of the empty-commit probe, which is what makes both halves read one tree under one set of rules | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the argument from the `git diff` invocation | remove |
+| `refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed` (`tests/halts.rs`) | `--root` on the plumbing half of the empty-commit probe, which is what makes `diff-tree` name the paths a commit with no parent adds | `src/scratch.rs`, `stopped_commit_is_already_in_head` — drop the argument from the `diff-tree` invocation | remove |
+| Nothing — see the record below | The round charged for a `--skip`, which no reachable replay can be shown to spend | `src/scratch.rs`, `Scratch::replay_rebase_within` — move `rounds += 1` from the top of the loop into the `Halt::Conflict` arm | narrow |
 | `a_path_that_ends_in_whitespace_comes_back_with_that_whitespace_intact` | `Git::path`, the byte-for-byte read of the one path git printed | `src/git.rs`, `Git::path` — read the answer the way `Git::run` reads one, `String::from_utf8_lossy(&output.stdout).trim()` in place of the one-newline strip | redirect |
 | `uncommitted_files_counts_a_staged_copy_as_the_one_file_it_is` (`tests/repo.rs`) | The copy letter in the pairing that skips the second field of a copy record | `src/repo.rs`, `moved_from_elsewhere` — drop the `b'C'` arm from the `any` predicate | remove |
 | `uncommitted_files_counts_a_working_tree_rename_and_copy_as_the_files_they_are` (`tests/repo.rs`) | The second status byte, the working-tree column, which carries the letter as readily as the index one | `src/repo.rs`, `moved_from_elsewhere` — reduce `[record.first(), record.get(1)]` to `[record.first()]` | narrow |
@@ -111,6 +113,7 @@ registry that reports everything as fine is worth less than no registry at all.
 | `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` | None beyond the fixture, which `conflicting_repo` builds with a `main` that resolves. | **Missing.** The hazard is that `git worktree add -q --detach <path> --force` succeeds and checks out HEAD, and arming it in-test means building the wrong scratch on purpose and then removing it. Asserting the wrong-scratch HEAD under a deliberately unseparated call closes it. The mutation record below is the out-of-band substitute. |
 | `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | The scratch worktree is checked out at `iterated`, through a call that panics if git refuses, so the replay provably starts somewhere a rebase can run. | **Full, as a control on the other side.** The same scratch then replays onto `single` and must cost `CONTESTED_ROUNDS` stops, so a replay that refused every upstream, or one that could not replay this fixture at all, fails there instead of passing on the refusal above. What is not armed is the halt itself: nothing states that plain `git rebase --root` succeeds on this fixture, and the mutation record below is what stands in for it. |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` | The stopped commit is asked of `diff-tree` first and must touch exactly one path — "the stopped commit has to touch the submodule pointer and nothing else; an ordinary path beside it comes back from the porcelain whatever the setting says, carries the refusal on its own, and leaves what the pointer costs invisible". An ordinary path alongside is what would let this test pass without the pointer ever mattering. | **Full.** Plain git, through the fixture, is asked for `diff --name-only branch~1 branch` and must answer with nothing — "`diff.ignoreSubmodules=all` is not hiding the pointer from `git diff`, so this test could only pass vacuously; the porcelain reported {porcelain:?} for a commit the plumbing reports {bumped:?} for". That silence *is* the hazard: it is the second probe's whole answer under the developer's own configuration, and it is demonstrated before the replay is asked anything. The fixture arms the setting itself rather than reading it out of `~/.gitconfig`, so the control holds on a machine whose developer has never set the key. |
+| `refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed` | The branch's only commit is read back through plain git and must list exactly one field — its own id, and no parent — "the branch's only commit has to be a root commit ... or there is nothing here for `--root` to be load-bearing about". A commit with a parent is a commit `--root` changes no answer for. | **Full, in both directions.** `git diff-tree`, asked through the fixture with the arguments the probe really uses and `--root` left off, must answer with nothing for that commit — "`diff-tree` no longer stays silent about a root commit, so this test could only pass vacuously; that silence is what makes a probe without `--root` read a whole history as a commit that changes nothing". The same call *with* the flag must then name the path the commit adds, so the control proves what the flag buys as well as what its absence costs. The silence is the hazard, demonstrated before the replay is asked anything. |
 | `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | The fixture sets `maintenance.auto true` in its own repository, and the value is read back before the runner is asked anything. | **Full.** That read-back *is* the arming: plain git, through the fixture, must answer `true` — "the fixture does not hold `maintenance.auto=true`, so there is nothing here for the runner to override and the assertion below is measured against nothing". A key the fixture never took is a key the runner cannot be shown to override. What is **not** armed, and cannot be here, is the damage: the chain from git's `run_auto_maintenance` to a prefetch that writes `refs/prefetch/*` is read from git's source, and arming it would need a developer who has run `git maintenance start` and a remote to fetch from. This test pins the pin, not the consequence, and says so. |
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | The fixture sets `core.fsmonitor .git/hooks/fsmonitor-watchman`, the classic watchman spelling, and the value is read back first. | **Full, for the pin.** Plain git must answer with that path before the runner is asked. The same limit as the row above applies to the *consequence*: proving git would execute the named program means letting a replay execute a program on the developer's machine, which no fixture here may do. `tests/safety.rs` cannot cover this route either — its planted hooks all live under `core.hooksPath`, and this program is executed directly — which is the reason the pin is asserted here at all. |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | The fixture sets `rebase.rebaseMerges true` and the value is read back first. | **Full, and the consequence was executed out of band.** The read-back arms the pin. The hazard behind it was watched by hand on git 2.55: a branch carrying a merge, rebased onto a moved base under `-c rebase.rebaseMerges=true`, comes out still carrying the merge (`git rev-list --min-parents=2 --count` answers 1), so a developer's own configuration really does put a merge commit on a replay's todo list. That demonstration is a shell session rather than an assertion, because a merge on the todo list only becomes a halt in a repository built to conflict at it, and the reviewer who found this could not construct one. |
@@ -616,6 +619,123 @@ unfalsifiable rather than claimed as a guard. It stays because the rule the
 probe rests on is that both of its halves read one tree under one set of rules,
 and which of the two consults a config key is a fact about this version of git.
 
+### `refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed`
+
+Mutation: removed `"--root"` from the `diff-tree` invocation in
+`stopped_commit_is_already_in_head`, and from the `TOUCHED_PATHS` constant in
+`src/scratch.rs` that spells the same call for the unit tests. `diff-tree`
+compares a commit against its parent, so without the flag it prints no path at
+all for a commit that has none: the touched set comes back empty, the empty-set
+guard answers `Halt::EmptyCommit`, and the replay reaches for `rebase --skip` on
+the first commit of a whole history.
+
+```text
+thread 'refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed'
+panicked at src/gitscratch/tests/halts.rs:
+a root commit whose file is absent from the new base is not an empty commit,
+whatever `diff-tree` says about a commit it was not asked for `--root` about:
+the rebase halted on a commit that adds nothing to the new base, but git would
+not `rebase --skip` it: 76ee41e the unrelated history's own work
+
+test result: FAILED. 7 passed; 1 failed
+```
+
+Red for the stated reason: the misclassification is the whole of the failure,
+and the message under it is the skip arm being reached at all. The sealed object
+database refuses that skip, so the run ends in an error either way — which is why
+the assertion is on the classification rather than on there being an error. In a
+repository where the skip succeeds, the same misclassification finishes the
+rebase, drops the root commit, and reports a cost of zero for a branch that was
+never replayed.
+
+No collateral: the run was `cargo test --no-fail-fast -p gitscratch -p grind -p
+grist`, and this is the only test of the three crates the mutation reddens. Every
+other fixture starts from a base commit both branches share, so no other test
+puts a commit with no parent at a halt.
+
+**The `TOUCHED_PATHS` half reddens nothing on its own, and it is a test constant
+rather than a guard.** It spells the probe's invocation for
+`refuses_a_merge_commit_at_a_halt_rather_than_reading_it_as_a_commit_that_changes_nothing`,
+whose control asks `diff-tree` about a *merge* commit — silent with the flag and
+without it alike. The constant moved with the probe so that it kept spelling the
+same call, and not because anything watched it fail.
+
+**The parent count ahead of the probe was checked against this shape rather than
+assumed.** `git rev-list --no-walk --parents` prints one field for a root commit
+— its own id, and nothing after it — so `stopped_commit_parent_count` answers
+zero and the refusal of a merge commit passes a root commit through. That is the
+right answer: a root commit is measurable and a merge commit is not. The two
+guards sit on the same line of the probe and answer opposite ways, so the test
+carries a start-state control proving which of the two it is exercising.
+
+### The round charged for a `--skip`, which nothing can redden
+
+Mutation: moved `rounds += 1` out of the top of `replay_rebase_within`'s loop and
+into the `Halt::Conflict` arm, so a `--skip` round costs nothing. Every test in
+`gitscratch`, `grind` and `grist` stayed green.
+
+That is the finding, not a failure to find one, and the reason is structural. The
+loop has three halt arms and only one of them comes round again:
+
+- `Halt::Conflict` stages the markers, runs `rebase --continue`, and returns to
+  the top of the loop.
+- `Halt::UnwritableCommit` stops the replay outright.
+- `Halt::EmptyCommit` runs `rebase --skip` and reads the outcome at once,
+  stopping the replay unless git exited zero. And `git rebase --skip` exits zero
+  only when it has finished the rebase.
+
+So a skip round is always the last round, and a charge on the last round decides
+nothing: the budget is read at the *top* of a round, against the rounds charged
+before it. Charging the skip and not charging it produce the same answer for
+every sequence the loop can reach.
+
+The third bullet is the load-bearing one and it was executed rather than argued.
+Git 2.55 was watched twice, in a throwaway repository built the way the fixtures
+here are built:
+
+```text
+initial exit=1     # git rebase --empty=stop main, halted on an emptied commit
+skip1   exit=1     # the skip worked - REBASE_HEAD advanced to the next commit -
+                   # and the rebase halted on a second emptied commit
+skip2   exit=1     # the skip worked again, and the rebase halted on a conflict
+```
+
+`REBASE_HEAD` names a different commit after each of those, so each skip did its
+job and git still exited 1. `git rebase --skip` reports the rebase being
+unfinished, and cannot report anything narrower.
+
+**Which makes the doc comment this charge used to carry wrong, and it has been
+corrected.** It said that a `--skip` leaving the rebase halted and still empty is
+the runaway the bound exists to catch, and that an uncharged one spins for ever.
+Neither holds: the skip arm's own refusal stops that replay on the first such
+skip, long before any bound is reached, and
+`refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped` in
+`tests/halts.rs` pins exactly that — it asserts the error does *not* say "gave
+up". The bound catches a resolution that makes no progress, and only that, which
+`a_replay_that_outruns_its_budget_still_gives_up` pins.
+
+The charge stays at the top of the loop. It costs nothing, it states the rule
+that a round of work costs a round, and an arm added under a charge written into
+one branch alone starts uncounted. It is recorded here as unfalsifiable rather
+than dropped, for the reason this file gives elsewhere: a guard nobody can watch
+fail is exactly what this file exists to say out loud.
+
+**A related defect turned up while this was being measured, and it is written
+down here rather than fixed.** The skip arm reads `outcome.success`, and that
+exit code cannot separate a skip git refused from a skip that worked and left the
+rebase halted on something else. Both of the runs above are the second kind, and
+so is the one inside
+`refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped`, where
+`REBASE_HEAD` was watched to advance from the emptied commit to the branch's real
+commit before the object write failed. The replay says "git would not
+`rebase --skip` it" for all three. The error is loud rather than cheap, so
+nothing is thrown away by it, and `Halt::EmptyCommit` is unreachable in
+production on git 2.55 in any case — only `--empty=stop` on git's command line
+reaches that halt, and `replay_rebase` never passes it. Separating the two needs
+a state-based reading of what the skip did, and it changes what
+`refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped` asserts, so it
+belongs to a decision of its own.
+
 ### `--literal-pathspecs`, which nothing can redden any more
 
 Mutation: removed `arguments.push("--literal-pathspecs".to_string())` from
@@ -966,6 +1086,16 @@ code moves. Every place below is load-bearing for the whole table:
   `--ignore-submodules=none` on both is that rule today. A change that adds a
   filter to one of them, or that hands a path list back to git instead of
   intersecting the two lists here, needs its own mutation and its own row.
+  `--root` on the plumbing half belongs to the same line: `diff-tree` compares a
+  commit against its parent, so it names nothing at all for a commit that has
+  none, and an empty touched set is what the guard below reads as a commit that
+  changes nothing.
+- **`replay_rebase_within`'s three halt arms** — the round budget is charged once
+  at the top of the loop, and which arms that charge can decide anything about is
+  a fact about the arms rather than about the charge. Two of the three stop the
+  replay, so only a resolution comes round again, and the charge for a `--skip`
+  is unfalsifiable today. An arm that starts coming round again after a skip
+  makes it falsifiable, and needs its own mutation and its own row.
 - **`Scratch::check_out_detached`** — the detached checkout every consumer now
   makes. `tests/safety.rs` spells its own checkout out by hand rather than
   calling this, on purpose: that detach is a guard under test, and a guard read

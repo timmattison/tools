@@ -51,13 +51,26 @@ use crate::metrics::{Files, Hunks, Stops};
 /// forever.
 ///
 /// A round is a round of *work* on a rebase that is still going: resolving a
-/// stop, or skipping a commit that arrived with nothing unmerged. Skips are
-/// charged because they are exactly as capable of failing to make progress as a
-/// resolution is - a `--skip` that leaves the rebase halted and still empty is
-/// the runaway this bound exists to catch, and one that went uncounted would
-/// spin forever. Noticing that the rebase has *finished* costs nothing, so a
-/// replay that stops `MAX_RESOLUTION_ROUNDS` times is answered rather than
-/// abandoned.
+/// stop, or skipping a commit that arrived with nothing unmerged. The charge
+/// happens before the loop learns which of the two it has, so every round costs
+/// the same. Noticing that the rebase has *finished* costs nothing, so a replay
+/// that stops `MAX_RESOLUTION_ROUNDS` times is answered rather than abandoned.
+///
+/// **What the bound catches today is a resolution that makes no progress, and
+/// only that.** Of the three halt arms below, one comes round again. A stop
+/// resolves and returns to the top of the loop. A skip reads git's outcome at
+/// once and stops the replay unless git exited zero, and `git rebase --skip`
+/// exits zero only when it has finished the rebase. Git 2.55 was watched to exit
+/// 1 for a skip that worked and then met a conflict, and again for a skip that
+/// worked and then met a second empty commit. A commit git could not write stops
+/// the replay outright. So no round can follow a skip round, and charging a skip
+/// decides nothing a test can watch fail.
+///
+/// The charge stays at the top of the loop all the same, because the rule is
+/// that a round of work costs a round. An arm that starts coming round again
+/// after a skip needs the charge already there, and a charge written into one
+/// arm alone leaves the next arm uncounted. `MUTATIONS.md` records this as an
+/// unfalsifiable guard rather than claiming one nobody has watched fail.
 const MAX_RESOLUTION_ROUNDS: usize = 1_000;
 
 /// A detached scratch worktree that removes itself.
@@ -360,6 +373,10 @@ impl Scratch {
                 rounds < max_rounds,
                 "gave up on the rebase after {max_rounds} resolution rounds"
             );
+            // Charged here rather than inside an arm, so every kind of round
+            // costs the same and a new arm cannot arrive uncounted. See
+            // `MAX_RESOLUTION_ROUNDS` for which arms this can decide anything
+            // about today.
             rounds += 1;
 
             match classify_halt(&git)? {
@@ -746,6 +763,19 @@ fn classify_halt(git: &Git) -> Result<Halt> {
 /// git, and this crate takes the rule. Pinned by
 /// `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed`
 /// in `tests/halts.rs`.
+///
+/// **`--root` on the `diff-tree` invocation is the same kind of flag, for the
+/// commit that has no parent.** `diff-tree` compares a commit against its parent,
+/// so it prints no path at all for a root commit until it is asked to compare
+/// that commit against nothing. Without the flag the touched set of a root commit
+/// comes back empty, the guard below states the answer an empty set states, and
+/// `rebase --skip` drops the first commit of a whole history. A root commit
+/// arrives here in ordinary use: replaying a branch onto one that shares no
+/// history with it replays every commit of that branch, its root commit included.
+/// The refusal above is not the guard for this one - a root commit has no parent,
+/// so the count is zero and the refusal passes it through, correctly. Pinned by
+/// `refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed`
+/// in `tests/halts.rs`.
 fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt> {
     // Read before anything else, because a merge commit makes every answer
     // below meaningless. `diff-tree` prints no path at all for a merge unless it
@@ -768,18 +798,13 @@ fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt>
          adds anything to the new base cannot answer about it."
     );
 
-    // MUTATION, deliberate, and the next commit takes it back out: `--root` is
-    // gone from the probe. Without it `diff-tree` prints no path at all for a
-    // commit with no parent, so the touched set comes back empty, the guard
-    // below reads the halt as a commit that changes nothing, and `rebase --skip`
-    // drops a whole history. That is what the new test in `tests/halts.rs` is
-    // here to catch.
     let touched = git.paths(
         "diff-tree",
         &[
             "--no-commit-id",
             "--name-only",
             "-r",
+            "--root",
             "--ignore-submodules=none",
             "REBASE_HEAD",
         ],
@@ -1099,13 +1124,11 @@ mod tests {
     /// [`stopped_commit_is_already_in_head`] asks for them. Spelled here so the
     /// control below demonstrates the hazard with the invocation the probe
     /// really makes, rather than with a plausible-looking neighbour of it.
-    // MUTATION, deliberate, and the next commit takes it back out: this constant
-    // spells the probe's own invocation, so it loses `--root` alongside it. The
-    // test that reads it answers the same either way, which the record says.
-    const TOUCHED_PATHS: [&str; 5] = [
+    const TOUCHED_PATHS: [&str; 6] = [
         "--no-commit-id",
         "--name-only",
         "-r",
+        "--root",
         "--ignore-submodules=none",
         "REBASE_HEAD",
     ];
