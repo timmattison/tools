@@ -34,6 +34,14 @@ pub const TIMEOUT_ENV: &str = "WN_PLAN_TIMEOUT";
 /// repository, which is a longer run, so this one waits ten minutes.
 const DEFAULT_TIMEOUT_SECONDS: u64 = 600;
 
+/// The seconds a run may take at the most.
+///
+/// A run of `claude` takes minutes, and a year is longer than a reader
+/// waits, so a larger value names no run that a person starts. `Instant`
+/// holds a moment and not every number of seconds after now, so a value near
+/// the top of `u64` is a deadline the clock cannot hold.
+const MAX_TIMEOUT_SECONDS: u64 = 31_536_000;
+
 /// The prompt the run is handed.
 ///
 /// A constant rather than a literal at the spawn, because a test asserts it. A
@@ -98,12 +106,22 @@ pub fn claude_is_off(value: Option<&str>) -> bool {
 /// seconds, and for a zero. A reader who wrote `WN_PLAN_TIMEOUT=10m` and got
 /// the default back would learn nothing about why the run still took ten
 /// minutes, and a zero is a confusing way to spell [`NO_CLAUDE_ENV`].
+///
+/// Gives [`BuildError::TimeoutTooFar`] for a value above
+/// [`MAX_TIMEOUT_SECONDS`]. Such a value names no run that a person starts,
+/// and the largest of them build a deadline the clock cannot hold.
+///
+/// It reads no clock, so it gives the same answer on every machine and at
+/// every moment.
 pub fn seconds(value: Option<&str>) -> Result<Duration, BuildError> {
     let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
         return Ok(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS));
     };
     match named.parse::<u64>() {
         Ok(0) | Err(_) => Err(BuildError::BadTimeout {
+            value: named.to_string(),
+        }),
+        Ok(read) if read > MAX_TIMEOUT_SECONDS => Err(BuildError::TimeoutTooFar {
             value: named.to_string(),
         }),
         Ok(read) => Ok(Duration::from_secs(read)),
@@ -192,10 +210,14 @@ fn looked_in_lines(paths: &[String]) -> String {
 /// # Errors
 ///
 /// Gives [`BuildError::BadTimeout`] for a timeout that names no seconds,
+/// [`BuildError::TimeoutTooFar`] for a timeout longer than a run waits,
 /// [`BuildError::NotInstalled`] when no path holds a `claude`,
 /// [`BuildError::TimedOut`] for a run that outlived its deadline,
 /// [`BuildError::NotAuthenticated`] for a `claude` with no account, and
 /// [`BuildError::Failed`] for every other failure.
+///
+/// The two refusals of the timeout stand before the run starts, because the
+/// timeout is read before a path is found and before a child is spawned.
 pub fn plan(
     paths: &[String],
     answers: &dyn Fn(&str) -> bool,
@@ -292,10 +314,23 @@ fn joined(reader: thread::JoinHandle<String>) -> String {
 ///
 /// # Errors
 ///
-/// Gives [`BuildError::TimedOut`] for a run that outlived its deadline, and
-/// [`BuildError::Failed`] when the state of the child could not be read.
+/// Gives [`BuildError::TimedOut`] for a run that outlived its deadline and
+/// for a `waited` the clock cannot hold, and [`BuildError::Failed`] when the
+/// state of the child could not be read.
 fn wait_for(child: &mut Child, waited: Duration) -> Result<ExitStatus, BuildError> {
-    let deadline = Instant::now() + waited;
+    // `seconds` refuses a value above MAX_TIMEOUT_SECONDS, and this fallback
+    // stands under it. This function takes the duration and never the value
+    // that named it, and the clock is read twice: once here for the deadline
+    // and once for each look at the child. A duration at the edge of what the
+    // clock holds must kill the child and give a refusal, and it must never
+    // panic with the run left alive.
+    let Some(deadline) = Instant::now().checked_add(waited) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(BuildError::TimedOut {
+            seconds: waited.as_secs(),
+        });
+    };
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
@@ -348,6 +383,15 @@ pub enum BuildError {
          {TIMEOUT_ENV}={DEFAULT_TIMEOUT_SECONDS}"
     )]
     BadTimeout {
+        /// The value the environment named, with the space around it dropped.
+        value: String,
+    },
+    /// The value of [`TIMEOUT_ENV`] names more seconds than a run waits.
+    #[error(
+        "{TIMEOUT_ENV} names {value:?} seconds, and no run waits that long. Name \
+         {MAX_TIMEOUT_SECONDS} seconds at the most: {TIMEOUT_ENV}={DEFAULT_TIMEOUT_SECONDS}"
+    )]
+    TimeoutTooFar {
         /// The value the environment named, with the space around it dropped.
         value: String,
     },
