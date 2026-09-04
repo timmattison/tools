@@ -9,8 +9,6 @@
 
 use std::io::{self, Write};
 
-use crate::geometry::terminal_cells;
-
 /// Control sequence introducer. It starts a CSI escape sequence.
 const CSI: &str = "\x1b[";
 
@@ -64,34 +62,46 @@ pub(crate) enum CursorContract {
 impl CursorContract {
     /// Give the contract for one image of a display routine.
     ///
-    /// This is the one place that reads the height of the terminal and bounds
-    /// the reservation by it, so no display routine can reserve more rows than
-    /// the terminal has. An image taller than the screen has no row below it,
-    /// and CUU and CUD both stop at the edge of the screen, so a reservation
-    /// larger than the screen only scrolls the content of the user out of view
-    /// and gives nothing back for it. The bound therefore holds the scroll to
-    /// one screen.
+    /// This is the one place that bounds the reservation by the height of the
+    /// terminal, so no display routine can reserve more rows than the terminal
+    /// has. An image taller than the screen has no row below it, and CUU and
+    /// CUD both stop at the edge of the screen, so a reservation larger than
+    /// the screen only scrolls the content of the user out of view and gives
+    /// nothing back for it. The bound therefore holds the scroll to one screen.
+    ///
+    /// The height of the terminal arrives from the caller, and this function
+    /// reads no terminal itself. The writer of one image measures one window
+    /// and hands the rows of that window to every step of that image, so the
+    /// picture and the reservation below it name one terminal. A second read
+    /// here can name a second one: a user who resizes the window between the
+    /// two reads gets a picture laid out for the old window and a reservation
+    /// bounded by the new one, and it fits neither.
     ///
     /// The row count of the image arrives as a closure, because the caller must
-    /// read the size of a character cell from the terminal to compute it. Video
-    /// playback asks for [`CursorContract::CallerManaged`] one time for each
-    /// frame, and the closure keeps that path clear of the terminal.
+    /// convert the pixels of the image with the size of a character cell to
+    /// compute it. Video playback asks for [`CursorContract::CallerManaged`]
+    /// one time for each frame, and the closure keeps that arithmetic off that
+    /// path.
     ///
     /// # Arguments
     /// * `no_newline` - True when the caller puts the cursor where it wants it.
+    /// * `term_rows` - The height of the terminal in rows, off the one window
+    ///   that the writer measured.
     /// * `image_rows` - Gives the height of the image in terminal rows.
     ///
     /// # Returns
     /// The promise that the display routine must keep.
-    pub(crate) fn below_image(no_newline: bool, image_rows: impl FnOnce() -> u32) -> Self {
+    pub(crate) fn below_image(
+        no_newline: bool,
+        term_rows: u32,
+        image_rows: impl FnOnce() -> u32,
+    ) -> Self {
         if no_newline {
             return CursorContract::CallerManaged;
         }
 
-        let (_, term_height) = terminal_cells();
-
         CursorContract::BelowImage {
-            rows: reservation_rows(image_rows(), term_height),
+            rows: reservation_rows(image_rows(), term_rows),
         }
     }
 }
@@ -185,6 +195,47 @@ mod tests {
         assert_eq!(reservation_rows(1, 1), 1);
         assert_eq!(reservation_rows(5, 0), 1);
         assert_eq!(reservation_rows(0, 24), 1);
+    }
+
+    // =========================================================================
+    // Tests for CursorContract::below_image
+    // =========================================================================
+
+    /// The rows that one contract reserves, or `None` when the caller states
+    /// the position of the cursor itself.
+    ///
+    /// [`CursorContract`] carries no `PartialEq`, so a test names the variant
+    /// through this function instead of comparing two contracts.
+    fn reserved_rows(contract: CursorContract) -> Option<u32> {
+        match contract {
+            CursorContract::CallerManaged => None,
+            CursorContract::BelowImage { rows } => Some(rows),
+        }
+    }
+
+    #[test]
+    fn below_image_bounds_the_reservation_by_the_rows_it_is_given() {
+        // The writer measures one window and hands the rows of that window
+        // over, so the bound must come off the number in the argument and off
+        // no other terminal. The two cases below state two different terminals
+        // for one image of 50 rows, and no one terminal answers both: a
+        // reservation that read a terminal of its own would give the same
+        // bound to both calls.
+        assert_eq!(
+            reserved_rows(CursorContract::below_image(false, 7, || 50)),
+            Some(6),
+            "an image of 50 rows in a terminal of 7 leaves the last row for the cursor to land on"
+        );
+        assert_eq!(
+            reserved_rows(CursorContract::below_image(false, 100, || 50)),
+            Some(50),
+            "an image of 50 rows fits inside a terminal of 100, so the reservation keeps every row of it"
+        );
+        assert_eq!(
+            reserved_rows(CursorContract::below_image(true, 7, || 50)),
+            None,
+            "the caller that asks for no newline states the position of the cursor itself"
+        );
     }
 
     // =========================================================================

@@ -4139,6 +4139,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "image",
+ "libc",
  "notify",
  "termgfx",
  "termion",
@@ -7836,6 +7837,7 @@ name = "termsize"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "libc",
  "terminal_size",
 ]
 
