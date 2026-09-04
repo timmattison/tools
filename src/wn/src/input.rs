@@ -213,6 +213,13 @@ impl Sources<'_> {
     /// holds no text, and [`InputError::NoChain`] when the clipboard was not
     /// tried and no other input answered.
     pub fn chain(&self) -> Result<Chain, InputError> {
+        if self.refresh {
+            let Some(build) = self.plan else {
+                return Err(InputError::RefreshWithoutClaude);
+            };
+            return built(build);
+        }
+
         if !self.argument.is_empty() {
             // A shell splits an unquoted chain into one argument for each
             // word, and a quoted one into a single argument. Joining with a
@@ -228,16 +235,49 @@ impl Sources<'_> {
             }
         }
 
-        let Some(read) = self.clipboard else {
+        // A clipboard that holds no chain and a clipboard that could not be
+        // opened both say the same thing to the input after them: this input
+        // did not answer. So the run is reached from either, and the two
+        // errors stand only when there is no run to reach.
+        if let Some(read) = self.clipboard {
+            match read() {
+                Ok(Some(copied)) if !copied.trim().is_empty() => {
+                    return Ok(Chain::new(copied, Source::Clipboard));
+                }
+                Ok(_) => {
+                    if self.plan.is_none() {
+                        return Err(InputError::EmptyClipboard);
+                    }
+                }
+                Err(cause) => {
+                    if self.plan.is_none() {
+                        return Err(InputError::Unavailable(cause));
+                    }
+                }
+            }
+        }
+
+        let Some(build) = self.plan else {
+            // The clipboard was not one of the inputs, and no other input
+            // answered. This is the message the tool printed before the run
+            // stood beside them.
             return Err(InputError::NoChain);
         };
-        match read() {
-            Ok(Some(copied)) if !copied.trim().is_empty() => {
-                Ok(Chain::new(copied, Source::Clipboard))
-            }
-            Ok(_) => Err(InputError::EmptyClipboard),
-            Err(cause) => Err(InputError::Unavailable(cause)),
-        }
+        built(build)
+    }
+}
+
+/// The chain a run of `claude` gave back.
+///
+/// # Errors
+///
+/// Gives [`InputError::EmptyPlan`] for a run that printed nothing at all, and
+/// [`InputError::NoPlan`] for a run that could not happen.
+fn built(build: &dyn Fn() -> PlanBuild) -> Result<Chain, InputError> {
+    match build() {
+        Ok(document) if !document.trim().is_empty() => Ok(Chain::new(document, Source::Plan)),
+        Ok(_) => Err(InputError::EmptyPlan),
+        Err(cause) => Err(InputError::NoPlan(cause)),
     }
 }
 
