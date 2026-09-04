@@ -2506,6 +2506,20 @@ Notes: Disjoint.";
     }
 
     #[test]
+    fn a_cell_that_names_a_later_step_of_its_own_stream_is_a_cycle() {
+        // The cell of `S1` says that `#2` comes before `#1`, and the `Order`
+        // field of `S1` says that `#1` comes before `#2`. That is a
+        // contradiction and not a true thing said twice, so the reader that
+        // drops the edge answers one half of what the reader wrote. This
+        // module refuses rather than guesses everywhere else, and the refusal
+        // names the two numbers that hold the knot.
+        assert_eq!(
+            plan_refusal(&table_of(&[("S1", "#1 → #2", "#2"), ("S2", "#3", "#1")])),
+            GraphError::Cycle(numbers_of(&[1, 2]))
+        );
+    }
+
+    #[test]
     fn the_steps_of_a_plan_stand_in_a_topological_order() {
         // A plan names the work that comes first wherever the reader put it,
         // so the rows of the answer are no order of the plan. S1 waits for the
