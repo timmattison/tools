@@ -1154,15 +1154,17 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - An empty cell is a stream nothing outside it blocks, and it is the common case. An absent
     column is a plan with no cross-stream edge at all, which is every plan written before this
     landed: such a plan still answers as one block for each stream under one summary, and nothing
-    about it changed. A cell that names a step of its own stream draws no edge either, because
-    `Order` already says how those two steps stand, and a plan that says a true thing twice holds
-    no mistake.
+    about it changed. A cell that names the first step of its own stream draws no edge either,
+    because such an edge runs from a step to itself and says nothing.
   - Three things are refused. A cell whose text is not a step earns the message a bad `Order` cell
     earns, naming the stream and the text: `after the leak lands` names no issue, and the reason a
-    stream waits is prose that belongs in `Notes`. Two streams that wait for each other are a
-    cycle, so `wn` names the numbers that hold the knot and exits `2` without asking GitHub
-    anything. A blocker the repository does not have keeps its row and its note, and the run exits
-    `1`, because a blocker that is a typo is a stream that waits forever.
+    stream waits is prose that belongs in `Notes`. An order that returns to itself is a cycle, so
+    `wn` names the numbers that hold the knot and exits `2` without asking GitHub anything. Two
+    streams that wait for each other are the common shape of one, and a cell that names a later
+    step of its own stream is another: that cell says the step comes before the first step of the
+    stream while `Order` says the opposite, and one half of a contradiction is no answer. A
+    blocker the repository does not have keeps its row and its note, and the run exits `1`,
+    because a blocker that is a typo is a stream that waits forever.
   - A plan drawn as a picture is a third shape of input, and it says the one thing that no chain
     and no table says: two streams that join.
 

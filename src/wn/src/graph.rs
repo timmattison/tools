@@ -144,10 +144,11 @@
 //! repository does not have must reach the rows and turn the run red, and a
 //! row of the answer is the only place that says so.
 //!
-//! A cell that names a step of its own stream draws no edge, because `Order`
-//! relates those two steps already. Such an edge would run back into the chain
-//! of the stream, and a plan that says a true thing twice is no plan with a
-//! mistake in it.
+//! A cell that names the first step of its own stream draws no edge, because
+//! such an edge runs from a step to itself and says nothing. A cell that names
+//! a later step of its own stream draws one: it says that step comes before
+//! the first one, and `Order` says the opposite, so the plan is a cycle and
+//! this reader refuses it.
 //!
 //! [`of_plan`] claims a plan that draws one such edge or more, and it claims no
 //! other. A plan whose streams wait for nothing is the plan every reader wrote
@@ -1417,8 +1418,8 @@ fn build(wirings: &[Wiring], lone: &[Port]) -> Graph {
 /// into one model, and one report answers either of them.
 ///
 /// `None` says that no cell of the plan draws an edge: every stream waits for
-/// nothing, or each cell names work that stands in the chain of its own stream
-/// already. Such a plan is the plan every reader wrote before this column
+/// nothing, or each cell names the first step of its own stream. Such a plan
+/// is the plan every reader wrote before this column
 /// stood, and the reader of streams answers it exactly as it always did.
 ///
 /// # Errors
@@ -1495,11 +1496,16 @@ fn chains_of(plan: &Plan) -> Vec<(IssueNumber, IssueNumber)> {
 /// `Order` field gives them, so the second step waits for the first one and
 /// never for the whole cell.
 ///
-/// A blocker whose number is the number of a step of that same stream draws no
-/// edge. The `Order` field says already how those two steps stand, and a plan
-/// that says a true thing twice is no plan with a mistake in it. The edge would
-/// run back into the chain of the stream, and the reader would then refuse the
-/// plan as a cycle.
+/// A blocker whose number is the number of the first step of that same stream
+/// draws no edge, because such an edge runs from a step to itself and says
+/// nothing.
+///
+/// Every other blocker keeps its edge, a later step of that same stream
+/// included. Such a cell says the later step comes before the first one, and
+/// the `Order` field says the opposite. That is a contradiction and not a true
+/// thing said twice, so the edge stands and the reader refuses the plan as a
+/// cycle. A reader that dropped it would answer one half of what the reader
+/// wrote and say nothing about the other half.
 ///
 /// A stream with no step at all draws nothing here, because there is no first
 /// step to reach. [`crate::plan::parse`] refuses such a stream, so this arm is
@@ -1511,11 +1517,7 @@ fn crossings_of(plan: &Plan) -> Vec<(IssueNumber, IssueNumber)> {
             continue;
         };
         for blocker in stream.waits_for() {
-            let its_own = stream
-                .steps()
-                .iter()
-                .any(|step| step.number() == blocker.number());
-            if !its_own {
+            if blocker.number() != first.number() {
                 edges.push((blocker.number(), first.number()));
             }
         }
@@ -2479,30 +2481,18 @@ Notes: Disjoint.";
     }
 
     #[test]
-    fn a_cell_that_names_a_step_of_its_own_stream_draws_no_edge() {
-        // `Order` says already how two steps of one stream stand, and a plan
-        // that says a true thing twice is no plan with a mistake in it. The
-        // edge would run back into the chain of the stream, and the reader
-        // would then refuse the plan as a cycle.
-        //
-        // Both spellings: the cell names the first step of its stream, and the
-        // cell names a later step of it. S2 waits for the work of another
-        // stream, so the plan is a graph either way.
-        for own in ["#1", "#2"] {
-            let graph = graph_of_plan(&table_of(&[("S1", "#1 → #2", own), ("S2", "#3", "#1")]));
-            assert_eq!(nodes(&graph), vec![1, 2, 3], "the cell {own:?}");
-            assert_eq!(edges(&graph), vec![(1, 2), (1, 3)], "the cell {own:?}");
-        }
+    fn a_cell_that_names_the_first_step_of_its_own_stream_draws_no_edge() {
+        // The edge would run from a step to itself, and an edge like that says
+        // nothing. S2 waits for the work of another stream, so the plan is a
+        // graph all the same.
+        let graph = graph_of_plan(&table_of(&[("S1", "#1 → #2", "#1"), ("S2", "#3", "#1")]));
+        assert_eq!(nodes(&graph), vec![1, 2, 3]);
+        assert_eq!(edges(&graph), vec![(1, 2), (1, 3)]);
 
         // A cell that draws no edge changes nothing at all, and which reader
-        // answers the plan is part of that. A plan whose one cell names its
-        // own chain is a plan of streams that stand apart.
-        for own in ["#1", "#2"] {
-            assert!(
-                of_plan(&plan_of(&table_of(&[("S1", "#1 → #2", own)]))).is_none(),
-                "the cell {own:?}"
-            );
-        }
+        // answers the plan is part of that. A plan whose one cell names the
+        // first step of its own stream is a plan of streams that stand apart.
+        assert!(of_plan(&plan_of(&table_of(&[("S1", "#1 → #2", "#1")]))).is_none());
     }
 
     #[test]
