@@ -468,3 +468,161 @@ fn a_broken_link_and_an_unresolvable_link_are_counted_apart() {
         run.err
     );
 }
+
+/// The options of a run whose walk does not enter a directory named in `names`.
+fn with_skip(root: &Path, names: &[&str]) -> Options {
+    Options {
+        skip: names.iter().copied().map(OsString::from).collect(),
+        ..options(root)
+    }
+}
+
+/// Builds the tree the skip tests share: one broken link inside `{root}/{name}`
+/// and one broken link beside that directory.
+///
+/// A skip that works leaves the first link out of the report and keeps the
+/// second one in it, so every test over this tree asserts both halves. A walk
+/// that found neither link would pass an assertion about the first one alone.
+fn broken_inside_and_outside(root: &Path, name: &str) -> (PathBuf, PathBuf) {
+    let inner = root.join(name);
+    fs::create_dir(&inner).unwrap();
+    (
+        link_at(&inner, "inside", "missing-inside.txt"),
+        link_at(root, "outside", "missing-outside.txt"),
+    )
+}
+
+#[test]
+fn a_broken_link_in_a_skipped_directory_is_not_found() {
+    let dir = TempDir::new().unwrap();
+    let (inside, outside) = broken_inside_and_outside(dir.path(), "node_modules");
+
+    let run = run_with(&with_skip(dir.path(), &["node_modules"]));
+
+    assert_eq!(run.summary.broken, 1);
+    assert_eq!(
+        run.out,
+        format!(
+            "{}Found 1 broken symlink(s).\n",
+            broken_line(&outside, "missing-outside.txt")
+        )
+    );
+    assert!(
+        !run.out.contains(&inside.display().to_string()),
+        "the link inside the skipped directory is not named: {:?}",
+        run.out
+    );
+}
+
+#[test]
+fn without_a_skip_both_broken_links_are_found() {
+    // This is what makes the test above mean something. The same tree with no
+    // skip gives both links, so the one that goes missing under the flag went
+    // missing because of the flag.
+    let dir = TempDir::new().unwrap();
+    let (inside, outside) = broken_inside_and_outside(dir.path(), "node_modules");
+
+    let run = run_in(dir.path());
+
+    assert_eq!(run.summary.broken, 2);
+    assert!(
+        run.out
+            .contains(&broken_line(&inside, "missing-inside.txt")),
+        "the link inside the directory is reported: {:?}",
+        run.out
+    );
+    assert!(
+        run.out
+            .contains(&broken_line(&outside, "missing-outside.txt")),
+        "the link beside the directory is reported: {:?}",
+        run.out
+    );
+}
+
+#[test]
+fn a_skipped_name_is_left_out_at_every_depth() {
+    // The comparison is on the file name of a directory and not on its path,
+    // because a user who says `.git` means every `.git` in the tree.
+    let dir = TempDir::new().unwrap();
+    let shallow = dir.path().join(".git");
+    fs::create_dir(&shallow).unwrap();
+    link_at(&shallow, "link", "missing-shallow.txt");
+    let deep = dir.path().join("a").join("b").join(".git");
+    fs::create_dir_all(&deep).unwrap();
+    link_at(&deep, "link", "missing-deep.txt");
+
+    let run = run_with(&with_skip(dir.path(), &[".git"]));
+
+    assert_eq!(run.summary.broken, 0);
+    assert_eq!(run.out, "No broken symlinks found.\n");
+}
+
+#[test]
+fn the_root_of_the_walk_is_never_skipped() {
+    // The walk is asked about its own root as well as about everything under
+    // it. A skip that read the name of the root would give an empty walk and no
+    // account of why, so a user who points the tool at `node_modules` while a
+    // shell alias carries `--skip node_modules` would be told the tree holds no
+    // broken links at all. The tool walks what it was pointed at.
+    let dir = TempDir::new().unwrap();
+    let modules = dir.path().join("node_modules");
+    fs::create_dir(&modules).unwrap();
+    let link = link_at(&modules, "link", "missing.txt");
+
+    let run = run_with(&with_skip(&modules, &["node_modules"]));
+
+    assert_eq!(run.summary.broken, 1);
+    assert_eq!(
+        run.out,
+        format!(
+            "{}Found 1 broken symlink(s).\n",
+            broken_line(&link, "missing.txt")
+        )
+    );
+}
+
+#[test]
+fn a_symlink_with_a_skipped_name_is_still_examined() {
+    // This is the case a skip that only read the file name gets wrong, and it
+    // is the one that matters most: a symbolic link is the thing this tool
+    // exists to look at, so a skip that hid one would hide the very thing the
+    // run was asked to find. Only a directory is skipped, and a link is not a
+    // directory to a walk that does not follow links — not even a link that
+    // points at one.
+    let dir = TempDir::new().unwrap();
+    let link = link_at(dir.path(), "node_modules", "missing.txt");
+
+    let run = run_with(&with_skip(dir.path(), &["node_modules"]));
+
+    assert_eq!(run.summary.broken, 1);
+    assert_eq!(
+        run.out,
+        format!(
+            "{}Found 1 broken symlink(s).\n",
+            broken_line(&link, "missing.txt")
+        )
+    );
+}
+
+#[test]
+fn two_skipped_names_are_both_left_out() {
+    let dir = TempDir::new().unwrap();
+    let modules = dir.path().join("node_modules");
+    fs::create_dir(&modules).unwrap();
+    link_at(&modules, "link", "missing-modules.txt");
+    let git = dir.path().join(".git");
+    fs::create_dir(&git).unwrap();
+    link_at(&git, "link", "missing-git.txt");
+    let outside = link_at(dir.path(), "outside", "missing-outside.txt");
+
+    let run = run_with(&with_skip(dir.path(), &["node_modules", ".git"]));
+
+    assert_eq!(run.summary.broken, 1);
+    assert_eq!(
+        run.out,
+        format!(
+            "{}Found 1 broken symlink(s).\n",
+            broken_line(&outside, "missing-outside.txt")
+        )
+    );
+}
