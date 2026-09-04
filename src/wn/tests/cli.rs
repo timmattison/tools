@@ -64,6 +64,22 @@ const NO_CLIPBOARD_ENV: &str = "WN_NO_CLIPBOARD";
 /// turns the fallback off; this one says why it is there.
 const NO_CLIPBOARD: &str = "1";
 
+/// The variable that turns the run of `claude` off.
+///
+/// Every child of this file gets it, for the reason every child gets
+/// [`NO_CLIPBOARD_ENV`]: a run of the real `claude` would cost money, would
+/// need an account, and would give a different answer every time. The list of
+/// places it looks reaches outside the `PATH` this file builds — `/usr/local/
+/// bin/claude` is one — so no `PATH` can hold the run down on its own.
+///
+/// [`run_building`] takes it back out, and the tests of the run go through
+/// that helper and write a `claude` of their own.
+const NO_CLAUDE_ENV: &str = "WN_NO_CLAUDE";
+
+/// The value [`NO_CLAUDE_ENV`] carries. Any value with a character in it turns
+/// the run off; this one says why it is there.
+const NO_CLAUDE: &str = "1";
+
 /// The error of a run that no input gave a chain, and that had no clipboard to
 /// fall back on.
 ///
@@ -672,7 +688,8 @@ fn wn(gh: &FakeGh, args: &[&str], columns: &str, color: bool, start: Option<&str
         .env_clear()
         .env("PATH", path)
         .env("COLUMNS", columns)
-        .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD);
+        .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD)
+        .env(NO_CLAUDE_ENV, NO_CLAUDE);
     if !color {
         command.env("NO_COLOR", "1");
     }
@@ -692,6 +709,10 @@ fn wn(gh: &FakeGh, args: &[&str], columns: &str, color: bool, start: Option<&str
 /// of the machine no more than it reads it.
 fn run_building(gh: &FakeGh, args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut command = wn(gh, args, "80", false, None);
+    // The switch is on for every other child of this file. A test of the run
+    // takes it off and writes its own `claude`, and a test that wants the
+    // switch back names it in `env`.
+    command.env_remove(NO_CLAUDE_ENV);
     for (name, value) in env {
         command.env(name, value);
     }
@@ -899,10 +920,10 @@ fn takes_the_chain_from_standard_input() {
 
 #[test]
 fn refuses_a_run_that_holds_no_chain_in_any_input() {
-    // The helper turns the clipboard off, so this is a machine with no
-    // clipboard to fall back on. The message is the message the tool printed
-    // before the clipboard was an input at all, because a run with the switch
-    // on asks for exactly that behavior.
+    // The helper turns the clipboard off and turns the run of `claude` off,
+    // so this is a machine with no input after the pipe. The message is the
+    // message the tool printed before either of them was an input at all,
+    // because a run with both switches on asks for exactly that behavior.
     let gh = FakeGh::new(THREE_ISSUES);
     let output = run(&gh, &["--repo", REPO], "80", false);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
@@ -917,7 +938,8 @@ fn refuses_a_run_that_holds_no_chain_in_any_input() {
 #[test]
 fn an_empty_pipe_reaches_the_clipboard_step() {
     // A pipe that holds nothing is not a chain of nothing. The run walks on to
-    // the clipboard, which the switch turned off, so it stops with the same
+    // the clipboard, which the switch turned off, and then to the run of
+    // `claude`, which the second switch turned off, so it stops with the same
     // message a run with no pipe at all stops with. A run that stopped at
     // standard input would report a chain error about empty text instead.
     let gh = FakeGh::new(THREE_ISSUES);
@@ -928,6 +950,7 @@ fn an_empty_pipe_reaches_the_clipboard_step() {
         .env("COLUMNS", "80")
         .env("NO_COLOR", "1")
         .env(NO_CLIPBOARD_ENV, NO_CLIPBOARD)
+        .env(NO_CLAUDE_ENV, NO_CLAUDE)
         .env("WN", env!("CARGO_BIN_EXE_wn"))
         .arg("-c")
         .arg("printf '' | \"$WN\" --repo timmattison/tools")
@@ -1967,9 +1990,6 @@ fn a_json_document_that_is_not_the_schema_names_the_path() {
         stderr(&output)
     );
 }
-
-/// The variable that turns the run of `claude` off.
-const NO_CLAUDE_ENV: &str = "WN_NO_CLAUDE";
 
 /// The variable that names the seconds the run of `claude` may take.
 const PLAN_TIMEOUT_ENV: &str = "WN_PLAN_TIMEOUT";

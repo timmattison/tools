@@ -46,6 +46,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use buildinfo::version_string;
+use chrono::Utc;
 use clap::Parser;
 use colored::Colorize;
 use termwindow::{effective_terminal_width, should_force_colors};
@@ -167,9 +168,30 @@ struct Cli {
     #[arg(short = 'R', long, value_name = "OWNER/NAME")]
     repo: Option<String>,
 
+    /// Build a new plan by running claude, whatever the other inputs hold,
+    /// and replace the clipboard with it.
+    #[arg(long)]
+    refresh: bool,
+
     /// Write no color.
     #[arg(long)]
     no_color: bool,
+}
+
+/// What the environment said about the two inputs `wn` reaches for on its own.
+///
+/// One struct rather than four arguments, because every one of them is a read
+/// of process-global state and `main` is the one place that reads it. The
+/// functions under it take values, so a test of them touches no environment.
+struct Environment {
+    /// Whether [`input::NO_CLIPBOARD_ENV`] turns the clipboard off.
+    clipboard_off: bool,
+    /// Whether [`build::NO_CLAUDE_ENV`] turns the run of `claude` off.
+    claude_off: bool,
+    /// The value of [`build::TIMEOUT_ENV`].
+    timeout: Option<String>,
+    /// The value of `HOME`, which says where `claude` can stand.
+    home: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -201,10 +223,16 @@ fn main() -> ExitCode {
     );
 
     let start = StartCommand::new(std::env::var(START_COMMAND_ENV).ok().as_deref());
-    let clipboard_off =
-        input::clipboard_is_off(std::env::var(input::NO_CLIPBOARD_ENV).ok().as_deref());
+    let environment = Environment {
+        clipboard_off: input::clipboard_is_off(
+            std::env::var(input::NO_CLIPBOARD_ENV).ok().as_deref(),
+        ),
+        claude_off: build::claude_is_off(std::env::var(build::NO_CLAUDE_ENV).ok().as_deref()),
+        timeout: std::env::var(build::TIMEOUT_ENV).ok(),
+        home: std::env::var("HOME").ok(),
+    };
 
-    match run(&cli, width, &start, clipboard_off) {
+    match run(&cli, width, &start, &environment) {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{} {err:#}", "wn:".red().bold());
@@ -252,7 +280,12 @@ fn main() -> ExitCode {
 /// nobody can read is a mistake the reader made, and reporting it costs no
 /// call to `gh`. A plan whose streams wait for each other is such a mistake,
 /// so that refusal costs no call either.
-fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Result<ExitCode> {
+fn run(
+    cli: &Cli,
+    width: usize,
+    start: &StartCommand,
+    environment: &Environment,
+) -> Result<ExitCode> {
     // Each input is a function rather than its text, so an input that a nearer
     // input already answered for is never touched. This matters for the
     // clipboard, which is one shared resource of the whole machine.
@@ -262,21 +295,51 @@ fn run(cli: &Cli, width: usize, start: &StartCommand, clipboard_off: bool) -> Re
         Ok(text)
     };
     let copied: &dyn Fn() -> input::ClipboardRead = &input::system_clipboard;
+    let paths = build::candidate_paths(environment.home.as_deref());
+    // The line stands before the spinner, because a reader who typed `wn` and
+    // waits a minute must know what is happening. It goes to standard error,
+    // so a pipe still gets the answer alone.
+    let announcement = if cli.refresh {
+        "building a new plan with claude…"
+    } else {
+        "no plan to read. Building one with claude…"
+    };
+    let built: &dyn Fn() -> input::PlanBuild = &|| {
+        eprintln!("{} {announcement}", "wn:".bold());
+        build::plan(
+            &paths,
+            &build::answers_version,
+            environment.timeout.as_deref(),
+        )
+    };
+    let write: &dyn Fn(&str) -> input::ClipboardWrite = &input::write_system_clipboard;
 
     let chain = input::Sources {
         argument: &cli.chain,
         // A terminal on standard input is a run with nothing piped into it.
         stdin: (!std::io::stdin().is_terminal()).then_some(piped),
-        clipboard: (!clipboard_off).then_some(copied),
-        plan: None,
-        refresh: false,
+        clipboard: (!environment.clipboard_off).then_some(copied),
+        plan: (!environment.claude_off).then_some(built),
+        refresh: cli.refresh,
     }
     .chain()?;
 
     if let Some(document) = json::read(chain.text()) {
+        // The plan is kept before the answer is asked for. A run that could
+        // read the document and then could not reach GitHub still built a
+        // plan, and the reader must not pay for a second one.
+        let kept = chain.keep(
+            document.is_ok(),
+            (!environment.clipboard_off).then_some(write),
+        );
         let document = document.map_err(|err| chain.blame(err))?;
         let repo = repo_of(cli)?;
-        return answer_graph(document.graph(), &repo, width, start);
+        let code = answer_graph(document.graph(), &repo, width, start)?;
+        for note in document.age_note(Utc::now()).into_iter().chain(kept) {
+            println!();
+            println!("{note}");
+        }
+        return Ok(code);
     }
 
     if plan::looks_like_a_plan(chain.text()) {
