@@ -28,25 +28,17 @@
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
-use std::process;
 use std::process::{Command, Stdio};
 use std::ptr;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The escape byte that starts every escape sequence.
-const ESC: u8 = 0x1b;
+mod common;
 
-/// The second byte of a control sequence introducer.
-const CSI_BRACKET: u8 = b'[';
+use common::{
+    find, scan_cursor_movement, unreachable_path_dir, SIXEL_START, TERM_XTERM_256COLOR, TEST_IMAGE,
+};
 
-/// The final byte of a CUU (cursor up) sequence.
-const CURSOR_UP_FINAL: u8 = b'A';
-
-/// The final byte of a CUD (cursor down) sequence.
-const CURSOR_DOWN_FINAL: u8 = b'B';
-
-/// The device control string introducer that opens the Sixel payload.
-const SIXEL_START: &[u8] = b"\x1bP";
+/// The name that this target puts in the unreachable `PATH` of its children.
+const TARGET_NAME: &str = "controlling-terminal";
 
 /// The byte that opens the raster attributes of a Sixel payload.
 const RASTER_INTRODUCER: u8 = b'"';
@@ -65,9 +57,6 @@ const RASTER_WIDTH_INDEX: usize = 2;
 /// The position of `Pv`, the height of the image in pixels, in the raster
 /// attributes.
 const RASTER_HEIGHT_INDEX: usize = 3;
-
-/// The terminal type of a child that must not look like Kitty.
-const TERM_XTERM_256COLOR: &str = "xterm-256color";
 
 /// The width of the pseudo-terminal of the tests, in columns.
 const TERMINAL_COLUMNS: u16 = 80;
@@ -119,32 +108,6 @@ const EXPECTED_SIXEL_HEIGHT_PX: u32 = EXPECTED_SIXEL_WIDTH_PX;
 /// the stream must move the cursor down. The type is `i64`, because
 /// [`scan_cursor_movement`] counts a movement up as well as a movement down.
 const EXPECTED_ROWS: i64 = (EXPECTED_SIXEL_HEIGHT_PX / CELL_HEIGHT_PX) as i64;
-
-/// The image that the tests send to `ic` on stdin. It is 1 pixel by 1, so it
-/// is square and it holds no aspect ratio of its own to argue with.
-const TEST_IMAGE: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_image.png"));
-
-/// A directory that does not exist, unique to this process.
-///
-/// The `PATH` of the child points here, which keeps `ps` out of reach. The
-/// remote transport detection then finds no process tree to walk, so a test
-/// runner that is itself under a remote transport cannot change the bytes that
-/// `ic` writes. The directory holds the process id and a nanosecond stamp, so
-/// two concurrent runs of this file never name the same directory.
-///
-/// # Returns
-/// The path of a directory that no process creates.
-fn unreachable_path_dir() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock must be after the epoch")
-        .as_nanos();
-    format!(
-        "/nonexistent-ic-controlling-terminal-{}-{nanos}",
-        process::id()
-    )
-}
 
 /// A pseudo-terminal of the size that the tests measure `ic` against.
 ///
@@ -252,7 +215,7 @@ fn ic_command(pty: &Pty, args: &[&str]) -> Command {
     command
         .args(args)
         .env_clear()
-        .env("PATH", unreachable_path_dir())
+        .env("PATH", unreachable_path_dir(TARGET_NAME))
         .env("TERM", TERM_XTERM_256COLOR)
         .env("MUXIAVELLI", "1")
         .env("MUXIAVELLI_IMAGE_PROTOCOLS", "sixel")
@@ -324,88 +287,6 @@ fn run_ic(args: &[&str]) -> Vec<u8> {
     );
 
     output.stdout
-}
-
-/// The cursor movement that a byte stream requests, in rows.
-struct CursorMovement {
-    /// The total number of rows of downward movement.
-    down: i64,
-    /// The total number of rows of upward movement.
-    up: i64,
-}
-
-impl CursorMovement {
-    /// Give the net movement in rows. A positive result is downward.
-    fn net(&self) -> i64 {
-        self.down - self.up
-    }
-}
-
-/// Scan a byte slice and measure the cursor movement that it requests.
-///
-/// A newline moves the cursor down one row. A CUD sequence (`ESC [ n B`) moves
-/// the cursor down `n` rows and a CUU sequence (`ESC [ n A`) moves it up `n`
-/// rows. A missing or zero parameter means one row, which is what a terminal
-/// does. The scan ignores all other bytes, and a Sixel payload holds none of
-/// the three, so the payload adds nothing to the count.
-///
-/// # Arguments
-/// * `bytes` - The byte stream to scan.
-///
-/// # Returns
-/// The total downward and upward movement in rows.
-fn scan_cursor_movement(bytes: &[u8]) -> CursorMovement {
-    let mut movement = CursorMovement { down: 0, up: 0 };
-    let mut index = 0_usize;
-
-    while index < bytes.len() {
-        if bytes[index] == b'\n' {
-            movement.down += 1;
-            index += 1;
-            continue;
-        }
-
-        if bytes[index] != ESC || bytes.get(index + 1) != Some(&CSI_BRACKET) {
-            index += 1;
-            continue;
-        }
-
-        let mut end = index + 2;
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
-            end += 1;
-        }
-
-        let parameter: i64 = std::str::from_utf8(&bytes[index + 2..end])
-            .ok()
-            .and_then(|digits| digits.parse().ok())
-            .unwrap_or(0);
-        // A missing or zero parameter means one row.
-        let rows = if parameter == 0 { 1 } else { parameter };
-
-        match bytes.get(end) {
-            Some(&CURSOR_DOWN_FINAL) => movement.down += rows,
-            Some(&CURSOR_UP_FINAL) => movement.up += rows,
-            _ => {}
-        }
-
-        index = end.saturating_add(1).min(bytes.len());
-    }
-
-    movement
-}
-
-/// Find the first position of a byte pattern in a byte slice.
-///
-/// # Arguments
-/// * `haystack` - The byte slice to search.
-/// * `needle` - The byte pattern to look for.
-///
-/// # Returns
-/// The index of the first byte of the match, or `None` when there is no match.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 /// Read the size in pixels of the Sixel image in a byte stream.

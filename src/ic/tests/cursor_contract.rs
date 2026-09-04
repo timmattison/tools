@@ -24,22 +24,15 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::process;
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The escape byte that starts every escape sequence.
-const ESC: u8 = 0x1b;
+mod common;
 
-/// The second byte of a control sequence introducer.
-const CSI_BRACKET: u8 = b'[';
+use common::{
+    find, scan_cursor_movement, unreachable_path_dir, SIXEL_START, TERM_XTERM_256COLOR, TEST_IMAGE,
+};
 
-/// The final byte of a CUU (cursor up) sequence.
-const CURSOR_UP_FINAL: u8 = b'A';
-
-/// The final byte of a CUD (cursor down) sequence.
-const CURSOR_DOWN_FINAL: u8 = b'B';
-
-/// The device control string introducer that opens the Sixel payload.
-const SIXEL_START: &[u8] = b"\x1bP";
+/// The name that this target puts in the unreachable `PATH` of its children.
+const TARGET_NAME: &str = "cursor-contract";
 
 /// The application program command that opens a Kitty graphics command.
 const KITTY_START: &[u8] = b"\x1b_G";
@@ -61,10 +54,6 @@ const SAVE_CURSOR: &[u8] = b"\x1b7";
 
 /// DECRC. It restores the saved position of the cursor.
 const RESTORE_CURSOR: &[u8] = b"\x1b8";
-
-/// The image that the tests send to `ic` on stdin.
-const TEST_IMAGE: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_image.png"));
 
 /// The path of the image that the tests give to `ic` as an argument.
 ///
@@ -91,9 +80,6 @@ const MAX_RESERVATION_ROWS: i64 = TERMINAL_ROWS - 1;
 
 /// A command line that asks for an image taller than the terminal of the tests.
 const OVERSIZED_ARGS: &[&str] = &["--stdin", "--width", "78", "--height", "50"];
-
-/// The terminal type of a child process that must not look like Kitty.
-const TERM_XTERM_256COLOR: &str = "xterm-256color";
 
 /// The terminal type that Kitty sets.
 const TERM_XTERM_KITTY: &str = "xterm-kitty";
@@ -163,24 +149,6 @@ impl Routine {
     }
 }
 
-/// A directory that does not exist, unique to this process.
-///
-/// The `PATH` of the child points here, which keeps `ps` out of reach. The
-/// remote transport detection then finds no process tree to walk, so a test
-/// runner that is itself under a remote transport cannot change the bytes that
-/// `ic` writes. The directory holds the process id and a nanosecond stamp, so
-/// two concurrent runs of this file never name the same directory.
-///
-/// # Returns
-/// The path of a directory that no process creates.
-fn unreachable_path_dir() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock must be after the epoch")
-        .as_nanos();
-    format!("/nonexistent-ic-cursor-contract-{}-{nanos}", process::id())
-}
-
 /// The number of terminal rows that the test image occupies.
 ///
 /// The test invocation makes a Sixel image of 100 pixels by 100 pixels. One
@@ -190,87 +158,6 @@ fn unreachable_path_dir() -> String {
 /// routine and the iTerm2 routine take the size of the image in character
 /// cells, and the same test invocation asks them for 5 rows.
 const EXPECTED_ROWS: i64 = 5;
-
-/// The cursor movement that a byte stream requests, in rows.
-struct CursorMovement {
-    /// The total number of rows of downward movement.
-    down: i64,
-    /// The total number of rows of upward movement.
-    up: i64,
-}
-
-impl CursorMovement {
-    /// Give the net movement in rows. A positive result is downward.
-    fn net(&self) -> i64 {
-        self.down - self.up
-    }
-}
-
-/// Scan a byte slice and measure the cursor movement that it requests.
-///
-/// A newline moves the cursor down one row. A CUD sequence (`ESC [ n B`) moves
-/// the cursor down `n` rows and a CUU sequence (`ESC [ n A`) moves it up `n`
-/// rows. A missing or zero parameter means one row, which is what a terminal
-/// does. The scan ignores all other bytes.
-///
-/// # Arguments
-/// * `bytes` - The byte stream to scan.
-///
-/// # Returns
-/// The total downward and upward movement in rows.
-fn scan_cursor_movement(bytes: &[u8]) -> CursorMovement {
-    let mut movement = CursorMovement { down: 0, up: 0 };
-    let mut index = 0_usize;
-
-    while index < bytes.len() {
-        if bytes[index] == b'\n' {
-            movement.down += 1;
-            index += 1;
-            continue;
-        }
-
-        if bytes[index] != ESC || bytes.get(index + 1) != Some(&CSI_BRACKET) {
-            index += 1;
-            continue;
-        }
-
-        let mut end = index + 2;
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
-            end += 1;
-        }
-
-        let parameter: i64 = std::str::from_utf8(&bytes[index + 2..end])
-            .ok()
-            .and_then(|digits| digits.parse().ok())
-            .unwrap_or(0);
-        // A missing or zero parameter means one row.
-        let rows = if parameter == 0 { 1 } else { parameter };
-
-        match bytes.get(end) {
-            Some(&CURSOR_DOWN_FINAL) => movement.down += rows,
-            Some(&CURSOR_UP_FINAL) => movement.up += rows,
-            _ => {}
-        }
-
-        index = end.saturating_add(1).min(bytes.len());
-    }
-
-    movement
-}
-
-/// Find the first position of a byte pattern in a byte slice.
-///
-/// # Arguments
-/// * `haystack` - The byte slice to search.
-/// * `needle` - The byte pattern to look for.
-///
-/// # Returns
-/// The index of the first byte of the match, or `None` when there is no match.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
 
 /// Find the last position of a byte pattern in a byte slice.
 ///
@@ -449,7 +336,7 @@ fn ic_command(routine: Routine, args: &[&str]) -> Command {
     command
         .args(args)
         .env_clear()
-        .env("PATH", unreachable_path_dir())
+        .env("PATH", unreachable_path_dir(TARGET_NAME))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
