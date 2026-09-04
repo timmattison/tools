@@ -870,6 +870,90 @@ fn verbose_names_the_removed_candidate_and_calls_it_absent() {
     );
 }
 
+/// Builds the tree the empty-candidate tests share: a link whose whole target
+/// is the text a remove would take off the front of it.
+///
+/// `{root}/sub/link` points at `{root}/absent`, which is not there, so the link
+/// is broken. A remove of that same text leaves a candidate with no bytes in
+/// it. The fixture gives back the link and the text, so a test names that text
+/// once and passes it to both the link and the option.
+fn the_whole_target_is_the_prefix(root: &Path) -> (PathBuf, OsString) {
+    let stale = OsString::from(root.join("absent"));
+    let link = link_at(&dir_at(root, "sub"), "link", &stale);
+    (link, stale)
+}
+
+#[test]
+fn a_remove_of_the_whole_target_makes_no_repair() {
+    // A prefix that is the whole target leaves a candidate with no bytes in it.
+    // The directory that holds the link, joined with nothing, is that directory
+    // again, and the directory is there — so a check of that path answers about
+    // the directory and not about a target. A run that took the answer would
+    // write an empty target over the only copy of the text the link held, and
+    // that text cannot be read back from anywhere.
+    let dir = TempDir::new().unwrap();
+    let (link, stale) = the_whole_target_is_the_prefix(dir.path());
+    let stale_text = Path::new(&stale).display().to_string();
+
+    let run = run_with(&with_remove(dir.path(), stale.clone()));
+
+    assert_eq!(
+        run.summary,
+        Summary {
+            broken: 1,
+            fixed: 0,
+            errors: 0
+        }
+    );
+    assert!(
+        !run.out.contains("Fixed"),
+        "no repair is reported: {:?}",
+        run.out
+    );
+    assert_eq!(
+        run.out,
+        format!(
+            "{}Found 1 broken symlink(s).\n{NOTHING_FIXED}",
+            broken_line(&link, &stale_text)
+        )
+    );
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        Path::new(&stale),
+        "the link still holds the target it was made with"
+    );
+}
+
+#[test]
+fn verbose_calls_an_empty_removed_candidate_empty() {
+    // The debug lines are the only account a user gets of a candidate the
+    // remove built and then refused, so an empty candidate gets a line of its
+    // own. `does not exist` would be the wrong reason: the path such a target
+    // resolves to is the directory of the link, and that directory is there.
+    let dir = TempDir::new().unwrap();
+    let (link, stale) = the_whole_target_is_the_prefix(dir.path());
+
+    let run = run_with(&Options {
+        verbose: true,
+        ..with_remove(dir.path(), stale)
+    });
+
+    assert_eq!(run.summary.fixed, 0);
+    assert!(
+        run.err.contains(&format!(
+            "Target with removed prefix is empty: {}\n",
+            link.display()
+        )),
+        "the empty candidate is called empty: {:?}",
+        run.err
+    );
+    assert!(
+        !run.err.contains("Target with removed prefix does not exist"),
+        "the empty candidate is not called absent: {:?}",
+        run.err
+    );
+}
+
 /// The line the tool writes for one repair the prepend planned and did not
 /// make.
 fn would_prepend_line(link: &Path, target: &str) -> String {
@@ -986,6 +1070,40 @@ fn a_dry_run_plans_a_remove_and_changes_nothing() {
         fs::metadata(&link).is_err(),
         "the link is still broken: {:?}",
         fs::read_link(&link)
+    );
+}
+
+#[test]
+fn a_dry_run_plans_no_repair_for_a_remove_of_the_whole_target() {
+    // A dry run decides exactly what a real run decides, so a repair the real
+    // run refuses is a repair the dry run must not plan. A plan for an empty
+    // target would tell a user to run the tool again without the flag, and the
+    // run that followed would destroy the target.
+    let dir = TempDir::new().unwrap();
+    let (link, stale) = the_whole_target_is_the_prefix(dir.path());
+
+    let run = run_with(&Options {
+        dry_run: true,
+        ..with_remove(dir.path(), stale.clone())
+    });
+
+    assert_eq!(
+        run.summary,
+        Summary {
+            broken: 1,
+            fixed: 0,
+            errors: 0
+        }
+    );
+    assert!(
+        !run.out.contains("Would fix"),
+        "no repair is planned: {:?}",
+        run.out
+    );
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        Path::new(&stale),
+        "the link still holds the target it was made with"
     );
 }
 
