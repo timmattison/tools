@@ -1254,3 +1254,5 @@ gitscratch = { workspace = true, features = ["testing"] }
 - [`grist`](../grist/README.md) — ranks squash-merge orderings by conflict cost
 - [`grind`](../grind/README.md) — would rebasing HEAD onto this branch conflict,
   and by how much?
+- [`grime`](../grime/README.md) — would merging this branch into HEAD conflict,
+  and by how much?
