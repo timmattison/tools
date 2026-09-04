@@ -35,7 +35,7 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 600;
 /// A constant rather than a literal at the spawn, because a test asserts it. A
 /// rename of the skill must become a build that stops, and not a run that
 /// quietly asks for something else.
-pub const PROMPT: &str = "";
+pub const PROMPT: &str = "/plan-parallel-work --json";
 
 /// The name of the binary, as `PATH` carries it.
 const CLAUDE: &str = "claude";
@@ -50,8 +50,8 @@ const CLAUDE: &str = "claude";
 /// variable is a common accident, and it is not the same statement as
 /// `WN_NO_CLAUDE=1`.
 #[must_use]
-pub fn claude_is_off(_value: Option<&str>) -> bool {
-    false
+pub fn claude_is_off(value: Option<&str>) -> bool {
+    value.is_some_and(|named| !named.trim().is_empty())
 }
 
 /// How long a run may take, as `value`, the value of [`TIMEOUT_ENV`], names it.
@@ -65,8 +65,16 @@ pub fn claude_is_off(_value: Option<&str>) -> bool {
 /// seconds, and for a zero. A reader who wrote `WN_PLAN_TIMEOUT=10m` and got
 /// the default back would learn nothing about why the run still took ten
 /// minutes, and a zero is a confusing way to spell [`NO_CLAUDE_ENV`].
-pub fn seconds(_value: Option<&str>) -> Result<Duration, BuildError> {
-    Ok(Duration::from_secs(0))
+pub fn seconds(value: Option<&str>) -> Result<Duration, BuildError> {
+    let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
+        return Ok(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS));
+    };
+    match named.parse::<u64>() {
+        Ok(0) | Err(_) => Err(BuildError::BadTimeout {
+            value: named.to_string(),
+        }),
+        Ok(read) => Ok(Duration::from_secs(read)),
+    }
 }
 
 /// The places `claude` stands, in the order they are tried.
@@ -75,8 +83,15 @@ pub fn seconds(_value: Option<&str>) -> Result<Duration, BuildError> {
 /// no home has no home directory to look under, so the two paths that name one
 /// are left out rather than written as `/.local/bin/claude`.
 #[must_use]
-pub fn candidate_paths(_home: Option<&str>) -> Vec<String> {
-    Vec::new()
+pub fn candidate_paths(home: Option<&str>) -> Vec<String> {
+    let mut paths = vec![CLAUDE.to_string()];
+    if let Some(home) = home.map(str::trim).filter(|home| !home.is_empty()) {
+        let home = home.trim_end_matches('/');
+        paths.push(format!("{home}/.local/bin/{CLAUDE}"));
+        paths.push(format!("{home}/.claude/local/{CLAUDE}"));
+    }
+    paths.push(format!("/usr/local/bin/{CLAUDE}"));
+    paths
 }
 
 /// Why no plan came back.
