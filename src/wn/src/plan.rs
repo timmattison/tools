@@ -2443,6 +2443,20 @@ Notes: Disjoint.";
     }
 
     #[test]
+    fn a_waits_for_cell_of_no_number_at_all_names_the_waits_for_field() {
+        // A reader of a Markdown table writes a hyphen for a cell that holds
+        // nothing. The cell names no work to wait for, so the plan is refused,
+        // and the message must name the cell that is wrong. A message that
+        // named the `Order` field would send the reader to a cell that reads.
+        let message = parse(&table_that_waits_for("-"))
+            .expect_err("a cell of no number at all is a refusal")
+            .to_string();
+        assert!(message.contains("Waits for"), "{message}");
+        assert!(!message.contains("Order"), "{message}");
+        assert!(message.contains(ONE_STREAM_LABEL), "{message}");
+    }
+
+    #[test]
     fn refuses_a_waits_for_cell_that_names_no_issue() {
         // The reason a stream waits is prose, and the prose of a stream
         // belongs in `Notes`. So a cell of prose here names no work to wait
