@@ -940,3 +940,204 @@ impl DetachedGitDirRepo {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 }
+
+/// Punctuation that a printed path can carry on either end.
+///
+/// [`path_at_or_above`] removes these characters from both ends of a candidate,
+/// so a path inside quotation marks or before a comma still reaches the
+/// comparison. Each of these characters also ends one candidate and starts the
+/// next.
+pub const TRIMMED_PUNCTUATION: &str = "\"'`,;:()[]{}";
+
+/// Resolve a path before an assertion reads it.
+///
+/// Every fixture lives under a temporary directory that macOS reaches through a
+/// symbolic link: `/var` resolves to `/private/var`. Git and the tools print
+/// the resolved form.
+///
+/// # Panics
+///
+/// Panics if the file system cannot resolve `path`.
+pub fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|e| panic!("canonicalize {}: {e}", path.display()))
+}
+
+/// Resolve `path` when the file system can, and hand it back as it is when it
+/// cannot.
+///
+/// A path the tool printed can name something that no longer exists, and such a
+/// path still has to reach the comparison.
+pub fn resolved(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The first path in `output` that is `work_tree` or a directory above it.
+///
+/// This is the safety matcher that every detached-git-directory guard reads the
+/// output of a destructive tool with. It lives here, once, because three of
+/// those guards ran a copy of it: a copy that widened left the other copies
+/// narrow, and a matcher that finds too little answers `None` for the wrong
+/// reason.
+///
+/// The work tree of a [`DetachedGitDirRepo`] stands in for `$HOME`, and the
+/// directories above it hold every other user of the machine. A tool that
+/// removes or rewrites files must name no path in that set. `starts_with` on
+/// the work tree is true for exactly that set: the work tree itself and each
+/// directory above it. A path below the work tree is a different answer, and
+/// this function passes it.
+///
+/// The scan reads one line at a time, because a path ends where the line ends.
+/// A candidate starts where a token starts, and white space or a character of
+/// [`TRIMMED_PUNCTUATION`] starts a token. A candidate ends at the end of the
+/// line or at a later white space character, and the longest candidate of a
+/// start comes first. A path that holds a space thus reaches the comparison,
+/// which a scan of single tokens misses, and the longest-first order keeps the
+/// whole path ahead of its own first word.
+///
+/// # Panics
+///
+/// Panics if the file system cannot resolve `work_tree`.
+pub fn path_at_or_above(output: &str, work_tree: &Path) -> Option<PathBuf> {
+    let work_tree = canonical(work_tree);
+
+    output
+        .lines()
+        .flat_map(candidate_paths)
+        .map(|candidate| resolved(&candidate))
+        .find(|candidate| work_tree.starts_with(candidate))
+}
+
+/// Every absolute path one line of output can hold, longest first at each
+/// start.
+///
+/// The ends of each candidate lose their white space and their punctuation
+/// before [`Path::is_absolute`] reads it, so a path inside quotation marks
+/// counts and the quotation marks do not.
+fn candidate_paths(line: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for start in token_starts(line) {
+        // `split_at` rather than an index range: `clippy::string_slice` is on
+        // for the whole workspace, and every index here comes from
+        // `char_indices`, so both halves stand on a character boundary.
+        let (_, tail) = line.split_at(start);
+
+        let mut ends: Vec<usize> = tail
+            .char_indices()
+            .filter(|(_, character)| character.is_whitespace())
+            .map(|(index, _)| index)
+            .collect();
+        ends.push(tail.len());
+
+        // Longest first, so the whole of a path that holds a space is read
+        // before the first word of it.
+        for end in ends.into_iter().rev() {
+            let (candidate, _) = tail.split_at(end);
+            let candidate = Path::new(candidate.trim_matches(separates_a_path));
+            if candidate.is_absolute() {
+                candidates.push(candidate.to_path_buf());
+            }
+        }
+    }
+
+    candidates
+}
+
+/// The index in `line` of the first character of each token.
+///
+/// One pass, and the start of the line counts as a boundary, so the first token
+/// of a line starts a candidate as well.
+fn token_starts(line: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut previous_separates = true;
+
+    for (index, character) in line.char_indices() {
+        let separates = separates_a_path(character);
+        if previous_separates && !separates {
+            starts.push(index);
+        }
+        previous_separates = separates;
+    }
+
+    starts
+}
+
+/// True for a character that stands between one candidate path and the next.
+fn separates_a_path(character: char) -> bool {
+    character.is_whitespace() || TRIMMED_PUNCTUATION.contains(character)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonical, path_at_or_above, DetachedGitDirRepo};
+
+    /// The name of the planted directory that holds a space.
+    const SPACED_DIRECTORY: &str = "directory with a space";
+
+    /// The work tree of the plant that holds a space, one level under it.
+    const SPACED_WORK_TREE: &str = "home";
+
+    /// Prove the path check can fail, before a clean answer from it is trusted.
+    ///
+    /// Three tools rest on this one function - `gitnuke`, `nodenuke` and
+    /// `repotidy` each assert that it answers `None` for the output of a run -
+    /// and a matcher that never matches answers `None` for every input. A guard
+    /// that reports clean for the wrong reason is the defect those three files
+    /// exist to stop, so the check gets the same treatment it gives the tools.
+    ///
+    /// Five plants: the work tree, the directory above it, the same work tree
+    /// inside quotation marks and before a comma, a directory whose name holds
+    /// a space, and the git directory, which the nested shape keeps under the
+    /// work tree. The first four must match and the last one must not.
+    ///
+    /// The plant that holds a space carries a work tree of its own, because
+    /// every directory above the work tree of the fixture has a name of one
+    /// word. It is the parent of that second work tree, so the check must flag
+    /// it. A scan of white-space-separated tokens reads the first word of that
+    /// name alone and finds nothing.
+    #[test]
+    fn the_path_check_flags_the_work_tree_and_the_directory_above_it() {
+        let repo = DetachedGitDirRepo::nested();
+        let work_tree = canonical(repo.work_tree());
+        let above = work_tree
+            .parent()
+            .expect("the work tree has a parent")
+            .to_path_buf();
+        let spaced = above.join(SPACED_DIRECTORY);
+        let spaced_work_tree = spaced.join(SPACED_WORK_TREE);
+        std::fs::create_dir_all(&spaced_work_tree)
+            .expect("create the work tree under a directory whose name holds a space");
+
+        assert_eq!(
+            path_at_or_above(&format!("root: {}", work_tree.display()), repo.work_tree()),
+            Some(work_tree.clone()),
+            "the check must flag the work tree itself"
+        );
+        assert_eq!(
+            path_at_or_above(&format!("root: {}", above.display()), repo.work_tree()),
+            Some(above),
+            "the check must flag a directory above the work tree"
+        );
+        assert_eq!(
+            path_at_or_above(
+                &format!("root: \"{}\", and more", work_tree.display()),
+                repo.work_tree()
+            ),
+            Some(work_tree),
+            "the check must flag a path that carries punctuation on either end"
+        );
+        assert_eq!(
+            path_at_or_above(&format!("root: {}", spaced.display()), &spaced_work_tree),
+            Some(canonical(&spaced)),
+            "the check must flag a path whose name holds a space"
+        );
+        assert_eq!(
+            path_at_or_above(
+                &format!("root: {}", repo.git_dir().display()),
+                repo.work_tree()
+            ),
+            None,
+            "the check must pass a directory under the work tree"
+        );
+    }
+}

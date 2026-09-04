@@ -35,6 +35,7 @@ not have to re-derive which guard belongs to which test.
 | `never_leaves_a_scratch_worktree_registered_in_the_real_repository` | `worktree remove --force` in teardown | `src/scratch.rs`, `impl Drop for Scratch` — drop the removal | remove |
 | `never_leaves_a_scratch_worktree_registered_in_the_real_repository` | `rebase.backend=merge` | `src/git.rs`, `Git::safety_config()` — drop the `"rebase.backend=merge"` entry | remove |
 | `replays_without_hanging_or_failing_when_commit_signing_is_enabled` | `commit.gpgsign=false` | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| `the_path_check_flags_the_work_tree_and_the_directory_above_it` | `path_at_or_above`, the matcher `gitnuke`, `nodenuke` and `repotidy` read a run's output with | `src/testing.rs`, `candidate_paths()` — keep the first candidate of each start instead of every one | narrow |
 
 ## What keeps each test honest
 
@@ -351,6 +352,42 @@ is sitting on a passphrase prompt nobody asked for
 
 No collateral.
 
+### `the_path_check_flags_the_work_tree_and_the_directory_above_it`
+
+The one guard here that protects other crates rather than this one.
+`path_at_or_above` reads the output of `gitnuke`, `nodenuke` or `repotidy` for a
+path at or above the work tree of a `DetachedGitDirRepo`, which stands in for
+`$HOME`. All three of those tests assert that it answers `None`, and a matcher
+that finds nothing answers `None` for every input, so the matcher needs the same
+treatment it gives the tools. Two mutations, because the matcher can fail in two
+directions.
+
+Mutation one: made `candidate_paths` read no candidate at all. Every plant goes
+unseen, and the first assertion reports it.
+
+```text
+assertion `left == right` failed: the check must flag the work tree itself
+  left: None
+ right: Some("/private/var/folders/.../T/.tmpNDd1t2/home")
+
+test result: FAILED. 0 passed; 1 failed
+```
+
+Mutation two: made `candidate_paths` keep the first candidate of each start
+rather than every one, which is the rule the three copies of this matcher used
+before it moved here. A path of one word still matches, and a path that holds a
+space does not.
+
+```text
+assertion `left == right` failed: the check must flag a path whose name holds a space
+  left: None
+ right: Some("/private/var/folders/.../T/.tmpXGF3Sa/directory with a space")
+
+test result: FAILED. 0 passed; 1 failed
+```
+
+No collateral in either direction: this is the only test the mutations redden.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
@@ -361,6 +398,9 @@ code moves. Three places are load-bearing for the whole table:
 - **`Scratch::create`** — the scratch worktree and its detached `worktree add`.
 - **The `Drop` teardown** — both the removal that must happen and the prune that
   must not.
+- **`path_at_or_above` and its `candidate_paths` scan** — the one guard here that
+  three other crates rest on, and the one that reddens nothing in this crate
+  when it goes narrow.
 
 Anyone touching those should re-run the relevant mutation and update this file
 with what they saw. A guard added without ever being watched to fail is back to

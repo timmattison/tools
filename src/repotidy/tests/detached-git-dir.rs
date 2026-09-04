@@ -24,59 +24,17 @@
 //! throwaway temporary directory that holds one tracked file and a git
 //! directory, so no `go.mod` exists anywhere `repotidy` can reach.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use gitscratch::shed_inherited_git_environment;
-use gitscratch::testing::DetachedGitDirRepo;
+use gitscratch::testing::{path_at_or_above, DetachedGitDirRepo};
 
 /// The exit code `repotidy` leaves behind when it finds no repository.
 const NO_REPOSITORY: i32 = 1;
 
 /// The words `repotidy` uses when it finds no repository.
 const NO_REPOSITORY_MESSAGE: &str = "Could not find git repository";
-
-/// Punctuation that a printed path can carry on either end.
-///
-/// Trimmed before a token is read as a path, so a path inside quotes or before
-/// a comma still reaches the comparison.
-const TRIMMED_PUNCTUATION: &str = "\"'`,;:()[]{}";
-
-/// Resolve a path before an assertion reads it.
-///
-/// Every fixture lives under a temporary directory that macOS reaches through a
-/// symbolic link: `/var` resolves to `/private/var`. Git and the tools print
-/// the resolved form.
-fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|e| panic!("canonicalize {}: {e}", path.display()))
-}
-
-/// Resolve `path` when the file system can, and hand it back as it is when it
-/// cannot.
-///
-/// A path the tool printed can name something that no longer exists, and such a
-/// path still has to reach the comparison.
-fn resolved(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// The first path in `output` that is `work_tree` or an ancestor of it.
-///
-/// This is the whole hazard in one function. The work tree stands in for
-/// `$HOME`, and its ancestors hold every other user of the machine, so a tool
-/// that rewrites files must name neither. `starts_with` on the work tree is
-/// true for exactly that set: the work tree itself and each directory above it.
-fn path_at_or_above(output: &str, work_tree: &Path) -> Option<PathBuf> {
-    let work_tree = canonical(work_tree);
-
-    output
-        .split_whitespace()
-        .map(|token| token.trim_matches(|c| TRIMMED_PUNCTUATION.contains(c)))
-        .map(Path::new)
-        .filter(|token| token.is_absolute())
-        .map(resolved)
-        .find(|candidate| work_tree.starts_with(candidate))
-}
 
 /// Run `repotidy` in `dir` and hand back its exit code and its whole output.
 ///
@@ -124,54 +82,6 @@ fn assert_finds_no_repository(repo: &DetachedGitDirRepo) {
         "repotidy must name no path at or above the work tree {}, but it \
          said:\n{output}",
         repo.work_tree().display()
-    );
-}
-
-/// Prove the path check can fail, before a clean answer from it is trusted.
-///
-/// The run assertions rest on `path_at_or_above` answering `None`, and a
-/// matcher that never matches answers `None` for every input. A guard that
-/// reports clean for the wrong reason is the defect this whole file exists to
-/// stop, so the check gets the same treatment it gives the tool.
-///
-/// Four plants: the work tree, the directory above it, the same work tree
-/// inside quotes and before a comma, and the git directory, which the nested
-/// shape keeps under the work tree. The first three must match and the last one
-/// must not.
-#[test]
-fn the_path_check_flags_the_work_tree_and_the_directory_above_it() {
-    let repo = DetachedGitDirRepo::nested();
-    let work_tree = canonical(repo.work_tree());
-    let above = work_tree
-        .parent()
-        .expect("the work tree has a parent")
-        .to_path_buf();
-
-    assert_eq!(
-        path_at_or_above(&format!("root: {}", work_tree.display()), repo.work_tree()),
-        Some(work_tree.clone()),
-        "the check must flag the work tree itself"
-    );
-    assert_eq!(
-        path_at_or_above(&format!("root: {}", above.display()), repo.work_tree()),
-        Some(above),
-        "the check must flag a directory above the work tree"
-    );
-    assert_eq!(
-        path_at_or_above(
-            &format!("root: \"{}\", and more", work_tree.display()),
-            repo.work_tree()
-        ),
-        Some(work_tree),
-        "the check must flag a path that carries punctuation on either end"
-    );
-    assert_eq!(
-        path_at_or_above(
-            &format!("root: {}", repo.git_dir().display()),
-            repo.work_tree()
-        ),
-        None,
-        "the check must pass a directory under the work tree"
     );
 }
 
