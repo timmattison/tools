@@ -79,8 +79,17 @@ impl Effort {
     /// the default back would learn nothing about why the plan still cost what
     /// it cost.
     pub fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
-        let _ = value;
-        Ok(None)
+        let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
+            return Ok(None);
+        };
+        let lowered = named.to_lowercase();
+        if EFFORT_LEVELS.contains(&lowered.as_str()) {
+            Ok(Some(Self(lowered)))
+        } else {
+            Err(BuildError::BadEffort {
+                value: named.to_string(),
+            })
+        }
     }
 
     /// The level, as the command line and the report write it.
@@ -104,8 +113,15 @@ impl ModelName {
     /// `claude` and not by this tool, so a list here would refuse a model that
     /// shipped after this build.
     pub fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
-        let _ = value;
-        Ok(None)
+        let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
+            return Ok(None);
+        };
+        if named.starts_with('-') {
+            return Err(BuildError::BadModel {
+                value: named.to_string(),
+            });
+        }
+        Ok(Some(Self(named.to_string())))
     }
 
     /// The model, as the command line writes it.
@@ -180,9 +196,23 @@ const ARGUMENTS: [&str; 5] = [
 /// variables cost the reader who sets neither of them nothing at all.
 #[must_use]
 pub fn arguments(effort: Option<&Effort>, model: Option<&ModelName>) -> Vec<String> {
-    let _ = (effort, model);
-    ARGUMENTS.iter().map(ToString::to_string).collect()
+    let mut carried: Vec<String> = ARGUMENTS.iter().map(ToString::to_string).collect();
+    if let Some(effort) = effort {
+        carried.push(EFFORT_FLAG.to_string());
+        carried.push(effort.as_str().to_string());
+    }
+    if let Some(model) = model {
+        carried.push(MODEL_FLAG.to_string());
+        carried.push(model.as_str().to_string());
+    }
+    carried
 }
+
+/// The flag that names the level of effort of a run.
+const EFFORT_FLAG: &str = "--effort";
+
+/// The flag that names the model of a run.
+const MODEL_FLAG: &str = "--model";
 
 /// How often a waiting run is asked whether it is finished.
 const POLL: Duration = Duration::from_millis(100);
@@ -303,10 +333,24 @@ fn looked_in_lines(paths: &[String]) -> String {
         .join("\n")
 }
 
+/// What the environment said about one run.
+///
+/// One struct rather than three arguments, because every one of them is a read
+/// of process-global state and `main` is the one place that reads it. The
+/// functions under it take values, so a test of them touches no environment.
+pub struct Settings<'a> {
+    /// The value of [`TIMEOUT_ENV`].
+    pub timeout: Option<&'a str>,
+    /// The value of [`EFFORT_ENV`].
+    pub effort: Option<&'a str>,
+    /// The value of [`MODEL_ENV`].
+    pub model: Option<&'a str>,
+}
+
 /// The plan a run of `claude` builds, as the document it printed.
 ///
-/// `paths` and `answers` are what [`find`] takes, and `timeout` is the value
-/// of [`TIMEOUT_ENV`]. All three arrive as arguments rather than as reads of
+/// `paths` and `answers` are what [`find`] takes, and `settings` is what the
+/// environment said. All of them arrive as arguments rather than as reads of
 /// the machine and of the environment, so the caller owns every input of the
 /// run and a test of the pieces under it touches neither.
 ///
@@ -321,31 +365,36 @@ fn looked_in_lines(paths: &[String]) -> String {
 ///
 /// Gives [`BuildError::BadTimeout`] for a timeout that names no seconds,
 /// [`BuildError::TimeoutTooFar`] for a timeout longer than a run waits,
-/// [`BuildError::NotInstalled`] when no path holds a `claude`,
+/// [`BuildError::BadEffort`] for a level that is not one of
+/// [`EFFORT_LEVELS`], [`BuildError::BadModel`] for a model that opens with a
+/// dash, [`BuildError::NotInstalled`] when no path holds a `claude`,
 /// [`BuildError::TimedOut`] for a run that outlived its deadline,
 /// [`BuildError::NotAuthenticated`] for a `claude` with no account,
 /// [`BuildError::BadEnvelope`] for a run that printed no envelope, and
 /// [`BuildError::Failed`] for every other failure.
 ///
-/// The two refusals of the timeout stand before the run starts, because the
-/// timeout is read before a path is found and before a child is spawned.
+/// The refusals of the settings stand before the run starts, because all
+/// three are read before a path is found and before a child is spawned. A
+/// value the run cannot use must cost no run at all.
 pub fn plan(
     paths: &[String],
     answers: &dyn Fn(&str) -> bool,
-    timeout: Option<&str>,
+    settings: &Settings,
 ) -> Result<String, BuildError> {
-    let waited = seconds(timeout)?;
+    let waited = seconds(settings.timeout)?;
+    let effort = Effort::new(settings.effort)?;
+    let model = ModelName::new(settings.model)?;
     let path = find(paths, answers)?;
 
     let spinner = spinner();
-    let printed = ask(&path, waited);
+    let printed = ask(&path, waited, effort.as_ref(), model.as_ref());
     spinner.finish_and_clear();
 
     let envelope = Envelope::read(&printed?)?;
     // The report stands after the spinner is cleared, and on the pipe the
     // spinner drew on. The document goes to standard output, and a reader who
     // pipes that output must get the document alone.
-    if let Some(report) = envelope.report(None) {
+    if let Some(report) = envelope.report(effort.as_ref().map(Effort::as_str)) {
         eprintln!("{report}");
     }
     Ok(envelope.document().to_string())
@@ -373,9 +422,14 @@ fn spinner() -> ProgressBar {
 /// refusals of [`refusal_of`] for a run that ended with a failure. Such a
 /// refusal carries the reason [`reason_of`] picks out of the two pipes and
 /// out of the write of the prompt.
-fn ask(path: &str, waited: Duration) -> Result<String, BuildError> {
+fn ask(
+    path: &str,
+    waited: Duration,
+    effort: Option<&Effort>,
+    model: Option<&ModelName>,
+) -> Result<String, BuildError> {
     let mut child = Command::new(path)
-        .args(ARGUMENTS)
+        .args(arguments(effort, model))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -206,7 +206,7 @@ struct Cli {
 
 /// What the environment said about the two inputs `wn` reaches for on its own.
 ///
-/// One struct rather than four arguments, because every one of them is a read
+/// One struct rather than six arguments, because every one of them is a read
 /// of process-global state and `main` is the one place that reads it. The
 /// functions under it take values, so a test of them touches no environment.
 struct Environment {
@@ -216,6 +216,10 @@ struct Environment {
     claude_off: bool,
     /// The value of [`build::TIMEOUT_ENV`].
     timeout: Option<String>,
+    /// The value of [`build::EFFORT_ENV`].
+    effort: Option<String>,
+    /// The value of [`build::MODEL_ENV`].
+    model: Option<String>,
     /// The value of `HOME`, which says where `claude` can stand.
     home: Option<String>,
 }
@@ -255,6 +259,8 @@ fn main() -> ExitCode {
         ),
         claude_off: build::claude_is_off(std::env::var(build::NO_CLAUDE_ENV).ok().as_deref()),
         timeout: std::env::var(build::TIMEOUT_ENV).ok(),
+        effort: std::env::var(build::EFFORT_ENV).ok(),
+        model: std::env::var(build::MODEL_ENV).ok(),
         home: std::env::var("HOME").ok(),
     };
 
@@ -318,7 +324,11 @@ fn run(
         build::plan(
             &paths,
             &build::answers_version,
-            environment.timeout.as_deref(),
+            &build::Settings {
+                timeout: environment.timeout.as_deref(),
+                effort: environment.effort.as_deref(),
+                model: environment.model.as_deref(),
+            },
         )
     };
     let write: &dyn Fn(&str) -> input::ClipboardWrite = &input::write_system_clipboard;

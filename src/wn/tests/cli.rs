@@ -2084,9 +2084,23 @@ fn envelope(document: &str) -> String {
         "total_cost_usd": 0.054_637_9,
         "duration_ms": 1886,
         "num_turns": 1,
+        "modelUsage": {
+            "claude-opus-5": {
+                "costUSD": 0.054_637_9,
+                "inputTokens": 118_000,
+                "outputTokens": 9_400,
+                "cacheReadInputTokens": 13_629,
+                "cacheCreationInputTokens": 26_438,
+            }
+        },
     })
     .to_string()
 }
+
+/// The report line the envelope of [`envelope`] earns, for a run that asked
+/// for no level of effort.
+const REPORT: &str =
+    "plan: $0.05 · claude-opus-5 · 118k in, 9.4k out, 13k cache read, 26k cache write · 1.8s";
 
 /// The shell of a fake `claude` that prints an envelope holding `document`.
 fn prints(document: &str) -> String {
@@ -2324,11 +2338,10 @@ fn the_report_of_the_run_goes_to_standard_error_and_the_plan_goes_to_standard_ou
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), JSON_ANSWER);
-    assert!(
-        stderr(&output).contains("plan: $0.05 \u{b7} 1.8s"),
-        "{}",
-        stderr(&output)
-    );
+    assert!(stderr(&output).contains(REPORT), "{}", stderr(&output));
+    // The document reaches standard output alone, so the report cannot be on
+    // both pipes.
+    assert!(!stdout(&output).contains("plan: $"), "{}", stdout(&output));
 }
 
 #[test]
@@ -2342,8 +2355,10 @@ fn the_level_the_environment_named_reaches_the_run_and_the_report() {
     let args = gh.recorded_claude_args();
     assert!(args.contains("--effort"), "{args}");
     assert!(args.contains("high"), "{args}");
+    // The whole line, with the level in it. The level stands beside the
+    // models, because the models are what ran at it.
     assert!(
-        stderr(&output).contains("at effort high"),
+        stderr(&output).contains(&REPORT.replace("claude-opus-5", "claude-opus-5 at effort high")),
         "{}",
         stderr(&output)
     );
