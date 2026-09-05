@@ -1,13 +1,12 @@
 //! `grime` - Git ReadIness for Merging Externally: would merging a branch into
 //! HEAD conflict, and by how much?
 
-use std::io::Write;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
-use gitscratch::{Repo, Report};
+use gitscratch::{Conflicts, Console, Repo, Report};
 use termbar::TerminalWidth;
 
 /// The tool's own name, on every line it prints and on the report it renders.
@@ -16,25 +15,6 @@ use termbar::TerminalWidth;
 /// greps for and the prefix [`Report`] indents its summary under cannot end up
 /// disagreeing.
 const TOOL: &str = "grime";
-
-/// Exit code for a replay that hit no conflicts.
-const CLEAN: u8 = 0;
-
-/// Exit code for a replay that hit conflicts.
-///
-/// The conflict verdict is the *answer*, not a failure, which is why it gets a
-/// code of its own rather than sharing one with the things that went wrong.
-const CONFLICTS: u8 = 1;
-
-/// Exit code for a run that could not answer the question at all - a branch
-/// that does not resolve, a directory that is not a repository, or git failing
-/// in a way that left no conflict to measure.
-///
-/// Deliberately not `1`. "The merge would conflict" and "I could not tell you"
-/// are different answers, and the shell function this tool replaces reported
-/// both as the same number - which is how a typo'd branch name came to be
-/// reported as a conflict.
-const ERROR: u8 = 2;
 
 // No `about` in the attribute below, and the absence is the point. clap's
 // derive takes the doc comment as the help text. A bare `about` takes
@@ -59,93 +39,20 @@ struct Args {
     quiet: bool,
 }
 
-/// Everything `grime` says, and the one switch that can silence it.
+/// Hands the whole shell to [`Console::answer`] - what this tool says, the one
+/// switch that silences it, and the three exit codes it answers with. The
+/// question below is all that is left, and it is all `grime` owns.
 ///
-/// The switch reaches what this type writes, and nothing before it.
-/// `Args::parse` runs ahead of the `Console`, so clap owns two writes of its
-/// own. One is the usage error for a command line it refuses, and the other is
-/// the version line. Both answer about the tool rather than about a merge.
-/// Silencing the refusal leaves a caller with a bare exit code and no word
-/// about which argument is missing.
-///
-/// `-q` has to reach three writes on three different paths - the
-/// uncommitted-work note, the verdict, and the failure - and the last of those
-/// is printed from [`main`], nowhere near the other two. Three independent
-/// `if !quiet` checks would be one design decision smeared across three sites,
-/// which is precisely the shape that goes wrong the first time somebody adds a
-/// fourth line. Routing every write through one type makes the check
-/// impossible to forget rather than merely easy to remember.
-///
-/// The methods are named for what is being said rather than for which stream
-/// it lands on, because which stream is this type's decision to make: the
-/// verdict is the answer and belongs on stdout, while a caveat or a failure
-/// belongs on stderr where it cannot contaminate a pipeline.
-///
-/// Routing the writes through one type is also what makes them unable to
-/// *panic*, which matters more here than in most tools. `println!` and
-/// `eprintln!` panic when the write fails, and a reader that closes early -
-/// `grime main | head -1`, a pipeline whose consumer exits first, a terminal
-/// that went away - makes it fail with `EPIPE`, because Rust ignores `SIGPIPE`
-/// and hands the error back rather than letting the signal end the process. A
-/// panic there unwinds straight past [`main`]'s hand-mapped codes and exits
-/// **101**: a fourth code the README does not publish, produced by the one tool
-/// whose entire contract is that its exit code is the answer. So every write
-/// here goes through `writeln!` with the result deliberately discarded - the
-/// words are what a broken pipe costs, never the answer - and the discarding
-/// lives at the three sites this type already owns rather than being a rule
-/// every future caller has to know.
-struct Console {
-    quiet: bool,
-}
-
-impl Console {
-    /// A caveat that qualifies the verdict without changing it.
-    fn note(&self, note: &str) {
-        if !self.quiet {
-            let _ = writeln!(std::io::stderr(), "{note}");
-        }
-    }
-
-    /// The answer itself.
-    fn verdict(&self, verdict: &str) {
-        if !self.quiet {
-            let _ = writeln!(std::io::stdout(), "{verdict}");
-        }
-    }
-
-    /// Why there is no answer.
-    fn failure(&self, err: &anyhow::Error) {
-        if !self.quiet {
-            // Alternate formatting so the whole context chain arrives, not just
-            // the outermost sentence: git's own stderr is carried in the causes
-            // and is usually the only part that says what actually went wrong.
-            let _ = writeln!(std::io::stderr(), "{TOOL}: error: {err:#}");
-        }
-    }
-}
-
-/// Returns an [`ExitCode`] rather than a `Result`, which looks like a stylistic
-/// choice and is not.
-///
-/// `fn main() -> Result<()>` prints the error and exits **1** - the same code
-/// this tool uses to mean "the merge would conflict". Every failure would then
-/// be indistinguishable from a conflict to the script reading the number, which
-/// is precisely the defect `grime` was written to fix. Mapping the codes by
-/// hand is the only way to keep "conflicts" and "could not tell" apart.
+/// See [`Console::answer`] for why an [`ExitCode`] is returned rather than a
+/// `Result`: a `Result` exits **1**, which is already the code for a merge that
+/// would conflict.
 fn main() -> ExitCode {
     let args = Args::parse();
-    let console = Console { quiet: args.quiet };
 
-    match run(&args, &console) {
-        Ok(code) => code,
-        Err(err) => {
-            console.failure(&err);
-            ExitCode::from(ERROR)
-        }
-    }
+    Console::answer(TOOL, args.quiet, |console| run(&args, console))
 }
 
-/// Answer the question, returning the code that carries the answer.
+/// Answer the question, returning what the merge would cost.
 ///
 /// # Errors
 ///
@@ -154,7 +61,7 @@ fn main() -> ExitCode {
 /// `branch`, or if the merge itself failed without leaving a conflict to
 /// measure. Not for a working tree that cannot be inspected: that only costs
 /// the uncommitted-work note, which is a caveat rather than part of the answer.
-fn run(args: &Args, console: &Console) -> Result<ExitCode> {
+fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     let repo = Repo::open(&cwd)?;
 
@@ -205,7 +112,8 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     // Printed after the replay comes back, because a caveat qualifies an
     // answer. A caveat ahead of a failed scratch, or ahead of a failed replay,
     // qualifies a verdict that never arrives. That is a wrong sentence rather
-    // than an early one.
+    // than an early one. The suite states the same rule one step earlier, where
+    // a HEAD with nothing on it is refused with no note.
     //
     // The wait costs the reader nothing. The note goes to stderr and the
     // verdict to stdout, so the caveat still reaches a terminal ahead of the
@@ -254,11 +162,5 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     console
         .verdict(&report.render_within(&conflicts, usize::from(TerminalWidth::get_or_default())));
 
-    // Read off the same fact the report was rendered from, so the words and the
-    // number a script acts on cannot tell two different stories.
-    Ok(ExitCode::from(if conflicts.is_clean() {
-        CLEAN
-    } else {
-        CONFLICTS
-    }))
+    Ok(conflicts)
 }

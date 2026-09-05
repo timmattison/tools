@@ -422,6 +422,74 @@ buys. `diff3` and `zdiff3` put the base version inside the region, so a base
 carrying a line that reads as a marker is measured on a developer who set the
 key and not on one who did not.
 
+## The shell
+
+`Report` says what a replay cost, and `Console` is the program around it.
+`grime` and `grind` ask different questions and answer them with the same short
+program — parse a command line, run the replay, print the verdict, exit with a
+number a script can act on — so that program lives here for the reason the
+renderer does, and each binary owns only the question in the middle:
+
+```rust
+use gitscratch::{Conflicts, Console};
+
+fn main() -> ExitCode {
+    let args = Args::parse();
+
+    Console::answer("grind", args.quiet, |console| run(&args, console))
+}
+
+fn run(args: &Args, console: &Console) -> Result<Conflicts> {
+    // The pre-flight, the dirty note, and the replay.
+    console.verdict(&report.render_within(&conflicts, columns));
+    Ok(conflicts)
+}
+```
+
+`Console::answer` is the only door. It builds the console, hands it to the
+tool's own body, and turns what that body answers into the code the caller
+reads:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | `Conflicts::is_clean()` — the operation hit no conflicts. |
+| `1` | Conflicts, and the verdict says how many and where. |
+| `2` | The body returned an error, printed as `<tool>: error: <chain>`. |
+
+Three codes rather than two, because "the operation would conflict" and "I could
+not tell you" are different answers and a script has to be able to act on the
+difference. Returning an `ExitCode` rather than a `Result` is what keeps them
+apart: a `main` that returns a `Result` prints the error and exits `1`, which is
+already the conflict code.
+
+The body answers with the `Conflicts` it measured and never with a code of its
+own, so the number a script acts on is read off the very value the verdict was
+rendered from. The words and the number cannot tell two different stories, and
+no tool can publish a fourth code or swap two of the three.
+
+`-q` reaches all three writes and nothing ahead of them. Argument parsing runs
+before the console exists, so a usage error and the version line are the
+parser's to print — both answer about the tool rather than about a replay, and
+silencing the refusal would leave a caller a bare exit code and no word about
+which argument is missing. `note` and `verdict` are named for what is being said
+rather than for which stream it lands on, because the stream is the console's
+decision to make: the verdict is the answer and goes to stdout, while a caveat
+or a failure goes to stderr where it cannot contaminate a pipeline.
+
+Every one of those writes is a `writeln!` whose result is discarded, and that is
+a guarantee rather than an oversight. `println!` panics when the write fails,
+and a reader that closes early — `grind main | head -1` — makes it fail with
+`EPIPE`, because Rust ignores `SIGPIPE` and hands the error back rather than
+letting the signal end the process. A panic unwinds straight past the table
+above and exits `101`: a fourth code no README publishes, out of the one kind of
+tool whose whole contract is that its exit code is the answer. The words are
+what a broken pipe costs, never the answer.
+
+The width of the terminal stays with the tool, which is what `render_within`
+above already says: measuring a terminal is a decision about one program's
+output. `grist` settles it — it is built on this crate, prints no breakdown at
+all, and must not carry a terminal-size dependency it would never read.
+
 ## Three ways a rebase halts, and why the third one matters
 
 A halted rebase with **no unmerged paths** is a classification point, not a
