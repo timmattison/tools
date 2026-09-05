@@ -121,11 +121,10 @@ A `compile_fail` doc-test holds the derive out — see **Testing** below.
 `Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
 to get a `Scratch`. A `Scratch` answers the operations it names —
 `check_out_detached`, `replay_rebase`, `replay_merge`, `head_tree`,
-`commit_tree` — and each of
-them builds its own git call under the whole safety configuration. So there is
-no way to get a worktree from here without also getting the hardening — nor
-without first having established that the directory is a repository at all,
-which is the pre-flight's job below.
+`commit_tree` — and each of them builds its own git call under the whole safety
+configuration. So there is no way to get a worktree from here without also
+getting the hardening — nor without first having established that the directory
+is a repository at all, which is the pre-flight's job below.
 
 What a `Scratch` does **not** hand back is the runner that makes those calls. A
 scratch worktree is a *linked* worktree of the developer's real repository, so
