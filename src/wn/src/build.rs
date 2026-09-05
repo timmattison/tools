@@ -170,6 +170,23 @@ impl ModelName {
     }
 }
 
+/// The seconds the run this deadline was measured against really took.
+///
+/// One run, on 2026-09-05, on `timmattison/tools`: 57 open issues and 8 open
+/// pull requests, at [`DEFAULT_MODEL`] at [`DEFAULT_EFFORT`], which is what a
+/// reader who sets neither variable gets. It took 10 minutes 24 seconds and
+/// cost $3.64.
+///
+/// The number stands in the source rather than in prose, because
+/// [`DEFAULT_TIMEOUT_SECONDS`] is derived from it. A deadline whose doc
+/// comment reasons about the size of the work and never about the model that
+/// does it is a deadline nobody set: the earlier 600 left 24 seconds over a
+/// run of 9m36s at Opus at whatever level the machine picked, and the moment
+/// the tool started asking for `xhigh` that same run took 624 seconds and
+/// would have been killed at the deadline.
+#[allow(dead_code, reason = "the deadline is derived from it in the green step")]
+const MEASURED_SECONDS: u64 = 624;
+
 /// The seconds a run may take when the environment names none.
 ///
 /// `inscribe` waits 120 seconds for a commit message. A plan of a whole
@@ -794,10 +811,25 @@ mod tests {
     }
 
     #[test]
-    fn an_environment_that_names_no_timeout_waits_ten_minutes() {
-        assert_eq!(seconds(None), Ok(Duration::from_secs(600)));
-        assert_eq!(seconds(Some("")), Ok(Duration::from_secs(600)));
-        assert_eq!(seconds(Some("  \t ")), Ok(Duration::from_secs(600)));
+    fn an_environment_that_names_no_timeout_waits_the_default() {
+        let default = Duration::from_secs(DEFAULT_TIMEOUT_SECONDS);
+        assert_eq!(seconds(None), Ok(default));
+        assert_eq!(seconds(Some("")), Ok(default));
+        assert_eq!(seconds(Some("  \t ")), Ok(default));
+    }
+
+    #[test]
+    fn the_default_deadline_outlasts_the_run_it_was_measured_against() {
+        // A deadline shorter than a run somebody measured is a deadline every
+        // run of the defaults dies at. That is what 600 became the moment the
+        // tool started asking for `xhigh`: the measured run took 624 seconds.
+        //
+        // The bound is a bound and never a target, so it leaves room for a
+        // backlog that grew and for a day the API answers slower on.
+        assert!(
+            DEFAULT_TIMEOUT_SECONDS >= MEASURED_SECONDS * 2,
+            "{DEFAULT_TIMEOUT_SECONDS} leaves no room over the measured {MEASURED_SECONDS}"
+        );
     }
 
     #[test]
