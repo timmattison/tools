@@ -1277,6 +1277,23 @@ plans.\n`gh repo view` failed."
     }
 
     #[test]
+    fn a_killed_run_is_quoted_from_the_end_of_what_it_printed() {
+        // Every run of `claude` opens with the same event, so a quotation of
+        // the front of the stream reads the same for a run that printed one
+        // event and for a run that worked nine minutes. The end is what tells
+        // those two apart, and the transcript drops its own front as the run
+        // goes on, so the front is not even the front of the run by then.
+        let printed = transcript(concat!(
+            "the first line\nthe second line\nthe third line\n",
+            "the fourth line\nthe fifth line\nthe last line\n"
+        ));
+        let refused = answer_past_the_deadline(600, &printed).expect_err("there is no envelope");
+        let message = refused.to_string();
+        assert!(message.contains("the last line"), "{message}");
+        assert!(!message.contains("the first line"), "{message}");
+    }
+
+    #[test]
     fn the_prompt_names_the_skill_and_the_json_mode() {
         // A rename of the skill must become a build that stops here, and not a
         // run that quietly asks for something else.

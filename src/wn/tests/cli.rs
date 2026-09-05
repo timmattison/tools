@@ -2362,6 +2362,25 @@ fn a_run_that_outlived_its_deadline_says_how_far_it_got() {
 }
 
 #[test]
+fn a_run_that_outlived_its_deadline_is_quoted_from_its_end() {
+    // Every run of `claude` opens with the same event, so a quotation of the
+    // front of the stream reads the same for a run that printed one event and
+    // for a run that worked nine minutes. The end is what tells those two
+    // apart, and the transcript drops its own front as the run goes on, so the
+    // front is not even the front of the run by then.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(
+        "printf 'the first line\\n'\nprintf 'the second line\\n'\nprintf 'the third line\\n'\n\
+         printf 'the fourth line\\n'\nprintf 'the fifth line\\n'\nprintf 'the last line\\n'\n\
+         exec sleep 30\n",
+    );
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "1")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(message.contains("the last line"), "{message}");
+    assert!(!message.contains("the first line"), "{message}");
+}
+
+#[test]
 fn a_timeout_that_names_no_seconds_is_a_refusal_that_costs_no_run() {
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "10m")]);
