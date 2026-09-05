@@ -1517,23 +1517,29 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     a longer value names no run a person starts, and the largest of them build a deadline the clock
     cannot hold. A machine with no `claude` earns a message naming the four paths it looked in and
     naming `WN_NO_CLAUDE` for a reader who wants no run at all. A run that outlives its deadline is
-    killed and the message names the seconds and `WN_PLAN_TIMEOUT` — killed, and not left behind,
-    because a `claude` nobody waits for keeps spending. A `claude` with no account earns a message
-    naming `claude login`. A run that fails for a reason only `claude` knows is named back with
-    that reason, out of the envelope it printed: a failing run prints one as well, `claude` writes
-    the sentence a reader can act on into it, and standard error carries a machine tag such as
-    `[claude-code:unrecognized_model]` that names the fault without saying what to do about it. A
-    run that printed no envelope is named back with the reason on whichever pipe carried it. A run
-    that prints nothing at all is named back as a run of `claude`. A document that is not the
-    schema earns the refusal of the JSON reader, unchanged and naming no clipboard, because a plan
-    `wn` built is a plan `wn` asked for. A run that answers with something that is no JSON envelope
-    is refused before that reader ever sees it, and the message names what the run printed: the
-    fault is in the run and a refusal that named the plan would send the reader to look in the
-    wrong place. A `WN_PLAN_EFFORT` that names none of the five levels is refused and named back,
-    and the message names the five. A `WN_PLAN_MODEL` that opens with a dash is refused, because
-    such a value is a flag: a variable that can put a flag on the command line of the run decides
-    what the run may do, and that decision is yours and never this tool's. Both refusals stand
-    before the run, so a mistake in either variable costs no money.
+    killed and not left behind, because a `claude` nobody waits for keeps spending. The two pipes
+    are read to their end before that wait is judged: `claude` writes the whole envelope and only
+    then exits, and those two moments are not the same moment, so a run killed between them holds a
+    finished plan in the pipe. A run that had finished one answers with it, and the deadline stands
+    on standard error above the price. A run that had finished none is refused, the message names
+    the seconds and `WN_PLAN_TIMEOUT`, and it quotes how far the run got — a reader who paid for
+    ten minutes must be able to tell a run that was working from a run that never started. A
+    `claude` with no account earns a message naming `claude login`. A run that fails for a reason
+    only `claude` knows is named back with that reason, out of the envelope it printed: a failing
+    run prints one as well, `claude` writes the sentence a reader can act on into it, and standard
+    error carries a machine tag such as `[claude-code:unrecognized_model]` that names the fault
+    without saying what to do about it. A run that printed no envelope is named back with the
+    reason on whichever pipe carried it. A run that prints nothing at all is named back as a run of
+    `claude`. A document that is not the schema earns the refusal of the JSON reader, unchanged and
+    naming no clipboard, because a plan `wn` built is a plan `wn` asked for. A run that answers
+    with something that is no JSON envelope is refused before that reader ever sees it, and the
+    message names what the run printed: the fault is in the run and a refusal that named the plan
+    would send the reader to look in the wrong place. A `WN_PLAN_EFFORT` that names none of the
+    five levels is refused and named back, and the message names the five. A `WN_PLAN_MODEL` that
+    opens with a dash is refused, because such a value is a flag: a variable that can put a flag on
+    the command line of the run decides what the run may do, and that decision is yours and never
+    this tool's. Both refusals stand before the run, so a mistake in either variable costs no
+    money.
   - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard, and builds a plan when it holds
     none), `wn --refresh`, `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole
     plan, a plan drawn as a picture, or a plan written as JSON),

@@ -477,6 +477,7 @@ fn overran_line(seconds: u64) -> String {
 }
 
 /// What one run of `claude` answered.
+#[derive(Debug)]
 struct Answer {
     /// The envelope the run printed.
     envelope: Envelope,
@@ -1225,6 +1226,54 @@ plans.\n`gh repo view` failed."
         };
         let message = refused.to_string();
         assert!(!message.contains("got as far as"), "{message}");
+    }
+
+    /// The transcript of a run that printed `text` on standard output.
+    fn transcript(text: &str) -> Transcript {
+        stream::transcribe(std::io::Cursor::new(text.to_string()), |_| {})
+    }
+
+    /// The `result` line that closes the stream of a run that answered
+    /// `document`.
+    ///
+    /// Built with the JSON writer rather than with `format!`, because a plan
+    /// holds newlines and quotation marks and every one of them has to be
+    /// escaped.
+    fn envelope_line(document: &str) -> String {
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": document,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_killed_run_that_had_finished_the_envelope_answers_with_the_plan() {
+        // `claude` writes the whole envelope and only then exits, and those two
+        // moments are not the same moment. A run killed between them holds a
+        // finished plan, and the reader already paid for it.
+        let printed = transcript(&format!("{}\n", envelope_line("the plan")));
+        let answer = answer_past_the_deadline(600, &printed).expect("the envelope is whole");
+        assert_eq!(answer.overran, Some(600));
+        assert_eq!(answer.envelope.answer().expect("a plan"), "the plan");
+    }
+
+    #[test]
+    fn a_killed_run_that_wrote_half_an_envelope_hands_no_plan_back() {
+        // A run killed in the middle of a write leaves broken JSON, and the
+        // reader of a plan must never be handed it as a document. What it wrote
+        // stands in the refusal instead.
+        let whole = envelope_line("the plan");
+        let half: String = whole.chars().take(whole.chars().count() / 2).collect();
+        let printed = transcript(&half);
+        let refused = answer_past_the_deadline(600, &printed).expect_err("the envelope is broken");
+        assert!(
+            matches!(refused, BuildError::TimedOut { seconds: 600, .. }),
+            "{refused:?}"
+        );
+        assert!(refused.to_string().contains("got as far as"), "{refused}");
     }
 
     #[test]
