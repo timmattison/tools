@@ -2466,16 +2466,23 @@ fn a_model_that_opens_with_a_dash_is_a_refusal_that_costs_no_run() {
     assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
 }
 
+/// The model a run asks for when the environment names none.
+const DEFAULT_MODEL: &str = "opus";
+
 #[test]
-fn a_run_that_names_neither_a_level_nor_a_model_asks_for_neither() {
-    // The two variables cost the reader who sets neither of them nothing at
-    // all, so `claude` picks both as it always did.
+fn a_run_that_names_no_model_asks_for_the_default_model() {
+    // How long a plan takes and what it costs are properties of the model
+    // that builds it. A tool that names no model has neither property: the
+    // same command on two machines runs on two models, and nobody can say
+    // what either reader waited or paid. So the default is a model this
+    // source names, and never the one the machine happens to configure.
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let args = gh.recorded_claude_args();
+    assert!(args.contains("--model"), "{args}");
+    assert!(args.contains(DEFAULT_MODEL), "{args}");
     assert!(!args.contains("--effort"), "{args}");
-    assert!(!args.contains("--model"), "{args}");
 }
 
 /// The tool the fake `claude` of this file reaches for first.
