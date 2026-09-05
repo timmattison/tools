@@ -2388,7 +2388,7 @@ fn a_directory_that_is_in_no_repository_costs_no_run() {
 #[test]
 fn the_report_of_the_run_goes_to_standard_error_and_the_plan_goes_to_standard_output() {
     // The reader pays for the run, and the price is written on the pipe the
-    // spinner already writes on. The document goes to standard output, so a
+    // moving line already writes on. The document goes to standard output, so a
     // reader who pipes that output gets the answer alone.
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO], &[]);
@@ -2626,16 +2626,25 @@ fn a_stream_that_carries_no_envelope_answers_nothing() {
 //
 // `wn` draws that line on standard error, and indicatif draws nothing at all
 // when standard error is not a terminal. That is the right rule — a redirected
-// run must not collect spinner frames — and it leaves a test that reads a pipe
-// with nothing to read. So each run below gets a pseudo-terminal of a size this
-// file chose as its standard error, and reads the painted frames back off the
-// other end of it.
+// run must not collect the frames of a line — and it leaves a test that reads a
+// pipe with nothing to read. So each run below gets a pseudo-terminal of a size
+// this file chose as its standard error, and reads the painted frames back off
+// the other end of it.
 
-/// The columns of the terminal every painted run holds.
+/// The columns of the terminal a painted run holds.
 ///
 /// The template cuts what the run does now to the width that is left, so a
 /// narrow terminal would cut the words these tests assert.
 const TERMINAL_COLUMNS: u16 = 200;
+
+/// The columns of a terminal too narrow to hold the whole line.
+///
+/// The words the line opens with, and the clock behind them, take 56 columns of
+/// it on their own, so anything the run reaches for runs past the edge.
+const NARROW_COLUMNS: u16 = 60;
+
+/// The words every frame of the line opens with.
+const OPENING_WORDS: &str = "plan-parallel-work: reading the backlog";
 
 /// The rows of that terminal.
 ///
@@ -2735,7 +2744,12 @@ impl Terminal {
 /// The environment is the environment [`run_building`] builds, with a terminal
 /// named on top of it.
 fn run_painting(gh: &FakeGh, args: &[&str], env: &[(&str, &str)]) -> Painted {
-    let Terminal { master, slave } = Terminal::open(TERMINAL_COLUMNS);
+    run_painting_within(gh, args, env, TERMINAL_COLUMNS)
+}
+
+/// The same, on a terminal `columns` columns wide.
+fn run_painting_within(gh: &FakeGh, args: &[&str], env: &[(&str, &str)], columns: u16) -> Painted {
+    let Terminal { master, slave } = Terminal::open(columns);
 
     let child = {
         let mut command = wn(gh, args, "80", false, None);
@@ -2845,11 +2859,46 @@ fn the_line_says_what_the_run_does_now() {
         assert!(painted.frames.contains(&reach), "{}", painted.frames);
     }
     // The words the line always carried still open it.
+    assert!(painted.frames.contains(OPENING_WORDS), "{}", painted.frames);
+}
+
+/// The words a run of a whole backlog writes for a reach of its own, which are
+/// wider than [`NARROW_COLUMNS`] leaves.
+const LONG_REACH: &str =
+    "Read every open issue of the backlog and every pull request that stands against it";
+
+#[test]
+fn the_line_never_runs_past_the_window_it_is_painted_in() {
+    // A line wider than its window wraps, and a wrapped line is painted again
+    // under itself rather than over itself, so the frames walk down the
+    // terminal rather than replacing each other. What the run reaches for is
+    // the part of the line with no width anybody can count on, so it is the
+    // part that gets cut.
+    let body = format!(
+        "cat <<'WN_FAKE_CLAUDE_REACH'\n{reach}\nWN_FAKE_CLAUDE_REACH\n\
+         sleep {PAUSE}\n\
+         cat <<'WN_FAKE_CLAUDE_ENVELOPE'\n{closing}\nWN_FAKE_CLAUDE_ENVELOPE\n",
+        reach = reached_for(FIRST_TOOL, LONG_REACH),
+        closing = envelope(&undated(JSON_PLAN)),
+    );
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&body);
+    let painted = run_painting_within(&gh, &["--repo", REPO], &[], NARROW_COLUMNS);
     assert!(
-        painted
-            .frames
-            .contains("plan-parallel-work: reading the backlog"),
-        "{}",
+        painted.output.status.success(),
+        "the run answered: {}",
         painted.frames
     );
+    let frames: Vec<&str> = painted
+        .frames
+        .split(['\r', '\n'])
+        .filter(|frame| frame.contains(OPENING_WORDS))
+        .collect();
+    assert!(!frames.is_empty(), "{}", painted.frames);
+    for frame in frames {
+        assert!(
+            frame.width() <= usize::from(NARROW_COLUMNS),
+            "{} columns of {NARROW_COLUMNS}: {frame}",
+            frame.width()
+        );
+    }
 }

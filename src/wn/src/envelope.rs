@@ -1,9 +1,13 @@
-//! Reading the envelope a run of `claude --print --output-format json` prints.
+//! Reading the envelope that closes a run of `claude`.
 //!
-//! The run answers with a document. `--output-format json` wraps that document
-//! in an envelope, which carries what the run cost beside it. So this module
-//! stands between the run and every reader of a plan: it takes the envelope
-//! apart and gives back the document.
+//! The run answers with a document, and the envelope wraps that document and
+//! carries what the run cost beside it. So this module stands between the run
+//! and every reader of a plan: it takes the envelope apart and gives back the
+//! document.
+//!
+//! The envelope arrives as the last line of the stream of events the run
+//! writes, and [`crate::stream`] is what picks that line out. This module is
+//! handed the one line and never the stream.
 //!
 //! # A run that failed prints an envelope as well
 //!
