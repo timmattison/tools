@@ -75,6 +75,52 @@ fn a_fast_forwardable_merge_still_runs_a_real_three_way_merge() {
     );
 }
 
+/// The third route to the clean verdict, and the only one where git merges no
+/// trees at all.
+///
+/// `main` is `alpha`'s parent, so every commit `main` holds is already in HEAD.
+/// Git says exactly that - `Already up to date.`, exit 0 - and stops there: no
+/// `MERGE_HEAD`, no unmerged path, and HEAD standing where it started. `--no-ff`
+/// does not change it. That flag refuses a fast-forward, and a branch already
+/// contained in HEAD offers none, so this exit is not the fast-forward the test
+/// above pins under another name.
+///
+/// "Is `main` already in my branch?" is an ordinary question to ask a tool built
+/// on this crate, and the clean verdict is the true answer to it: there is no
+/// work here for anybody. Both clean tests above drive a real three-way merge,
+/// so neither of them measures this exit.
+///
+/// The absent `MERGE_HEAD` is the arming rather than the answer. A fixture whose
+/// `main` had moved on past `alpha`'s fork point would present an ordinary merge
+/// here, come back clean because that merge is free, and repeat the first test
+/// in this file while reading like this one.
+#[test]
+fn a_merge_of_a_branch_already_in_head_is_clean() {
+    let repo = independent_branches_repo();
+    // `main` is `alpha`'s parent, so git has nothing at all to merge. Nothing
+    // else in this file reaches that exit.
+    let scratch = repo.scratch("alpha");
+    let git = scratch.testing_git();
+
+    let conflicts = scratch
+        .replay_merge("main")
+        .expect("replay a merge of a branch HEAD already contains");
+
+    assert!(
+        conflicts.is_clean(),
+        "a branch already contained in HEAD leaves nothing to merge and nothing \
+         to hand-resolve, so the verdict has to be clean, got {conflicts:?}"
+    );
+    assert!(
+        !git.try_run("rev-parse", &["-q", "--verify", "MERGE_HEAD"])
+            .expect("ask git whether a merge is in progress")
+            .success,
+        "a MERGE_HEAD means git made a three-way merge after all, so this \
+         fixture no longer stands on the up-to-date exit and this test only \
+         repeats the one at the top of the file"
+    );
+}
+
 /// The other half of the verdict, and the whole of what it is worth reading.
 ///
 /// A tool that only said "conflicts" would tell a developer nothing about the
