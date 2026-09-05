@@ -2622,6 +2622,51 @@ fn a_stream_that_carries_no_envelope_answers_nothing() {
     );
 }
 
+#[test]
+fn a_stream_that_carries_no_envelope_earns_a_refusal_of_bounded_length() {
+    // The refusal of a run that wrote no envelope quotes what the run wrote on
+    // standard output, and a plan run writes one object for each event. A
+    // refusal that carried every one of them buries the one sentence a reader
+    // can act on under thousands of lines the reader cannot use.
+    //
+    // The reason stands on the last line, which is where a dying run writes
+    // one, so a refusal that keeps the end of the stream keeps it.
+
+    /// The bytes the refusal of such a run takes, at the most.
+    ///
+    /// An integration test of a binary reads no constant of it, so this bound
+    /// is its own and it is looser than the cap the reader keeps. What it
+    /// states is that the refusal stops growing with the run.
+    const BOUNDED_REFUSAL: usize = 64 * 1024;
+
+    /// The words the run writes on its last line.
+    const REASON: &str = "the model is overloaded";
+
+    let mut lines = vec![opens_the_run()];
+    lines.extend((0..2000).map(|step| reached_for(LAST_TOOL, &format!("step {step}"))));
+    lines.push(REASON.to_string());
+    let stream = lines.join("\n");
+    assert!(
+        stream.len() > 200_000,
+        "the run writes far more than the bound, and it wrote {}",
+        stream.len()
+    );
+
+    let body = format!("cat <<'WN_FAKE_CLAUDE_STREAM'\n{stream}\nWN_FAKE_CLAUDE_STREAM\nexit 1\n");
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&body);
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+
+    let message = stderr(&output);
+    assert!(message.contains(REASON), "{message}");
+    assert!(
+        message.len() <= BOUNDED_REFUSAL,
+        "the refusal took {} bytes of the {} the run wrote",
+        message.len(),
+        stream.len()
+    );
+}
+
 // The line the tool paints while a run works.
 //
 // `wn` draws that line on standard error, and indicatif draws nothing at all

@@ -324,9 +324,45 @@ mod tests {
     }
 
     #[test]
-    fn every_line_the_run_wrote_is_kept() {
+    fn the_end_of_a_run_longer_than_the_cap_is_what_is_kept() {
         let (transcript, _) = stream(MEASURED);
-        assert_eq!(transcript.printed(), MEASURED);
+        let printed = transcript.printed();
+        let kept = printed
+            .strip_prefix(CUT)
+            .expect("the front of a stream this long went, and the mark says so");
+        assert!(MEASURED.ends_with(kept), "{kept}");
+        assert!(kept.chars().count() < MEASURED.chars().count(), "{kept}");
+    }
+
+    #[test]
+    fn a_stream_far_longer_than_the_cap_keeps_its_end_and_marks_the_cut() {
+        // A plan run writes one object for each event, thinking blocks and
+        // tool results included, and ten minutes of that is hundreds of
+        // thousands of bytes. The reason such a run gives stands at the end of
+        // what it wrote, so the end is what a refusal quotes.
+        //
+        // The bound is looser than the cap this module keeps, on purpose. What
+        // it states is that the transcript stops growing with the run, and not
+        // the number it stops at.
+        const BOUNDED: usize = 10_000;
+        const REASON: &str = "the model is overloaded";
+
+        let mut lines: Vec<String> = (0..2000)
+            .map(|step| reaching_for("Bash", &format!("step {step}")))
+            .collect();
+        lines.push(REASON.to_string());
+        let text = format!("{}\n", lines.join("\n"));
+        assert!(
+            text.chars().count() > 100_000,
+            "the stream this test writes stands far past the cap"
+        );
+
+        let (transcript, _) = stream(&text);
+        let printed = transcript.printed();
+        assert!(printed.chars().count() <= BOUNDED, "{}", printed.len());
+        assert!(printed.ends_with(&format!("{REASON}\n")), "{printed}");
+        assert!(printed.starts_with(CUT), "{printed}");
+        assert_eq!(printed.matches(CUT).count(), 1, "{printed}");
     }
 
     #[test]
