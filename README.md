@@ -1480,8 +1480,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     field of the document for it, and a document that names no moment says nothing about its age.
   - Set `WN_NO_CLAUDE` to any value with a character in it to turn the run off, which gives back
     the error a run with no chain printed before. An empty value leaves it on, because an exported
-    but empty variable is a common accident. `WN_PLAN_TIMEOUT` names the seconds a run may take;
-    it is 600 by default, because a plan of a whole backlog is a longer run than a commit message.
+    but empty variable is a common accident. `WN_PLAN_TIMEOUT` names the seconds a run may take,
+    and it is 1248 by default — twice a run somebody measured. That run was the defaults on this
+    repository on 2026-09-05, over 57 open issues and 8 open pull requests: 10 minutes 24 seconds,
+    and $3.64. A deadline is a bound on a runaway run and never a target, so it leaves room for a
+    backlog that grew and for a day the API answers slower on. The earlier 600 was set against no
+    model at all, and it left 24 seconds over the one run anybody had timed.
   - The run says what it cost, and a run that failed and printed an envelope says it as well,
     because such a run spent the money before it failed. One line follows it on standard error,
     where the moving line stood:
