@@ -22,11 +22,12 @@
 //! envelope says what it cost as well, because such a run spent the money
 //! before it failed.
 //!
-//! The two pipes are read to their end before the wait is judged. `claude`
-//! writes the whole envelope and only then exits, and those two moments are not
-//! the same moment. So a run killed at its deadline can hold a finished plan in
-//! the pipe, and a path that gave up on the wait first would throw that plan
-//! away.
+//! The pipe that carries the plan is read to its end before the wait is judged.
+//! `claude` writes the whole envelope and only then exits, and those two
+//! moments are not the same moment. So a run killed at its deadline can hold a
+//! finished plan in the pipe, and a path that gave up on the wait first would
+//! throw that plan away. The pipe that carries the complaint is read after,
+//! because only a run that ended on its own has a use for it.
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -243,8 +244,8 @@ const MODEL_FLAG: &str = "--model";
 /// How often a waiting run is asked whether it is finished.
 const POLL: Duration = Duration::from_millis(100);
 
-/// The seconds the readers of a killed run are given to reach the end of the
-/// two pipes.
+/// The seconds the reader of a killed run is given to reach the end of the pipe
+/// that carries the plan.
 ///
 /// A run that ended on its own closed both pipes, so its readers are waited for
 /// with no bound at all. A run that was killed is a run whose write end can
@@ -252,6 +253,11 @@ const POLL: Duration = Duration::from_millis(100);
 /// wait with no bound there would outlive the deadline it reports. This is the
 /// drain of a pipe that is already closed and never a read of a run that still
 /// works.
+///
+/// One pipe pays it and never two. A killed run answers out of what it printed,
+/// so the text of the other pipe reaches nobody, and a second grace paid for
+/// text nobody reads would run after the first — which puts the answer twice as
+/// far past the deadline it reports.
 const GRACE: Duration = Duration::from_secs(5);
 
 /// Whether `value`, the value of [`NO_CLAUDE_ENV`], turns the run off.
@@ -494,10 +500,11 @@ struct Answer {
 /// `progress` is the line the run stands behind, and what the run reaches for
 /// goes on it as the run reaches for it.
 ///
-/// Both pipes are read to their end on every path out of this function. A run
-/// that outlived `waited` and printed a whole envelope before it was killed
-/// answers with the plan of that envelope, and the [`Answer`] then names the
-/// seconds the deadline gave.
+/// The pipe that carries the plan is read to its end on every path out of this
+/// function, and the pipe that carries the complaint on every path that reads
+/// it. A run that outlived `waited` and printed a whole envelope before it was
+/// killed answers with the plan of that envelope, and the [`Answer`] then names
+/// the seconds the deadline gave.
 ///
 /// # Errors
 ///
@@ -564,10 +571,10 @@ fn ask(
     }
 
     let waiting = wait_for(&mut child, waited);
-    // Both pipes are read to their end before the wait is judged. A `?` on the
-    // wait would drop the reader of standard output without taking what it
-    // read, and what it read is the plan: `claude` writes the whole envelope
-    // and only then exits.
+    // The pipe that carries the plan is read to its end before the wait is
+    // judged. A `?` on the wait would drop the reader of standard output
+    // without taking what it read, and what it read is the plan: `claude`
+    // writes the whole envelope and only then exits.
     //
     // A run that ended on its own is waited for with no bound. A run that was
     // killed gets the grace, because a tool it started can hold the write end
@@ -576,15 +583,25 @@ fn ask(
     let printed = printed
         .and_then(|reading| reading.taken(grace))
         .unwrap_or_default();
-    let complained = complained
-        .and_then(|reading| reading.taken(grace))
-        .unwrap_or_default();
 
     let status = match waiting {
         Ok(status) => status,
         Err(Unfinished::Overran(seconds)) => return answer_past_the_deadline(seconds, &printed),
         Err(Unfinished::Unreadable(said)) => return Err(BuildError::Failed { said }),
     };
+
+    // The pipe that carries the complaint is read after the wait is judged,
+    // because only a run that ended on its own has a use for it. The two paths
+    // above kill the child and answer out of what it printed, so the text of
+    // this pipe reaches nobody on either of them — and a grace paid for text
+    // nobody reads runs after the grace of the other pipe, which makes the
+    // answer stand twice as far past the deadline it reports.
+    //
+    // A run that reaches this line closed both pipes when it ended, so its
+    // reader is waited for with no bound at all.
+    let complained = complained
+        .and_then(|reading| reading.taken(None))
+        .unwrap_or_default();
 
     if status.success() {
         // A run that answered with a plan says the write of the prompt got
