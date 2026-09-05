@@ -1044,6 +1044,34 @@ mod tests {
         assert_the_runner_pins("merge.conflictStyle=merge", "diff3");
     }
 
+    /// Signature verification is a key only `git merge` reads, and a developer
+    /// who turns it on makes the merge replay fail outright.
+    ///
+    /// `merge.verifySignatures=true` makes git require a good GPG signature on
+    /// the commit it is merging. Almost no branch carries one, so on git 2.55
+    /// `merge --no-commit --no-ff --end-of-options <branch>` exits 128 with
+    /// `fatal: Commit <sha> does not have a GPG signature.` and leaves no
+    /// unmerged path behind it. `Scratch::replay_merge` reads that empty path
+    /// list as its own "the merge failed and left nothing to resolve", which is
+    /// neither a cost nor a clean replay, so `grime` answers exit 2 - "I cannot
+    /// tell you" - for every unsigned branch on that machine, which is every
+    /// branch on almost all of them.
+    ///
+    /// `commit.gpgsign=false` and `gpg.format=openpgp` cover the other
+    /// direction, where a replay is asked to *make* a signature. This is the
+    /// direction where a replay is asked to *read* one, and no other pin
+    /// reaches it. `replay_rebase` is unaffected, because rebase consults no
+    /// such key, so the gap arrives with the merge replay rather than with the
+    /// rebase replay it sits beside.
+    ///
+    /// Git's refusal was read out of a real merge rather than from git's
+    /// documentation. What this test executes is the pin: the fixture turns
+    /// verification on, and the runner has to report it off.
+    #[test]
+    fn pins_signature_verification_off_even_when_the_repository_turns_it_on() {
+        assert_the_runner_pins("merge.verifySignatures=false", "true");
+    }
+
     /// `core.quotePath=false` needs its own test now that it protects nothing a
     /// caller can otherwise observe.
     ///
