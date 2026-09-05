@@ -252,6 +252,28 @@ mod tests {
         (transcript, reaches)
     }
 
+    /// A pipe that hands over `said` and then breaks.
+    ///
+    /// A pipe of a child breaks when the child is killed, which is what the
+    /// deadline of a run does. What the run wrote before that moment is what a
+    /// refusal quotes, so it has to survive the break.
+    struct Broken {
+        /// What the pipe hands over before it breaks.
+        said: Vec<u8>,
+    }
+
+    impl Read for Broken {
+        fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+            if self.said.is_empty() {
+                return Err(std::io::Error::other("the pipe broke"));
+            }
+            let taken = self.said.len().min(into.len());
+            into[..taken].copy_from_slice(&self.said[..taken]);
+            self.said.drain(..taken);
+            Ok(taken)
+        }
+    }
+
     /// One assistant event that reached for `tool` with `description`.
     fn reaching_for(tool: &str, description: &str) -> String {
         serde_json::json!({
@@ -505,6 +527,22 @@ mod tests {
             "{}",
             transcript.printed()
         );
+    }
+
+    #[test]
+    fn a_pipe_that_broke_keeps_what_it_carried_before_it_broke() {
+        // The deadline of a run kills the child, which breaks this pipe. The
+        // words in it are the reason such a run gives, and a reader that
+        // dropped the half line it was in the middle of would lose them.
+        let said = "the model is overloaded";
+        let read = read(
+            Broken {
+                said: said.as_bytes().to_vec(),
+            },
+            |_| {},
+        );
+        let transcript = read.join().expect("the reader thread stands");
+        assert_eq!(transcript.printed(), said);
     }
 
     #[test]
