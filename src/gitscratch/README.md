@@ -286,7 +286,9 @@ the developer actually made — folding the check in here would answer a typo wi
 words about a default that was never reached.
 
 A repository holding neither `DEFAULT_BRANCHES` candidate is an **error**, and
-the message names both. It is deliberately not a fall back to `HEAD`: a replay of
+the message names both — with the first candidate's own failure kept as the
+cause, so a caller printing `{err:#}` can tell a repository that has no `main`
+from one whose `main` git could not read. It is deliberately not a fall back to `HEAD`: a replay of
 HEAD onto HEAD is clean in every repository there is, so that fallback turns "I
 could not tell which branch you meant" into a confident wrong answer. Both
 candidates are local names, because `git rev-parse main` reads local refs — a

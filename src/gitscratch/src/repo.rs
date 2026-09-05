@@ -158,27 +158,51 @@ impl Repo {
     ///
     /// # Errors
     ///
-    /// Returns an error if `named` is `None` and no candidate resolves; the
-    /// message names every candidate that was tried.
+    /// Returns an error if `named` is `None` and no candidate resolves. The
+    /// message names every candidate that was tried, and carries why the first
+    /// one failed as its cause - a caller that prints `{err:#}` gets both.
     pub fn branch_or_default(&self, named: Option<&str>) -> Result<String> {
         if let Some(branch) = named {
             return Ok(branch.to_string());
         }
 
+        // The first candidate's failure, kept rather than dropped. Asking a
+        // candidate answers two different questions at once - the branch is not
+        // there, and git could not read a branch that is - and a refusal that
+        // keeps neither answer reports the second as the first. The developer
+        // then reads "no default branch resolves here" while looking at a `main`
+        // that `git branch` lists.
+        //
+        // The first one, because it is the candidate a repository is likeliest
+        // to be about, and because a refusal that carried every candidate's
+        // failure would grow with the list.
+        let mut first_failure = None;
+
         for candidate in DEFAULT_BRANCHES {
-            if self.resolve(candidate).is_ok() {
-                return Ok(candidate.to_string());
+            match self.resolve(candidate) {
+                Ok(_) => return Ok(candidate.to_string()),
+                Err(failure) => {
+                    first_failure.get_or_insert(failure);
+                }
             }
         }
 
         // Never a fall back to HEAD. A replay of HEAD onto HEAD answers "clean"
         // for every repository there is, so the fallback would turn "I could not
         // tell you which branch you meant" into a confident wrong answer.
-        Err(anyhow!(
+        let refusal = format!(
             "no branch was named, and no default branch resolves here (tried: {}) \
              - name the branch to measure against",
             DEFAULT_BRANCHES.join(", ")
-        ))
+        );
+
+        // The refusal is the outer layer, so it is the sentence a caller reads
+        // first and the only one a plain `{err}` prints. The cause sits under
+        // it, where `{err:#}` reaches it and a reader who needs it goes looking.
+        Err(match first_failure {
+            Some(failure) => failure.context(refusal),
+            None => anyhow!(refusal),
+        })
     }
 
     /// How many files are uncommitted — staged, unstaged, or untracked.

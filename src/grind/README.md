@@ -168,14 +168,22 @@ grind: clean - replaying HEAD onto main hit no conflicts
 ```
 
 A repository holding neither name is **refused**, with exit `2` and a message
-naming both candidates:
+naming both candidates. Why the first one failed rides under it as the cause,
+the same way a branch you typed yourself carries git's own words:
 
 ```console
 $ grind
-grind: error: no branch was named, and no default branch resolves here (tried: main, master) - name the branch to measure against
+grind: error: no branch was named, and no default branch resolves here (tried: main, master) - name the branch to measure against: could not resolve 'main' to a commit: git rev-parse --verify --end-of-options main^{commit} failed:
+
+fatal: Needed a single revision
 $ echo $?
 2
 ```
+
+The cause is what separates a repository that has no `main` from one whose
+`main` git cannot read — a corrupt object, a broken symref, a locked ref. Both
+refusals open on the same sentence, and only the cause says which one you are
+looking at.
 
 Refused rather than fallen back to `HEAD`. A replay of HEAD onto HEAD is clean
 in every repository there is, so that fallback would answer `0` — a confident
