@@ -1496,11 +1496,20 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     than the run reached. The dollars are rounded to the place they are written at, so the price is
     not a ceiling. A number the run leaves out costs its clause of the line and never the plan,
     because the plan is already paid for.
-  - `WN_PLAN_EFFORT` names the level the run asks for, one of `low`, `medium`, `high`, `xhigh` and
-    `max`. It is also the level the report names: the envelope carries no field that names one, so
-    a report can only name the level the run asked for, and a line that named a level nobody chose
-    would be worth nothing. `WN_PLAN_MODEL` names the model, such as `opus` or `claude-haiku-4-5`.
-    A run that names neither asks for neither, and `claude` picks both as it always did.
+  - **The run names its own model and its own level of effort**, and neither is the machine's
+    default. How long a plan takes and what it costs are properties of the model that builds it
+    and of the level it works at, so a tool that named neither had neither property: the same
+    command, on the same repository, on the same day, ran on one model on a machine configured
+    for Opus and on another on a machine configured for Sonnet. Neither reader could predict the
+    other's wait, and no deadline bounded a run whose speed nobody chose. `WN_PLAN_MODEL` names
+    the model and it is `opus` by default — the alias and not an id, so the tool always asks for
+    the newest model of that family: an id retires, and a build that named a retired one would
+    refuse every run its reader had set no variable for. `WN_PLAN_EFFORT` names the level, one of
+    `low`, `medium`, `high`, `xhigh` and `max`, and it is `xhigh` by default: a plan of a whole
+    backlog is read once and acted on for days, so a stream placed wrong costs more than the
+    level that placed it right. The level is also the level the report names — the envelope
+    carries no field that names one, so a report can only name the level the run asked for, and
+    every run now asks for one.
   - These things refuse, and each exits `2`. A directory that is in no repository `gh` can name is
     refused before the run, not after it: the skill plans the repository of the directory `wn` was
     run in, and its gather script turns a `gh` or a `git` failure into a warning rather than a
