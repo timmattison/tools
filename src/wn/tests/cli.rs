@@ -2324,6 +2324,30 @@ fn a_run_that_outlives_its_deadline_is_killed_and_says_so() {
 }
 
 #[test]
+fn a_run_that_finished_the_plan_before_its_deadline_answers_it() {
+    // `claude` writes the whole envelope and only then exits, and those two
+    // moments are not the same moment. A run killed between them holds a
+    // finished plan in the pipe, and the reader already paid for it.
+    //
+    // The fake `claude` prints the envelope and then replaces itself with the
+    // sleep, so the process the tool kills is the process that waits.
+    let body = format!("{}exec sleep 30\n", prints_the_plan());
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&body);
+    let started = std::time::Instant::now();
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "1")]);
+    let waited = started.elapsed();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+    let message = stderr(&output);
+    assert!(message.contains("1 seconds"), "{message}");
+    assert!(message.contains(PLAN_TIMEOUT_ENV), "{message}");
+    assert!(
+        waited < std::time::Duration::from_secs(20),
+        "the run stopped at its deadline and did not wait for the sleep, in {waited:?}"
+    );
+}
+
+#[test]
 fn a_timeout_that_names_no_seconds_is_a_refusal_that_costs_no_run() {
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "10m")]);
