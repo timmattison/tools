@@ -56,6 +56,18 @@ pub const MODEL_ENV: &str = "WN_PLAN_MODEL";
 /// and passed on, rather than taken out of the answer.
 const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
+/// The level of effort a run asks for when [`EFFORT_ENV`] names none.
+///
+/// The level is the second input that decides how long a run takes and what
+/// it costs, and it belongs in the source for the reason [`DEFAULT_MODEL`]
+/// does: a level the machine chose is a level nobody can read off this tool.
+///
+/// A plan of a whole backlog is read once and acted on for days. It reads
+/// every open issue and every open pull request, places each issue in a zone,
+/// and finds which streams block which, so a stream placed wrong costs more
+/// than the level that placed it right.
+const DEFAULT_EFFORT: &str = "xhigh";
+
 /// The level of effort a run asks for.
 ///
 /// A newtype rather than a `String`, because the value holds one rule every
@@ -93,10 +105,10 @@ struct ModelName(String);
 impl Effort {
     /// The level `value`, the value of [`EFFORT_ENV`], names.
     ///
-    /// An absent value gives `None`, and so does a value of nothing but
-    /// whitespace: an exported but empty variable is a common accident. The
-    /// run then asks for no level and the report names none, because a report
-    /// that named a level nobody chose is worth nothing.
+    /// An absent value gives [`DEFAULT_EFFORT`], and so does a value of
+    /// nothing but whitespace: an exported but empty variable is a common
+    /// accident. Every run asks for a level, so the report always names the
+    /// level the run really ran at.
     ///
     /// The case of the value is the reader's to choose, so `HIGH` is `high`.
     ///
@@ -106,13 +118,13 @@ impl Effort {
     /// [`EFFORT_LEVELS`]. A reader who wrote `WN_PLAN_EFFORT=quick` and got
     /// the default back would learn nothing about why the plan still cost what
     /// it cost.
-    fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
+    fn new(value: Option<&str>) -> Result<Self, BuildError> {
         let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
-            return Ok(None);
+            return Ok(Self(DEFAULT_EFFORT.to_string()));
         };
         let lowered = named.to_lowercase();
         if EFFORT_LEVELS.contains(&lowered.as_str()) {
-            Ok(Some(Self(lowered)))
+            Ok(Self(lowered))
         } else {
             Err(BuildError::BadEffort {
                 value: named.to_string(),
@@ -225,19 +237,15 @@ const ARGUMENTS: [&str; 6] = [
     ALLOWED_TOOLS,
 ];
 
-/// The arguments of one run: [`ARGUMENTS`], the model, and the level the
-/// environment named.
+/// The arguments of one run: [`ARGUMENTS`], the model, and the level.
 ///
-/// The model always stands there, because a run whose model nobody named is a
-/// run whose speed and price nobody knows. A run that names no level gets
-/// [`ARGUMENTS`] and the model, so that variable costs the reader who sets it
-/// nothing at all.
-fn arguments(effort: Option<&Effort>, model: &ModelName) -> Vec<String> {
+/// Both always stand there. A run whose model and level nobody named is a run
+/// whose speed and price nobody knows, and the two variables name which model
+/// and which level rather than whether to name one at all.
+fn arguments(effort: &Effort, model: &ModelName) -> Vec<String> {
     let mut carried: Vec<String> = ARGUMENTS.iter().map(ToString::to_string).collect();
-    if let Some(effort) = effort {
-        carried.push(EFFORT_FLAG.to_string());
-        carried.push(effort.as_str().to_string());
-    }
+    carried.push(EFFORT_FLAG.to_string());
+    carried.push(effort.as_str().to_string());
     carried.push(MODEL_FLAG.to_string());
     carried.push(model.as_str().to_string());
     carried
@@ -421,7 +429,7 @@ pub fn plan(
     let path = find(paths, answers)?;
 
     let progress = Progress::start(waited);
-    let answered = ask(&path, waited, effort.as_ref(), &model, &progress);
+    let answered = ask(&path, waited, &effort, &model, &progress);
     progress.stop();
 
     let envelope = answered?;
@@ -432,7 +440,7 @@ pub fn plan(
     // It also stands before the answer is taken. A run that failed after
     // several turns spent the money before it failed, so the reader of such a
     // run learns the price as well.
-    if let Some(report) = envelope.report(effort.as_ref().map(Effort::as_str)) {
+    if let Some(report) = envelope.report(Some(effort.as_str())) {
         eprintln!("{report}");
     }
     Ok(envelope.answer()?.to_string())
@@ -457,7 +465,7 @@ pub fn plan(
 fn ask(
     path: &str,
     waited: Duration,
-    effort: Option<&Effort>,
+    effort: &Effort,
     model: &ModelName,
     progress: &Progress,
 ) -> Result<Envelope, BuildError> {
@@ -1126,21 +1134,32 @@ plans.\n`gh repo view` failed."
     fn the_five_levels_are_the_levels_a_run_may_ask_for() {
         for level in ["low", "medium", "high", "xhigh", "max"] {
             assert_eq!(
-                Effort::new(Some(level))
-                    .expect("the level stands")
-                    .map(|effort| effort.as_str().to_string()),
-                Some(level.to_string())
+                Effort::new(Some(level)).expect("the level stands").as_str(),
+                level
             );
         }
     }
 
     #[test]
-    fn an_environment_that_names_no_level_asks_for_none() {
-        // A report that named a level nobody chose is worth nothing, so a run
-        // that asked for none says nothing about one.
+    fn an_environment_that_names_no_level_asks_for_the_default() {
         for value in [None, Some(""), Some("  \t ")] {
-            assert_eq!(Effort::new(value), Ok(None), "{value:?}");
+            assert_eq!(
+                Effort::new(value).expect("the default stands").as_str(),
+                DEFAULT_EFFORT,
+                "{value:?}"
+            );
         }
+    }
+
+    #[test]
+    fn the_default_level_is_one_of_the_five() {
+        // Every other level goes through the list, and this one goes around
+        // it. A default the run does not know is a run that stops before it
+        // starts, and it would stop for the reader who set nothing at all.
+        assert!(
+            EFFORT_LEVELS.contains(&DEFAULT_EFFORT),
+            "{DEFAULT_EFFORT} in {EFFORT_LEVELS:?}"
+        );
     }
 
     #[test]
@@ -1162,10 +1181,8 @@ plans.\n`gh repo view` failed."
     #[test]
     fn the_case_of_a_level_is_the_readers_to_choose() {
         assert_eq!(
-            Effort::new(Some(" HIGH "))
-                .expect("the level stands")
-                .map(|effort| effort.as_str().to_string()),
-            Some("high".to_string())
+            Effort::new(Some(" HIGH ")).expect("the level stands").as_str(),
+            "high"
         );
     }
 
@@ -1207,21 +1224,22 @@ plans.\n`gh repo view` failed."
     }
 
     #[test]
-    fn a_run_that_names_no_level_carries_the_arguments_and_the_default_model() {
+    fn a_run_that_names_neither_carries_the_arguments_and_both_defaults() {
+        let effort = Effort::new(None).expect("the default stands");
         let model = ModelName::new(None).expect("the default stands");
         let mut expected: Vec<String> = ARGUMENTS.iter().map(ToString::to_string).collect();
+        expected.push(EFFORT_FLAG.to_string());
+        expected.push(DEFAULT_EFFORT.to_string());
         expected.push(MODEL_FLAG.to_string());
         expected.push(DEFAULT_MODEL.to_string());
-        assert_eq!(arguments(None, &model), expected);
+        assert_eq!(arguments(&effort, &model), expected);
     }
 
     #[test]
     fn the_level_and_the_model_reach_the_command_line_of_the_run() {
-        let effort = Effort::new(Some("high"))
-            .expect("the level stands")
-            .expect("a level was named");
+        let effort = Effort::new(Some("high")).expect("the level stands");
         let model = ModelName::new(Some("claude-opus-5")).expect("the model stands");
-        let carried = arguments(Some(&effort), &model);
+        let carried = arguments(&effort, &model);
         for pair in [["--effort", "high"], ["--model", "claude-opus-5"]] {
             let at = carried
                 .iter()
