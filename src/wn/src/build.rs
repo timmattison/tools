@@ -65,6 +65,21 @@ const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Effort(String);
 
+/// The model a run asks for when [`MODEL_ENV`] names none.
+///
+/// How long a plan takes and what it costs are properties of the model that
+/// builds it. A tool that names no model has neither: the same command, on
+/// the same repository, on the same day, runs on one model on a machine that
+/// defaults to Opus and on another on a machine that defaults to Sonnet.
+/// Neither reader can predict the other's wait, and no deadline written here
+/// bounds a run whose speed nobody chose.
+///
+/// The alias and not an id, so the tool always asks for the newest model of
+/// that family. An id retires, and a build that named a retired one refuses
+/// every run its reader did not set the variable for. The alias fixes the
+/// family, and the family is what fixes the speed and the price.
+const DEFAULT_MODEL: &str = "opus";
+
 /// The model a run asks for.
 ///
 /// A newtype rather than a `String`, for the rule it holds: the value is not
@@ -114,9 +129,10 @@ impl Effort {
 impl ModelName {
     /// The model `value`, the value of [`MODEL_ENV`], names.
     ///
-    /// An absent value gives `None`, and so does a value of nothing but
-    /// whitespace. The run then asks for no model, and the report names the
-    /// models the answer says the run really used.
+    /// An absent value gives [`DEFAULT_MODEL`], and so does a value of nothing
+    /// but whitespace: an exported but empty variable is a common accident.
+    /// Every run names a model, so the reader who set nothing gets the model
+    /// this source chose rather than the one the machine configured.
     ///
     /// # Errors
     ///
@@ -124,16 +140,16 @@ impl ModelName {
     /// Every other value goes through: the models of `claude` are named by
     /// `claude` and not by this tool, so a list here would refuse a model that
     /// shipped after this build.
-    fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
+    fn new(value: Option<&str>) -> Result<Self, BuildError> {
         let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
-            return Ok(None);
+            return Ok(Self(DEFAULT_MODEL.to_string()));
         };
         if named.starts_with('-') {
             return Err(BuildError::BadModel {
                 value: named.to_string(),
             });
         }
-        Ok(Some(Self(named.to_string())))
+        Ok(Self(named.to_string()))
     }
 
     /// The model, as the command line writes it.
@@ -209,21 +225,21 @@ const ARGUMENTS: [&str; 6] = [
     ALLOWED_TOOLS,
 ];
 
-/// The arguments of one run: [`ARGUMENTS`], and the level and the model the
+/// The arguments of one run: [`ARGUMENTS`], the model, and the level the
 /// environment named.
 ///
-/// A run that names neither gets [`ARGUMENTS`] and nothing more, so the two
-/// variables cost the reader who sets neither of them nothing at all.
-fn arguments(effort: Option<&Effort>, model: Option<&ModelName>) -> Vec<String> {
+/// The model always stands there, because a run whose model nobody named is a
+/// run whose speed and price nobody knows. A run that names no level gets
+/// [`ARGUMENTS`] and the model, so that variable costs the reader who sets it
+/// nothing at all.
+fn arguments(effort: Option<&Effort>, model: &ModelName) -> Vec<String> {
     let mut carried: Vec<String> = ARGUMENTS.iter().map(ToString::to_string).collect();
     if let Some(effort) = effort {
         carried.push(EFFORT_FLAG.to_string());
         carried.push(effort.as_str().to_string());
     }
-    if let Some(model) = model {
-        carried.push(MODEL_FLAG.to_string());
-        carried.push(model.as_str().to_string());
-    }
+    carried.push(MODEL_FLAG.to_string());
+    carried.push(model.as_str().to_string());
     carried
 }
 
@@ -405,7 +421,7 @@ pub fn plan(
     let path = find(paths, answers)?;
 
     let progress = Progress::start(waited);
-    let answered = ask(&path, waited, effort.as_ref(), model.as_ref(), &progress);
+    let answered = ask(&path, waited, effort.as_ref(), &model, &progress);
     progress.stop();
 
     let envelope = answered?;
@@ -442,7 +458,7 @@ fn ask(
     path: &str,
     waited: Duration,
     effort: Option<&Effort>,
-    model: Option<&ModelName>,
+    model: &ModelName,
     progress: &Progress,
 ) -> Result<Envelope, BuildError> {
     let mut child = Command::new(path)
@@ -1158,15 +1174,19 @@ plans.\n`gh repo view` failed."
         assert_eq!(
             ModelName::new(Some(" claude-opus-5 "))
                 .expect("the model stands")
-                .map(|model| model.as_str().to_string()),
-            Some("claude-opus-5".to_string())
+                .as_str(),
+            "claude-opus-5"
         );
     }
 
     #[test]
-    fn an_environment_that_names_no_model_asks_for_none() {
+    fn an_environment_that_names_no_model_asks_for_the_default() {
         for value in [None, Some(""), Some("  ")] {
-            assert_eq!(ModelName::new(value), Ok(None), "{value:?}");
+            assert_eq!(
+                ModelName::new(value).expect("the default stands").as_str(),
+                DEFAULT_MODEL,
+                "{value:?}"
+            );
         }
     }
 
@@ -1187,14 +1207,12 @@ plans.\n`gh repo view` failed."
     }
 
     #[test]
-    fn a_run_that_names_neither_carries_the_arguments_and_nothing_more() {
-        assert_eq!(
-            arguments(None, None),
-            ARGUMENTS
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        );
+    fn a_run_that_names_no_level_carries_the_arguments_and_the_default_model() {
+        let model = ModelName::new(None).expect("the default stands");
+        let mut expected: Vec<String> = ARGUMENTS.iter().map(ToString::to_string).collect();
+        expected.push(MODEL_FLAG.to_string());
+        expected.push(DEFAULT_MODEL.to_string());
+        assert_eq!(arguments(None, &model), expected);
     }
 
     #[test]
@@ -1202,10 +1220,8 @@ plans.\n`gh repo view` failed."
         let effort = Effort::new(Some("high"))
             .expect("the level stands")
             .expect("a level was named");
-        let model = ModelName::new(Some("claude-opus-5"))
-            .expect("the model stands")
-            .expect("a model was named");
-        let carried = arguments(Some(&effort), Some(&model));
+        let model = ModelName::new(Some("claude-opus-5")).expect("the model stands");
+        let carried = arguments(Some(&effort), &model);
         for pair in [["--effort", "high"], ["--model", "claude-opus-5"]] {
             let at = carried
                 .iter()
