@@ -313,6 +313,36 @@ fn branch_or_default_refuses_a_repository_holding_neither_candidate_and_names_bo
     }
 }
 
+/// The refusal has to carry the reason the first candidate failed, not only the
+/// fact that it did.
+///
+/// Every candidate is asked through [`Repo::resolve`], and that answer fails for
+/// two different reasons: the branch is not there, which is the ordinary case,
+/// and git could not read a branch that is - a corrupt object, a broken symref,
+/// a locked ref. A refusal that drops the answer reports the second as the
+/// first, and the developer reads "no default branch resolves here" while
+/// looking at a `main` that `git branch` lists.
+#[test]
+fn branch_or_default_carries_the_first_candidates_failure_into_the_refusal() {
+    let fixture = default_branch_choice_repo(&[]);
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    let error = repo
+        .branch_or_default(None)
+        .expect_err("the fixture holds neither candidate");
+
+    // Alternate formatting, because that is what a caller prints - `grind`
+    // writes `{err:#}` for exactly this reason - and the cause chain is the
+    // half of the message this test is about.
+    let message = format!("{error:#}");
+    let first = DEFAULT_BRANCHES[0];
+    assert!(
+        message.contains(&format!("could not resolve '{first}' to a commit")),
+        "the refusal has to carry why the first candidate failed, and it \
+         carries nothing: {message}"
+    );
+}
+
 /// The default exists to spare the developer a name they always type, and it
 /// must never overrule the one they did type.
 #[test]
