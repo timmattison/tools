@@ -431,10 +431,10 @@ pub struct Settings<'a> {
 /// [`BuildError::BadEffort`] for a level that is not one of
 /// [`EFFORT_LEVELS`], [`BuildError::BadModel`] for a model that opens with a
 /// dash, [`BuildError::NotInstalled`] when no path holds a `claude`,
-/// [`BuildError::TimedOut`] for a run that outlived its deadline,
-/// [`BuildError::NotAuthenticated`] for a `claude` with no account,
-/// [`BuildError::BadEnvelope`] for a run that printed no envelope, and
-/// [`BuildError::Failed`] for every other failure.
+/// [`BuildError::TimedOut`] for a run that outlived its deadline and printed
+/// no whole envelope, [`BuildError::NotAuthenticated`] for a `claude` with no
+/// account, [`BuildError::BadEnvelope`] for a run that printed no envelope,
+/// and [`BuildError::Failed`] for every other failure.
 ///
 /// The refusals of the settings stand before the run starts, because all
 /// three are read before a path is found and before a child is spawned. A
@@ -514,6 +514,11 @@ struct Answer {
 /// failure and printed no envelope that says why. Such a refusal carries the
 /// reason [`reason_of`] picks out of the two pipes and out of the write of the
 /// prompt.
+///
+/// Gives [`BuildError::Failed`] for a child that could not be spawned and for
+/// one whose state could not be read. Neither of those is a run that said
+/// anything, so the refusal carries what the operating system said about the
+/// child instead.
 ///
 /// A run that ended with a failure and printed an envelope that says so gives
 /// that envelope. The reason then stands in its `result`, and
@@ -941,7 +946,8 @@ pub enum BuildError {
         /// What the JSON reader said about it.
         cause: String,
     },
-    /// The run failed for a reason only `claude` knows.
+    /// The run failed for a reason only `claude` knows, or the child never
+    /// started at all, or its state could not be read.
     #[error("claude could not build a plan: {said}")]
     Failed {
         /// The reason the run gave, with the space around it dropped.
@@ -950,6 +956,10 @@ pub enum BuildError {
         /// `claude` writes the sentence a reader can act on. A run that
         /// printed no envelope gives it on one of the two pipes instead, and
         /// standard output gives the end of what it wrote there.
+        ///
+        /// A child that could not be spawned and one whose state could not be
+        /// read said nothing at all, and this text is then what the operating
+        /// system said about the child.
         said: String,
     },
 }
