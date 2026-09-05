@@ -2348,6 +2348,20 @@ fn a_run_that_finished_the_plan_before_its_deadline_answers_it() {
 }
 
 #[test]
+fn a_run_that_outlived_its_deadline_says_how_far_it_got() {
+    // The refusal carries what the run printed. A reader who paid for ten
+    // minutes and got one sentence about a deadline cannot tell a run that was
+    // working from a run that never started.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude("printf 'half of an answer\\n'\nexec sleep 30\n");
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "1")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(message.contains("1 seconds"), "{message}");
+    assert!(message.contains(PLAN_TIMEOUT_ENV), "{message}");
+    assert!(message.contains("half of an answer"), "{message}");
+}
+
+#[test]
 fn a_timeout_that_names_no_seconds_is_a_refusal_that_costs_no_run() {
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "10m")]);
