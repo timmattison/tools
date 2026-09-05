@@ -2381,6 +2381,42 @@ fn a_run_that_outlived_its_deadline_is_quoted_from_its_end() {
 }
 
 #[test]
+fn a_killed_run_pays_the_grace_once_and_not_twice() {
+    // The fake `claude` starts a sleep in the background that drops the
+    // standard output pipe and keeps the standard error one, and then replaces
+    // itself with a sleep of its own. So the process the tool kills is the
+    // process it waited for, and standard error stays open in a grandchild the
+    // kill does not reach. That is the one shape the grace exists for, and it
+    // is the shape that shows whether the grace is paid once or twice.
+    //
+    // The arithmetic the four seconds tells apart: the deadline gives one
+    // second and the grace gives five. A run that drains both pipes under the
+    // grace cannot answer before six seconds. A run that drains only the pipe
+    // that carries the plan answers at about one, because the pipe that carries
+    // the plan closes with the process that was killed. Four seconds stands
+    // between those two and it is neither a round number nor a spare margin.
+    //
+    // The background sleep outlives this test on purpose. It ends on its own
+    // after thirty seconds, which is its bound, and holding the pipe open past
+    // the kill is the whole of what it is here for.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude("sleep 30 1>/dev/null &\nexec sleep 30\n");
+    let started = std::time::Instant::now();
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "1")]);
+    let waited = started.elapsed();
+    // The refusal is asserted beside the clock. A run that got its speed by
+    // giving up on the wait would answer nothing at all, and a test of the
+    // clock alone would call that a pass.
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(message.contains("1 seconds"), "{message}");
+    assert!(message.contains(PLAN_TIMEOUT_ENV), "{message}");
+    assert!(
+        waited < std::time::Duration::from_secs(4),
+        "the run paid one grace and not two, in {waited:?}"
+    );
+}
+
+#[test]
 fn a_timeout_that_names_no_seconds_is_a_refusal_that_costs_no_run() {
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "10m")]);
