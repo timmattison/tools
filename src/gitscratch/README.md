@@ -269,6 +269,38 @@ would have made the checked path and an unchecked one the same `&Path`,
 indistinguishable at the call site. The validated path never leaves the type, so
 the worktree comes out of the thing that validated it.
 
+## The branch a caller did not name
+
+Almost every run of a tool built on this crate means the repository's default
+branch, so `Repo::branch_or_default` is where "which branch did they mean?" is
+answered — once, for every consumer:
+
+```rust
+let branch = repo.branch_or_default(named.as_deref())?; // `None` → main, else master
+let onto = repo.resolve(&branch)?;                      // still the caller's to resolve
+```
+
+A name the caller *was* given comes straight back, unresolved. Resolving it is
+the caller's line above, and the caller's message is the one that names the typo
+the developer actually made — folding the check in here would answer a typo with
+words about a default that was never reached.
+
+A repository holding neither `DEFAULT_BRANCHES` candidate is an **error**, and
+the message names both — with the first candidate's own failure kept as the
+cause, so a caller printing `{err:#}` can tell a repository that has no `main`
+from one whose `main` git could not read. It is deliberately not a fall back to `HEAD`: a replay of
+HEAD onto HEAD is clean in every repository there is, so that fallback turns "I
+could not tell which branch you meant" into a confident wrong answer. Both
+candidates are local names, because `git rev-parse main` reads local refs — a
+repository whose default branch exists only as `origin/main` is refused too, and
+the developer names the remote-tracking ref themselves. Searching the remote refs
+would make the rule harder to state and would hide which branch got measured
+behind a name nobody typed.
+
+The choice lives here rather than in each tool for the reason the hardening does:
+two implementations of it are two implementations that drift, and the one that
+drifts is the one measuring a different branch than the one it printed.
+
 ## The report
 
 `Report` turns a `Conflicts` into the words a developer reads. It lives here,
@@ -1328,6 +1360,7 @@ that end leaves is litter on the disk rather than a hazard to a later run.
 | `commit_emptied_by_main_repo()` | A branch whose first commit reaches content `main` arrived at by a different route, followed by a second commit that is real work. No commit shares a patch id with one on the other side, so git cannot drop the first early: under `--empty=stop` the rebase halts on it legitimately, and the second still has to survive. |
 | `multi_byte_names_repo()` | Branches `left-左` and `right-右` colliding in `readme.md` and `日本語.txt` — a name git would escape, a hunk count that collapses when it does, and two names whose byte, character and column widths disagree. |
 | `awkward_names_repo()` | Conflicts in names git C-quotes whatever `core.quotePath` says — a backslash, a double quote — beside names with leading and trailing whitespace, including U+3000. Each is contested in two regions, so a mangled name floors at one hunk and the count fails, not just the spelling. Unix only, because the filesystem has to hold the names. |
+| `default_branch_choice_repo(candidates)` | A repository holding exactly the default-branch candidates `candidates` names — `main`, `master`, both, or neither — with `CHOICE_HEAD_BRANCH` checked out. That head branch is neither candidate deliberately, since a fixture sitting on one would let a tool that measured HEAD against itself pass. The two candidates differ in the *answer* rather than only in the name a run prints: replaying the head branch onto `main` is clean and onto `master` conflicts, so the exit code alone says which branch a run measured, and a tool that named one candidate while measuring the other is caught by the number. |
 | `not_a_repository()` | A directory outside every repository, which checks its own premise and says so if `TMPDIR` turns out to sit inside one. |
 | `TestRepo::bare_clone(head)` | A `BareRepo`: `worktree add` succeeds there but `status --porcelain` cannot run, so a pre-flight query can fail where the replay still answers. |
 | `DetachedGitDirRepo::nested()` and `::beside()` | A repository whose git directory is detached from its work tree, the way `yadm` keeps a directory of dotfiles. The fixture leaves no `.git` entry anywhere, so a walk upward for one finds no repository at all. `nested` puts the git directory inside the work tree, which is what `yadm` does, and git reports `--is-inside-work-tree` as true from there. `beside` puts it outside, and git reports that same question as false and `--is-inside-git-dir` as true, so code that reads either answer needs both shapes. Like `not_a_repository()`, it checks its own premise and refuses a `TMPDIR` that sits inside a repository. |

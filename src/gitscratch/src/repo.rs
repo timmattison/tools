@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::git::Git;
 use crate::metrics::Uncommitted;
@@ -55,6 +55,25 @@ use crate::scratch::Scratch;
 /// hook from. It is the one hooks path a test can name without building a
 /// directory for it.
 pub(crate) const PREFLIGHT_HOOKS_PATH: &str = ".git/gitscratch-preflight-no-hooks";
+
+/// The branches a replay measures against when the caller named none, in the
+/// order they are tried.
+///
+/// Local names only, and both of them. `git rev-parse main` reads local refs,
+/// so a repository whose default branch exists only as `origin/main` matches
+/// neither candidate and gets the refusal below. That is the intended answer: a
+/// search of the remote refs makes the rule harder to state, and it hides which
+/// branch a run measured behind a name the developer never typed.
+///
+/// Public because the refusal names every candidate it tried, and a test that
+/// asserts on those names has to read them from here. Two copies of the list
+/// could agree today and disagree the day a third candidate is added.
+///
+/// A slice rather than an array, so that day costs nothing. An array writes its
+/// length into the public type, and a third candidate would then be a breaking
+/// change to every consumer that spelled the type out - over a list this crate
+/// expects to grow.
+pub const DEFAULT_BRANCHES: &[&str] = &["main", "master"];
 
 /// A git repository, opened for the read-only questions that precede a replay.
 #[derive(Debug)]
@@ -126,6 +145,69 @@ impl Repo {
     /// names the revision that could not be resolved.
     pub fn resolve(&self, revision: &str) -> Result<String> {
         self.git().rev_parse(revision)
+    }
+
+    /// The branch a replay measures against: `named` when the caller was given
+    /// one, and otherwise the first of [`DEFAULT_BRANCHES`] this repository
+    /// holds.
+    ///
+    /// The whole choice lives here rather than in each tool, because two
+    /// implementations of "which branch did they mean" is two implementations
+    /// that drift - and the one that drifts is the one measuring a different
+    /// branch than the one it printed.
+    ///
+    /// A named branch is handed straight back without being resolved. Resolving
+    /// it is the caller's, and the caller's error message is the one that names
+    /// the typo the developer actually made. Answering a typo with this
+    /// function's words would describe a default that was never reached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `named` is `None` and no candidate resolves. The
+    /// message names every candidate that was tried, and carries why the first
+    /// one failed as its cause - a caller that prints `{err:#}` gets both.
+    pub fn branch_or_default(&self, named: Option<&str>) -> Result<String> {
+        if let Some(branch) = named {
+            return Ok(branch.to_string());
+        }
+
+        // The first candidate's failure, kept rather than dropped. Asking a
+        // candidate answers two different questions at once - the branch is not
+        // there, and git could not read a branch that is - and a refusal that
+        // keeps neither answer reports the second as the first. The developer
+        // then reads "no default branch resolves here" while looking at a `main`
+        // that `git branch` lists.
+        //
+        // The first one, because it is the candidate a repository is likeliest
+        // to be about, and because a refusal that carried every candidate's
+        // failure would grow with the list.
+        let mut first_failure = None;
+
+        for candidate in DEFAULT_BRANCHES {
+            match self.resolve(candidate) {
+                Ok(_) => return Ok(candidate.to_string()),
+                Err(failure) => {
+                    first_failure.get_or_insert(failure);
+                }
+            }
+        }
+
+        // Never a fall back to HEAD. A replay of HEAD onto HEAD answers "clean"
+        // for every repository there is, so the fallback would turn "I could not
+        // tell you which branch you meant" into a confident wrong answer.
+        let refusal = format!(
+            "no branch was named, and no default branch resolves here (tried: {}) \
+             - name the branch to measure against",
+            DEFAULT_BRANCHES.join(", ")
+        );
+
+        // The refusal is the outer layer, so it is the sentence a caller reads
+        // first and the only one a plain `{err}` prints. The cause sits under
+        // it, where `{err:#}` reaches it and a reader who needs it goes looking.
+        Err(match first_failure {
+            Some(failure) => failure.context(refusal),
+            None => anyhow!(refusal),
+        })
     }
 
     /// How many files are uncommitted — staged, unstaged, or untracked.

@@ -30,9 +30,16 @@ const TOOL: &str = "grind";
 #[derive(Parser, Debug)]
 #[clap(author, version = version_string!())]
 struct Args {
-    /// Branch to rebase HEAD onto
+    /// Branch to rebase HEAD onto [default: main, else master]
+    ///
+    // The default is stated in the doc comment above rather than through clap's
+    // `default_value`, and the difference is the refusal. A `default_value` of
+    // `main` hands the tool a name in a repository that has no `main`, and the
+    // run then fails as though the developer had typed a branch that does not
+    // exist. The choice needs to see the repository, so it happens where the
+    // repository is open - and `None` is how it learns nobody named one.
     #[clap(value_name = "BRANCH")]
-    branch: String,
+    branch: Option<String>,
 
     /// Print nothing about the rebase - the exit code is the answer
     #[clap(short, long)]
@@ -42,6 +49,11 @@ struct Args {
 /// Hands the whole shell to [`Console::answer`] - what this tool says, the one
 /// switch that silences it, and the three exit codes it answers with. The
 /// question below is all that is left, and it is all `grind` owns.
+///
+/// A run that names no `BRANCH` is not a usage error. The argument is
+/// optional, and the branch it stands for is chosen from the repository - so a
+/// repository that holds no default branch to pick is refused by `grind`
+/// itself, in a message `-q` does silence.
 ///
 /// See [`Console::answer`] for why an [`ExitCode`] is returned rather than a
 /// `Result`: a `Result` exits **1**, which is already the code for a rebase
@@ -57,7 +69,8 @@ fn main() -> ExitCode {
 /// # Errors
 ///
 /// Returns an error if the current directory cannot be read, is not inside a
-/// git repository, has no commit at HEAD to replay, does not contain `branch`,
+/// git repository, has no commit at HEAD to replay, holds no branch the run
+/// could measure against - the one named, or a default when none was named -
 /// or if the replay itself failed without leaving a conflict to measure. Not for
 /// a working tree that cannot be inspected: that only costs the uncommitted-work
 /// note, which is a caveat rather than part of the answer.
@@ -81,13 +94,24 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
         "a replay starts from HEAD, and there is no commit at HEAD to start from \
          - an empty repository, or a branch nothing has been committed to yet",
     )?;
-    repo.resolve(&args.branch)?;
+    // Before the branch resolves, because there is no branch to resolve until
+    // the choice is made. `gitscratch` owns the choice rather than this file,
+    // so every tool built on it picks the same branch and refuses in the same
+    // words.
+    //
+    // The name comes back unresolved, and the line below is what resolves it.
+    // That keeps one message for a branch that does not exist, whether the
+    // developer typed the name or the default supplied it.
+    let branch = repo.branch_or_default(args.branch.as_deref())?;
+    repo.resolve(&branch)?;
 
     // The tool's name alone. The note below reads nothing else, and the verdict
     // adds the action on the next line. `UnwordedReport` is `Copy`, so one
     // value serves both.
     let unworded = Report::for_tool(TOOL);
-    let action = format!("replaying HEAD onto {}", args.branch);
+    // The chosen name, so this line tells the developer which branch got
+    // measured on a run that named none.
+    let action = format!("replaying HEAD onto {branch}");
     let report = unworded.describing(&action);
 
     // Read here and printed later, which is two decisions rather than one.
@@ -121,7 +145,7 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let dirty_note = unworded.dirty_note(repo.uncommitted_files().unwrap_or_default());
 
     let scratch = repo.scratch("HEAD")?;
-    let conflicts = scratch.replay_rebase(&args.branch)?;
+    let conflicts = scratch.replay_rebase(&branch)?;
 
     // There is a verdict now, so the caveat has something to qualify.
     if let Some(note) = dirty_note {

@@ -37,7 +37,7 @@ Three codes rather than two, because "the rebase would conflict" and "I could no
 tell you" are different answers and a script has to be able to act on the
 difference.
 
-The table is about a run that names a `BRANCH`. `--help` and `--version` ask
+The table is about a run that measures a rebase. `--help` and `--version` ask
 about the tool rather than about a rebase, so each answers and exits `0` with no
 replay behind it. A command line the argument parser refuses exits `2`, which is
 already the code for "I could not tell you".
@@ -113,12 +113,12 @@ $ echo $?
 ## Usage
 
 ```console
-grind [-q] <BRANCH>
+grind [-q] [BRANCH]
 ```
 
 | Argument | Meaning |
 | --- | --- |
-| `<BRANCH>` | What to rebase HEAD onto. Anything git resolves to a commit works — a branch, a remote-tracking ref, a tag, a raw sha. |
+| `[BRANCH]` | What to rebase HEAD onto. Anything git resolves to a commit works — a branch, a remote-tracking ref, a tag, a raw sha. Leave it out for `main`, or `master` in a repository with no `main`. |
 | `-q`, `--quiet` | Print nothing about the rebase. The exit code is still the answer. |
 
 One positional argument and no `--onto`. `grind` simulates from `HEAD`, which is
@@ -131,11 +131,15 @@ caller redirecting stdout to `/dev/null` and getting chatter on the terminal
 anyway has not been given a quiet tool.
 
 `-q` silences everything `grind` itself says, and stops there. The argument
-parser answers before `grind` starts. So `grind -q` with no `BRANCH` still
-prints a usage error and exits `2`, and `grind -q --version` still prints the
-version and exits `0`. Both answer about the tool rather than about a rebase.
-The missing `BRANCH` is the likely one in the script below. A caller left with a
-bare `2` and no word about which argument is missing is worse off.
+parser answers before `grind` starts. So `grind -q --onto main` still prints a
+usage error and exits `2`, and `grind -q --version` still prints the version and
+exits `0`. Both answer about the tool rather than about a rebase. A caller left
+with a bare `2` and no word about which part of the command line was refused is
+worse off.
+
+A run with no `BRANCH` is not one of those. That refusal — no default branch to
+pick — is `grind`'s own, so `-q` does silence it and the exit code is the whole
+answer.
 
 ```console
 # only start the real rebase if the dry run says it is free
@@ -150,6 +154,52 @@ case $? in
   *) grind "$target" ;;  # not quiet this time, so it explains itself
 esac
 ```
+
+## The branch you do not have to type
+
+Almost every run means the repository's default branch, so a run that names no
+`BRANCH` measures against `main`, and against `master` in a repository that has
+no `main`. The verdict line names whichever one was picked, so the answer always
+says which branch it is about:
+
+```console
+$ grind
+grind: clean - replaying HEAD onto main hit no conflicts
+```
+
+A repository holding neither name is **refused**, with exit `2` and a message
+naming both candidates. Why the first one failed rides under it as the cause,
+the same way a branch you typed yourself carries git's own words:
+
+```console
+$ grind
+grind: error: no branch was named, and no default branch resolves here (tried: main, master) - name the branch to measure against: could not resolve 'main' to a commit: git rev-parse --verify --end-of-options main^{commit} failed:
+
+fatal: Needed a single revision
+$ echo $?
+2
+```
+
+The cause is what separates a repository that has no `main` from one whose
+`main` git cannot read — a corrupt object, a broken symref, a locked ref. Both
+refusals open on the same sentence, and only the cause says which one you are
+looking at.
+
+Refused rather than fallen back to `HEAD`. A replay of HEAD onto HEAD is clean
+in every repository there is, so that fallback would answer `0` — a confident
+wrong answer standing where "I could not tell you" belongs. Exit `2` is already
+the code for that, and the message names the two candidates so you can see which
+third name your repository actually uses.
+
+Both candidates are **local** names. `git rev-parse main` reads local refs, so a
+repository whose default branch exists only as `origin/main` is refused too —
+name the remote-tracking ref yourself (`grind origin/main`). Searching the remote
+refs would make the rule harder to state and would hide which branch got
+measured behind a name you never typed.
+
+The choice itself lives in [`gitscratch`](../gitscratch/README.md), which every
+tool built on that harness shares, so no two of them can drift into measuring
+different branches for the same command line.
 
 ## The three numbers
 

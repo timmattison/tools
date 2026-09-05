@@ -1331,6 +1331,73 @@ pub fn conflicting_repo() -> TestRepo {
     repo
 }
 
+/// The branch [`default_branch_choice_repo`] leaves checked out, and the one it
+/// builds the two candidates to be measured against.
+///
+/// Neither `main` nor `master`, deliberately: a fixture whose HEAD sat on a
+/// candidate would let a tool that measured HEAD against itself pass.
+pub const CHOICE_HEAD_BRANCH: &str = "work";
+
+/// The branch [`default_branch_choice_repo`] starts every other branch from.
+///
+/// It exists because [`TestRepo::init`] names the unborn branch `main`, and a
+/// fixture asked for no `main` must not have one. Committing onto a branch of
+/// this name instead leaves `main` unborn, so each candidate is created only
+/// when it was asked for, and none has to be deleted afterwards.
+const CHOICE_BASE_BRANCH: &str = "base";
+
+/// A repository holding exactly the default-branch candidates in `candidates`,
+/// with [`CHOICE_HEAD_BRANCH`] checked out.
+///
+/// The two candidates differ in the *answer* they produce, not only in the name
+/// a run prints: replaying `work` onto `main` is clean, and replaying it onto
+/// `master` conflicts. So the exit code alone says which branch a run measured,
+/// and a tool that named one candidate while measuring the other is caught by
+/// the number rather than by the words.
+///
+/// `candidates` may name `main`, `master`, both, or neither. Any other name is
+/// ignored, since the choice being tested has only those two candidates in it.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn default_branch_choice_repo(candidates: &[&str]) -> TestRepo {
+    const CONTESTED_LINE: usize = 15;
+
+    let repo = TestRepo::init();
+    repo.branch(CHOICE_BASE_BRANCH);
+    let base = numbered_lines(30);
+    repo.commit_file("shared.txt", &base, "base");
+
+    repo.branch(CHOICE_HEAD_BRANCH);
+    repo.commit_file(
+        "shared.txt",
+        &replace_line(&base, CONTESTED_LINE, "work-edit"),
+        "work",
+    );
+
+    if candidates.contains(&"main") {
+        repo.checkout(CHOICE_BASE_BRANCH);
+        repo.branch("main");
+        // Somewhere else entirely, so replaying `work` onto `main` is clean.
+        repo.commit_file("elsewhere.txt", "main moved on\n", "main moves ahead");
+    }
+
+    if candidates.contains(&"master") {
+        repo.checkout(CHOICE_BASE_BRANCH);
+        repo.branch("master");
+        // The same line `work` rewrote, so replaying `work` onto `master` halts.
+        repo.commit_file(
+            "shared.txt",
+            &replace_line(&base, CONTESTED_LINE, "master-edit"),
+            "master moves ahead",
+        );
+    }
+
+    repo.checkout(CHOICE_HEAD_BRANCH);
+    repo
+}
+
 /// The name the detached-git-directory fixtures give the work tree, one level
 /// under the temporary directory so the "beside" shape has room for a sibling.
 const DETACHED_WORK_TREE: &str = "home";
