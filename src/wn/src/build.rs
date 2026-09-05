@@ -31,7 +31,7 @@ use thiserror::Error;
 
 use crate::chain::Snippet;
 use crate::envelope::Envelope;
-use crate::progress::{Doing, Progress};
+use crate::progress::Progress;
 use crate::stream::{self, Transcript};
 
 /// The variable that turns the run off.
@@ -410,8 +410,8 @@ pub fn plan(
 
     let envelope = answered?;
     // The report stands after the line is cleared, and on the pipe that line
-    // drew on. The document goes to standard output, and a reader who
-    // pipes that output must get the document alone.
+    // drew on. The document goes to standard output, and a reader who pipes
+    // that output must get the document alone.
     //
     // It also stands before the answer is taken. A run that failed after
     // several turns spent the money before it failed, so the reader of such a
@@ -465,7 +465,7 @@ fn ask(
     // line at a time and puts each reach on the line as it arrives. A reader
     // that joined at the end would say what the run did at the one moment
     // nobody needs telling any more.
-    let doing: Doing = progress.doing();
+    let doing = progress.doing();
     let printed = child
         .stdout
         .take()
