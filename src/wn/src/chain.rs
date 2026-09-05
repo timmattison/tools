@@ -73,8 +73,9 @@ pub const SNIPPET_CHARS: usize = 60;
 /// type and not a rule a caller remembers. The text is cut where the value is
 /// built, so an error never holds more than [`SNIPPET_CHARS`] characters of it:
 /// a message written later is cut, a `{:?}` of the error is cut, and a variant
-/// added later is cut as well, because [`new`](Snippet::new) is the only way
-/// text gets in.
+/// added later is cut as well, because [`new`](Snippet::new) and
+/// [`tail`](Snippet::tail) are the only ways text gets in. The two differ only
+/// in which end of the text they keep.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Snippet(String);
 
@@ -96,12 +97,37 @@ impl Snippet {
         Self(cut)
     }
 
+    /// The last [`SNIPPET_CHARS`] characters of `text`, with the space around
+    /// it dropped. A cut opens with `…`, so a text that starts where it starts
+    /// reads differently from a text that lost its front.
+    ///
+    /// The end rather than the front, for a text whose newest words are the
+    /// ones that say anything. The transcript of a run of `claude` is such a
+    /// text: every run opens with the same event, so the front of one reads
+    /// like the front of every other, and what the run did last is what tells
+    /// one from another.
+    ///
+    /// Cuts by characters and never by bytes: a cut through the middle of a
+    /// multi-byte character panics, and the machine of a person who reads
+    /// Japanese prints Japanese.
+    #[must_use]
+    pub fn tail(text: &str) -> Self {
+        let trimmed = text.trim();
+        let dropped = trimmed.chars().count().saturating_sub(SNIPPET_CHARS);
+        let mut cut = String::new();
+        if dropped > 0 {
+            cut.push('…');
+        }
+        cut.extend(trimmed.chars().skip(dropped));
+        Self(cut)
+    }
+
     /// Whether the snippet holds no text at all.
     ///
     /// A text of nothing but space is empty as well, because
-    /// [`new`](Snippet::new) drops the space around what it is given. A message
-    /// that quotes a snippet needs this: an empty quotation says less than no
-    /// quotation at all.
+    /// [`new`](Snippet::new) and [`tail`](Snippet::tail) both drop the space
+    /// around what they are given. A message that quotes a snippet needs this:
+    /// an empty quotation says less than no quotation at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -391,5 +417,43 @@ mod tests {
         assert_eq!(number.to_string(), "#278");
         assert_eq!(number.get(), 278);
         assert_eq!(IssueNumber::new(0), None);
+    }
+
+    #[test]
+    fn a_snippet_of_the_end_keeps_the_last_characters_and_marks_the_cut() {
+        // The mark opens the text, because the front is what went. A reader
+        // who meets it knows there was more in front of what is quoted.
+        let text = format!("the front of it{}the end of it", "x".repeat(200));
+        let snippet = Snippet::tail(&text);
+        let kept: String = text
+            .chars()
+            .skip(text.chars().count() - SNIPPET_CHARS)
+            .collect();
+        assert_eq!(snippet.to_string(), format!("…{kept}"));
+        assert!(snippet.to_string().ends_with("the end of it"));
+        assert!(!snippet.to_string().contains("the front of it"));
+    }
+
+    #[test]
+    fn a_short_text_arrives_whole_and_carries_no_mark() {
+        assert_eq!(
+            Snippet::tail("  the whole of it  ").to_string(),
+            "the whole of it"
+        );
+        assert!(Snippet::tail("   ").is_empty());
+    }
+
+    #[test]
+    fn a_text_of_multi_byte_characters_is_cut_by_characters_at_its_end() {
+        // A cut through the middle of a multi-byte character panics, and the
+        // machine of a person who reads Japanese prints Japanese.
+        let text = "日本語🎉café".repeat(20);
+        let snippet = Snippet::tail(&text);
+        let kept: String = text
+            .chars()
+            .skip(text.chars().count() - SNIPPET_CHARS)
+            .collect();
+        assert_eq!(kept.chars().count(), SNIPPET_CHARS);
+        assert_eq!(snippet.to_string(), format!("…{kept}"));
     }
 }

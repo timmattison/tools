@@ -370,10 +370,13 @@ fn looked_in_lines(paths: &[String]) -> String {
 /// The clause of a refusal that says how far a run got, or nothing at all for a
 /// run that printed nothing.
 ///
-/// A run writes one JSON object for each event, so this text is the front of
-/// what the transcript kept and never a document. It is here because the bytes
-/// a killed run wrote are the only evidence that the run was working, and a
-/// refusal that dropped them lost them for good.
+/// A run writes one JSON object for each event, so this text is the end of what
+/// the transcript kept and never a document. The end rather than the front:
+/// every run opens with the same event, so the front of one reads like the
+/// front of every other, and the newest events are what tell a run that was
+/// working from a run that only started. It is here because the bytes a killed
+/// run wrote are the only evidence that the run was working, and a refusal that
+/// dropped them lost them for good.
 fn got_as_far_as(printed: &Snippet) -> String {
     if printed.is_empty() {
         return String::new();
@@ -630,7 +633,8 @@ fn ask(
 ///
 /// Gives [`BuildError::TimedOut`] for a run that printed no whole envelope, and
 /// for one whose envelope carries a reason rather than a plan. The refusal
-/// carries what the run printed, cut, so the reader learns how far it got.
+/// carries the end of what the run printed, cut, so the reader learns how far
+/// it got.
 fn answer_past_the_deadline(seconds: u64, printed: &Transcript) -> Result<Answer, BuildError> {
     match Envelope::read(printed.envelope()) {
         Ok(envelope) if envelope.answer().is_ok() => Ok(Answer {
@@ -639,7 +643,7 @@ fn answer_past_the_deadline(seconds: u64, printed: &Transcript) -> Result<Answer
         }),
         _ => Err(BuildError::TimedOut {
             seconds,
-            printed: Snippet::new(printed.printed()),
+            printed: Snippet::tail(printed.printed()),
         }),
     }
 }
@@ -848,12 +852,14 @@ pub enum BuildError {
     TimedOut {
         /// The seconds it was given.
         seconds: u64,
-        /// What the run printed on standard output before it was killed, cut to
-        /// the length every message of this tool cuts to.
+        /// The end of what the run printed on standard output before it was
+        /// killed, cut to the length every message of this tool cuts to.
         ///
         /// A run that printed a whole envelope answers with the plan of it, so
         /// this text is never a plan. It says how far the run got, which is
         /// what tells a run that was working from a run that never started.
+        /// The end rather than the front, because every run opens with the same
+        /// event and only the newest ones say which run this was.
         printed: Snippet,
     },
     /// `claude` has no account to run under.
