@@ -269,6 +269,36 @@ would have made the checked path and an unchecked one the same `&Path`,
 indistinguishable at the call site. The validated path never leaves the type, so
 the worktree comes out of the thing that validated it.
 
+## The branch a caller did not name
+
+Almost every run of a tool built on this crate means the repository's default
+branch, so `Repo::branch_or_default` is where "which branch did they mean?" is
+answered — once, for every consumer:
+
+```rust
+let branch = repo.branch_or_default(named.as_deref())?; // `None` → main, else master
+let onto = repo.resolve(&branch)?;                      // still the caller's to resolve
+```
+
+A name the caller *was* given comes straight back, unresolved. Resolving it is
+the caller's line above, and the caller's message is the one that names the typo
+the developer actually made — folding the check in here would answer a typo with
+words about a default that was never reached.
+
+A repository holding neither `DEFAULT_BRANCHES` candidate is an **error**, and
+the message names both. It is deliberately not a fall back to `HEAD`: a replay of
+HEAD onto HEAD is clean in every repository there is, so that fallback turns "I
+could not tell which branch you meant" into a confident wrong answer. Both
+candidates are local names, because `git rev-parse main` reads local refs — a
+repository whose default branch exists only as `origin/main` is refused too, and
+the developer names the remote-tracking ref themselves. Searching the remote refs
+would make the rule harder to state and would hide which branch got measured
+behind a name nobody typed.
+
+The choice lives here rather than in each tool for the reason the hardening does:
+two implementations of it are two implementations that drift, and the one that
+drifts is the one measuring a different branch than the one it printed.
+
 ## The report
 
 `Report` turns a `Conflicts` into the words a developer reads. It lives here,
