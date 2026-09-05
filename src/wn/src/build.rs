@@ -745,7 +745,8 @@ pub enum BuildError {
         ///
         /// It comes out of the envelope the run printed, which is where
         /// `claude` writes the sentence a reader can act on. A run that
-        /// printed no envelope gives it on one of the two pipes instead.
+        /// printed no envelope gives it on one of the two pipes instead, and
+        /// standard output gives the end of what it wrote there.
         said: String,
     },
 }

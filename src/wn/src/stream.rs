@@ -19,12 +19,19 @@
 //! name themselves. So a line of an unknown kind, and a line that is no JSON at
 //! all, both cost nothing.
 //!
-//! # Why the whole of the pipe is kept as well
+//! # Why the end of the pipe is kept as well
 //!
 //! A run that failed says why on one of its two pipes, and a run that mixes the
 //! two says it on this one. Such a reason is text and no event, so a reader
 //! that kept the events alone would lose it. [`Transcript::printed`] is what
 //! [`crate::build`] reads for a run like that.
+//!
+//! It is the end of the pipe and not the whole of it. One object for each
+//! event is hundreds of thousands of bytes for a plan run of ten minutes. A
+//! refusal that quoted all of them buries the one sentence a reader can act on,
+//! and a reader that kept all of them holds every event in memory to serve one
+//! error path. The reason stands at the end of what a run wrote, so the end is
+//! what [`WIDEST_TRANSCRIPT`] keeps.
 
 use std::io::{BufRead, BufReader, Read};
 use std::thread;
@@ -88,17 +95,40 @@ const WIDEST_DETAIL: usize = 60;
 /// The mark that stands where a detail was cut.
 const CUT: char = '…';
 
+/// The characters of standard output the transcript keeps.
+///
+/// A refusal quotes the transcript of a run that wrote no envelope, and the
+/// reader of that refusal reads a terminal. A terminal window holds about this
+/// many characters, so this is one look. A refusal of ten times the window
+/// says no more than this one does: the reader scrolls past the events of the
+/// run to find the sentence that stands at the end anyway.
+const WIDEST_TRANSCRIPT: usize = 4000;
+
+/// The characters the transcript runs past [`WIDEST_TRANSCRIPT`] before it is
+/// cut back to it.
+///
+/// A cut on each line copies the whole of the buffer on each line, and a plan
+/// run writes thousands of lines. The buffer runs this far past the cap
+/// instead, so one copy carries this many characters of the run and the cost
+/// of the cutting stays flat as the run goes on.
+const TRANSCRIPT_SLACK: usize = WIDEST_TRANSCRIPT / 2;
+
 /// What one run of `claude` wrote on standard output.
 #[derive(Debug, Default)]
 pub struct Transcript {
-    /// Every byte of it, as the run wrote them.
+    /// The end of it, as the run wrote it.
+    ///
+    /// The front goes once the buffer stands more than [`TRANSCRIPT_SLACK`]
+    /// characters past [`WIDEST_TRANSCRIPT`], and one [`CUT`] marks where it
+    /// went.
     printed: String,
     /// The last line whose kind is [`RESULT`], for a run that wrote one.
     envelope: Option<String>,
 }
 
 impl Transcript {
-    /// The envelope of the run, or everything it printed when it wrote none.
+    /// The envelope of the run, or the end of what it printed when it wrote
+    /// none.
     ///
     /// A run that wrote no envelope answered no plan, and the words it did
     /// write are what the refusal must quote. So the fallback is not a guess at
@@ -108,10 +138,46 @@ impl Transcript {
         self.envelope.as_deref().unwrap_or(&self.printed)
     }
 
-    /// Everything the run wrote on standard output.
+    /// The end of what the run wrote on standard output, to
+    /// [`WIDEST_TRANSCRIPT`] characters.
+    ///
+    /// A run that wrote more than that gives its last characters and a [`CUT`]
+    /// in front of them. The reason a run gives stands at the end of what it
+    /// wrote, so the end is the part a refusal can use.
     #[must_use]
     pub fn printed(&self) -> &str {
         &self.printed
+    }
+
+    /// Take `line` into what the run printed, and cut the front away once the
+    /// buffer stands past the slack.
+    ///
+    /// The test that asks whether to cut counts bytes, because a byte count is
+    /// free and a character count reads the whole buffer. A text holds no more
+    /// characters than bytes, so a buffer under the cap in bytes is under it in
+    /// characters as well, and the true count runs only for a buffer that could
+    /// stand past the cap.
+    ///
+    /// The cut itself goes by characters and never by bytes. The stream carries
+    /// whatever the run wrote, and a cut through the middle of a character
+    /// makes a text no reader can read.
+    fn print(&mut self, line: &str) {
+        self.printed.push_str(line);
+        if self.printed.len() <= WIDEST_TRANSCRIPT + TRANSCRIPT_SLACK {
+            return;
+        }
+        let count = self.printed.chars().count();
+        if count <= WIDEST_TRANSCRIPT + TRANSCRIPT_SLACK {
+            return;
+        }
+        // The mark takes one of the characters the cap allows, and the cut
+        // takes the mark of the cut before it with the rest of the front. So
+        // one mark stands, however many times the buffer is cut.
+        let dropped = count - (WIDEST_TRANSCRIPT - 1);
+        let kept: String = std::iter::once(CUT)
+            .chain(self.printed.chars().skip(dropped))
+            .collect();
+        self.printed = kept;
     }
 }
 
@@ -139,7 +205,7 @@ where
                 let line = String::from_utf8_lossy(&raw).into_owned();
                 raw.clear();
                 take(&mut transcript, &line, &doing);
-                transcript.printed.push_str(&line);
+                transcript.print(&line);
             }
             // A read that failed and a read that found the end both end the
             // reading, and what was read up to that point is kept either way. A
@@ -321,6 +387,19 @@ mod tests {
         // constant told.
         let (_, reaches) = stream(MEASURED);
         assert_eq!(reaches.len(), 1, "{reaches:?}");
+    }
+
+    #[test]
+    fn a_run_shorter_than_the_cap_is_kept_whole() {
+        // The cut costs such a run nothing at all: what it wrote stands as it
+        // wrote it, and no mark stands in front of it.
+        let text = format!(
+            "{}\nthe model is overloaded\n",
+            reaching_for("Bash", "Wait")
+        );
+        assert!(text.chars().count() < WIDEST_TRANSCRIPT, "{text}");
+        let (transcript, _) = stream(&text);
+        assert_eq!(transcript.printed(), text);
     }
 
     #[test]
@@ -591,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_that_wrote_no_envelope_hands_on_everything_it_wrote() {
+    fn a_run_that_wrote_no_envelope_hands_on_the_words_it_wrote() {
         let text = "the model is overloaded\n";
         let (transcript, _) = stream(text);
         assert_eq!(transcript.envelope(), text);
