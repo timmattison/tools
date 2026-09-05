@@ -11,10 +11,11 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use gitscratch::testing::{
-    contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
-    multi_byte_names_repo, nested_conflict_repo, not_a_repository, TestRepo,
+    contested_region_repo, default_branch_choice_repo, equal_hunks_unequal_stops_repo,
+    independent_branches_repo, multi_byte_names_repo, nested_conflict_repo, not_a_repository,
+    TestRepo, CHOICE_HEAD_BRANCH,
 };
-use gitscratch::NoInheritedGitEnvironment;
+use gitscratch::{NoInheritedGitEnvironment, DEFAULT_BRANCHES};
 use unicode_width::UnicodeWidthStr;
 
 /// Exit code for a replay that hit no conflicts.
@@ -751,6 +752,149 @@ fn a_head_with_no_commit_on_it_is_refused_in_grinds_own_words_and_costs_no_workt
     );
 }
 
+/// The header line of a verdict, which is the line that names the branch a run
+/// measured.
+///
+/// The rest of the block is asserted whole elsewhere in this file. What each
+/// test below is about is *which branch got measured*, and the exit code plus
+/// this one line is the whole of that claim.
+fn header(stdout: &str) -> &str {
+    stdout.lines().next().unwrap_or_default()
+}
+
+/// The name almost every run means, so a repository holding it must not make
+/// the developer type it.
+///
+/// [`default_branch_choice_repo`] makes `main` the clean candidate, so the exit
+/// code says which branch was measured on its own. A tool that printed `main`
+/// while measuring `master` would answer [`CONFLICTS`] here.
+#[test]
+fn no_branch_measures_main_when_the_repository_holds_one() {
+    let repo = default_branch_choice_repo(&["main"]);
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, CHOICE_HEAD_BRANCH, &[]));
+
+    assert_eq!(
+        code,
+        Some(CLEAN),
+        "replaying work onto main collides with nothing\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "grind: clean - replaying HEAD onto main hit no conflicts",
+        "the line that already names the action is what tells the developer \
+         which branch got measured\nstderr:\n{stderr}"
+    );
+}
+
+/// The older name is still the default branch of plenty of repositories, and a
+/// tool that knew only the newer one would refuse every one of them.
+///
+/// `master` is the candidate that collides in the fixture, so [`CONFLICTS`] is
+/// the answer only a run that really measured `master` can give.
+#[test]
+fn no_branch_falls_back_to_master_when_the_repository_holds_no_main() {
+    let repo = default_branch_choice_repo(&["master"]);
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, CHOICE_HEAD_BRANCH, &[]));
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "replaying work onto master rewrites the line master rewrote\nstdout:\n\
+         {stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        header(&stdout),
+        "grind: conflicts - replaying HEAD onto master",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// A repository carrying both names is the ordinary shape of one that was
+/// renamed, and the new name is the one it is developed on now.
+#[test]
+fn no_branch_measures_main_when_the_repository_holds_both_candidates() {
+    let repo = default_branch_choice_repo(&["main", "master"]);
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, CHOICE_HEAD_BRANCH, &[]));
+
+    assert_eq!(
+        code,
+        Some(CLEAN),
+        "main outranks master, and only main is clean here\nstdout:\n{stdout}\n\
+         stderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "grind: clean - replaying HEAD onto main hit no conflicts",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// The default spares the developer a name they always type. It must never
+/// overrule the one they did type.
+#[test]
+fn a_named_branch_wins_over_the_default_that_would_have_been_picked() {
+    let repo = default_branch_choice_repo(&["main", "master"]);
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, CHOICE_HEAD_BRANCH, &["master"]));
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the branch the developer named is the branch that gets measured\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        header(&stdout),
+        "grind: conflicts - replaying HEAD onto master",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// A repository with neither candidate is refused, and the refusal names both
+/// of them so the developer can see which two names were tried.
+///
+/// [`ERROR`] rather than a fall back to `HEAD`: a replay of HEAD onto HEAD is
+/// clean in every repository there is, so the fallback would put a confident
+/// wrong answer where a refusal belongs.
+#[test]
+fn no_branch_and_no_candidate_is_refused_in_words_that_name_both_candidates() {
+    let repo = default_branch_choice_repo(&[]);
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, CHOICE_HEAD_BRANCH, &[]));
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a run that cannot tell which branch was meant answers {ERROR}, never \
+         clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "",
+        "the refusal belongs on stderr, where it cannot contaminate a pipeline"
+    );
+    for candidate in DEFAULT_BRANCHES {
+        assert!(
+            stderr.contains(candidate),
+            "the refusal has to name every candidate it tried, and it does not \
+             name {candidate}:\n{stderr}"
+        );
+    }
+}
+
+/// The refusal is `grind`'s own, so `-q` reaches it - unlike the parser's
+/// refusal below, which answers before `grind` starts.
+#[test]
+fn quiet_prints_nothing_when_no_default_branch_resolves() {
+    let repo = default_branch_choice_repo(&[]);
+
+    assert_silent(
+        &run_raw(&repo, CHOICE_HEAD_BRANCH, &["-q"]),
+        ERROR,
+        "no default branch",
+    );
+}
+
 /// One of the three build-state words `CLAUDE.md` allows after the hash.
 const BUILD_STATES: [&str; 3] = ["clean", "dirty", "unknown"];
 
@@ -1153,8 +1297,12 @@ fn the_long_spelling_of_quiet_answers_exactly_as_the_short_one_does() {
 /// `Args::parse` runs ahead of the `Console` that carries the switch, so a
 /// command line clap refuses is answered by clap. That is the right place for
 /// it: silencing the refusal leaves a caller with a bare number and no way to
-/// learn which argument is missing, and the missing `BRANCH` is the likely one
-/// in the very script the README prints.
+/// learn what about the command line was wrong.
+///
+/// The example is a flag `grind` does not have, because a *missing* argument
+/// stopped being one: `BRANCH` is optional, and a run without it picks the
+/// default branch instead of being refused. A refusal `grind` itself owns - no
+/// default branch to pick - is silenced by `-q`, and is asserted above.
 ///
 /// The code is [`ERROR`], which already means "I could not tell you". A command
 /// line `grind` cannot read is one more way to get no answer.
@@ -1163,9 +1311,10 @@ fn the_long_spelling_of_quiet_answers_exactly_as_the_short_one_does() {
 /// there is no repository here to answer from.
 #[test]
 fn quiet_leaves_the_usage_error_to_the_parser_that_answers_before_grind_starts() {
+    const REFUSED_FLAG: &str = "--onto";
     let elsewhere = not_a_repository();
 
-    let (code, stdout, stderr) = streams(&grind(elsewhere.path(), &["-q"]));
+    let (code, stdout, stderr) = streams(&grind(elsewhere.path(), &["-q", REFUSED_FLAG, "main"]));
 
     assert_eq!(
         code,
@@ -1174,8 +1323,8 @@ fn quiet_leaves_the_usage_error_to_the_parser_that_answers_before_grind_starts()
          {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("<BRANCH>"),
-        "the refusal has to name the argument that is missing:\n{stderr}"
+        stderr.contains(REFUSED_FLAG),
+        "the refusal has to name the argument it could not read:\n{stderr}"
     );
     assert_eq!(
         stdout, "",
