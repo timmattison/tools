@@ -852,10 +852,14 @@ mod tests {
         // bypass flag answers every prompt of every tool, and that decision is
         // the reader\'s to make and not this tool\'s.
         assert!(ARGUMENTS.contains(&"--print"), "{ARGUMENTS:?}");
-        // The envelope is what says what the run cost. The plan is one field
-        // of it, so a run without this pair prints a plan nobody priced.
+        // The stream is what says what the run does while it works, and its
+        // last line is the envelope that says what the run cost. A run without
+        // these three prints a plan nobody priced, behind a line that says the
+        // same words for ten minutes.
         assert!(ARGUMENTS.contains(&"--output-format"), "{ARGUMENTS:?}");
-        assert!(ARGUMENTS.contains(&"json"), "{ARGUMENTS:?}");
+        assert!(ARGUMENTS.contains(&"stream-json"), "{ARGUMENTS:?}");
+        // `claude` refuses the stream without this flag.
+        assert!(ARGUMENTS.contains(&"--verbose"), "{ARGUMENTS:?}");
         assert!(ARGUMENTS.contains(&"--allowed-tools"), "{ARGUMENTS:?}");
         assert!(ARGUMENTS.contains(&ALLOWED_TOOLS), "{ARGUMENTS:?}");
         assert!(

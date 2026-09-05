@@ -24,6 +24,11 @@ thiserror.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+# So a test of the line the tool paints while a run works can give that run a
+# terminal to paint on. indicatif draws nothing when standard error is not a
+# terminal, which is right for a redirected run and which leaves a test with
+# nothing to read. `openpty` makes a terminal of a size the test chose.
+libc.workspace = true
 tempfile.workspace = true
 testcolor.workspace = true
 
