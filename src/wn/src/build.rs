@@ -184,15 +184,21 @@ impl ModelName {
 /// run of 9m36s at Opus at whatever level the machine picked, and the moment
 /// the tool started asking for `xhigh` that same run took 624 seconds and
 /// would have been killed at the deadline.
-#[allow(dead_code, reason = "the deadline is derived from it in the green step")]
 const MEASURED_SECONDS: u64 = 624;
 
 /// The seconds a run may take when the environment names none.
 ///
+/// Twice [`MEASURED_SECONDS`], and written as that product so a reader who
+/// asks where the number came from finds the run it came from one constant
+/// up. A deadline is a bound on a runaway run and never a target, so it
+/// leaves room for a backlog that grew, for a repository larger than this
+/// one, and for a day the API answers slower on.
+///
 /// `inscribe` waits 120 seconds for a commit message. A plan of a whole
 /// backlog reads every open issue and every open pull request of the
-/// repository, which is a longer run, so this one waits ten minutes.
-const DEFAULT_TIMEOUT_SECONDS: u64 = 600;
+/// repository, places each issue in a zone, and finds which streams block
+/// which, which is a much longer run.
+const DEFAULT_TIMEOUT_SECONDS: u64 = MEASURED_SECONDS * 2;
 
 /// The seconds a run may take at the most.
 ///
@@ -849,8 +855,10 @@ mod tests {
         );
         assert_eq!(
             refused.to_string(),
-            "WN_PLAN_TIMEOUT names \"10m\", and it names a number of seconds, one and up: \
-             WN_PLAN_TIMEOUT=600"
+            format!(
+                "WN_PLAN_TIMEOUT names \"10m\", and it names a number of seconds, one and up: \
+                 WN_PLAN_TIMEOUT={DEFAULT_TIMEOUT_SECONDS}"
+            )
         );
     }
 

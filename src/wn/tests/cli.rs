@@ -2742,7 +2742,14 @@ const TERMINAL_ROWS: u16 = 24;
 /// environment [`wn`] builds names no terminal at all.
 const TERMINAL_KIND: &str = "xterm-256color";
 
-/// The deadline every painted run below is given, as the line writes it.
+/// The seconds every painted run below is given.
+///
+/// The runs below name their own deadline rather than taking the default,
+/// because none of them is a test of what the default is. A test that read
+/// the default would break every time somebody measured the run again.
+const DEADLINE_SECONDS: &str = "600";
+
+/// That same deadline, as the line writes it.
 const DEADLINE: &str = " of 10m0s";
 
 /// The seconds the fake `claude` of a painted run holds the first reach on the
@@ -2906,7 +2913,11 @@ fn the_line_says_how_long_the_run_waited_and_how_long_it_may() {
     // line, and the reader could not tell the two apart. The clock is what
     // tells them apart, and it only does that if it moves.
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&writes_the_stream_slowly(&undated(JSON_PLAN)));
-    let painted = run_painting(&gh, &["--repo", REPO], &[]);
+    let painted = run_painting(
+        &gh,
+        &["--repo", REPO],
+        &[(PLAN_TIMEOUT_ENV, DEADLINE_SECONDS)],
+    );
     assert!(
         painted.output.status.success(),
         "the run answered: {}",
@@ -2930,7 +2941,11 @@ fn the_line_says_what_the_run_does_now() {
     // is such evidence, and it is what a reader who wonders whether to kill the
     // run reads.
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&writes_the_stream_slowly(&undated(JSON_PLAN)));
-    let painted = run_painting(&gh, &["--repo", REPO], &[]);
+    let painted = run_painting(
+        &gh,
+        &["--repo", REPO],
+        &[(PLAN_TIMEOUT_ENV, DEADLINE_SECONDS)],
+    );
     assert!(
         painted.output.status.success(),
         "the run answered: {}",
