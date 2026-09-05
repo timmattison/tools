@@ -725,11 +725,16 @@ pub enum BuildError {
     },
     /// The run printed something that is no envelope.
     ///
-    /// The run is asked for `--output-format json`, so what it prints is one
-    /// JSON envelope and the plan is one field of it. A text that is no
-    /// envelope is a `claude` that answered in another shape, and the plan
-    /// reader must never be handed it: the refusal would then name the plan
-    /// and the fault is in the run.
+    /// The run is asked for `--output-format stream-json`, so what it prints
+    /// is one JSON object for each event of the run. The last of those
+    /// objects is the envelope, and the plan is one field of it.
+    /// [`Transcript::envelope`] picks that `result` line out of the stream,
+    /// and for a run that wrote none it gives the end of what the run printed
+    /// instead. This refusal stands when what it gives is no envelope.
+    ///
+    /// A text that is no envelope is a `claude` that answered in another
+    /// shape, and the plan reader must never be handed it: the refusal would
+    /// then name the plan and the fault is in the run.
     #[error("claude answered with {text:?}, which is no JSON envelope: {cause}")]
     BadEnvelope {
         /// What the run printed, cut to the length every message of this tool

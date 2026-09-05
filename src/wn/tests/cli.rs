@@ -2075,8 +2075,8 @@ const PLAN_EFFORT_ENV: &str = "WN_PLAN_EFFORT";
 /// The variable that names the model the run asks for.
 const PLAN_MODEL_ENV: &str = "WN_PLAN_MODEL";
 
-/// The envelope a run of `claude --print --output-format json` prints, with
-/// `document` in its `result`.
+/// The `result` line that closes the stream of a run of `claude --print
+/// --output-format stream-json --verbose`, with `document` in its `result`.
 ///
 /// Built with the JSON writer rather than with `format!`, because a plan holds
 /// newlines and quotation marks and every one of them has to be escaped. The
