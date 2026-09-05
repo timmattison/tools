@@ -68,7 +68,12 @@ pub(crate) const PREFLIGHT_HOOKS_PATH: &str = ".git/gitscratch-preflight-no-hook
 /// Public because the refusal names every candidate it tried, and a test that
 /// asserts on those names has to read them from here. Two copies of the list
 /// could agree today and disagree the day a third candidate is added.
-pub const DEFAULT_BRANCHES: [&str; 2] = ["main", "master"];
+///
+/// A slice rather than an array, so that day costs nothing. An array writes its
+/// length into the public type, and a third candidate would then be a breaking
+/// change to every consumer that spelled the type out - over a list this crate
+/// expects to grow.
+pub const DEFAULT_BRANCHES: &[&str] = &["main", "master"];
 
 /// A git repository, opened for the read-only questions that precede a replay.
 #[derive(Debug)]
