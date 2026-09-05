@@ -31,6 +31,12 @@
 //! through `run_with_stdin`, which opens a pipe and builds the same
 //! environment every other child of this file gets.
 //!
+//! The last tests of this file read the line the tool paints while a run of
+//! `claude` works. That line goes to standard error, and indicatif draws
+//! nothing at all when standard error is not a terminal. So those runs get a
+//! pseudo-terminal of a size this file chose as their standard error, and the
+//! test reads the painted frames back off the other end of it.
+//!
 //! Each test builds its own temporary directory, so concurrent test runs stay
 //! isolated (see the parallel-safety note in the project guidelines).
 
@@ -41,7 +47,8 @@
     reason = "every unwrap in this file is an assertion, not an unhandled error: on the temporary directory and the fixture files the test just created, on spawning the freshly built binary (a spawn failure is a broken harness, not behavior under test), and on reading back a file the fake gh wrote. The error paths of the tool itself are never unwrapped — they are asserted through the exit status and the text on standard error"
 )]
 
-use std::io::Write;
+use std::io::{Read, Write};
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -2068,8 +2075,8 @@ const PLAN_EFFORT_ENV: &str = "WN_PLAN_EFFORT";
 /// The variable that names the model the run asks for.
 const PLAN_MODEL_ENV: &str = "WN_PLAN_MODEL";
 
-/// The envelope a run of `claude --print --output-format json` prints, with
-/// `document` in its `result`.
+/// The `result` line that closes the stream of a run of `claude --print
+/// --output-format stream-json --verbose`, with `document` in its `result`.
 ///
 /// Built with the JSON writer rather than with `format!`, because a plan holds
 /// newlines and quotation marks and every one of them has to be escaped. The
@@ -2381,7 +2388,7 @@ fn a_directory_that_is_in_no_repository_costs_no_run() {
 #[test]
 fn the_report_of_the_run_goes_to_standard_error_and_the_plan_goes_to_standard_output() {
     // The reader pays for the run, and the price is written on the pipe the
-    // spinner already writes on. The document goes to standard output, so a
+    // moving line already writes on. The document goes to standard output, so a
     // reader who pipes that output gets the answer alone.
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO], &[]);
@@ -2469,4 +2476,474 @@ fn a_run_that_names_neither_a_level_nor_a_model_asks_for_neither() {
     let args = gh.recorded_claude_args();
     assert!(!args.contains("--effort"), "{args}");
     assert!(!args.contains("--model"), "{args}");
+}
+
+/// The tool the fake `claude` of this file reaches for first.
+const FIRST_TOOL: &str = "Read";
+
+/// The words that fake `claude` writes for that reach.
+const FIRST_REACH: &str = "Read the open issues";
+
+/// The tool it reaches for last.
+const LAST_TOOL: &str = "Bash";
+
+/// The words it writes for that reach.
+const LAST_REACH: &str = "Check wn CLI flags";
+
+/// The line of the stream that opens a run.
+///
+/// The reader walks past every kind of event but the two it reads, and this
+/// one is a kind it walks past.
+fn opens_the_run() -> String {
+    serde_json::json!({
+        "type": "system",
+        "subtype": "init",
+        "model": "claude-opus-5",
+    })
+    .to_string()
+}
+
+/// The line of the stream that says the run reached for `tool`, with
+/// `description` as the words it wrote for that reach.
+///
+/// The shape is the shape of one measured run: an `assistant` event carries a
+/// message, the message carries blocks, and a `tool_use` block names the tool
+/// and holds what the tool was given.
+fn reached_for(tool: &str, description: &str) -> String {
+    serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "name": tool,
+                "input": { "description": description },
+            }],
+        },
+    })
+    .to_string()
+}
+
+/// The shell of a fake `claude` that writes the whole stream of a run at once,
+/// with `document` in the `result` of its last line.
+fn writes_the_stream(document: &str) -> String {
+    let stream = [
+        opens_the_run(),
+        reached_for(FIRST_TOOL, FIRST_REACH),
+        reached_for(LAST_TOOL, LAST_REACH),
+        envelope(document),
+    ]
+    .join("\n");
+    format!("cat <<'WN_FAKE_CLAUDE_STREAM'\n{stream}\nWN_FAKE_CLAUDE_STREAM\n")
+}
+
+#[test]
+fn the_run_asks_for_the_stream_of_events_it_reads() {
+    // The words on the line while the run works come out of that stream, and
+    // `claude` writes no stream without both of these flags.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&writes_the_stream(&undated(JSON_PLAN)));
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let args = gh.recorded_claude_args();
+    assert!(args.contains("stream-json"), "{args}");
+    assert!(args.contains("--verbose"), "{args}");
+}
+
+#[test]
+fn the_plan_of_a_stream_is_the_result_of_its_last_line() {
+    // Standard output carries one JSON object for each event of the run, and
+    // the plan is the `result` of the last of them. A reader handed the whole
+    // stream gets JSON that is no plan at all.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&writes_the_stream(&undated(JSON_PLAN)));
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+    // The events of the run are not the plan, and none of them reaches the
+    // pipe the plan goes to.
+    assert!(!stdout(&output).contains("tool_use"), "{}", stdout(&output));
+    // The last line is still the envelope, so the run still says what it cost.
+    assert!(stderr(&output).contains(REPORT), "{}", stderr(&output));
+}
+
+#[test]
+fn a_stream_whose_last_line_says_the_run_failed_carries_the_reason() {
+    // The envelope of a failing run stands at the end of a stream like every
+    // other envelope, and the sentence a reader can act on stands in it. A
+    // refusal that quoted the whole stream would hand the reader the events of
+    // the run instead of the reason it stopped.
+    let said = "There's an issue with the selected model (no-such-model-xyz). It may not exist \
+                or you may not have access to it. Run --model to pick a different model.";
+    let refused = serde_json::json!({
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": true,
+        "result": said,
+        "total_cost_usd": 0.054_637_9,
+        "duration_ms": 1886,
+        "num_turns": 1,
+    })
+    .to_string();
+    let stream = [opens_the_run(), reached_for(LAST_TOOL, LAST_REACH), refused].join("\n");
+    let body = format!("cat <<'WN_FAKE_CLAUDE_STREAM'\n{stream}\nWN_FAKE_CLAUDE_STREAM\nexit 1\n");
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&body);
+    let output = run_building(
+        &gh,
+        &["--repo", REPO],
+        &[(PLAN_MODEL_ENV, "no-such-model-xyz")],
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(
+        message.contains("There's an issue with the selected model"),
+        "{message}"
+    );
+    // The events of the run say nothing a reader acts on, so none of them
+    // stands in the refusal.
+    assert!(!message.contains("tool_use"), "{message}");
+    // The run spent the money before it failed, and the reader paid for it.
+    assert!(message.contains("plan: $0.05"), "{message}");
+}
+
+#[test]
+fn a_stream_that_carries_no_envelope_answers_nothing() {
+    // Every line of this stream is an event of the run, and none of them is
+    // the line that carries the plan. An `assistant` event holds no plan, so a
+    // reader that took the last line it could parse would answer with one.
+    let stream = [opens_the_run(), reached_for(LAST_TOOL, LAST_REACH)].join("\n");
+    let body = format!("cat <<'WN_FAKE_CLAUDE_STREAM'\n{stream}\nWN_FAKE_CLAUDE_STREAM\n");
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&body);
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(stderr(&output).contains("claude"), "{}", stderr(&output));
+    assert!(
+        gh.sent_no_query(),
+        "a run with no plan asks about no issue, and it asked {}",
+        gh.recorded_args()
+    );
+}
+
+#[test]
+fn a_stream_that_carries_no_envelope_earns_a_refusal_of_bounded_length() {
+    // The refusal of a run that wrote no envelope quotes what the run wrote on
+    // standard output, and a plan run writes one object for each event. A
+    // refusal that carried every one of them buries the one sentence a reader
+    // can act on under thousands of lines the reader cannot use.
+    //
+    // The reason stands on the last line, which is where a dying run writes
+    // one, so a refusal that keeps the end of the stream keeps it.
+
+    /// The bytes the refusal of such a run takes, at the most.
+    ///
+    /// An integration test of a binary reads no constant of it, so this bound
+    /// is its own and it is looser than the cap the reader keeps. What it
+    /// states is that the refusal stops growing with the run.
+    const BOUNDED_REFUSAL: usize = 64 * 1024;
+
+    /// The words the run writes on its last line.
+    const REASON: &str = "the model is overloaded";
+
+    let mut lines = vec![opens_the_run()];
+    lines.extend((0..2000).map(|step| reached_for(LAST_TOOL, &format!("step {step}"))));
+    lines.push(REASON.to_string());
+    let stream = lines.join("\n");
+    assert!(
+        stream.len() > 200_000,
+        "the run writes far more than the bound, and it wrote {}",
+        stream.len()
+    );
+
+    let body = format!("cat <<'WN_FAKE_CLAUDE_STREAM'\n{stream}\nWN_FAKE_CLAUDE_STREAM\nexit 1\n");
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&body);
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+
+    let message = stderr(&output);
+    assert!(message.contains(REASON), "{message}");
+    assert!(
+        message.len() <= BOUNDED_REFUSAL,
+        "the refusal took {} bytes of the {} the run wrote",
+        message.len(),
+        stream.len()
+    );
+}
+
+// The line the tool paints while a run works.
+//
+// `wn` draws that line on standard error, and indicatif draws nothing at all
+// when standard error is not a terminal. That is the right rule — a redirected
+// run must not collect the frames of a line — and it leaves a test that reads a
+// pipe with nothing to read. So each run below gets a pseudo-terminal of a size
+// this file chose as its standard error, and reads the painted frames back off
+// the other end of it.
+
+/// The columns of the terminal a painted run holds.
+///
+/// The template cuts what the run does now to the width that is left, so a
+/// narrow terminal would cut the words these tests assert.
+const TERMINAL_COLUMNS: u16 = 200;
+
+/// The columns of a terminal too narrow to hold the whole line.
+///
+/// The words the line opens with, and the clock behind them, take 56 columns of
+/// it on their own, so anything the run reaches for runs past the edge.
+const NARROW_COLUMNS: u16 = 60;
+
+/// The words every frame of the line opens with.
+const OPENING_WORDS: &str = "plan-parallel-work: reading the backlog";
+
+/// The rows of that terminal.
+///
+/// The line takes one row and nothing here reads a row count. It is above zero
+/// because a terminal of zero rows carries no window.
+const TERMINAL_ROWS: u16 = 24;
+
+/// The terminal the painted runs say they hold.
+///
+/// indicatif hides the line when `TERM` is unset or names `dumb`, and the
+/// environment [`wn`] builds names no terminal at all.
+const TERMINAL_KIND: &str = "xterm-256color";
+
+/// The deadline every painted run below is given, as the line writes it.
+const DEADLINE: &str = " of 10m0s";
+
+/// The seconds the fake `claude` of a painted run holds the first reach on the
+/// line, as the shell writes them.
+const PAUSE: &str = "1";
+
+/// The seconds it holds the last reach there.
+///
+/// Longer than [`PAUSE`], because the clock of the line reads whole seconds
+/// and a test that asks whether it moved needs it to pass more than one of
+/// them.
+const LONGER_PAUSE: &str = "2";
+
+/// What one run painted on its terminal, and what it answered.
+struct Painted {
+    /// Every frame the run painted, with the escape codes taken out.
+    frames: String,
+    /// The standard output and the exit status of the run.
+    output: Output,
+}
+
+/// A pseudo-terminal of a size this file chose.
+struct Terminal {
+    /// The end a test reads the painted frames back from.
+    master: OwnedFd,
+    /// The end the child takes as its standard error.
+    slave: OwnedFd,
+}
+
+impl Terminal {
+    /// Open a pseudo-terminal `columns` columns wide.
+    ///
+    /// A pseudo-terminal that nobody sized reports zero columns, and the call
+    /// that reads a window answers that size without an error. So the size
+    /// arrives with the `openpty` call, and no window of the wrong size ever
+    /// exists.
+    fn open(columns: u16) -> Self {
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        let mut size = libc::winsize {
+            ws_row: TERMINAL_ROWS,
+            ws_col: columns,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+
+        // SAFETY: `openpty` writes one file descriptor to each of the first two
+        // pointers, and both point at a live local variable. The two null
+        // pointers are the documented way to ask for the default terminal modes
+        // and to ask for no name of the slave device. The last pointer is the
+        // size of the window, and it points at a live local variable that
+        // outlives the call.
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        assert_eq!(
+            opened,
+            0,
+            "openpty must give a pseudo-terminal: {}",
+            std::io::Error::last_os_error()
+        );
+
+        // SAFETY: both descriptors came from the one `openpty` call above, they
+        // are open, and nothing else in this process owns either of them.
+        unsafe {
+            Self {
+                master: OwnedFd::from_raw_fd(master),
+                slave: OwnedFd::from_raw_fd(slave),
+            }
+        }
+    }
+}
+
+/// Run `wn` with its standard error on a terminal, and give back what it
+/// painted there beside what it answered.
+///
+/// The environment is the environment [`run_building`] builds, with a terminal
+/// named on top of it.
+fn run_painting(gh: &FakeGh, args: &[&str], env: &[(&str, &str)]) -> Painted {
+    run_painting_within(gh, args, env, TERMINAL_COLUMNS)
+}
+
+/// The same, on a terminal `columns` columns wide.
+fn run_painting_within(gh: &FakeGh, args: &[&str], env: &[(&str, &str)], columns: u16) -> Painted {
+    let Terminal { master, slave } = Terminal::open(columns);
+
+    let child = {
+        let mut command = wn(gh, args, "80", false, None);
+        command.env_remove(NO_CLAUDE_ENV);
+        command.env("TERM", TERMINAL_KIND);
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(slave));
+        command.spawn().unwrap()
+        // The command holds the last copy of the slave end in this process, and
+        // it goes out of scope here. The read of the master end below ends when
+        // the child exits, and it would never end while this process still held
+        // a writer of the terminal.
+    };
+
+    let mut painted = std::fs::File::from(master);
+    let frames = std::thread::spawn(move || {
+        let mut read = Vec::new();
+        // A terminal answers the last close of its other end with an error
+        // rather than with an end of file, so what was read up to that point is
+        // what the run painted.
+        let _ = painted.read_to_end(&mut read);
+        String::from_utf8_lossy(&read).into_owned()
+    });
+    let output = child.wait_with_output().unwrap();
+    Painted {
+        frames: testcolor::strip_ansi(&frames.join().unwrap()),
+        output,
+    }
+}
+
+/// The shell of a fake `claude` that writes the stream of a run one piece at a
+/// time, holding each reach on the line long enough to be painted.
+fn writes_the_stream_slowly(document: &str) -> String {
+    let opening = [opens_the_run(), reached_for(FIRST_TOOL, FIRST_REACH)].join("\n");
+    let reach = reached_for(LAST_TOOL, LAST_REACH);
+    let closing = envelope(document);
+    format!(
+        "cat <<'WN_FAKE_CLAUDE_OPENING'\n{opening}\nWN_FAKE_CLAUDE_OPENING\n\
+         sleep {PAUSE}\n\
+         cat <<'WN_FAKE_CLAUDE_REACH'\n{reach}\nWN_FAKE_CLAUDE_REACH\n\
+         sleep {LONGER_PAUSE}\n\
+         cat <<'WN_FAKE_CLAUDE_ENVELOPE'\n{closing}\nWN_FAKE_CLAUDE_ENVELOPE\n"
+    )
+}
+
+/// Every reading of the clock that `painted` holds, one of each.
+///
+/// The clock stands in front of [`DEADLINE`], so the reading is the last word
+/// before it.
+fn readings_of(painted: &str) -> Vec<String> {
+    let pieces: Vec<&str> = painted.split(DEADLINE).collect();
+    let mut readings: Vec<String> = pieces[..pieces.len().saturating_sub(1)]
+        .iter()
+        .filter_map(|piece| piece.split_whitespace().next_back())
+        .map(ToString::to_string)
+        .collect();
+    readings.sort();
+    readings.dedup();
+    readings
+}
+
+#[test]
+fn the_line_says_how_long_the_run_waited_and_how_long_it_may() {
+    // A run that works and a run that died eight minutes ago painted the same
+    // line, and the reader could not tell the two apart. The clock is what
+    // tells them apart, and it only does that if it moves.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&writes_the_stream_slowly(&undated(JSON_PLAN)));
+    let painted = run_painting(&gh, &["--repo", REPO], &[]);
+    assert!(
+        painted.output.status.success(),
+        "the run answered: {}",
+        painted.frames
+    );
+    // The deadline stands on the line, so the reader knows what the wait is
+    // measured against.
+    assert!(painted.frames.contains(DEADLINE), "{}", painted.frames);
+    let readings = readings_of(&painted.frames);
+    assert!(
+        readings.len() >= 2,
+        "the clock moved while the run worked, and it read {readings:?} in {}",
+        painted.frames
+    );
+}
+
+#[test]
+fn the_line_says_what_the_run_does_now() {
+    // A steady tick moves the frame while one API call is open, so the
+    // animation is no evidence that the run works. The tool the run reached for
+    // is such evidence, and it is what a reader who wonders whether to kill the
+    // run reads.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&writes_the_stream_slowly(&undated(JSON_PLAN)));
+    let painted = run_painting(&gh, &["--repo", REPO], &[]);
+    assert!(
+        painted.output.status.success(),
+        "the run answered: {}",
+        painted.frames
+    );
+    for reach in [
+        format!("{FIRST_TOOL}: {FIRST_REACH}"),
+        format!("{LAST_TOOL}: {LAST_REACH}"),
+    ] {
+        assert!(painted.frames.contains(&reach), "{}", painted.frames);
+    }
+    // The words the line always carried still open it.
+    assert!(painted.frames.contains(OPENING_WORDS), "{}", painted.frames);
+}
+
+/// The words a run of a whole backlog writes for a reach of its own, which are
+/// wider than [`NARROW_COLUMNS`] leaves.
+const LONG_REACH: &str =
+    "Read every open issue of the backlog and every pull request that stands against it";
+
+#[test]
+fn the_line_never_runs_past_the_window_it_is_painted_in() {
+    // A line wider than its window wraps, and a wrapped line is painted again
+    // under itself rather than over itself, so the frames walk down the
+    // terminal rather than replacing each other. What the run reaches for is
+    // the part of the line with no width anybody can count on, so it is the
+    // part that gets cut.
+    let body = format!(
+        "cat <<'WN_FAKE_CLAUDE_REACH'\n{reach}\nWN_FAKE_CLAUDE_REACH\n\
+         sleep {PAUSE}\n\
+         cat <<'WN_FAKE_CLAUDE_ENVELOPE'\n{closing}\nWN_FAKE_CLAUDE_ENVELOPE\n",
+        reach = reached_for(FIRST_TOOL, LONG_REACH),
+        closing = envelope(&undated(JSON_PLAN)),
+    );
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&body);
+    let painted = run_painting_within(&gh, &["--repo", REPO], &[], NARROW_COLUMNS);
+    assert!(
+        painted.output.status.success(),
+        "the run answered: {}",
+        painted.frames
+    );
+    let frames: Vec<&str> = painted
+        .frames
+        .split(['\r', '\n'])
+        .filter(|frame| frame.contains(OPENING_WORDS))
+        .collect();
+    assert!(!frames.is_empty(), "{}", painted.frames);
+    for frame in frames {
+        assert!(
+            frame.width() <= usize::from(NARROW_COLUMNS),
+            "{} columns of {NARROW_COLUMNS}: {frame}",
+            frame.width()
+        );
+    }
 }

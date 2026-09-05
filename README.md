@@ -1421,7 +1421,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     ```
     $ wn
     wn: no plan to read. Building one with claude…
-    ⠹ plan-parallel-work: reading the backlog…
+    ⠹ plan-parallel-work: reading the backlog… 4m12s of 10m0s · Bash: Check wn CLI flags
 
     → #96  fix the daemon leak
     · #91  archive a killed session   waits for #96
@@ -1432,15 +1432,28 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 
     The plan is on the clipboard. Run wn --refresh to build a new one.
     ```
-  - The run is `claude --print --allowed-tools …` with the prompt `/plan-parallel-work --json` on
-    standard input, in the directory `wn` was run in, and `wn` reads the document it prints. It
-    looks for `claude` in `PATH`, then `~/.local/bin/claude`, then `~/.claude/local/claude`, then
-    `/usr/local/bin/claude`, and the first one that answers `--version` is the one. It names the
-    tools the skill needs rather than reaching for `--dangerously-skip-permissions`: a run under
-    `--print` has no terminal to answer a permission prompt with, and a tool that reaches for the
-    bypass on behalf of its reader has made a decision that is not its to make. The line that says
-    a run is happening and the spinner under it both go to standard error, so a pipe still gets the
-    document alone.
+  - The run is `claude --print --output-format stream-json --verbose --allowed-tools …` with the
+    prompt `/plan-parallel-work --json` on standard input, in the directory `wn` was run in, and
+    `wn` reads the document out of the stream it writes. It looks for `claude` in `PATH`, then
+    `~/.local/bin/claude`, then `~/.claude/local/claude`, then `/usr/local/bin/claude`, and the
+    first one that answers `--version` is the one. It names the tools the skill needs rather than
+    reaching for `--dangerously-skip-permissions`: a run under `--print` has no terminal to answer
+    a permission prompt with, and a tool that reaches for the bypass on behalf of its reader has
+    made a decision that is not its to make. The line that says a run is happening and the moving
+    line under it both go to standard error, so a pipe still gets the document alone.
+  - The moving line says two things a reader acts on, and one measured run is why. That run took 9
+    minutes and 36 seconds against a deadline of 10 minutes, and for all of that time the line
+    carried one constant — so a run that worked and a run that had died eight minutes earlier
+    painted the same words, and the reader killed a run that worked or waited on a run that was
+    gone. **How long the run waited, and how long it may**: `4m12s of 10m0s`, whole seconds, cut
+    and never rounded, against the deadline `WN_PLAN_TIMEOUT` names. **Which tool the run just
+    reached for**, with the words the run wrote for that reach: `Bash: Check wn CLI flags`. The
+    braille frame is evidence of neither — a steady tick keeps it moving while the run holds one
+    API call open, and that same measured run held one for 128 seconds. `--output-format
+    stream-json` is what makes the second fact reachable: the run then writes one JSON object for
+    each event, as the event happens, and `wn` reads them one line at a time on a thread of its
+    own. The line is cut to the window it is painted in, so a long reach never wraps, and nothing
+    is painted at all when standard error is not a terminal.
   - The clipboard is the cache. A second `wn` a minute later must not pay for a second run, so the
     document goes on the system clipboard and the next run reads it back through the clipboard
     input that already stands. No second cache, no second reader, and no file to go stale in a
@@ -1469,7 +1482,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     it is 600 by default, because a plan of a whole backlog is a longer run than a commit message.
   - The run says what it cost, and a run that failed and printed an envelope says it as well,
     because such a run spent the money before it failed. One line follows it on standard error,
-    beside the spinner:
+    where the moving line stood:
     `plan: $0.28 · claude-opus-5[1m], claude-haiku-4-5 at effort high · 32 in, 420 out, 94k cache
     read, 61k cache write · 1.3s`. The document still goes to standard output alone, so a reader
     who pipes that output gets the plan and nothing else. The numbers cover the subagents the skill

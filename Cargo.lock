@@ -9684,6 +9684,7 @@ dependencies = [
  "clap",
  "colored",
  "indicatif",
+ "libc",
  "serde_json",
  "tempfile",
  "termsize",

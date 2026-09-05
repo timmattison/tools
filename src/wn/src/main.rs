@@ -47,8 +47,10 @@ mod graph;
 mod input;
 mod json;
 mod plan;
+mod progress;
 mod render;
 mod report;
+mod stream;
 
 use std::io::{IsTerminal, Read};
 use std::process::ExitCode;
@@ -303,7 +305,7 @@ fn run(
     };
     let copied: &dyn Fn() -> input::ClipboardRead = &input::system_clipboard;
     let paths = build::candidate_paths(environment.home.as_deref());
-    // The line stands before the spinner, because a reader who typed `wn` and
+    // This line stands before the moving one, because a reader who typed `wn` and
     // waits a minute must know what is happening. It goes to standard error,
     // so a pipe still gets the answer alone.
     let announcement = if cli.refresh {

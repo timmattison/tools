@@ -11,21 +11,28 @@
 //! quieter still, so it answers only when the other three did not.
 //!
 //! The run says what it cost, because a reader who pays for one must learn the
-//! price. `--output-format json` wraps the plan in an envelope that carries
-//! that price beside it, and [`crate::envelope`] writes one line of it on
-//! standard error. A run that failed and printed an envelope says what it cost
-//! as well, because such a run spent the money before it failed.
+//! price, and it says what it is doing, because a run of ten minutes behind one
+//! constant is a run nobody can tell from a dead one.
+//!
+//! `--output-format stream-json --verbose` carries both. It makes the run write
+//! one JSON object for each event as the event happens, which [`crate::stream`]
+//! reads on a thread and [`crate::progress`] puts on the line. The last of
+//! those objects is the envelope that carries the plan and the price beside it,
+//! which [`crate::envelope`] takes apart. A run that failed and printed an
+//! envelope says what it cost as well, because such a run spent the money
+//! before it failed.
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use thiserror::Error;
 
 use crate::chain::Snippet;
 use crate::envelope::Envelope;
+use crate::progress::Progress;
+use crate::stream::{self, Transcript};
 
 /// The variable that turns the run off.
 ///
@@ -182,13 +189,22 @@ const ALLOWED_TOOLS: &str = "Bash Read Glob Grep Agent Task TodoWrite Skill";
 
 /// The arguments the run is given. The prompt goes on standard input.
 ///
-/// `--output-format json` is what makes the run say what it cost. Standard
-/// output then carries one JSON envelope, and the plan is the `result` field
-/// of it, which [`Envelope`] takes back out.
-const ARGUMENTS: [&str; 5] = [
+/// `--output-format stream-json` is what makes the run say what it is doing.
+/// Standard output then carries one JSON object for each event of the run, one
+/// to a line, written as the event happens. [`crate::stream`] reads them, and
+/// the line on standard error names the tool the run just reached for.
+///
+/// The last of those objects is the envelope that says what the run cost, and
+/// the plan is its `result` field, which [`Envelope`] takes back out. The
+/// plain `json` mode carries that envelope and nothing else, so it can say
+/// what a run cost and it can never say what a run is doing.
+///
+/// `--verbose` is not a choice. `claude` refuses the stream without it.
+const ARGUMENTS: [&str; 6] = [
     "--print",
     "--output-format",
-    "json",
+    "stream-json",
+    "--verbose",
     "--allowed-tools",
     ALLOWED_TOOLS,
 ];
@@ -219,9 +235,6 @@ const MODEL_FLAG: &str = "--model";
 
 /// How often a waiting run is asked whether it is finished.
 const POLL: Duration = Duration::from_millis(100);
-
-/// The words the spinner writes while the run works.
-const WORKING: &str = "plan-parallel-work: reading the backlog…";
 
 /// Whether `value`, the value of [`NO_CLAUDE_ENV`], turns the run off.
 ///
@@ -360,10 +373,11 @@ pub struct Settings<'a> {
 /// The run inherits the directory `wn` was started in, because the skill asks
 /// `gh` and `git` about the repository of that directory.
 ///
-/// A spinner runs on standard error while the run works, and the report of
-/// what the run cost stands there after it, so a pipe still gets the document
-/// alone. A run that failed and printed an envelope earns that report as well,
-/// because it spent the money before it failed.
+/// A line runs on standard error while the run works, saying how long the run
+/// waited against its deadline and which tool it just reached for. The report
+/// of what the run cost stands there after it, so a pipe still gets the
+/// document alone. A run that failed and printed an envelope earns that report
+/// as well, because it spent the money before it failed.
 ///
 /// # Errors
 ///
@@ -390,14 +404,14 @@ pub fn plan(
     let model = ModelName::new(settings.model)?;
     let path = find(paths, answers)?;
 
-    let spinner = spinner();
-    let answered = ask(&path, waited, effort.as_ref(), model.as_ref());
-    spinner.finish_and_clear();
+    let progress = Progress::start(waited);
+    let answered = ask(&path, waited, effort.as_ref(), model.as_ref(), &progress);
+    progress.stop();
 
     let envelope = answered?;
-    // The report stands after the spinner is cleared, and on the pipe the
-    // spinner drew on. The document goes to standard output, and a reader who
-    // pipes that output must get the document alone.
+    // The report stands after the line is cleared, and on the pipe that line
+    // drew on. The document goes to standard output, and a reader who pipes
+    // that output must get the document alone.
     //
     // It also stands before the answer is taken. A run that failed after
     // several turns spent the money before it failed, so the reader of such a
@@ -408,21 +422,10 @@ pub fn plan(
     Ok(envelope.answer()?.to_string())
 }
 
-/// The spinner that stands while the run works.
+/// Hand `path` the prompt and read the envelope out of the stream it writes.
 ///
-/// It draws on standard error. The document goes to standard output, and a
-/// reader who pipes that output must get the document alone.
-fn spinner() -> ProgressBar {
-    let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
-    if let Ok(style) = ProgressStyle::with_template("{spinner:.cyan} {msg}") {
-        spinner.set_style(style.tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]));
-    }
-    spinner.set_message(WORKING);
-    spinner.enable_steady_tick(POLL);
-    spinner
-}
-
-/// Hand `path` the prompt and read the envelope it prints.
+/// `progress` is the line the run stands behind, and what the run reaches for
+/// goes on it as the run reaches for it.
 ///
 /// # Errors
 ///
@@ -440,6 +443,7 @@ fn ask(
     waited: Duration,
     effort: Option<&Effort>,
     model: Option<&ModelName>,
+    progress: &Progress,
 ) -> Result<Envelope, BuildError> {
     let mut child = Command::new(path)
         .args(arguments(effort, model))
@@ -456,7 +460,16 @@ fn ask(
     // that writes into a full pipe blocks there until the deadline. A write
     // that fails must find the two readers in place as well, because what the
     // run said is the reason to report and the error of the pipe is not.
-    let printed = child.stdout.take().map(read_whole);
+    //
+    // Standard output carries the stream of events, so its reader reads one
+    // line at a time and puts each reach on the line as it arrives. A reader
+    // that joined at the end would say what the run did at the one moment
+    // nobody needs telling any more.
+    let doing = progress.doing();
+    let printed = child
+        .stdout
+        .take()
+        .map(|pipe| stream::read(pipe, move |reach| doing.set(reach)));
     let complained = child.stderr.take().map(read_whole);
 
     // The pipe is closed as soon as the prompt is in it. A `claude` that reads
@@ -476,13 +489,13 @@ fn ask(
     }
 
     let status = wait_for(&mut child, waited)?;
-    let printed = printed.map_or_else(String::new, joined);
+    let printed = printed.map_or_else(Transcript::default, joined_stream);
     let complained = complained.map_or_else(String::new, joined);
 
     if status.success() {
         // A run that answered with a plan says the write of the prompt got
         // there. An error of that pipe is then worth nothing, so it is dropped.
-        Envelope::read(&printed)
+        Envelope::read(printed.envelope())
     } else {
         // The envelope stands in front of the pipes for a run that failed. A
         // failing run prints its envelope as well, and the `result` of that
@@ -494,11 +507,11 @@ fn ask(
         // A run that printed no envelope falls back to the pipes, and so does
         // one whose envelope says it did not fail: such an envelope says
         // nothing at all about the failure the exit status reports.
-        match Envelope::read(&printed) {
+        match Envelope::read(printed.envelope()) {
             Ok(envelope) if envelope.answer().is_err() => Ok(envelope),
             _ => Err(refusal_of(&reason_of(
                 &complained,
-                &printed,
+                printed.printed(),
                 pipe.as_deref(),
             ))),
         }
@@ -521,6 +534,12 @@ where
 
 /// What the thread `reader` read, or nothing when the thread went down.
 fn joined(reader: thread::JoinHandle<String>) -> String {
+    reader.join().unwrap_or_default()
+}
+
+/// The transcript the thread `reader` read, or nothing when the thread went
+/// down.
+fn joined_stream(reader: thread::JoinHandle<Transcript>) -> Transcript {
     reader.join().unwrap_or_default()
 }
 
@@ -706,11 +725,16 @@ pub enum BuildError {
     },
     /// The run printed something that is no envelope.
     ///
-    /// The run is asked for `--output-format json`, so what it prints is one
-    /// JSON envelope and the plan is one field of it. A text that is no
-    /// envelope is a `claude` that answered in another shape, and the plan
-    /// reader must never be handed it: the refusal would then name the plan
-    /// and the fault is in the run.
+    /// The run is asked for `--output-format stream-json`, so what it prints
+    /// is one JSON object for each event of the run. The last of those
+    /// objects is the envelope, and the plan is one field of it.
+    /// [`Transcript::envelope`] picks that `result` line out of the stream,
+    /// and for a run that wrote none it gives the end of what the run printed
+    /// instead. This refusal stands when what it gives is no envelope.
+    ///
+    /// A text that is no envelope is a `claude` that answered in another
+    /// shape, and the plan reader must never be handed it: the refusal would
+    /// then name the plan and the fault is in the run.
     #[error("claude answered with {text:?}, which is no JSON envelope: {cause}")]
     BadEnvelope {
         /// What the run printed, cut to the length every message of this tool
@@ -726,7 +750,8 @@ pub enum BuildError {
         ///
         /// It comes out of the envelope the run printed, which is where
         /// `claude` writes the sentence a reader can act on. A run that
-        /// printed no envelope gives it on one of the two pipes instead.
+        /// printed no envelope gives it on one of the two pipes instead, and
+        /// standard output gives the end of what it wrote there.
         said: String,
     },
 }
@@ -852,10 +877,14 @@ mod tests {
         // bypass flag answers every prompt of every tool, and that decision is
         // the reader\'s to make and not this tool\'s.
         assert!(ARGUMENTS.contains(&"--print"), "{ARGUMENTS:?}");
-        // The envelope is what says what the run cost. The plan is one field
-        // of it, so a run without this pair prints a plan nobody priced.
+        // The stream is what says what the run does while it works, and its
+        // last line is the envelope that says what the run cost. A run without
+        // these three prints a plan nobody priced, behind a line that says the
+        // same words for ten minutes.
         assert!(ARGUMENTS.contains(&"--output-format"), "{ARGUMENTS:?}");
-        assert!(ARGUMENTS.contains(&"json"), "{ARGUMENTS:?}");
+        assert!(ARGUMENTS.contains(&"stream-json"), "{ARGUMENTS:?}");
+        // `claude` refuses the stream without this flag.
+        assert!(ARGUMENTS.contains(&"--verbose"), "{ARGUMENTS:?}");
         assert!(ARGUMENTS.contains(&"--allowed-tools"), "{ARGUMENTS:?}");
         assert!(ARGUMENTS.contains(&ALLOWED_TOOLS), "{ARGUMENTS:?}");
         assert!(
