@@ -1419,21 +1419,21 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     first one that answers `--version` is the one. It names the tools the skill needs rather than
     reaching for `--dangerously-skip-permissions`: a run under `--print` has no terminal to answer
     a permission prompt with, and a tool that reaches for the bypass on behalf of its reader has
-    made a decision that is not its to make. The line that says a run is happening and the line
-    that moves under it both go to standard error, so a pipe still gets the document alone.
-  - That moving line says two things a reader acts on, and one measured run is why. It took 9
+    made a decision that is not its to make. The line that says a run is happening and the moving
+    line under it both go to standard error, so a pipe still gets the document alone.
+  - The moving line says two things a reader acts on, and one measured run is why. That run took 9
     minutes and 36 seconds against a deadline of 10 minutes, and for all of that time the line
-    carried one constant — so a run that worked and a run that died eight minutes earlier painted
-    the same words, and the reader kills a run that works or waits on a run that is gone. **How
-    long the run waited, and how long it may**: `4m12s of 10m0s`, whole seconds, cut and never
-    rounded, against the deadline `WN_PLAN_TIMEOUT` names. **Which tool the run just reached for**,
-    with the words the run wrote for that reach: `Bash: Check wn CLI flags`. The braille frame is
-    no evidence of either one — a steady tick keeps it moving while the run holds one API call
-    open, and that same measured run held one for 128 seconds. `--output-format stream-json` is
-    what makes the second fact reachable: the run then writes one JSON object for each event, as
-    the event happens, and `wn` reads them one line at a time on a thread of its own. The line is
-    cut to the window it is painted in, so a long reach never wraps, and nothing is painted at all
-    when standard error is not a terminal.
+    carried one constant — so a run that worked and a run that had died eight minutes earlier
+    painted the same words, and the reader killed a run that worked or waited on a run that was
+    gone. **How long the run waited, and how long it may**: `4m12s of 10m0s`, whole seconds, cut
+    and never rounded, against the deadline `WN_PLAN_TIMEOUT` names. **Which tool the run just
+    reached for**, with the words the run wrote for that reach: `Bash: Check wn CLI flags`. The
+    braille frame is evidence of neither — a steady tick keeps it moving while the run holds one
+    API call open, and that same measured run held one for 128 seconds. `--output-format
+    stream-json` is what makes the second fact reachable: the run then writes one JSON object for
+    each event, as the event happens, and `wn` reads them one line at a time on a thread of its
+    own. The line is cut to the window it is painted in, so a long reach never wraps, and nothing
+    is painted at all when standard error is not a terminal.
   - The clipboard is the cache. A second `wn` a minute later must not pay for a second run, so the
     document goes on the system clipboard and the next run reads it back through the clipboard
     input that already stands. No second cache, no second reader, and no file to go stale in a

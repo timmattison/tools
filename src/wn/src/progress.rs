@@ -125,8 +125,8 @@ impl Progress {
 /// The half of [`Progress`] that says what the run is doing.
 ///
 /// A handle of its own, because the thread that reads the stream is the one
-/// that knows and it outlives no line: the bar itself is a handle, so a clone
-/// of it writes the same line.
+/// that knows, and that thread cannot borrow the line it writes on. The bar is
+/// itself a handle, so a clone of it writes the same line.
 pub struct Doing {
     /// The bar the words go on.
     bar: ProgressBar,
