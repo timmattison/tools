@@ -2104,10 +2104,20 @@ fn envelope(document: &str) -> String {
     .to_string()
 }
 
-/// The report line the envelope of [`envelope`] earns, for a run that asked
-/// for no level of effort.
+/// The report line the envelope of [`envelope`] earns, with no level of
+/// effort in it.
+///
+/// Every run asks for a level, so no run earns this line as it stands.
+/// [`report_at`] puts the level in, and the tests read that.
 const REPORT: &str =
     "plan: $0.05 · claude-opus-5 · 118k in, 9.4k out, 13k cache read, 26k cache write · 1.8s";
+
+/// The report line of [`REPORT`], for a run that asked for level `effort`.
+///
+/// The level stands beside the models, because the models are what ran at it.
+fn report_at(effort: &str) -> String {
+    REPORT.replace("claude-opus-5", &format!("claude-opus-5 at effort {effort}"))
+}
 
 /// The shell of a fake `claude` that prints an envelope holding `document`.
 fn prints(document: &str) -> String {
@@ -2394,7 +2404,11 @@ fn the_report_of_the_run_goes_to_standard_error_and_the_plan_goes_to_standard_ou
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), JSON_ANSWER);
-    assert!(stderr(&output).contains(REPORT), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&report_at(DEFAULT_EFFORT)),
+        "{}",
+        stderr(&output)
+    );
     // The document reaches standard output alone, so the report cannot be on
     // both pipes.
     assert!(!stdout(&output).contains("plan: $"), "{}", stdout(&output));
@@ -2413,11 +2427,7 @@ fn the_level_the_environment_named_reaches_the_run_and_the_report() {
     assert!(args.contains("high"), "{args}");
     // The whole line, with the level in it. The level stands beside the
     // models, because the models are what ran at it.
-    assert!(
-        stderr(&output).contains(&REPORT.replace("claude-opus-5", "claude-opus-5 at effort high")),
-        "{}",
-        stderr(&output)
-    );
+    assert!(stderr(&output).contains(&report_at("high")), "{}", stderr(&output));
 }
 
 #[test]
@@ -2469,20 +2479,31 @@ fn a_model_that_opens_with_a_dash_is_a_refusal_that_costs_no_run() {
 /// The model a run asks for when the environment names none.
 const DEFAULT_MODEL: &str = "opus";
 
+/// The level of effort a run asks for when the environment names none.
+const DEFAULT_EFFORT: &str = "xhigh";
+
 #[test]
-fn a_run_that_names_no_model_asks_for_the_default_model() {
+fn a_run_that_names_neither_asks_for_the_default_model_and_level() {
     // How long a plan takes and what it costs are properties of the model
-    // that builds it. A tool that names no model has neither property: the
-    // same command on two machines runs on two models, and nobody can say
-    // what either reader waited or paid. So the default is a model this
-    // source names, and never the one the machine happens to configure.
+    // that builds it and of the level it works at. A tool that names neither
+    // has neither property: the same command on two machines runs two ways,
+    // and nobody can say what either reader waited or paid. So both defaults
+    // are named in the source, and never left to the machine.
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let args = gh.recorded_claude_args();
     assert!(args.contains("--model"), "{args}");
     assert!(args.contains(DEFAULT_MODEL), "{args}");
-    assert!(!args.contains("--effort"), "{args}");
+    assert!(args.contains("--effort"), "{args}");
+    assert!(args.contains(DEFAULT_EFFORT), "{args}");
+    // The report names the level the run asked for, and every run now asks
+    // for one. A reader who reads no level would think none was chosen.
+    assert!(
+        stderr(&output).contains(&report_at(DEFAULT_EFFORT)),
+        "{}",
+        stderr(&output)
+    );
 }
 
 /// The tool the fake `claude` of this file reaches for first.
@@ -2569,7 +2590,11 @@ fn the_plan_of_a_stream_is_the_result_of_its_last_line() {
     // pipe the plan goes to.
     assert!(!stdout(&output).contains("tool_use"), "{}", stdout(&output));
     // The last line is still the envelope, so the run still says what it cost.
-    assert!(stderr(&output).contains(REPORT), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&report_at(DEFAULT_EFFORT)),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
