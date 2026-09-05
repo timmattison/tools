@@ -178,21 +178,33 @@ impl ModelName {
     }
 }
 
-/// The seconds the run this deadline was measured against really took.
+/// The seconds of the longest run anybody measured.
 ///
-/// One run, on 2026-09-05, on `timmattison/tools`: 57 open issues and 8 open
-/// pull requests, at [`DEFAULT_MODEL`] at [`DEFAULT_EFFORT`], which is what a
-/// reader who sets neither variable gets. It took 10 minutes 24 seconds and
-/// cost $3.64.
+/// **The longest, and not the last.** A deadline set against one sample is a
+/// deadline the next run walks past, and this constant has already been wrong
+/// once for that reason. When a new run outlasts this number, raise it and
+/// name the run here. When a new run is shorter, leave it alone.
+///
+/// Every run below is `timmattison/tools` on 2026-09-05, 57 open issues and
+/// 8 open pull requests, at [`DEFAULT_MODEL`] at [`DEFAULT_EFFORT`], which is
+/// what a reader who sets neither variable gets:
+///
+/// | Seconds | Cost | Note |
+/// | --- | --- | --- |
+/// | 576 | — | Opus at whatever level the machine picked, before this tool named either |
+/// | 624 | $3.64 | one model in `modelUsage` |
+/// | 780 | — | the run this number now stands on |
+///
+/// The spread of the last two is 25% on one repository, on one day, at one
+/// setting. That spread is the reason the deadline doubles this number rather
+/// than adding a margin to it.
 ///
 /// The number stands in the source rather than in prose, because
 /// [`DEFAULT_TIMEOUT_SECONDS`] is derived from it. A deadline whose doc
 /// comment reasons about the size of the work and never about the model that
-/// does it is a deadline nobody set: the earlier 600 left 24 seconds over a
-/// run of 9m36s at Opus at whatever level the machine picked, and the moment
-/// the tool started asking for `xhigh` that same run took 624 seconds and
-/// would have been killed at the deadline.
-const MEASURED_SECONDS: u64 = 624;
+/// does it is a deadline nobody set: the earlier 600 would have killed the
+/// 624-second run and the 780-second run both.
+const MEASURED_SECONDS: u64 = 780;
 
 /// The seconds a run may take when the environment names none.
 ///
