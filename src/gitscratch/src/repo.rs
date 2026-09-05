@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::git::Git;
 use crate::metrics::Uncommitted;
@@ -146,11 +146,39 @@ impl Repo {
     /// one, and otherwise the first of [`DEFAULT_BRANCHES`] this repository
     /// holds.
     ///
+    /// The whole choice lives here rather than in each tool, because two
+    /// implementations of "which branch did they mean" is two implementations
+    /// that drift - and the one that drifts is the one measuring a different
+    /// branch than the one it printed.
+    ///
+    /// A named branch is handed straight back without being resolved. Resolving
+    /// it is the caller's, and the caller's error message is the one that names
+    /// the typo the developer actually made. Answering a typo with this
+    /// function's words would describe a default that was never reached.
+    ///
     /// # Errors
     ///
-    /// Returns an error if `named` is `None` and no candidate resolves.
+    /// Returns an error if `named` is `None` and no candidate resolves; the
+    /// message names every candidate that was tried.
     pub fn branch_or_default(&self, named: Option<&str>) -> Result<String> {
-        todo!("pick the default branch")
+        if let Some(branch) = named {
+            return Ok(branch.to_string());
+        }
+
+        for candidate in DEFAULT_BRANCHES {
+            if self.resolve(candidate).is_ok() {
+                return Ok(candidate.to_string());
+            }
+        }
+
+        // Never a fall back to HEAD. A replay of HEAD onto HEAD answers "clean"
+        // for every repository there is, so the fallback would turn "I could not
+        // tell you which branch you meant" into a confident wrong answer.
+        Err(anyhow!(
+            "no branch was named, and no default branch resolves here (tried: {}) \
+             - name the branch to measure against",
+            DEFAULT_BRANCHES.join(", ")
+        ))
     }
 
     /// How many files are uncommitted — staged, unstaged, or untracked.
