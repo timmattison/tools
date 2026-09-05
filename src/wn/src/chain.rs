@@ -95,6 +95,17 @@ impl Snippet {
         }
         Self(cut)
     }
+
+    /// Whether the snippet holds no text at all.
+    ///
+    /// A text of nothing but space is empty as well, because
+    /// [`new`](Snippet::new) drops the space around what it is given. A message
+    /// that quotes a snippet needs this: an empty quotation says less than no
+    /// quotation at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl fmt::Display for Snippet {

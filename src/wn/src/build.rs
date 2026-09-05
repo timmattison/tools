@@ -367,6 +367,20 @@ fn looked_in_lines(paths: &[String]) -> String {
         .join("\n")
 }
 
+/// The clause of a refusal that says how far a run got, or nothing at all for a
+/// run that printed nothing.
+///
+/// A run writes one JSON object for each event, so this text is the front of
+/// what the transcript kept and never a document. It is here because the bytes
+/// a killed run wrote are the only evidence that the run was working, and a
+/// refusal that dropped them lost them for good.
+fn got_as_far_as(printed: &Snippet) -> String {
+    if printed.is_empty() {
+        return String::new();
+    }
+    format!("\n\nIt got as far as: {printed:?}")
+}
+
 /// What the environment said about one run.
 ///
 /// One struct rather than three arguments, because every one of them is a read
@@ -614,14 +628,18 @@ fn ask(
 /// # Errors
 ///
 /// Gives [`BuildError::TimedOut`] for a run that printed no whole envelope, and
-/// for one whose envelope carries a reason rather than a plan.
+/// for one whose envelope carries a reason rather than a plan. The refusal
+/// carries what the run printed, cut, so the reader learns how far it got.
 fn answer_past_the_deadline(seconds: u64, printed: &Transcript) -> Result<Answer, BuildError> {
     match Envelope::read(printed.envelope()) {
         Ok(envelope) if envelope.answer().is_ok() => Ok(Answer {
             envelope,
             overran: Some(seconds),
         }),
-        _ => Err(BuildError::TimedOut { seconds }),
+        _ => Err(BuildError::TimedOut {
+            seconds,
+            printed: Snippet::new(printed.printed()),
+        }),
     }
 }
 
@@ -823,11 +841,19 @@ pub enum BuildError {
     /// The run took longer than it was given.
     #[error(
         "claude took longer than {seconds} seconds to build a plan. {TIMEOUT_ENV} names a \
-         different number of seconds."
+         different number of seconds.{}",
+        got_as_far_as(.printed)
     )]
     TimedOut {
         /// The seconds it was given.
         seconds: u64,
+        /// What the run printed on standard output before it was killed, cut to
+        /// the length every message of this tool cuts to.
+        ///
+        /// A run that printed a whole envelope answers with the plan of it, so
+        /// this text is never a plan. It says how far the run got, which is
+        /// what tells a run that was working from a run that never started.
+        printed: Snippet,
     },
     /// `claude` has no account to run under.
     #[error("claude is not logged in. Run: claude login")]
@@ -1171,10 +1197,34 @@ plans.\n`gh repo view` failed."
 
     #[test]
     fn a_run_that_outlived_its_deadline_names_the_seconds_and_the_variable() {
-        let refused = BuildError::TimedOut { seconds: 600 };
+        let refused = BuildError::TimedOut {
+            seconds: 600,
+            printed: Snippet::new(""),
+        };
         let message = refused.to_string();
         assert!(message.contains("600"), "{message}");
         assert!(message.contains(TIMEOUT_ENV), "{message}");
+    }
+
+    #[test]
+    fn a_run_that_printed_something_before_its_deadline_says_how_far_it_got() {
+        let refused = BuildError::TimedOut {
+            seconds: 600,
+            printed: Snippet::new("half of an answer"),
+        };
+        let message = refused.to_string();
+        assert!(message.contains("half of an answer"), "{message}");
+    }
+
+    #[test]
+    fn a_run_that_printed_nothing_quotes_nothing() {
+        // An empty quotation says less than no quotation at all.
+        let refused = BuildError::TimedOut {
+            seconds: 600,
+            printed: Snippet::new("   "),
+        };
+        let message = refused.to_string();
+        assert!(!message.contains("got as far as"), "{message}");
     }
 
     #[test]
