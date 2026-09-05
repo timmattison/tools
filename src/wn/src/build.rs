@@ -9,6 +9,12 @@
 //! argument was typed on purpose, a pipe was built on purpose, and the
 //! clipboard was neither. A run that costs money and a minute of waiting is
 //! quieter still, so it answers only when the other three did not.
+//!
+//! The run says what it cost, because a reader who pays for one must learn the
+//! price. `--output-format json` wraps the plan in an envelope that carries
+//! that price beside it, and [`crate::envelope`] writes one line of it on
+//! standard error. A run that failed and printed an envelope says what it cost
+//! as well, because such a run spent the money before it failed.
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -18,6 +24,9 @@ use std::time::{Duration, Instant};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use thiserror::Error;
 
+use crate::chain::Snippet;
+use crate::envelope::Envelope;
+
 /// The variable that turns the run off.
 ///
 /// It has the shape [`crate::input::NO_CLIPBOARD_ENV`] has: any value with a
@@ -26,6 +35,105 @@ pub const NO_CLAUDE_ENV: &str = "WN_NO_CLAUDE";
 
 /// The variable that names the seconds a run may take.
 pub const TIMEOUT_ENV: &str = "WN_PLAN_TIMEOUT";
+
+/// The variable that names the level of effort a run asks for.
+pub const EFFORT_ENV: &str = "WN_PLAN_EFFORT";
+
+/// The variable that names the model a run asks for.
+pub const MODEL_ENV: &str = "WN_PLAN_MODEL";
+
+/// The levels of effort a run may ask for.
+///
+/// The envelope of a run carries no field that names one, so the report can
+/// only name the level the run asked for. That is why the level is read here
+/// and passed on, rather than taken out of the answer.
+const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// The level of effort a run asks for.
+///
+/// A newtype rather than a `String`, because the value holds one rule every
+/// reader of it depends on: it is one of [`EFFORT_LEVELS`]. A level the run
+/// does not know is a run that stops before it starts, and the report would
+/// then name a level nothing ran at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Effort(String);
+
+/// The model a run asks for.
+///
+/// A newtype rather than a `String`, for the rule it holds: the value is not
+/// empty, and it does not open with a dash. A value that opens with a dash is
+/// a flag, and a variable that can put a flag on the command line of the run
+/// decides what the run is allowed to do. That decision belongs to the reader
+/// and never to a variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelName(String);
+
+impl Effort {
+    /// The level `value`, the value of [`EFFORT_ENV`], names.
+    ///
+    /// An absent value gives `None`, and so does a value of nothing but
+    /// whitespace: an exported but empty variable is a common accident. The
+    /// run then asks for no level and the report names none, because a report
+    /// that named a level nobody chose is worth nothing.
+    ///
+    /// The case of the value is the reader's to choose, so `HIGH` is `high`.
+    ///
+    /// # Errors
+    ///
+    /// Gives [`BuildError::BadEffort`] for a value that is not one of
+    /// [`EFFORT_LEVELS`]. A reader who wrote `WN_PLAN_EFFORT=quick` and got
+    /// the default back would learn nothing about why the plan still cost what
+    /// it cost.
+    fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
+        let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
+            return Ok(None);
+        };
+        let lowered = named.to_lowercase();
+        if EFFORT_LEVELS.contains(&lowered.as_str()) {
+            Ok(Some(Self(lowered)))
+        } else {
+            Err(BuildError::BadEffort {
+                value: named.to_string(),
+            })
+        }
+    }
+
+    /// The level, as the command line and the report write it.
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ModelName {
+    /// The model `value`, the value of [`MODEL_ENV`], names.
+    ///
+    /// An absent value gives `None`, and so does a value of nothing but
+    /// whitespace. The run then asks for no model, and the report names the
+    /// models the answer says the run really used.
+    ///
+    /// # Errors
+    ///
+    /// Gives [`BuildError::BadModel`] for a value that opens with a dash.
+    /// Every other value goes through: the models of `claude` are named by
+    /// `claude` and not by this tool, so a list here would refuse a model that
+    /// shipped after this build.
+    fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
+        let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
+            return Ok(None);
+        };
+        if named.starts_with('-') {
+            return Err(BuildError::BadModel {
+                value: named.to_string(),
+            });
+        }
+        Ok(Some(Self(named.to_string())))
+    }
+
+    /// The model, as the command line writes it.
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// The seconds a run may take when the environment names none.
 ///
@@ -73,7 +181,41 @@ const CLAUDE: &str = "claude";
 const ALLOWED_TOOLS: &str = "Bash Read Glob Grep Agent Task TodoWrite Skill";
 
 /// The arguments the run is given. The prompt goes on standard input.
-const ARGUMENTS: [&str; 3] = ["--print", "--allowed-tools", ALLOWED_TOOLS];
+///
+/// `--output-format json` is what makes the run say what it cost. Standard
+/// output then carries one JSON envelope, and the plan is the `result` field
+/// of it, which [`Envelope`] takes back out.
+const ARGUMENTS: [&str; 5] = [
+    "--print",
+    "--output-format",
+    "json",
+    "--allowed-tools",
+    ALLOWED_TOOLS,
+];
+
+/// The arguments of one run: [`ARGUMENTS`], and the level and the model the
+/// environment named.
+///
+/// A run that names neither gets [`ARGUMENTS`] and nothing more, so the two
+/// variables cost the reader who sets neither of them nothing at all.
+fn arguments(effort: Option<&Effort>, model: Option<&ModelName>) -> Vec<String> {
+    let mut carried: Vec<String> = ARGUMENTS.iter().map(ToString::to_string).collect();
+    if let Some(effort) = effort {
+        carried.push(EFFORT_FLAG.to_string());
+        carried.push(effort.as_str().to_string());
+    }
+    if let Some(model) = model {
+        carried.push(MODEL_FLAG.to_string());
+        carried.push(model.as_str().to_string());
+    }
+    carried
+}
+
+/// The flag that names the level of effort of a run.
+const EFFORT_FLAG: &str = "--effort";
+
+/// The flag that names the model of a run.
+const MODEL_FLAG: &str = "--model";
 
 /// How often a waiting run is asked whether it is finished.
 const POLL: Duration = Duration::from_millis(100);
@@ -194,42 +336,76 @@ fn looked_in_lines(paths: &[String]) -> String {
         .join("\n")
 }
 
+/// What the environment said about one run.
+///
+/// One struct rather than three arguments, because every one of them is a read
+/// of process-global state and `main` is the one place that reads it. The
+/// functions under it take values, so a test of them touches no environment.
+pub struct Settings<'a> {
+    /// The value of [`TIMEOUT_ENV`].
+    pub timeout: Option<&'a str>,
+    /// The value of [`EFFORT_ENV`].
+    pub effort: Option<&'a str>,
+    /// The value of [`MODEL_ENV`].
+    pub model: Option<&'a str>,
+}
+
 /// The plan a run of `claude` builds, as the document it printed.
 ///
-/// `paths` and `answers` are what [`find`] takes, and `timeout` is the value
-/// of [`TIMEOUT_ENV`]. All three arrive as arguments rather than as reads of
+/// `paths` and `answers` are what [`find`] takes, and `settings` is what the
+/// environment said. All of them arrive as arguments rather than as reads of
 /// the machine and of the environment, so the caller owns every input of the
 /// run and a test of the pieces under it touches neither.
 ///
 /// The run inherits the directory `wn` was started in, because the skill asks
 /// `gh` and `git` about the repository of that directory.
 ///
-/// A spinner runs on standard error while the run works, so a pipe still gets
-/// the document alone.
+/// A spinner runs on standard error while the run works, and the report of
+/// what the run cost stands there after it, so a pipe still gets the document
+/// alone. A run that failed and printed an envelope earns that report as well,
+/// because it spent the money before it failed.
 ///
 /// # Errors
 ///
 /// Gives [`BuildError::BadTimeout`] for a timeout that names no seconds,
 /// [`BuildError::TimeoutTooFar`] for a timeout longer than a run waits,
-/// [`BuildError::NotInstalled`] when no path holds a `claude`,
+/// [`BuildError::BadEffort`] for a level that is not one of
+/// [`EFFORT_LEVELS`], [`BuildError::BadModel`] for a model that opens with a
+/// dash, [`BuildError::NotInstalled`] when no path holds a `claude`,
 /// [`BuildError::TimedOut`] for a run that outlived its deadline,
-/// [`BuildError::NotAuthenticated`] for a `claude` with no account, and
+/// [`BuildError::NotAuthenticated`] for a `claude` with no account,
+/// [`BuildError::BadEnvelope`] for a run that printed no envelope, and
 /// [`BuildError::Failed`] for every other failure.
 ///
-/// The two refusals of the timeout stand before the run starts, because the
-/// timeout is read before a path is found and before a child is spawned.
+/// The refusals of the settings stand before the run starts, because all
+/// three are read before a path is found and before a child is spawned. A
+/// value the run cannot use must cost no run at all.
 pub fn plan(
     paths: &[String],
     answers: &dyn Fn(&str) -> bool,
-    timeout: Option<&str>,
+    settings: &Settings,
 ) -> Result<String, BuildError> {
-    let waited = seconds(timeout)?;
+    let waited = seconds(settings.timeout)?;
+    let effort = Effort::new(settings.effort)?;
+    let model = ModelName::new(settings.model)?;
     let path = find(paths, answers)?;
 
     let spinner = spinner();
-    let built = ask(&path, waited);
+    let answered = ask(&path, waited, effort.as_ref(), model.as_ref());
     spinner.finish_and_clear();
-    built
+
+    let envelope = answered?;
+    // The report stands after the spinner is cleared, and on the pipe the
+    // spinner drew on. The document goes to standard output, and a reader who
+    // pipes that output must get the document alone.
+    //
+    // It also stands before the answer is taken. A run that failed after
+    // several turns spent the money before it failed, so the reader of such a
+    // run learns the price as well.
+    if let Some(report) = envelope.report(effort.as_ref().map(Effort::as_str)) {
+        eprintln!("{report}");
+    }
+    Ok(envelope.answer()?.to_string())
 }
 
 /// The spinner that stands while the run works.
@@ -246,17 +422,27 @@ fn spinner() -> ProgressBar {
     spinner
 }
 
-/// Hand `path` the prompt and read the document it prints.
+/// Hand `path` the prompt and read the envelope it prints.
 ///
 /// # Errors
 ///
-/// Gives [`BuildError::TimedOut`] when the run outlives `waited`, and the
-/// refusals of [`refusal_of`] for a run that ended with a failure. Such a
-/// refusal carries the reason [`reason_of`] picks out of the two pipes and
-/// out of the write of the prompt.
-fn ask(path: &str, waited: Duration) -> Result<String, BuildError> {
+/// Gives [`BuildError::TimedOut`] when the run outlives `waited`, and
+/// [`BuildError::BadEnvelope`] for a run that printed no envelope. Gives the
+/// refusals of [`refusal_of`] for a run that ended with a failure and printed
+/// no envelope that says why. Such a refusal carries the reason [`reason_of`]
+/// picks out of the two pipes and out of the write of the prompt.
+///
+/// A run that ended with a failure and printed an envelope that says so gives
+/// that envelope. The reason then stands in its `result`, and
+/// [`Envelope::answer`] is what hands it on.
+fn ask(
+    path: &str,
+    waited: Duration,
+    effort: Option<&Effort>,
+    model: Option<&ModelName>,
+) -> Result<Envelope, BuildError> {
     let mut child = Command::new(path)
-        .args(ARGUMENTS)
+        .args(arguments(effort, model))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -296,13 +482,26 @@ fn ask(path: &str, waited: Duration) -> Result<String, BuildError> {
     if status.success() {
         // A run that answered with a plan says the write of the prompt got
         // there. An error of that pipe is then worth nothing, so it is dropped.
-        Ok(printed)
+        Envelope::read(&printed)
     } else {
-        Err(refusal_of(&reason_of(
-            &complained,
-            &printed,
-            pipe.as_deref(),
-        )))
+        // The envelope stands in front of the pipes for a run that failed. A
+        // failing run prints its envelope as well, and the `result` of that
+        // envelope carries the sentence a reader can act on. Standard error
+        // carries a machine tag on the likeliest mistake of all — a model that
+        // does not exist — and a tag names the fault without saying what to do
+        // about it.
+        //
+        // A run that printed no envelope falls back to the pipes, and so does
+        // one whose envelope says it did not fail: such an envelope says
+        // nothing at all about the failure the exit status reports.
+        match Envelope::read(&printed) {
+            Ok(envelope) if envelope.answer().is_err() => Ok(envelope),
+            _ => Err(refusal_of(&reason_of(
+                &complained,
+                &printed,
+                pipe.as_deref(),
+            ))),
+        }
     }
 }
 
@@ -408,7 +607,7 @@ fn reason_of(complained: &str, printed: &str, pipe: Option<&str>) -> String {
 /// login server, for one — is a failure of something else, and
 /// [`BuildError::NotAuthenticated`] carries no text, so such a run loses the
 /// reason it gave.
-fn refusal_of(said: &str) -> BuildError {
+pub(crate) fn refusal_of(said: &str) -> BuildError {
     let clause = said.trim();
     let lowered = clause.to_lowercase();
     if ["not authenticated", "/login", "log in"]
@@ -486,11 +685,48 @@ pub enum BuildError {
         /// What said the directory is in no repository.
         said: String,
     },
+    /// The value of [`EFFORT_ENV`] is not one of [`EFFORT_LEVELS`].
+    #[error(
+        "{EFFORT_ENV} names {value:?}, and it names one of {}: {EFFORT_ENV}=high",
+        EFFORT_LEVELS.join(", ")
+    )]
+    BadEffort {
+        /// The value the environment named, with the space around it dropped.
+        value: String,
+    },
+    /// The value of [`MODEL_ENV`] opens with a dash, so it names a flag.
+    #[error(
+        "{MODEL_ENV} names {value:?}, which opens with a dash, and a model is no flag. A variable \
+         that can put a flag on the command line of the run decides what the run may do, and that \
+         decision is yours: {MODEL_ENV}=claude-opus-5"
+    )]
+    BadModel {
+        /// The value the environment named, with the space around it dropped.
+        value: String,
+    },
+    /// The run printed something that is no envelope.
+    ///
+    /// The run is asked for `--output-format json`, so what it prints is one
+    /// JSON envelope and the plan is one field of it. A text that is no
+    /// envelope is a `claude` that answered in another shape, and the plan
+    /// reader must never be handed it: the refusal would then name the plan
+    /// and the fault is in the run.
+    #[error("claude answered with {text:?}, which is no JSON envelope: {cause}")]
+    BadEnvelope {
+        /// What the run printed, cut to the length every message of this tool
+        /// cuts to.
+        text: Snippet,
+        /// What the JSON reader said about it.
+        cause: String,
+    },
     /// The run failed for a reason only `claude` knows.
     #[error("claude could not build a plan: {said}")]
     Failed {
-        /// The reason the run gave, on whichever pipe carried it, with the
-        /// space around it dropped.
+        /// The reason the run gave, with the space around it dropped.
+        ///
+        /// It comes out of the envelope the run printed, which is where
+        /// `claude` writes the sentence a reader can act on. A run that
+        /// printed no envelope gives it on one of the two pipes instead.
         said: String,
     },
 }
@@ -616,6 +852,10 @@ mod tests {
         // bypass flag answers every prompt of every tool, and that decision is
         // the reader\'s to make and not this tool\'s.
         assert!(ARGUMENTS.contains(&"--print"), "{ARGUMENTS:?}");
+        // The envelope is what says what the run cost. The plan is one field
+        // of it, so a run without this pair prints a plan nobody priced.
+        assert!(ARGUMENTS.contains(&"--output-format"), "{ARGUMENTS:?}");
+        assert!(ARGUMENTS.contains(&"json"), "{ARGUMENTS:?}");
         assert!(ARGUMENTS.contains(&"--allowed-tools"), "{ARGUMENTS:?}");
         assert!(ARGUMENTS.contains(&ALLOWED_TOOLS), "{ARGUMENTS:?}");
         assert!(
@@ -835,5 +1075,121 @@ plans.\n`gh repo view` failed."
             matches!(refused, BuildError::TimedOut { .. }),
             "{refused:?}"
         );
+    }
+
+    #[test]
+    fn the_five_levels_are_the_levels_a_run_may_ask_for() {
+        for level in ["low", "medium", "high", "xhigh", "max"] {
+            assert_eq!(
+                Effort::new(Some(level))
+                    .expect("the level stands")
+                    .map(|effort| effort.as_str().to_string()),
+                Some(level.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn an_environment_that_names_no_level_asks_for_none() {
+        // A report that named a level nobody chose is worth nothing, so a run
+        // that asked for none says nothing about one.
+        for value in [None, Some(""), Some("  \t ")] {
+            assert_eq!(Effort::new(value), Ok(None), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_level_that_is_not_one_of_the_five_is_a_refusal() {
+        let refused = Effort::new(Some("quick")).expect_err("quick is no level");
+        assert_eq!(
+            refused,
+            BuildError::BadEffort {
+                value: "quick".to_string()
+            }
+        );
+        let message = refused.to_string();
+        assert!(message.contains(EFFORT_ENV), "{message}");
+        for level in EFFORT_LEVELS {
+            assert!(message.contains(level), "{message}");
+        }
+    }
+
+    #[test]
+    fn the_case_of_a_level_is_the_readers_to_choose() {
+        assert_eq!(
+            Effort::new(Some(" HIGH "))
+                .expect("the level stands")
+                .map(|effort| effort.as_str().to_string()),
+            Some("high".to_string())
+        );
+    }
+
+    #[test]
+    fn the_model_the_environment_names_is_the_model() {
+        assert_eq!(
+            ModelName::new(Some(" claude-opus-5 "))
+                .expect("the model stands")
+                .map(|model| model.as_str().to_string()),
+            Some("claude-opus-5".to_string())
+        );
+    }
+
+    #[test]
+    fn an_environment_that_names_no_model_asks_for_none() {
+        for value in [None, Some(""), Some("  ")] {
+            assert_eq!(ModelName::new(value), Ok(None), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_model_that_opens_with_a_dash_is_a_refusal() {
+        // A variable that can put a flag on the command line of the run
+        // decides what the run may do, and this file already says that
+        // decision is the reader's and never this tool's.
+        let refused =
+            ModelName::new(Some("--dangerously-skip-permissions")).expect_err("a flag is no model");
+        assert_eq!(
+            refused,
+            BuildError::BadModel {
+                value: "--dangerously-skip-permissions".to_string()
+            }
+        );
+        assert!(refused.to_string().contains(MODEL_ENV), "{refused}");
+    }
+
+    #[test]
+    fn a_run_that_names_neither_carries_the_arguments_and_nothing_more() {
+        assert_eq!(
+            arguments(None, None),
+            ARGUMENTS
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_level_and_the_model_reach_the_command_line_of_the_run() {
+        let effort = Effort::new(Some("high"))
+            .expect("the level stands")
+            .expect("a level was named");
+        let model = ModelName::new(Some("claude-opus-5"))
+            .expect("the model stands")
+            .expect("a model was named");
+        let carried = arguments(Some(&effort), Some(&model));
+        for pair in [["--effort", "high"], ["--model", "claude-opus-5"]] {
+            let at = carried
+                .iter()
+                .position(|argument| argument == pair[0])
+                .unwrap_or_else(|| panic!("{} stands in {carried:?}", pair[0]));
+            assert_eq!(carried.get(at + 1).map(String::as_str), Some(pair[1]));
+        }
+        // The arguments that were always there are still there.
+        for argument in ARGUMENTS {
+            assert!(
+                carried.iter().any(|carried| carried == argument),
+                "{argument} in {carried:?}"
+            );
+        }
     }
 }

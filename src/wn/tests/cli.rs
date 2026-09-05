@@ -2062,15 +2062,60 @@ fn a_json_document_that_is_not_the_schema_names_the_path() {
 /// The variable that names the seconds the run of `claude` may take.
 const PLAN_TIMEOUT_ENV: &str = "WN_PLAN_TIMEOUT";
 
+/// The variable that names the level of effort the run asks for.
+const PLAN_EFFORT_ENV: &str = "WN_PLAN_EFFORT";
+
+/// The variable that names the model the run asks for.
+const PLAN_MODEL_ENV: &str = "WN_PLAN_MODEL";
+
+/// The envelope a run of `claude --print --output-format json` prints, with
+/// `document` in its `result`.
+///
+/// Built with the JSON writer rather than with `format!`, because a plan holds
+/// newlines and quotation marks and every one of them has to be escaped. The
+/// numbers are the numbers of one measured run, so a test that reads them
+/// reads a shape a real `claude` really printed.
+fn envelope(document: &str) -> String {
+    serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": document,
+        "total_cost_usd": 0.054_637_9,
+        "duration_ms": 1886,
+        "num_turns": 1,
+        "modelUsage": {
+            "claude-opus-5": {
+                "costUSD": 0.054_637_9,
+                "inputTokens": 118_000,
+                "outputTokens": 9_400,
+                "cacheReadInputTokens": 13_629,
+                "cacheCreationInputTokens": 26_438,
+            }
+        },
+    })
+    .to_string()
+}
+
+/// The report line the envelope of [`envelope`] earns, for a run that asked
+/// for no level of effort.
+const REPORT: &str =
+    "plan: $0.05 · claude-opus-5 · 118k in, 9.4k out, 13k cache read, 26k cache write · 1.8s";
+
+/// The shell of a fake `claude` that prints an envelope holding `document`.
+fn prints(document: &str) -> String {
+    format!(
+        "cat <<'WN_FAKE_CLAUDE_ENVELOPE'\n{}\nWN_FAKE_CLAUDE_ENVELOPE\n",
+        envelope(document)
+    )
+}
+
 /// The shell of a fake `claude` that prints the document of [`JSON_PLAN`].
 ///
 /// The plan names no moment, so its answer carries no note about its age. The
 /// tests of that note name the moment they want.
 fn prints_the_plan() -> String {
-    format!(
-        "cat <<'WN_FAKE_CLAUDE_PLAN'\n{}\nWN_FAKE_CLAUDE_PLAN\n",
-        undated(JSON_PLAN)
-    )
+    prints(&undated(JSON_PLAN))
 }
 
 #[test]
@@ -2183,6 +2228,9 @@ fn a_reason_written_on_standard_output_reaches_the_reader() {
     // two pipes writes it on standard output. The reason is the same reason,
     // so the reader gets it whichever pipe carried it. A refusal that named
     // `claude` and then stopped at the colon tells the reader nothing.
+    //
+    // This run prints no envelope at all, which is the shape the pipes are
+    // still read for. A run that prints one is the test below.
     let gh = FakeGh::new(JSON_ISSUES).with_claude("printf 'the model is overloaded\\n'\nexit 1\n");
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
@@ -2191,11 +2239,57 @@ fn a_reason_written_on_standard_output_reaches_the_reader() {
 }
 
 #[test]
+fn the_envelope_of_a_failing_run_carries_the_reason_and_the_pipes_do_not() {
+    // A run that names a model that does not exist exits 1, and it prints an
+    // envelope all the same. That envelope carries the sentence a reader can
+    // act on, and standard error carries a machine tag on the same mistake.
+    // So the envelope stands in front of the pipes.
+    //
+    // The run also spent money before it failed, and the report of what it
+    // cost is the one place a reader reads the price.
+    let said = "There's an issue with the selected model (no-such-model-xyz). It may not exist \
+                or you may not have access to it. Run --model to pick a different model.";
+    let refused = serde_json::json!({
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": true,
+        "result": said,
+        "total_cost_usd": 0.054_637_9,
+        "duration_ms": 1886,
+        "num_turns": 1,
+    })
+    .to_string();
+    let body = format!(
+        "cat <<'WN_FAKE_CLAUDE_ENVELOPE'\n{refused}\nWN_FAKE_CLAUDE_ENVELOPE\n\
+         printf '[claude-code:unrecognized_model] \
+         {{\"model\":\"no-such-model-xyz\",\"query_source\":\"sdk\"}}\\n' >&2\n\
+         exit 1\n"
+    );
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&body);
+    let output = run_building(
+        &gh,
+        &["--repo", REPO],
+        &[(PLAN_MODEL_ENV, "no-such-model-xyz")],
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(
+        message.contains("There's an issue with the selected model"),
+        "{message}"
+    );
+    // The machine tag names the mistake and says nothing a reader acts on, so
+    // it must not stand in front of the sentence.
+    assert!(!message.contains("unrecognized_model"), "{message}");
+    // The run cost money before it failed, and the reader paid for it.
+    assert!(message.contains("plan: $0.05"), "{message}");
+}
+
+#[test]
 fn a_document_the_run_built_that_does_not_parse_names_no_clipboard() {
     // The refusal of the reader of a JSON plan, unchanged. A message that
     // named the clipboard would send the reader to look at a clipboard that
     // holds none of it.
-    let gh = FakeGh::new(JSON_ISSUES).with_claude("printf '{ \"version\": 1\\n'\n");
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints("{ \"version\": 1\n"));
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
     let message = stderr(&output);
@@ -2282,4 +2376,97 @@ fn a_directory_that_is_in_no_repository_costs_no_run() {
     assert!(message.contains("not a git repository"), "{message}");
     assert!(!message.contains("Name the repository with"), "{message}");
     assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn the_report_of_the_run_goes_to_standard_error_and_the_plan_goes_to_standard_output() {
+    // The reader pays for the run, and the price is written on the pipe the
+    // spinner already writes on. The document goes to standard output, so a
+    // reader who pipes that output gets the answer alone.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+    assert!(stderr(&output).contains(REPORT), "{}", stderr(&output));
+    // The document reaches standard output alone, so the report cannot be on
+    // both pipes.
+    assert!(!stdout(&output).contains("plan: $"), "{}", stdout(&output));
+}
+
+#[test]
+fn the_level_the_environment_named_reaches_the_run_and_the_report() {
+    // The envelope carries no field that names a level, so the report can
+    // only name the level the run asked for. The variable is that level, and
+    // it is the lever a reader who thinks the plan cost too much pulls.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_EFFORT_ENV, "high")]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let args = gh.recorded_claude_args();
+    assert!(args.contains("--effort"), "{args}");
+    assert!(args.contains("high"), "{args}");
+    // The whole line, with the level in it. The level stands beside the
+    // models, because the models are what ran at it.
+    assert!(
+        stderr(&output).contains(&REPORT.replace("claude-opus-5", "claude-opus-5 at effort high")),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_level_that_is_not_one_of_the_five_is_a_refusal_that_costs_no_run() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_EFFORT_ENV, "quick")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains(PLAN_EFFORT_ENV),
+        "{}",
+        stderr(&output)
+    );
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn the_model_the_environment_named_reaches_the_run() {
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(
+        &gh,
+        &["--repo", REPO],
+        &[(PLAN_MODEL_ENV, "claude-haiku-4-5")],
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let args = gh.recorded_claude_args();
+    assert!(args.contains("--model"), "{args}");
+    assert!(args.contains("claude-haiku-4-5"), "{args}");
+}
+
+#[test]
+fn a_model_that_opens_with_a_dash_is_a_refusal_that_costs_no_run() {
+    // A variable that can put a flag on the command line of the run decides
+    // what the run may do, and that decision is the reader's.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(
+        &gh,
+        &["--repo", REPO],
+        &[(PLAN_MODEL_ENV, "--dangerously-skip-permissions")],
+    );
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    assert!(
+        stderr(&output).contains(PLAN_MODEL_ENV),
+        "{}",
+        stderr(&output)
+    );
+    assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
+}
+
+#[test]
+fn a_run_that_names_neither_a_level_nor_a_model_asks_for_neither() {
+    // The two variables cost the reader who sets neither of them nothing at
+    // all, so `claude` picks both as it always did.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let args = gh.recorded_claude_args();
+    assert!(!args.contains("--effort"), "{args}");
+    assert!(!args.contains("--model"), "{args}");
 }
