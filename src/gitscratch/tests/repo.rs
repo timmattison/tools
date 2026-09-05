@@ -8,9 +8,10 @@
 //! never share a path.
 
 use gitscratch::testing::{
-    conflicting_repo, nested_conflict_repo, not_a_repository, numbered_lines, TestRepo,
+    conflicting_repo, default_branch_choice_repo, nested_conflict_repo, not_a_repository,
+    numbered_lines, TestRepo,
 };
-use gitscratch::{Repo, Uncommitted};
+use gitscratch::{Repo, Uncommitted, DEFAULT_BRANCHES};
 
 /// Every porcelain record plain git reports, byte for byte.
 ///
@@ -238,6 +239,111 @@ fn resolve_returns_the_commit_a_branch_points_at() {
         fixture.rev_parse("left"),
         "resolve should agree with git about where 'left' points"
     );
+}
+
+/// `main` is the name almost every run means, so a repository that holds one
+/// must not make the developer type it.
+#[test]
+fn branch_or_default_picks_main_when_the_caller_named_none() {
+    let fixture = default_branch_choice_repo(&["main"]);
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    let branch = repo
+        .branch_or_default(None)
+        .expect("a repository holding main has a default to pick");
+
+    assert_eq!(branch, "main", "main is the first candidate");
+}
+
+/// The older name is still the default branch of plenty of repositories, and a
+/// tool that only knew the newer one would refuse every one of them.
+#[test]
+fn branch_or_default_falls_back_to_master_when_there_is_no_main() {
+    let fixture = default_branch_choice_repo(&["master"]);
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    let branch = repo
+        .branch_or_default(None)
+        .expect("a repository holding master has a default to pick");
+
+    assert_eq!(
+        branch, "master",
+        "master answers for a repository with no main"
+    );
+}
+
+/// A repository that carries both names is the ordinary shape of one that was
+/// renamed, and the new name is the one it is actually developed on. Order is
+/// the whole content of that decision, so it gets a test rather than a comment.
+#[test]
+fn branch_or_default_prefers_main_over_master_when_both_resolve() {
+    let fixture = default_branch_choice_repo(&["main", "master"]);
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    let branch = repo
+        .branch_or_default(None)
+        .expect("a repository holding both has a default to pick");
+
+    assert_eq!(branch, "main", "main outranks master");
+}
+
+/// The refusal is the point of this function, and it is only actionable if it
+/// says which names were tried - the developer's own default branch is
+/// whichever third name this repository actually uses.
+///
+/// Deliberately not a fallback to `HEAD`: a replay of HEAD onto HEAD answers
+/// "clean" for every repository on earth, which is a wrong answer standing
+/// where a refusal belongs.
+#[test]
+fn branch_or_default_refuses_a_repository_holding_neither_candidate_and_names_both() {
+    let fixture = default_branch_choice_repo(&[]);
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    let error = repo
+        .branch_or_default(None)
+        .expect_err("the fixture holds neither candidate");
+
+    let message = format!("{error:#}");
+    for candidate in DEFAULT_BRANCHES {
+        assert!(
+            message.contains(candidate),
+            "the refusal should name every candidate it tried, and it does not \
+             name {candidate}: {message}"
+        );
+    }
+}
+
+/// The default exists to spare the developer a name they always type, and it
+/// must never overrule the one they did type.
+#[test]
+fn branch_or_default_keeps_the_branch_the_caller_named() {
+    let fixture = default_branch_choice_repo(&["main", "master"]);
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    let branch = repo
+        .branch_or_default(Some("master"))
+        .expect("a named branch needs no default");
+
+    assert_eq!(
+        branch, "master",
+        "the named branch wins over an existing main"
+    );
+}
+
+/// A named branch is handed straight back, unresolved, so the caller's own
+/// resolution keeps saying which name failed. Folding the check in here would
+/// answer a typo with this function's words instead, and those words are about
+/// a default the caller never asked for.
+#[test]
+fn branch_or_default_hands_back_a_named_branch_that_does_not_resolve() {
+    let fixture = default_branch_choice_repo(&["main"]);
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    let branch = repo
+        .branch_or_default(Some("mian"))
+        .expect("a named branch is not this function's to reject");
+
+    assert_eq!(branch, "mian", "the name is handed back as it was given");
 }
 
 /// A clean tree has to read as clean, or every caller that warns about

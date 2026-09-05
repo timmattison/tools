@@ -128,6 +128,6 @@ pub use git::Git;
 
 pub use console::Console;
 pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
-pub use repo::Repo;
+pub use repo::{Repo, DEFAULT_BRANCHES};
 pub use report::{Report, UnwordedReport};
 pub use scratch::{Conflicts, Scratch};

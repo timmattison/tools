@@ -56,6 +56,20 @@ use crate::scratch::Scratch;
 /// directory for it.
 pub(crate) const PREFLIGHT_HOOKS_PATH: &str = ".git/gitscratch-preflight-no-hooks";
 
+/// The branches a replay measures against when the caller named none, in the
+/// order they are tried.
+///
+/// Local names only, and both of them. `git rev-parse main` reads local refs,
+/// so a repository whose default branch exists only as `origin/main` matches
+/// neither candidate and gets the refusal below. That is the intended answer: a
+/// search of the remote refs makes the rule harder to state, and it hides which
+/// branch a run measured behind a name the developer never typed.
+///
+/// Public because the refusal names every candidate it tried, and a test that
+/// asserts on those names has to read them from here. Two copies of the list
+/// could agree today and disagree the day a third candidate is added.
+pub const DEFAULT_BRANCHES: [&str; 2] = ["main", "master"];
+
 /// A git repository, opened for the read-only questions that precede a replay.
 #[derive(Debug)]
 pub struct Repo {
@@ -126,6 +140,17 @@ impl Repo {
     /// names the revision that could not be resolved.
     pub fn resolve(&self, revision: &str) -> Result<String> {
         self.git().rev_parse(revision)
+    }
+
+    /// The branch a replay measures against: `named` when the caller was given
+    /// one, and otherwise the first of [`DEFAULT_BRANCHES`] this repository
+    /// holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `named` is `None` and no candidate resolves.
+    pub fn branch_or_default(&self, named: Option<&str>) -> Result<String> {
+        todo!("pick the default branch")
     }
 
     /// How many files are uncommitted — staged, unstaged, or untracked.
