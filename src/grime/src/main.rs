@@ -1,5 +1,5 @@
-//! `grind` - Git Rebase In aNother Dimension: would rebasing HEAD onto a
-//! branch conflict, and by how much?
+//! `grime` - Git ReadIness for Merging Externally: would merging a branch into
+//! HEAD conflict, and by how much?
 
 use std::process::ExitCode;
 
@@ -14,7 +14,7 @@ use termbar::TerminalWidth;
 /// One constant rather than a literal per call site, so the prefix a script
 /// greps for and the prefix [`Report`] indents its summary under cannot end up
 /// disagreeing.
-const TOOL: &str = "grind";
+const TOOL: &str = "grime";
 
 // No `about` in the attribute below, and the absence is the point. clap's
 // derive takes the doc comment as the help text. A bare `about` takes
@@ -26,41 +26,41 @@ const TOOL: &str = "grind";
 // One line only. A second paragraph here becomes clap's `long_about`, which
 // `--help` prints and `-h` does not, and the two spellings of one switch then
 // answer differently.
-/// Report whether rebasing HEAD onto BRANCH would conflict, and by how much
+/// Report whether merging BRANCH into HEAD would conflict, and by how much
 #[derive(Parser, Debug)]
 #[clap(author, version = version_string!())]
 struct Args {
-    /// Branch to rebase HEAD onto
+    /// Branch to merge into HEAD
     #[clap(value_name = "BRANCH")]
     branch: String,
 
-    /// Print nothing about the rebase - the exit code is the answer
+    /// Print nothing about the merge - the exit code is the answer
     #[clap(short, long)]
     quiet: bool,
 }
 
 /// Hands the whole shell to [`Console::answer`] - what this tool says, the one
 /// switch that silences it, and the three exit codes it answers with. The
-/// question below is all that is left, and it is all `grind` owns.
+/// question below is all that is left, and it is all `grime` owns.
 ///
 /// See [`Console::answer`] for why an [`ExitCode`] is returned rather than a
-/// `Result`: a `Result` exits **1**, which is already the code for a rebase
-/// that would conflict.
+/// `Result`: a `Result` exits **1**, which is already the code for a merge that
+/// would conflict.
 fn main() -> ExitCode {
     let args = Args::parse();
 
     Console::answer(TOOL, args.quiet, |console| run(&args, console))
 }
 
-/// Answer the question, returning what the rebase would cost.
+/// Answer the question, returning what the merge would cost.
 ///
 /// # Errors
 ///
 /// Returns an error if the current directory cannot be read, is not inside a
-/// git repository, has no commit at HEAD to replay, does not contain `branch`,
-/// or if the replay itself failed without leaving a conflict to measure. Not for
-/// a working tree that cannot be inspected: that only costs the uncommitted-work
-/// note, which is a caveat rather than part of the answer.
+/// git repository, has no commit at HEAD to merge into, does not contain
+/// `branch`, or if the merge itself failed without leaving a conflict to
+/// measure. Not for a working tree that cannot be inspected: that only costs
+/// the uncommitted-work note, which is a caveat rather than part of the answer.
 fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     let repo = Repo::open(&cwd)?;
@@ -78,7 +78,7 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // longer exists, which tells a developer with an empty repository or a fresh
     // orphan branch nothing about what is actually wrong.
     repo.resolve("HEAD").context(
-        "a replay starts from HEAD, and there is no commit at HEAD to start from \
+        "a merge starts from HEAD, and there is no commit at HEAD to merge into \
          - an empty repository, or a branch nothing has been committed to yet",
     )?;
     repo.resolve(&args.branch)?;
@@ -87,8 +87,20 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // adds the action on the next line. `UnwordedReport` is `Copy`, so one
     // value serves both.
     let unworded = Report::for_tool(TOOL);
-    let action = format!("replaying HEAD onto {}", args.branch);
-    let report = unworded.describing(&action);
+    let action = format!("merging {} into HEAD", args.branch);
+
+    // `without_stops`, because a merge halts exactly once. Git makes one
+    // three-way merge and stops at it, so the count is `1` for every conflicted
+    // merge and `0` for every clean one - a constant dressed up as a
+    // measurement. Printing it would invite a reader to weigh it against
+    // `grind`'s stop count, which is a real measurement of how many times a
+    // rebase halted, and the comparison would be meaningless.
+    //
+    // The count is dropped from the *words* and nowhere else. `Conflicts` still
+    // records the halt, because a caller folding several replays together adds
+    // those halts up, and because the two tools have to measure the same thing
+    // to stay comparable. Only this sentence leaves it out.
+    let report = unworded.describing(&action).without_stops();
 
     // Read here and printed later, which is two decisions rather than one.
     //
@@ -121,7 +133,7 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let dirty_note = unworded.dirty_note(repo.uncommitted_files().unwrap_or_default());
 
     let scratch = repo.scratch("HEAD")?;
-    let conflicts = scratch.replay_rebase(&args.branch)?;
+    let conflicts = scratch.replay_merge(&args.branch)?;
 
     // There is a verdict now, so the caveat has something to qualify.
     if let Some(note) = dirty_note {
@@ -146,8 +158,7 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // environment states in `COLUMNS` wins, and the ioctl answers when the
     // environment states none. That is the rule POSIX gives the variable, and
     // it is what lets a wrapper report the terminal it holds and lets a test
-    // state a width of its own. `tests/controlling-terminal.rs` holds that rule
-    // against a pseudo-terminal of a size it chose.
+    // state a width of its own.
     console
         .verdict(&report.render_within(&conflicts, usize::from(TerminalWidth::get_or_default())));
 

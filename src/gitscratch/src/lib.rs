@@ -34,6 +34,15 @@
 //! on top (`grist`, and the `grime`/`grind` dry-run reporters) cannot drift
 //! apart on safety, because there is only one implementation of it.
 //!
+//! Two operations are replayed behind that door, and they answer the two
+//! questions a developer asks before doing the work. [`Scratch::replay_rebase`]
+//! walks a whole rebase, halt by halt, and folds a cost per stop.
+//! [`Scratch::replay_merge`] makes one three-way merge and reads what git could
+//! not merge, so it counts one stop or none. Both answer with the same
+//! [`Conflicts`], and both refuse rather than answer when git would not perform
+//! the operation at all - "refusing to merge unrelated histories" is neither a
+//! clean verdict nor a conflicted one.
+//!
 //! The git runner is no part of that door. It is crate-private, and both halves
 //! of that are needed: nothing outside this crate can *build* a runner, because
 //! `Git::new` is crate-private, and nothing outside is *handed* one,
@@ -52,6 +61,19 @@
 //! and it lives here for the same reason the hardening does — `grime` and
 //! `grind` answer different questions and must print the same shape, which two
 //! renderers could not stay agreed on.
+//!
+//! The program around that print lives here too, on the third reading of the
+//! same argument. [`Console`] is everything such a tool says, and
+//! [`Console::answer`] is the whole of its `main`: it maps a [`Conflicts`] onto
+//! the three exit codes those tools publish, sends each kind of sentence to the
+//! stream it belongs on, silences all of them on `-q`, and writes every one of
+//! them the one way that cannot panic when the reader closes the pipe first.
+//! Each of those is a guarantee a README states, so two copies of them is one
+//! fix that reaches one binary — and the two copies had already begun to drift
+//! apart. What a tool keeps is the question: its arguments, the sentence naming
+//! what it did, which replay answers it, and the width of its own terminal,
+//! which stays with the tool because measuring one is a decision about a single
+//! program's output.
 //!
 //! Not every question needs a worktree, though. [`Repo`] answers the cheap ones
 //! a caller should ask first — does this directory contain a repository, does
@@ -72,6 +94,8 @@
 //! Fixtures for building throwaway repositories with known conflict shapes live
 //! in `testing`, behind the `testing` feature, so every consumer's test suite
 //! shares one copy instead of each compiling its own.
+
+pub mod console;
 
 /// The git runner, and the two environment guards that are safe to share.
 ///
@@ -102,6 +126,7 @@ pub use git::{shed_inherited_git_environment, NoInheritedGitEnvironment};
 #[cfg(feature = "testing")]
 pub use git::Git;
 
+pub use console::Console;
 pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
 pub use repo::Repo;
 pub use report::{Report, UnwordedReport};

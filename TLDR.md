@@ -25,6 +25,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `glo` | Finds and displays large objects in git repositories. |
 | `goup` | Updates Go dependencies across all `go.mod` files in a repo. |
 | `gr8` | Displays GitHub API rate limit info, color-coded, via the GitHub CLI. |
+| `grime` | Git ReadIness for Merging Externally — reports whether merging a branch into HEAD would conflict and by how much, by replaying the merge in a throwaway worktree. The exit code is the answer (0 clean, 1 conflicts, 2 error). |
 | `grind` | Git Rebase In aNother Dimension — reports whether rebasing HEAD onto a branch would conflict and by how much, by replaying it in a throwaway worktree; the exit code is the answer (0 clean, 1 conflicts, 2 error). |
 | `grist` | Git Ranks Its Squash Trials — ranks the orders you could squash-merge a set of branches in, cheapest conflicts first, by replaying each one in a throwaway worktree. |
 | `gsw` | Git Status Watch — compact status dashboard that watches on a TTY (refresh clock in the separator) and renders once when piped; a merge or rebase in progress gets its own row, `⚠ merge` / `⚠ rebase 1/2 · 1 conflict to resolve`. Press `p` to push the current branch after a confirmation; the result says how long ago it happened and fades off the screen after a minute. While the push runs, a window under the frame shows the newest six lines from git and from any `pre-push` hook, live, so a slow hook shows its progress instead of a frozen screen. |

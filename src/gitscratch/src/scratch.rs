@@ -441,6 +441,114 @@ impl Scratch {
         }
     }
 
+    /// Merge `branch` into the checked-out HEAD, measuring what conflicted.
+    ///
+    /// A merge halts at most once, and that one difference is why this is a
+    /// straight line where [`Scratch::replay_rebase`] is a loop. A rebase
+    /// replays one commit at a time and can stop at every one of them, so it
+    /// walks the halts and folds a cost per stop. A merge makes a single
+    /// three-way merge of two trees, so there is one halt to count and one set
+    /// of conflicted files to read. Both answer with the same [`Conflicts`],
+    /// which is what lets the tools built on them print one shape.
+    ///
+    /// The merge stops before the commit, so the replay writes no commit and
+    /// moves no ref. The conflicted files stay in the scratch worktree with
+    /// git's markers in them, which is where the hunk count is read from.
+    /// Nothing resolves them, because the whole worktree goes away on drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if git refused the
+    /// merge and left no unmerged path behind - an unresolvable branch name,
+    /// or two histories with no commit in common. Neither of those is work a
+    /// person could sit down and resolve, so neither is a conflict, and
+    /// reporting one as clean would say a merge is free when git will not do
+    /// it at all.
+    pub fn replay_merge(&self, branch: &str) -> Result<Conflicts> {
+        let git = self.git();
+        let worktree = self.path();
+
+        // `--no-ff`, because git takes a merge whose branch is strictly ahead
+        // as a fast-forward, and a fast-forward merges no trees at all: it
+        // moves HEAD to the other tip and stops. The verdict is the same
+        // either way, and not by luck - a merge git can fast-forward has HEAD
+        // as its own merge base, so ours equals base and the three-way merge
+        // is conflict-free by construction. What the flag buys is that this
+        // method performs the operation its name promises, and so leaves what
+        // a halted merge leaves: `MERGE_HEAD`, and a worktree standing where
+        // the replay started. A fast-forward leaves the other branch checked
+        // out instead, which a caller that reads the worktree rather than the
+        // verdict sees - `Scratch::head_tree` reads `HEAD^{tree}`, so it would
+        // answer with the other branch's tree. Nothing pairs the two today, so
+        // the flag protects the next caller rather than a defect on hand.
+        // Pinned by
+        // `a_fast_forwardable_merge_still_runs_a_real_three_way_merge` in
+        // `tests/merges.rs`, which asserts the mechanism rather than the
+        // verdict, because the verdict cannot catch the flag going missing.
+        //
+        // `--end-of-options` ahead of `branch`, because `branch` arrives from a
+        // caller and a caller can spell a revision that starts with a dash.
+        // Git reads such a name as an option of `merge` instead, is left with
+        // no branch to merge at all, and falls back to the upstream of the
+        // current branch - a merge of something nobody named. The scratch
+        // worktree stands on a detached HEAD, so there is no current branch to
+        // take an upstream from and git stops with `fatal: No current branch.`
+        // That is still an error rather than a cheap answer, and it is the
+        // wrong error: it names this crate's own worktree instead of the name
+        // the caller typed, so what the caller has to correct never reaches
+        // it. With the separator git refuses the branch by name. Pinned by
+        // `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree`
+        // in `tests/merges.rs`. Every other caller-supplied revision in this
+        // file carries the separator for the same reason.
+        let outcome = git.try_run(
+            "merge",
+            &["--no-commit", "--no-ff", "--end-of-options", branch],
+        )?;
+
+        let mut cost = Conflicts::nothing_replayed();
+        if outcome.success {
+            return Ok(cost);
+        }
+
+        // The same two readers the rebase replay takes, because a conflicted
+        // path costs the same to mis-read whichever operation produced it.
+        // `nul_separated_paths` keeps the bytes git printed, so a name git
+        // would otherwise C-quote still opens the file it names, and
+        // `count_conflict_hunks` reads the regions out of that file. A second
+        // reader beside either one would be a second place for the count to go
+        // wrong.
+        let conflicted = git.nul_separated_paths("diff", &["--name-only", "--diff-filter=U"])?;
+
+        // A merge git would not perform leaves no unmerged path, and it is
+        // neither of the two verdicts. "refusing to merge unrelated histories"
+        // is the plain case, and a branch name that resolves to nothing is the
+        // other. Neither one is work a person could sit down and resolve, so
+        // neither is a conflict; and neither one is a merge that went through,
+        // so neither is clean. Only an error says what happened. Git's own two
+        // streams travel with it, because they hold the sentence that says
+        // which refusal this was.
+        anyhow::ensure!(
+            !conflicted.is_empty(),
+            "the merge failed and left nothing to resolve:\n{}\n{}",
+            outcome.stdout,
+            outcome.stderr
+        );
+
+        // Once, whatever the merge left behind. A merge makes one three-way
+        // merge and stops at it, so the stop count is one for every conflicted
+        // merge and carries no information beyond "conflicted". The rebase
+        // replay increments the same counter once per halt, which is where the
+        // number does say something.
+        cost.stops.increment();
+
+        for file in conflicted {
+            let hunks = count_conflict_hunks(&worktree.join(&file))?;
+            cost.add_file(file, hunks);
+        }
+
+        Ok(cost)
+    }
+
     fn worktree_arg(&self) -> Result<&str> {
         self.worktree
             .to_str()

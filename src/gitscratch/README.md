@@ -35,6 +35,46 @@ if conflicts.is_clean() {
 }
 ```
 
+A rebase is one of the two questions this crate answers. The other is the
+merge, and it is a straight line where the rebase is a loop:
+
+```rust
+// A worktree standing where the merge would happen, and the cost of merging
+// `feature` into it.
+let conflicts = Repo::open(repo_path)?.scratch("HEAD")?.replay_merge("feature")?;
+```
+
+`replay_rebase` replays one commit at a time and can halt at every one of them,
+so it walks the halts and folds a cost per stop. `replay_merge` makes a single
+three-way merge of two trees, so it has one halt to count and one set of
+conflicted files to read — which is why its stop count is only ever one or zero
+and tells a reader nothing the verdict has not said already. Both answer with
+the same `Conflicts`, and that is what lets `grind` and `grime` print one shape.
+
+Two flags on that merge are load-bearing. `--no-ff` is there because git takes a
+merge whose branch is strictly ahead as a fast-forward, and a fast-forward
+merges no trees at all: it moves HEAD to the other tip and stops. The verdict is
+the same either way — such a merge has HEAD as its own merge base, so ours
+equals base and the three-way merge is conflict-free by construction — but the
+flag is what makes `replay_merge` perform the operation its name promises, and
+so leave what a halted merge leaves: `MERGE_HEAD`, and a worktree standing where
+the replay started. A fast-forward leaves the other branch checked out instead,
+which is what a caller that reads the worktree rather than the verdict sees —
+`head_tree` would answer with the other branch's tree. Nothing pairs the two
+today, so the flag protects the next caller rather than a defect on hand.
+`--end-of-options` is there because the branch name arrives from a caller and a
+caller can spell a revision that starts with a dash, which git reads as an
+option of `merge`. Every caller-supplied revision in this crate carries that
+separator for the same reason.
+
+A merge git will not perform at all is neither verdict. It leaves no unmerged
+path, so there is nothing for a person to resolve, and it wrote nothing, so
+nothing is clean either. `replay_merge` returns an error carrying git's own two
+streams — "refusing to merge unrelated histories" is the plain case, and a
+branch name that resolves to nothing is the other — because that sentence is the
+only part of the answer that says which refusal this was. `replay_rebase`
+refuses the same shape of state for the same reason.
+
 A `Conflicts` records how many times the replay halted and, for every file that
 conflicted, how many hunks it contributed. The headline totals — `hunks()`,
 `files()`, `stops()` — are summaries of that breakdown rather than numbers
@@ -80,11 +120,11 @@ A `compile_fail` doc-test holds the derive out — see **Testing** below.
 
 `Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
 to get a `Scratch`. A `Scratch` answers the operations it names —
-`check_out_detached`, `replay_rebase`, `head_tree`, `commit_tree` — and each of
-them builds its own git call under the whole safety configuration. So there is
-no way to get a worktree from here without also getting the hardening — nor
-without first having established that the directory is a repository at all,
-which is the pre-flight's job below.
+`check_out_detached`, `replay_rebase`, `replay_merge`, `head_tree`,
+`commit_tree` — and each of them builds its own git call under the whole safety
+configuration. So there is no way to get a worktree from here without also
+getting the hardening — nor without first having established that the directory
+is a repository at all, which is the pre-flight's job below.
 
 What a `Scratch` does **not** hand back is the runner that makes those calls. A
 scratch worktree is a *linked* worktree of the developer's real repository, so
@@ -381,6 +421,74 @@ buys. `diff3` and `zdiff3` put the base version inside the region, so a base
 carrying a line that reads as a marker is measured on a developer who set the
 key and not on one who did not.
 
+## The shell
+
+`Report` says what a replay cost, and `Console` is the program around it.
+`grime` and `grind` ask different questions and answer them with the same short
+program — parse a command line, run the replay, print the verdict, exit with a
+number a script can act on — so that program lives here for the reason the
+renderer does, and each binary owns only the question in the middle:
+
+```rust
+use gitscratch::{Conflicts, Console};
+
+fn main() -> ExitCode {
+    let args = Args::parse();
+
+    Console::answer("grind", args.quiet, |console| run(&args, console))
+}
+
+fn run(args: &Args, console: &Console) -> Result<Conflicts> {
+    // The pre-flight, the dirty note, and the replay.
+    console.verdict(&report.render_within(&conflicts, columns));
+    Ok(conflicts)
+}
+```
+
+`Console::answer` is the only door. It builds the console, hands it to the
+tool's own body, and turns what that body answers into the code the caller
+reads:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | `Conflicts::is_clean()` — the operation hit no conflicts. |
+| `1` | Conflicts, and the verdict says how many and where. |
+| `2` | The body returned an error, printed as `<tool>: error: <chain>`. |
+
+Three codes rather than two, because "the operation would conflict" and "I could
+not tell you" are different answers and a script has to be able to act on the
+difference. Returning an `ExitCode` rather than a `Result` is what keeps them
+apart: a `main` that returns a `Result` prints the error and exits `1`, which is
+already the conflict code.
+
+The body answers with the `Conflicts` it measured and never with a code of its
+own, so the number a script acts on is read off the very value the verdict was
+rendered from. The words and the number cannot tell two different stories, and
+no tool can publish a fourth code or swap two of the three.
+
+`-q` reaches all three writes and nothing ahead of them. Argument parsing runs
+before the console exists, so a usage error and the version line are the
+parser's to print — both answer about the tool rather than about a replay, and
+silencing the refusal would leave a caller a bare exit code and no word about
+which argument is missing. `note` and `verdict` are named for what is being said
+rather than for which stream it lands on, because the stream is the console's
+decision to make: the verdict is the answer and goes to stdout, while a caveat
+or a failure goes to stderr where it cannot contaminate a pipeline.
+
+Every one of those writes is a `writeln!` whose result is discarded, and that is
+a guarantee rather than an oversight. `println!` panics when the write fails,
+and a reader that closes early — `grind main | head -1` — makes it fail with
+`EPIPE`, because Rust ignores `SIGPIPE` and hands the error back rather than
+letting the signal end the process. A panic unwinds straight past the table
+above and exits `101`: a fourth code no README publishes, out of the one kind of
+tool whose whole contract is that its exit code is the answer. The words are
+what a broken pipe costs, never the answer.
+
+The width of the terminal stays with the tool, which is what `render_within`
+above already says: measuring a terminal is a decision about one program's
+output. `grist` settles it — it is built on this crate, prints no breakdown at
+all, and must not carry a terminal-size dependency it would never read.
+
 ## Three ways a rebase halts, and why the third one matters
 
 A halted rebase with **no unmerged paths** is a classification point, not a
@@ -472,6 +580,7 @@ because it quietly discarded the work.
 | `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. The config half settles nothing on its own: an identity variable outranks every config source, `-c` included, which is why the row above sheds the whole inherited environment first. The runner then restates the identity as environment on every command it builds, so it holds with either guard edited away — the four variables that name a person pinned to the harness, and `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` *removed* rather than pinned, since a pinned date gives every commit of one run the same timestamp. All six, because a restatement that covered four of them would hold the name and let both dates through the day the sweep went away. |
 | `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job or `Git::paths`'s, and reading one path is `Git::path`'s (all three above), and this narrows what a call site that reaches around them can get wrong. |
 | `merge.conflictStyle=merge` | The count has to mean the same thing on every machine. All three styles open and close a conflict region with the same markers, so a region whose two sides carry no bracket line of their own costs one hunk under any of them. What `diff3` and `zdiff3` add is the **base** version of the region, between a `|||||||` line and the `=======` one — so a base carrying a line that reads as a marker lands inside the region under those two and outside it under `merge`. The replay then measures a different file on a developer who set the key, and `grist` ranks candidates on that count: two developers comparing the same branches read two orders and neither is told why. Read out of a real merge rather than from git's documentation. |
+| `merge.verifySignatures=false` | The two rows about signing above cover a replay asked to *make* a signature; this one covers a replay asked to **read** one. `merge.verifySignatures` is consulted by `git merge` alone, so a developer who turns it on leaves the rebase replay untouched and breaks the merge replay outright: git 2.55 exits 128 with `fatal: Commit <sha> does not have a GPG signature.` for any branch that carries no signature, which is nearly every branch, and it leaves no unmerged path behind it. The merge replay reads that empty path list as its own "the merge failed and left nothing to resolve" — neither a cost nor a clean replay — so `grime` answers exit 2, "I cannot tell you", for every unsigned branch on that machine. Read out of a real merge rather than from git's documentation. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the
@@ -706,6 +815,20 @@ where the pin above only closes the route into it that exists today. It carries
 two controls ahead of the assertion — the fixture's stopped commit really has two
 parents, and `diff-tree` really is silent about it — and one after it: the same
 probe, pointed at a single-parent commit, has to answer rather than refuse.
+
+One more pins the setting that decides **whether git will merge at all**.
+`pins_signature_verification_off_even_when_the_repository_turns_it_on` covers
+`merge.verifySignatures=false`, against a fixture that turns verification on.
+The two signing rows above cover a replay asked to *make* a signature; this key
+is the other direction, a replay asked to *read* one, and `git merge` is the
+only command that reads it — so a developer who sets it leaves the rebase replay
+untouched and stops the merge replay dead. Git 2.55 was watched to exit 128 with
+`fatal: Commit <sha> does not have a GPG signature.` for a branch carrying no
+signature, and to leave no unmerged path behind it, which the merge replay reads
+as its own "the merge failed and left nothing to resolve". That is neither a
+cost nor a clean replay, so `grime` answers exit 2 for every unsigned branch on
+that machine. The refusal was read out of a real merge; what the test executes
+is the pin.
 
 The fixture builder stamps commits too, and is covered on its own ground in
 `src/testing.rs`, by
@@ -1218,4 +1341,6 @@ gitscratch = { workspace = true, features = ["testing"] }
 
 - [`grist`](../grist/README.md) — ranks squash-merge orderings by conflict cost
 - [`grind`](../grind/README.md) — would rebasing HEAD onto this branch conflict,
+  and by how much?
+- [`grime`](../grime/README.md) — would merging this branch into HEAD conflict,
   and by how much?

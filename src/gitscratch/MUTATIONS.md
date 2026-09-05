@@ -44,10 +44,13 @@ not have to re-derive which guard belongs to which test.
 | `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back` | The pair `--verify --end-of-options`, which is how the pre-flight asks a question git can refuse | `src/git.rs`, `Git::rev_parse` — drop both arguments | remove |
 | `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` (`tests/repo.rs`) | `--end-of-options` ahead of the two positionals of `worktree add` | `src/scratch.rs`, `Scratch::create` — drop the argument | remove |
 | `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | `--end-of-options` ahead of the upstream of `rebase` | `src/scratch.rs`, `Scratch::replay_rebase_within` — drop the argument | remove |
+| `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree` (`tests/merges.rs`) | `--end-of-options` ahead of the branch of `merge` | `src/scratch.rs`, `Scratch::replay_merge` — drop the argument | remove |
+| `a_merge_of_a_branch_already_in_head_is_clean` (`tests/merges.rs`) | The **absence** of a `MERGE_HEAD` check on the merge replay's success path, which is what lets a branch already contained in HEAD come back clean | `src/scratch.rs`, `Scratch::replay_merge` — require `rev-parse -q --verify MERGE_HEAD` to succeed before the early return | **add** |
 | `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | `maintenance.auto=false`, the switch on automatic maintenance that `gc.auto=0` does not reach | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | `core.fsmonitor=false`, the one program git runs that the redirected `core.hooksPath` cannot take away | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | `rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo list | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_the_conflict_style_even_when_the_repository_asks_for_diff3` | `merge.conflictStyle=merge`, which keeps the base version out of the region the hunk counter reads | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| `pins_signature_verification_off_even_when_the_repository_turns_it_on` | `merge.verifySignatures=false`, which keeps `git merge` from refusing every branch that carries no signature | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `a_non_ascii_path_read_back_through_run_is_not_octal_escaped` | `core.quotePath=false`, which stops git C-quoting and octal-escaping a path it prints on a line | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `a_bracket_run_that_is_not_a_marker_does_not_count_as_a_conflict_region` | The exact marker shape — seven brackets, then a space or the end of the line | `src/scratch.rs`, `is_conflict_marker` — take the answer from `starts_with` and drop the test on what follows the run | widen |
 | `an_opening_marker_with_no_closing_one_does_not_count_as_a_conflict_region` | The closed-region rule, which is what makes an unpaired marker file content rather than a cost | `src/scratch.rs`, `count_conflict_hunks` — count the lines that open a region instead of the pairs that close one | widen |
@@ -124,12 +127,15 @@ registry that reports everything as fine is worth less than no registry at all.
 | `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back` | The fixture commits a file, so the repository is one a revision could resolve in, and the refusal cannot be a refusal of everything - `resolves_a_revision_that_names_a_commit_to_its_full_id` holds that side. | **Full.** Plain git, through the fixture, is asked for `--root^{commit}` and must print that argument straight back — "git no longer prints a dash-leading argument back at exit 0, so this test could only pass vacuously". That echo *is* the hazard: it exits 0, and the pre-flight reads an exit of 0 as a commit. |
 | `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` | None beyond the fixture, which `conflicting_repo` builds with a `main` that resolves. | **Missing.** The hazard is that `git worktree add -q --detach <path> --force` succeeds and checks out HEAD, and arming it in-test means building the wrong scratch on purpose and then removing it. Asserting the wrong-scratch HEAD under a deliberately unseparated call closes it. The mutation record below is the out-of-band substitute. |
 | `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | The scratch worktree is checked out at `iterated`, through a call that panics if git refuses, so the replay provably starts somewhere a rebase can run. | **Full, as a control on the other side.** The same scratch then replays onto `single` and must cost `CONTESTED_ROUNDS` stops, so a replay that refused every upstream, or one that could not replay this fixture at all, fails there instead of passing on the refusal above. What is not armed is the halt itself: nothing states that plain `git rebase --root` succeeds on this fixture, and the mutation record below is what stands in for it. |
+| `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree` | The scratch worktree is built at `left`, a branch `conflicting_repo` really has, so the replay provably starts somewhere a merge can run. | **Full, as a control on the other side.** The same scratch then merges `right` and must halt once, so a replay that refused every branch, or one that could not merge this fixture at all, fails there instead of passing on the refusal above. What is not armed is git's own fallback: nothing states that plain `git merge --no-commit --no-ff --allow-unrelated-histories` reaches for the upstream of the current branch, and the mutation record below is what stands in for it. |
+| `a_merge_of_a_branch_already_in_head_is_clean` | The absent `MERGE_HEAD`, read back through the runner after the replay. It says the fixture really stood on the up-to-date exit: a `main` that had moved on past `alpha`'s fork point would present an ordinary three-way merge here, come back clean because that merge is free, and repeat the first test in this file while reading like this one. | **Full, as a control on the other side.** The clean verdict is also what a replay that answered clean for everything would give, and `a_merge_that_hits_a_contested_region_counts_its_hunks_and_files` is the test such a replay fails. What is not armed in-test is git's own answer: nothing asserts that `git merge --no-commit --no-ff --end-of-options <ancestor>` prints `Already up to date.` at exit 0, because the replay keeps neither the words nor the status once it has its verdict. That was watched by hand on git 2.55 — see the record below. |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` | The stopped commit is asked of `diff-tree` first and must touch exactly one path — "the stopped commit has to touch the submodule pointer and nothing else; an ordinary path beside it comes back from the porcelain whatever the setting says, carries the refusal on its own, and leaves what the pointer costs invisible". An ordinary path alongside is what would let this test pass without the pointer ever mattering. | **Full.** Plain git, through the fixture, is asked for `diff --name-only branch~1 branch` and must answer with nothing — "`diff.ignoreSubmodules=all` is not hiding the pointer from `git diff`, so this test could only pass vacuously; the porcelain reported {porcelain:?} for a commit the plumbing reports {bumped:?} for". That silence *is* the hazard: it is the second probe's whole answer under the developer's own configuration, and it is demonstrated before the replay is asked anything. The fixture arms the setting itself rather than reading it out of `~/.gitconfig`, so the control holds on a machine whose developer has never set the key. |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed` | The branch's only commit is read back through plain git and must list exactly one field — its own id, and no parent — "the branch's only commit has to be a root commit ... or there is nothing here for `--root` to be load-bearing about". A commit with a parent is a commit `--root` changes no answer for. | **Full, in both directions.** `git diff-tree`, asked through the fixture with the arguments the probe really uses and `--root` left off, must answer with nothing for that commit — "`diff-tree` no longer stays silent about a root commit, so this test could only pass vacuously; that silence is what makes a probe without `--root` read a whole history as a commit that changes nothing". The same call *with* the flag must then name the path the commit adds, so the control proves what the flag buys as well as what its absence costs. The silence is the hazard, demonstrated before the replay is asked anything. |
 | `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | The fixture sets `maintenance.auto true` in its own repository, and the value is read back before the runner is asked anything. | **Full.** That read-back *is* the arming: plain git, through the fixture, must answer `true` — "the fixture does not hold `maintenance.auto=true`, so there is nothing here for the runner to override and the assertion below is measured against nothing". A key the fixture never took is a key the runner cannot be shown to override. What is **not** armed, and cannot be here, is the damage: the chain from git's `run_auto_maintenance` to a prefetch that writes `refs/prefetch/*` is read from git's source, and arming it would need a developer who has run `git maintenance start` and a remote to fetch from. This test pins the pin, not the consequence, and says so. |
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | The fixture sets `core.fsmonitor .git/hooks/fsmonitor-watchman`, the classic watchman spelling, and the value is read back first. | **Full, for the pin.** Plain git must answer with that path before the runner is asked. The same limit as the row above applies to the *consequence*: proving git would execute the named program means letting a replay execute a program on the developer's machine, which no fixture here may do. `tests/safety.rs` cannot cover this route either — its planted hooks all live under `core.hooksPath`, and this program is executed directly — which is the reason the pin is asserted here at all. |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | The fixture sets `rebase.rebaseMerges true` and the value is read back first. | **Full, and the consequence was executed out of band.** The read-back arms the pin. The hazard behind it was watched by hand on git 2.55: a branch carrying a merge, rebased onto a moved base under `-c rebase.rebaseMerges=true`, comes out still carrying the merge (`git rev-list --min-parents=2 --count` answers 1), so a developer's own configuration really does put a merge commit on a replay's todo list. That demonstration is a shell session rather than an assertion, because a merge on the todo list only becomes a halt in a repository built to conflict at it, and the reviewer who found this could not construct one. |
 | `pins_the_conflict_style_even_when_the_repository_asks_for_diff3` | The fixture sets `merge.conflictStyle diff3` and the value is read back first. | **Full, for the pin.** Plain git must answer `diff3` before the runner is asked anything — "the fixture does not hold `merge.conflictStyle=diff3`, so there is nothing here for the runner to override and the assertion below is measured against nothing". What the *style* does was executed out of band rather than asserted: a merge run under each setting was read, and `diff3` was watched to put the base version between a `|||||||` line and the `=======` one. Arming that inside the test means a fixture whose base carries a line reading as a marker, which measures the counter rather than the pin, and the counter has two tests of its own below. |
+| `pins_signature_verification_off_even_when_the_repository_turns_it_on` | The fixture sets `merge.verifySignatures true` and the value is read back first. | **Full, for the pin.** Plain git must answer `true` before the runner is asked anything — "the fixture does not hold `merge.verifySignatures=true`, so there is nothing here for the runner to override and the assertion below is measured against nothing". What the *setting* does was executed out of band rather than asserted: a merge run under `-c merge.verifySignatures=true` on git 2.55 was watched to exit 128 with `fatal: Commit <sha> does not have a GPG signature.` and to leave no unmerged path behind it. Arming that inside the test means a replay built to fail on purpose, which measures the merge replay's refusal rather than the pin — and the rebase replay could not show it at all, since rebase reads no such key. |
 | `a_non_ascii_path_read_back_through_run_is_not_octal_escaped` | The fixture stages a `日本語.txt`, so a name git would escape provably reaches the reader. Without it the assertion reads an empty answer against an expected one and fails for the wrong reason. | **Structural.** The escaping is git's own default, so the hazard is armed by git rather than by the fixture: an unpinned `core.quotePath` is what git does with no configuration at all, which is what the mutation below reads back. What no control here states is that git still escapes, so a git that stopped C-quoting would leave this test green about a hazard that had gone. Reading the same path back with `-c core.quotePath=true` pinned on one plain-git command would close it. |
 | `a_bracket_run_that_is_not_a_marker_does_not_count_as_a_conflict_region` | The document really conflicts in **two** places, and the merge that made it is required to have failed — "the merge came out clean, so the document holds no marker at all and the count below meets the floor instead of the markers". Two rather than one because the floor answers one for a counter that found the markers and for one that found nothing. | **Full.** The bracket lines the document carries are whole regions rather than lone lines, so a counter that reads closed regions and matches the run loosely counts them as well: the arming is that the mutation below really does answer 4. The markers on the other side are git's own, out of a real merge, so the shape under test is what git writes rather than what this file believes git writes. |
 | `an_opening_marker_with_no_closing_one_does_not_count_as_a_conflict_region` | The same two-region document and the same required merge failure. | **Full.** The lone marker is spelled exactly the way git spells one, so matching the run exactly does not reject it and the closed-region rule is the only thing that can: a counter that reads opening markers answers 3 whether it matches loosely or exactly. It sits after the last region git wrote, so no later closing marker can pair with it and hide the mutation. |
@@ -524,9 +530,9 @@ No collateral: the other 31 unit tests and every integration suite stayed green
 under the old shape, which is the point. The hole was open for the whole life of
 the crate and nothing else in the suite could see it.
 
-### The dash-leading revision, across `Git::rev_parse`, `Scratch::create` and `Scratch::replay_rebase`
+### The dash-leading revision, across `Git::rev_parse`, `Scratch::create`, `Scratch::replay_rebase` and `Scratch::replay_merge`
 
-One defect in three places: a revision arrives from a caller, reaches a git
+One defect in four places: a revision arrives from a caller, reaches a git
 argv with nothing between it and git's option position, and git reads it as an
 option of its own. Each site was mutated on its own.
 
@@ -586,11 +592,96 @@ has: "Conflicts { stops: 0, files: {} }"
 test result: FAILED. 35 passed; 1 failed
 ```
 
-No collateral on any of the four: each mutation reddened its own test and left
+**`--end-of-options`, removed from `Scratch::replay_merge`.** Git knows
+`--allow-unrelated-histories` as an option of `merge`, so it reads the branch as
+one, is left with nothing to merge, and falls back to the upstream of the
+current branch. A scratch worktree stands on a detached HEAD, so there is no
+current branch to take an upstream from and git stops with `fatal: No current
+branch.` — an error, and the wrong one: it names this crate's own worktree
+rather than the name the caller typed, so what the caller has to correct never
+reaches it.
+
+```text
+thread 'refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree'
+panicked at src/gitscratch/tests/merges.rs:234:5:
+the refusal has to name the branch git would not merge, or the caller is told
+about a detached HEAD it never asked for and never hears the name it typed: the
+merge failed and left nothing to resolve:
+
+fatal: No current branch.
+
+test result: FAILED. 5 passed; 1 failed
+```
+
+This is the one site of the four where the wrong answer is not the cheap one, so
+the test asserts the words of the refusal rather than the fact of one. No option
+of `git merge` was found that git obeys and answers at exit 0: `--abort`,
+`--quit` and `--continue` refuse the arguments standing beside them, and every
+other spelling reaches the fallback above. Both spellings of the call therefore
+fail, and only the sentence separates them.
+
+`--allow-unrelated-histories` rather than `--abort`, and the choice is what the
+rows above make when they pick the shape that succeeds: take the argument the
+mutation would otherwise get past. Git's complaint about `--abort` quotes the
+argument straight back — `fatal: --abort expects no arguments` — so a test
+built on that name reads its own argument out of git's complaint, passes with
+the separator gone, and pins nothing.
+
+The run was `cargo test --no-fail-fast -p gitscratch -p grime` on git 2.55.0, so
+the one consumer of the merge replay really ran — and `grime`'s own
+`a_branch_name_that_starts_with_a_dash_is_refused_rather_than_reported_clean`
+stayed green through the mutation, because `grime` asks the pre-flight first and
+a name it refuses never reaches a merge. That is why this test had to be written
+here: a guard standing behind a pre-flight is a guard no consumer's suite can
+watch fail, and `Scratch::replay_merge` is public.
+
+No collateral on any of the five: each mutation reddened its own test and left
 every other unit test and every integration suite green. That is the finding
 rather than a footnote. The whole class was open for the life of the crate, and
 `grind -- --root` printed `grind: clean - replaying HEAD onto --root hit no
 conflicts` at exit 0 while every one of these suites passed.
+
+### `a_merge_of_a_branch_already_in_head_is_clean`
+
+Mutation (**opposite direction — added, not removed**): made the merge replay's
+success path demand a `MERGE_HEAD` before it hands the clean verdict back —
+`anyhow::ensure!` on `git.try_run("rev-parse", &["-q", "--verify",
+"MERGE_HEAD"])?.success`, immediately ahead of the early return in
+`Scratch::replay_merge`.
+
+That is the plausible over-correction rather than an arbitrary break. The
+comment on `--no-ff` three lines above says what this replay is afraid of — a
+merge git turned into a fast-forward, which records no `MERGE_HEAD` and merges
+no trees — and asking for evidence that a three-way merge really happened is the
+obvious second lock to fit. It is the wrong lock, and this is the only test that
+says so. A branch already contained in HEAD is not a merge git declined to do;
+it is a merge git finished, with `Already up to date.` and exit 0 for its whole
+answer. There is no `MERGE_HEAD` to find, because there was nothing to merge.
+
+```text
+thread 'a_merge_of_a_branch_already_in_head_is_clean'
+panicked at src/gitscratch/tests/merges.rs:107:10:
+replay a merge of a branch HEAD already contains: the merge exited zero and
+recorded no MERGE_HEAD, so git merged no trees at all
+
+test result: FAILED. 6 passed; 1 failed
+```
+
+No collateral: this is the only test the mutation reddens. The run was
+`cargo test --no-fail-fast -p gitscratch -p grime` on git 2.55.0, so the one
+consumer of the merge replay really ran. The other two clean tests in the file
+both drive a real three-way merge — `alpha` and `beta` are siblings, and
+`--no-ff` makes the fast-forwardable one a merge as well — so both record a
+`MERGE_HEAD` and both stay green.
+
+Git's own answer was read by hand rather than asserted, because the replay keeps
+neither the words nor the exit status once it has its verdict. On git 2.55.0,
+`git merge --no-commit --no-ff --end-of-options main` from a detached HEAD at
+`alpha` printed `Already up to date.`, exited 0, wrote no `MERGE_HEAD`, listed no
+unmerged path, and left HEAD on the commit it started on. Dropping `--no-ff`
+changed none of it: a branch already contained in HEAD offers no fast-forward for
+the flag to refuse, which is what makes this a third route to the clean verdict
+rather than the fast-forward one under another name.
 
 ### `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed`
 
@@ -878,6 +969,47 @@ merge rather than asserted: under `diff3` and `zdiff3` git puts the base between
 inside the region under those two and outside it under `merge`. Arming that in
 the test would need a fixture whose base carries such a line, which measures the
 counter rather than the pin — and the counter has two tests of its own, below.
+
+### `merge.verifySignatures`, the setting that decides whether git merges at all
+
+Mutation: removed `"merge.verifySignatures=false"` from `Git::safety_config()`.
+The fixture's own `merge.verifySignatures = true` then stands, which is what a
+developer who turned signature verification on hands every merge replay. The run
+was `cargo test --no-fail-fast -p gitscratch -p grind -p grist` on git 2.55.0, so
+the other two crates really ran.
+
+```text
+---- git::tests::pins_signature_verification_off_even_when_the_repository_turns_it_on stdout ----
+
+thread 'git::tests::pins_signature_verification_off_even_when_the_repository_turns_it_on'
+panicked at src/gitscratch/src/git.rs:947:9:
+assertion `left == right` failed: `merge.verifySignatures=false` is not pinned,
+so git reads `merge.verifySignatures` out of the developer's own configuration
+and acts on it for the length of a replay
+  left: "true"
+ right: "false"
+
+test result: FAILED. 53 passed; 1 failed
+```
+
+No collateral. That is exactly one test across the three crates, and the README
+inventory guard stays green for the same reason it does one section above: it
+asks that every setting the config pins has a row, not that every row is a
+setting the config pins, so a pin that disappears leaves its row behind in
+silence.
+
+What this test pins is the pin. What the *setting* does was read out of a real
+merge rather than asserted: under `-c merge.verifySignatures=true`, git 2.55
+answers `merge --no-commit --no-ff --end-of-options <branch>` with exit 128 and
+`fatal: Commit <sha> does not have a GPG signature.` for a branch carrying no
+signature, and leaves no unmerged path behind it. `Scratch::replay_merge` reads
+that empty path list as its own "the merge failed and left nothing to resolve",
+which is neither a cost nor a clean replay, so `grime` can only say it cannot
+tell — for every unsigned branch on that machine, which is nearly every branch.
+Arming that inside the test means a replay built to fail on purpose, which
+measures the merge replay's refusal rather than the pin. The rebase replay could
+not stand in for it either: rebase reads no such key, which is why this gap
+opened with the merge replay and not beside the conflict style above it.
 
 ### `core.quotePath`, the setting that decides how git spells a path
 

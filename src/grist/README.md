@@ -5,10 +5,11 @@ before you commit to one. A trial is one ordering, replayed and costed.
 
 If your question is about *one* branch — would rebasing HEAD onto it conflict,
 and by how much? — that's [`grind`](../grind/README.md), which ships alongside
-this and answers with its exit code. `grime` (does a *merge* conflict?) is still
-a planned sibling and does not exist yet. `grist` answers the question neither of
-them can: when you have several branches to land and each one makes the next one
-harder, **which order costs the least?**
+this and answers with its exit code. [`grime`](../grime/README.md) asks the same
+thing about a *merge* — would merging that branch into HEAD conflict? — and
+answers the same way. `grist` answers the question neither of them can: when you
+have several branches to land and each one makes the next one harder, **which
+order costs the least?**
 
 ```console
 $ grist issue-130 issue-120

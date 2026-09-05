@@ -3713,6 +3713,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "grime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buildinfo",
+ "clap",
+ "gitscratch",
+ "termbar",
+ "unicode-width",
+]
+
+[[package]]
 name = "grind"
 version = "0.1.0"
 dependencies = [

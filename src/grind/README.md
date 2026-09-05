@@ -19,7 +19,9 @@ $ grind origin/main
 grind: clean - replaying HEAD onto origin/main hit no conflicts
 ```
 
-`grime` (does a *merge* conflict?) is a planned sibling and does not exist yet.
+[`grime`](../grime/README.md) is the sibling that asks the same question about a
+*merge* — would merging that branch into HEAD conflict? It prints the same
+shape, from the same renderer, minus the stop count a merge cannot produce.
 [`grist`](../grist/README.md) is the one for the other question — given several
 branches to land, which *order* costs the least?
 
