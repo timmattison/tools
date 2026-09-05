@@ -35,14 +35,18 @@ fn a_merge_that_conflicts_with_nothing_is_clean() {
 ///
 /// Git fast-forwards a merge whose branch is strictly ahead, and a
 /// fast-forward is not a merge at all: git moves HEAD to the other tip and
-/// merges no trees. The replay then reports "clean" for an operation it never
-/// performed, which is the one answer this crate exists never to give, and it
-/// is indistinguishable from the answer a genuinely free merge earns.
+/// merges no trees. Both routes still answer clean, and for one reason
+/// rather than two: a merge git can fast-forward has HEAD as its own merge
+/// base, so ours equals base and the three-way merge is conflict-free by
+/// construction.
 ///
 /// So the assertion is about the operation rather than about the verdict.
-/// HEAD standing where it started, with `MERGE_HEAD` set beside it, is what
-/// only a real three-way merge leaves behind. A fast-forward leaves the
-/// opposite of both: HEAD on the other branch's tip, and no `MERGE_HEAD`.
+/// The verdict is the one thing here that cannot catch the flag going
+/// missing. HEAD standing where it started, with `MERGE_HEAD` set beside it,
+/// is what only a real three-way merge leaves behind, and it is what a
+/// caller that reads the scratch worktree afterwards goes on. A fast-forward
+/// leaves the opposite of both: HEAD on the other branch's tip, and no
+/// `MERGE_HEAD`.
 #[test]
 fn a_fast_forwardable_merge_still_runs_a_real_three_way_merge() {
     let repo = independent_branches_repo();

@@ -469,14 +469,22 @@ impl Scratch {
         let worktree = self.path();
 
         // `--no-ff`, because git takes a merge whose branch is strictly ahead
-        // as a fast-forward, and a fast-forward merges no trees at all. It
-        // moves HEAD to the other tip and stops, so the replay measures
-        // nothing and reports the clean verdict for an operation that never
-        // ran. That verdict is the one a genuinely free merge earns too, so
-        // nothing downstream tells the two apart. The flag makes git do the
-        // three-way merge the caller asked about. Pinned by
+        // as a fast-forward, and a fast-forward merges no trees at all: it
+        // moves HEAD to the other tip and stops. The verdict is the same
+        // either way, and not by luck - a merge git can fast-forward has HEAD
+        // as its own merge base, so ours equals base and the three-way merge
+        // is conflict-free by construction. What the flag buys is that this
+        // method performs the operation its name promises, and so leaves what
+        // a halted merge leaves: `MERGE_HEAD`, and a worktree standing where
+        // the replay started. A fast-forward leaves the other branch checked
+        // out instead, which a caller that reads the worktree rather than the
+        // verdict sees - `Scratch::head_tree` reads `HEAD^{tree}`, so it would
+        // answer with the other branch's tree. Nothing pairs the two today, so
+        // the flag protects the next caller rather than a defect on hand.
+        // Pinned by
         // `a_fast_forwardable_merge_still_runs_a_real_three_way_merge` in
-        // `tests/merges.rs`.
+        // `tests/merges.rs`, which asserts the mechanism rather than the
+        // verdict, because the verdict cannot catch the flag going missing.
         //
         // `--end-of-options` ahead of `branch`, because `branch` arrives from a
         // caller and a caller can spell a revision that starts with a dash.

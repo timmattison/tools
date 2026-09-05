@@ -110,18 +110,24 @@ The merge runs as `git merge --no-commit --no-ff --end-of-options <branch>`, and
 
 Git takes a merge whose branch is strictly ahead as a fast-forward, and a
 fast-forward merges no trees at all. It moves HEAD to the other tip and stops.
-A replay of that measures nothing, and then reports `clean` for an operation it
-never performed — which is the identical verdict a genuinely free merge earns,
-so nothing downstream tells the two apart. A branch cut from the current one
-that nothing has diverged from is exactly this shape, and that is an ordinary
-branch to ask about.
+A branch cut from the current one that nothing has diverged from is exactly this
+shape, and that is an ordinary branch to ask about.
 
-`--no-ff` makes git perform the three-way merge the caller asked about.
+The verdict is the same on both routes, and not by accident: a merge git can
+fast-forward has HEAD as its own merge base, so ours equals base and the
+three-way merge is conflict-free by construction. What `--no-ff` buys is that
+the replay performs the merge it says it performed, and so leaves behind what a
+halted merge leaves — `MERGE_HEAD`, and a worktree standing where the replay
+started. A fast-forward leaves the other branch checked out there instead.
+`grime` reads only the verdict, so the flag guards what a later caller of
+`gitscratch` reads out of that worktree rather than a defect on hand.
+
 `a_fast_forwardable_merge_still_runs_a_real_three_way_merge` in
 [`src/gitscratch/tests/merges.rs`](../gitscratch/tests/merges.rs) pins it. The
 test replays a merge git could take as a fast-forward and asserts that HEAD did
-not move and that `MERGE_HEAD` exists, because only a real merge records one. It
-fails the day somebody drops the flag.
+not move and that `MERGE_HEAD` exists, because only a real merge records one. An
+assertion on the verdict is the one assertion that could not work here. It fails
+the day somebody drops the flag.
 
 `--no-commit` is the other half of the pair. The merge stops before the commit,
 so the replay writes no commit and moves no ref, and the conflicted files stay

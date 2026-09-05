@@ -651,8 +651,8 @@ success path demand a `MERGE_HEAD` before it hands the clean verdict back —
 
 That is the plausible over-correction rather than an arbitrary break. The
 comment on `--no-ff` three lines above says what this replay is afraid of — a
-merge that measured nothing and reported the clean verdict for an operation that
-never ran — and asking for evidence that a three-way merge really happened is the
+merge git turned into a fast-forward, which records no `MERGE_HEAD` and merges
+no trees — and asking for evidence that a three-way merge really happened is the
 obvious second lock to fit. It is the wrong lock, and this is the only test that
 says so. A branch already contained in HEAD is not a merge git declined to do;
 it is a merge git finished, with `Already up to date.` and exit 0 for its whole

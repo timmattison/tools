@@ -53,13 +53,19 @@ the same `Conflicts`, and that is what lets `grind` and `grime` print one shape.
 
 Two flags on that merge are load-bearing. `--no-ff` is there because git takes a
 merge whose branch is strictly ahead as a fast-forward, and a fast-forward
-merges no trees at all: it moves HEAD to the other tip and stops, so the replay
-measures nothing and still answers clean — which is the answer a genuinely free
-merge earns, so nothing downstream tells the two apart. `--end-of-options` is
-there because the branch name arrives from a caller and a caller can spell a
-revision that starts with a dash, which git reads as an option of `merge`. Every
-caller-supplied revision in this crate carries that separator for the same
-reason.
+merges no trees at all: it moves HEAD to the other tip and stops. The verdict is
+the same either way — such a merge has HEAD as its own merge base, so ours
+equals base and the three-way merge is conflict-free by construction — but the
+flag is what makes `replay_merge` perform the operation its name promises, and
+so leave what a halted merge leaves: `MERGE_HEAD`, and a worktree standing where
+the replay started. A fast-forward leaves the other branch checked out instead,
+which is what a caller that reads the worktree rather than the verdict sees —
+`head_tree` would answer with the other branch's tree. Nothing pairs the two
+today, so the flag protects the next caller rather than a defect on hand.
+`--end-of-options` is there because the branch name arrives from a caller and a
+caller can spell a revision that starts with a dash, which git reads as an
+option of `merge`. Every caller-supplied revision in this crate carries that
+separator for the same reason.
 
 A merge git will not perform at all is neither verdict. It leaves no unmerged
 path, so there is nothing for a person to resolve, and it wrote nothing, so

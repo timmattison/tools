@@ -700,8 +700,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     repository. It merges the branch into HEAD in a detached scratch worktree in a temp directory,
     counts the conflict hunks and the files they land in, and tears the worktree down before you see
     the answer. The merge carries `--no-ff`, because git takes a merge whose branch is strictly
-    ahead as a fast-forward and a fast-forward merges no trees at all — the replay would then report
-    a clean verdict for an operation it never performed. The exit code is the answer: 0 clean, 1
+    ahead as a fast-forward and a fast-forward merges no trees at all — the verdict is unchanged,
+    but the replay leaves a checkout, not a halted merge. The exit code is the answer: 0 clean, 1
     conflicts, 2 could not tell you (bad ref, not a repository, git refused the merge and left
     nothing to measure, as it does for two histories with no commit in common). It prints no stop
     count: a merge halts exactly once, so the number is a constant dressed up as a measurement and
