@@ -507,6 +507,7 @@ because it quietly discarded the work.
 | `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. The config half settles nothing on its own: an identity variable outranks every config source, `-c` included, which is why the row above sheds the whole inherited environment first. The runner then restates the identity as environment on every command it builds, so it holds with either guard edited away — the four variables that name a person pinned to the harness, and `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` *removed* rather than pinned, since a pinned date gives every commit of one run the same timestamp. All six, because a restatement that covered four of them would hold the name and let both dates through the day the sweep went away. |
 | `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job or `Git::paths`'s, and reading one path is `Git::path`'s (all three above), and this narrows what a call site that reaches around them can get wrong. |
 | `merge.conflictStyle=merge` | The count has to mean the same thing on every machine. All three styles open and close a conflict region with the same markers, so a region whose two sides carry no bracket line of their own costs one hunk under any of them. What `diff3` and `zdiff3` add is the **base** version of the region, between a `|||||||` line and the `=======` one — so a base carrying a line that reads as a marker lands inside the region under those two and outside it under `merge`. The replay then measures a different file on a developer who set the key, and `grist` ranks candidates on that count: two developers comparing the same branches read two orders and neither is told why. Read out of a real merge rather than from git's documentation. |
+| `merge.verifySignatures=false` | The two rows about signing above cover a replay asked to *make* a signature; this one covers a replay asked to **read** one. `merge.verifySignatures` is consulted by `git merge` alone, so a developer who turns it on leaves the rebase replay untouched and breaks the merge replay outright: git 2.55 exits 128 with `fatal: Commit <sha> does not have a GPG signature.` for any branch that carries no signature, which is nearly every branch, and it leaves no unmerged path behind it. The merge replay reads that empty path list as its own "the merge failed and left nothing to resolve" — neither a cost nor a clean replay — so `grime` answers exit 2, "I cannot tell you", for every unsigned branch on that machine. Read out of a real merge rather than from git's documentation. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the
@@ -741,6 +742,20 @@ where the pin above only closes the route into it that exists today. It carries
 two controls ahead of the assertion — the fixture's stopped commit really has two
 parents, and `diff-tree` really is silent about it — and one after it: the same
 probe, pointed at a single-parent commit, has to answer rather than refuse.
+
+One more pins the setting that decides **whether git will merge at all**.
+`pins_signature_verification_off_even_when_the_repository_turns_it_on` covers
+`merge.verifySignatures=false`, against a fixture that turns verification on.
+The two signing rows above cover a replay asked to *make* a signature; this key
+is the other direction, a replay asked to *read* one, and `git merge` is the
+only command that reads it — so a developer who sets it leaves the rebase replay
+untouched and stops the merge replay dead. Git 2.55 was watched to exit 128 with
+`fatal: Commit <sha> does not have a GPG signature.` for a branch carrying no
+signature, and to leave no unmerged path behind it, which the merge replay reads
+as its own "the merge failed and left nothing to resolve". That is neither a
+cost nor a clean replay, so `grime` answers exit 2 for every unsigned branch on
+that machine. The refusal was read out of a real merge; what the test executes
+is the pin.
 
 The fixture builder stamps commits too, and is covered on its own ground in
 `src/testing.rs`, by

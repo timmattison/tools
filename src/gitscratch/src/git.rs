@@ -688,6 +688,22 @@ impl Git {
             // read two orders and neither is told why. Read out of a real
             // merge rather than from git's documentation.
             "merge.conflictStyle=merge",
+            // Signature verification is a key `git merge` reads and nothing
+            // else does, so the two signing pins above do not reach it. Those
+            // two stop a replay *making* a signature; this one stops a replay
+            // demanding to read one. Under `merge.verifySignatures=true` git
+            // 2.55 refuses to merge a commit that carries no signature at all:
+            // it exits 128 with `fatal: Commit <sha> does not have a GPG
+            // signature.` and leaves no unmerged path behind it. An empty list
+            // of conflicted paths is what the merge replay reads as "the merge
+            // failed and left nothing to resolve", which is neither a cost nor
+            // a clean replay, so a consumer can only report that it cannot
+            // tell - for every unsigned branch on that machine, which is
+            // nearly every branch. The rebase replay never reaches this,
+            // because rebase reads no such key, so the pin arrives with the
+            // merge replay. Read out of a real merge rather than from git's
+            // documentation.
+            "merge.verifySignatures=false",
         ]
         .iter()
         .map(|setting| (*setting).to_string())

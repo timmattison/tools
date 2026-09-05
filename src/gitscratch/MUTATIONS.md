@@ -48,6 +48,7 @@ not have to re-derive which guard belongs to which test.
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | `core.fsmonitor=false`, the one program git runs that the redirected `core.hooksPath` cannot take away | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | `rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo list | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_the_conflict_style_even_when_the_repository_asks_for_diff3` | `merge.conflictStyle=merge`, which keeps the base version out of the region the hunk counter reads | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| `pins_signature_verification_off_even_when_the_repository_turns_it_on` | `merge.verifySignatures=false`, which keeps `git merge` from refusing every branch that carries no signature | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `a_non_ascii_path_read_back_through_run_is_not_octal_escaped` | `core.quotePath=false`, which stops git C-quoting and octal-escaping a path it prints on a line | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `a_bracket_run_that_is_not_a_marker_does_not_count_as_a_conflict_region` | The exact marker shape — seven brackets, then a space or the end of the line | `src/scratch.rs`, `is_conflict_marker` — take the answer from `starts_with` and drop the test on what follows the run | widen |
 | `an_opening_marker_with_no_closing_one_does_not_count_as_a_conflict_region` | The closed-region rule, which is what makes an unpaired marker file content rather than a cost | `src/scratch.rs`, `count_conflict_hunks` — count the lines that open a region instead of the pairs that close one | widen |
@@ -130,6 +131,7 @@ registry that reports everything as fine is worth less than no registry at all.
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | The fixture sets `core.fsmonitor .git/hooks/fsmonitor-watchman`, the classic watchman spelling, and the value is read back first. | **Full, for the pin.** Plain git must answer with that path before the runner is asked. The same limit as the row above applies to the *consequence*: proving git would execute the named program means letting a replay execute a program on the developer's machine, which no fixture here may do. `tests/safety.rs` cannot cover this route either — its planted hooks all live under `core.hooksPath`, and this program is executed directly — which is the reason the pin is asserted here at all. |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | The fixture sets `rebase.rebaseMerges true` and the value is read back first. | **Full, and the consequence was executed out of band.** The read-back arms the pin. The hazard behind it was watched by hand on git 2.55: a branch carrying a merge, rebased onto a moved base under `-c rebase.rebaseMerges=true`, comes out still carrying the merge (`git rev-list --min-parents=2 --count` answers 1), so a developer's own configuration really does put a merge commit on a replay's todo list. That demonstration is a shell session rather than an assertion, because a merge on the todo list only becomes a halt in a repository built to conflict at it, and the reviewer who found this could not construct one. |
 | `pins_the_conflict_style_even_when_the_repository_asks_for_diff3` | The fixture sets `merge.conflictStyle diff3` and the value is read back first. | **Full, for the pin.** Plain git must answer `diff3` before the runner is asked anything — "the fixture does not hold `merge.conflictStyle=diff3`, so there is nothing here for the runner to override and the assertion below is measured against nothing". What the *style* does was executed out of band rather than asserted: a merge run under each setting was read, and `diff3` was watched to put the base version between a `|||||||` line and the `=======` one. Arming that inside the test means a fixture whose base carries a line reading as a marker, which measures the counter rather than the pin, and the counter has two tests of its own below. |
+| `pins_signature_verification_off_even_when_the_repository_turns_it_on` | The fixture sets `merge.verifySignatures true` and the value is read back first. | **Full, for the pin.** Plain git must answer `true` before the runner is asked anything — "the fixture does not hold `merge.verifySignatures=true`, so there is nothing here for the runner to override and the assertion below is measured against nothing". What the *setting* does was executed out of band rather than asserted: a merge run under `-c merge.verifySignatures=true` on git 2.55 was watched to exit 128 with `fatal: Commit <sha> does not have a GPG signature.` and to leave no unmerged path behind it. Arming that inside the test means a replay built to fail on purpose, which measures the merge replay's refusal rather than the pin — and the rebase replay could not show it at all, since rebase reads no such key. |
 | `a_non_ascii_path_read_back_through_run_is_not_octal_escaped` | The fixture stages a `日本語.txt`, so a name git would escape provably reaches the reader. Without it the assertion reads an empty answer against an expected one and fails for the wrong reason. | **Structural.** The escaping is git's own default, so the hazard is armed by git rather than by the fixture: an unpinned `core.quotePath` is what git does with no configuration at all, which is what the mutation below reads back. What no control here states is that git still escapes, so a git that stopped C-quoting would leave this test green about a hazard that had gone. Reading the same path back with `-c core.quotePath=true` pinned on one plain-git command would close it. |
 | `a_bracket_run_that_is_not_a_marker_does_not_count_as_a_conflict_region` | The document really conflicts in **two** places, and the merge that made it is required to have failed — "the merge came out clean, so the document holds no marker at all and the count below meets the floor instead of the markers". Two rather than one because the floor answers one for a counter that found the markers and for one that found nothing. | **Full.** The bracket lines the document carries are whole regions rather than lone lines, so a counter that reads closed regions and matches the run loosely counts them as well: the arming is that the mutation below really does answer 4. The markers on the other side are git's own, out of a real merge, so the shape under test is what git writes rather than what this file believes git writes. |
 | `an_opening_marker_with_no_closing_one_does_not_count_as_a_conflict_region` | The same two-region document and the same required merge failure. | **Full.** The lone marker is spelled exactly the way git spells one, so matching the run exactly does not reject it and the closed-region rule is the only thing that can: a counter that reads opening markers answers 3 whether it matches loosely or exactly. It sits after the last region git wrote, so no later closing marker can pair with it and hide the mutation. |
@@ -878,6 +880,47 @@ merge rather than asserted: under `diff3` and `zdiff3` git puts the base between
 inside the region under those two and outside it under `merge`. Arming that in
 the test would need a fixture whose base carries such a line, which measures the
 counter rather than the pin — and the counter has two tests of its own, below.
+
+### `merge.verifySignatures`, the setting that decides whether git merges at all
+
+Mutation: removed `"merge.verifySignatures=false"` from `Git::safety_config()`.
+The fixture's own `merge.verifySignatures = true` then stands, which is what a
+developer who turned signature verification on hands every merge replay. The run
+was `cargo test --no-fail-fast -p gitscratch -p grind -p grist` on git 2.55.0, so
+the other two crates really ran.
+
+```text
+---- git::tests::pins_signature_verification_off_even_when_the_repository_turns_it_on stdout ----
+
+thread 'git::tests::pins_signature_verification_off_even_when_the_repository_turns_it_on'
+panicked at src/gitscratch/src/git.rs:947:9:
+assertion `left == right` failed: `merge.verifySignatures=false` is not pinned,
+so git reads `merge.verifySignatures` out of the developer's own configuration
+and acts on it for the length of a replay
+  left: "true"
+ right: "false"
+
+test result: FAILED. 53 passed; 1 failed
+```
+
+No collateral. That is exactly one test across the three crates, and the README
+inventory guard stays green for the same reason it does one section above: it
+asks that every setting the config pins has a row, not that every row is a
+setting the config pins, so a pin that disappears leaves its row behind in
+silence.
+
+What this test pins is the pin. What the *setting* does was read out of a real
+merge rather than asserted: under `-c merge.verifySignatures=true`, git 2.55
+answers `merge --no-commit --no-ff --end-of-options <branch>` with exit 128 and
+`fatal: Commit <sha> does not have a GPG signature.` for a branch carrying no
+signature, and leaves no unmerged path behind it. `Scratch::replay_merge` reads
+that empty path list as its own "the merge failed and left nothing to resolve",
+which is neither a cost nor a clean replay, so `grime` can only say it cannot
+tell — for every unsigned branch on that machine, which is nearly every branch.
+Arming that inside the test means a replay built to fail on purpose, which
+measures the merge replay's refusal rather than the pin. The rebase replay could
+not stand in for it either: rebase reads no such key, which is why this gap
+opened with the merge replay and not beside the conflict style above it.
 
 ### `core.quotePath`, the setting that decides how git spells a path
 
