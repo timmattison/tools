@@ -200,6 +200,20 @@ const MEASURED_SECONDS: u64 = 624;
 /// which, which is a much longer run.
 const DEFAULT_TIMEOUT_SECONDS: u64 = MEASURED_SECONDS * 2;
 
+/// The deadline outlasts the run it was measured against, or the build stops.
+///
+/// A deadline shorter than a run somebody measured is a deadline every run of
+/// the defaults dies at, which is what 600 became the moment the tool started
+/// asking for `xhigh`. The product above holds the rule today, and this holds
+/// it against the reader who later writes a number in its place.
+///
+/// A compile-time check and not a test, because a mistake that cannot be
+/// built beats a mistake a suite reports.
+const _: () = assert!(
+    DEFAULT_TIMEOUT_SECONDS >= MEASURED_SECONDS * 2,
+    "the default deadline leaves no room over the run it was measured against"
+);
+
 /// The seconds a run may take at the most.
 ///
 /// A run of `claude` takes minutes, and a year is longer than a reader
@@ -822,20 +836,6 @@ mod tests {
         assert_eq!(seconds(None), Ok(default));
         assert_eq!(seconds(Some("")), Ok(default));
         assert_eq!(seconds(Some("  \t ")), Ok(default));
-    }
-
-    #[test]
-    fn the_default_deadline_outlasts_the_run_it_was_measured_against() {
-        // A deadline shorter than a run somebody measured is a deadline every
-        // run of the defaults dies at. That is what 600 became the moment the
-        // tool started asking for `xhigh`: the measured run took 624 seconds.
-        //
-        // The bound is a bound and never a target, so it leaves room for a
-        // backlog that grew and for a day the API answers slower on.
-        assert!(
-            DEFAULT_TIMEOUT_SECONDS >= MEASURED_SECONDS * 2,
-            "{DEFAULT_TIMEOUT_SECONDS} leaves no room over the measured {MEASURED_SECONDS}"
-        );
     }
 
     #[test]
