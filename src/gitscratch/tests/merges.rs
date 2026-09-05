@@ -190,3 +190,61 @@ fn a_conflicted_non_ascii_path_survives_a_merge_by_name_and_by_count() {
          by count"
     );
 }
+
+/// A branch name that starts with a dash is a branch name, and the merge that
+/// measures it has to read it as one.
+///
+/// `git merge --no-commit --no-ff --allow-unrelated-histories` is a complete
+/// and valid command. Git reads the name as an option of its own, is left with
+/// no branch to merge at all, and falls back to the upstream of the current
+/// branch - a merge of something nobody named. A scratch worktree stands on a
+/// detached HEAD, so there is no current branch to take an upstream from, and
+/// git stops with `fatal: No current branch.`
+///
+/// So the assertion is on the words of the refusal rather than on the fact of
+/// one. Both spellings fail, which is what makes the fact of a failure worth
+/// nothing here. Only the separated one names the branch git would not merge;
+/// the other blames the worktree this crate built, which is machinery the
+/// caller never asked for and cannot correct. A name the message never carries
+/// is a name nobody can repair.
+///
+/// `--allow-unrelated-histories` rather than `--abort`, `--quit` or `--squash`:
+/// git refuses those three by name - `fatal: --abort expects no arguments` -
+/// so a test built on one of them reads its own argument back out of git's
+/// complaint and passes with the separator gone.
+///
+/// The control at the end merges a branch the fixture really has, on the same
+/// scratch worktree, because a replay that refused every branch would pass the
+/// assertion above and measure nothing at all.
+#[test]
+fn refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree() {
+    let repo = conflicting_repo();
+    let scratch = repo.scratch("left");
+
+    let error = scratch
+        .replay_merge("--allow-unrelated-histories")
+        .map(|cost| format!("{cost:?}"))
+        .expect_err(
+            "a branch that names no commit has to stop the replay. Git knows \
+             `--allow-unrelated-histories` as an option of `merge`, so reading it as one leaves \
+             git with no branch to merge and a complaint about the worktree the replay stands in",
+        );
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("--allow-unrelated-histories"),
+        "the refusal has to name the branch git would not merge, or the caller is told about a \
+         detached HEAD it never asked for and never hears the name it typed: {message}"
+    );
+
+    let control = scratch
+        .replay_merge("right")
+        .expect("replay a merge of a branch the fixture really has");
+
+    assert_eq!(
+        control.stops(),
+        Stops::new(1),
+        "the fixture has to conflict, or the refusal above proves only that this replay answers \
+         nothing at all: {control:?}"
+    );
+}

@@ -44,6 +44,7 @@ not have to re-derive which guard belongs to which test.
 | `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back` | The pair `--verify --end-of-options`, which is how the pre-flight asks a question git can refuse | `src/git.rs`, `Git::rev_parse` — drop both arguments | remove |
 | `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` (`tests/repo.rs`) | `--end-of-options` ahead of the two positionals of `worktree add` | `src/scratch.rs`, `Scratch::create` — drop the argument | remove |
 | `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | `--end-of-options` ahead of the upstream of `rebase` | `src/scratch.rs`, `Scratch::replay_rebase_within` — drop the argument | remove |
+| `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree` (`tests/merges.rs`) | `--end-of-options` ahead of the branch of `merge` | `src/scratch.rs`, `Scratch::replay_merge` — drop the argument | remove |
 | `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | `maintenance.auto=false`, the switch on automatic maintenance that `gc.auto=0` does not reach | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | `core.fsmonitor=false`, the one program git runs that the redirected `core.hooksPath` cannot take away | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | `rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo list | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
@@ -125,6 +126,7 @@ registry that reports everything as fine is worth less than no registry at all.
 | `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back` | The fixture commits a file, so the repository is one a revision could resolve in, and the refusal cannot be a refusal of everything - `resolves_a_revision_that_names_a_commit_to_its_full_id` holds that side. | **Full.** Plain git, through the fixture, is asked for `--root^{commit}` and must print that argument straight back — "git no longer prints a dash-leading argument back at exit 0, so this test could only pass vacuously". That echo *is* the hazard: it exits 0, and the pre-flight reads an exit of 0 as a commit. |
 | `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` | None beyond the fixture, which `conflicting_repo` builds with a `main` that resolves. | **Missing.** The hazard is that `git worktree add -q --detach <path> --force` succeeds and checks out HEAD, and arming it in-test means building the wrong scratch on purpose and then removing it. Asserting the wrong-scratch HEAD under a deliberately unseparated call closes it. The mutation record below is the out-of-band substitute. |
 | `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | The scratch worktree is checked out at `iterated`, through a call that panics if git refuses, so the replay provably starts somewhere a rebase can run. | **Full, as a control on the other side.** The same scratch then replays onto `single` and must cost `CONTESTED_ROUNDS` stops, so a replay that refused every upstream, or one that could not replay this fixture at all, fails there instead of passing on the refusal above. What is not armed is the halt itself: nothing states that plain `git rebase --root` succeeds on this fixture, and the mutation record below is what stands in for it. |
+| `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree` | The scratch worktree is built at `left`, a branch `conflicting_repo` really has, so the replay provably starts somewhere a merge can run. | **Full, as a control on the other side.** The same scratch then merges `right` and must halt once, so a replay that refused every branch, or one that could not merge this fixture at all, fails there instead of passing on the refusal above. What is not armed is git's own fallback: nothing states that plain `git merge --no-commit --no-ff --allow-unrelated-histories` reaches for the upstream of the current branch, and the mutation record below is what stands in for it. |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_submodule_pointer_could_not_be_committed` | The stopped commit is asked of `diff-tree` first and must touch exactly one path — "the stopped commit has to touch the submodule pointer and nothing else; an ordinary path beside it comes back from the porcelain whatever the setting says, carries the refusal on its own, and leaves what the pointer costs invisible". An ordinary path alongside is what would let this test pass without the pointer ever mattering. | **Full.** Plain git, through the fixture, is asked for `diff --name-only branch~1 branch` and must answer with nothing — "`diff.ignoreSubmodules=all` is not hiding the pointer from `git diff`, so this test could only pass vacuously; the porcelain reported {porcelain:?} for a commit the plumbing reports {bumped:?} for". That silence *is* the hazard: it is the second probe's whole answer under the developer's own configuration, and it is demonstrated before the replay is asked anything. The fixture arms the setting itself rather than reading it out of `~/.gitconfig`, so the control holds on a machine whose developer has never set the key. |
 | `refuses_to_report_a_cost_when_a_clean_pick_of_a_root_commit_could_not_be_committed` | The branch's only commit is read back through plain git and must list exactly one field — its own id, and no parent — "the branch's only commit has to be a root commit ... or there is nothing here for `--root` to be load-bearing about". A commit with a parent is a commit `--root` changes no answer for. | **Full, in both directions.** `git diff-tree`, asked through the fixture with the arguments the probe really uses and `--root` left off, must answer with nothing for that commit — "`diff-tree` no longer stays silent about a root commit, so this test could only pass vacuously; that silence is what makes a probe without `--root` read a whole history as a commit that changes nothing". The same call *with* the flag must then name the path the commit adds, so the control proves what the flag buys as well as what its absence costs. The silence is the hazard, demonstrated before the replay is asked anything. |
 | `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | The fixture sets `maintenance.auto true` in its own repository, and the value is read back before the runner is asked anything. | **Full.** That read-back *is* the arming: plain git, through the fixture, must answer `true` — "the fixture does not hold `maintenance.auto=true`, so there is nothing here for the runner to override and the assertion below is measured against nothing". A key the fixture never took is a key the runner cannot be shown to override. What is **not** armed, and cannot be here, is the damage: the chain from git's `run_auto_maintenance` to a prefetch that writes `refs/prefetch/*` is read from git's source, and arming it would need a developer who has run `git maintenance start` and a remote to fetch from. This test pins the pin, not the consequence, and says so. |
@@ -526,9 +528,9 @@ No collateral: the other 31 unit tests and every integration suite stayed green
 under the old shape, which is the point. The hole was open for the whole life of
 the crate and nothing else in the suite could see it.
 
-### The dash-leading revision, across `Git::rev_parse`, `Scratch::create` and `Scratch::replay_rebase`
+### The dash-leading revision, across `Git::rev_parse`, `Scratch::create`, `Scratch::replay_rebase` and `Scratch::replay_merge`
 
-One defect in three places: a revision arrives from a caller, reaches a git
+One defect in four places: a revision arrives from a caller, reaches a git
 argv with nothing between it and git's option position, and git reads it as an
 option of its own. Each site was mutated on its own.
 
@@ -588,7 +590,50 @@ has: "Conflicts { stops: 0, files: {} }"
 test result: FAILED. 35 passed; 1 failed
 ```
 
-No collateral on any of the four: each mutation reddened its own test and left
+**`--end-of-options`, removed from `Scratch::replay_merge`.** Git knows
+`--allow-unrelated-histories` as an option of `merge`, so it reads the branch as
+one, is left with nothing to merge, and falls back to the upstream of the
+current branch. A scratch worktree stands on a detached HEAD, so there is no
+current branch to take an upstream from and git stops with `fatal: No current
+branch.` — an error, and the wrong one: it names this crate's own worktree
+rather than the name the caller typed, so what the caller has to correct never
+reaches it.
+
+```text
+thread 'refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree'
+panicked at src/gitscratch/tests/merges.rs:234:5:
+the refusal has to name the branch git would not merge, or the caller is told
+about a detached HEAD it never asked for and never hears the name it typed: the
+merge failed and left nothing to resolve:
+
+fatal: No current branch.
+
+test result: FAILED. 5 passed; 1 failed
+```
+
+This is the one site of the four where the wrong answer is not the cheap one, so
+the test asserts the words of the refusal rather than the fact of one. No option
+of `git merge` was found that git obeys and answers at exit 0: `--abort`,
+`--quit` and `--continue` refuse the arguments standing beside them, and every
+other spelling reaches the fallback above. Both spellings of the call therefore
+fail, and only the sentence separates them.
+
+`--allow-unrelated-histories` rather than `--abort`, and the choice is what the
+rows above make when they pick the shape that succeeds: take the argument the
+mutation would otherwise get past. Git's complaint about `--abort` quotes the
+argument straight back — `fatal: --abort expects no arguments` — so a test
+built on that name reads its own argument out of git's complaint, passes with
+the separator gone, and pins nothing.
+
+The run was `cargo test --no-fail-fast -p gitscratch -p grime` on git 2.55.0, so
+the one consumer of the merge replay really ran — and `grime`'s own
+`a_branch_name_that_starts_with_a_dash_is_refused_rather_than_reported_clean`
+stayed green through the mutation, because `grime` asks the pre-flight first and
+a name it refuses never reaches a merge. That is why this test had to be written
+here: a guard standing behind a pre-flight is a guard no consumer's suite can
+watch fail, and `Scratch::replay_merge` is public.
+
+No collateral on any of the five: each mutation reddened its own test and left
 every other unit test and every integration suite green. That is the finding
 rather than a footnote. The whole class was open for the life of the crate, and
 `grind -- --root` printed `grind: clean - replaying HEAD onto --root hit no

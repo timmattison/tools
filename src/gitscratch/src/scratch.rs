@@ -480,10 +480,18 @@ impl Scratch {
         //
         // `--end-of-options` ahead of `branch`, because `branch` arrives from a
         // caller and a caller can spell a revision that starts with a dash.
-        // Git reads such a name as an option of `merge` instead, and the
-        // answer then describes a command nobody asked for. Every other
-        // caller-supplied revision in this file carries the separator for the
-        // same reason.
+        // Git reads such a name as an option of `merge` instead, is left with
+        // no branch to merge at all, and falls back to the upstream of the
+        // current branch - a merge of something nobody named. The scratch
+        // worktree stands on a detached HEAD, so there is no current branch to
+        // take an upstream from and git stops with `fatal: No current branch.`
+        // That is still an error rather than a cheap answer, and it is the
+        // wrong error: it names this crate's own worktree instead of the name
+        // the caller typed, so what the caller has to correct never reaches
+        // it. With the separator git refuses the branch by name. Pinned by
+        // `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree`
+        // in `tests/merges.rs`. Every other caller-supplied revision in this
+        // file carries the separator for the same reason.
         let outcome = git.try_run(
             "merge",
             &["--no-commit", "--no-ff", "--end-of-options", branch],
