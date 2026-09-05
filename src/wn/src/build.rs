@@ -1181,7 +1181,9 @@ plans.\n`gh repo view` failed."
     #[test]
     fn the_case_of_a_level_is_the_readers_to_choose() {
         assert_eq!(
-            Effort::new(Some(" HIGH ")).expect("the level stands").as_str(),
+            Effort::new(Some(" HIGH "))
+                .expect("the level stands")
+                .as_str(),
             "high"
         );
     }

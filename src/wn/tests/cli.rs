@@ -2116,7 +2116,10 @@ const REPORT: &str =
 ///
 /// The level stands beside the models, because the models are what ran at it.
 fn report_at(effort: &str) -> String {
-    REPORT.replace("claude-opus-5", &format!("claude-opus-5 at effort {effort}"))
+    REPORT.replace(
+        "claude-opus-5",
+        &format!("claude-opus-5 at effort {effort}"),
+    )
 }
 
 /// The shell of a fake `claude` that prints an envelope holding `document`.
@@ -2427,7 +2430,11 @@ fn the_level_the_environment_named_reaches_the_run_and_the_report() {
     assert!(args.contains("high"), "{args}");
     // The whole line, with the level in it. The level stands beside the
     // models, because the models are what ran at it.
-    assert!(stderr(&output).contains(&report_at("high")), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&report_at("high")),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
