@@ -133,13 +133,22 @@ where
         let mut reader = BufReader::new(pipe);
         let mut transcript = Transcript::default();
         let mut raw = Vec::new();
-        // A line that ends early is a run that ended early, and the status of
-        // the run is what says so. What was read up to that point is kept.
-        while matches!(reader.read_until(b'\n', &mut raw), Ok(read) if read > 0) {
-            let line = String::from_utf8_lossy(&raw).into_owned();
-            raw.clear();
-            take(&mut transcript, &line, &doing);
-            transcript.printed.push_str(&line);
+        loop {
+            let more = reader.read_until(b'\n', &mut raw);
+            if !raw.is_empty() {
+                let line = String::from_utf8_lossy(&raw).into_owned();
+                raw.clear();
+                take(&mut transcript, &line, &doing);
+                transcript.printed.push_str(&line);
+            }
+            // A read that failed and a read that found the end both end the
+            // reading, and what was read up to that point is kept either way. A
+            // pipe that broke is a run that ended early, the status of the run
+            // is what says so, and the half line before the break can be the
+            // one that says why.
+            if !matches!(more, Ok(read) if read > 0) {
+                break;
+            }
         }
         transcript
     })
