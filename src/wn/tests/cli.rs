@@ -2883,7 +2883,17 @@ const TERMINAL_KIND: &str = "xterm-256color";
 /// The runs below name their own deadline rather than taking the default,
 /// because none of them is a test of what the default is. A test that read
 /// the default would break every time somebody measured the run again.
+/// [`the_line_says_the_default_deadline`] is the one exception, and it is a
+/// test of the default itself.
 const DEADLINE_SECONDS: &str = "600";
+
+/// The default deadline, as the line writes it.
+///
+/// Twice the longest run anybody measured, which is the rule `build.rs`
+/// states. A reader who has set no variable waits this long at the most, so
+/// the number is user-facing and a change to it must be a change somebody
+/// made on purpose.
+const DEFAULT_DEADLINE: &str = " of 26m0s";
 
 /// That same deadline, as the line writes it.
 const DEADLINE: &str = " of 10m0s";
@@ -3066,6 +3076,25 @@ fn the_line_says_how_long_the_run_waited_and_how_long_it_may() {
     assert!(
         readings.len() >= 2,
         "the clock moved while the run worked, and it read {readings:?} in {}",
+        painted.frames
+    );
+}
+
+#[test]
+fn the_line_says_the_default_deadline() {
+    // The deadline a reader who set no variable waits under. It is twice the
+    // longest run anybody measured, and a run that outlives it is killed, so
+    // a number that drifts under a real run kills every default run.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&writes_the_stream_slowly(&undated(JSON_PLAN)));
+    let painted = run_painting(&gh, &["--repo", REPO], &[]);
+    assert!(
+        painted.output.status.success(),
+        "the run answered: {}",
+        painted.frames
+    );
+    assert!(
+        painted.frames.contains(DEFAULT_DEADLINE),
+        "{}",
         painted.frames
     );
 }
