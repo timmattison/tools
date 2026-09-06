@@ -31,6 +31,14 @@
 //! silence, and a read that waited for that silence would spend the whole
 //! budget on every run.
 //!
+//! # The run that owns no terminal
+//!
+//! The question needs raw mode, and the call that asks for raw mode sends
+//! SIGTTOU to a caller that stands in a background process group. The default
+//! action of SIGTTOU stops the process. So the probe asks
+//! [`owns_the_terminal`] first, and a run that owns the terminal is the only
+//! run that asks it anything.
+//!
 //! # The answer that arrives behind the budget
 //!
 //! The budget ends the read, and it ends no answer of a terminal. A terminal
@@ -166,8 +174,10 @@ fn position_of(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Ask the controlling terminal which image protocol it draws.
 ///
-/// Gives [`None`] when there is no controlling terminal, when the terminal
-/// answers nothing inside `budget`, or when the answer names neither protocol.
+/// Gives [`None`] when there is no controlling terminal, when this run stands
+/// in a background process group and therefore owns no terminal to ask (see
+/// [`owns_the_terminal`]), when the terminal answers nothing inside `budget`,
+/// or when the answer names neither protocol.
 pub(crate) fn ask_the_terminal(budget: Duration) -> Option<AnsweredProtocol> {
     let terminal = OpenOptions::new()
         .read(true)
@@ -276,6 +286,28 @@ fn waits_for_a_byte(fd: RawFd, left: Duration) -> bool {
     ready > 0
 }
 
+/// Whether the process group of this run owns `fd`.
+///
+/// **A caller that does not own the terminal must write no terminal setting to
+/// it.** tcsetattr(3) of such a caller sends SIGTTOU to the whole process group
+/// of the caller, and the default action of SIGTTOU stops the process. A shell
+/// that starts a script with `&` puts that script in a background process
+/// group, so a probe with no guard here freezes the script on the one call that
+/// asks for raw mode, and it prints nothing that says why.
+///
+/// A run that owns no terminal keeps the behavior it had before the probe
+/// existed: it asks nothing, and the name the environment carries is the whole
+/// of the answer.
+///
+/// A terminal that answers nothing to tcgetpgrp(3) is one this run does not own
+/// either, because the answer of that call is the one thing that says it does.
+fn owns_the_terminal(fd: RawFd) -> bool {
+    // SAFETY: `fd` is the descriptor of a file this module holds open.
+    let foreground = unsafe { libc::tcgetpgrp(fd) };
+    // SAFETY: getpgrp takes no argument, reads no memory and fails for nothing.
+    foreground != -1 && foreground == unsafe { libc::getpgrp() }
+}
+
 /// The terminal held in raw mode, and put back the way it was on the way out.
 ///
 /// A canonical terminal gives a read nothing until a newline arrives, and no
@@ -287,8 +319,12 @@ struct RawMode {
 }
 
 impl RawMode {
-    /// Put `fd` in raw mode, or give [`None`] for a descriptor that refuses.
+    /// Put `fd` in raw mode, or give [`None`] for a descriptor this process
+    /// group does not own and for a descriptor that refuses.
     fn of(fd: RawFd) -> Option<Self> {
+        if !owns_the_terminal(fd) {
+            return None;
+        }
         // SAFETY: `termios` is a plain C struct, and tcgetattr fills the whole
         // of it before anything reads it.
         let mut saved: libc::termios = unsafe { std::mem::zeroed() };
@@ -459,6 +495,14 @@ mod tests {
     /// What the child exits with when a call of its own failed.
     const FAILED: libc::c_int = 21;
 
+    /// What the child exits with when the guard refused the owner itself.
+    ///
+    /// The verdict of the grandchild alone says nothing about a guard that
+    /// answers no to every caller, and such a guard takes the probe out of
+    /// service on every terminal. So the child, which owns the terminal, asks
+    /// the guard about itself and reports what it said.
+    const OWNER_REFUSED: libc::c_int = 23;
+
     /// Ask `terminal` from a process group that does not own it, and exit with
     /// the verdict.
     ///
@@ -473,6 +517,9 @@ mod tests {
     /// terminal from there. A grandchild that stops instead of coming back is
     /// the defect. The child names the grandchild on `report` first, so that a
     /// run which has to clean up after a timeout can reach it.
+    ///
+    /// The child also reports what the guard says about the child itself, which
+    /// owns the terminal. Both directions of the guard are then in one verdict.
     fn ask_from_the_background(terminal: RawFd, report: RawFd) -> ! {
         // SAFETY: every call below reads no memory of this process, except the
         // bytes of `named` that the write names and the status word that
@@ -491,6 +538,13 @@ mod tests {
             )]
             if libc::ioctl(terminal, libc::c_ulong::from(libc::TIOCSCTTY), 0) == -1 {
                 libc::_exit(FAILED);
+            }
+
+            // setsid made this child the leader of a session and TIOCSCTTY made
+            // its process group the foreground group of the terminal, so this
+            // child owns the terminal and the guard must say so.
+            if !owns_the_terminal(terminal) {
+                libc::_exit(OWNER_REFUSED);
             }
 
             let grandchild = libc::fork();
@@ -642,8 +696,10 @@ mod tests {
             libc::WEXITSTATUS(status),
             CAME_BACK,
             "a probe that stands in a background process group must come back. \
-             A grandchild that stopped was stopped by the SIGTTOU that \
-             tcsetattr(3) sends to a background caller"
+             {STOPPED} says the grandchild stopped, which is the SIGTTOU that \
+             tcsetattr(3) sends to a background caller. {OWNER_REFUSED} says \
+             the guard refused the child, which owns the terminal and must be \
+             free to ask it"
         );
     }
 }

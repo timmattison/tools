@@ -170,6 +170,11 @@ impl Capabilities {
     /// and cost the budget of [`crate::probe::QUERY_BUDGET`]. A run whose
     /// standard output is no terminal asks nothing either.
     ///
+    /// A run that stands in a background process group asks nothing as well.
+    /// The question needs raw mode, and the call that asks for raw mode stops
+    /// such a run. [`crate::probe::ask_the_terminal`] holds that rule, and a
+    /// run it stops short answers with the name the environment carries.
+    ///
     /// The answer replaces the name. It never replaces a name the environment
     /// carried, because the only name it can replace is
     /// [`TerminalType::Unknown`].
