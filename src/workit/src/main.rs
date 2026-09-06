@@ -36,7 +36,7 @@ struct Args {
     #[arg(
         short,
         long,
-        help = "Exclude paths matching these patterns (in addition to defaults: target, node_modules)"
+        help = "Exclude directories with these exact names, at any depth below the search path (in addition to defaults: target, node_modules)"
     )]
     exclude: Vec<String>,
 
@@ -100,9 +100,23 @@ fn find_cargo_tomls(
                 }
             }
 
-            // Skip excluded paths
-            for exclude in excludes {
-                if path.to_string_lossy().contains(exclude) {
+            // Skip excluded directories. An exclusion names a directory, so it
+            // is matched against whole components rather than against the path
+            // as text: `targets` and `node_modules_backup` are directories of
+            // their own and are not `target` or `node_modules`.
+            //
+            // Only the components below the search root are matched. WalkDir
+            // hands the root itself to this filter first, and the user asked
+            // for that root by name, so a word in its own path says nothing
+            // about what is under it — a root named `targeting`, or an
+            // explicit `--path /home/tim/target/myproj`, is searched normally.
+            let below_root = path.strip_prefix(root).unwrap_or_else(|_| Path::new(""));
+            for component in below_root.components() {
+                let name = component.as_os_str();
+                if excludes
+                    .iter()
+                    .any(|exclude| name == std::ffi::OsStr::new(exclude))
+                {
                     return false;
                 }
             }

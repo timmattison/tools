@@ -1590,8 +1590,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     into the `[workspace]` members list — rewriting the members of a manifest that is already there
     and leaving the rest of it alone. Two packages that share a name are refused rather than
     written, with the paths that hold each one, because a workspace cannot carry the same package
-    name twice. `target` and `node_modules` stay out of the walk, and so does a package inside a
-    git worktree, which is a second checkout of packages the repository already holds.
+    name twice. A directory named `target` or `node_modules` stays out of the walk, and so does a
+    package inside a git worktree, which is a second checkout of packages the repository already
+    holds. An exclusion names a whole directory below the search path, so `targets` and
+    `node_modules_backup` stay in, and the search path itself is never matched against the list —
+    `workit --path ~/code/target/myproj` searches that tree like any other.
   - Usage: `workit`, `workit --path ~/code/tools`, `workit --output workspace/Cargo.toml`,
     `workit --dry-run` (prints the manifest it would write and touches nothing),
     `workit --exclude vendor`, `workit --prefix src/`, `workit --include-worktrees`,
