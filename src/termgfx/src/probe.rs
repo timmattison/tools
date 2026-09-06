@@ -351,7 +351,10 @@ mod tests {
     #[test]
     fn a_refusal_of_the_kitty_query_is_no_kitty_answer() {
         // The specification answers a refused query with a code, not with OK.
-        assert_eq!(read_answer(b"\x1b_Gi=31;ENOTSUPP:nope\x1b\\\x1b[?62;22c"), None);
+        assert_eq!(
+            read_answer(b"\x1b_Gi=31;ENOTSUPP:nope\x1b\\\x1b[?62;22c"),
+            None
+        );
     }
 
     #[test]

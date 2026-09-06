@@ -2288,13 +2288,11 @@ not_a_number  1 /bin/bash
         // user. So an answer under mosh is a fact about the far terminal, and
         // it outranks the process tree. A name under mosh is still a guess,
         // which is what `mosh_refusal_message` above covers.
-        let answered = Capabilities::new(
-            TerminalType::Answered(AnsweredProtocol::Kitty),
-            true,
-            true,
-        );
+        let answered =
+            Capabilities::new(TerminalType::Answered(AnsweredProtocol::Kitty), true, true);
         assert!(
-            validate_terminal_for_graphics(&answered, &RemoteTransport::Mosh, false, "Image").is_ok(),
+            validate_terminal_for_graphics(&answered, &RemoteTransport::Mosh, false, "Image")
+                .is_ok(),
             "a terminal that answered the query draws the picture"
         );
     }
@@ -2303,13 +2301,11 @@ not_a_number  1 /bin/bash
     fn a_terminal_that_answered_draws_a_picture_inside_tmux() {
         // tmux 3.7c answers `CSI ?1;2;4 c`, which names sixel. Measured
         // 2026-09-06. The blanket refusal below it rests on an older tmux.
-        let answered = Capabilities::new(
-            TerminalType::Answered(AnsweredProtocol::Sixel),
-            true,
-            true,
-        );
+        let answered =
+            Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true);
         assert!(
-            validate_terminal_for_graphics(&answered, &RemoteTransport::None, true, "Image").is_ok(),
+            validate_terminal_for_graphics(&answered, &RemoteTransport::None, true, "Image")
+                .is_ok(),
             "a terminal that answered the query draws the picture"
         );
     }
