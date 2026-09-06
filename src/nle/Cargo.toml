@@ -27,6 +27,7 @@ ts-rs = { version = "10", features = ["serde-compat"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+yaml-rust2 = { workspace = true }
 
 [lints]
 workspace = true
