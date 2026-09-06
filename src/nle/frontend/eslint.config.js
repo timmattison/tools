@@ -21,5 +21,5 @@ export default tseslint.config(
       "@typescript-eslint/no-misused-promises": "error",
     },
   },
-  { ignores: ["dist/"] },
+  { ignores: ["dist/", "eslint.config.js"] },
 );

@@ -1,7 +1,6 @@
-/// <reference types="vitest" />
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
-import { devServerPort } from "./src/dev-port";
+import { devServerPort } from "./dev-port";
 
 export default defineConfig({
   plugins: [react()],
