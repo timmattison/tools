@@ -506,14 +506,22 @@ fn ensure_ffprobe_available() -> Result<()> {
 }
 
 /// Whether this run stands inside a tmux session.
-///
-/// The gate takes this as an argument rather than reading it, so that the gate
-/// is a pure function of its inputs. A test that set `TMUX` would change the
-/// environment of every other test in the process.
 fn in_tmux() -> bool {
     std::env::var("TMUX").is_ok()
 }
 
+/// Refuse the run when this session cannot draw an image.
+///
+/// The gate reads three things: the answer the terminal gave to a query, the
+/// remote transport, and the multiplexer. It gives `Ok` when the session can
+/// show graphics. It gives an error when the session cannot, and that error
+/// carries the reason and the repair for the user to read. `feature` names
+/// what the user asked for, "Image" or "Video", and the messages say that
+/// word.
+///
+/// `in_tmux` arrives as an argument, and the gate does not read `TMUX` itself,
+/// so that the gate is a pure function of its inputs. A test that set `TMUX`
+/// would change the environment of every other test in the process.
 fn validate_terminal_for_graphics(
     terminal_caps: &Capabilities,
     transport: &RemoteTransport,
