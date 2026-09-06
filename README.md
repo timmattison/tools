@@ -1584,6 +1584,19 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `WN_NO_CLAUDE=1 wn`, `WN_PLAN_TIMEOUT=900 wn`, `WN_PLAN_EFFORT=high wn`,
     `WN_PLAN_MODEL=opus wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
+- workit
+  - Builds a Cargo workspace manifest out of a directory tree. It walks the tree, finds every
+    `Cargo.toml` that declares a package and no workspace of its own, and writes those directories
+    into the `[workspace]` members list — rewriting the members of a manifest that is already there
+    and leaving the rest of it alone. Two packages that share a name are refused rather than
+    written, with the paths that hold each one, because a workspace cannot carry the same package
+    name twice. `target` and `node_modules` stay out of the walk, and so does a package inside a
+    git worktree, which is a second checkout of packages the repository already holds.
+  - Usage: `workit`, `workit --path ~/code/tools`, `workit --output workspace/Cargo.toml`,
+    `workit --dry-run` (prints the manifest it would write and touches nothing),
+    `workit --exclude vendor`, `workit --prefix src/`, `workit --include-worktrees`,
+    `workit --no-default-excludes`.
+  - To install: `cargo install --git https://github.com/timmattison/tools workit`
 
 ## dirhash
 
