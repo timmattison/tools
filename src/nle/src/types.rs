@@ -119,9 +119,8 @@ impl Recording {
                 NleError::InvalidFormat(format!("Failed to parse compressed recording: {e}"))
             })
         } else {
-            serde_json::from_reader(reader).map_err(|e| {
-                NleError::InvalidFormat(format!("Failed to parse recording: {e}"))
-            })
+            serde_json::from_reader(reader)
+                .map_err(|e| NleError::InvalidFormat(format!("Failed to parse recording: {e}")))
         }
     }
 
@@ -134,8 +133,7 @@ impl Recording {
             let file = std::fs::File::create(path).map_err(|e| {
                 NleError::SaveError(format!("Failed to create file {}: {e}", path.display()))
             })?;
-            let mut encoder =
-                flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
             encoder.write_all(json.as_bytes()).map_err(|e| {
                 NleError::SaveError(format!("Failed to write gzip file {}: {e}", path.display()))
             })?;
@@ -226,8 +224,7 @@ mod tests {
         // Write gzip file
         let json = serde_json::to_string(&recording).unwrap();
         let file = std::fs::File::create(&path).unwrap();
-        let mut encoder =
-            flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         encoder.write_all(json.as_bytes()).unwrap();
         encoder.finish().unwrap();
 
@@ -245,8 +242,7 @@ mod tests {
 
         let json = serde_json::to_string(&recording).unwrap();
         let file = std::fs::File::create(&path).unwrap();
-        let mut encoder =
-            flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         encoder.write_all(json.as_bytes()).unwrap();
         encoder.finish().unwrap();
 

@@ -69,9 +69,8 @@ fn no_package_is_both_allowed_and_ignored() {
 
     for package in ignored {
         let package = package.as_str().unwrap_or("<non-string entry>");
-        let allowed_here = allowed.is_some_and(|entries| {
-            entries.iter().any(|(key, _)| key.as_str() == Some(package))
-        });
+        let allowed_here = allowed
+            .is_some_and(|entries| entries.iter().any(|(key, _)| key.as_str() == Some(package)));
         assert!(
             !allowed_here,
             "pnpm-workspace.yaml names `{package}` under both {ALLOW_BUILDS_KEY} and \
