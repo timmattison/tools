@@ -2927,7 +2927,7 @@ const DEADLINE_SECONDS: &str = "600";
 /// made on purpose.
 const DEFAULT_DEADLINE: &str = " of 26m0s";
 
-/// That same deadline, as the line writes it.
+/// [`DEADLINE_SECONDS`], as the line writes it.
 const DEADLINE: &str = " of 10m0s";
 
 /// The seconds the fake `claude` of a painted run holds the first reach on the
