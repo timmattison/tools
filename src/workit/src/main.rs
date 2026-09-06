@@ -21,10 +21,9 @@ struct Args {
     #[arg(
         short,
         long,
-        help = "Output file for workspace Cargo.toml",
-        default_value = "Cargo.toml"
+        help = "Output file for workspace Cargo.toml [default: <path>/Cargo.toml]"
     )]
-    output: PathBuf,
+    output: Option<PathBuf>,
 
     #[arg(
         short,
@@ -43,7 +42,7 @@ struct Args {
     #[arg(
         short = 'P',
         long,
-        help = "Prefix to add to member paths (e.g., 'src/')"
+        help = "Prefix to add to member paths (e.g., 'src/'); a package the manifest directory does not hold is named in full and takes no prefix"
     )]
     prefix: Option<String>,
 
@@ -170,6 +169,60 @@ fn get_package_name(path: &Path) -> Result<String> {
     ))
 }
 
+/// The directory every member path is measured from: the directory that holds
+/// the manifest being written.
+///
+/// Cargo resolves a member against the manifest that lists it, so the manifest
+/// decides what a member means — not the tree the walk happened to start at.
+/// The two are the same directory on a default run and part company as soon as
+/// `--output` names a file somewhere else.
+fn manifest_directory(output: &Path) -> Result<PathBuf> {
+    // `Path::parent` answers `Some("")` for a bare file name, which names no
+    // directory. The file lands in the directory the run was started from, so
+    // that is the directory its members are measured from.
+    let directory = match output.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+
+    directory.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve {}, the directory that would hold {}",
+            directory.display(),
+            output.display()
+        )
+    })
+}
+
+/// The member path for the package directory `package`, as the manifest in
+/// `manifest_directory` lists it.
+///
+/// Both sides of the subtraction are canonical, so it is exact whether the run
+/// named its tree relatively or absolutely — a relative `--path` used to leave
+/// a `./` on the front of every member, because an absolute root cannot be
+/// taken off a relative path.
+///
+/// A package the manifest directory does not hold cannot be named relative to
+/// it, which an explicit `--output` makes possible. Such a package is named in
+/// full, and the prefix does not apply to it: a prefix names a directory under
+/// the manifest, and an absolute path is under nothing.
+fn member_path(package: &Path, manifest_directory: &Path, prefix: Option<&str>) -> Result<String> {
+    let package = package
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve {}", package.display()))?;
+
+    match package.strip_prefix(manifest_directory) {
+        Ok(relative) => {
+            let member = relative.to_string_lossy().replace('\\', "/");
+            Ok(match prefix {
+                Some(prefix) => format!("{prefix}{member}"),
+                None => member,
+            })
+        }
+        Err(_) => Ok(package.to_string_lossy().replace('\\', "/")),
+    }
+}
+
 fn create_or_update_workspace(output: &Path, members: &[String], dry_run: bool) -> Result<()> {
     let mut doc = if output.exists() {
         let content = fs::read_to_string(output)
@@ -199,6 +252,27 @@ fn create_or_update_workspace(output: &Path, members: &[String], dry_run: bool) 
         .as_array_mut()
         .ok_or_else(|| anyhow::anyhow!("Failed to create members array"))?;
 
+    // The members list is rewritten whole, so every member the scan did not
+    // find goes. Name them first: a manifest that quietly loses a member reads
+    // afterwards like a manifest nobody touched.
+    let mut dropped = Vec::new();
+    for existing in members_array.iter().filter_map(toml_edit::Value::as_str) {
+        if !members.iter().any(|member| member.as_str() == existing) {
+            dropped.push(existing.to_string());
+        }
+    }
+
+    if !dropped.is_empty() {
+        eprintln!(
+            "Dropping {} member(s) of {} that the scan did not find:",
+            dropped.len(),
+            output.display()
+        );
+        for member in &dropped {
+            eprintln!("  - {member}");
+        }
+    }
+
     // Clear existing members and add new ones
     members_array.clear();
     for member in members {
@@ -224,6 +298,14 @@ fn create_or_update_workspace(output: &Path, members: &[String], dry_run: bool) 
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // The manifest lands beside the tree that was scanned unless the run named
+    // a file of its own. It used to land in the directory the run was started
+    // from whatever tree it read, so `workit --path <elsewhere>` rewrote the
+    // members of a manifest it had not looked at, naming packages that
+    // directory does not hold. Clap cannot spell a default that reads another
+    // argument, so the default is resolved here.
+    let output = args.output.unwrap_or_else(|| args.path.join("Cargo.toml"));
 
     // Merge default excludes with user excludes
     let all_excludes = if args.no_default_excludes {
@@ -289,34 +371,23 @@ fn main() -> Result<()> {
         return Err(anyhow::anyhow!("Duplicate package names found"));
     }
 
-    // Convert paths to relative paths for workspace members
+    // Name each package the way the manifest that lists it has to read it.
     let mut members = Vec::new();
-    let root = args.path.canonicalize()?;
+    let manifest_directory = manifest_directory(&output)?;
 
     for cargo_file in &cargo_files {
         let parent = cargo_file
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Cargo.toml has no parent directory"))?;
 
-        let relative = if parent.starts_with(&root) {
-            parent.strip_prefix(&root)?
-        } else {
-            parent
-        };
+        let member = member_path(parent, &manifest_directory, args.prefix.as_deref())?;
 
-        let mut member = relative.to_string_lossy().replace('\\', "/");
-
-        // Add prefix if specified
-        if let Some(prefix) = &args.prefix {
-            member = format!("{}{}", prefix, member);
-        }
-
-        println!("  - {}", member);
+        println!("  - {member}");
         members.push(member);
     }
 
     // Create or update workspace Cargo.toml
-    create_or_update_workspace(&args.output, &members, args.dry_run)?;
+    create_or_update_workspace(&output, &members, args.dry_run)?;
 
     if !args.dry_run {
         println!("\nWorkspace created with {} members", members.len());

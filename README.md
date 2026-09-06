@@ -1588,14 +1588,21 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Builds a Cargo workspace manifest out of a directory tree. It walks the tree, finds every
     `Cargo.toml` that declares a package and no workspace of its own, and writes those directories
     into the `[workspace]` members list — rewriting the members of a manifest that is already there
-    and leaving the rest of it alone. Two packages that share a name are refused rather than
-    written, with the paths that hold each one, because a workspace cannot carry the same package
-    name twice. A directory named `target` or `node_modules` stays out of the walk, and so does a
-    package inside a git worktree, which is a second checkout of packages the repository already
-    holds. An exclusion names a whole directory below the search path, so `targets` and
-    `node_modules_backup` stay in, and the search path itself is never matched against the list —
-    `workit --path ~/code/target/myproj` searches that tree like any other.
-  - Usage: `workit`, `workit --path ~/code/tools`, `workit --output workspace/Cargo.toml`,
+    and leaving the rest of it alone, and naming on stderr every member the walk did not find
+    before that rewrite drops it. The manifest lands beside the tree that was scanned, so
+    `workit --path ~/code/other` writes `~/code/other/Cargo.toml` and never touches the directory
+    the run was started from; `--output` names a file of its own instead. A member is written
+    relative to the directory that holds the manifest, because that is the directory cargo resolves
+    a member against, so `--output` decides what the members read — and a package that directory
+    does not hold is named in full and takes no `--prefix`. Two packages that share a name are
+    refused rather than written, with the paths that hold each one, because a workspace cannot
+    carry the same package name twice. A directory named `target` or `node_modules` stays out of
+    the walk, and so does a package inside a git worktree, which is a second checkout of packages
+    the repository already holds. An exclusion names a whole directory below the search path, so
+    `targets` and `node_modules_backup` stay in, and the search path itself is never matched
+    against the list — `workit --path ~/code/target/myproj` searches that tree like any other.
+  - Usage: `workit`, `workit --path ~/code/tools` (writes `~/code/tools/Cargo.toml`),
+    `workit --output workspace/Cargo.toml` (writes there, and roots every member at `workspace/`),
     `workit --dry-run` (prints the manifest it would write and touches nothing),
     `workit --exclude vendor`, `workit --prefix src/`, `workit --include-worktrees`,
     `workit --no-default-excludes`.
