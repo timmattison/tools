@@ -434,4 +434,216 @@ mod tests {
             "the answer of the attributes request is what ends the read"
         );
     }
+
+    /// The budget of the probe that the background grandchild runs.
+    ///
+    /// Nothing stands behind the pseudo-terminal to answer, so every run of
+    /// this test spends the whole of this budget. It is short for that reason.
+    const BACKGROUND_BUDGET: Duration = Duration::from_millis(50);
+
+    /// How long this test waits for the child to report.
+    const REPORT_BUDGET: Duration = Duration::from_secs(10);
+
+    /// How long this test waits between two reads of the state of the child.
+    const REPORT_POLL: Duration = Duration::from_millis(10);
+
+    /// How many bytes the child writes to name the grandchild.
+    const PID_BYTES: usize = std::mem::size_of::<libc::pid_t>();
+
+    /// What the child exits with for a grandchild that stopped.
+    const STOPPED: libc::c_int = 17;
+
+    /// What the child exits with for a grandchild that came back.
+    const CAME_BACK: libc::c_int = 19;
+
+    /// What the child exits with when a call of its own failed.
+    const FAILED: libc::c_int = 21;
+
+    /// Ask `terminal` from a process group that does not own it, and exit with
+    /// the verdict.
+    ///
+    /// This runs in a child of a fork, and the process it forked from is a test
+    /// binary that holds many threads. So the block below holds plain libc
+    /// calls alone and leaves through `_exit`, which runs no destructor of the
+    /// parent.
+    ///
+    /// The child takes `terminal` as its controlling terminal, and its process
+    /// group is the foreground group of that terminal. The grandchild leaves
+    /// that group, which is what puts it in the background, and asks the
+    /// terminal from there. A grandchild that stops instead of coming back is
+    /// the defect. The child names the grandchild on `report` first, so that a
+    /// run which has to clean up after a timeout can reach it.
+    fn ask_from_the_background(terminal: RawFd, report: RawFd) -> ! {
+        // SAFETY: every call below reads no memory of this process, except the
+        // bytes of `named` that the write names and the status word that
+        // waitpid fills, and this function owns both of them. `terminal` and
+        // `report` are descriptors the test opened and still holds. The fork
+        // gave this process a new process id and left it in the process group
+        // of the test, so it leads no process group and setsid cannot fail for
+        // the one reason it has.
+        unsafe {
+            if libc::setsid() == -1 {
+                libc::_exit(FAILED);
+            }
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of this child, and termsize offers no call for that"
+            )]
+            if libc::ioctl(terminal, libc::c_ulong::from(libc::TIOCSCTTY), 0) == -1 {
+                libc::_exit(FAILED);
+            }
+
+            let grandchild = libc::fork();
+            if grandchild == -1 {
+                libc::_exit(FAILED);
+            }
+            if grandchild == 0 {
+                // A process group of its own is a background group of this
+                // terminal, because the foreground group is still the one of
+                // the child. This is the shape of a script that a shell
+                // started with `&`.
+                if libc::setpgid(0, 0) == -1 {
+                    libc::_exit(FAILED);
+                }
+                let _answer = ask_the_terminal(BACKGROUND_BUDGET);
+                libc::_exit(0);
+            }
+
+            let named = grandchild.to_ne_bytes();
+            let _sent = libc::write(report, named.as_ptr().cast(), named.len());
+
+            let mut status: libc::c_int = 0;
+            if libc::waitpid(grandchild, &mut status, libc::WUNTRACED) == -1 {
+                libc::_exit(FAILED);
+            }
+            if libc::WIFSTOPPED(status) {
+                libc::kill(grandchild, libc::SIGCONT);
+                libc::kill(grandchild, libc::SIGKILL);
+                libc::waitpid(grandchild, std::ptr::null_mut(), 0);
+                libc::_exit(STOPPED);
+            }
+            libc::_exit(CAME_BACK)
+        }
+    }
+
+    /// The process id the child wrote to `reader`, or [`None`] for a child that
+    /// named nothing inside `budget`.
+    fn read_the_pid(reader: RawFd, budget: Duration) -> Option<libc::pid_t> {
+        if !waits_for_a_byte(reader, budget) {
+            return None;
+        }
+        let mut named = [0_u8; PID_BYTES];
+        // SAFETY: the buffer is owned here and the length is its own.
+        let taken = unsafe { libc::read(reader, named.as_mut_ptr().cast(), named.len()) };
+        (usize::try_from(taken) == Ok(named.len())).then(|| libc::pid_t::from_ne_bytes(named))
+    }
+
+    #[test]
+    fn a_run_in_the_background_asks_the_terminal_nothing() {
+        // tcsetattr(3) of a caller that stands in a background process group
+        // sends SIGTTOU to the whole of that group, and the default action of
+        // SIGTTOU stops the process. A script that a shell started with `&`
+        // stands in such a group, so a probe that puts the terminal in raw
+        // mode there freezes the script and prints nothing that says why. This
+        // test builds that process group and asks whether the probe comes back
+        // out of it.
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        // SAFETY: openpty writes one file descriptor to each of the first two
+        // pointers, and both point at a live local variable. The three null
+        // pointers ask for the default terminal modes, for no name of the
+        // slave device and for the default size of the window. The probe reads
+        // no window, so no size of one reaches what this test asserts.
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            opened,
+            0,
+            "openpty must give a pseudo-terminal: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let mut ends = [0_i32; 2];
+        // SAFETY: pipe(2) fills the two descriptors of an array this test owns.
+        let made = unsafe { libc::pipe(ends.as_mut_ptr()) };
+        assert_eq!(made, 0, "pipe(2) gives a pair of descriptors");
+        let [reader, writer] = ends;
+
+        // SAFETY: fork(2) reads nothing of this process. The child leaves
+        // through `_exit` alone, so it runs no destructor of this one.
+        let child = unsafe { libc::fork() };
+        assert!(child != -1, "fork(2) must give a child");
+        if child == 0 {
+            ask_from_the_background(slave, writer);
+        }
+
+        // SAFETY: this test opened the descriptor and the child holds a copy of
+        // its own. A closed copy here ends the read below for a child that
+        // names nothing.
+        unsafe { libc::close(writer) };
+        let grandchild = read_the_pid(reader, REPORT_BUDGET);
+
+        let deadline = Instant::now() + REPORT_BUDGET;
+        let mut status: libc::c_int = 0;
+        let mut reported = 0;
+        while Instant::now() < deadline {
+            // SAFETY: `status` is owned here, and `child` is a child of this
+            // process, so waitpid reads no other family.
+            reported = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
+            if reported != 0 {
+                break;
+            }
+            std::thread::sleep(REPORT_POLL);
+        }
+
+        if reported != child {
+            // Take the family down, so that a run which timed out leaves no
+            // stopped process behind. The grandchild goes first: it stands in
+            // a process group of its own, and a group with no living parent
+            // outside it takes no job control signal at all.
+            // SAFETY: kill and waitpid read no memory of this process, and both
+            // process ids below name a member of this family.
+            unsafe {
+                if let Some(grandchild) = grandchild {
+                    libc::kill(grandchild, libc::SIGCONT);
+                    libc::kill(grandchild, libc::SIGKILL);
+                }
+                libc::kill(child, libc::SIGKILL);
+                libc::waitpid(child, std::ptr::null_mut(), 0);
+            }
+        }
+
+        // Every descriptor goes back before the assertions, because a failed
+        // assertion leaves this test through a panic.
+        // SAFETY: this test opened all three descriptors and nothing else holds
+        // them.
+        unsafe {
+            libc::close(reader);
+            libc::close(slave);
+            libc::close(master);
+        }
+
+        assert_eq!(
+            reported, child,
+            "the child must report inside {REPORT_BUDGET:?}"
+        );
+        assert!(
+            libc::WIFEXITED(status),
+            "the child must exit, and it exited for a signal instead"
+        );
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            CAME_BACK,
+            "a probe that stands in a background process group must come back. \
+             A grandchild that stopped was stopped by the SIGTTOU that \
+             tcsetattr(3) sends to a background caller"
+        );
+    }
 }
