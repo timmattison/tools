@@ -8,8 +8,9 @@
 //! price beside it.
 //!
 //! So this module stands between the pipe and the two readers of it. It reads
-//! the pipe one line at a time on a thread of its own, hands each reach on as
-//! it arrives, and keeps the envelope for the end.
+//! the pipe one line at a time, hands each reach on as it arrives, and keeps
+//! the envelope for the end. The thread the reading runs on belongs to
+//! [`crate::build`], which owns the child.
 //!
 //! # Every other kind is read past
 //!
@@ -34,7 +35,6 @@
 //! what [`WIDEST_TRANSCRIPT`] keeps.
 
 use std::io::{BufRead, BufReader, Read};
-use std::thread;
 
 use serde_json::Value;
 
@@ -181,43 +181,41 @@ impl Transcript {
     }
 }
 
-/// Read `pipe` to its end on a thread of its own, telling `doing` what the run
-/// reaches for as it reaches for it.
+/// Read `pipe` to its end, telling `doing` what the run reaches for as it
+/// reaches for it.
 ///
-/// The thread is what makes the line move. A pipe nobody reads fills up and the
-/// run blocks in it, and a pipe read at the end says nothing until the run is
-/// over — which is the one moment the reader no longer needs telling.
+/// The reading runs on a thread [`crate::build`] starts, because that module
+/// owns the child and the reading has to go on while the run writes. The reason
+/// for that stands at `crate::build::Reading`.
 ///
 /// `doing` is handed one reach at a time, newest last. It is never handed the
 /// envelope: the line is cleared before the envelope is read.
-pub fn read<R, F>(pipe: R, doing: F) -> thread::JoinHandle<Transcript>
+pub fn transcribe<R, F>(pipe: R, doing: F) -> Transcript
 where
-    R: Read + Send + 'static,
-    F: Fn(&str) + Send + 'static,
+    R: Read,
+    F: Fn(&str),
 {
-    thread::spawn(move || {
-        let mut reader = BufReader::new(pipe);
-        let mut transcript = Transcript::default();
-        let mut raw = Vec::new();
-        loop {
-            let more = reader.read_until(b'\n', &mut raw);
-            if !raw.is_empty() {
-                let line = String::from_utf8_lossy(&raw).into_owned();
-                raw.clear();
-                take(&mut transcript, &line, &doing);
-                transcript.print(&line);
-            }
-            // A read that failed and a read that found the end both end the
-            // reading, and what was read up to that point is kept either way. A
-            // pipe that broke is a run that ended early, the status of the run
-            // is what says so, and the half line before the break can be the
-            // one that says why.
-            if !matches!(more, Ok(read) if read > 0) {
-                break;
-            }
+    let mut reader = BufReader::new(pipe);
+    let mut transcript = Transcript::default();
+    let mut raw = Vec::new();
+    loop {
+        let more = reader.read_until(b'\n', &mut raw);
+        if !raw.is_empty() {
+            let line = String::from_utf8_lossy(&raw).into_owned();
+            raw.clear();
+            take(&mut transcript, &line, &doing);
+            transcript.print(&line);
         }
-        transcript
-    })
+        // A read that failed and a read that found the end both end the
+        // reading, and what was read up to that point is kept either way. A
+        // pipe that broke is a run that ended early, the status of the run
+        // is what says so, and the half line before the break can be the
+        // one that says why.
+        if !matches!(more, Ok(read) if read > 0) {
+            break;
+        }
+    }
+    transcript
 }
 
 /// Take `line` into `transcript`, and tell `doing` what it says the run does.
@@ -314,12 +312,11 @@ mod tests {
     fn stream(text: &str) -> (Transcript, Vec<String>) {
         let reaches = Arc::new(Mutex::new(Vec::new()));
         let kept = Arc::clone(&reaches);
-        let read = read(std::io::Cursor::new(text.to_string()), move |reach| {
+        let transcript = transcribe(std::io::Cursor::new(text.to_string()), move |reach| {
             kept.lock()
                 .expect("no test of this file panics while it holds the lock")
                 .push(reach.to_string());
         });
-        let transcript = read.join().expect("the reader thread stands");
         let reaches = reaches
             .lock()
             .expect("the reader thread let the lock go")
@@ -659,13 +656,12 @@ mod tests {
         // words in it are the reason such a run gives, and a reader that
         // dropped the half line it was in the middle of would lose them.
         let said = "the model is overloaded";
-        let read = read(
+        let transcript = transcribe(
             Broken {
                 said: said.as_bytes().to_vec(),
             },
             |_| {},
         );
-        let transcript = read.join().expect("the reader thread stands");
         assert_eq!(transcript.printed(), said);
     }
 

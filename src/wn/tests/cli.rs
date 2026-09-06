@@ -2324,6 +2324,142 @@ fn a_run_that_outlives_its_deadline_is_killed_and_says_so() {
 }
 
 #[test]
+fn a_run_that_finished_the_plan_before_its_deadline_answers_it() {
+    // `claude` writes the whole envelope and only then exits, and those two
+    // moments are not the same moment. A run killed between them holds a
+    // finished plan in the pipe, and the reader already paid for it.
+    //
+    // The fake `claude` prints the envelope and then replaces itself with the
+    // sleep, so the process the tool kills is the process that waits.
+    let body = format!("{}exec sleep 30\n", prints_the_plan());
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&body);
+    let started = std::time::Instant::now();
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "1")]);
+    let waited = started.elapsed();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+    let message = stderr(&output);
+    assert!(message.contains("1 seconds"), "{message}");
+    assert!(message.contains(PLAN_TIMEOUT_ENV), "{message}");
+    assert!(
+        waited < std::time::Duration::from_secs(20),
+        "the run stopped at its deadline and did not wait for the sleep, in {waited:?}"
+    );
+}
+
+#[test]
+fn a_run_that_outlived_its_deadline_says_how_far_it_got() {
+    // The refusal carries what the run printed. A reader who paid for ten
+    // minutes and got one sentence about a deadline cannot tell a run that was
+    // working from a run that never started.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude("printf 'half of an answer\\n'\nexec sleep 30\n");
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "1")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(message.contains("1 seconds"), "{message}");
+    assert!(message.contains(PLAN_TIMEOUT_ENV), "{message}");
+    assert!(message.contains("half of an answer"), "{message}");
+}
+
+#[test]
+fn a_run_that_outlived_its_deadline_is_quoted_from_its_end() {
+    // Every run of `claude` opens with the same event, so a quotation of the
+    // front of the stream reads the same for a run that printed one event and
+    // for a run that worked nine minutes. The end is what tells those two
+    // apart, and the transcript drops its own front as the run goes on, so the
+    // front is not even the front of the run by then.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(
+        "printf 'the first line\\n'\nprintf 'the second line\\n'\nprintf 'the third line\\n'\n\
+         printf 'the fourth line\\n'\nprintf 'the fifth line\\n'\nprintf 'the last line\\n'\n\
+         exec sleep 30\n",
+    );
+    let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "1")]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(message.contains("the last line"), "{message}");
+    assert!(!message.contains("the first line"), "{message}");
+}
+
+#[test]
+fn a_killed_run_pays_the_grace_once_and_not_twice() {
+    // The fake `claude` of the held run starts a sleep in the background that
+    // drops the standard output pipe and keeps the standard error one, and
+    // then replaces itself with a sleep of its own. So the process the tool
+    // kills is the process it waited for, and standard error stays open in a
+    // grandchild the kill does not reach. That is the one shape the grace
+    // exists for, and it is the shape that shows whether the grace is paid
+    // once or twice.
+    //
+    // The arithmetic: the deadline gives one second and the grace gives five.
+    // A run that drains the pipe nobody reads under the grace stands five
+    // seconds further out than a run that does not. But a run also costs
+    // whatever the machine costs that minute — the fork, the fake `gh`, the
+    // scheduler — and that cost was measured between seven tenths of a second
+    // on an idle machine and near four seconds under a whole workspace run.
+    // So one second plus that cost cannot be told apart from one second plus
+    // seven tenths plus a grace by any constant, and a bound written as a
+    // constant measures the machine instead of the code.
+    //
+    // Two runs are measured instead, and the cost of the machine cancels
+    // between them. The baseline run leaves no grandchild behind, so both
+    // pipes close with the process the tool kills and neither the code that
+    // pays one grace nor the code that pays two has anything to wait for: it
+    // answers at the deadline plus whatever the machine cost. The held run is
+    // the same run with the grandchild added, so the only work that differs
+    // between the two is the wait on the pipe the grandchild holds open. Code
+    // that pays one grace puts the difference near zero, and code that pays it
+    // twice puts the difference at five seconds. The three seconds allows for
+    // the machine costing a different amount on the second run than on the
+    // first — it is not an allowance for that cost itself, which is in both
+    // measurements and cancels.
+    //
+    // The baseline runs first, so it also pays for the first load of the
+    // binary and the held run does not.
+    //
+    // The background sleep outlives this test on purpose. It ends on its own
+    // after thirty seconds, which is its bound, and holding the pipe open past
+    // the kill is the whole of what it is here for.
+    let plain = FakeGh::new(JSON_ISSUES).with_claude("exec sleep 30\n");
+    let started = std::time::Instant::now();
+    let baseline_output = run_building(&plain, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "1")]);
+    let baseline = started.elapsed();
+
+    let held = FakeGh::new(JSON_ISSUES).with_claude("sleep 30 1>/dev/null &\nexec sleep 30\n");
+    let started = std::time::Instant::now();
+    let held_output = run_building(&held, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "1")]);
+    let waited = started.elapsed();
+
+    // The refusal is asserted beside the clock, of both runs. A run that got
+    // its speed by giving up on the wait would answer nothing at all, and a
+    // test of the clock alone would call that a pass. The baseline is asserted
+    // as well, because a baseline that stopped refusing would stand for
+    // something other than the same run without the grandchild, and the
+    // comparison would then say nothing.
+    assert_eq!(
+        baseline_output.status.code(),
+        Some(2),
+        "the baseline run could not answer"
+    );
+    let message = stderr(&baseline_output);
+    assert!(message.contains("1 seconds"), "{message}");
+    assert!(message.contains(PLAN_TIMEOUT_ENV), "{message}");
+
+    assert_eq!(
+        held_output.status.code(),
+        Some(2),
+        "the run could not answer"
+    );
+    let message = stderr(&held_output);
+    assert!(message.contains("1 seconds"), "{message}");
+    assert!(message.contains(PLAN_TIMEOUT_ENV), "{message}");
+
+    assert!(
+        waited < baseline + std::time::Duration::from_secs(3),
+        "the run paid one grace and not two: {waited:?} against a baseline of {baseline:?}"
+    );
+}
+
+#[test]
 fn a_timeout_that_names_no_seconds_is_a_refusal_that_costs_no_run() {
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO], &[(PLAN_TIMEOUT_ENV, "10m")]);

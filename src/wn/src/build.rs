@@ -21,9 +21,17 @@
 //! which [`crate::envelope`] takes apart. A run that failed and printed an
 //! envelope says what it cost as well, because such a run spent the money
 //! before it failed.
+//!
+//! The pipe that carries the plan is read to its end before the wait is judged.
+//! `claude` writes the whole envelope and only then exits, and those two
+//! moments are not the same moment. So a run killed at its deadline can hold a
+//! finished plan in the pipe, and a path that gave up on the wait first would
+//! throw that plan away. The pipe that carries the complaint is read after,
+//! because only a run that ended on its own has a use for it.
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -236,6 +244,22 @@ const MODEL_FLAG: &str = "--model";
 /// How often a waiting run is asked whether it is finished.
 const POLL: Duration = Duration::from_millis(100);
 
+/// The seconds the reader of a killed run is given to reach the end of the pipe
+/// that carries the plan.
+///
+/// A run that ended on its own closed both pipes, so its readers are waited for
+/// with no bound at all. A run that was killed is a run whose write end can
+/// outlive it, because a tool the run started can hold the pipe open, and a
+/// wait with no bound there would outlive the deadline it reports. This is the
+/// drain of a pipe that is already closed and never a read of a run that still
+/// works.
+///
+/// One pipe pays it and never two. A killed run answers out of what it printed,
+/// so the text of the other pipe reaches nobody, and a second grace paid for
+/// text nobody reads would run after the first — which puts the answer twice as
+/// far past the deadline it reports.
+const GRACE: Duration = Duration::from_secs(5);
+
 /// Whether `value`, the value of [`NO_CLAUDE_ENV`], turns the run off.
 ///
 /// Takes the value as an argument rather than reading the environment, so a
@@ -349,6 +373,23 @@ fn looked_in_lines(paths: &[String]) -> String {
         .join("\n")
 }
 
+/// The clause of a refusal that says how far a run got, or nothing at all for a
+/// run that printed nothing.
+///
+/// A run writes one JSON object for each event, so this text is the end of what
+/// the transcript kept and never a document. The end rather than the front:
+/// every run opens with the same event, so the front of one reads like the
+/// front of every other, and the newest events are what tell a run that was
+/// working from a run that only started. It is here because the bytes a killed
+/// run wrote are the only evidence that the run was working, and a refusal that
+/// dropped them lost them for good.
+fn got_as_far_as(printed: &Snippet) -> String {
+    if printed.is_empty() {
+        return String::new();
+    }
+    format!("\n\nIt got as far as: {printed:?}")
+}
+
 /// What the environment said about one run.
 ///
 /// One struct rather than three arguments, because every one of them is a read
@@ -379,6 +420,10 @@ pub struct Settings<'a> {
 /// document alone. A run that failed and printed an envelope earns that report
 /// as well, because it spent the money before it failed.
 ///
+/// A run that outlived its deadline and finished the plan before it was killed
+/// answers with that plan, and the deadline stands on standard error above the
+/// price.
+///
 /// # Errors
 ///
 /// Gives [`BuildError::BadTimeout`] for a timeout that names no seconds,
@@ -386,10 +431,10 @@ pub struct Settings<'a> {
 /// [`BuildError::BadEffort`] for a level that is not one of
 /// [`EFFORT_LEVELS`], [`BuildError::BadModel`] for a model that opens with a
 /// dash, [`BuildError::NotInstalled`] when no path holds a `claude`,
-/// [`BuildError::TimedOut`] for a run that outlived its deadline,
-/// [`BuildError::NotAuthenticated`] for a `claude` with no account,
-/// [`BuildError::BadEnvelope`] for a run that printed no envelope, and
-/// [`BuildError::Failed`] for every other failure.
+/// [`BuildError::TimedOut`] for a run that outlived its deadline and printed
+/// no whole envelope, [`BuildError::NotAuthenticated`] for a `claude` with no
+/// account, [`BuildError::BadEnvelope`] for a run that printed no envelope,
+/// and [`BuildError::Failed`] for every other failure.
 ///
 /// The refusals of the settings stand before the run starts, because all
 /// three are read before a path is found and before a child is spawned. A
@@ -408,7 +453,12 @@ pub fn plan(
     let answered = ask(&path, waited, effort.as_ref(), model.as_ref(), &progress);
     progress.stop();
 
-    let envelope = answered?;
+    let answer = answered?;
+    // The deadline came and the run had finished the plan all the same. Both
+    // facts stand on standard error, above the price.
+    if let Some(seconds) = answer.overran {
+        eprintln!("{}", overran_line(seconds));
+    }
     // The report stands after the line is cleared, and on the pipe that line
     // drew on. The document goes to standard output, and a reader who pipes
     // that output must get the document alone.
@@ -416,10 +466,33 @@ pub fn plan(
     // It also stands before the answer is taken. A run that failed after
     // several turns spent the money before it failed, so the reader of such a
     // run learns the price as well.
-    if let Some(report) = envelope.report(effort.as_ref().map(Effort::as_str)) {
+    if let Some(report) = answer.envelope.report(effort.as_ref().map(Effort::as_str)) {
         eprintln!("{report}");
     }
-    Ok(envelope.answer()?.to_string())
+    Ok(answer.envelope.answer()?.to_string())
+}
+
+/// The line a run that outlived its deadline and finished the plan earns.
+///
+/// The plan goes to standard output all the same, so this line says two things:
+/// the deadline came, and `wn` answers with the plan the run finished before
+/// it. A reader who saw the deadline alone would believe the run answered
+/// nothing, and the plan they paid for would be gone.
+fn overran_line(seconds: u64) -> String {
+    format!(
+        "claude took longer than {seconds} seconds, and it had finished the plan by then. \
+         wn answers with that plan. {TIMEOUT_ENV} names a different number of seconds."
+    )
+}
+
+/// What one run of `claude` answered.
+#[derive(Debug)]
+struct Answer {
+    /// The envelope the run printed.
+    envelope: Envelope,
+    /// The seconds the deadline gave, for a run that outlived it and printed a
+    /// whole envelope before it was killed.
+    overran: Option<u64>,
 }
 
 /// Hand `path` the prompt and read the envelope out of the stream it writes.
@@ -427,13 +500,25 @@ pub fn plan(
 /// `progress` is the line the run stands behind, and what the run reaches for
 /// goes on it as the run reaches for it.
 ///
+/// The pipe that carries the plan is read to its end on every path out of this
+/// function, and the pipe that carries the complaint on every path that reads
+/// it. A run that outlived `waited` and printed a whole envelope before it was
+/// killed answers with the plan of that envelope, and the [`Answer`] then names
+/// the seconds the deadline gave.
+///
 /// # Errors
 ///
-/// Gives [`BuildError::TimedOut`] when the run outlives `waited`, and
-/// [`BuildError::BadEnvelope`] for a run that printed no envelope. Gives the
-/// refusals of [`refusal_of`] for a run that ended with a failure and printed
-/// no envelope that says why. Such a refusal carries the reason [`reason_of`]
-/// picks out of the two pipes and out of the write of the prompt.
+/// Gives [`BuildError::TimedOut`] when the run outlives `waited` and printed no
+/// whole envelope, and [`BuildError::BadEnvelope`] for a run that printed no
+/// envelope. Gives the refusals of [`refusal_of`] for a run that ended with a
+/// failure and printed no envelope that says why. Such a refusal carries the
+/// reason [`reason_of`] picks out of the two pipes and out of the write of the
+/// prompt.
+///
+/// Gives [`BuildError::Failed`] for a child that could not be spawned and for
+/// one whose state could not be read. Neither of those is a run that said
+/// anything, so the refusal carries what the operating system said about the
+/// child instead.
 ///
 /// A run that ended with a failure and printed an envelope that says so gives
 /// that envelope. The reason then stands in its `result`, and
@@ -444,7 +529,7 @@ fn ask(
     effort: Option<&Effort>,
     model: Option<&ModelName>,
     progress: &Progress,
-) -> Result<Envelope, BuildError> {
+) -> Result<Answer, BuildError> {
     let mut child = Command::new(path)
         .args(arguments(effort, model))
         .stdin(Stdio::piped())
@@ -466,11 +551,13 @@ fn ask(
     // that joined at the end would say what the run did at the one moment
     // nobody needs telling any more.
     let doing = progress.doing();
-    let printed = child
-        .stdout
+    let printed = child.stdout.take().map(|pipe| {
+        Reading::start(move || stream::transcribe(pipe, move |reach| doing.set(reach)))
+    });
+    let complained = child
+        .stderr
         .take()
-        .map(|pipe| stream::read(pipe, move |reach| doing.set(reach)));
-    let complained = child.stderr.take().map(read_whole);
+        .map(|pipe| Reading::start(move || read_whole(pipe)));
 
     // The pipe is closed as soon as the prompt is in it. A `claude` that reads
     // standard input waits for the end of it, so a pipe left open is a run
@@ -488,14 +575,46 @@ fn ask(
         }
     }
 
-    let status = wait_for(&mut child, waited)?;
-    let printed = printed.map_or_else(Transcript::default, joined_stream);
-    let complained = complained.map_or_else(String::new, joined);
+    let waiting = wait_for(&mut child, waited);
+    // The pipe that carries the plan is read to its end before the wait is
+    // judged. A `?` on the wait would drop the reader of standard output
+    // without taking what it read, and what it read is the plan: `claude`
+    // writes the whole envelope and only then exits.
+    //
+    // A run that ended on its own is waited for with no bound. A run that was
+    // killed gets the grace, because a tool it started can hold the write end
+    // open and a wait with no bound would then outlive the deadline it reports.
+    let grace = waiting.as_ref().err().map(|_| GRACE);
+    let printed = printed
+        .and_then(|reading| reading.taken(grace))
+        .unwrap_or_default();
+
+    let status = match waiting {
+        Ok(status) => status,
+        Err(Unfinished::Overran(seconds)) => return answer_past_the_deadline(seconds, &printed),
+        Err(Unfinished::Unreadable(said)) => return Err(BuildError::Failed { said }),
+    };
+
+    // The pipe that carries the complaint is read after the wait is judged,
+    // because only a run that ended on its own has a use for it. The two paths
+    // above kill the child and answer out of what it printed, so the text of
+    // this pipe reaches nobody on either of them — and a grace paid for text
+    // nobody reads runs after the grace of the other pipe, which makes the
+    // answer stand twice as far past the deadline it reports.
+    //
+    // A run that reaches this line closed both pipes when it ended, so its
+    // reader is waited for with no bound at all.
+    let complained = complained
+        .and_then(|reading| reading.taken(None))
+        .unwrap_or_default();
 
     if status.success() {
         // A run that answered with a plan says the write of the prompt got
         // there. An error of that pipe is then worth nothing, so it is dropped.
-        Envelope::read(printed.envelope())
+        Envelope::read(printed.envelope()).map(|envelope| Answer {
+            envelope,
+            overran: None,
+        })
     } else {
         // The envelope stands in front of the pipes for a run that failed. A
         // failing run prints its envelope as well, and the `result` of that
@@ -508,7 +627,10 @@ fn ask(
         // one whose envelope says it did not fail: such an envelope says
         // nothing at all about the failure the exit status reports.
         match Envelope::read(printed.envelope()) {
-            Ok(envelope) if envelope.answer().is_err() => Ok(envelope),
+            Ok(envelope) if envelope.answer().is_err() => Ok(Answer {
+                envelope,
+                overran: None,
+            }),
             _ => Err(refusal_of(&reason_of(
                 &complained,
                 printed.printed(),
@@ -518,39 +640,111 @@ fn ask(
     }
 }
 
-/// Read the whole of `pipe` on a thread of its own.
-fn read_whole<R>(mut pipe: R) -> thread::JoinHandle<String>
-where
-    R: Read + Send + 'static,
-{
-    thread::spawn(move || {
-        let mut read = Vec::new();
-        // A pipe that ends early is a run that ended early, and the status of
-        // the run is what says so. What was read up to that point is kept.
-        let _ = pipe.read_to_end(&mut read);
-        String::from_utf8_lossy(&read).into_owned()
-    })
+/// The answer a run that outlived its deadline earns, out of what it printed.
+///
+/// `claude` writes the whole plan in one `result` line and then exits, and a
+/// run killed between those two moments holds a finished plan in the pipe. So
+/// the plan is looked for before the refusal is built, and a run that printed
+/// one answers with it.
+///
+/// A line that parses is a line the run finished. [`crate::stream`] keeps a
+/// line as the envelope only when the whole of it parses as JSON, so the half
+/// line a killed run leaves behind is never handed on as a document.
+///
+/// # Errors
+///
+/// Gives [`BuildError::TimedOut`] for a run that printed no whole envelope, and
+/// for one whose envelope carries a reason rather than a plan. The refusal
+/// carries the end of what the run printed, cut, so the reader learns how far
+/// it got.
+fn answer_past_the_deadline(seconds: u64, printed: &Transcript) -> Result<Answer, BuildError> {
+    match Envelope::read(printed.envelope()) {
+        Ok(envelope) if envelope.answer().is_ok() => Ok(Answer {
+            envelope,
+            overran: Some(seconds),
+        }),
+        _ => Err(BuildError::TimedOut {
+            seconds,
+            printed: Snippet::tail(printed.printed()),
+        }),
+    }
 }
 
-/// What the thread `reader` read, or nothing when the thread went down.
-fn joined(reader: thread::JoinHandle<String>) -> String {
-    reader.join().unwrap_or_default()
+/// One pipe of the run, read on a thread of its own.
+///
+/// A pipe nobody reads fills up, and a child that writes into a full pipe
+/// blocks there until the deadline. So both pipes are read as the run writes,
+/// and this is what the reader hands its answer back through.
+///
+/// A channel rather than a [`std::thread::JoinHandle`], because a join has no
+/// bound and the paths that kill the child need one.
+struct Reading<T> {
+    /// Where the reader hands what it read.
+    from: mpsc::Receiver<T>,
 }
 
-/// The transcript the thread `reader` read, or nothing when the thread went
-/// down.
-fn joined_stream(reader: thread::JoinHandle<Transcript>) -> Transcript {
-    reader.join().unwrap_or_default()
+impl<T: Send + 'static> Reading<T> {
+    /// Start `read` on a thread of its own.
+    fn start(read: impl FnOnce() -> T + Send + 'static) -> Self {
+        let (to, from) = mpsc::channel();
+        thread::spawn(move || {
+            // A send that fails is a caller that stopped waiting, and the
+            // thread has nothing more to do about it.
+            let _ = to.send(read());
+        });
+        Self { from }
+    }
+
+    /// What the reader read, or nothing when it read nothing in time and
+    /// nothing when the thread went down.
+    ///
+    /// `grace` bounds the wait. `None` waits for the end of the pipe, which is
+    /// where a run that ended on its own leaves it.
+    fn taken(self, grace: Option<Duration>) -> Option<T> {
+        match grace {
+            None => self.from.recv().ok(),
+            Some(grace) => self.from.recv_timeout(grace).ok(),
+        }
+    }
+}
+
+/// The whole of `pipe`, as text.
+///
+/// A pipe that ends early is a run that ended early, and the status of the run
+/// is what says so. What was read up to that point is kept.
+fn read_whole<R: Read>(mut pipe: R) -> String {
+    let mut read = Vec::new();
+    let _ = pipe.read_to_end(&mut read);
+    String::from_utf8_lossy(&read).into_owned()
+}
+
+/// Why a run gave no exit status.
+///
+/// No refusal is built here, and that is the point. Both of these stand on a
+/// path that has to read the two pipes to their end first, and a [`BuildError`]
+/// built where the wait happens is one a caller carries past those readers with
+/// a `?`. That is how the plan of a run that beat its deadline by a second was
+/// thrown away.
+#[derive(Debug)]
+enum Unfinished {
+    /// The run outlived the seconds it was given, and it was killed.
+    Overran(u64),
+    /// The state of the child could not be read, and it was killed.
+    Unreadable(String),
 }
 
 /// Wait for `child`, and kill it when it outlives `waited`.
 ///
+/// The child is killed and reaped on every path out that carries an
+/// [`Unfinished`], which is what lets the caller read both pipes to their end:
+/// a child that still holds a write end open is a read that never ends.
+///
 /// # Errors
 ///
-/// Gives [`BuildError::TimedOut`] for a run that outlived its deadline and
-/// for a `waited` the clock cannot hold, and [`BuildError::Failed`] when the
-/// state of the child could not be read.
-fn wait_for(child: &mut Child, waited: Duration) -> Result<ExitStatus, BuildError> {
+/// Gives [`Unfinished::Overran`] for a run that outlived its deadline and for a
+/// `waited` the clock cannot hold, and [`Unfinished::Unreadable`] when the state
+/// of the child could not be read.
+fn wait_for(child: &mut Child, waited: Duration) -> Result<ExitStatus, Unfinished> {
     // `seconds` refuses a value above MAX_TIMEOUT_SECONDS, and this fallback
     // stands under it. This function takes the duration and never the value
     // that named it, and the clock is read twice: once here for the deadline
@@ -560,18 +754,19 @@ fn wait_for(child: &mut Child, waited: Duration) -> Result<ExitStatus, BuildErro
     let Some(deadline) = Instant::now().checked_add(waited) else {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(BuildError::TimedOut {
-            seconds: waited.as_secs(),
-        });
+        return Err(Unfinished::Overran(waited.as_secs()));
     };
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {}
             Err(cause) => {
-                return Err(BuildError::Failed {
-                    said: cause.to_string(),
-                })
+                // The child is killed here as well. The caller reads both pipes
+                // to their end after this, and a child that still holds a write
+                // end open is a read that never ends.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Unfinished::Unreadable(cause.to_string()));
             }
         }
         if Instant::now() >= deadline {
@@ -580,9 +775,7 @@ fn wait_for(child: &mut Child, waited: Duration) -> Result<ExitStatus, BuildErro
             // keeps spending while it does.
             let _ = child.kill();
             let _ = child.wait();
-            return Err(BuildError::TimedOut {
-                seconds: waited.as_secs(),
-            });
+            return Err(Unfinished::Overran(waited.as_secs()));
         }
         thread::sleep(POLL);
     }
@@ -675,11 +868,21 @@ pub enum BuildError {
     /// The run took longer than it was given.
     #[error(
         "claude took longer than {seconds} seconds to build a plan. {TIMEOUT_ENV} names a \
-         different number of seconds."
+         different number of seconds.{}",
+        got_as_far_as(.printed)
     )]
     TimedOut {
         /// The seconds it was given.
         seconds: u64,
+        /// The end of what the run printed on standard output before it was
+        /// killed, cut to the length every message of this tool cuts to.
+        ///
+        /// A run that printed a whole envelope answers with the plan of it, so
+        /// this text is never a plan. It says how far the run got, which is
+        /// what tells a run that was working from a run that never started.
+        /// The end rather than the front, because every run opens with the same
+        /// event and only the newest ones say which run this was.
+        printed: Snippet,
     },
     /// `claude` has no account to run under.
     #[error("claude is not logged in. Run: claude login")]
@@ -743,7 +946,8 @@ pub enum BuildError {
         /// What the JSON reader said about it.
         cause: String,
     },
-    /// The run failed for a reason only `claude` knows.
+    /// The run failed for a reason only `claude` knows, or the child never
+    /// started at all, or its state could not be read.
     #[error("claude could not build a plan: {said}")]
     Failed {
         /// The reason the run gave, with the space around it dropped.
@@ -752,6 +956,10 @@ pub enum BuildError {
         /// `claude` writes the sentence a reader can act on. A run that
         /// printed no envelope gives it on one of the two pipes instead, and
         /// standard output gives the end of what it wrote there.
+        ///
+        /// A child that could not be spawned and one whose state could not be
+        /// read said nothing at all, and this text is then what the operating
+        /// system said about the child.
         said: String,
     },
 }
@@ -1023,10 +1231,99 @@ plans.\n`gh repo view` failed."
 
     #[test]
     fn a_run_that_outlived_its_deadline_names_the_seconds_and_the_variable() {
-        let refused = BuildError::TimedOut { seconds: 600 };
+        let refused = BuildError::TimedOut {
+            seconds: 600,
+            printed: Snippet::new(""),
+        };
         let message = refused.to_string();
         assert!(message.contains("600"), "{message}");
         assert!(message.contains(TIMEOUT_ENV), "{message}");
+    }
+
+    #[test]
+    fn a_run_that_printed_something_before_its_deadline_says_how_far_it_got() {
+        let refused = BuildError::TimedOut {
+            seconds: 600,
+            printed: Snippet::new("half of an answer"),
+        };
+        let message = refused.to_string();
+        assert!(message.contains("half of an answer"), "{message}");
+    }
+
+    #[test]
+    fn a_run_that_printed_nothing_quotes_nothing() {
+        // An empty quotation says less than no quotation at all.
+        let refused = BuildError::TimedOut {
+            seconds: 600,
+            printed: Snippet::new("   "),
+        };
+        let message = refused.to_string();
+        assert!(!message.contains("got as far as"), "{message}");
+    }
+
+    /// The transcript of a run that printed `text` on standard output.
+    fn transcript(text: &str) -> Transcript {
+        stream::transcribe(std::io::Cursor::new(text.to_string()), |_| {})
+    }
+
+    /// The `result` line that closes the stream of a run that answered
+    /// `document`.
+    ///
+    /// Built with the JSON writer rather than with `format!`, because a plan
+    /// holds newlines and quotation marks and every one of them has to be
+    /// escaped.
+    fn envelope_line(document: &str) -> String {
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": document,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_killed_run_that_had_finished_the_envelope_answers_with_the_plan() {
+        // `claude` writes the whole envelope and only then exits, and those two
+        // moments are not the same moment. A run killed between them holds a
+        // finished plan, and the reader already paid for it.
+        let printed = transcript(&format!("{}\n", envelope_line("the plan")));
+        let answer = answer_past_the_deadline(600, &printed).expect("the envelope is whole");
+        assert_eq!(answer.overran, Some(600));
+        assert_eq!(answer.envelope.answer().expect("a plan"), "the plan");
+    }
+
+    #[test]
+    fn a_killed_run_that_wrote_half_an_envelope_hands_no_plan_back() {
+        // A run killed in the middle of a write leaves broken JSON, and the
+        // reader of a plan must never be handed it as a document. What it wrote
+        // stands in the refusal instead.
+        let whole = envelope_line("the plan");
+        let half: String = whole.chars().take(whole.chars().count() / 2).collect();
+        let printed = transcript(&half);
+        let refused = answer_past_the_deadline(600, &printed).expect_err("the envelope is broken");
+        assert!(
+            matches!(refused, BuildError::TimedOut { seconds: 600, .. }),
+            "{refused:?}"
+        );
+        assert!(refused.to_string().contains("got as far as"), "{refused}");
+    }
+
+    #[test]
+    fn a_killed_run_is_quoted_from_the_end_of_what_it_printed() {
+        // Every run of `claude` opens with the same event, so a quotation of
+        // the front of the stream reads the same for a run that printed one
+        // event and for a run that worked nine minutes. The end is what tells
+        // those two apart, and the transcript drops its own front as the run
+        // goes on, so the front is not even the front of the run by then.
+        let printed = transcript(concat!(
+            "the first line\nthe second line\nthe third line\n",
+            "the fourth line\nthe fifth line\nthe last line\n"
+        ));
+        let refused = answer_past_the_deadline(600, &printed).expect_err("there is no envelope");
+        let message = refused.to_string();
+        assert!(message.contains("the last line"), "{message}");
+        assert!(!message.contains("the first line"), "{message}");
     }
 
     #[test]
@@ -1100,10 +1397,7 @@ plans.\n`gh repo view` failed."
             .expect("/bin/sleep");
         let refused = wait_for(&mut child, Duration::from_secs(u64::MAX))
             .expect_err("no clock holds that deadline");
-        assert!(
-            matches!(refused, BuildError::TimedOut { .. }),
-            "{refused:?}"
-        );
+        assert!(matches!(refused, Unfinished::Overran(..)), "{refused:?}");
     }
 
     #[test]
