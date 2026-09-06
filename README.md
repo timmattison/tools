@@ -1600,7 +1600,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the walk, and so does a package inside a git worktree, which is a second checkout of packages
     the repository already holds. An exclusion names a whole directory below the search path, so
     `targets` and `node_modules_backup` stay in, and the search path itself is never matched
-    against the list — `workit --path ~/code/target/myproj` searches that tree like any other.
+    against the list — `workit --path ~/code/target/myproj` searches that tree like any other. An
+    entry it cannot read — a directory whose mode keeps it out, a `Cargo.toml` nobody can parse — is
+    named on stderr and skipped rather than ending the walk, and the number skipped is stated once at
+    the end; the packages it did find are still the answer. A scan that skipped something and found
+    nothing never read the tree it was pointed at, so that one fails instead of reporting an empty
+    tree.
   - Usage: `workit`, `workit --path ~/code/tools` (writes `~/code/tools/Cargo.toml`),
     `workit --output workspace/Cargo.toml` (writes there, and roots every member at `workspace/`),
     `workit --dry-run` (prints the manifest it would write and touches nothing),

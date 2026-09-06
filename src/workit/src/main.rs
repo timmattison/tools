@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut, Item, Table};
@@ -79,11 +80,67 @@ fn is_in_worktree(path: &Path) -> bool {
     }
 }
 
+/// The entries a scan gave up on.
+///
+/// A tree of any size holds things a run cannot read: a directory whose mode
+/// keeps it out, a `Cargo.toml` that nobody can parse. Each of those is a
+/// reason to skip that entry, not a reason to abandon the tree around it. One
+/// of them used to end the walk, so a single unreadable entry threw away every
+/// package the scan had already found and said nothing about them — which a
+/// scan of a home directory or of a shared tree meets routinely. Each is now
+/// named on stderr as it is met and counted here, and the total is stated once
+/// at the end.
+///
+/// Every reason names the path it is about: `walkdir` says so in its own
+/// message, and every failure to read a manifest carries the path in its
+/// context. So the warning states the path once, rather than repeating it.
+#[derive(Default)]
+struct Skipped {
+    count: usize,
+}
+
+impl Skipped {
+    /// Names one entry the scan gave up on, and counts it.
+    fn skip(&mut self, reason: &dyn fmt::Display) {
+        eprintln!("Warning: {reason:#}");
+        self.count += 1;
+    }
+
+    /// States the total once, and says whether the scan answered the question.
+    ///
+    /// The summary goes to stderr, because standard output carries the manifest
+    /// under `--dry-run`.
+    ///
+    /// A scan that skipped something and still found packages succeeded: those
+    /// packages are the answer, and what it skipped is named above them. A scan
+    /// that skipped something and found nothing never read the tree it was
+    /// pointed at, so it fails instead of reporting an empty tree — the two are
+    /// different answers, and only one of them is success.
+    fn report(&self, found: usize) -> Result<()> {
+        if self.count == 0 {
+            return Ok(());
+        }
+
+        let entries = if self.count == 1 { "entry" } else { "entries" };
+        eprintln!("Skipped {} {entries} that could not be read.", self.count);
+
+        if found == 0 {
+            return Err(anyhow::anyhow!(
+                "Found no packages, and {} {entries} could not be read",
+                self.count
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 fn find_cargo_tomls(
     root: &Path,
     excludes: &[String],
     include_worktrees: bool,
-) -> Result<Vec<PathBuf>> {
+    skipped: &mut Skipped,
+) -> Vec<PathBuf> {
     let mut cargo_files = Vec::new();
 
     for entry in WalkDir::new(root)
@@ -123,7 +180,13 @@ fn find_cargo_tomls(
             true
         })
     {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                skipped.skip(&error);
+                continue;
+            }
+        };
         let path = entry.path();
 
         if path.file_name() == Some("Cargo.toml".as_ref()) && path != root.join("Cargo.toml") {
@@ -133,19 +196,33 @@ fn find_cargo_tomls(
             }
 
             // Check if it's a package (not already a workspace)
-            if is_package_toml(path)? {
-                cargo_files.push(path.to_path_buf());
+            match is_package_toml(path) {
+                Ok(true) => cargo_files.push(path.to_path_buf()),
+                Ok(false) => {}
+                Err(error) => skipped.skip(&error),
             }
         }
     }
 
     cargo_files.sort();
-    Ok(cargo_files)
+    cargo_files
 }
 
+/// Whether `path` holds a package rather than a workspace.
+///
+/// # Errors
+///
+/// Answers the failure to read the file or to parse it, naming the file in
+/// both. The caller reports that failure beside every other entry it skipped,
+/// and a message that names no file leaves the reader to find it in a tree of
+/// thousands: an unparsable manifest used to end the whole scan with nothing
+/// but `TOML parse error at line 1, column 6` to say which file it had read.
 fn is_package_toml(path: &Path) -> Result<bool> {
-    let content = fs::read_to_string(path)?;
-    let doc = content.parse::<DocumentMut>()?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let doc = content
+        .parse::<DocumentMut>()
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
 
     // It's a package if it has [package] but not [workspace]
     Ok(doc.get("package").is_some() && doc.get("workspace").is_none())
@@ -316,10 +393,21 @@ fn main() -> Result<()> {
         excludes
     };
 
-    // Find all Cargo.toml files
-    let cargo_files = find_cargo_tomls(&args.path, &all_excludes, args.include_worktrees)?;
+    // Find all Cargo.toml files. An entry the walk cannot read is skipped and
+    // counted rather than propagated, so the packages it did find still reach
+    // the manifest.
+    let mut skipped = Skipped::default();
+    let cargo_files = find_cargo_tomls(
+        &args.path,
+        &all_excludes,
+        args.include_worktrees,
+        &mut skipped,
+    );
 
     if cargo_files.is_empty() {
+        // A tree the scan read whole and found nothing in is an answer. A tree
+        // it could not read is not, so `report` refuses that one.
+        skipped.report(cargo_files.len())?;
         println!("No Cargo.toml files found in subdirectories");
         return Ok(());
     }
@@ -396,6 +484,10 @@ fn main() -> Result<()> {
         println!("  cargo test --workspace");
         println!("  cargo build -p <package-name>");
     }
+
+    // The last word on the scan: a run that skipped something must not read
+    // afterwards like a run that read the whole tree.
+    skipped.report(cargo_files.len())?;
 
     Ok(())
 }
