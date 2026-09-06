@@ -167,8 +167,11 @@ impl Capabilities {
     ///
     /// So this call asks that terminal, and it asks only that one. A terminal
     /// that named itself is already known, and a round trip would buy nothing
-    /// and cost the budget of [`crate::probe::QUERY_BUDGET`]. A run whose
-    /// standard output is no terminal asks nothing either.
+    /// and cost the budget of [`crate::probe::QUERY_BUDGET`]. The question
+    /// goes to the controlling terminal, which is a descriptor of its own, so
+    /// a run whose standard output is a file still has a terminal to ask.
+    /// Standard output decides one thing here, which is
+    /// [`Capabilities::raw_mode`].
     ///
     /// A run that stands in a background process group asks nothing as well.
     /// The question needs raw mode, and the call that asks for raw mode stops
