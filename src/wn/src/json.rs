@@ -1049,6 +1049,49 @@ mod tests {
     }
 
     #[test]
+    fn a_fenced_text_that_is_no_json_document_walks_on_to_the_next_reader() {
+        // What stands inside the fence decides the claim, and a box table is
+        // the work of the table reader. The fence tells this reader nothing.
+        for info in ["", "text"] {
+            assert!(
+                read(&fenced(info, BOX_TABLE)).is_none(),
+                "the box table keeps its reader, with {info:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fence_that_never_closed_keeps_the_document() {
+        // A run the deadline killed writes an opening fence and stops. The plan
+        // it wrote is still there, so the reader reads it.
+        let text = format!("{CODE_FENCE}json\n{DOCUMENT}");
+        assert_eq!(nodes(&graph_of(&text)), vec![91, 96, 102]);
+    }
+
+    #[test]
+    fn a_fenced_document_that_does_not_parse_names_the_document() {
+        // The message names what is wrong. The fence is no part of that, and a
+        // message that opened with a backtick would name the wrong problem.
+        let broken = DOCUMENT
+            .trim_end()
+            .strip_suffix(CLOSING_BRACE)
+            .expect("the document closes with a brace");
+        let refused = refusal(&fenced("json", broken));
+        assert!(
+            matches!(refused, JsonError::NotJson { .. }),
+            "a broken document is not JSON, and this is {refused:?}"
+        );
+        assert!(
+            refused.to_string().starts_with("\"{"),
+            "the message names the document, and it reads {refused}"
+        );
+        assert!(
+            !refused.to_string().contains(CODE_FENCE),
+            "the message names no fence, and it reads {refused}"
+        );
+    }
+
+    #[test]
     fn an_empty_streams_array_is_a_plan_with_no_work_in_it() {
         // Not an error. Somebody ran the skill on a repository with nothing to
         // do, and a plan of nothing is the true answer to that.
