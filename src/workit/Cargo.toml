@@ -12,6 +12,10 @@ toml_edit.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+# The one rule for shedding an inherited git environment. `tests/worktree.rs`
+# builds real repositories and real worktrees, and a `GIT_DIR` inherited from a
+# pre-commit hook outranks both the working directory and `git -C`.
+gitscratch.workspace = true
 regex.workspace = true
 tempfile.workspace = true
 
