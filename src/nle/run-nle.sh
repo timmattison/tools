@@ -25,7 +25,7 @@ fi
 if ! cargo tauri --version > /dev/null 2>&1; then
     echo "run-nle: the Tauri CLI is not installed for the account '$user'." >&2
     echo "  Install it with:" >&2
-    echo "    cargo install tauri-cli --version '^2' --locked" >&2
+    echo "    cargo install tauri-cli" >&2
     echo "  Or run this from the account that already has it." >&2
     exit 1
 fi
