@@ -170,9 +170,17 @@ fn reports_a_missing_tauri_cli() {
         Some(1),
         "the script must stop with exit 1 when the Tauri CLI is missing. stderr was: {stderr}"
     );
-    assert!(
-        stderr.contains("cargo install tauri-cli"),
-        "the message must give the command that installs the CLI. stderr was: {stderr}"
+    let install_line = stderr
+        .lines()
+        .find(|line| line.contains("cargo install tauri-cli"))
+        .unwrap_or_else(|| {
+            panic!("the message must give the command that installs the CLI. stderr was: {stderr}")
+        });
+    assert_eq!(
+        install_line.trim(),
+        "cargo install tauri-cli",
+        "the command must be the plain one, with no version pin and no flags to retype. \
+         stderr was: {stderr}"
     );
 }
 
