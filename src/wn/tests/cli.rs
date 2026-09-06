@@ -779,6 +779,29 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// The value `flag` carries on a command line that holds one argument to a
+/// line, the shape [`FakeGh::recorded_claude_args`] writes.
+///
+/// It gives back the argument that comes after the flag, and `None` when no
+/// argument is the flag. The pair is what a test of a command line must read.
+/// A search of the whole line for the text of the value alone finds that text
+/// in any other argument as well — `--allowed-tools` carries `low` inside the
+/// word `allowed` — so such a search passes whatever the run asked for.
+fn flag_value<'a>(args: &'a str, flag: &str) -> Option<&'a str> {
+    let _ = (args, flag);
+    None
+}
+
+#[test]
+fn a_flag_carries_the_argument_that_comes_after_it() {
+    // The command line of a run of `claude` holds `low` twice: once as the
+    // level, and once inside `--allowed-tools`. So the value of a flag is the
+    // argument after the flag, and text that stands anywhere else is not it.
+    let args = "--allowed-tools\nRead,Bash\n--effort\nlow\n";
+    assert_eq!(flag_value(args, "--effort"), Some("low"));
+    assert_eq!(flag_value(args, "--model"), None);
+}
+
 #[test]
 fn walks_the_chain_and_names_the_issue_to_start() {
     let gh = FakeGh::new(THREE_ISSUES);
