@@ -29,7 +29,9 @@
 //! hands back. The four written forms carry layout the reader has to undo, and
 //! layout is lossy: a table re-wrapped by whatever pasted it can lose the
 //! second line of an `Order` cell, which costs a step. A document carries no
-//! layout, so `wn` reads it first and claims it on one character.
+//! layout, so `wn` reads it first and claims it on one character. A Markdown
+//! code fence around the document comes off before that character is read,
+//! because a run of a model at a high level of effort writes such a fence.
 //!
 //! The reader who has no plan at all has a repository full of open issues
 //! instead. That plan is one `claude` run away, and `wn` already knows the
@@ -156,8 +158,9 @@ A plan written as JSON is a fifth shape of input, and it is the shape a program 
 reads the `streams` of it and nothing else: the order array of a stream is a chain, and the \
 waitsFor of a step names the work that comes before that step. JSON is tried first and claimed on \
 one character, because a text whose first character that is not a space is `{` is a JSON document \
-and nothing else `wn` reads starts that way. A document that does not parse is an error and never \
-a walk on to the next reader.\n\n\
+and nothing else `wn` reads starts that way. A Markdown code fence around the document comes off \
+before that character is read, because a run of a model at a high level of effort writes one. A \
+document that does not parse is an error and never a walk on to the next reader.\n\n\
 Quote the chain. A shell reads an unquoted `#` as the start of a comment.\n\n\
 The chain comes out of the first input that holds one: the argument, then standard input, then \
 the system clipboard, then a run of claude that builds a plan. So `wn` alone answers the chain \
@@ -440,6 +443,14 @@ enum ReadError {
 /// the next reader: a document with one missing brace would otherwise reach
 /// the chain reader, which would report `"version" is not an issue number`,
 /// and that message names the wrong problem.
+///
+/// A Markdown code fence comes off before that character is read. A run of a
+/// model at a high level of effort writes the document it prints inside such a
+/// fence, and the reader paid for that run. The whole opening line comes off,
+/// because it carries the info string, and a closing line of three backticks
+/// comes off after it. A fence that never closed keeps its body, because a run
+/// the deadline killed writes an opening fence and stops. [`json::read`]
+/// states the whole rule.
 ///
 /// A plan is read twice: once as a set of streams, and once as the graph its
 /// `Waits for` cells draw. A plan that draws one cross-stream edge or more

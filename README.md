@@ -1398,6 +1398,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `{` and does not parse is an error and never a walk on to the next reader: a document with one
     missing brace would otherwise reach the chain reader, which would answer `"version" is not an
     issue number`, and that message names the wrong problem.
+  - A Markdown code fence around the document comes off before that character is read. A run of a
+    model at a high level of effort writes the document it prints inside such a fence, and the
+    reader paid for that run. The whole opening line comes off, because it carries the info string
+    such as `json`, and a closing line of three backticks comes off after it. A fence that never
+    closed keeps its body, because a run the deadline killed writes an opening fence and stops.
+    The claim stays decided on one character: a fence is a wrapper this tool knows, and to take a
+    known wrapper off a text is not to parse what stands inside it.
   - Three things are refused, and each of them exits `2`. A `version` that is not `1` stops the
     run and names the version it read beside the version `wn` knows, because a consumer that
     guesses at a schema it does not know answers with the wrong plan. A document that is not the
@@ -1518,9 +1525,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     scheduled a consumer before its producer — so the cheapest level won. It takes 184 seconds
     and $1.63 where `xhigh` takes 397 and $2.30, and it placed more of the backlog than any of
     the other three. The `xhigh` run also wrapped its document in a fenced code block, which
-    JSON mode forbids and which `wn` refuses, so the dearest run of the four was the one run the
-    tool could not read. A reader who wants the tool to think harder names the level. The doc
-    comment beside the constant in `src/wn/src/build.rs` carries the four runs. The level is
+    JSON mode forbids. That run is what put the fence rule in: `wn` takes a Markdown fence off a
+    text before it claims the text on the opening brace, so the document of the dearest run reads.
+    The fence changes none of the numbers above, so `low` is still the default. A reader who wants
+    the tool to think harder names the level. The doc comment beside the constant in
+    `src/wn/src/build.rs` carries the four runs. The level is
     also the level the report names — the envelope
     carries no field that names one, so a report can only name the level the run asked for, and
     every run now asks for one.
@@ -1554,16 +1563,20 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     into it, and standard error carries a machine tag such as `[claude-code:unrecognized_model]`
     that names the fault without saying what to do about it. A run that printed no envelope is
     named back with the reason on whichever pipe carried it. A run that prints nothing at all is
-    named back as a run of `claude`. A document that is not the schema earns the refusal of the
-    JSON reader, unchanged and naming no clipboard, because a plan `wn` built is a plan `wn` asked
-    for. A run that answers with something that is no JSON envelope is refused before that reader
-    ever sees it, and the message names what the run printed: the fault is in the run and a refusal
-    that named the plan would send the reader to look in the wrong place. A `WN_PLAN_EFFORT` that
-    names none of the five levels is refused and named back, and the message names the five. A
-    `WN_PLAN_MODEL` that opens with a dash is refused, because such a value is a flag: a variable
-    that can put a flag on the command line of the run decides what the run may do, and that
-    decision is yours and never this tool's. Both refusals stand before the run, so a mistake in
-    either variable costs no money.
+    named back as a run of `claude`. A text the run printed that no reader can read is blamed on
+    the run: the message reads `the run of claude printed a plan wn cannot read`, carries the
+    reason of whichever reader refused the text, and quotes the first line of it. It names no
+    clipboard, because the plan is on none. The reader typed that text nowhere and pasted it
+    nowhere — `wn` ran `claude`, waited about a minute, and paid for the run — and a message about
+    a backtick names neither the run nor the problem. The first line is what tells the reader the
+    shape of what the run printed. A run that answers with something that is no JSON envelope is
+    refused before that reader ever sees it, and the message names what the run printed: the fault
+    is in the run and a refusal that named the plan would send the reader to look in the wrong
+    place. A `WN_PLAN_EFFORT` that names none of the five levels is refused and named back, and the
+    message names the five. A `WN_PLAN_MODEL` that opens with a dash is refused, because such a
+    value is a flag: a variable that can put a flag on the command line of the run decides what the
+    run may do, and that decision is yours and never this tool's. Both refusals stand before the
+    run, so a mistake in either variable costs no money.
   - Usage: `wn "#277 → #278 ∥ #279"`, `wn` (reads the clipboard, and builds a plan when it holds
     none), `wn --refresh`, `wn -R timmattison/tools "#1 → #2"`, `pbpaste | wn` (a chain, a whole
     plan, a plan drawn as a picture, or a plan written as JSON),
