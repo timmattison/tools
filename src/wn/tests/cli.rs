@@ -788,8 +788,9 @@ fn stderr(output: &Output) -> String {
 /// in any other argument as well — `--allowed-tools` carries `low` inside the
 /// word `allowed` — so such a search passes whatever the run asked for.
 fn flag_value<'a>(args: &'a str, flag: &str) -> Option<&'a str> {
-    let _ = (args, flag);
-    None
+    let mut lines = args.lines();
+    lines.by_ref().find(|line| *line == flag)?;
+    lines.next()
 }
 
 #[test]
@@ -2585,8 +2586,7 @@ fn the_level_the_environment_named_reaches_the_run_and_the_report() {
     let output = run_building(&gh, &["--repo", REPO], &[(PLAN_EFFORT_ENV, "high")]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let args = gh.recorded_claude_args();
-    assert!(args.contains("--effort"), "{args}");
-    assert!(args.contains("high"), "{args}");
+    assert_eq!(flag_value(&args, "--effort"), Some("high"), "{args}");
     // The whole line, with the level in it. The level stands beside the
     // models, because the models are what ran at it.
     assert!(
@@ -2619,8 +2619,11 @@ fn the_model_the_environment_named_reaches_the_run() {
     );
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let args = gh.recorded_claude_args();
-    assert!(args.contains("--model"), "{args}");
-    assert!(args.contains("claude-haiku-4-5"), "{args}");
+    assert_eq!(
+        flag_value(&args, "--model"),
+        Some("claude-haiku-4-5"),
+        "{args}"
+    );
 }
 
 #[test]
@@ -2663,10 +2666,12 @@ fn a_run_that_names_neither_asks_for_the_default_model_and_level() {
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let args = gh.recorded_claude_args();
-    assert!(args.contains("--model"), "{args}");
-    assert!(args.contains(DEFAULT_MODEL), "{args}");
-    assert!(args.contains("--effort"), "{args}");
-    assert!(args.contains(DEFAULT_EFFORT), "{args}");
+    assert_eq!(flag_value(&args, "--model"), Some(DEFAULT_MODEL), "{args}");
+    assert_eq!(
+        flag_value(&args, "--effort"),
+        Some(DEFAULT_EFFORT),
+        "{args}"
+    );
     // The report names the level the run asked for, and every run now asks
     // for one. A reader who reads no level would think none was chosen.
     assert!(
