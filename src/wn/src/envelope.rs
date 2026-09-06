@@ -203,21 +203,24 @@ impl Envelope {
     /// field that names a level, so the caller passes the level it asked for,
     /// and every run asks for one.
     #[must_use]
-    pub fn report(&self, effort: &str) -> Option<String> {
+    pub fn report(&self, effort: &str) -> String {
         let clauses: Vec<String> = [
             self.dollars.map(dollars),
-            self.models_clause(effort),
+            Some(self.models_clause(effort)),
             self.tokens_clause(),
             self.milliseconds.map(elapsed),
         ]
         .into_iter()
         .flatten()
         .collect();
-        (!clauses.is_empty()).then(|| format!("{OPENING} {}", clauses.join(BETWEEN)))
+        format!("{OPENING} {}", clauses.join(BETWEEN))
     }
 
     /// The clause that names the models and the level they ran at.
-    fn models_clause(&self, effort: &str) -> Option<String> {
+    ///
+    /// Every report carries this clause, because the caller holds the level.
+    /// An envelope that names no model gives the level alone.
+    fn models_clause(&self, effort: &str) -> String {
         let named = self
             .models
             .iter()
@@ -225,9 +228,9 @@ impl Envelope {
             .collect::<Vec<_>>()
             .join(", ");
         if named.is_empty() {
-            Some(format!("effort {effort}"))
+            format!("effort {effort}")
         } else {
-            Some(format!("{named} at effort {effort}"))
+            format!("{named} at effort {effort}")
         }
     }
 
@@ -487,10 +490,7 @@ mod tests {
         // near side of the gate `answer` holds, so the price is written
         // whether the run answered with a plan or with a reason.
         let read = Envelope::read(&refused("the model is overloaded")).expect("the envelope reads");
-        assert_eq!(
-            read.report("low"),
-            Some("plan: $0.05 · effort low · 1.8s".to_string())
-        );
+        assert_eq!(read.report("low"), "plan: $0.05 · effort low · 1.8s");
     }
 
     /// The envelope of one measured run, with a plan in its `result`.
@@ -516,11 +516,8 @@ mod tests {
         // run and this line is the only place the price is written.
         assert_eq!(
             measured().report("low"),
-            Some(
-                "plan: $0.28 · claude-opus-5[1m], claude-haiku-4-5 at effort low · \
-                 32 in, 420 out, 94k cache read, 61k cache write · 1.3s"
-                    .to_string()
-            )
+            "plan: $0.28 · claude-opus-5[1m], claude-haiku-4-5 at effort low · \
+             32 in, 420 out, 94k cache read, 61k cache write · 1.3s"
         );
     }
 
@@ -528,9 +525,7 @@ mod tests {
     fn an_envelope_of_two_models_names_both_the_dearest_first() {
         // A run that dispatched a subagent used two models, and the reader who
         // thinks the plan cost too much reads the expensive one first.
-        let line = measured()
-            .report("low")
-            .expect("the envelope carries numbers");
+        let line = measured().report("low");
         let opus = line.find("claude-opus-5[1m]").expect("the subagent model");
         let haiku = line.find("claude-haiku-4-5").expect("the parent model");
         assert!(opus < haiku, "{line}");
@@ -541,9 +536,7 @@ mod tests {
         // The envelope carries no effort field, so the level is the caller's
         // to name. This one is a recorded envelope, and the level it earns is
         // the word the caller handed over and no word out of the run.
-        let line = measured()
-            .report("xhigh")
-            .expect("the envelope carries numbers");
+        let line = measured().report("xhigh");
         assert!(line.contains("effort xhigh"), "{line}");
     }
 
@@ -556,7 +549,7 @@ mod tests {
             Envelope::read(&said)
                 .expect("the envelope reads")
                 .report("low"),
-            Some("plan: $0.0046 · effort low".to_string())
+            "plan: $0.0046 · effort low"
         );
     }
 
@@ -575,7 +568,7 @@ mod tests {
                 Envelope::read(&said)
                     .expect("the envelope reads")
                     .report("high"),
-                Some(format!("plan: effort high · {written}")),
+                format!("plan: effort high · {written}"),
                 "{milliseconds} milliseconds"
             );
         }
@@ -602,11 +595,8 @@ mod tests {
             Envelope::read(&said)
                 .expect("the envelope reads")
                 .report("high"),
-            Some(
-                "plan: claude-opus-5 at effort high · \
-                 118k in, 9.4k out, 1.2M cache read, 999 cache write"
-                    .to_string()
-            )
+            "plan: claude-opus-5 at effort high · \
+             118k in, 9.4k out, 1.2M cache read, 999 cache write"
         );
     }
 
@@ -623,7 +613,7 @@ mod tests {
             Envelope::read(&said)
                 .expect("the envelope reads")
                 .report("low"),
-            Some("plan: claude-opus-5 at effort low · 12 in, 34 out".to_string())
+            "plan: claude-opus-5 at effort low · 12 in, 34 out"
         );
     }
 
@@ -637,7 +627,7 @@ mod tests {
             Envelope::read(r#"{"result":"the plan"}"#)
                 .expect("the envelope reads")
                 .report("medium"),
-            Some("plan: effort medium".to_string())
+            "plan: effort medium"
         );
     }
 
@@ -650,7 +640,7 @@ mod tests {
             Envelope::read(&envelope("the plan"))
                 .expect("the envelope reads")
                 .report("high"),
-            Some("plan: $0.05 · effort high · 1.8s".to_string())
+            "plan: $0.05 · effort high · 1.8s"
         );
     }
 
@@ -677,8 +667,7 @@ mod tests {
             .to_string();
             let line = Envelope::read(&said)
                 .expect("the envelope reads")
-                .report("low")
-                .expect("the envelope carries numbers");
+                .report("low");
             assert!(
                 line.ends_with(&format!("{written} in")),
                 "{counted}: {line}"
@@ -697,7 +686,7 @@ mod tests {
                 Envelope::read(&said)
                     .expect("the envelope reads")
                     .report("medium"),
-                Some(format!("plan: effort medium · {written}")),
+                format!("plan: effort medium · {written}"),
                 "{milliseconds} milliseconds"
             );
         }

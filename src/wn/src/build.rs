@@ -586,9 +586,7 @@ pub fn plan(
     // It also stands before the answer is taken. A run that failed after
     // several turns spent the money before it failed, so the reader of such a
     // run learns the price as well.
-    if let Some(report) = answer.envelope.report(effort.as_str()) {
-        eprintln!("{report}");
-    }
+    eprintln!("{}", answer.envelope.report(effort.as_str()));
     Ok(answer.envelope.answer()?.to_string())
 }
 
