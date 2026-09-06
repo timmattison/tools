@@ -9711,6 +9711,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "regex",
  "toml_edit 0.22.27",
  "walkdir",
 ]

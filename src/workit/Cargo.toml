@@ -10,5 +10,8 @@ clap.workspace = true
 toml_edit.workspace = true
 walkdir.workspace = true
 
+[dev-dependencies]
+regex.workspace = true
+
 [lints]
 workspace = true
