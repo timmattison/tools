@@ -1510,9 +1510,16 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the model and it is `opus` by default — the alias and not an id, so the tool always asks for
     the newest model of that family: an id retires, and a build that named a retired one would
     refuse every run its reader had set no variable for. `WN_PLAN_EFFORT` names the level, one of
-    `low`, `medium`, `high`, `xhigh` and `max`, and it is `xhigh` by default: a plan of a whole
-    backlog is read once and acted on for days, so a stream placed wrong costs more than the
-    level that placed it right. The level is also the level the report names — the envelope
+    `low`, `medium`, `high`, `xhigh` and `max`, and it is `low` by default, which a measurement
+    picked rather than a guess: four runs on this repository, one at each level, gave four plans
+    that all held — none put two issues that edit one file in parallel streams, and none
+    scheduled a consumer before its producer — so the cheapest level won. It takes 184 seconds
+    and $1.63 where `xhigh` takes 397 and $2.30, and it placed more of the backlog than any of
+    the other three. The `xhigh` run also wrapped its document in a fenced code block, which
+    JSON mode forbids and which `wn` refuses, so the dearest run of the four was the one run the
+    tool could not read. A reader who wants the tool to think harder names the level. The doc
+    comment beside the constant in `src/wn/src/build.rs` carries the four runs. The level is
+    also the level the report names — the envelope
     carries no field that names one, so a report can only name the level the run asked for, and
     every run now asks for one.
   - These things refuse, and each exits `2`. A directory that is in no repository `gh` can name is

@@ -217,9 +217,14 @@ impl ModelName {
 /// once for that reason. When a new run outlasts this number, raise it and
 /// name the run here. When a new run is shorter, leave it alone.
 ///
-/// Every run below is `timmattison/tools` on 2026-09-05, 57 open issues and
-/// 8 open pull requests, at [`DEFAULT_MODEL`] at [`DEFAULT_EFFORT`], which is
-/// what a reader who sets neither variable gets:
+/// **The dearest level, and not the default one.** [`EFFORT_ENV`] lets a
+/// reader ask for `max`, and the deadline kills that reader's run as readily
+/// as anybody else's. So this number stands on the slowest level somebody
+/// measured and never on [`DEFAULT_EFFORT`], which is now the fastest of the
+/// five and finishes in a quarter of the time.
+///
+/// Every run below is `timmattison/tools` at [`DEFAULT_MODEL`]. The first
+/// three are 2026-09-05, 57 open issues and 8 open pull requests, at `xhigh`:
 ///
 /// | Seconds | Cost | Note |
 /// | --- | --- | --- |
@@ -230,6 +235,12 @@ impl ModelName {
 /// The spread of the last two is 25% on one repository, on one day, at one
 /// setting. That spread is the reason the deadline doubles this number rather
 /// than adding a margin to it.
+///
+/// The four of 2026-09-06 are the measurement [`DEFAULT_EFFORT`] carries, 58
+/// open issues and 7 open pull requests, one run at each level: 184 seconds
+/// at `low`, 205 at `medium`, 353 at `high`, and 397 at `xhigh`. Every one of
+/// them is under half of this number, and the 780-second run of the day
+/// before is why that is no reason to lower it.
 ///
 /// The number stands in the source rather than in prose, because
 /// [`DEFAULT_TIMEOUT_SECONDS`] is derived from it. A deadline whose doc
@@ -244,7 +255,8 @@ const MEASURED_SECONDS: u64 = 780;
 /// asks where the number came from finds the run it came from one constant
 /// up. A deadline is a bound on a runaway run and never a target, so it
 /// leaves room for a backlog that grew, for a repository larger than this
-/// one, and for a day the API answers slower on.
+/// one, for a day the API answers slower on, and for a reader who raised the
+/// level with [`EFFORT_ENV`]. A run of the defaults takes a fraction of it.
 ///
 /// `inscribe` waits 120 seconds for a commit message. A plan of a whole
 /// backlog reads every open issue and every open pull request of the
@@ -254,10 +266,13 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = MEASURED_SECONDS * 2;
 
 /// The deadline outlasts the run it was measured against, or the build stops.
 ///
-/// A deadline shorter than a run somebody measured is a deadline every run of
-/// the defaults dies at, which is what 600 became the moment the tool started
-/// asking for `xhigh`. The product above holds the rule today, and this holds
-/// it against the reader who later writes a number in its place.
+/// A deadline shorter than a run somebody measured is a deadline that run
+/// dies at, which is what 600 became the moment the tool started asking for
+/// `xhigh`. The default level is `low` now and finishes far inside 600, so
+/// the hazard moved rather than went: [`EFFORT_ENV`] lets a reader ask for
+/// `max`, and a deadline written against the default alone kills that reader.
+/// The product above holds the rule today, and this holds it against the
+/// reader who later writes a number in its place.
 ///
 /// A compile-time check and not a test, because a mistake that cannot be
 /// built beats a mistake a suite reports.
