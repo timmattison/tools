@@ -463,11 +463,77 @@ mod tests {
         );
     }
 
+    /// The request of the primary device attributes, which ends [`IMAGE_QUERY`].
+    const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
+
     #[test]
     fn the_query_ends_with_the_attributes_request() {
         assert!(
-            IMAGE_QUERY.ends_with(b"\x1b[c"),
+            IMAGE_QUERY.ends_with(ATTRIBUTES_REQUEST),
             "the answer of the attributes request is what ends the read"
+        );
+    }
+
+    /// The budget of the read that gets nothing.
+    ///
+    /// Nothing writes to the pipe of that test, so every run of it spends the
+    /// whole of this budget. It is short for that reason.
+    const EMPTY_BUDGET: Duration = Duration::from_millis(200);
+
+    /// The least that read takes.
+    ///
+    /// A little under the budget, because select(2) takes its own budget in
+    /// whole microseconds and the nanoseconds below one microsecond are lost on
+    /// the way in. A read that gave up at once takes about nothing, which is far
+    /// under this.
+    const EMPTY_FLOOR: Duration = Duration::from_millis(150);
+
+    /// The most that read takes.
+    ///
+    /// Generous, because a loaded machine wakes a sleeper late. This test
+    /// measures the code and not the machine, so the ceiling is far above the
+    /// budget and only a read with no end at all reaches it.
+    const EMPTY_CEILING: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn the_budget_ends_a_read_that_gets_nothing() {
+        // A terminal that draws no image answers the kitty query with silence,
+        // and a terminal on the far side of a network answers late. The budget
+        // is what ends the read for both of them. A read with no end holds the
+        // whole tool, because the answer of this probe stands in front of the
+        // first thing the tool draws.
+        let mut ends = [0_i32; 2];
+        // SAFETY: pipe(2) fills the two descriptors of an array this test owns.
+        let made = unsafe { libc::pipe(ends.as_mut_ptr()) };
+        assert_eq!(made, 0, "pipe(2) gives a pair of descriptors");
+        let [reader, writer] = ends;
+
+        // The write end stays open across the read. A closed one gives the read
+        // the end of the file at once, and the budget would then end nothing.
+        let started = Instant::now();
+        let answer = drain(reader, EMPTY_BUDGET);
+        let took = started.elapsed();
+
+        // Both descriptors go back before the assertions, because a failed
+        // assertion leaves this test through a panic.
+        // SAFETY: this test opened the two descriptors and nothing else holds
+        // them.
+        unsafe {
+            libc::close(writer);
+            libc::close(reader);
+        }
+
+        assert!(
+            answer.is_empty(),
+            "a pipe that nobody writes to holds no answer, and the read gave {answer:?}"
+        );
+        assert!(
+            took >= EMPTY_FLOOR,
+            "the read waits for the budget of {EMPTY_BUDGET:?}, and it came back after {took:?}"
+        );
+        assert!(
+            took < EMPTY_CEILING,
+            "the budget of {EMPTY_BUDGET:?} ends the read, and it took {took:?}"
         );
     }
 
@@ -700,6 +766,376 @@ mod tests {
              tcsetattr(3) sends to a background caller. {OWNER_REFUSED} says \
              the guard refused the child, which owns the terminal and must be \
              free to ask it"
+        );
+    }
+
+    /// A pseudo-terminal, as the master end and then the slave end.
+    ///
+    /// The slave end is a terminal that no user reads. A test that puts it in
+    /// raw mode, or that writes a query to it, therefore reaches nothing of the
+    /// terminal of whoever started the run.
+    fn open_a_pseudo_terminal() -> (RawFd, RawFd) {
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        // SAFETY: openpty writes one file descriptor to each of the first two
+        // pointers, and both point at a live local variable. The three null
+        // pointers ask for the default terminal modes, for no name of the slave
+        // device and for the default size of the window.
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            opened,
+            0,
+            "openpty must give a pseudo-terminal: {}",
+            std::io::Error::last_os_error()
+        );
+        (master, slave)
+    }
+
+    /// Wait up to [`REPORT_BUDGET`] for `child`, and give the status word of a
+    /// child that reported inside it.
+    ///
+    /// A child that reports nothing inside the budget is taken down here, so a
+    /// run that timed out leaves no process behind, and the answer is [`None`].
+    fn wait_for_the_child(child: libc::pid_t) -> Option<libc::c_int> {
+        let deadline = Instant::now() + REPORT_BUDGET;
+        let mut status: libc::c_int = 0;
+        while Instant::now() < deadline {
+            // SAFETY: `status` is owned here, and `child` is a child of this
+            // process, so waitpid reads no other family.
+            let reported = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
+            if reported == child {
+                return Some(status);
+            }
+            if reported == -1 {
+                return None;
+            }
+            std::thread::sleep(REPORT_POLL);
+        }
+        // SAFETY: kill and waitpid read no memory of this process, and `child`
+        // names a child of it. SIGCONT sets a child that stopped running again,
+        // and SIGKILL then ends it.
+        unsafe {
+            libc::kill(child, libc::SIGCONT);
+            libc::kill(child, libc::SIGKILL);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
+        None
+    }
+
+    /// Leave this child with `verdict`.
+    ///
+    /// **This is for a child of a fork alone.** The process that forked is a
+    /// test binary that holds many threads, so the child runs no destructor of
+    /// it and takes the one door that runs none.
+    fn leave(verdict: libc::c_int) -> ! {
+        // SAFETY: `_exit` reads no memory of this process and ends it at once.
+        unsafe { libc::_exit(verdict) }
+    }
+
+    /// Take `terminal` as the controlling terminal of this child.
+    ///
+    /// setsid(2) goes first. It puts the child in a session of its own, and it
+    /// drops the controlling terminal the child inherited. **That drop is what
+    /// keeps a test off the terminal of whoever started the run**: a child that
+    /// failed to take the pseudo-terminal owns no terminal at all, so nothing
+    /// it does afterwards reaches a terminal of the user.
+    ///
+    /// The child is the leader of that session and `TIOCSCTTY` makes the
+    /// process group of the child the foreground group of the terminal. So the
+    /// child owns the terminal, and [`owns_the_terminal`] says so.
+    fn claim_the_terminal(terminal: RawFd) {
+        // SAFETY: setsid takes no argument and reads no memory. The fork gave
+        // this process a new process id and left it in the process group of the
+        // test, so it leads no process group and setsid cannot fail for the one
+        // reason it has. The ioctl reads no memory either, and `terminal` is a
+        // descriptor the test opened and still holds.
+        unsafe {
+            if libc::setsid() == -1 {
+                leave(FAILED);
+            }
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of this child, and termsize offers no call for that"
+            )]
+            if libc::ioctl(terminal, libc::c_ulong::from(libc::TIOCSCTTY), 0) == -1 {
+                leave(FAILED);
+            }
+        }
+    }
+
+    /// The terminal mode of `fd`.
+    ///
+    /// **This is for a child of a fork alone.** A call that fails leaves the
+    /// child with [`FAILED`], because a child that read no mode has nothing to
+    /// compare and nothing to report.
+    fn mode_of(fd: RawFd) -> libc::termios {
+        // SAFETY: `termios` is a plain C struct, and tcgetattr fills the whole
+        // of it before anything reads it.
+        let mut mode: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: `fd` is a descriptor this child holds open, and `mode` is one
+        // owned structure that tcgetattr fills.
+        if unsafe { libc::tcgetattr(fd, &mut mode) } != 0 {
+            leave(FAILED);
+        }
+        mode
+    }
+
+    /// The bits of the local modes that the terminal driver owns.
+    ///
+    /// `PENDIN` stands for input that the driver has to retype, and the driver
+    /// sets that bit itself when the canonical line discipline comes back on.
+    /// tcsetattr(3) cannot clear it either: the driver puts its own value of
+    /// that bit into every mode a caller writes. `FLUSHO` stands for output the
+    /// driver threw away, and it is such a bit as well.
+    ///
+    /// Measured 2026-09-06 on macOS 25.6 against the pseudo-terminal of the
+    /// test below: the probe puts every other bit of the local modes back, and
+    /// the terminal carries `PENDIN` afterwards whatever the probe writes. So
+    /// neither bit says anything about the mode the probe put back, and a
+    /// comparison that read them would name a defect in every restore of a
+    /// terminal that a user works in.
+    const DRIVER_MODES: libc::tcflag_t = libc::PENDIN | libc::FLUSHO;
+
+    /// Whether two terminal modes carry the same value in every field a caller
+    /// writes.
+    ///
+    /// The fields are read one at a time. A `termios` carries padding that no
+    /// call fills, so a comparison of the whole structure would read bytes that
+    /// stand for nothing. The two speeds arrive through cfgetispeed(3) and
+    /// cfgetospeed(3), because the field behind them carries a different name
+    /// on each platform. The local modes are read without [`DRIVER_MODES`],
+    /// which no caller writes.
+    fn same_mode(before: &libc::termios, after: &libc::termios) -> bool {
+        // SAFETY: both structures were filled by tcgetattr, and the two calls
+        // read them and write neither.
+        let speeds = unsafe {
+            libc::cfgetispeed(before) == libc::cfgetispeed(after)
+                && libc::cfgetospeed(before) == libc::cfgetospeed(after)
+        };
+        speeds
+            && before.c_iflag == after.c_iflag
+            && before.c_oflag == after.c_oflag
+            && before.c_cflag == after.c_cflag
+            && (before.c_lflag & !DRIVER_MODES) == (after.c_lflag & !DRIVER_MODES)
+            && before.c_cc == after.c_cc
+    }
+
+    /// What the child of the restore test exits with when every field of the
+    /// mode came back.
+    const RESTORED: libc::c_int = 31;
+
+    /// What it exits with when the guard refused a terminal this child owns.
+    const GUARD_REFUSED: libc::c_int = 33;
+
+    /// What it exits with for a live [`RawMode`] that left the terminal
+    /// canonical or echoing.
+    const NOT_RAW: libc::c_int = 35;
+
+    /// What it exits with when a field of the mode did not come back.
+    const NOT_RESTORED: libc::c_int = 37;
+
+    /// Make a [`RawMode`] of `terminal`, drop it, and exit with what happened
+    /// to the mode of that terminal.
+    ///
+    /// This runs in a child of a fork, and the process it forked from is a test
+    /// binary that holds many threads. So it calls libc alone, it allocates
+    /// nothing, and it leaves through [`leave`].
+    fn report_the_restore(terminal: RawFd) -> ! {
+        claim_the_terminal(terminal);
+        let before = mode_of(terminal);
+        {
+            let Some(_raw) = RawMode::of(terminal) else {
+                leave(GUARD_REFUSED);
+            };
+            let live = mode_of(terminal);
+            // cfmakeraw(3) turns the echo off and it turns the canonical line
+            // discipline off. A terminal that still carries either one gives a
+            // read nothing until a newline arrives, or it paints the answer of
+            // the terminal onto the screen of the user.
+            if live.c_lflag & (libc::ECHO | libc::ICANON) != 0 {
+                leave(NOT_RAW);
+            }
+        }
+        let after = mode_of(terminal);
+        if same_mode(&before, &after) {
+            leave(RESTORED);
+        }
+        leave(NOT_RESTORED)
+    }
+
+    #[test]
+    fn the_terminal_goes_back_to_the_mode_it_had() {
+        // The probe takes the terminal of the user out of the mode that user
+        // works in. A probe that leaves it there hands the shell a terminal
+        // that echoes nothing and reads no line, and the user has no way to
+        // read on the screen what went wrong.
+        let (master, slave) = open_a_pseudo_terminal();
+
+        // SAFETY: fork(2) reads nothing of this process. The child leaves
+        // through `_exit` alone, so it runs no destructor of this one.
+        let child = unsafe { libc::fork() };
+        assert!(child != -1, "fork(2) must give a child");
+        if child == 0 {
+            report_the_restore(slave);
+        }
+
+        let status = wait_for_the_child(child);
+
+        // Both descriptors go back before the assertions, because a failed
+        // assertion leaves this test through a panic.
+        // SAFETY: this test opened the two descriptors and nothing else holds
+        // them.
+        unsafe {
+            libc::close(slave);
+            libc::close(master);
+        }
+
+        let status = status.expect("the child must report inside the budget");
+        assert!(
+            libc::WIFEXITED(status),
+            "the child must exit, and it exited for a signal instead"
+        );
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            RESTORED,
+            "the mode of the terminal must come back whole. {NOT_RESTORED} says \
+             a field of it did not, {NOT_RAW} says the live raw mode was no raw \
+             mode, {GUARD_REFUSED} says the guard refused a child that owns the \
+             terminal, and {FAILED} says a call of the child failed"
+        );
+    }
+
+    /// How long the probe of the round trip waits for its answer.
+    ///
+    /// The answer arrives from the test itself, which writes it as soon as the
+    /// query reaches the master end, so a run that works spends almost none of
+    /// this. It is here for a run that answers nothing.
+    const ROUND_TRIP_BUDGET: Duration = Duration::from_secs(5);
+
+    /// How much of the query one read of the master end takes.
+    const QUERY_CHUNK: usize = 64;
+
+    /// The answer this test writes back. tmux 3.7c answers this, measured
+    /// 2026-09-06, and parameter 4 of it names sixel.
+    const SIXEL_ANSWER: &[u8] = b"\x1b[?1;2;4c";
+
+    /// What the child of the round trip exits with for the answer it read.
+    const NAMED_SIXEL: libc::c_int = 41;
+
+    /// What it exits with when the probe named kitty.
+    const NAMED_KITTY: libc::c_int = 43;
+
+    /// What it exits with when the probe named nothing.
+    const NAMED_NOTHING: libc::c_int = 45;
+
+    /// Ask the controlling terminal of this child, and exit with what the probe
+    /// made of the answer.
+    ///
+    /// This runs in a child of a fork of a test binary that holds many threads,
+    /// and it leaves through [`leave`].
+    fn report_the_round_trip(terminal: RawFd, master: RawFd) -> ! {
+        claim_the_terminal(terminal);
+        // SAFETY: the fork gave this child a copy of the master end, and this
+        // child reads nothing of it. The test holds the other copy, and the
+        // answer arrives on that one.
+        unsafe { libc::close(master) };
+        leave(match ask_the_terminal(ROUND_TRIP_BUDGET) {
+            Some(AnsweredProtocol::Sixel) => NAMED_SIXEL,
+            Some(AnsweredProtocol::Kitty) => NAMED_KITTY,
+            None => NAMED_NOTHING,
+        })
+    }
+
+    /// Read `fd` until the whole query of the probe arrives, or until `budget`
+    /// is spent.
+    ///
+    /// The query ends with [`ATTRIBUTES_REQUEST`], so the end of it is what
+    /// says the whole of it arrived.
+    fn read_the_query(fd: RawFd, budget: Duration) -> Vec<u8> {
+        let deadline = Instant::now() + budget;
+        let mut seen = Vec::new();
+        while seen.len() < ANSWER_LIMIT && !seen.ends_with(ATTRIBUTES_REQUEST) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || !waits_for_a_byte(fd, left) {
+                break;
+            }
+            let mut chunk = [0_u8; QUERY_CHUNK];
+            // SAFETY: the buffer is owned here and the length is its own.
+            let taken = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+            let Ok(taken) = usize::try_from(taken) else {
+                break;
+            };
+            if taken == 0 {
+                break;
+            }
+            seen.extend_from_slice(&chunk[..taken]);
+        }
+        seen
+    }
+
+    #[test]
+    fn the_probe_asks_the_terminal_and_reads_what_it_answers() {
+        // The whole round trip, over a terminal that this test answers for: the
+        // probe opens the controlling terminal, puts it in raw mode, writes the
+        // query, and reads the answer back off the same descriptor.
+        let (master, slave) = open_a_pseudo_terminal();
+
+        // SAFETY: fork(2) reads nothing of this process. The child leaves
+        // through `_exit` alone, so it runs no destructor of this one.
+        let child = unsafe { libc::fork() };
+        assert!(child != -1, "fork(2) must give a child");
+        if child == 0 {
+            report_the_round_trip(slave, master);
+        }
+
+        // The query arrives on the master end, and it arrives after the child
+        // put the terminal in raw mode. So the answer this test writes back
+        // reaches a terminal that echoes nothing and waits for no newline.
+        let query = read_the_query(master, REPORT_BUDGET);
+        // SAFETY: the buffer is owned here and the length is its own.
+        let put = unsafe { libc::write(master, SIXEL_ANSWER.as_ptr().cast(), SIXEL_ANSWER.len()) };
+
+        let status = wait_for_the_child(child);
+
+        // Both descriptors go back before the assertions, because a failed
+        // assertion leaves this test through a panic.
+        // SAFETY: this test opened the two descriptors and nothing else holds
+        // them.
+        unsafe {
+            libc::close(slave);
+            libc::close(master);
+        }
+
+        assert_eq!(
+            query, IMAGE_QUERY,
+            "the probe writes the whole query to the terminal it asks"
+        );
+        assert_eq!(
+            put,
+            isize::try_from(SIXEL_ANSWER.len())
+                .expect("the answer is far below the size of a read"),
+            "the whole of the answer reaches the terminal"
+        );
+
+        let status = status.expect("the child must report inside the budget");
+        assert!(
+            libc::WIFEXITED(status),
+            "the child must exit, and it exited for a signal instead"
+        );
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            NAMED_SIXEL,
+            "the probe must read the answer the terminal wrote. {NAMED_NOTHING} \
+             says it read no answer at all, {NAMED_KITTY} says it named the \
+             other protocol, and {FAILED} says a call of the child failed"
         );
     }
 }
