@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -507,14 +507,20 @@ fn main() -> Result<()> {
 
     println!("Found {} Cargo.toml files:", cargo_files.len());
 
-    // Check for duplicate package names
-    let mut package_names: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    // Check for duplicate package names. The map is ordered by package name,
+    // and the scan handed its packages over sorted, so the report below reads
+    // the same on every run: the groups in order by name, and the paths inside
+    // one group in order by path. A `HashMap` seeds its iteration order afresh
+    // in every process, which printed one tree's groups in a different order on
+    // every run and on every machine — and this report is a list of directories
+    // to rename, so it is read beside the previous run's.
+    let mut package_names: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for cargo_file in cargo_files {
         match get_package_name(cargo_file) {
             Ok(name) => {
                 package_names
                     .entry(name)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(cargo_file.clone());
             }
             Err(e) => {

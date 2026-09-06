@@ -113,7 +113,10 @@ fn build_duplicates(root: &Path) -> Vec<(String, Vec<String>)> {
         // already in the order a sort puts them in.
         expected.push((
             name,
-            paths.iter().map(|path| path.display().to_string()).collect(),
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
         ));
     }
     expected
