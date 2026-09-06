@@ -92,6 +92,14 @@ const ATTRIBUTES_OPENER: &[u8] = b"\x1b[?";
 /// The final byte of an answer of the primary device attributes.
 const ATTRIBUTES_FINAL: u8 = b'c';
 
+/// The byte that divides one parameter of that answer from the next.
+///
+/// This byte is the byte of [`KITTY_SEPARATOR`], and that is a coincidence of
+/// two protocols. The two constants stand apart for that reason: a change to
+/// the answer of the attributes moves this one alone, and a change to the
+/// kitty answer moves that one alone.
+const PARAMETER_SEPARATOR: u8 = b';';
+
 /// The parameter of that answer which names sixel.
 const SIXEL_PARAMETER: &[u8] = b"4";
 
@@ -139,7 +147,7 @@ fn kitty_said_ok(answer: &[u8]) -> bool {
 fn attributes_name_sixel(answer: &[u8]) -> bool {
     attributes_parameters(answer).is_some_and(|parameters| {
         parameters
-            .split(|byte| *byte == KITTY_SEPARATOR)
+            .split(|byte| *byte == PARAMETER_SEPARATOR)
             .any(|parameter| parameter == SIXEL_PARAMETER)
     })
 }
