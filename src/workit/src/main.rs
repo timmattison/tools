@@ -47,7 +47,10 @@ struct Args {
     )]
     prefix: Option<String>,
 
-    #[arg(long, help = "Include packages in git worktrees (excluded by default)")]
+    #[arg(
+        long,
+        help = "Include packages in a git worktree below the search path (excluded by default; where the search path itself sits is never matched)"
+    )]
     include_worktrees: bool,
 
     #[arg(long, help = "Disable default exclusions (target, node_modules)")]
@@ -58,25 +61,105 @@ fn get_default_excludes() -> Vec<String> {
     vec!["target".to_string(), "node_modules".to_string()]
 }
 
-fn is_in_worktree(path: &Path) -> bool {
-    // Walk up the directory tree looking for .git
-    let mut current = path;
-    loop {
-        let git_path = current.join(".git");
-        if git_path.exists() {
-            // If .git is a file (not directory), it's likely a worktree
-            if git_path.is_file() {
-                if let Ok(content) = fs::read_to_string(&git_path) {
-                    return content.trim().starts_with("gitdir:");
-                }
-            }
-            return false; // Regular git repo
+/// Whether the package whose manifest is `manifest` sits in a git worktree
+/// that lies below `root`.
+///
+/// `--include-worktrees` answers one question: this tree holds a second
+/// checkout of packages the repository already has, so do not list them twice.
+/// That is a statement about the directories *below* the search path, so the
+/// walk up stops at `root` and never asks where `root` itself sits.
+///
+/// It used to walk on to the root of the file system, which asked the opposite
+/// question — is the search path inside a worktree — and answered it for every
+/// package at once. A search path inside a worktree therefore lost all of them,
+/// and the run reported an empty tree. That is the same defect the exclusion
+/// matching in `find_cargo_tomls` carried, in the same place: a filter meant to
+/// judge what is under the root ended up judging the root.
+///
+/// A `.git` *directory* is a repository of its own rather than a worktree. A
+/// package under one is a package nothing else holds, so it is listed, and the
+/// walk stops there: what lies above a repository says nothing about what is
+/// inside it.
+fn is_in_worktree(manifest: &Path, root: &Path) -> bool {
+    let Some(package) = manifest.parent() else {
+        return false;
+    };
+
+    for directory in package.ancestors() {
+        // The search path is where the walk ends. Comparing paths rather than
+        // subtracting them keeps a relative `--path` working: `WalkDir` hands
+        // back every path built onto the root exactly as it was given, and
+        // `Path` compares by component, so `.` and `./` both stop here.
+        if directory == root {
+            return false;
         }
 
-        match current.parent() {
-            Some(parent) => current = parent,
-            None => return false,
+        // A directory the root does not hold cannot be reached by walking up
+        // from a path under the root, so this is unreachable in practice. It is
+        // the second half of the stop condition all the same: an equality that
+        // never matches would otherwise walk to the root of the file system,
+        // which is the behaviour being removed.
+        if directory.strip_prefix(root).is_err() {
+            return false;
         }
+
+        let git_path = directory.join(".git");
+        if git_path.is_file() {
+            // A linked worktree keeps a file naming the directory it borrows.
+            if let Ok(content) = fs::read_to_string(&git_path) {
+                return content.trim().starts_with("gitdir:");
+            }
+            return false;
+        }
+        if git_path.is_dir() {
+            return false; // A repository of its own, not a worktree.
+        }
+    }
+
+    false
+}
+
+/// What one walk of the tree found.
+///
+/// The two counts answer different questions and an empty result needs both:
+/// packages the scan found and a count of the ones the worktree filter took
+/// back out. A run that found nothing because everything it found was filtered
+/// must not read like a run over a tree that holds no package - the second one
+/// is an answer, and the first is a flag the user has not been told about.
+///
+/// Entries the scan could not read are counted separately again, by `Skipped`,
+/// because those decide the exit status and these do not: a package left out on
+/// purpose is not a package the scan failed to read.
+struct Scan {
+    /// The package manifests to write into the workspace, sorted.
+    packages: Vec<PathBuf>,
+    /// How many manifests the worktree filter left out.
+    worktrees: usize,
+}
+
+impl Scan {
+    /// Says why the scan found nothing, when the reason is the worktree filter.
+    ///
+    /// Prints nothing when the filter left nothing out: a tree that holds no
+    /// package at all is not a filtering problem, and naming a flag that would
+    /// change nothing sends the reader the wrong way.
+    fn explain_empty_result(&self, root: &Path) {
+        if self.worktrees == 0 {
+            return;
+        }
+
+        let files = if self.worktrees == 1 {
+            "Cargo.toml file"
+        } else {
+            "Cargo.toml files"
+        };
+        println!(
+            "{} {files} below {} {} left out for being in a git worktree. \
+             Pass --include-worktrees to list them.",
+            self.worktrees,
+            root.display(),
+            if self.worktrees == 1 { "was" } else { "were" },
+        );
     }
 }
 
@@ -140,8 +223,9 @@ fn find_cargo_tomls(
     excludes: &[String],
     include_worktrees: bool,
     skipped: &mut Skipped,
-) -> Vec<PathBuf> {
+) -> Scan {
     let mut cargo_files = Vec::new();
+    let mut worktrees = 0;
 
     for entry in WalkDir::new(root)
         .follow_links(false)
@@ -190,8 +274,12 @@ fn find_cargo_tomls(
         let path = entry.path();
 
         if path.file_name() == Some("Cargo.toml".as_ref()) && path != root.join("Cargo.toml") {
-            // Skip if in a worktree (unless explicitly included)
-            if !include_worktrees && is_in_worktree(path) {
+            // Skip a second checkout of packages the repository already holds,
+            // unless the run asked for it. Counted, so a scan the filter
+            // emptied can say so rather than reporting a tree with nothing in
+            // it.
+            if !include_worktrees && is_in_worktree(path, root) {
+                worktrees += 1;
                 continue;
             }
 
@@ -205,7 +293,10 @@ fn find_cargo_tomls(
     }
 
     cargo_files.sort();
-    cargo_files
+    Scan {
+        packages: cargo_files,
+        worktrees,
+    }
 }
 
 /// Whether `path` holds a package rather than a workspace.
@@ -397,18 +488,20 @@ fn main() -> Result<()> {
     // counted rather than propagated, so the packages it did find still reach
     // the manifest.
     let mut skipped = Skipped::default();
-    let cargo_files = find_cargo_tomls(
+    let scan = find_cargo_tomls(
         &args.path,
         &all_excludes,
         args.include_worktrees,
         &mut skipped,
     );
+    let cargo_files = &scan.packages;
 
     if cargo_files.is_empty() {
         // A tree the scan read whole and found nothing in is an answer. A tree
         // it could not read is not, so `report` refuses that one.
         skipped.report(cargo_files.len())?;
         println!("No Cargo.toml files found in subdirectories");
+        scan.explain_empty_result(&args.path);
         return Ok(());
     }
 
@@ -416,7 +509,7 @@ fn main() -> Result<()> {
 
     // Check for duplicate package names
     let mut package_names: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    for cargo_file in &cargo_files {
+    for cargo_file in cargo_files {
         match get_package_name(cargo_file) {
             Ok(name) => {
                 package_names
@@ -463,7 +556,7 @@ fn main() -> Result<()> {
     let mut members = Vec::new();
     let manifest_directory = manifest_directory(&output)?;
 
-    for cargo_file in &cargo_files {
+    for cargo_file in cargo_files {
         let parent = cargo_file
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Cargo.toml has no parent directory"))?;
