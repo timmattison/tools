@@ -3,11 +3,16 @@
 //! A terminal that draws an image draws it from an escape sequence, and three
 //! such sequences are in service. Kitty carries the pixels in a protocol of
 //! its own. iTerm2 carries a whole image file in one sequence. Sixel carries a
-//! palette and then a band of pixels at a time. No terminal reads all three,
-//! and a terminal answers no question about the ones it reads. A tool that
-//! wants to draw an image therefore reads the environment variables that the
-//! terminal set, names the terminal from what it finds there, and then picks
-//! the one sequence that terminal reads.
+//! palette and then a band of pixels at a time. No terminal reads all three.
+//! A tool that wants to draw an image therefore reads the environment
+//! variables that the terminal set, names the terminal from what it finds
+//! there, and then picks the one sequence that terminal reads.
+//!
+//! **A terminal that set no variable is not out of reach.** Two of the three
+//! protocols carry a query, and a terminal answers it. [`crate::probe`] writes
+//! that query, and [`Capabilities::detect_by_asking`] is the entrance that
+//! reads the answer. This module keeps the names, because a name costs no
+//! round trip and every terminal that carries one is answered already.
 //!
 //! A caller asks [`Capabilities::detect`] once and gets three facts: which
 //! terminal it draws into, whether that terminal draws an image at all, and
@@ -170,14 +175,26 @@ impl Capabilities {
     /// [`TerminalType::Unknown`].
     #[must_use]
     pub fn detect_by_asking() -> Self {
+        // One round trip for the whole run. What a terminal draws does not
+        // change while a program runs, and a second question costs a second
+        // budget on the one terminal that answers nothing.
+        static ANSWER: std::sync::OnceLock<Capabilities> = std::sync::OnceLock::new();
+        ANSWER.get_or_init(Self::ask_once).clone()
+    }
+
+    /// The one round trip that [`Capabilities::detect_by_asking`] memoizes.
+    fn ask_once() -> Self {
         let env = TerminalEnv::from_process();
-        let raw_mode = stdout_is_a_terminal();
-        let answered = if raw_mode && classify_terminal_type(&env) == TerminalType::Unknown {
+        // The question goes to the controlling terminal, which is a different
+        // descriptor from standard output. A run whose standard output is a
+        // file still has a terminal to ask, and `ic --will-display` promises
+        // that a redirected standard output does not change its answer.
+        let answered = if classify_terminal_type(&env) == TerminalType::Unknown {
             crate::probe::ask_the_terminal(crate::probe::QUERY_BUDGET)
         } else {
             None
         };
-        Self::from_env_and_answer(&env, raw_mode, answered)
+        Self::from_env_and_answer(&env, stdout_is_a_terminal(), answered)
     }
 
     /// Build a set of capabilities from facts that the caller already holds.
@@ -212,11 +229,12 @@ impl Capabilities {
     ///
     /// A terminal that set none of the signals this crate reads is a
     /// [`TerminalType::Unknown`], and [`display_routine_for`] sends such a
-    /// terminal the sequence of iTerm2. That is a guess at the protocol, and it
-    /// is the only thing left to do: no terminal answers a question about the
-    /// sequences it reads. So this method answers no for a terminal of no name,
-    /// and it answers [`Capabilities::draws_images`] for every terminal that
-    /// the crate does name.
+    /// terminal the sequence of iTerm2. That is a guess at the protocol, and a
+    /// terminal that answered [`crate::probe::IMAGE_QUERY`] is no terminal of
+    /// no name: it arrives as [`TerminalType::Answered`], and the answer is a
+    /// fact. So this method answers no for a terminal that neither named
+    /// itself nor answered, and it answers [`Capabilities::draws_images`] for
+    /// every other one.
     ///
     /// This is not [`Capabilities::draws_images`]. That method takes the guess,
     /// and the guess is right for a tool with no second way to show the
@@ -249,8 +267,19 @@ impl Capabilities {
         raw_mode: bool,
         answered: Option<AnsweredProtocol>,
     ) -> Self {
-        let _ = answered;
-        Self::from_env(env, raw_mode)
+        let named = Self::from_env(env, raw_mode);
+        match (named.terminal_type, answered) {
+            (TerminalType::Unknown, Some(protocol)) => Self {
+                terminal_type: TerminalType::Answered(protocol),
+                draws_images: true,
+                raw_mode,
+            },
+            (terminal_type, _) => Self {
+                terminal_type,
+                draws_images: named.draws_images,
+                raw_mode,
+            },
+        }
     }
 
     /// Name what the terminal does from a captured environment.

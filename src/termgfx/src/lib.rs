@@ -5,9 +5,11 @@
 //! before it writes one byte, and none of the three has an obvious answer.
 //!
 //! * Which terminal is this, and does it draw an image at all. Three escape
-//!   sequences are in service, no terminal reads all three, and a terminal
-//!   answers no question about the ones it reads. [`Capabilities::detect`]
-//!   names the terminal from the environment variables that the terminal set.
+//!   sequences are in service and no terminal reads all three.
+//!   [`Capabilities::detect`] names the terminal from the environment
+//!   variables that the terminal set. A terminal that set none of them
+//!   answers two of the three questions itself, and
+//!   [`Capabilities::detect_by_asking`] asks it. See the `probe` module.
 //! * How many pixels does one character cell hold. A terminal lays text out in
 //!   cells and it draws an image in pixels, so a tool that wants an image of a
 //!   given number of cells has to convert. [`cell_pixels`] measures one cell,
@@ -42,7 +44,8 @@
 //!
 //! # The modules
 //!
-//! `detect` reads the environment and names the terminal. `geometry` measures
+//! `detect` reads the environment and names the terminal. `probe` asks a
+//! terminal that the environment left unnamed. `geometry` measures
 //! a character cell and every size that comes off it. `cursor` states where the
 //! cursor ends. `draw` holds the three writers, one for each protocol. Each
 //! module keeps its tests beside the code they cover.
