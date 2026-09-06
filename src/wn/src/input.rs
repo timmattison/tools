@@ -43,6 +43,7 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::build::{BuildError, NO_CLAUDE_ENV};
+use crate::chain::Snippet;
 
 /// The variable that turns the clipboard fallback off. Any value with a
 /// character in it turns it off.
@@ -201,6 +202,14 @@ The next run builds a new one."
     /// from. The clipboard was read on the initiative of the tool, so the
     /// message names it.
     ///
+    /// A plan is the same kind of invisible input, and it costs more than the
+    /// others. The reader typed the text of a plan nowhere and pasted it
+    /// nowhere: `wn` ran `claude`, waited about a minute, and paid for the
+    /// run. So the message says where the text came from, and it quotes the
+    /// first line of the text, which is what tells the reader the shape of
+    /// what the run printed. It still names no clipboard, because the plan is
+    /// not on one.
+    ///
     /// `err` is the reason of whichever reader took the text: one chain that
     /// holds a word, and a plan whose `Order` field holds one, both arrive
     /// here. The input is what this function knows and the reader is what it
@@ -222,18 +231,47 @@ The next run builds a new one."
         E: std::error::Error + Send + Sync + 'static,
     {
         match self.source {
-            // A plan `wn` built is a plan `wn` asked for, and the reason it
-            // could not be read is the reason of the reader of it, unchanged.
-            // Naming the run would tell a reader to look at their clipboard,
-            // which holds none of it.
-            Source::Argument | Source::Stdin | Source::Plan => anyhow::Error::new(err),
+            Source::Argument | Source::Stdin => anyhow::Error::new(err),
             Source::Clipboard => anyhow::anyhow!("wn cannot read the clipboard: {err}"),
+            // A plan `wn` built is a plan the reader neither typed nor pasted,
+            // so the message names the run that printed it and quotes its
+            // first line. It names no clipboard, because the plan is not on
+            // one, and a reader sent to look at a clipboard finds none of it.
+            //
+            // The quotation always says something. `built` refuses a run that
+            // printed nothing but space, so a plan holds one character that is
+            // not space, and the line that character stands on is the line
+            // `first_line` finds.
+            Source::Plan => anyhow::anyhow!(
+                "the run of claude printed a plan wn cannot read: {err}. \
+The first line of it is {line:?}.",
+                line = first_line(&self.text)
+            ),
         }
     }
 }
 
 /// The note a run that kept its plan earns.
 const KEPT: &str = "The plan is on the clipboard. Run wn --refresh to build a new one.";
+
+/// The first line of `text` that holds something other than space, cut for a
+/// message.
+///
+/// The shape of what a run of `claude` printed is on that line: a run that
+/// wrapped its document in a code fence opens with the fence, and a run that
+/// wrote prose opens with a word. A line of nothing but space says nothing, so
+/// the search steps over it.
+///
+/// Gives an empty [`Snippet`] for a text whose lines all hold nothing but
+/// space. The one caller never meets such a text: [`built`] refuses a run that
+/// printed nothing but space, so every plan holds a line this finds.
+fn first_line(text: &str) -> Snippet {
+    Snippet::new(
+        text.lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or_default(),
+    )
+}
 
 /// Every input a chain can come out of, in the order `wn` tries them.
 pub struct Sources<'a> {
@@ -1119,10 +1157,10 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
     }
 
     #[test]
-    fn a_plan_that_cannot_be_read_is_blamed_on_no_input_at_all() {
-        // A plan `wn` built is a plan `wn` asked for. A message that named the
-        // clipboard would send the reader to look at a clipboard that holds
-        // none of it.
+    fn a_plan_that_cannot_be_read_is_blamed_on_the_run_and_names_no_clipboard() {
+        // The reader paid for the run that printed the text, so the message
+        // names the run. A message that named the clipboard would send the
+        // reader to look at a clipboard that holds none of it.
         let plan = || -> PlanBuild { Ok("#277 an #278".to_string()) };
         let chain = Sources {
             argument: &[],
@@ -1135,7 +1173,50 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
         .expect("the run gave a plan back");
         let err = parse_chain(chain.text()).expect_err("the word is not an issue number");
         let message = chain.blame(err).to_string();
-        assert_eq!(message, "\"an\" is not an issue number");
+        assert_eq!(
+            message,
+            "the run of claude printed a plan wn cannot read: \
+\"an\" is not an issue number. The first line of it is \"#277 an #278\"."
+        );
+        assert!(!message.contains("clipboard"), "{message}");
+    }
+
+    #[test]
+    fn the_first_line_of_a_text_is_the_first_one_that_holds_something() {
+        // The lines in front of a document carry nothing, so the search steps
+        // over them. A text of nothing but space gives an empty snippet, which
+        // `blame` never meets: `built` refuses such a plan, and
+        // `a_run_that_gives_nothing_back_names_claude` holds that.
+        assert_eq!(first_line("```json\n{}\n```").to_string(), "```json");
+        assert_eq!(first_line("\n\n  \nStream: S1\n").to_string(), "Stream: S1");
+        assert_eq!(first_line("  日本語  \n").to_string(), "日本語");
+        assert!(first_line("   \n\t\n  ").is_empty());
+        assert!(first_line("").is_empty());
+    }
+
+    #[test]
+    fn a_fenced_plan_is_blamed_on_the_run_and_quotes_its_first_line() {
+        // The reader typed no text and pasted none. The run of `claude` wrote
+        // the document, and the fence on its first line is what tells the
+        // reader the shape of what the run printed.
+        let fenced = "```json\n{\"streams\": []}\n```";
+        let plan = || -> PlanBuild { Ok(fenced.to_string()) };
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        let err = parse_chain(chain.text()).expect_err("a fence is not an issue number");
+        let message = chain.blame(err).to_string();
+        assert_eq!(
+            message,
+            "the run of claude printed a plan wn cannot read: \
+\"```json\" is not an issue number. The first line of it is \"```json\"."
+        );
         assert!(!message.contains("clipboard"), "{message}");
     }
 

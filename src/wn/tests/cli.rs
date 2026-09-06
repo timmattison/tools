@@ -2330,14 +2330,66 @@ fn the_envelope_of_a_failing_run_carries_the_reason_and_the_pipes_do_not() {
 
 #[test]
 fn a_document_the_run_built_that_does_not_parse_names_no_clipboard() {
-    // The refusal of the reader of a JSON plan, unchanged. A message that
-    // named the clipboard would send the reader to look at a clipboard that
-    // holds none of it.
+    // The message names the run that printed the document, carries the refusal
+    // of the reader of a JSON plan, and quotes the first line of what the run
+    // printed. It names no clipboard: the plan is not on one, and a message
+    // that named one would send the reader to look at a clipboard that holds
+    // none of it.
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints("{ \"version\": 1\n"));
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
     let message = stderr(&output);
     assert!(message.contains("is not a JSON document"), "{message}");
+    assert!(!message.contains("clipboard"), "{message}");
+}
+
+/// The three backticks a Markdown code fence is written with.
+const CODE_FENCE: &str = "```";
+
+/// A text a run of `claude` printed that no reader of `wn` can take.
+///
+/// It holds no brace, no field of a plan, no wire, and no issue number, so
+/// every reader in turn refuses it and the chain reader is the last of them.
+const NO_PLAN_AT_ALL: &str = "There is nothing to plan.";
+
+/// `document` inside a Markdown code fence, with the `json` info string.
+///
+/// The shape a run of a model at a high level of effort prints. JSON mode of
+/// the skill forbids the fence, and such a run wrote one all the same.
+fn fenced(document: &str) -> String {
+    format!("{CODE_FENCE}json\n{document}\n{CODE_FENCE}\n")
+}
+
+#[test]
+fn a_run_that_wrapped_its_document_in_a_fence_is_read_and_answered() {
+    // The fence comes off before the claim, so the document inside it earns
+    // the answer the same document earns without one. The reader paid for the
+    // run, and a message about a backtick is no answer to it.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints(&fenced(&undated(JSON_PLAN))));
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), JSON_ANSWER);
+}
+
+#[test]
+fn a_run_that_printed_a_text_no_reader_can_read_names_the_run() {
+    // The fence comes off and no reader can take what stands inside this one.
+    // The reader typed that text nowhere and pasted it nowhere: `wn` ran
+    // `claude` and paid for the run. So the message names the run and quotes
+    // the first line, which is what tells the reader the shape of what the run
+    // printed. It names no clipboard, because the plan is not on one.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints(&fenced(NO_PLAN_AT_ALL)));
+    let output = run_building(&gh, &["--repo", REPO], &[]);
+    assert_eq!(output.status.code(), Some(2), "the run could not answer");
+    let message = stderr(&output);
+    assert!(
+        message.contains("the run of claude printed a plan wn cannot read"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("The first line of it is \"{CODE_FENCE}json\"")),
+        "{message}"
+    );
     assert!(!message.contains("clipboard"), "{message}");
 }
 

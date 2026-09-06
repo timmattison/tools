@@ -43,6 +43,20 @@
 //! `wn` reads starts that way. So the claim is decided on one character and
 //! never on a partial parse.
 //!
+//! A Markdown code fence comes off before that character is read. A run of a
+//! model at a high level of effort writes the document it prints inside such a
+//! fence, so the first character of the text is a backtick. The whole first
+//! line comes off, because it carries the info string of the fence, such as
+//! `json`. A closing line of three backticks comes off after it.
+//!
+//! The claim stays decided on one character. A fence is a wrapper this tool
+//! knows, and it is no part of any plan this tool reads. To take a known
+//! wrapper off a text is not to parse what stands inside it.
+//!
+//! A text with an opening fence and no closing one keeps its body. A run the
+//! deadline killed writes an opening fence and stops, and the plan it wrote is
+//! still there to read.
+//!
 //! A text that starts with `{` and does not parse is an error, and never a
 //! walk on to the next reader. A reader that fell through on a broken document
 //! would take a document with one missing brace to the chain reader, which
@@ -69,6 +83,12 @@ use crate::plan::Step;
 
 /// The character a JSON document opens with.
 const OPENING_BRACE: char = '{';
+
+/// The three backticks a Markdown code fence is written with.
+const CODE_FENCE: &str = "```";
+
+/// The character that ends a line.
+const END_OF_LINE: char = '\n';
 
 /// The version of the schema this reader knows.
 const SCHEMA_VERSION: u64 = 1;
@@ -271,9 +291,13 @@ impl Document {
 /// document.
 ///
 /// The claim and the read share all of their work, so one function does both,
-/// exactly as [`crate::graph::read`] does for a picture. The claim is the
-/// first character that is not a space: a `{` is a JSON document, and every
-/// other text walks on to the next reader.
+/// exactly as [`crate::graph::read`] does for a picture. A code fence comes off
+/// first, through [`unfenced`]. The claim is then the first character that is
+/// not a space: a `{` is a JSON document, and every other text walks on to the
+/// next reader.
+///
+/// The text this reads is the text the fence came off, so a message about a
+/// broken document names the document and never the fence.
 ///
 /// # Errors
 ///
@@ -284,10 +308,39 @@ impl Document {
 /// other.
 #[must_use]
 pub fn read(text: &str) -> Option<Result<Document, JsonError>> {
+    let text = unfenced(text);
     if !text.trim_start().starts_with(OPENING_BRACE) {
         return None;
     }
     Some(document_of(text))
+}
+
+/// The body of `text`, with a Markdown code fence taken off it.
+///
+/// A run of a model writes the document it prints inside a fence, and the
+/// opening line of that fence carries an info string such as `json`. So the
+/// whole first line comes off, and a closing line of three backticks after it.
+///
+/// A text with an opening fence and no closing one keeps its body. A run the
+/// deadline killed writes an opening fence and stops, and the plan it wrote is
+/// still there to read.
+///
+/// A text that does not open with three backticks is given back as it stands.
+/// Only this reader takes a fence off, because only this reader knows that a
+/// fence is no part of what it reads.
+#[must_use]
+fn unfenced(text: &str) -> &str {
+    let Some(opened) = text.trim().strip_prefix(CODE_FENCE) else {
+        return text;
+    };
+    let body = opened
+        .split_once(END_OF_LINE)
+        .map_or("", |(_info_string, rest)| rest);
+    let closed = body.trim_end();
+    match closed.strip_suffix(CODE_FENCE) {
+        Some(inner) if inner.is_empty() || inner.ends_with(END_OF_LINE) => inner,
+        _ => body,
+    }
 }
 
 /// One step of the plan, as one element of an `order` array writes it.
@@ -973,6 +1026,69 @@ mod tests {
             let text = format!("{space}{DOCUMENT}");
             assert_eq!(nodes(&graph_of(&text)), vec![91, 96, 102], "with {space:?}");
         }
+    }
+
+    /// The text `body` inside a code fence whose info string is `info`.
+    ///
+    /// One helper writes every fenced text of these tests, so the shape of a
+    /// fence stands in one place.
+    fn fenced(info: &str, body: &str) -> String {
+        format!("{CODE_FENCE}{info}\n{body}\n{CODE_FENCE}\n")
+    }
+
+    #[test]
+    fn a_document_in_a_code_fence_reads() {
+        // A run of a model at a high level of effort writes the document it
+        // prints inside a Markdown fence. The reader paid for that run, and a
+        // message about a backtick is no answer to it. Both spellings of the
+        // opening fence stand, because a model writes either one.
+        for info in ["json", ""] {
+            let text = fenced(info, DOCUMENT);
+            assert_eq!(nodes(&graph_of(&text)), vec![91, 96, 102], "with {info:?}");
+        }
+    }
+
+    #[test]
+    fn a_fenced_text_that_is_no_json_document_walks_on_to_the_next_reader() {
+        // What stands inside the fence decides the claim, and a box table is
+        // the work of the table reader. The fence tells this reader nothing.
+        for info in ["", "text"] {
+            assert!(
+                read(&fenced(info, BOX_TABLE)).is_none(),
+                "the box table keeps its reader, with {info:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fence_that_never_closed_keeps_the_document() {
+        // A run the deadline killed writes an opening fence and stops. The plan
+        // it wrote is still there, so the reader reads it.
+        let text = format!("{CODE_FENCE}json\n{DOCUMENT}");
+        assert_eq!(nodes(&graph_of(&text)), vec![91, 96, 102]);
+    }
+
+    #[test]
+    fn a_fenced_document_that_does_not_parse_names_the_document() {
+        // The message names what is wrong. The fence is no part of that, and a
+        // message that opened with a backtick would name the wrong problem.
+        let broken = DOCUMENT
+            .trim_end()
+            .strip_suffix(CLOSING_BRACE)
+            .expect("the document closes with a brace");
+        let refused = refusal(&fenced("json", broken));
+        assert!(
+            matches!(refused, JsonError::NotJson { .. }),
+            "a broken document is not JSON, and this is {refused:?}"
+        );
+        assert!(
+            refused.to_string().starts_with("\"{"),
+            "the message names the document, and it reads {refused}"
+        );
+        assert!(
+            !refused.to_string().contains(CODE_FENCE),
+            "the message names no fence, and it reads {refused}"
+        );
     }
 
     #[test]

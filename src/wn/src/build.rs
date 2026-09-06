@@ -82,7 +82,7 @@ const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// | `low` | 184 | $1.63 | 14,387 | 9 | 24 | 54 | 0 | yes |
 /// | `medium` | 205 | $1.54 | 15,208 | 8 | 18 | 48 | 0 | yes |
 /// | `high` | 353 | $2.24 | 22,193 | 17 | 23 | 49 | 0 | yes |
-/// | `xhigh` | 397 | $2.30 | 28,570 | 21 | 20 | 49 | 0 | **no** |
+/// | `xhigh` | 397 | $2.30 | 28,570 | 21 | 20 | 49 | 0 | yes, in a fence |
 ///
 /// A plan is wrong when it puts two issues that edit one file in parallel
 /// streams, and it is wrong when it schedules a consumer before its producer.
@@ -97,10 +97,13 @@ const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// # What the dearest level did
 ///
 /// The `xhigh` run wrapped its document in a fenced code block. JSON mode of
-/// the skill forbids that, and [`crate::json`] claims a text on the opening
-/// brace, so `wn` refuses such a document and falls through to the readers
-/// that cannot read it either. The dearest run of the four is the one run
-/// this tool could not use.
+/// the skill forbids that, and the dearest run of the four wrote one all the
+/// same. This measurement is what put the fence rule of [`crate::json`] in: a
+/// Markdown fence comes off a text before the claim on the opening brace, so
+/// the document of that run reads.
+///
+/// The fence changes no number of the table above, so the default stands.
+/// `low` won on speed, on price, and on the count of issues it placed.
 ///
 /// One run at each level, on one backlog, on one day. That is what the
 /// numbers cover, and a level whose plan held once is not a level proved to
