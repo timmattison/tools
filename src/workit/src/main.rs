@@ -7,7 +7,7 @@ use toml_edit::{Array, DocumentMut, Item, Table};
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Find all Cargo.toml files and add them to a workspace", long_about = None)]
+#[command(version, about = "Find all Cargo.toml files and add them to a workspace", long_about = None)]
 struct Args {
     #[arg(short, long, help = "Path to search for Cargo.toml files", default_value = ".")]
     path: PathBuf,

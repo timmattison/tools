@@ -9706,6 +9706,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "workit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "toml_edit 0.22.27",
+ "walkdir",
+]
+
+[[package]]
 name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

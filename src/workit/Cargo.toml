@@ -1,10 +1,14 @@
 [package]
 name = "workit"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+description = "Find every Cargo.toml under a directory and write a workspace manifest that lists them as members"
 
 [dependencies]
-anyhow = "1.0"
-clap = { version = "4.0", features = ["derive"] }
-toml_edit = "0.22"
-walkdir = "2.3"
+anyhow.workspace = true
+clap.workspace = true
+toml_edit.workspace = true
+walkdir.workspace = true
+
+[lints]
+workspace = true
