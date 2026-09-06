@@ -10,12 +10,12 @@ describe("devServerPort", () => {
 
   beforeEach(() => {
     saved = process.env[PORT_VARIABLE];
-    delete process.env[PORT_VARIABLE];
+    Reflect.deleteProperty(process.env, PORT_VARIABLE);
   });
 
   afterEach(() => {
     if (saved === undefined) {
-      delete process.env[PORT_VARIABLE];
+      Reflect.deleteProperty(process.env, PORT_VARIABLE);
     } else {
       process.env[PORT_VARIABLE] = saved;
     }
