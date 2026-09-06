@@ -191,7 +191,13 @@ const CONTROLLING_TERMINAL: &str = "/dev/tty";
 const ANSWER_LIMIT: usize = 1024;
 
 /// How much of an answer one read takes.
-const READ_CHUNK: usize = 128;
+///
+/// One byte, because the loop tests for a whole answer of the attributes after
+/// each read. A larger read takes the bytes behind the answer as well, and
+/// those bytes belong to whoever reads the descriptor next, so one byte is what
+/// makes the rule of [`drain`] true. A whole answer is about twenty bytes, so
+/// one probe pays about twenty pairs of select(2) and read(2) for it.
+const READ_CHUNK: usize = 1;
 
 /// Read the descriptor until the answer of the attributes arrives, until the
 /// budget is spent, or until the cap is reached.
