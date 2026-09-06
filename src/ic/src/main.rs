@@ -505,25 +505,62 @@ fn ensure_ffprobe_available() -> Result<()> {
     Ok(())
 }
 
+/// Whether this run stands inside a tmux session.
+fn in_tmux() -> bool {
+    std::env::var("TMUX").is_ok()
+}
+
+/// Refuse the run when this session cannot draw an image.
+///
+/// The gate reads three things: the answer the terminal gave to a query, the
+/// remote transport, and the multiplexer. It gives `Ok` when the session can
+/// show graphics. It gives an error when the session cannot, and that error
+/// carries the reason and the repair for the user to read. `feature` names
+/// what the user asked for, "Image" or "Video", and the messages say that
+/// word.
+///
+/// `in_tmux` arrives as an argument, and the gate does not read `TMUX` itself,
+/// so that the gate is a pure function of its inputs. A test that set `TMUX`
+/// would change the environment of every other test in the process.
 fn validate_terminal_for_graphics(
     terminal_caps: &Capabilities,
     transport: &RemoteTransport,
+    in_tmux: bool,
     feature: &str,
 ) -> Result<()> {
-    // Check for Mosh first, since it strips escape sequences needed by all graphics protocols
+    // A terminal that answered a query is a fact, and every rule below it is a
+    // guess about a terminal that answered nothing. A fact outranks a guess.
+    //
+    // This is what mosh and tmux both turn on. Neither one carries a signal in
+    // the environment, so both of them reach this gate unnamed, and the two
+    // rules below used to refuse them on the strength of the process tree
+    // alone. Both of them answer a query instead: measured 2026-09-06, tmux
+    // 3.7c answers `CSI ?1;2;4 c` and names sixel. A mosh session answers for
+    // the pair — mosh together with the terminal of the user — so an answer
+    // there is an answer about the far terminal, which no environment variable
+    // can carry across the session.
+    if matches!(terminal_caps.terminal_type(), TerminalType::Answered(_)) {
+        return Ok(());
+    }
+
+    // Check for Mosh, since upstream Mosh strips the escape sequences that
+    // every graphics protocol needs. A Mosh that draws them answers the query
+    // above, and this one answered nothing.
     if *transport == RemoteTransport::Mosh {
         anyhow::bail!(
-            "Mosh detected. {} display does not work over Mosh.\n\
-            Mosh strips the escape sequences needed for image display (Sixel, Kitty, iTerm2).\n\
+            "Mosh detected, and this session answered no query about images.\n\
+            Upstream Mosh strips the escape sequences that carry an image (Sixel, Kitty, iTerm2).\n\
+            A Mosh that draws them answers that query, so {} display cannot work here.\n\
             \n\
             To display images, reconnect with ssh user@host instead of mosh user@host.",
             feature
         );
     }
 
-    // Check for tmux, since graphics don't work in tmux
-    if std::env::var("TMUX").is_ok() {
-        anyhow::bail!("tmux detected. {} display does not work in tmux. Please run it directly in your terminal.", feature);
+    // Check for tmux, since a tmux that draws no image strips the sequences.
+    // A tmux that draws one answers the query above.
+    if in_tmux {
+        anyhow::bail!("tmux detected, and this session answered no query about images. {} display does not work here. Please run it directly in your terminal.", feature);
     }
 
     if !terminal_caps.draws_images() {
@@ -581,17 +618,17 @@ fn validate_terminal_for_graphics(
 /// ask whether stdout is a terminal, so a redirected stdout does not change
 /// the answer.
 fn report_display_readiness() -> Result<()> {
-    let terminal_caps = Capabilities::detect();
+    let terminal_caps = Capabilities::detect_by_asking();
     let transport = detect_remote_transport();
 
-    validate_terminal_for_graphics(&terminal_caps, &transport, "Image")
+    validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")
 }
 
 fn display_video_from_file(file_path: &Path, args: &Args) -> Result<()> {
-    let terminal_caps = Capabilities::detect();
+    let terminal_caps = Capabilities::detect_by_asking();
     let transport = detect_remote_transport();
 
-    validate_terminal_for_graphics(&terminal_caps, &transport, "Video")?;
+    validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Video")?;
     ensure_ffmpeg_available()?;
 
     // Clear screen initially with function
@@ -889,7 +926,7 @@ fn play_video_simple(
     duration: f64,
     fps: f64,
 ) -> Result<()> {
-    let terminal_caps = Capabilities::detect();
+    let terminal_caps = Capabilities::detect_by_asking();
     let (_raw_mode, input_rx, _input_handle) = setup_video_controls(&terminal_caps)?;
 
     let _screen_guard = AlternateScreenGuard::enter()?;
@@ -1569,10 +1606,10 @@ fn display_image(
     no_newline: bool,
     header: HeaderRows,
 ) -> Result<()> {
-    let terminal_caps = Capabilities::detect();
+    let terminal_caps = Capabilities::detect_by_asking();
     let transport = detect_remote_transport();
 
-    validate_terminal_for_graphics(&terminal_caps, &transport, "Image")?;
+    validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")?;
 
     // Always use character-based sizing (fit mode), but respect user-specified dimensions if provided
     let (target_width, target_height) = if args.width.is_some() || args.height.is_some() {
@@ -2070,6 +2107,7 @@ fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use termgfx::AnsweredProtocol;
 
     // =========================================================================
     // Tests for comm_basename
@@ -2231,7 +2269,7 @@ not_a_number  1 /bin/bash
         // stands in favor of the image, so the refusal below comes from the
         // transport alone.
         let caps = Capabilities::new(TerminalType::ITerm2, true, true);
-        let error = validate_terminal_for_graphics(&caps, &RemoteTransport::Mosh, "Image")
+        let error = validate_terminal_for_graphics(&caps, &RemoteTransport::Mosh, false, "Image")
             .expect_err("Mosh must be refused");
         error.to_string()
     }
@@ -2248,6 +2286,35 @@ not_a_number  1 /bin/bash
         assert!(
             !message.contains("et user@host"),
             "message still recommends the et command: {message}"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_answered_draws_a_picture_under_mosh() {
+        // This port of mosh reads all three image protocols, and its emulator
+        // answers a query for the pair: mosh together with the terminal of the
+        // user. So an answer under mosh is a fact about the far terminal, and
+        // it outranks the process tree. A name under mosh is still a guess,
+        // which is what `mosh_refusal_message` above covers.
+        let answered =
+            Capabilities::new(TerminalType::Answered(AnsweredProtocol::Kitty), true, true);
+        assert!(
+            validate_terminal_for_graphics(&answered, &RemoteTransport::Mosh, false, "Image")
+                .is_ok(),
+            "a terminal that answered the query draws the picture"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_answered_draws_a_picture_inside_tmux() {
+        // tmux 3.7c answers `CSI ?1;2;4 c`, which names sixel. Measured
+        // 2026-09-06. The blanket refusal below it rests on an older tmux.
+        let answered =
+            Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true);
+        assert!(
+            validate_terminal_for_graphics(&answered, &RemoteTransport::None, true, "Image")
+                .is_ok(),
+            "a terminal that answered the query draws the picture"
         );
     }
 

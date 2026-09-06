@@ -149,6 +149,25 @@ A panel's PTY inherits the environment of whatever terminal launched the muxiave
 | `MUXIAVELLI` | `1` | The PTY is inside a muxiavelli panel. Checked before every host-terminal signal so leaked env vars cannot win. |
 | `MUXIAVELLI_IMAGE_PROTOCOLS` | e.g. `sixel,iterm2` | Ordered preference of inline-image protocols the panel renders. `ic` picks the first one it supports. Absent, empty, or naming nothing supported falls back to Sixel. The Kitty protocol is intentionally never used in muxiavelli panels. |
 
-### tmux Support
+### Multiplexers and mosh
 
-The utility automatically detects when running inside tmux and reports an error. This program does not work in tmux (yet).
+`ic` asks the terminal which image protocol it draws when the environment names
+no terminal, and the answer decides. The query is the query action of the kitty
+graphics protocol together with a request for the primary device attributes,
+whose parameter 4 names sixel. A terminal that answers draws the picture,
+whatever the process tree says.
+
+That covers two cases a name cannot:
+
+- **tmux.** tmux 3.7c answers `CSI ?1;2;4 c` and draws sixel. Older tmux
+  answers no such thing and still gets the error it always got.
+- **mosh.** Upstream mosh strips the sequences that carry an image. The Rust
+  port reads all three protocols, and its emulator answers the query for the
+  pair — mosh together with the terminal of the user. No environment variable
+  carries that answer, because no variable crosses the session.
+
+zellij is not one of these cases. It sets the `ZELLIJ` variable, so `ic` names
+it from the environment and asks it nothing. It draws sixel by that name.
+
+A terminal that answers nothing keeps the behavior it had: `ic` names it from
+the environment, and it reports an error for tmux and for mosh.
