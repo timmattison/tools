@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::Parser;
 use std::collections::HashMap;
 use std::fs;
@@ -7,7 +8,7 @@ use toml_edit::{Array, DocumentMut, Item, Table};
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
-#[command(version, about = "Find all Cargo.toml files and add them to a workspace", long_about = None)]
+#[command(version = version_string!(), about = "Find all Cargo.toml files and add them to a workspace", long_about = None)]
 struct Args {
     #[arg(
         short,

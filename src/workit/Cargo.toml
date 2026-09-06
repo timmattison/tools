@@ -6,6 +6,7 @@ description = "Find every Cargo.toml under a directory and write a workspace man
 
 [dependencies]
 anyhow.workspace = true
+buildinfo.workspace = true
 clap.workspace = true
 toml_edit.workspace = true
 walkdir.workspace = true
