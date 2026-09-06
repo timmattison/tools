@@ -2,11 +2,11 @@
 # Run the NLE (Non-Linear Editor) Tauri application in development mode
 #
 # Usage:
-#   ./scripts/run-nle.sh
+#   ./src/nle/run-nle.sh
 
 set -e
 
-cd "$(dirname "$0")/../src/nle"
+cd "$(dirname "$0")"
 
 # Ensure frontend dependencies are installed
 if [ ! -d "frontend/node_modules" ]; then
