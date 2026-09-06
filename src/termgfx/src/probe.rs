@@ -378,6 +378,50 @@ mod tests {
     }
 
     #[test]
+    fn the_read_stops_at_the_answer_and_leaves_what_follows() {
+        // A user who types inside the budget writes those bytes to the same
+        // descriptor the answer of the terminal arrives on. The probe owes
+        // every one of them to whoever reads the descriptor next.
+        let mut ends = [0_i32; 2];
+        // SAFETY: pipe(2) fills the two descriptors of an array this test owns.
+        let made = unsafe { libc::pipe(ends.as_mut_ptr()) };
+        assert_eq!(made, 0, "pipe(2) gives a pair of descriptors");
+        let [reader, writer] = ends;
+
+        let sent = b"\x1b[?1;2;4cxyz";
+        // SAFETY: the buffer is owned here and the length is its own.
+        let put = unsafe { libc::write(writer, sent.as_ptr().cast(), sent.len()) };
+        assert_eq!(
+            put,
+            isize::try_from(sent.len()).expect("the answer is far below the size of a pipe"),
+            "the whole of the answer and the keystrokes reach the pipe"
+        );
+
+        let answer = drain(reader, QUERY_BUDGET);
+        assert_eq!(
+            read_answer(&answer),
+            Some(AnsweredProtocol::Sixel),
+            "the read takes the whole answer of the attributes"
+        );
+
+        // A closed write end ends the second read at once, whatever it holds.
+        // SAFETY: this test opened the descriptor and nothing else holds it.
+        unsafe { libc::close(writer) };
+        let mut left = [0_u8; 16];
+        // SAFETY: the buffer is owned here and the length is its own.
+        let taken = unsafe { libc::read(reader, left.as_mut_ptr().cast(), left.len()) };
+        // SAFETY: this test opened the descriptor and nothing else holds it.
+        unsafe { libc::close(reader) };
+        let taken =
+            usize::try_from(taken).expect("a read of a pipe with no writer fails for nothing");
+        assert_eq!(
+            &left[..taken],
+            b"xyz",
+            "the bytes after the answer stay for the reader that comes next"
+        );
+    }
+
+    #[test]
     fn the_query_ends_with_the_attributes_request() {
         assert!(
             IMAGE_QUERY.ends_with(b"\x1b[c"),
