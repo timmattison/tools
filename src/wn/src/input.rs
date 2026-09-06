@@ -237,30 +237,22 @@ The next run builds a new one."
             // so the message names the run that printed it and quotes its
             // first line. It names no clipboard, because the plan is not on
             // one, and a reader sent to look at a clipboard finds none of it.
-            Source::Plan => {
-                let line = first_line(&self.text);
-                if line.is_empty() {
-                    anyhow::anyhow!("{PLAN_NO_READER_CAN_READ}: {err}")
-                } else {
-                    anyhow::anyhow!(
-                        "{PLAN_NO_READER_CAN_READ}: {err}. The first line of it is {line:?}."
-                    )
-                }
-            }
+            //
+            // The quotation always says something. `built` refuses a run that
+            // printed nothing but space, so a plan holds one character that is
+            // not space, and the line that character stands on is the line
+            // `first_line` finds.
+            Source::Plan => anyhow::anyhow!(
+                "the run of claude printed a plan wn cannot read: {err}. \
+The first line of it is {line:?}.",
+                line = first_line(&self.text)
+            ),
         }
     }
 }
 
 /// The note a run that kept its plan earns.
 const KEPT: &str = "The plan is on the clipboard. Run wn --refresh to build a new one.";
-
-/// The opening of every message that blames a plan on the run that printed it.
-///
-/// One constant, because the message is written twice: a plan whose first line
-/// says something is quoted, and a plan of nothing but space is not. A reader
-/// who meets the two openings in two different wordings reads them as two
-/// different failures.
-const PLAN_NO_READER_CAN_READ: &str = "the run of claude printed a plan wn cannot read";
 
 /// The first line of `text` that holds something other than space, cut for a
 /// message.
@@ -271,8 +263,8 @@ const PLAN_NO_READER_CAN_READ: &str = "the run of claude printed a plan wn canno
 /// the search steps over it.
 ///
 /// Gives an empty [`Snippet`] for a text whose lines all hold nothing but
-/// space. A message that quotes such a snippet drops the whole clause, because
-/// an empty quotation says less than no quotation at all.
+/// space. The one caller never meets such a text: [`built`] refuses a run that
+/// printed nothing but space, so every plan holds a line this finds.
 fn first_line(text: &str) -> Snippet {
     Snippet::new(
         text.lines()
@@ -1192,8 +1184,9 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
     #[test]
     fn the_first_line_of_a_text_is_the_first_one_that_holds_something() {
         // The lines in front of a document carry nothing, so the search steps
-        // over them. A text of nothing but space gives an empty snippet, and
-        // the message that holds one drops its whole clause.
+        // over them. A text of nothing but space gives an empty snippet, which
+        // `blame` never meets: `built` refuses such a plan, and
+        // `a_run_that_gives_nothing_back_names_claude` holds that.
         assert_eq!(first_line("```json\n{}\n```").to_string(), "```json");
         assert_eq!(first_line("\n\n  \nStream: S1\n").to_string(), "Stream: S1");
         assert_eq!(first_line("  日本語  \n").to_string(), "日本語");
