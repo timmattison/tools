@@ -2330,9 +2330,11 @@ fn the_envelope_of_a_failing_run_carries_the_reason_and_the_pipes_do_not() {
 
 #[test]
 fn a_document_the_run_built_that_does_not_parse_names_no_clipboard() {
-    // The refusal of the reader of a JSON plan, unchanged. A message that
-    // named the clipboard would send the reader to look at a clipboard that
-    // holds none of it.
+    // The message names the run that printed the document, carries the refusal
+    // of the reader of a JSON plan, and quotes the first line of what the run
+    // printed. It names no clipboard: the plan is not on one, and a message
+    // that named one would send the reader to look at a clipboard that holds
+    // none of it.
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints("{ \"version\": 1\n"));
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert_eq!(output.status.code(), Some(2), "the run could not answer");
