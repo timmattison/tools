@@ -8828,6 +8828,7 @@ dependencies = [
  "clap",
  "colored",
  "op-cache",
+ "tempfile",
  "which",
 ]
 
