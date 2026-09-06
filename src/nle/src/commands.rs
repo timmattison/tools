@@ -40,9 +40,9 @@ pub async fn save_recording(
 ) -> Result<(), NleError> {
     let file_path = PathBuf::from(&path);
     // Canonicalize the parent directory to prevent path traversal
-    let parent = file_path
-        .parent()
-        .ok_or_else(|| NleError::SaveError(format!("Invalid path (no parent directory): {path}")))?;
+    let parent = file_path.parent().ok_or_else(|| {
+        NleError::SaveError(format!("Invalid path (no parent directory): {path}"))
+    })?;
     if !parent.exists() {
         return Err(NleError::SaveError(format!(
             "Parent directory does not exist: {}",
@@ -91,10 +91,7 @@ pub async fn list_recordings(directory: String) -> Result<Vec<RecordingMetadata>
             }
         };
         let path = entry.path();
-        let filename = path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("");
+        let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
         if filename.ends_with(".json") || filename.ends_with(".json.gz") {
             if let Ok(recording) = Recording::load(&path) {
                 recordings.push(recording.metadata(&path.to_string_lossy()));
@@ -186,15 +183,19 @@ pub async fn export_video(
         extra_args.push("--optimize-web".to_string());
     }
 
-    run_beta_export(&app, "video", &options.input_path, &options.output_path, extra_args).await
+    run_beta_export(
+        &app,
+        "video",
+        &options.input_path,
+        &options.output_path,
+        extra_args,
+    )
+    .await
 }
 
 /// Export a recording to web (HTML) format by shelling out to the beta CLI.
 #[tauri::command]
-pub async fn export_web(
-    app: tauri::AppHandle,
-    options: ExportOptions,
-) -> Result<String, NleError> {
+pub async fn export_web(app: tauri::AppHandle, options: ExportOptions) -> Result<String, NleError> {
     if !matches!(options.format, ExportFormat::Web) {
         return Err(NleError::ExportError(
             "export_web requires Web format".into(),
@@ -210,5 +211,12 @@ pub async fn export_web(
         extra_args.push("--compress".to_string());
     }
 
-    run_beta_export(&app, "web", &options.input_path, &options.output_path, extra_args).await
+    run_beta_export(
+        &app,
+        "web",
+        &options.input_path,
+        &options.output_path,
+        extra_args,
+    )
+    .await
 }
