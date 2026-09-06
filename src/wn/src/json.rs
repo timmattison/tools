@@ -975,6 +975,26 @@ mod tests {
         }
     }
 
+    /// The text `body` inside a code fence whose info string is `info`.
+    ///
+    /// One helper writes every fenced text of these tests, so the shape of a
+    /// fence stands in one place.
+    fn fenced(info: &str, body: &str) -> String {
+        format!("```{info}\n{body}\n```\n")
+    }
+
+    #[test]
+    fn a_document_in_a_code_fence_reads() {
+        // A run of a model at a high level of effort writes the document it
+        // prints inside a Markdown fence. The reader paid for that run, and a
+        // message about a backtick is no answer to it. Both spellings of the
+        // opening fence stand, because a model writes either one.
+        for info in ["json", ""] {
+            let text = fenced(info, DOCUMENT);
+            assert_eq!(nodes(&graph_of(&text)), vec![91, 96, 102], "with {info:?}");
+        }
+    }
+
     #[test]
     fn an_empty_streams_array_is_a_plan_with_no_work_in_it() {
         // Not an error. Somebody ran the skill on a repository with nothing to
