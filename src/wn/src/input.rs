@@ -1140,6 +1140,32 @@ Unset it to build one. Pass it as an argument, in quotes: wn \"#277 → #278\""
     }
 
     #[test]
+    fn a_fenced_plan_is_blamed_on_the_run_and_quotes_its_first_line() {
+        // The reader typed no text and pasted none. The run of `claude` wrote
+        // the document, and the fence on its first line is what tells the
+        // reader the shape of what the run printed.
+        let fenced = "```json\n{\"streams\": []}\n```";
+        let plan = || -> PlanBuild { Ok(fenced.to_string()) };
+        let chain = Sources {
+            argument: &[],
+            stdin: None,
+            clipboard: None,
+            plan: Some(&plan),
+            refresh: false,
+        }
+        .chain()
+        .expect("the run gave a plan back");
+        let err = parse_chain(chain.text()).expect_err("a fence is not an issue number");
+        let message = chain.blame(err).to_string();
+        assert_eq!(
+            message,
+            "the run of claude printed a plan wn cannot read: \
+\"```json\" is not an issue number. The first line of it is \"```json\"."
+        );
+        assert!(!message.contains("clipboard"), "{message}");
+    }
+
+    #[test]
     fn a_value_with_a_character_in_it_turns_the_clipboard_off() {
         assert!(!clipboard_is_off(None));
         assert!(!clipboard_is_off(Some("")));
