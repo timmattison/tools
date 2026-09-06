@@ -1480,8 +1480,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     field of the document for it, and a document that names no moment says nothing about its age.
   - Set `WN_NO_CLAUDE` to any value with a character in it to turn the run off, which gives back
     the error a run with no chain printed before. An empty value leaves it on, because an exported
-    but empty variable is a common accident. `WN_PLAN_TIMEOUT` names the seconds a run may take;
-    it is 600 by default, because a plan of a whole backlog is a longer run than a commit message.
+    but empty variable is a common accident. `WN_PLAN_TIMEOUT` names the seconds a run may take,
+    and it is 1560 by default — twice the longest run anybody measured. Three runs at `xhigh` on
+    this repository on 2026-09-05, over 57 open issues and 8 open pull requests, took 576, 624 and
+    780 seconds. The first of the three ran at whatever level the machine picked, before the tool
+    named one. **The spread of 25% between the last two, on one repository and one day, is why the
+    deadline doubles the longest rather than adding a margin to it.** A deadline is a bound on a
+    runaway run and never a target, and it stands on the dearest level a reader can ask for and
+    never on the default one. The earlier 600 was set against no model at all, and it would have
+    killed two of those three runs.
   - The run says what it cost, and a run that failed and printed an envelope says it as well,
     because such a run spent the money before it failed. One line follows it on standard error,
     where the moving line stood:
@@ -1496,11 +1503,27 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     than the run reached. The dollars are rounded to the place they are written at, so the price is
     not a ceiling. A number the run leaves out costs its clause of the line and never the plan,
     because the plan is already paid for.
-  - `WN_PLAN_EFFORT` names the level the run asks for, one of `low`, `medium`, `high`, `xhigh` and
-    `max`. It is also the level the report names: the envelope carries no field that names one, so
-    a report can only name the level the run asked for, and a line that named a level nobody chose
-    would be worth nothing. `WN_PLAN_MODEL` names the model, such as `opus` or `claude-haiku-4-5`.
-    A run that names neither asks for neither, and `claude` picks both as it always did.
+  - **The run names its own model and its own level of effort**, and neither is the machine's
+    default. How long a plan takes and what it costs are properties of the model that builds it
+    and of the level it works at, so a tool that named neither had neither property: the same
+    command, on the same repository, on the same day, ran on one model on a machine configured
+    for Opus and on another on a machine configured for Sonnet. Neither reader could predict the
+    other's wait, and no deadline bounded a run whose speed nobody chose. `WN_PLAN_MODEL` names
+    the model and it is `opus` by default — the alias and not an id, so the tool always asks for
+    the newest model of that family: an id retires, and a build that named a retired one would
+    refuse every run its reader had set no variable for. `WN_PLAN_EFFORT` names the level, one of
+    `low`, `medium`, `high`, `xhigh` and `max`, and it is `low` by default, which a measurement
+    picked rather than a guess: four runs on this repository, one at each level, gave four plans
+    that all held — none put two issues that edit one file in parallel streams, and none
+    scheduled a consumer before its producer — so the cheapest level won. It takes 184 seconds
+    and $1.63 where `xhigh` takes 397 and $2.30, and it placed more of the backlog than any of
+    the other three. The `xhigh` run also wrapped its document in a fenced code block, which
+    JSON mode forbids and which `wn` refuses, so the dearest run of the four was the one run the
+    tool could not read. A reader who wants the tool to think harder names the level. The doc
+    comment beside the constant in `src/wn/src/build.rs` carries the four runs. The level is
+    also the level the report names — the envelope
+    carries no field that names one, so a report can only name the level the run asked for, and
+    every run now asks for one.
   - These things refuse, and each exits `2`. A directory that is in no repository `gh` can name is
     refused before the run, not after it: the skill plans the repository of the directory `wn` was
     run in, and its gather script turns a `gh` or a `git` failure into a warning rather than a

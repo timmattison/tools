@@ -1,17 +1,17 @@
 //! The line that stands while a run of `claude` works.
 //!
 //! A plan of a whole backlog takes minutes, and one measured run of it took 9
-//! minutes and 36 seconds against a deadline of 10 minutes. For all of that
-//! time the line carried one constant, so a run that worked and a run that died
-//! eight minutes earlier painted the same words. The reader could not tell them
-//! apart, and the reader who cannot tell them apart kills a run that works or
-//! waits on a run that is gone.
+//! minutes and 36 seconds against the deadline of that time, 10 minutes. For
+//! all of that time the line carried one constant, so a run that worked and a
+//! run that died eight minutes earlier painted the same words. The reader
+//! could not tell them apart, and the reader who cannot tell them apart kills
+//! a run that works or waits on a run that is gone.
 //!
 //! So the line carries two facts that move.
 //!
 //! **How long the run waited, and how long it may.** The clock comes off the
 //! bar itself, which knows when it started, so nothing has to feed it and it
-//! moves whatever the run is doing. A reader who sees `9m30s of 10m0s` knows
+//! moves whatever the run is doing. A reader who sees `25m30s of 26m0s` knows
 //! the run is about to be killed, and a reader who sees the same reading twice
 //! knows the tool itself is gone.
 //!
@@ -148,7 +148,7 @@ fn clock(elapsed: Duration, waited: Duration) -> String {
 ///
 /// Whole seconds throughout. The report of a finished run writes tenths,
 /// because a fast run and a slow one differ by fractions there. A line that a
-/// reader watches for ten minutes wants the shortest reading that still
+/// reader watches for twenty-six minutes wants the shortest reading that still
 /// answers, and a tenth of a second on it would be a digit that never rests.
 fn spelled(span: Duration) -> String {
     let whole = span.as_secs();
@@ -168,7 +168,7 @@ fn spelled(span: Duration) -> String {
 mod tests {
     use super::*;
 
-    /// The deadline of a run that names none.
+    /// The deadline the readings below are measured against.
     const TEN_MINUTES: Duration = Duration::from_secs(600);
 
     #[test]

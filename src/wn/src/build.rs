@@ -64,6 +64,50 @@ pub const MODEL_ENV: &str = "WN_PLAN_MODEL";
 /// and passed on, rather than taken out of the answer.
 const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
+/// The level of effort a run asks for when [`EFFORT_ENV`] names none.
+///
+/// The level is the second input that decides how long a run takes and what
+/// it costs, and it belongs in the source for the reason [`DEFAULT_MODEL`]
+/// does: a level the machine chose is a level nobody can read off this tool.
+///
+/// # The measurement that picked it
+///
+/// The level was `xhigh` first, and a guess picked that. This one is
+/// measured. Four runs of [`PROMPT`] on `timmattison/tools` on 2026-09-06, 58
+/// open issues and 7 open pull requests, at [`DEFAULT_MODEL`], one run at each
+/// level, one after the other so no run measured the load of another:
+///
+/// | Level | Seconds | Cost | Output | Turns | Streams | Issues placed | Faults | `wn` reads it |
+/// | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+/// | `low` | 184 | $1.63 | 14,387 | 9 | 24 | 54 | 0 | yes |
+/// | `medium` | 205 | $1.54 | 15,208 | 8 | 18 | 48 | 0 | yes |
+/// | `high` | 353 | $2.24 | 22,193 | 17 | 23 | 49 | 0 | yes |
+/// | `xhigh` | 397 | $2.30 | 28,570 | 21 | 20 | 49 | 0 | **no** |
+///
+/// A plan is wrong when it puts two issues that edit one file in parallel
+/// streams, and it is wrong when it schedules a consumer before its producer.
+/// Both are checkable against the document, and no plan of the four broke
+/// either one. The four agree on the substance as well: each found the same
+/// bug to do first and alone, and each gave the same one stream to launch now.
+///
+/// So every plan held, and the cheapest level whose plan holds is `low`. It
+/// is 2.2 times as fast as `xhigh` and 29% cheaper, and it placed the most
+/// issues of the four.
+///
+/// # What the dearest level did
+///
+/// The `xhigh` run wrapped its document in a fenced code block. JSON mode of
+/// the skill forbids that, and [`crate::json`] claims a text on the opening
+/// brace, so `wn` refuses such a document and falls through to the readers
+/// that cannot read it either. The dearest run of the four is the one run
+/// this tool could not use.
+///
+/// One run at each level, on one backlog, on one day. That is what the
+/// numbers cover, and a level whose plan held once is not a level proved to
+/// hold always. A reader who wants the tool to think harder names the level:
+/// [`EFFORT_ENV`] is what the variable is for.
+const DEFAULT_EFFORT: &str = "low";
+
 /// The level of effort a run asks for.
 ///
 /// A newtype rather than a `String`, because the value holds one rule every
@@ -72,6 +116,21 @@ const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// then name a level nothing ran at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Effort(String);
+
+/// The model a run asks for when [`MODEL_ENV`] names none.
+///
+/// How long a plan takes and what it costs are properties of the model that
+/// builds it. A tool that names no model has neither: the same command, on
+/// the same repository, on the same day, runs on one model on a machine that
+/// defaults to Opus and on another on a machine that defaults to Sonnet.
+/// Neither reader can predict the other's wait, and no deadline written here
+/// bounds a run whose speed nobody chose.
+///
+/// The alias and not an id, so the tool always asks for the newest model of
+/// that family. An id retires, and a build that named a retired one refuses
+/// every run its reader did not set the variable for. The alias fixes the
+/// family, and the family is what fixes the speed and the price.
+const DEFAULT_MODEL: &str = "opus";
 
 /// The model a run asks for.
 ///
@@ -86,10 +145,10 @@ struct ModelName(String);
 impl Effort {
     /// The level `value`, the value of [`EFFORT_ENV`], names.
     ///
-    /// An absent value gives `None`, and so does a value of nothing but
-    /// whitespace: an exported but empty variable is a common accident. The
-    /// run then asks for no level and the report names none, because a report
-    /// that named a level nobody chose is worth nothing.
+    /// An absent value gives [`DEFAULT_EFFORT`], and so does a value of
+    /// nothing but whitespace: an exported but empty variable is a common
+    /// accident. Every run asks for a level, so the report always names the
+    /// level the run really ran at.
     ///
     /// The case of the value is the reader's to choose, so `HIGH` is `high`.
     ///
@@ -99,13 +158,13 @@ impl Effort {
     /// [`EFFORT_LEVELS`]. A reader who wrote `WN_PLAN_EFFORT=quick` and got
     /// the default back would learn nothing about why the plan still cost what
     /// it cost.
-    fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
+    fn new(value: Option<&str>) -> Result<Self, BuildError> {
         let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
-            return Ok(None);
+            return Ok(Self(DEFAULT_EFFORT.to_string()));
         };
         let lowered = named.to_lowercase();
         if EFFORT_LEVELS.contains(&lowered.as_str()) {
-            Ok(Some(Self(lowered)))
+            Ok(Self(lowered))
         } else {
             Err(BuildError::BadEffort {
                 value: named.to_string(),
@@ -122,9 +181,10 @@ impl Effort {
 impl ModelName {
     /// The model `value`, the value of [`MODEL_ENV`], names.
     ///
-    /// An absent value gives `None`, and so does a value of nothing but
-    /// whitespace. The run then asks for no model, and the report names the
-    /// models the answer says the run really used.
+    /// An absent value gives [`DEFAULT_MODEL`], and so does a value of nothing
+    /// but whitespace: an exported but empty variable is a common accident.
+    /// Every run names a model, so the reader who set nothing gets the model
+    /// this source chose rather than the one the machine configured.
     ///
     /// # Errors
     ///
@@ -132,16 +192,16 @@ impl ModelName {
     /// Every other value goes through: the models of `claude` are named by
     /// `claude` and not by this tool, so a list here would refuse a model that
     /// shipped after this build.
-    fn new(value: Option<&str>) -> Result<Option<Self>, BuildError> {
+    fn new(value: Option<&str>) -> Result<Self, BuildError> {
         let Some(named) = value.map(str::trim).filter(|named| !named.is_empty()) else {
-            return Ok(None);
+            return Ok(Self(DEFAULT_MODEL.to_string()));
         };
         if named.starts_with('-') {
             return Err(BuildError::BadModel {
                 value: named.to_string(),
             });
         }
-        Ok(Some(Self(named.to_string())))
+        Ok(Self(named.to_string()))
     }
 
     /// The model, as the command line writes it.
@@ -150,12 +210,76 @@ impl ModelName {
     }
 }
 
+/// The seconds of the longest run anybody measured.
+///
+/// **The longest, and not the last.** A deadline set against one sample is a
+/// deadline the next run walks past, and this constant has already been wrong
+/// once for that reason. When a new run outlasts this number, raise it and
+/// name the run here. When a new run is shorter, leave it alone.
+///
+/// **The dearest level, and not the default one.** [`EFFORT_ENV`] lets a
+/// reader ask for `max`, and the deadline kills that reader's run as readily
+/// as anybody else's. So this number stands on the slowest level somebody
+/// measured and never on [`DEFAULT_EFFORT`], which is now the fastest of the
+/// five and finishes in a quarter of the time.
+///
+/// Every run below is `timmattison/tools` at [`DEFAULT_MODEL`]. The first
+/// three are 2026-09-05, 57 open issues and 8 open pull requests, at `xhigh`:
+///
+/// | Seconds | Cost | Note |
+/// | --- | --- | --- |
+/// | 576 | — | Opus at whatever level the machine picked, before this tool named either |
+/// | 624 | $3.64 | one model in `modelUsage` |
+/// | 780 | — | the run this number now stands on |
+///
+/// The spread of the last two is 25% on one repository, on one day, at one
+/// setting. That spread is the reason the deadline doubles this number rather
+/// than adding a margin to it.
+///
+/// The four of 2026-09-06 are the measurement [`DEFAULT_EFFORT`] carries, 58
+/// open issues and 7 open pull requests, one run at each level: 184 seconds
+/// at `low`, 205 at `medium`, 353 at `high`, and 397 at `xhigh`. Every one of
+/// them is under this number, and the `xhigh` run is 51% of it. The
+/// 780-second run of the day before is why that is no reason to lower it.
+///
+/// The number stands in the source rather than in prose, because
+/// [`DEFAULT_TIMEOUT_SECONDS`] is derived from it. A deadline whose doc
+/// comment reasons about the size of the work and never about the model that
+/// does it is a deadline nobody set: the earlier 600 would have killed the
+/// 624-second run and the 780-second run both.
+const MEASURED_SECONDS: u64 = 780;
+
 /// The seconds a run may take when the environment names none.
+///
+/// Twice [`MEASURED_SECONDS`], and written as that product so a reader who
+/// asks where the number came from finds the run it came from one constant
+/// up. A deadline is a bound on a runaway run and never a target, so it
+/// leaves room for a backlog that grew, for a repository larger than this
+/// one, for a day the API answers slower on, and for a reader who raised the
+/// level with [`EFFORT_ENV`]. A run of the defaults takes a fraction of it.
 ///
 /// `inscribe` waits 120 seconds for a commit message. A plan of a whole
 /// backlog reads every open issue and every open pull request of the
-/// repository, which is a longer run, so this one waits ten minutes.
-const DEFAULT_TIMEOUT_SECONDS: u64 = 600;
+/// repository, places each issue in a zone, and finds which streams block
+/// which, which is a much longer run.
+const DEFAULT_TIMEOUT_SECONDS: u64 = MEASURED_SECONDS * 2;
+
+/// The deadline outlasts the run it was measured against, or the build stops.
+///
+/// A deadline shorter than a run somebody measured is a deadline that run
+/// dies at, which is what 600 became the moment the tool started asking for
+/// `xhigh`. The default level is `low` now and finishes far inside 600, so
+/// the hazard moved rather than went: [`EFFORT_ENV`] lets a reader ask for
+/// `max`, and a deadline written against the default alone kills that reader.
+/// The product above holds the rule today, and this holds it against the
+/// reader who later writes a number in its place.
+///
+/// A compile-time check and not a test, because a mistake that cannot be
+/// built beats a mistake a suite reports.
+const _: () = assert!(
+    DEFAULT_TIMEOUT_SECONDS >= MEASURED_SECONDS * 2,
+    "the default deadline leaves no room over the run it was measured against"
+);
 
 /// The seconds a run may take at the most.
 ///
@@ -217,21 +341,17 @@ const ARGUMENTS: [&str; 6] = [
     ALLOWED_TOOLS,
 ];
 
-/// The arguments of one run: [`ARGUMENTS`], and the level and the model the
-/// environment named.
+/// The arguments of one run: [`ARGUMENTS`], the model, and the level.
 ///
-/// A run that names neither gets [`ARGUMENTS`] and nothing more, so the two
-/// variables cost the reader who sets neither of them nothing at all.
-fn arguments(effort: Option<&Effort>, model: Option<&ModelName>) -> Vec<String> {
+/// Both always stand there. A run whose model and level nobody named is a run
+/// whose speed and price nobody knows, and the two variables name which model
+/// and which level rather than whether to name one at all.
+fn arguments(effort: &Effort, model: &ModelName) -> Vec<String> {
     let mut carried: Vec<String> = ARGUMENTS.iter().map(ToString::to_string).collect();
-    if let Some(effort) = effort {
-        carried.push(EFFORT_FLAG.to_string());
-        carried.push(effort.as_str().to_string());
-    }
-    if let Some(model) = model {
-        carried.push(MODEL_FLAG.to_string());
-        carried.push(model.as_str().to_string());
-    }
+    carried.push(EFFORT_FLAG.to_string());
+    carried.push(effort.as_str().to_string());
+    carried.push(MODEL_FLAG.to_string());
+    carried.push(model.as_str().to_string());
     carried
 }
 
@@ -450,7 +570,7 @@ pub fn plan(
     let path = find(paths, answers)?;
 
     let progress = Progress::start(waited);
-    let answered = ask(&path, waited, effort.as_ref(), model.as_ref(), &progress);
+    let answered = ask(&path, waited, &effort, &model, &progress);
     progress.stop();
 
     let answer = answered?;
@@ -466,9 +586,7 @@ pub fn plan(
     // It also stands before the answer is taken. A run that failed after
     // several turns spent the money before it failed, so the reader of such a
     // run learns the price as well.
-    if let Some(report) = answer.envelope.report(effort.as_ref().map(Effort::as_str)) {
-        eprintln!("{report}");
-    }
+    eprintln!("{}", answer.envelope.report(effort.as_str()));
     Ok(answer.envelope.answer()?.to_string())
 }
 
@@ -526,8 +644,8 @@ struct Answer {
 fn ask(
     path: &str,
     waited: Duration,
-    effort: Option<&Effort>,
-    model: Option<&ModelName>,
+    effort: &Effort,
+    model: &ModelName,
     progress: &Progress,
 ) -> Result<Answer, BuildError> {
     let mut child = Command::new(path)
@@ -978,10 +1096,11 @@ mod tests {
     }
 
     #[test]
-    fn an_environment_that_names_no_timeout_waits_ten_minutes() {
-        assert_eq!(seconds(None), Ok(Duration::from_secs(600)));
-        assert_eq!(seconds(Some("")), Ok(Duration::from_secs(600)));
-        assert_eq!(seconds(Some("  \t ")), Ok(Duration::from_secs(600)));
+    fn an_environment_that_names_no_timeout_waits_the_default() {
+        let default = Duration::from_secs(DEFAULT_TIMEOUT_SECONDS);
+        assert_eq!(seconds(None), Ok(default));
+        assert_eq!(seconds(Some("")), Ok(default));
+        assert_eq!(seconds(Some("  \t ")), Ok(default));
     }
 
     #[test]
@@ -1001,8 +1120,10 @@ mod tests {
         );
         assert_eq!(
             refused.to_string(),
-            "WN_PLAN_TIMEOUT names \"10m\", and it names a number of seconds, one and up: \
-             WN_PLAN_TIMEOUT=600"
+            format!(
+                "WN_PLAN_TIMEOUT names \"10m\", and it names a number of seconds, one and up: \
+                 WN_PLAN_TIMEOUT={DEFAULT_TIMEOUT_SECONDS}"
+            )
         );
     }
 
@@ -1404,21 +1525,32 @@ plans.\n`gh repo view` failed."
     fn the_five_levels_are_the_levels_a_run_may_ask_for() {
         for level in ["low", "medium", "high", "xhigh", "max"] {
             assert_eq!(
-                Effort::new(Some(level))
-                    .expect("the level stands")
-                    .map(|effort| effort.as_str().to_string()),
-                Some(level.to_string())
+                Effort::new(Some(level)).expect("the level stands").as_str(),
+                level
             );
         }
     }
 
     #[test]
-    fn an_environment_that_names_no_level_asks_for_none() {
-        // A report that named a level nobody chose is worth nothing, so a run
-        // that asked for none says nothing about one.
+    fn an_environment_that_names_no_level_asks_for_the_default() {
         for value in [None, Some(""), Some("  \t ")] {
-            assert_eq!(Effort::new(value), Ok(None), "{value:?}");
+            assert_eq!(
+                Effort::new(value).expect("the default stands").as_str(),
+                DEFAULT_EFFORT,
+                "{value:?}"
+            );
         }
+    }
+
+    #[test]
+    fn the_default_level_is_one_of_the_five() {
+        // Every other level goes through the list, and this one goes around
+        // it. A default the run does not know is a run that stops before it
+        // starts, and it would stop for the reader who set nothing at all.
+        assert!(
+            EFFORT_LEVELS.contains(&DEFAULT_EFFORT),
+            "{DEFAULT_EFFORT} in {EFFORT_LEVELS:?}"
+        );
     }
 
     #[test]
@@ -1442,8 +1574,8 @@ plans.\n`gh repo view` failed."
         assert_eq!(
             Effort::new(Some(" HIGH "))
                 .expect("the level stands")
-                .map(|effort| effort.as_str().to_string()),
-            Some("high".to_string())
+                .as_str(),
+            "high"
         );
     }
 
@@ -1452,15 +1584,19 @@ plans.\n`gh repo view` failed."
         assert_eq!(
             ModelName::new(Some(" claude-opus-5 "))
                 .expect("the model stands")
-                .map(|model| model.as_str().to_string()),
-            Some("claude-opus-5".to_string())
+                .as_str(),
+            "claude-opus-5"
         );
     }
 
     #[test]
-    fn an_environment_that_names_no_model_asks_for_none() {
+    fn an_environment_that_names_no_model_asks_for_the_default() {
         for value in [None, Some(""), Some("  ")] {
-            assert_eq!(ModelName::new(value), Ok(None), "{value:?}");
+            assert_eq!(
+                ModelName::new(value).expect("the default stands").as_str(),
+                DEFAULT_MODEL,
+                "{value:?}"
+            );
         }
     }
 
@@ -1481,25 +1617,22 @@ plans.\n`gh repo view` failed."
     }
 
     #[test]
-    fn a_run_that_names_neither_carries_the_arguments_and_nothing_more() {
-        assert_eq!(
-            arguments(None, None),
-            ARGUMENTS
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        );
+    fn a_run_that_names_neither_carries_the_arguments_and_both_defaults() {
+        let effort = Effort::new(None).expect("the default stands");
+        let model = ModelName::new(None).expect("the default stands");
+        let mut expected: Vec<String> = ARGUMENTS.iter().map(ToString::to_string).collect();
+        expected.push(EFFORT_FLAG.to_string());
+        expected.push(DEFAULT_EFFORT.to_string());
+        expected.push(MODEL_FLAG.to_string());
+        expected.push(DEFAULT_MODEL.to_string());
+        assert_eq!(arguments(&effort, &model), expected);
     }
 
     #[test]
     fn the_level_and_the_model_reach_the_command_line_of_the_run() {
-        let effort = Effort::new(Some("high"))
-            .expect("the level stands")
-            .expect("a level was named");
-        let model = ModelName::new(Some("claude-opus-5"))
-            .expect("the model stands")
-            .expect("a model was named");
-        let carried = arguments(Some(&effort), Some(&model));
+        let effort = Effort::new(Some("high")).expect("the level stands");
+        let model = ModelName::new(Some("claude-opus-5")).expect("the model stands");
+        let carried = arguments(&effort, &model);
         for pair in [["--effort", "high"], ["--model", "claude-opus-5"]] {
             let at = carried
                 .iter()

@@ -779,6 +779,30 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// The value `flag` carries on a command line that holds one argument to a
+/// line, the shape [`FakeGh::recorded_claude_args`] writes.
+///
+/// It gives back the argument that comes after the flag, and `None` when no
+/// argument is the flag. The pair is what a test of a command line must read.
+/// A search of the whole line for the text of the value alone finds that text
+/// in any other argument as well — `--allowed-tools` carries `low` inside the
+/// word `allowed` — so such a search passes whatever the run asked for.
+fn flag_value<'a>(args: &'a str, flag: &str) -> Option<&'a str> {
+    let mut lines = args.lines();
+    lines.by_ref().find(|line| *line == flag)?;
+    lines.next()
+}
+
+#[test]
+fn a_flag_carries_the_argument_that_comes_after_it() {
+    // The command line of a run of `claude` holds `low` twice: once as the
+    // level, and once inside `--allowed-tools`. So the value of a flag is the
+    // argument after the flag, and text that stands anywhere else is not it.
+    let args = "--allowed-tools\nRead,Bash\n--effort\nlow\n";
+    assert_eq!(flag_value(args, "--effort"), Some("low"));
+    assert_eq!(flag_value(args, "--model"), None);
+}
+
 #[test]
 fn walks_the_chain_and_names_the_issue_to_start() {
     let gh = FakeGh::new(THREE_ISSUES);
@@ -2104,10 +2128,23 @@ fn envelope(document: &str) -> String {
     .to_string()
 }
 
-/// The report line the envelope of [`envelope`] earns, for a run that asked
-/// for no level of effort.
+/// The report line the envelope of [`envelope`] earns, with no level of
+/// effort in it.
+///
+/// Every run asks for a level, so no run earns this line as it stands.
+/// [`report_at`] puts the level in, and the tests read that.
 const REPORT: &str =
     "plan: $0.05 · claude-opus-5 · 118k in, 9.4k out, 13k cache read, 26k cache write · 1.8s";
+
+/// The report line of [`REPORT`], for a run that asked for level `effort`.
+///
+/// The level stands beside the models, because the models are what ran at it.
+fn report_at(effort: &str) -> String {
+    REPORT.replace(
+        "claude-opus-5",
+        &format!("claude-opus-5 at effort {effort}"),
+    )
+}
 
 /// The shell of a fake `claude` that prints an envelope holding `document`.
 fn prints(document: &str) -> String {
@@ -2530,7 +2567,11 @@ fn the_report_of_the_run_goes_to_standard_error_and_the_plan_goes_to_standard_ou
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), JSON_ANSWER);
-    assert!(stderr(&output).contains(REPORT), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&report_at(DEFAULT_EFFORT)),
+        "{}",
+        stderr(&output)
+    );
     // The document reaches standard output alone, so the report cannot be on
     // both pipes.
     assert!(!stdout(&output).contains("plan: $"), "{}", stdout(&output));
@@ -2545,12 +2586,11 @@ fn the_level_the_environment_named_reaches_the_run_and_the_report() {
     let output = run_building(&gh, &["--repo", REPO], &[(PLAN_EFFORT_ENV, "high")]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let args = gh.recorded_claude_args();
-    assert!(args.contains("--effort"), "{args}");
-    assert!(args.contains("high"), "{args}");
+    assert_eq!(flag_value(&args, "--effort"), Some("high"), "{args}");
     // The whole line, with the level in it. The level stands beside the
     // models, because the models are what ran at it.
     assert!(
-        stderr(&output).contains(&REPORT.replace("claude-opus-5", "claude-opus-5 at effort high")),
+        stderr(&output).contains(&report_at("high")),
         "{}",
         stderr(&output)
     );
@@ -2579,8 +2619,11 @@ fn the_model_the_environment_named_reaches_the_run() {
     );
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let args = gh.recorded_claude_args();
-    assert!(args.contains("--model"), "{args}");
-    assert!(args.contains("claude-haiku-4-5"), "{args}");
+    assert_eq!(
+        flag_value(&args, "--model"),
+        Some("claude-haiku-4-5"),
+        "{args}"
+    );
 }
 
 #[test]
@@ -2602,16 +2645,40 @@ fn a_model_that_opens_with_a_dash_is_a_refusal_that_costs_no_run() {
     assert!(gh.never_ran_claude(), "{}", gh.recorded_claude_args());
 }
 
+/// The model a run asks for when the environment names none.
+const DEFAULT_MODEL: &str = "opus";
+
+/// The level of effort a run asks for when the environment names none.
+///
+/// The cheapest level whose plan held, which is what the measurement of
+/// timmattison/tools#451 picked. `DEFAULT_EFFORT` of `src/wn/src/build.rs`
+/// carries the four runs it was picked from.
+const DEFAULT_EFFORT: &str = "low";
+
 #[test]
-fn a_run_that_names_neither_a_level_nor_a_model_asks_for_neither() {
-    // The two variables cost the reader who sets neither of them nothing at
-    // all, so `claude` picks both as it always did.
+fn a_run_that_names_neither_asks_for_the_default_model_and_level() {
+    // How long a plan takes and what it costs are properties of the model
+    // that builds it and of the level it works at. A tool that names neither
+    // has neither property: the same command on two machines runs two ways,
+    // and nobody can say what either reader waited or paid. So both defaults
+    // are named in the source, and never left to the machine.
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&prints_the_plan());
     let output = run_building(&gh, &["--repo", REPO], &[]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let args = gh.recorded_claude_args();
-    assert!(!args.contains("--effort"), "{args}");
-    assert!(!args.contains("--model"), "{args}");
+    assert_eq!(flag_value(&args, "--model"), Some(DEFAULT_MODEL), "{args}");
+    assert_eq!(
+        flag_value(&args, "--effort"),
+        Some(DEFAULT_EFFORT),
+        "{args}"
+    );
+    // The report names the level the run asked for, and every run now asks
+    // for one. A reader who reads no level would think none was chosen.
+    assert!(
+        stderr(&output).contains(&report_at(DEFAULT_EFFORT)),
+        "{}",
+        stderr(&output)
+    );
 }
 
 /// The tool the fake `claude` of this file reaches for first.
@@ -2698,7 +2765,11 @@ fn the_plan_of_a_stream_is_the_result_of_its_last_line() {
     // pipe the plan goes to.
     assert!(!stdout(&output).contains("tool_use"), "{}", stdout(&output));
     // The last line is still the envelope, so the run still says what it cost.
-    assert!(stderr(&output).contains(REPORT), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&report_at(DEFAULT_EFFORT)),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -2839,7 +2910,24 @@ const TERMINAL_ROWS: u16 = 24;
 /// environment [`wn`] builds names no terminal at all.
 const TERMINAL_KIND: &str = "xterm-256color";
 
-/// The deadline every painted run below is given, as the line writes it.
+/// The seconds every painted run below is given.
+///
+/// The runs below name their own deadline rather than taking the default,
+/// because none of them is a test of what the default is. A test that read
+/// the default would break every time somebody measured the run again.
+/// [`the_line_says_the_default_deadline`] is the one exception, and it is a
+/// test of the default itself.
+const DEADLINE_SECONDS: &str = "600";
+
+/// The default deadline, as the line writes it.
+///
+/// Twice the longest run anybody measured, which is the rule `build.rs`
+/// states. A reader who has set no variable waits this long at the most, so
+/// the number is user-facing and a change to it must be a change somebody
+/// made on purpose.
+const DEFAULT_DEADLINE: &str = " of 26m0s";
+
+/// [`DEADLINE_SECONDS`], as the line writes it.
 const DEADLINE: &str = " of 10m0s";
 
 /// The seconds the fake `claude` of a painted run holds the first reach on the
@@ -3003,7 +3091,11 @@ fn the_line_says_how_long_the_run_waited_and_how_long_it_may() {
     // line, and the reader could not tell the two apart. The clock is what
     // tells them apart, and it only does that if it moves.
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&writes_the_stream_slowly(&undated(JSON_PLAN)));
-    let painted = run_painting(&gh, &["--repo", REPO], &[]);
+    let painted = run_painting(
+        &gh,
+        &["--repo", REPO],
+        &[(PLAN_TIMEOUT_ENV, DEADLINE_SECONDS)],
+    );
     assert!(
         painted.output.status.success(),
         "the run answered: {}",
@@ -3021,13 +3113,36 @@ fn the_line_says_how_long_the_run_waited_and_how_long_it_may() {
 }
 
 #[test]
+fn the_line_says_the_default_deadline() {
+    // The deadline a reader who set no variable waits under. It is twice the
+    // longest run anybody measured, and a run that outlives it is killed, so
+    // a number that drifts under a real run kills every default run.
+    let gh = FakeGh::new(JSON_ISSUES).with_claude(&writes_the_stream_slowly(&undated(JSON_PLAN)));
+    let painted = run_painting(&gh, &["--repo", REPO], &[]);
+    assert!(
+        painted.output.status.success(),
+        "the run answered: {}",
+        painted.frames
+    );
+    assert!(
+        painted.frames.contains(DEFAULT_DEADLINE),
+        "{}",
+        painted.frames
+    );
+}
+
+#[test]
 fn the_line_says_what_the_run_does_now() {
     // A steady tick moves the frame while one API call is open, so the
     // animation is no evidence that the run works. The tool the run reached for
     // is such evidence, and it is what a reader who wonders whether to kill the
     // run reads.
     let gh = FakeGh::new(JSON_ISSUES).with_claude(&writes_the_stream_slowly(&undated(JSON_PLAN)));
-    let painted = run_painting(&gh, &["--repo", REPO], &[]);
+    let painted = run_painting(
+        &gh,
+        &["--repo", REPO],
+        &[(PLAN_TIMEOUT_ENV, DEADLINE_SECONDS)],
+    );
     assert!(
         painted.output.status.success(),
         "the run answered: {}",

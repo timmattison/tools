@@ -197,39 +197,40 @@ impl Envelope {
         Ok(&self.document)
     }
 
-    /// The one line that says what the run cost, or nothing for an envelope
-    /// that carries no number at all.
+    /// The one line that says what the run cost.
     ///
-    /// `effort` is the level the run was asked for, which the envelope does
-    /// not carry: no field of it names one, so the caller passes the level it
-    /// asked for and a run that asked for none earns no such words.
+    /// `effort` is the level the run was asked for. The envelope carries no
+    /// field that names a level, so the caller passes the level it asked for,
+    /// and every run asks for one.
     #[must_use]
-    pub fn report(&self, effort: Option<&str>) -> Option<String> {
+    pub fn report(&self, effort: &str) -> String {
         let clauses: Vec<String> = [
             self.dollars.map(dollars),
-            self.models_clause(effort),
+            Some(self.models_clause(effort)),
             self.tokens_clause(),
             self.milliseconds.map(elapsed),
         ]
         .into_iter()
         .flatten()
         .collect();
-        (!clauses.is_empty()).then(|| format!("{OPENING} {}", clauses.join(BETWEEN)))
+        format!("{OPENING} {}", clauses.join(BETWEEN))
     }
 
     /// The clause that names the models and the level they ran at.
-    fn models_clause(&self, effort: Option<&str>) -> Option<String> {
+    ///
+    /// Every report carries this clause, because the caller holds the level.
+    /// An envelope that names no model gives the level alone.
+    fn models_clause(&self, effort: &str) -> String {
         let named = self
             .models
             .iter()
             .map(|model| model.id.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        match (named.is_empty(), effort) {
-            (true, None) => None,
-            (true, Some(effort)) => Some(format!("effort {effort}")),
-            (false, None) => Some(named),
-            (false, Some(effort)) => Some(format!("{named} at effort {effort}")),
+        if named.is_empty() {
+            format!("effort {effort}")
+        } else {
+            format!("{named} at effort {effort}")
         }
     }
 
@@ -489,7 +490,7 @@ mod tests {
         // near side of the gate `answer` holds, so the price is written
         // whether the run answered with a plan or with a reason.
         let read = Envelope::read(&refused("the model is overloaded")).expect("the envelope reads");
-        assert_eq!(read.report(None), Some("plan: $0.05 · 1.8s".to_string()));
+        assert_eq!(read.report("low"), "plan: $0.05 · effort low · 1.8s");
     }
 
     /// The envelope of one measured run, with a plan in its `result`.
@@ -514,12 +515,9 @@ mod tests {
         // The whole line, from a recorded envelope. The reader pays for the
         // run and this line is the only place the price is written.
         assert_eq!(
-            measured().report(Some("low")),
-            Some(
-                "plan: $0.28 · claude-opus-5[1m], claude-haiku-4-5 at effort low · \
-                 32 in, 420 out, 94k cache read, 61k cache write · 1.3s"
-                    .to_string()
-            )
+            measured().report("low"),
+            "plan: $0.28 · claude-opus-5[1m], claude-haiku-4-5 at effort low · \
+             32 in, 420 out, 94k cache read, 61k cache write · 1.3s"
         );
     }
 
@@ -527,22 +525,19 @@ mod tests {
     fn an_envelope_of_two_models_names_both_the_dearest_first() {
         // A run that dispatched a subagent used two models, and the reader who
         // thinks the plan cost too much reads the expensive one first.
-        let line = measured()
-            .report(None)
-            .expect("the envelope carries numbers");
+        let line = measured().report("low");
         let opus = line.find("claude-opus-5[1m]").expect("the subagent model");
         let haiku = line.find("claude-haiku-4-5").expect("the parent model");
         assert!(opus < haiku, "{line}");
     }
 
     #[test]
-    fn a_run_that_asked_for_no_effort_earns_no_such_words() {
+    fn the_level_the_report_names_is_the_one_the_caller_passed() {
         // The envelope carries no effort field, so the level is the caller's
-        // to name. A line that named a level nobody chose is worth nothing.
-        let line = measured()
-            .report(None)
-            .expect("the envelope carries numbers");
-        assert!(!line.contains("effort"), "{line}");
+        // to name. This one is a recorded envelope, and the level it earns is
+        // the word the caller handed over and no word out of the run.
+        let line = measured().report("xhigh");
+        assert!(line.contains("effort xhigh"), "{line}");
     }
 
     #[test]
@@ -553,8 +548,8 @@ mod tests {
         assert_eq!(
             Envelope::read(&said)
                 .expect("the envelope reads")
-                .report(None),
-            Some("plan: $0.0046".to_string())
+                .report("low"),
+            "plan: $0.0046 · effort low"
         );
     }
 
@@ -572,8 +567,8 @@ mod tests {
             assert_eq!(
                 Envelope::read(&said)
                     .expect("the envelope reads")
-                    .report(None),
-                Some(format!("plan: {written}")),
+                    .report("high"),
+                format!("plan: effort high · {written}"),
                 "{milliseconds} milliseconds"
             );
         }
@@ -599,11 +594,9 @@ mod tests {
         assert_eq!(
             Envelope::read(&said)
                 .expect("the envelope reads")
-                .report(None),
-            Some(
-                "plan: claude-opus-5 · 118k in, 9.4k out, 1.2M cache read, 999 cache write"
-                    .to_string()
-            )
+                .report("high"),
+            "plan: claude-opus-5 at effort high · \
+             118k in, 9.4k out, 1.2M cache read, 999 cache write"
         );
     }
 
@@ -619,31 +612,35 @@ mod tests {
         assert_eq!(
             Envelope::read(&said)
                 .expect("the envelope reads")
-                .report(None),
-            Some("plan: claude-opus-5 · 12 in, 34 out".to_string())
+                .report("low"),
+            "plan: claude-opus-5 at effort low · 12 in, 34 out"
         );
     }
 
     #[test]
-    fn an_envelope_that_carries_no_number_at_all_earns_no_line() {
-        // A report is a courtesy. A missing number costs a clause, and a
-        // missing everything costs the line, and neither costs the plan the
-        // reader already paid for.
+    fn an_envelope_that_carries_no_number_at_all_is_the_level_alone() {
+        // A report is a courtesy, and a missing number costs a clause. The
+        // level is the one clause no envelope can cost, because the caller
+        // holds it, so an envelope of a plan and nothing else still earns a
+        // line.
         assert_eq!(
             Envelope::read(r#"{"result":"the plan"}"#)
                 .expect("the envelope reads")
-                .report(None),
-            None
+                .report("medium"),
+            "plan: effort medium"
         );
     }
 
     #[test]
-    fn a_run_that_asked_for_an_effort_and_carries_no_model_still_names_the_level() {
+    fn a_run_that_carries_no_model_names_the_level_where_the_models_stand() {
+        // An envelope that names no model still has numbers around the model
+        // clause, and the level takes the place the models would hold: after
+        // the price and before the seconds.
         assert_eq!(
-            Envelope::read(r#"{"result":"the plan"}"#)
+            Envelope::read(&envelope("the plan"))
                 .expect("the envelope reads")
-                .report(Some("high")),
-            Some("plan: effort high".to_string())
+                .report("high"),
+            "plan: $0.05 · effort high · 1.8s"
         );
     }
 
@@ -670,8 +667,7 @@ mod tests {
             .to_string();
             let line = Envelope::read(&said)
                 .expect("the envelope reads")
-                .report(None)
-                .expect("the envelope carries numbers");
+                .report("low");
             assert!(
                 line.ends_with(&format!("{written} in")),
                 "{counted}: {line}"
@@ -689,8 +685,8 @@ mod tests {
             assert_eq!(
                 Envelope::read(&said)
                     .expect("the envelope reads")
-                    .report(None),
-                Some(format!("plan: {written}")),
+                    .report("medium"),
+                format!("plan: effort medium · {written}"),
                 "{milliseconds} milliseconds"
             );
         }
