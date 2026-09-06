@@ -1481,12 +1481,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Set `WN_NO_CLAUDE` to any value with a character in it to turn the run off, which gives back
     the error a run with no chain printed before. An empty value leaves it on, because an exported
     but empty variable is a common accident. `WN_PLAN_TIMEOUT` names the seconds a run may take,
-    and it is 1560 by default — twice the longest run anybody measured. Three runs of the defaults
-    on this repository on 2026-09-05, over 57 open issues and 8 open pull requests, took 576, 624
-    and 780 seconds. **The spread of 25% between the last two, on one repository and one day, is
-    why the deadline doubles the longest rather than adding a margin to it.** A deadline is a bound
-    on a runaway run and never a target. The earlier 600 was set against no model at all, and it
-    would have killed two of those three runs.
+    and it is 1560 by default — twice the longest run anybody measured. Three runs at `xhigh` on
+    this repository on 2026-09-05, over 57 open issues and 8 open pull requests, took 576, 624 and
+    780 seconds. The first of the three ran at whatever level the machine picked, before the tool
+    named one. **The spread of 25% between the last two, on one repository and one day, is why the
+    deadline doubles the longest rather than adding a margin to it.** A deadline is a bound on a
+    runaway run and never a target, and it stands on the dearest level a reader can ask for and
+    never on the default one. The earlier 600 was set against no model at all, and it would have
+    killed two of those three runs.
   - The run says what it cost, and a run that failed and printed an envelope says it as well,
     because such a run spent the money before it failed. One line follows it on standard error,
     where the moving line stood:

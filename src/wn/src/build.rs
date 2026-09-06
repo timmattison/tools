@@ -239,8 +239,8 @@ impl ModelName {
 /// The four of 2026-09-06 are the measurement [`DEFAULT_EFFORT`] carries, 58
 /// open issues and 7 open pull requests, one run at each level: 184 seconds
 /// at `low`, 205 at `medium`, 353 at `high`, and 397 at `xhigh`. Every one of
-/// them is under half of this number, and the 780-second run of the day
-/// before is why that is no reason to lower it.
+/// them is under this number, and the `xhigh` run is 51% of it. The
+/// 780-second run of the day before is why that is no reason to lower it.
 ///
 /// The number stands in the source rather than in prose, because
 /// [`DEFAULT_TIMEOUT_SECONDS`] is derived from it. A deadline whose doc
