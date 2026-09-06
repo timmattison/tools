@@ -20,11 +20,19 @@ export function App() {
 
   return (
     <div className="app-layout">
-      <MenuBar onRecordingLoaded={handleRecordingLoaded} onError={handleError} />
+      <MenuBar
+        onRecordingLoaded={handleRecordingLoaded}
+        onError={handleError}
+      />
       {error && (
         <div className="error-banner" role="alert">
           {error}
-          <button onClick={() => { setError(null); }} className="error-dismiss">
+          <button
+            onClick={() => {
+              setError(null);
+            }}
+            className="error-dismiss"
+          >
             Dismiss
           </button>
         </div>

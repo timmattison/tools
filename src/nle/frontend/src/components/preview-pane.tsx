@@ -8,9 +8,7 @@ export function PreviewPane({ recording }: PreviewPaneProps) {
   if (!recording) {
     return (
       <div className="preview-pane">
-        <div className="placeholder">
-          Open a recording to preview it here
-        </div>
+        <div className="placeholder">Open a recording to preview it here</div>
       </div>
     );
   }

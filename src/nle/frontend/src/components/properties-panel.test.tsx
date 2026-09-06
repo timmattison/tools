@@ -35,11 +35,9 @@ describe("PropertiesPanel", () => {
   });
 
   it("shows only filename, not full path", () => {
-    const { container } = render(
-      <PropertiesPanel metadata={TEST_METADATA} />,
-    );
+    const { container } = render(<PropertiesPanel metadata={TEST_METADATA} />);
     const fileValue = container.querySelector(
-      '.metadata-item:last-child .metadata-value',
+      ".metadata-item:last-child .metadata-value",
     );
     expect(fileValue).toHaveTextContent("demo.json");
     expect(fileValue).toHaveAttribute(
@@ -58,7 +56,7 @@ describe("PropertiesPanel", () => {
       />,
     );
     const fileValue = container.querySelector(
-      '.metadata-item:last-child .metadata-value',
+      ".metadata-item:last-child .metadata-value",
     );
     expect(fileValue).toHaveTextContent("demo.json");
   });
