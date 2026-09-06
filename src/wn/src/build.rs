@@ -70,11 +70,43 @@ const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// it costs, and it belongs in the source for the reason [`DEFAULT_MODEL`]
 /// does: a level the machine chose is a level nobody can read off this tool.
 ///
-/// A plan of a whole backlog is read once and acted on for days. It reads
-/// every open issue and every open pull request, places each issue in a zone,
-/// and finds which streams block which, so a stream placed wrong costs more
-/// than the level that placed it right.
-const DEFAULT_EFFORT: &str = "xhigh";
+/// # The measurement that picked it
+///
+/// The level was `xhigh` first, and a guess picked that. This one is
+/// measured. Four runs of [`PROMPT`] on `timmattison/tools` on 2026-09-06, 58
+/// open issues and 7 open pull requests, at [`DEFAULT_MODEL`], one run at each
+/// level, one after the other so no run measured the load of another:
+///
+/// | Level | Seconds | Cost | Output | Turns | Streams | Issues placed | Faults | `wn` reads it |
+/// | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+/// | `low` | 184 | $1.63 | 14,387 | 9 | 24 | 54 | 0 | yes |
+/// | `medium` | 205 | $1.54 | 15,208 | 8 | 18 | 48 | 0 | yes |
+/// | `high` | 353 | $2.24 | 22,193 | 17 | 23 | 49 | 0 | yes |
+/// | `xhigh` | 397 | $2.30 | 28,570 | 21 | 20 | 49 | 0 | **no** |
+///
+/// A plan is wrong when it puts two issues that edit one file in parallel
+/// streams, and it is wrong when it schedules a consumer before its producer.
+/// Both are checkable against the document, and no plan of the four broke
+/// either one. The four agree on the substance as well: each found the same
+/// bug to do first and alone, and each gave the same one stream to launch now.
+///
+/// So every plan held, and the cheapest level whose plan holds is `low`. It
+/// is 2.2 times as fast as `xhigh` and 29% cheaper, and it placed the most
+/// issues of the four.
+///
+/// # What the dearest level did
+///
+/// The `xhigh` run wrapped its document in a fenced code block. JSON mode of
+/// the skill forbids that, and [`crate::json`] claims a text on the opening
+/// brace, so `wn` refuses such a document and falls through to the readers
+/// that cannot read it either. The dearest run of the four is the one run
+/// this tool could not use.
+///
+/// One run at each level, on one backlog, on one day. That is what the
+/// numbers cover, and a level whose plan held once is not a level proved to
+/// hold always. A reader who wants the tool to think harder names the level:
+/// [`EFFORT_ENV`] is what the variable is for.
+const DEFAULT_EFFORT: &str = "low";
 
 /// The level of effort a run asks for.
 ///
