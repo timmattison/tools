@@ -2623,7 +2623,11 @@ fn a_model_that_opens_with_a_dash_is_a_refusal_that_costs_no_run() {
 const DEFAULT_MODEL: &str = "opus";
 
 /// The level of effort a run asks for when the environment names none.
-const DEFAULT_EFFORT: &str = "xhigh";
+///
+/// The cheapest level whose plan held, which is what the measurement of
+/// timmattison/tools#451 picked. `DEFAULT_EFFORT` of `src/wn/src/build.rs`
+/// carries the four runs it was picked from.
+const DEFAULT_EFFORT: &str = "low";
 
 #[test]
 fn a_run_that_names_neither_asks_for_the_default_model_and_level() {
