@@ -12,7 +12,9 @@ use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
-use termgfx::{terminal_cells, Budget, Capabilities, Cursor, Request, TerminalType};
+use termgfx::{
+    terminal_cells, AnsweredProtocol, Budget, Capabilities, Cursor, Request, TerminalType,
+};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
@@ -505,9 +507,19 @@ fn ensure_ffprobe_available() -> Result<()> {
     Ok(())
 }
 
+/// Whether this run stands inside a tmux session.
+///
+/// The gate takes this as an argument rather than reading it, so that the gate
+/// is a pure function of its inputs. A test that set `TMUX` would change the
+/// environment of every other test in the process.
+fn in_tmux() -> bool {
+    std::env::var("TMUX").is_ok()
+}
+
 fn validate_terminal_for_graphics(
     terminal_caps: &Capabilities,
     transport: &RemoteTransport,
+    in_tmux: bool,
     feature: &str,
 ) -> Result<()> {
     // Check for Mosh first, since it strips escape sequences needed by all graphics protocols
@@ -522,7 +534,7 @@ fn validate_terminal_for_graphics(
     }
 
     // Check for tmux, since graphics don't work in tmux
-    if std::env::var("TMUX").is_ok() {
+    if in_tmux {
         anyhow::bail!("tmux detected. {} display does not work in tmux. Please run it directly in your terminal.", feature);
     }
 
@@ -584,14 +596,14 @@ fn report_display_readiness() -> Result<()> {
     let terminal_caps = Capabilities::detect();
     let transport = detect_remote_transport();
 
-    validate_terminal_for_graphics(&terminal_caps, &transport, "Image")
+    validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")
 }
 
 fn display_video_from_file(file_path: &Path, args: &Args) -> Result<()> {
     let terminal_caps = Capabilities::detect();
     let transport = detect_remote_transport();
 
-    validate_terminal_for_graphics(&terminal_caps, &transport, "Video")?;
+    validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Video")?;
     ensure_ffmpeg_available()?;
 
     // Clear screen initially with function
@@ -1572,7 +1584,7 @@ fn display_image(
     let terminal_caps = Capabilities::detect();
     let transport = detect_remote_transport();
 
-    validate_terminal_for_graphics(&terminal_caps, &transport, "Image")?;
+    validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")?;
 
     // Always use character-based sizing (fit mode), but respect user-specified dimensions if provided
     let (target_width, target_height) = if args.width.is_some() || args.height.is_some() {
@@ -2231,7 +2243,7 @@ not_a_number  1 /bin/bash
         // stands in favor of the image, so the refusal below comes from the
         // transport alone.
         let caps = Capabilities::new(TerminalType::ITerm2, true, true);
-        let error = validate_terminal_for_graphics(&caps, &RemoteTransport::Mosh, "Image")
+        let error = validate_terminal_for_graphics(&caps, &RemoteTransport::Mosh, false, "Image")
             .expect_err("Mosh must be refused");
         error.to_string()
     }
@@ -2248,6 +2260,39 @@ not_a_number  1 /bin/bash
         assert!(
             !message.contains("et user@host"),
             "message still recommends the et command: {message}"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_answered_draws_a_picture_under_mosh() {
+        // This port of mosh reads all three image protocols, and its emulator
+        // answers a query for the pair: mosh together with the terminal of the
+        // user. So an answer under mosh is a fact about the far terminal, and
+        // it outranks the process tree. A name under mosh is still a guess,
+        // which is what `mosh_refusal_message` above covers.
+        let answered = Capabilities::new(
+            TerminalType::Answered(AnsweredProtocol::Kitty),
+            true,
+            true,
+        );
+        assert!(
+            validate_terminal_for_graphics(&answered, &RemoteTransport::Mosh, false, "Image").is_ok(),
+            "a terminal that answered the query draws the picture"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_answered_draws_a_picture_inside_tmux() {
+        // tmux 3.7c answers `CSI ?1;2;4 c`, which names sixel. Measured
+        // 2026-09-06. The blanket refusal below it rests on an older tmux.
+        let answered = Capabilities::new(
+            TerminalType::Answered(AnsweredProtocol::Sixel),
+            true,
+            true,
+        );
+        assert!(
+            validate_terminal_for_graphics(&answered, &RemoteTransport::None, true, "Image").is_ok(),
+            "a terminal that answered the query draws the picture"
         );
     }
 

@@ -58,7 +58,8 @@ mod cursor;
 mod detect;
 mod draw;
 mod geometry;
+mod probe;
 
-pub use detect::{Capabilities, ImageProtocol, TerminalType};
+pub use detect::{AnsweredProtocol, Capabilities, ImageProtocol, TerminalType};
 pub use draw::{Budget, Cursor, DrawError, Request};
 pub use geometry::{cell_pixels, terminal_cells};
