@@ -222,6 +222,36 @@ mod tests {
         );
     }
 
+    /// A server that ignores the offset and answers the first page every time
+    /// defeats the empty-page guard above: every page it sends is full, so the
+    /// walk never sees one that is empty. It collects the first page over and
+    /// over until the count reaches the stated total, then reports the pile as
+    /// the collection. Most of it is the same items again, and the rest of the
+    /// collection was never read.
+    #[tokio::test]
+    async fn a_server_that_ignores_the_requested_offset_is_an_error() {
+        let items: Vec<u32> = (0..57).collect();
+
+        let collected = collect_pages(|_offset| {
+            // The first page, whatever was asked for.
+            let page = page_at(&items, 0, SERVER_PAGE_SIZE);
+            async move { Ok(page) }
+        })
+        .await;
+
+        let error =
+            collected.expect_err("a server that ignores the offset must be reported, not believed");
+        let report = format!("{error:#}");
+        assert!(
+            report.contains("25"),
+            "the failure should say which offset was asked for, got {report}"
+        );
+        assert!(
+            report.contains('0'),
+            "the failure should say which offset came back, got {report}"
+        );
+    }
+
     #[tokio::test]
     async fn a_server_that_stops_making_progress_is_an_error() {
         // A misbehaving server: it claims a hundred items but hands back an
