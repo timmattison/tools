@@ -212,6 +212,10 @@ pub(crate) fn cells_of(window: Option<Window>) -> (u32, u32) {
 /// window of zero columns and no window of zero rows. See
 /// `src/termsize/src/lib.rs`.
 ///
+/// A quotient above [`MAX_CELL_PIXELS`] is no size either, and it gives `None`
+/// with them. A character cell is a few tens of pixels, and the doc of that
+/// constant says what a number several times larger is instead.
+///
 /// This is not [`cell_pixels_or_estimate_of`]. That function answers the same
 /// question and never says `None`: it falls back to an estimate of the cell of
 /// a typical terminal. The fallback is right for a tool with no second way to
@@ -240,8 +244,10 @@ pub fn cell_pixels() -> Option<(u32, u32)> {
 ///
 /// # Returns
 /// The width and the height of one cell in pixels, or `None` when the probe
-/// measured no window, when the terminal reports no pixel size, or when either
-/// quotient is zero.
+/// measured no window, when the terminal reports no pixel size, when either
+/// quotient is zero, and when either quotient stands above
+/// [`MAX_CELL_PIXELS`]. A quotient above that bound is no character cell, and
+/// the doc of the constant says what such a number is instead.
 pub(crate) fn cell_pixels_of(window: Option<Window>) -> Option<CellPixels> {
     let (pixels_wide, pixels_tall) = window_pixels(window)?;
     let (columns, rows) = window?.cells();
@@ -747,6 +753,12 @@ mod tests {
     /// The measured cell of a window of [`REPORTED_CELLS`] and [`DENSE_PIXELS`].
     const DENSE_CELL: (u32, u32) = (20, 40);
 
+    /// The pixel size of a window whose quotient stands above
+    /// [`MAX_CELL_PIXELS`]. 48000 pixels over 80 columns is a cell 600 pixels
+    /// wide, and 14400 pixels over 24 rows is a cell 600 pixels tall. No font
+    /// has a cell of that size.
+    const ABSURD_PIXELS: (u16, u16) = (48_000, 14_400);
+
     /// The window that a terminal of a stated size reports.
     ///
     /// # Arguments
@@ -794,6 +806,11 @@ mod tests {
             cell_pixels_of(window(REPORTED_CELLS, None)),
             None,
             "a pane of Zellij and a ttyd panel report their cells and no pixel size, so there is nothing to divide and no cell to measure"
+        );
+        assert_eq!(
+            cell_pixels_of(window(REPORTED_CELLS, Some(ABSURD_PIXELS))),
+            None,
+            "a quotient of 600 pixels on each side stands above MAX_CELL_PIXELS, and a number that large is no character cell"
         );
     }
 
