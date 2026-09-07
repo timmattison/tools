@@ -3,7 +3,27 @@
 # UNIFI_SITE_MANAGER_API_KEY on every parse -- so tests that call it directly
 # race the tests that write those variables. Parse through
 # `crate::test_support::parse_args_for_test`, which holds the environment lock.
+#
+# The `Parser` trait is one of two routes to that parse, and the ban must name
+# both. `Args::command()` hands back a `clap::Command`, and every `get_matches`
+# spelling on that command reads the same four variables, because the
+# environment fallback belongs to the argument rather than to the trait method.
+# A ban on the trait alone was proved to miss it: a probe module that called
+# `Args::command().get_matches_from([...])` followed by `Args::from_arg_matches`
+# sat in this crate while clippy reported clean.
+#
+# `from_arg_matches` reads no environment on its own, because the `ArgMatches`
+# it takes is already filled in. It is banned so the two-step spelling fails at
+# both of its lines rather than at one.
 disallowed-methods = [
     { path = "clap::Parser::try_parse_from", reason = "parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
     { path = "clap::Parser::parse_from", reason = "parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
+    { path = "clap::Command::get_matches", reason = "this reads the real argument vector and the same UNIFI_* variables; parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
+    { path = "clap::Command::try_get_matches", reason = "this reads the real argument vector and the same UNIFI_* variables; parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
+    { path = "clap::Command::get_matches_from", reason = "the environment fallback belongs to the argument, not to the Parser trait, so this reads UNIFI_* too; parse through crate::test_support::parse_args_for_test" },
+    { path = "clap::Command::try_get_matches_from", reason = "the environment fallback belongs to the argument, not to the Parser trait, so this reads UNIFI_* too; parse through crate::test_support::parse_args_for_test" },
+    { path = "clap::FromArgMatches::from_arg_matches", reason = "the only way to hold an ArgMatches is a banned call above; parse through crate::test_support::parse_args_for_test" },
+    { path = "clap::FromArgMatches::from_arg_matches_mut", reason = "the only way to hold an ArgMatches is a banned call above; parse through crate::test_support::parse_args_for_test" },
+    { path = "clap::FromArgMatches::update_from_arg_matches", reason = "the only way to hold an ArgMatches is a banned call above; parse through crate::test_support::parse_args_for_test" },
+    { path = "clap::FromArgMatches::update_from_arg_matches_mut", reason = "the only way to hold an ArgMatches is a banned call above; parse through crate::test_support::parse_args_for_test" },
 ]
