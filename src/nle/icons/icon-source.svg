@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="NLE, a non-linear editor for terminal recordings">
+  <title>NLE</title>
+  <rect width="1024" height="1024" rx="200" fill="#161B26"/>
+  <rect x="24" y="24" width="976" height="976" rx="176" fill="none" stroke="#2A3244" stroke-width="16"/>
+  <polyline points="286,260 452,382 286,504" fill="none" stroke="#3DDC84" stroke-width="76" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="530" y="466" width="230" height="76" rx="38" fill="#3DDC84"/>
+  <rect x="200" y="672" width="624" height="20" rx="10" fill="#39435A"/>
+  <rect x="200" y="630" width="180" height="104" rx="34" fill="#4C7EF3"/>
+  <rect x="420" y="630" width="120" height="104" rx="34" fill="#4C7EF3" opacity="0.65"/>
+  <rect x="640" y="630" width="150" height="104" rx="34" fill="#4C7EF3" opacity="0.85"/>
+  <rect x="588" y="598" width="22" height="168" rx="11" fill="#F5A623"/>
+</svg>
