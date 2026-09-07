@@ -163,7 +163,7 @@ pub(crate) fn read_answer(answer: &[u8]) -> Option<AnsweredProtocol> {
 /// reads no window operation answers neither question, and it reaches this
 /// function as silence.
 pub(crate) fn read_cell(answer: &[u8], cells: Option<(u32, u32)>) -> Option<CellPixels> {
-    read_text_area_cell(answer, cells)
+    read_cell_size(answer).or_else(|| read_text_area_cell(answer, cells))
 }
 
 /// The size of one character cell that a terminal named in its answer to
