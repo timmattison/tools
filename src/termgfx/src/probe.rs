@@ -99,6 +99,16 @@ pub(crate) const IMAGE_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b
 /// [`IMAGE_QUERY`] ends with it, and [`ask_for_a_refusal`] writes it alone.
 const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
 
+/// The request of the size of one character cell in pixels.
+///
+/// This is window operation 16 of xterm, and a terminal answers it with
+/// `CSI 6 ; height ; width t`. It names one cell directly, so it is the best
+/// answer a terminal gives to the question this crate asks about a cell.
+const CELL_SIZE_REQUEST: &[u8] = b"\x1b[16t";
+
+/// The first parameter of the answer to [`CELL_SIZE_REQUEST`].
+const CELL_SIZE_ANSWER: &[u8] = b"6";
+
 /// How long a reader of the terminal waits for the answer.
 ///
 /// Two readers take this budget. [`ask_the_terminal`] waits this long for the
@@ -135,8 +145,76 @@ pub(crate) fn read_answer(answer: &[u8]) -> Option<AnsweredProtocol> {
 ///
 /// # Returns
 /// The cell that the terminal named, or `None` for an answer that names none.
-fn read_cell_size(_answer: &[u8]) -> Option<CellPixels> {
+fn read_cell_size(answer: &[u8]) -> Option<CellPixels> {
+    let parameters = window_operation_parameters(answer, CELL_SIZE_ANSWER)?;
+    // The answer carries three parameters and no other count is this answer.
+    // A request to resize a window carries three of its own behind another
+    // first parameter, and the guard above already put that one aside.
+    let [_, height, width] = parameters.as_slice() else {
+        return None;
+    };
+    CellPixels::measured(number(width)?, number(height)?)
+}
+
+/// The opener of a control sequence.
+///
+/// This is not [`ATTRIBUTES_OPENER`], which carries the `?` that opens a
+/// private answer. A window operation answers with no private byte, so a
+/// reader of one starts here.
+const CSI_OPENER: &[u8] = b"\x1b[";
+
+/// The final byte of every window operation and of every answer to one.
+const WINDOW_OPERATION_FINAL: u8 = b't';
+
+/// The parameters of the first window operation of `answer` whose first
+/// parameter is `kind`.
+///
+/// The buffer holds every byte the terminal wrote before the answer that ended
+/// the read, so it holds the answers of the other questions of
+/// [`IMAGE_QUERY`] as well. This walk therefore passes over every sequence
+/// that is not the one asked for, instead of reading the first sequence it
+/// finds.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote.
+/// * `kind` - The first parameter that names the answer, such as
+///   [`CELL_SIZE_ANSWER`].
+///
+/// # Returns
+/// Every parameter of that answer, the first one included, or `None` when the
+/// buffer holds no such answer and when a sequence is cut short before its
+/// final byte.
+fn window_operation_parameters<'a>(answer: &'a [u8], kind: &[u8]) -> Option<Vec<&'a [u8]>> {
+    let mut rest = answer;
+    while let Some(start) = position_of(rest, CSI_OPENER) {
+        let body = &rest[start + CSI_OPENER.len()..];
+        // A control sequence ends at its final byte, which stands above every
+        // parameter byte. An answer with no final byte is an answer cut short.
+        let end = body.iter().position(|byte| (0x40..=0x7e).contains(byte))?;
+        if body[end] == WINDOW_OPERATION_FINAL {
+            let parameters: Vec<&[u8]> = body[..end]
+                .split(|byte| *byte == PARAMETER_SEPARATOR)
+                .collect();
+            if parameters.first() == Some(&kind) {
+                return Some(parameters);
+            }
+        }
+        rest = &body[end + 1..];
+    }
     None
+}
+
+/// The number that `bytes` spells, for a run of ASCII digits and nothing else.
+///
+/// A parameter of a control sequence is a run of digits. Every other shape is
+/// no number of this protocol, and `None` is the answer for it. That includes
+/// an empty parameter, which a terminal writes for a value it left out, and a
+/// number above the range, which no font has.
+fn number(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 /// The opener of an application-program command, which carries a kitty answer.
