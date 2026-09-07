@@ -622,8 +622,16 @@ fn validate_terminal_for_graphics(
 /// about the terminal, the multiplexer, and the remote transport. It does not
 /// ask whether stdout is a terminal, so a redirected stdout does not change
 /// the answer.
+///
+/// The gate reads the name of the terminal and whether that terminal draws an
+/// image at all, and it reads no size of anything. So this call takes the
+/// entrance that asks about the protocol alone: a run under a terminal that
+/// named itself asks nothing, where the entrance the drawing paths take would
+/// spend a round trip on the size of a character cell that no verdict of this
+/// function reads, and would swallow whatever the user typed while it held the
+/// terminal in raw mode.
 fn report_display_readiness() -> Result<()> {
-    let terminal_caps = Capabilities::detect_by_asking();
+    let terminal_caps = Capabilities::detect_by_asking_the_protocol();
     let transport = detect_remote_transport();
 
     validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")

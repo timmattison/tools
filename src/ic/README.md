@@ -174,7 +174,8 @@ That covers two cases a name cannot:
   carries that answer, because no variable crosses the session.
 
 zellij is not one of these cases. It sets the `ZELLIJ` variable, so `ic` names
-it from the environment and asks it nothing. It draws sixel by that name.
+it from the environment and asks it no protocol question. It draws sixel by
+that name.
 
 A terminal that answers nothing keeps the behavior it had: `ic` names it from
 the environment, and it reports an error for tmux and for mosh.

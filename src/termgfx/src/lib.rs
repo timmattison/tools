@@ -9,7 +9,11 @@
 //!   [`Capabilities::detect`] names the terminal from the environment
 //!   variables that the terminal set. A terminal that set none of them
 //!   answers two of the three questions itself, and
-//!   [`Capabilities::detect_by_asking`] asks it. See the `probe` module.
+//!   [`Capabilities::detect_by_asking`] asks it. See the `probe` module. A
+//!   tool that reports what the terminal is and draws nothing takes
+//!   [`Capabilities::detect_by_asking_the_protocol`], which asks about the
+//!   protocol alone and spends no round trip on the size of a cell it never
+//!   reads.
 //! * How many pixels does one character cell hold. A terminal lays text out in
 //!   cells and it draws an image in pixels, so a tool that wants an image of a
 //!   given number of cells has to convert. [`cell_pixels`] measures one cell,

@@ -31,6 +31,27 @@
 //! silence, and a read that waited for that silence would spend the whole
 //! budget on every run.
 //!
+//! # The third question, which is how big one character cell is
+//!
+//! A terminal lays text out in cells and it draws a picture in pixels, so a
+//! tool that wants a picture of a given number of cells has to convert. The
+//! `TIOCGWINSZ` ioctl carries that measure, and a mosh session carries none:
+//! the mosh wire protocol resizes with a width and a height in cells and
+//! nothing else, so the server writes a zero into both pixel fields of the
+//! pseudo terminal. A pane of Zellij and a ttyd panel report none either.
+//!
+//! The xterm window operations carry the answer. [`CELL_SIZE_REQUEST`] names
+//! one cell directly, and [`TEXT_AREA_REQUEST`] names the whole text area,
+//! which measures a cell after a division by the cell counts of that same
+//! window. [`read_cell`] puts the two in order.
+//!
+//! **Both questions ride in [`IMAGE_QUERY`], in front of the attributes
+//! request.** A terminal answers in the order it reads, so their answers stand
+//! in front of the answer that ends the read, and the two of them cost no
+//! extra round trip and no extra wait. GitHub issue #468 reports what the
+//! estimate of a cell did to a mosh session: `ic` drew a picture about 7
+//! percent too narrow.
+//!
 //! # The second question, which the picture itself asks
 //!
 //! A kitty terminal also answers a picture that it refused, and it names a
@@ -74,29 +95,86 @@
 //! The budget ends the read, and it ends no answer of a terminal. A terminal
 //! that answers late writes those bytes to the descriptor the shell of the
 //! user reads next, and the shell takes them for keystrokes. So the budget is
-//! generous enough that a terminal on the far side of a network reaches it,
-//! and the probe runs only for a terminal that carries no name at all.
+//! generous enough that a terminal on the far side of a network reaches it.
+//!
+//! The two questions about a cell add no shape to that risk. A terminal
+//! answers in the order it reads, and both of them stand in front of the
+//! request that ends the read, so a terminal that answers at all writes their
+//! answers before the one the read waits for. A terminal that answers neither
+//! writes nothing for them, and the read still ends on the attributes.
+//!
+//! **What the two questions do change is how many runs ask anything.** The
+//! probe used to run for a terminal that carried no name at all. It now runs
+//! for every window that reports no pixel size, a named terminal included, so
+//! a mosh session and a pane of Zellij reach it. Those runs carry the risk
+//! that a run of an unnamed terminal always carried, and they carry it for the
+//! same budget. The trade is a picture of the right size against a terminal
+//! that answers nothing writing nothing late, and issue #468 measured what the
+//! guess costs: a picture about 7 percent too narrow.
 
 use crate::detect::AnsweredProtocol;
 use crate::draw::{ImageNumber, KITTY_IMAGE_NUMBER_KEY};
+use crate::geometry::CellPixels;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
-/// The bytes [`ask_the_terminal`] writes.
+/// The query action of the kitty graphics protocol.
 ///
-/// The first is the query action of the kitty graphics protocol: a
-/// transmission of one pixel that the terminal answers and never draws. The
-/// second is the request of the primary device attributes, which every
-/// terminal answers and which therefore ends the read.
-pub(crate) const IMAGE_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+/// It is a transmission of one pixel that the terminal answers and never
+/// draws. A terminal that reads the protocol answers `OK`, and one that reads
+/// none of it answers nothing at all.
+const KITTY_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+
+/// The questions [`ask_the_terminal`] writes, in the order it writes them.
+///
+/// They leave in one write, so the whole set costs one round trip. A terminal
+/// answers in the order it reads, so each answer arrives in the order of this
+/// list.
+///
+/// **The attributes request stands last, and it must stay last.** Every
+/// terminal answers it, so its answer is what ends the read. A question in
+/// front of it costs no extra round trip and no extra wait, because its answer
+/// arrives in front of the one the read waits for. A question behind it would
+/// answer after the read had already stopped, and those bytes would land on
+/// the descriptor the shell of the user reads next. The order is a property of
+/// this list, and `the_query_asks_every_question_and_ends_with_the_attributes_request`
+/// holds it.
+pub(crate) const IMAGE_QUERY: [&[u8]; 4] = [
+    KITTY_QUERY,
+    CELL_SIZE_REQUEST,
+    TEXT_AREA_REQUEST,
+    ATTRIBUTES_REQUEST,
+];
 
 /// The request of the primary device attributes.
 ///
 /// Every terminal answers this request, so its answer is what ends a read.
 /// [`IMAGE_QUERY`] ends with it, and [`ask_for_a_refusal`] writes it alone.
 const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
+
+/// The request of the size of one character cell in pixels.
+///
+/// This is window operation 16 of xterm, and a terminal answers it with
+/// `CSI 6 ; height ; width t`. It names one cell directly, so it is the best
+/// answer a terminal gives to the question this crate asks about a cell.
+const CELL_SIZE_REQUEST: &[u8] = b"\x1b[16t";
+
+/// The first parameter of the answer to [`CELL_SIZE_REQUEST`].
+const CELL_SIZE_ANSWER: &[u8] = b"6";
+
+/// The request of the size of the text area in pixels.
+///
+/// This is window operation 14 of xterm, and a terminal answers it with
+/// `CSI 4 ; height ; width t`. It names the whole text area and not one cell,
+/// so a reader of it divides by the cell counts of that same window. It is the
+/// fallback of [`CELL_SIZE_REQUEST`], because a terminal that answers the
+/// older of the two operations answers this one.
+const TEXT_AREA_REQUEST: &[u8] = b"\x1b[14t";
+
+/// The first parameter of the answer to [`TEXT_AREA_REQUEST`].
+const TEXT_AREA_ANSWER: &[u8] = b"4";
 
 /// How long a reader of the terminal waits for the answer.
 ///
@@ -119,6 +197,157 @@ pub(crate) fn read_answer(answer: &[u8]) -> Option<AnsweredProtocol> {
     } else {
         None
     }
+}
+
+/// The cell that the terminal named, from the best answer it gave.
+///
+/// A terminal gives two answers about a cell, and they can both arrive in one
+/// buffer. [`CELL_SIZE_REQUEST`] names one cell directly, and
+/// [`TEXT_AREA_REQUEST`] names the whole text area, which measures a cell only
+/// after a division that rounds. So the first one outranks the second, and
+/// this function is the one place that says so.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote before the answer that ended the
+///   read.
+/// * `cells` - The columns and the rows of the window the answers are about,
+///   or `None` for a run that measured no window.
+///
+/// # Returns
+/// The cell the terminal named, or `None` when it named none. A terminal that
+/// reads no window operation answers neither question, and it reaches this
+/// function as silence.
+pub(crate) fn read_cell(answer: &[u8], cells: Option<(u32, u32)>) -> Option<CellPixels> {
+    read_cell_size(answer).or_else(|| read_text_area_cell(answer, cells))
+}
+
+/// The size of one character cell that a terminal named in its answer to
+/// [`CELL_SIZE_REQUEST`].
+///
+/// The answer is `CSI 6 ; height ; width t`. **The height stands first**, and
+/// nothing in the bytes says so, which is why [`CellPixels::measured`] takes
+/// the two numbers by name.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote before the answer that ended the
+///   read.
+///
+/// # Returns
+/// The cell that the terminal named, or `None` for an answer that names none.
+fn read_cell_size(answer: &[u8]) -> Option<CellPixels> {
+    let parameters = window_operation_parameters(answer, CELL_SIZE_ANSWER)?;
+    // The answer carries three parameters and no other count is this answer.
+    // A request to resize a window carries three of its own behind another
+    // first parameter, and the guard above already put that one aside.
+    let [_, height, width] = parameters.as_slice() else {
+        return None;
+    };
+    CellPixels::measured(number(width)?, number(height)?)
+}
+
+/// The size of one character cell that the answer to [`TEXT_AREA_REQUEST`]
+/// measures.
+///
+/// The answer names the whole text area, so one cell is the pixel width over
+/// the column count and the pixel height over the row count. The division uses
+/// the cell counts of the **same** window that the answer is about, which the
+/// caller measured in the one read it made before it asked anything.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote before the answer that ended the
+///   read.
+/// * `cells` - The columns and the rows of that same window, or `None` for a
+///   run that measured no window.
+///
+/// # Returns
+/// The cell that the division measures, or `None` for an answer that names no
+/// text area, for a run that measured no window to divide by, and for a
+/// quotient that is no cell.
+fn read_text_area_cell(answer: &[u8], cells: Option<(u32, u32)>) -> Option<CellPixels> {
+    let (columns, rows) = cells?;
+    let parameters = window_operation_parameters(answer, TEXT_AREA_ANSWER)?;
+    let [_, height, width] = parameters.as_slice() else {
+        return None;
+    };
+    // `Window::measured` makes no window of zero columns and no window of zero
+    // rows, so no caller of a measured window reaches a division by zero here.
+    // The signature takes a bare pair all the same, so the division is a
+    // checked one and a zero gives no cell instead of a panic.
+    // `CellPixels::measured` then refuses a quotient of no pixels, which is
+    // what a text area smaller than its own grid gives.
+    CellPixels::measured(
+        number(width)?.checked_div(columns)?,
+        number(height)?.checked_div(rows)?,
+    )
+}
+
+/// The opener of a control sequence.
+///
+/// This is not [`ATTRIBUTES_OPENER`], which carries the `?` that opens a
+/// private answer. A window operation answers with no private byte, so a
+/// reader of one starts here.
+const CSI_OPENER: &[u8] = b"\x1b[";
+
+/// The final byte of every window operation and of every answer to one.
+const WINDOW_OPERATION_FINAL: u8 = b't';
+
+/// The parameters of the first window operation of `answer` whose first
+/// parameter is `kind`.
+///
+/// The buffer holds every byte the terminal wrote before the answer that ended
+/// the read, so it holds the answers of the other questions of
+/// [`IMAGE_QUERY`] as well. This walk therefore passes over every sequence
+/// that is not the one asked for, instead of reading the first sequence it
+/// finds.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote.
+/// * `kind` - The first parameter that names the answer, such as
+///   [`CELL_SIZE_ANSWER`].
+///
+/// # Returns
+/// Every parameter of that answer, the first one included, or `None` when the
+/// buffer holds no such answer and when a sequence is cut short before its
+/// final byte.
+fn window_operation_parameters<'a>(answer: &'a [u8], kind: &[u8]) -> Option<Vec<&'a [u8]>> {
+    let mut rest = answer;
+    while let Some(start) = position_of(rest, CSI_OPENER) {
+        let body = &rest[start + CSI_OPENER.len()..];
+        // A control sequence ends at its final byte, which stands above every
+        // parameter byte. A sequence with no final byte was cut short, and the
+        // walk below reads the rest of the buffer all the same.
+        if let Some(end) = body.iter().position(|byte| (0x40..=0x7e).contains(byte)) {
+            if body[end] == WINDOW_OPERATION_FINAL {
+                let parameters: Vec<&[u8]> = body[..end]
+                    .split(|byte| *byte == PARAMETER_SEPARATOR)
+                    .collect();
+                if parameters.first() == Some(&kind) {
+                    return Some(parameters);
+                }
+            }
+        }
+        // The walk goes on from the body of the sequence it just refused, and
+        // not from behind the final byte of it. A sequence that was cut short
+        // holds the opener of the next one inside what would otherwise be its
+        // parameters, and that opener stands in front of the final byte. The
+        // body is two bytes shorter than `rest` on every turn, so the walk ends.
+        rest = body;
+    }
+    None
+}
+
+/// The number that `bytes` spells, for a run of ASCII digits and nothing else.
+///
+/// A parameter of a control sequence is a run of digits. Every other shape is
+/// no number of this protocol, and `None` is the answer for it. That includes
+/// an empty parameter, which a terminal writes for a value it left out, and a
+/// number that no `u32` holds. The bound that a font has stands elsewhere:
+/// [`crate::geometry::CellPixels::measured`] refuses a cell above it.
+fn number(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 /// The opener of an application-program command, which carries a kitty answer.
@@ -403,13 +632,53 @@ fn position_of(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// Ask the controlling terminal which image protocol it draws.
+/// What one terminal said for the whole of [`IMAGE_QUERY`].
 ///
-/// Gives [`None`] when there is no controlling terminal, when this run stands
-/// in a background process group and therefore owns no terminal to ask (see
-/// [`owns_the_terminal`]), when the terminal answers nothing inside `budget`,
-/// or when the answer names neither protocol.
-pub(crate) fn ask_the_terminal(budget: Duration) -> Option<AnsweredProtocol> {
+/// The two answers travel together because one write asked for both, and a
+/// caller that took them one at a time would read the terminal twice for one
+/// picture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TerminalAnswer {
+    /// The image protocol the terminal named, or `None` when it named none.
+    pub(crate) protocol: Option<AnsweredProtocol>,
+    /// The character cell the terminal named, or `None` when it named none.
+    pub(crate) cell: Option<CellPixels>,
+}
+
+/// Ask the controlling terminal which image protocol it draws and how big one
+/// character cell is.
+///
+/// # Arguments
+/// * `budget` - The longest that the read waits.
+/// * `cells` - The columns and the rows of the window that the caller
+///   measured, or `None` when it measured none. The answer of
+///   [`TEXT_AREA_REQUEST`] divides by this pair, so the measure and the answer
+///   are about one window.
+///
+/// # Returns
+/// What the terminal said. Every field is `None` when there is no controlling
+/// terminal, when this run stands in a background process group and therefore
+/// owns no terminal to ask (see [`owns_the_terminal`]), when the terminal
+/// answers nothing inside `budget`, and when the answer names neither thing.
+pub(crate) fn ask_the_terminal(budget: Duration, cells: Option<(u32, u32)>) -> TerminalAnswer {
+    let Some(answer) = query_the_terminal(budget) else {
+        return TerminalAnswer::default();
+    };
+    TerminalAnswer {
+        protocol: read_answer(&answer),
+        cell: read_cell(&answer, cells),
+    }
+}
+
+/// Write [`IMAGE_QUERY`] to the controlling terminal and read what comes back.
+///
+/// The read of the terminal stands apart from the reading of the bytes, so
+/// every parser above is a function of its input alone.
+///
+/// # Returns
+/// Every byte the terminal wrote before the answer that ended the read, or
+/// `None` when this run has no terminal to ask.
+fn query_the_terminal(budget: Duration) -> Option<Vec<u8>> {
     let terminal = OpenOptions::new()
         .read(true)
         .write(true)
@@ -417,9 +686,11 @@ pub(crate) fn ask_the_terminal(budget: Duration) -> Option<AnsweredProtocol> {
         .ok()?;
     let fd = terminal.as_raw_fd();
     let _raw = RawMode::of(fd)?;
-    (&terminal).write_all(IMAGE_QUERY).ok()?;
+    // The questions leave in one write. A terminal reads them in the order of
+    // the list, and its answers come back in that order.
+    (&terminal).write_all(&IMAGE_QUERY.concat()).ok()?;
     (&terminal).flush().ok()?;
-    read_answer(&drain(fd, budget))
+    Some(drain(fd, budget))
 }
 
 /// Ask the controlling terminal whether it refused the picture that went
@@ -633,6 +904,145 @@ impl Drop for RawMode {
 mod tests {
     use super::*;
 
+    /// The height of the cell that the answers of these tests name, in pixels.
+    ///
+    /// It stands **first** in the answer of a terminal, and second in every
+    /// call of [`CellPixels::measured`]. The two numbers differ, so an answer
+    /// read the wrong way round fails the test instead of passing it.
+    const ANSWERED_CELL_HEIGHT: u32 = 30;
+
+    /// The width of that same cell, in pixels.
+    const ANSWERED_CELL_WIDTH: u32 = 14;
+
+    #[test]
+    fn the_answer_of_the_cell_size_names_the_height_first() {
+        // Kitty 0.42 answers this shape, and so does xterm. The height stands
+        // in the first parameter and the width in the second, which is the
+        // order of every window operation of xterm.
+        assert_eq!(
+            read_cell_size(b"\x1b[6;30;14t"),
+            CellPixels::measured(ANSWERED_CELL_WIDTH, ANSWERED_CELL_HEIGHT),
+            "the answer names the height first, so a reader that swaps the two measures a cell of the wrong shape"
+        );
+    }
+
+    /// The answer of a terminal that names the cell of these tests.
+    const CELL_SIZE_ANSWER_BYTES: &[u8] = b"\x1b[6;30;14t";
+
+    #[test]
+    fn one_answer_of_each_shape_that_names_no_cell_gives_no_cell() {
+        // One case for each syntactic form that reaches this parser and names
+        // no cell. A parser that reads a number out of any of them measures a
+        // cell that no terminal reported, and every picture of the run comes
+        // out at that size.
+        for (answer, form) in [
+            (
+                &b"\x1b[8;24;80t"[..],
+                "a request to resize the window, which carries three parameters of its own behind another first one",
+            ),
+            (&b"\x1b[6;16t"[..], "one parameter short"),
+            (&b"\x1b[6;16;8;4t"[..], "one parameter long"),
+            (&b"\x1b[6;0;14t"[..], "a height of no pixels"),
+            (&b"\x1b[6;30;0t"[..], "a width of no pixels"),
+            (
+                &b"\x1b[6;99999;99999t"[..],
+                "a cell far above the largest font",
+            ),
+            (&b"\x1b[6;;14t"[..], "a height the terminal left out"),
+            (&b"\x1b[6;30;14"[..], "an answer cut short of its final byte"),
+            (&b""[..], "a terminal that answered nothing at all"),
+        ] {
+            assert_eq!(
+                read_cell_size(answer),
+                None,
+                "an answer of {form} names no cell, and the measure must fall through to the next source"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sequence_cut_short_in_front_of_the_answer_does_not_take_the_answer_with_it() {
+        // The buffer holds every byte that stood in front of the answer which
+        // ended the read, and a terminal that answered the run before this one
+        // late leaves a part of a sequence there. The opener of the real answer
+        // stands inside what those bytes would otherwise claim as parameters.
+        let mut answer = b"\x1b[999".to_vec();
+        answer.extend_from_slice(CELL_SIZE_ANSWER_BYTES);
+
+        assert_eq!(
+            read_cell_size(&answer),
+            CellPixels::measured(ANSWERED_CELL_WIDTH, ANSWERED_CELL_HEIGHT),
+            "a walk that steps over the final byte of a sequence cut short steps over the opener of the next one with it"
+        );
+    }
+
+    /// The columns and the rows of the window that the tests of the text area
+    /// divide by.
+    const ANSWERED_WINDOW_CELLS: (u32, u32) = (80, 24);
+
+    #[test]
+    fn the_answer_of_the_text_area_divides_by_the_cells_of_the_same_window() {
+        // 640 pixels over 80 columns is a cell 8 pixels wide, and 384 pixels
+        // over 24 rows is a cell 16 pixels tall. The height stands first in
+        // this answer as well.
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", Some(ANSWERED_WINDOW_CELLS)),
+            CellPixels::measured(8, 16),
+            "the answer names the whole text area, and the cell counts of that same window name one cell"
+        );
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", None),
+            None,
+            "a run that measured no window holds nothing to divide by, so it measures no cell"
+        );
+        // A text area smaller than its own grid. 40 pixels over 80 columns is
+        // a cell of no width, and 12 pixels over 24 rows is a cell of no
+        // height.
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;12;40t", Some(ANSWERED_WINDOW_CELLS)),
+            None,
+            "`CellPixels::measured` refuses a quotient of no pixels, and a cell of no width holds no pixel of a picture"
+        );
+        // A count of zero reaches no caller that measured a window, because
+        // `Window::measured` makes no window of zero columns and no window of
+        // zero rows. It reaches this function because the signature takes a
+        // bare pair, and the division is a checked one for that reason.
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", Some((0, ANSWERED_WINDOW_CELLS.1))),
+            None,
+            "the checked division gives no cell for a column count of zero, where a plain division panics"
+        );
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", Some((ANSWERED_WINDOW_CELLS.0, 0))),
+            None,
+            "the checked division gives no cell for a row count of zero, where a plain division panics"
+        );
+    }
+
+    #[test]
+    fn the_cell_that_the_cell_size_names_outranks_the_one_the_text_area_measures() {
+        // The two answers arrive in one buffer, because the query asks both
+        // questions in one write. They disagree here, so the order of the two
+        // sources is the whole of what this test measures.
+        let both = b"\x1b[6;30;14t\x1b[4;384;640t";
+
+        assert_eq!(
+            read_cell(both, Some(ANSWERED_WINDOW_CELLS)),
+            CellPixels::measured(ANSWERED_CELL_WIDTH, ANSWERED_CELL_HEIGHT),
+            "the answer of the cell size names one cell directly, and the text area names one only after a division that rounds"
+        );
+        assert_eq!(
+            read_cell(b"\x1b[4;384;640t", Some(ANSWERED_WINDOW_CELLS)),
+            CellPixels::measured(8, 16),
+            "a terminal that answers the text area alone still measures a cell"
+        );
+        assert_eq!(
+            read_cell(b"\x1b[?62;4c", Some(ANSWERED_WINDOW_CELLS)),
+            None,
+            "a terminal that reads no window operation answers neither question, and it names no cell"
+        );
+    }
+
     #[test]
     fn an_answer_that_names_sixel_gives_sixel() {
         // tmux 3.7c answers this, measured 2026-09-06. Parameter 4 names sixel.
@@ -740,10 +1150,23 @@ mod tests {
     }
 
     #[test]
-    fn the_query_ends_with_the_attributes_request() {
+    fn the_query_asks_every_question_and_ends_with_the_attributes_request() {
         assert!(
-            IMAGE_QUERY.ends_with(ATTRIBUTES_REQUEST),
-            "the answer of the attributes request is what ends the read"
+            IMAGE_QUERY.contains(&CELL_SIZE_REQUEST),
+            "the question about one cell rides in the same write, so it costs no round trip of its own"
+        );
+        assert!(
+            IMAGE_QUERY.contains(&TEXT_AREA_REQUEST),
+            "the question about the text area rides there too, for a terminal that reads the older window operation alone"
+        );
+        assert_eq!(
+            IMAGE_QUERY.last(),
+            Some(&ATTRIBUTES_REQUEST),
+            "the answer of the attributes request is what ends the read, so its request stands last"
+        );
+        assert!(
+            IMAGE_QUERY.concat().ends_with(ATTRIBUTES_REQUEST),
+            "the bytes that reach the terminal end with it as well"
         );
     }
 
@@ -898,7 +1321,7 @@ mod tests {
                 if libc::setpgid(0, 0) == -1 {
                     libc::_exit(FAILED);
                 }
-                let _answer = ask_the_terminal(BACKGROUND_BUDGET);
+                let _answer = ask_the_terminal(BACKGROUND_BUDGET, None);
                 libc::_exit(0);
             }
 
@@ -1320,7 +1743,7 @@ mod tests {
         // child reads nothing of it. The test holds the other copy, and the
         // answer arrives on that one.
         unsafe { libc::close(master) };
-        leave(match ask_the_terminal(ROUND_TRIP_BUDGET) {
+        leave(match ask_the_terminal(ROUND_TRIP_BUDGET, None).protocol {
             Some(AnsweredProtocol::Sixel) => NAMED_SIXEL,
             Some(AnsweredProtocol::Kitty) => NAMED_KITTY,
             None => NAMED_NOTHING,
@@ -1388,7 +1811,8 @@ mod tests {
         }
 
         assert_eq!(
-            query, IMAGE_QUERY,
+            query,
+            IMAGE_QUERY.concat(),
             "the probe writes the whole query to the terminal it asks"
         );
         assert_eq!(
