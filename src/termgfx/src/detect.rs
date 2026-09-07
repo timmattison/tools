@@ -146,6 +146,15 @@ pub struct Capabilities {
     terminal_type: TerminalType,
     draws_images: bool,
     raw_mode: bool,
+    /// The character cell that the terminal named in its answer, or `None`
+    /// when it named none and when nothing asked it.
+    ///
+    /// **This is the only way the measure reaches the writer.** The one read
+    /// of the terminal happens in [`Capabilities::detect_by_asking`], and the
+    /// writers of `draw` are the only callers that need what it found. A
+    /// writer that asked the terminal for itself would read it a second time
+    /// for every picture, and a still picture already holds one round trip.
+    cell: Option<crate::geometry::CellPixels>,
 }
 
 impl Capabilities {
@@ -199,11 +208,20 @@ impl Capabilities {
         // descriptor from standard output. A run whose standard output is a
         // file still has a terminal to ask, and `ic --will-display` promises
         // that a redirected standard output does not change its answer.
+        // One read of the terminal for the whole run, and one window with it.
+        // The answer of the text area divides by the cell counts of the window
+        // it is about, so the two arrive from the same measure.
         let window = termsize::drawing_window();
         let answered = if asks_the_terminal(&classify_terminal_type(&env), window) {
-            crate::probe::ask_the_terminal(crate::probe::QUERY_BUDGET)
+            crate::probe::ask_the_terminal(
+                crate::probe::QUERY_BUDGET,
+                window.map(|window| {
+                    let (columns, rows) = window.cells();
+                    (u32::from(columns), u32::from(rows))
+                }),
+            )
         } else {
-            None
+            crate::probe::TerminalAnswer::default()
         };
         Self::from_env_and_answer(&env, stdout_is_a_terminal(), answered)
     }
@@ -221,6 +239,10 @@ impl Capabilities {
             terminal_type,
             draws_images,
             raw_mode,
+            // A caller that states the terminal states no answer of it, so the
+            // measure of a cell falls back to the ioctl and then to the
+            // estimate. See [`crate::geometry::cell_pixels_or_estimate_of`].
+            cell: None,
         }
     }
 
@@ -265,6 +287,15 @@ impl Capabilities {
         self.raw_mode
     }
 
+    /// The character cell that this terminal named in its answer.
+    ///
+    /// A writer of `draw` hands this to
+    /// [`crate::geometry::cell_pixels_or_estimate_of`], which holds the order
+    /// of every source of a cell.
+    pub(crate) fn answered_cell(&self) -> Option<crate::geometry::CellPixels> {
+        self.cell
+    }
+
     /// Name what the terminal does from a captured environment and one answer.
     ///
     /// `answered` is what the terminal said about the protocols it draws, and
@@ -276,19 +307,26 @@ impl Capabilities {
     fn from_env_and_answer(
         env: &TerminalEnv,
         raw_mode: bool,
-        answered: Option<AnsweredProtocol>,
+        answered: crate::probe::TerminalAnswer,
     ) -> Self {
         let named = Self::from_env(env, raw_mode);
-        match (named.terminal_type, answered) {
+        // The cell the terminal named is kept whatever the environment said.
+        // The name of a terminal carries no size, so there is nothing for it to
+        // overrule, and the ioctl still stands in front of it wherever it
+        // reports a pixel size.
+        let cell = answered.cell;
+        match (named.terminal_type, answered.protocol) {
             (TerminalType::Unknown, Some(protocol)) => Self {
                 terminal_type: TerminalType::Answered(protocol),
                 draws_images: true,
                 raw_mode,
+                cell,
             },
             (terminal_type, _) => Self {
                 terminal_type,
                 draws_images: named.draws_images,
                 raw_mode,
+                cell,
             },
         }
     }
@@ -305,6 +343,9 @@ impl Capabilities {
             terminal_type,
             draws_images,
             raw_mode,
+            // The environment carries no size of a cell. Only the ioctl and the
+            // answer of a terminal do.
+            cell: None,
         }
     }
 }
@@ -544,6 +585,17 @@ mod tests {
     // Tests for the answer of a terminal (probe.rs writes the question)
     // =========================================================================
 
+    /// The answer of a terminal that named one protocol and no cell.
+    ///
+    /// Every test of this section covers the naming of the terminal, and a
+    /// cell names no terminal. `crate::probe` holds the tests of the cell.
+    fn answer_of(protocol: AnsweredProtocol) -> crate::probe::TerminalAnswer {
+        crate::probe::TerminalAnswer {
+            protocol: Some(protocol),
+            cell: None,
+        }
+    }
+
     #[test]
     fn an_answer_names_a_terminal_the_environment_left_unnamed() {
         // A mosh session and a pane of a multiplexer both arrive with no
@@ -551,7 +603,7 @@ mod tests {
         let answered = Capabilities::from_env_and_answer(
             &TerminalEnv::default(),
             true,
-            Some(AnsweredProtocol::Sixel),
+            answer_of(AnsweredProtocol::Sixel),
         );
         assert_eq!(
             answered.terminal_type(),
@@ -576,7 +628,7 @@ mod tests {
                 ..TerminalEnv::default()
             },
             true,
-            Some(AnsweredProtocol::Kitty),
+            answer_of(AnsweredProtocol::Kitty),
         );
         assert_eq!(
             panel.terminal_type(),
@@ -586,7 +638,11 @@ mod tests {
 
     #[test]
     fn a_terminal_that_answered_nothing_keeps_the_name_it_had() {
-        let unknown = Capabilities::from_env_and_answer(&TerminalEnv::default(), true, None);
+        let unknown = Capabilities::from_env_and_answer(
+            &TerminalEnv::default(),
+            true,
+            crate::probe::TerminalAnswer::default(),
+        );
         assert_eq!(unknown.terminal_type(), &TerminalType::Unknown);
     }
 
@@ -612,7 +668,7 @@ mod tests {
                 ..TerminalEnv::default()
             },
             true,
-            Some(AnsweredProtocol::Sixel),
+            answer_of(AnsweredProtocol::Sixel),
         );
         assert!(answered.draws_images());
     }

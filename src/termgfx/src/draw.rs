@@ -42,7 +42,7 @@ use crate::detect::{display_routine_for, Capabilities, DisplayRoutine};
 use crate::geometry::{
     calculate_aspect_preserving_size, calculate_sixel_dimensions, cell_aspect_of,
     cell_pixels_or_estimate_of, cells_of, downscale_to_display_pixels, image_rows,
-    image_rows_in_cells, sixel_pixel_budget, window_pixels,
+    image_rows_in_cells, sixel_pixel_budget, window_pixels, CellPixels,
 };
 use crate::probe::{ask_for_a_refusal, Refusal, QUERY_BUDGET};
 
@@ -492,10 +492,14 @@ impl Capabilities {
             return Err(DrawError::NoGraphics);
         }
 
+        // The cell that the terminal named travels with the request, because
+        // the one read of the terminal happened before this call and no writer
+        // reads the terminal a second time.
+        let answered = self.answered_cell();
         match display_routine_for(self.terminal_type()) {
-            DisplayRoutine::Sixel => write_sixel(out, image, request),
-            DisplayRoutine::Kitty => write_kitty(out, image, request),
-            DisplayRoutine::Iterm2 => write_iterm2(out, image, request),
+            DisplayRoutine::Sixel => write_sixel(out, image, request, answered),
+            DisplayRoutine::Kitty => write_kitty(out, image, request, answered),
+            DisplayRoutine::Iterm2 => write_iterm2(out, image, request, answered),
         }?;
 
         out.flush()?;
@@ -887,12 +891,13 @@ fn write_kitty<W: Write>(
     out: &mut W,
     image: &DynamicImage,
     request: &Request,
+    answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and every size of this image comes off it.
     // Two reads can name two terminals, and a picture laid out for one terminal
     // and reserved for another fits neither.
     let window = termsize::drawing_window();
-    let cell = cell_pixels_or_estimate_of(window, None);
+    let cell = cell_pixels_or_estimate_of(window, answered);
     let (cell_width_px, cell_height_px) = (cell.width(), cell.height());
 
     // The display size is in terminal cells, and it serves two roles: the `c=`
@@ -1024,6 +1029,7 @@ fn write_sixel<W: Write>(
     out: &mut W,
     image: &DynamicImage,
     request: &Request,
+    answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and both bounds of this image come off it.
     // The margin takes the pixel size of the window and the budget of the caller
@@ -1031,7 +1037,7 @@ fn write_sixel<W: Write>(
     // terminals. The cell size comes from the terminal when it reports a pixel
     // size, and from the estimates when it does not.
     let window = termsize::drawing_window();
-    let cell = cell_pixels_or_estimate_of(window, None);
+    let cell = cell_pixels_or_estimate_of(window, answered);
     let (cell_width_px, cell_height_px) = (cell.width(), cell.height());
 
     let (target_pixel_width, target_pixel_height) = sixel_pixel_budget(
@@ -1105,12 +1111,13 @@ fn write_iterm2<W: Write>(
     out: &mut W,
     image: &DynamicImage,
     request: &Request,
+    answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and every size of this image comes off it.
     // Two reads can name two terminals, and a picture laid out for one terminal
     // and reserved for another fits neither.
     let window = termsize::drawing_window();
-    let cell = cell_pixels_or_estimate_of(window, None);
+    let cell = cell_pixels_or_estimate_of(window, answered);
     let (cell_width_px, cell_height_px) = (cell.width(), cell.height());
 
     // The display size is in terminal cells, and it serves as both the size

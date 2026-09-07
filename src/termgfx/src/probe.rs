@@ -606,13 +606,53 @@ fn position_of(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// Ask the controlling terminal which image protocol it draws.
+/// What one terminal said for the whole of [`IMAGE_QUERY`].
 ///
-/// Gives [`None`] when there is no controlling terminal, when this run stands
-/// in a background process group and therefore owns no terminal to ask (see
-/// [`owns_the_terminal`]), when the terminal answers nothing inside `budget`,
-/// or when the answer names neither protocol.
-pub(crate) fn ask_the_terminal(budget: Duration) -> Option<AnsweredProtocol> {
+/// The two answers travel together because one write asked for both, and a
+/// caller that took them one at a time would read the terminal twice for one
+/// picture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TerminalAnswer {
+    /// The image protocol the terminal named, or `None` when it named none.
+    pub(crate) protocol: Option<AnsweredProtocol>,
+    /// The character cell the terminal named, or `None` when it named none.
+    pub(crate) cell: Option<CellPixels>,
+}
+
+/// Ask the controlling terminal which image protocol it draws and how big one
+/// character cell is.
+///
+/// # Arguments
+/// * `budget` - The longest that the read waits.
+/// * `cells` - The columns and the rows of the window that the caller
+///   measured, or `None` when it measured none. The answer of
+///   [`TEXT_AREA_REQUEST`] divides by this pair, so the measure and the answer
+///   are about one window.
+///
+/// # Returns
+/// What the terminal said. Every field is `None` when there is no controlling
+/// terminal, when this run stands in a background process group and therefore
+/// owns no terminal to ask (see [`owns_the_terminal`]), when the terminal
+/// answers nothing inside `budget`, and when the answer names neither thing.
+pub(crate) fn ask_the_terminal(budget: Duration, cells: Option<(u32, u32)>) -> TerminalAnswer {
+    let Some(answer) = query_the_terminal(budget) else {
+        return TerminalAnswer::default();
+    };
+    TerminalAnswer {
+        protocol: read_answer(&answer),
+        cell: read_cell(&answer, cells),
+    }
+}
+
+/// Write [`IMAGE_QUERY`] to the controlling terminal and read what comes back.
+///
+/// The read of the terminal stands apart from the reading of the bytes, so
+/// every parser above is a function of its input alone.
+///
+/// # Returns
+/// Every byte the terminal wrote before the answer that ended the read, or
+/// `None` when this run has no terminal to ask.
+fn query_the_terminal(budget: Duration) -> Option<Vec<u8>> {
     let terminal = OpenOptions::new()
         .read(true)
         .write(true)
@@ -622,7 +662,7 @@ pub(crate) fn ask_the_terminal(budget: Duration) -> Option<AnsweredProtocol> {
     let _raw = RawMode::of(fd)?;
     (&terminal).write_all(IMAGE_QUERY).ok()?;
     (&terminal).flush().ok()?;
-    read_answer(&drain(fd, budget))
+    Some(drain(fd, budget))
 }
 
 /// Ask the controlling terminal whether it refused the picture that went
@@ -1226,7 +1266,7 @@ mod tests {
                 if libc::setpgid(0, 0) == -1 {
                     libc::_exit(FAILED);
                 }
-                let _answer = ask_the_terminal(BACKGROUND_BUDGET);
+                let _answer = ask_the_terminal(BACKGROUND_BUDGET, None);
                 libc::_exit(0);
             }
 
@@ -1648,7 +1688,7 @@ mod tests {
         // child reads nothing of it. The test holds the other copy, and the
         // answer arrives on that one.
         unsafe { libc::close(master) };
-        leave(match ask_the_terminal(ROUND_TRIP_BUDGET) {
+        leave(match ask_the_terminal(ROUND_TRIP_BUDGET, None).protocol {
             Some(AnsweredProtocol::Sixel) => NAMED_SIXEL,
             Some(AnsweredProtocol::Kitty) => NAMED_KITTY,
             None => NAMED_NOTHING,
