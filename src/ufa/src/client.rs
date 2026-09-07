@@ -294,6 +294,76 @@ mod tests {
         );
     }
 
+    /// A controller behind a reverse proxy answers at a path prefix, and the
+    /// integration API hangs off that prefix rather than off the origin.
+    ///
+    /// The base URL has to end in a slash whatever it is built from, because
+    /// every request is a relative join onto it: `Url::join` replaces the
+    /// last segment of a path that does not end in one, so a missing slash
+    /// sends `info` to `.../v1/info` in one case and `.../integration/info`
+    /// in another.
+    #[test]
+    fn a_controller_behind_a_path_prefix_keeps_the_prefix() {
+        let client = UnifiClient::new("https://192.168.1.1/unifi", "an-api-key", true)
+            .expect("a prefixed controller URL must build a client");
+
+        assert_eq!(
+            client.base_url.as_str(),
+            "https://192.168.1.1/unifi/proxy/network/integration/v1/"
+        );
+    }
+
+    /// The same prefix, spelled with the trailing slash a browser adds. The
+    /// two spellings name one controller and must reach one base URL.
+    #[test]
+    fn a_path_prefix_that_ends_in_a_slash_reaches_the_same_base_url() {
+        let client = UnifiClient::new("https://192.168.1.1/unifi/", "an-api-key", true)
+            .expect("a prefixed controller URL must build a client");
+
+        assert_eq!(
+            client.base_url.as_str(),
+            "https://192.168.1.1/unifi/proxy/network/integration/v1/"
+        );
+    }
+
+    /// A user who pastes the whole integration URL has already given the
+    /// right answer. Appending to it asks the controller for
+    /// `.../integration/v1/proxy/network/integration/v1/`, which nothing
+    /// serves, and every command then fails on a 404 that names a path the
+    /// user never typed.
+    #[test]
+    fn a_url_that_already_names_the_integration_api_is_used_as_it_stands() {
+        let client = UnifiClient::new(
+            "https://192.168.1.1/proxy/network/integration/v1/",
+            "an-api-key",
+            true,
+        )
+        .expect("the integration URL itself must build a client");
+
+        assert_eq!(
+            client.base_url.as_str(),
+            "https://192.168.1.1/proxy/network/integration/v1/"
+        );
+    }
+
+    /// The same URL without its trailing slash. It still names the
+    /// integration API, and the base URL still has to end in a slash for the
+    /// relative joins above it.
+    #[test]
+    fn the_integration_api_without_a_trailing_slash_gains_one_and_nothing_else() {
+        let client = UnifiClient::new(
+            "https://192.168.1.1/proxy/network/integration/v1",
+            "an-api-key",
+            true,
+        )
+        .expect("the integration URL itself must build a client");
+
+        assert_eq!(
+            client.base_url.as_str(),
+            "https://192.168.1.1/proxy/network/integration/v1/"
+        );
+    }
+
     /// A cloud console URL is rejected up front, with advice on what to use
     /// instead, rather than by whatever the first request happens to fail on.
     #[test]
