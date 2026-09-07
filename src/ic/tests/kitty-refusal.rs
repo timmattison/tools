@@ -18,10 +18,15 @@
 //!
 //! `TERM=xterm-kitty` names the terminal Kitty, so the Kitty writer runs and
 //! the still picture asks for the failures. No test here sets `MUXIAVELLI`,
-//! which would select Sixel, and no test here passes `--no-newline`. That flag
-//! draws one frame of a video, which asks the terminal for no answer at all: a
-//! caller of that path holds the terminal in raw mode for the key presses of
-//! the user, and an answer would arrive there as a key press.
+//! which would select Sixel.
+//!
+//! No test here passes `--no-newline` either, and that flag would change
+//! nothing: it states who moves the cursor, so a run that carries it draws one
+//! still picture, asks for the failures, and reads the answer.
+//! `no_newline_still_draws_one_still_picture` in `cursor_contract.rs` holds it
+//! to that. Video playback is the path that asks for no answer at all: it draws
+//! frame after frame and holds the terminal in raw mode for the key presses of
+//! the user, where an answer would arrive as a key press.
 //!
 //! # The two things that a test of this shape gets wrong
 //!

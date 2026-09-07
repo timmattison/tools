@@ -480,9 +480,10 @@ fn write_images(
                 columns: Some(columns),
                 rows: Some(1),
             },
-            cursor: termgfx::Cursor::Held {
+            picture: termgfx::Picture::Frame {
                 id: u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1),
             },
+            cursor: termgfx::Cursor::Held,
             preserve_aspect: false,
         };
         if graphics.capabilities.draw(frame, &image, &request).is_err() {

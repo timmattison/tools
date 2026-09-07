@@ -47,8 +47,9 @@ fn reservation_rows(image_rows: u32, term_height: u32) -> u32 {
 /// caller must move it. A tool therefore states the position of the cursor
 /// instead of a guess.
 pub(crate) enum CursorContract {
-    /// The caller puts the cursor where it wants it (`--no-newline`, video
-    /// playback). The routine writes the payload and nothing else.
+    /// The caller puts the cursor where it wants it. Video playback asks for
+    /// this contract, and so does `--no-newline` on a still picture. The
+    /// routine writes the payload and nothing else.
     CallerManaged,
     /// Column 1 of the first row below the image.
     BelowImage {
@@ -84,7 +85,10 @@ impl CursorContract {
     /// path.
     ///
     /// # Arguments
-    /// * `no_newline` - True when the caller puts the cursor where it wants it.
+    /// * `caller_holds_cursor` - True when the caller puts the cursor where it
+    ///   wants it. Video playback asks for that, and so does `--no-newline` on
+    ///   a still picture, so the argument states the cursor and it states
+    ///   nothing about how many pictures the run draws.
     /// * `term_rows` - The height of the terminal in rows, off the one window
     ///   that the writer measured.
     /// * `image_rows` - Gives the height of the image in terminal rows.
@@ -92,11 +96,11 @@ impl CursorContract {
     /// # Returns
     /// The promise that the display routine must keep.
     pub(crate) fn below_image(
-        no_newline: bool,
+        caller_holds_cursor: bool,
         term_rows: u32,
         image_rows: impl FnOnce() -> u32,
     ) -> Self {
-        if no_newline {
+        if caller_holds_cursor {
             return CursorContract::CallerManaged;
         }
 

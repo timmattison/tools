@@ -61,14 +61,14 @@ const KITTY_DELETE_ALL: &str = "\x1b_Ga=d,d=A\x1b\\";
 /// The Kitty graphics key that stops the terminal from answering a command.
 ///
 /// A Kitty terminal answers an image command that names an image id, and the
-/// answer is an APC sequence on the terminal itself. A frame of a video wants
+/// answer is an APC sequence on the terminal itself. [`Picture::Frame`] wants
 /// no answer, because the caller that draws one frame after another holds the
 /// terminal in raw mode for the key presses of the user: the answer arrives at
 /// that caller as key presses, and `krt` then reads the `p` of `i=1,p=1;OK` as
 /// the pause command of its own live table. `q=2` takes the success answer and
 /// the failure answer both away.
 ///
-/// A still picture asks for the failures instead, through
+/// [`Picture::Still`] asks for the failures instead, through
 /// [`KITTY_FAILURES_ONLY`], because a caller that draws one picture reads the
 /// answer and then gives the terminal back to the shell.
 ///
@@ -78,10 +78,10 @@ const KITTY_QUIET: &str = "q=2";
 
 /// The Kitty graphics key that asks the terminal for the failures alone.
 ///
-/// `q=1` takes the success answer away and leaves the failure answer. A still
-/// picture wants that one. A terminal that refuses the picture draws nothing,
-/// and the tool that asked for no answer then reports success in front of an
-/// empty screen. The image store of a mosh session holds a fixed number of
+/// `q=1` takes the success answer away and leaves the failure answer.
+/// [`Picture::Still`] wants that one. A terminal that refuses the picture draws
+/// nothing, and the tool that asked for no answer then reports success in front
+/// of an empty screen. The image store of a mosh session holds a fixed number of
 /// bytes and refuses a picture above it, so the case is a common one.
 ///
 /// **The caller of this crate reads the answer that this key asks for.** A
@@ -91,7 +91,7 @@ const KITTY_QUIET: &str = "q=2";
 /// [`Capabilities::read_refusal`] is the read.
 const KITTY_FAILURES_ONLY: &str = "q=1";
 
-/// The image number that a still picture carries.
+/// The image number that [`Picture::Still`] carries.
 ///
 /// **A Kitty terminal answers a transmission only when the transmission names
 /// an image id or an image number.** The specification says of the `i` key that
@@ -109,6 +109,18 @@ const KITTY_FAILURES_ONLY: &str = "q=1";
 /// the same number stands already, and the terminal answers with the id that it
 /// made. Kitty, Ghostty and WezTerm all read it.
 const KITTY_STILL_IMAGE_NUMBER: &str = "I=1";
+
+/// The Kitty graphics key that stops the renderer from moving the cursor.
+///
+/// The writer states the position of the cursor itself, through
+/// [`write_image_with_cursor_contract`]. A renderer that also moved the cursor
+/// would double the movement.
+///
+/// Every image carries this key, whatever [`Request::cursor`] asks for, because
+/// the writer owns the movement in both contracts. [`Cursor::Held`] wants no
+/// movement at all, and [`Cursor::BelowImage`] wants the movement that the
+/// contract writes around the payload.
+const KITTY_HOLD_CURSOR: &str = "C=1";
 
 /// How much of the terminal one image can take, in character cells.
 ///
@@ -130,19 +142,49 @@ pub struct Budget {
 /// decides for itself, so the caller states the position it wants instead of a
 /// guess.
 ///
-/// The placement `id` of [`Cursor::Held`] means something to the Kitty
-/// graphics protocol alone. The Sixel protocol and the iTerm2 protocol paint
-/// into the screen and hold no handle on what they painted, so the two writers
-/// of those protocols read the id and then ignore it.
+/// This states the cursor and it states nothing else. [`Picture`] states
+/// whether the run draws one picture or one frame of many, and the two answers
+/// are free of each other: a user who types `ic -n photo.png` holds the cursor
+/// for one still picture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cursor {
     /// The crate writes the image and moves the cursor to the row under it.
     BelowImage,
-    /// The caller holds the cursor, and the crate moves nothing. The image
-    /// carries the placement `id`, so a later image of that same id replaces
-    /// it in place instead of standing beside it.
-    Held {
-        /// The placement id of the image, which a Kitty terminal reads and the
+    /// The caller holds the cursor, and the crate moves nothing.
+    Held,
+}
+
+/// Whether the run draws one picture or one frame of many.
+///
+/// A run that draws one picture and a run that draws frame after frame want
+/// two different things from the same protocol, and the difference is the cost
+/// that each of them pays.
+///
+/// A still picture pays its characters one time, so it travels in the shape
+/// that costs the fewest of them, and it asks the terminal for the failures
+/// because the caller reads that answer before it gives the terminal back to
+/// the shell. A frame pays for every frame, so it takes the shape that costs
+/// the least time, and it asks for no answer at all because the caller holds
+/// the terminal in raw mode for the key presses of the user.
+///
+/// This is a different question from [`Cursor`], and the two answers are free
+/// of each other. A user who types `ic -n photo.png` draws one still picture
+/// and holds the cursor as well.
+///
+/// The choice means something to the Kitty graphics protocol alone. The Sixel
+/// protocol and the iTerm2 protocol each carry one shape of an image and answer
+/// no command at all, so the two writers of those protocols read this and then
+/// ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Picture {
+    /// One still picture. It travels as a whole PNG file, and it asks the
+    /// terminal for the failures.
+    Still,
+    /// One frame of many. It keeps the raw pixels, it asks the terminal for no
+    /// answer, and it carries the placement `id` that makes the next frame of
+    /// that same id replace it in place instead of stand beside it.
+    Frame {
+        /// The placement id of the frame, which a Kitty terminal reads and the
         /// other two protocols ignore.
         id: u32,
     },
@@ -153,6 +195,8 @@ pub enum Cursor {
 pub struct Request {
     /// How much of the terminal the image can take.
     pub budget: Budget,
+    /// Whether the run draws one picture or one frame of many.
+    pub picture: Picture,
     /// Where the cursor stands when the image is written.
     pub cursor: Cursor,
     /// True when the image keeps its aspect ratio inside the budget.
@@ -301,8 +345,8 @@ impl Capabilities {
 
 /// Give the cursor contract that one request asks for.
 ///
-/// [`Cursor::Held`] is the caller-managed contract, because the caller that
-/// names a placement id is the caller that puts the cursor where it wants it.
+/// [`Cursor::Held`] is the caller-managed contract, because a caller that holds
+/// the cursor is the caller that puts the cursor where it wants it.
 ///
 /// # Arguments
 /// * `request` - The request that names the cursor.
@@ -311,8 +355,9 @@ impl Capabilities {
 ///   reservation by it, so the picture and the reservation below it name one
 ///   terminal.
 /// * `image_rows` - Gives the height of the image in terminal rows. It runs
-///   only for [`Cursor::BelowImage`]. A video frame asks for [`Cursor::Held`]
-///   one time for each frame, so that arithmetic never stands on its path.
+///   only for [`Cursor::BelowImage`]. A caller that draws frame after frame
+///   asks for [`Cursor::Held`] one time for each frame, so that arithmetic
+///   never stands on its path.
 ///
 /// # Returns
 /// The promise that the writer must keep.
@@ -322,7 +367,7 @@ fn cursor_contract(
     image_rows: impl FnOnce() -> u32,
 ) -> CursorContract {
     CursorContract::below_image(
-        matches!(request.cursor, Cursor::Held { .. }),
+        matches!(request.cursor, Cursor::Held),
         term_rows,
         image_rows,
     )
@@ -429,31 +474,34 @@ impl KittyPayload {
 /// size of one command. `m=1` says that more data follows and `m=0` closes the
 /// image.
 ///
-/// The writer holds the cursor still with `C=1` and then states the position of
-/// the cursor itself through [`write_image_with_cursor_contract`]. A renderer
-/// that also moved the cursor would double the movement.
+/// The writer holds the cursor still with [`KITTY_HOLD_CURSOR`] and then states
+/// the position of the cursor itself through
+/// [`write_image_with_cursor_contract`]. A renderer that also moved the cursor
+/// would double the movement. `request.cursor` names which position the writer
+/// then states, and it names nothing else about the command.
 ///
 /// The header states which answer the writer wants from the terminal, and
-/// `request.cursor` names it. A still picture asks for the failures with
+/// `request.picture` names it. [`Picture::Still`] asks for the failures with
 /// [`KITTY_FAILURES_ONLY`] and carries [`KITTY_STILL_IMAGE_NUMBER`], because a
 /// terminal answers no transmission that names neither an image id nor an image
-/// number. A frame of a video asks for nothing with [`KITTY_QUIET`]. A Kitty
-/// terminal reads the keys of a chunked image from the first chunk alone, and
-/// the first chunk is the header, so the keys cover the chunked path as well.
+/// number. [`Picture::Frame`] asks for nothing with [`KITTY_QUIET`], and it
+/// names its placement id instead. A Kitty terminal reads the keys of a chunked
+/// image from the first chunk alone, and the first chunk is the header, so the
+/// keys cover the chunked path as well.
 ///
 /// # The two shapes of the payload
 ///
 /// An image leaves here in one of the two shapes of [`KittyPayload`], and
-/// `request.cursor` names which one.
+/// `request.picture` names which one.
 ///
-/// [`Cursor::BelowImage`] is one still picture, and it travels as a PNG.
+/// [`Picture::Still`] is one still picture, and it travels as a PNG.
 /// Raw pixels cost four base64 characters for every pixel, so a photograph of
 /// 330 pixels by 440 costs 580800 characters that way. Mosh gives a whole
 /// session less than half of that, and the picture then never arrives. A still
 /// picture goes out one time, so the characters are the whole of what it pays,
 /// and a PNG of it costs a fraction of the raw pixels.
 ///
-/// [`Cursor::Held`] is one frame of a video, and it keeps the raw pixels. The
+/// [`Picture::Frame`] is one frame of many, and it keeps the raw pixels. The
 /// caller draws the next frame directly after this one, so a PNG encoder here
 /// runs one time for every frame, and that time costs more than the characters
 /// that it saves.
@@ -500,13 +548,13 @@ fn write_kitty<W: Write>(
         cell_height_px,
     );
 
-    // The cursor names the two callers apart. A caller that holds the cursor is
-    // drawing one frame of a video, and it draws the next one directly after.
-    // A caller that asks for the row below the image is drawing one still
-    // picture, and the characters are the whole of what that picture pays.
-    let payload = match request.cursor {
-        Cursor::Held { .. } => KittyPayload::RawRgb,
-        Cursor::BelowImage => KittyPayload::Png,
+    // The picture names the two callers apart. A caller that draws one frame of
+    // many draws the next one directly after this one. A caller that draws one
+    // still picture pays for it one time, and the characters are the whole of
+    // what it pays.
+    let payload = match request.picture {
+        Picture::Frame { .. } => KittyPayload::RawRgb,
+        Picture::Still => KittyPayload::Png,
     };
     let base64_data = payload.encode(&image)?;
 
@@ -524,27 +572,27 @@ fn write_kitty<W: Write>(
 
     // The two callers want two different answers from the terminal. The caller
     // of a still picture reads the answer and tells the user why the screen is
-    // empty. The caller of a video frame holds the terminal in raw mode for the
-    // key presses of the user, and an answer would arrive there as a key press.
-    let answer_keys = match request.cursor {
-        Cursor::Held { .. } => KITTY_QUIET,
-        Cursor::BelowImage => KITTY_FAILURES_ONLY,
+    // empty. The caller of a frame holds the terminal in raw mode for the key
+    // presses of the user, and an answer would arrive there as a key press.
+    let answer_keys = match request.picture {
+        Picture::Frame { .. } => KITTY_QUIET,
+        Picture::Still => KITTY_FAILURES_ONLY,
     };
 
-    // A fixed image id and a fixed placement id make each frame of a video
-    // replace the one before it in place, which holds the memory of the
-    // renderer flat. A still picture names an image number instead: a terminal
-    // answers no transmission that names neither, and a second picture that
-    // re-used one image id would delete the first picture.
-    let cursor_keys = match request.cursor {
-        Cursor::Held { id } => format!(",i={id},p={id},C=1"),
-        Cursor::BelowImage => format!(",{KITTY_STILL_IMAGE_NUMBER},C=1"),
+    // A fixed image id and a fixed placement id make each frame replace the one
+    // before it in place, which holds the memory of the renderer flat. A still
+    // picture names an image number instead: a terminal answers no transmission
+    // that names neither, and a second picture that re-used one image id would
+    // delete the first picture.
+    let image_keys = match request.picture {
+        Picture::Frame { id } => format!(",i={id},p={id}"),
+        Picture::Still => format!(",{KITTY_STILL_IMAGE_NUMBER}"),
     };
     let width_key = display_width.map_or_else(String::new, |columns| format!(",c={columns}"));
     let height_key = display_height.map_or_else(String::new, |rows| format!(",r={rows}"));
     let size_keys = payload.pixel_size_keys(image.width(), image.height());
     let header = format!(
-        "\x1b_Ga=T,f={},{answer_keys}{size_keys}{cursor_keys}{width_key}{height_key}",
+        "\x1b_Ga=T,f={},{answer_keys}{size_keys}{image_keys},{KITTY_HOLD_CURSOR}{width_key}{height_key}",
         payload.format_key()
     );
 
@@ -750,10 +798,14 @@ mod tests {
                 columns: Some(10),
                 rows: Some(5),
             },
+            picture: Picture::Still,
             cursor: Cursor::BelowImage,
             preserve_aspect: true,
         }
     }
+
+    /// The placement id that the frame tests draw with.
+    const TEST_PLACEMENT_ID: u32 = 1;
 
     /// The width in pixels of the photograph that the cost test measures.
     const PHOTOGRAPH_WIDTH: u32 = 330;
@@ -814,8 +866,9 @@ mod tests {
         String::from_utf8(out).expect("the delete command is ASCII")
     }
 
-    /// Draw one image on a Kitty terminal and give back the control data of
-    /// the command, which is the part between `ESC _ G` and the semicolon.
+    /// Draw one frame of many on a Kitty terminal and give back the control
+    /// data of the command, which is the part between `ESC _ G` and the
+    /// semicolon.
     ///
     /// The cursor is [`Cursor::Held`], which takes the caller managed cursor
     /// contract. That contract reserves no rows, so the command is the same in
@@ -824,7 +877,10 @@ mod tests {
     /// test here draws with it.
     fn kitty_control_data() -> String {
         let request = Request {
-            cursor: Cursor::Held { id: 1 },
+            picture: Picture::Frame {
+                id: TEST_PLACEMENT_ID,
+            },
+            cursor: Cursor::Held,
             ..test_request()
         };
 
@@ -846,10 +902,11 @@ mod tests {
     /// semicolon after it.
     ///
     /// The cursor is [`Cursor::BelowImage`], which is the contract that a still
-    /// picture takes. That contract writes newlines, a CUU and a DECSC before
-    /// the payload, and the count of the newlines comes off the window of
-    /// whoever runs the suite. The control data stands after all of them and
-    /// holds none of them, so this slice is the same in every terminal.
+    /// picture takes when the caller states no other one. That contract writes
+    /// newlines, a CUU and a DECSC before the payload, and the count of the
+    /// newlines comes off the window of whoever runs the suite. The control
+    /// data stands after all of them and holds none of them, so this slice is
+    /// the same in every terminal.
     fn kitty_still_control_data() -> String {
         let mut out = Vec::new();
         Capabilities::new(TerminalType::Kitty, true, true)

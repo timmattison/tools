@@ -193,10 +193,15 @@ The exit code is 1, so a script reads the failure as well.
 The refusal arrives because `ic` asks for it. A Kitty image command carries the
 key `q`, and `q=2` asks the terminal to answer nothing at all, success and
 failure both. A still picture carries `q=1` instead, which asks for the failures
-alone, and `ic` reads the answer off the controlling terminal. A run that holds
-the cursor with `--no-newline` keeps `q=2`: such a run draws frame after frame
-and holds the terminal in raw mode for the key presses of the user, and an
-answer of the terminal would arrive there as a key press.
+alone, and `ic` reads the answer off the controlling terminal.
+
+Video playback is the path that keeps `q=2`: it draws frame after frame and
+holds the terminal in raw mode for the key presses of the user, and an answer of
+the terminal would arrive there as a key press.
+
+`-n, --no-newline` states who moves the cursor, and it states nothing about how
+many pictures the run draws. `ic -n photo.png` is one still picture, so it
+carries `q=1` and `ic` reads the answer for it as well.
 
 ### The size of a still picture
 
@@ -208,3 +213,6 @@ about 300,000 as a PNG.
 
 A frame of a video keeps the raw pixels. A PNG encoder inside a frame loop
 costs more time than it saves bytes.
+
+`-n, --no-newline` changes none of this. It states who moves the cursor, so
+`ic -n photo.png` is one still picture and it travels as a PNG as well.
