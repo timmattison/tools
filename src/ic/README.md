@@ -171,3 +171,40 @@ it from the environment and asks it nothing. It draws sixel by that name.
 
 A terminal that answers nothing keeps the behavior it had: `ic` names it from
 the environment, and it reports an error for tmux and for mosh.
+### A terminal that refuses a picture
+
+A terminal can read a picture and refuse it. The image store of a mosh session
+is the case that shows first: mosh keeps every image for the length of the
+session, because a client that reconnects holds none, so the store is capped.
+A picture above that cap arrives whole and draws never.
+
+`ic` reports such a refusal instead of exiting 0 with an empty screen:
+
+```
+$ ic big-photograph.png
+Error: The terminal refused this image and drew nothing: ENOSPC: the image store is full
+
+The image reached the terminal, and the terminal reported the failure above.
+A smaller image can fit where this one did not: try --width, --height or --scale.
+```
+
+The exit code is 1, so a script reads the failure as well.
+
+The refusal arrives because `ic` asks for it. A Kitty image command carries the
+key `q`, and `q=2` asks the terminal to answer nothing at all, success and
+failure both. A still picture carries `q=1` instead, which asks for the failures
+alone, and `ic` reads the answer off the controlling terminal. A run that holds
+the cursor with `--no-newline` keeps `q=2`: such a run draws frame after frame
+and holds the terminal in raw mode for the key presses of the user, and an
+answer of the terminal would arrive there as a key press.
+
+### The size of a still picture
+
+A still picture travels to a Kitty terminal as a PNG, under the key `f=100`.
+The picture cost four characters for every pixel before, because the protocol
+also takes the raw pixels and base64 makes three bytes into four characters. A
+photograph of 330 pixels by 440 cost 580,800 characters that way, and it costs
+about 300,000 as a PNG.
+
+A frame of a video keeps the raw pixels. A PNG encoder inside a frame loop
+costs more time than it saves bytes.
