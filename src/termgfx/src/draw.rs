@@ -1281,6 +1281,35 @@ mod tests {
         kitty_payload_characters(&String::from_utf8(out).expect("a Kitty command is ASCII"))
     }
 
+    /// Draw `image` on a Kitty terminal inside `budget` and give back the keys
+    /// of the opening command, which is the part between `ESC _ G` and the
+    /// first semicolon.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `picture` - Whether the picture travels as one still or as one frame.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn kitty_keys_of(image: &DynamicImage, picture: Picture, budget: PayloadBudget) -> String {
+        let request = Request {
+            payload: budget,
+            picture,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::Kitty, true, true)
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+
+        let command = String::from_utf8(out).expect("a Kitty command is ASCII");
+        let (keys, _payload) = command
+            .split_once(';')
+            .expect("a Kitty command holds a semicolon between the keys and the payload");
+
+        String::from(keys)
+    }
+
     /// The Kitty graphics command that takes every image off the screen. The
     /// test spells the bytes out, so a change of the command fails the test
     /// instead of moving with it.
@@ -1445,6 +1474,51 @@ mod tests {
         assert!(
             spent > 0,
             "a still that spends nothing drew nothing, which is the failure this repairs"
+        );
+    }
+
+    /// The fit takes resolution off a picture and takes no room off it.
+    ///
+    /// `c=` and `r=` state how many cells the picture spans, and the terminal
+    /// scales the pixels it got into them. So the keys come off the screen
+    /// bounds, ahead of the fit, and a picture that spends fewer pixels holds
+    /// the size that the user sees.
+    ///
+    /// A fit that derived those keys from the pixels it ended at would shrink
+    /// the picture on the screen instead, which is the mistake this guards.
+    #[test]
+    fn a_fit_that_shrinks_the_payload_keeps_the_cell_span() {
+        let fixture = photograph_fixture();
+        let frame = Picture::Frame {
+            id: TEST_PLACEMENT_ID,
+        };
+
+        let generous = kitty_keys_of(&fixture, frame, PayloadBudget::UNLIMITED);
+        let tight = kitty_keys_of(&fixture, frame, PayloadBudget::of(TEST_PAYLOAD_BUDGET));
+
+        let span = |keys: &str| -> Vec<String> {
+            keys.split(',')
+                .filter(|key| key.starts_with("c=") || key.starts_with("r="))
+                .map(String::from)
+                .collect()
+        };
+
+        assert!(
+            !span(&generous).is_empty(),
+            "the test reads nothing unless the command states a cell span, but the keys are {generous:?}"
+        );
+        assert_eq!(
+            span(&tight),
+            span(&generous),
+            "a picture that spent fewer pixels must span the same cells, but the keys went from {generous:?} to {tight:?}"
+        );
+
+        // A payload that did not move proves nothing about a span that did not
+        // move either, so the test states that the fit really ran.
+        assert!(
+            kitty_payload_of(&fixture, frame, PayloadBudget::of(TEST_PAYLOAD_BUDGET))
+                < kitty_payload_of(&fixture, frame, PayloadBudget::UNLIMITED),
+            "the tight budget must really take pixels off the picture"
         );
     }
 
