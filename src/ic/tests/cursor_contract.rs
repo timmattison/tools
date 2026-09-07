@@ -651,8 +651,9 @@ fn no_newline_suppresses_the_cursor_contract_for_iterm2() {
 /// user types, so it must travel in the shape of a still picture.
 ///
 /// A still picture travels as a PNG. Raw pixels cost four base64 characters for
-/// every pixel, and a mosh session gives a whole session fewer characters than
-/// one photograph costs that way, so such a picture never arrives.
+/// every pixel, and a mosh session holds 1048576 characters of image, so one
+/// photograph takes over half of that store and a photograph of twice the
+/// pixels never arrives.
 ///
 /// A still picture also asks the terminal for the failures with `q=1`, because
 /// a terminal that refused the picture draws nothing and a run that asked for

@@ -619,8 +619,10 @@ fn cursor_contract(
 /// and the two cost very different numbers of characters. Base64 turns three
 /// bytes into four characters, and three bytes is one pixel, so raw pixels cost
 /// four characters for every pixel: 580800 characters for a photograph of 330
-/// pixels by 440. Mosh gives a whole session less than half of that, so such a
-/// picture never arrives. A PNG of the same photograph costs a fraction of it.
+/// pixels by 440. A mosh session holds 1048576 characters of image, so one such
+/// picture takes over half of that store. A photograph of twice the pixels
+/// costs more than the whole store, and it never arrives. A PNG of the same
+/// photograph costs a fraction of it.
 ///
 /// The variant owns the `f=` key, the keys that state the pixel size, and the
 /// encoder, all three together. One place therefore decides the header and the
@@ -846,10 +848,11 @@ fn shrink_towards(
 ///
 /// [`Picture::Still`] is one still picture, and it travels as a PNG.
 /// Raw pixels cost four base64 characters for every pixel, so a photograph of
-/// 330 pixels by 440 costs 580800 characters that way. Mosh gives a whole
-/// session less than half of that, and the picture then never arrives. A still
-/// picture goes out one time, so the characters are the whole of what it pays,
-/// and a PNG of it costs a fraction of the raw pixels.
+/// 330 pixels by 440 costs 580800 characters that way. That is over half of the
+/// 1048576 characters that a mosh session holds, and a photograph of twice the
+/// pixels never arrives at all. A still picture goes out one time, so the
+/// characters are the whole of what it pays, and a PNG of it costs a fraction
+/// of the raw pixels.
 ///
 /// [`Picture::Frame`] is one frame of many, and it keeps the raw pixels. The
 /// caller draws the next frame directly after this one, so a PNG encoder here
@@ -1509,11 +1512,12 @@ mod tests {
 
     #[test]
     fn a_still_picture_travels_as_a_png() {
-        // Raw pixels cost four base64 characters for every pixel, and mosh
-        // gives a whole session fewer characters than one photograph costs that
-        // way, so the picture never arrives. `f=100` names a PNG instead, and a
-        // Kitty terminal then reads the width and the height out of the PNG
-        // itself. The header must carry no `s=` key and no `v=` key beside it.
+        // Raw pixels cost four base64 characters for every pixel, and a mosh
+        // session holds 1048576 characters of image, so one photograph takes
+        // over half of that store and a photograph of twice the pixels never
+        // arrives. `f=100` names a PNG instead, and a Kitty terminal then reads
+        // the width and the height out of the PNG itself. The header must carry
+        // no `s=` key and no `v=` key beside it.
         let control_data = kitty_still_control_data();
 
         assert!(
