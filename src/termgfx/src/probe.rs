@@ -120,22 +120,33 @@ use std::io::Write;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
-/// The bytes [`ask_the_terminal`] writes.
+/// The query action of the kitty graphics protocol.
 ///
-/// Four questions in one write. The first is the query action of the kitty
-/// graphics protocol: a transmission of one pixel that the terminal answers
-/// and never draws. The second is [`CELL_SIZE_REQUEST`] and the third is
-/// [`TEXT_AREA_REQUEST`], which name the size of one character cell. The last
-/// is the request of the primary device attributes, which every terminal
-/// answers and which therefore ends the read.
+/// It is a transmission of one pixel that the terminal answers and never
+/// draws. A terminal that reads the protocol answers `OK`, and one that reads
+/// none of it answers nothing at all.
+const KITTY_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+
+/// The questions [`ask_the_terminal`] writes, in the order it writes them.
 ///
-/// **The attributes request stands last, and it must stay last.** A question
-/// in front of it costs no round trip and no extra wait, because its answer
-/// arrives in front of the one that ends the read. A question behind it would
+/// They leave in one write, so the whole set costs one round trip. A terminal
+/// answers in the order it reads, so each answer arrives in the order of this
+/// list.
+///
+/// **The attributes request stands last, and it must stay last.** Every
+/// terminal answers it, so its answer is what ends the read. A question in
+/// front of it costs no extra round trip and no extra wait, because its answer
+/// arrives in front of the one the read waits for. A question behind it would
 /// answer after the read had already stopped, and those bytes would land on
-/// the descriptor the shell of the user reads next.
-pub(crate) const IMAGE_QUERY: &[u8] =
-    b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[14t\x1b[c";
+/// the descriptor the shell of the user reads next. The order is a property of
+/// this list, and `the_query_asks_every_question_and_ends_with_the_attributes_request`
+/// holds it.
+pub(crate) const IMAGE_QUERY: [&[u8]; 4] = [
+    KITTY_QUERY,
+    CELL_SIZE_REQUEST,
+    TEXT_AREA_REQUEST,
+    ATTRIBUTES_REQUEST,
+];
 
 /// The request of the primary device attributes.
 ///
@@ -674,7 +685,9 @@ fn query_the_terminal(budget: Duration) -> Option<Vec<u8>> {
         .ok()?;
     let fd = terminal.as_raw_fd();
     let _raw = RawMode::of(fd)?;
-    (&terminal).write_all(IMAGE_QUERY).ok()?;
+    // The questions leave in one write. A terminal reads them in the order of
+    // the list, and its answers come back in that order.
+    (&terminal).write_all(&IMAGE_QUERY.concat()).ok()?;
     (&terminal).flush().ok()?;
     Some(drain(fd, budget))
 }
@@ -1116,16 +1129,21 @@ mod tests {
     #[test]
     fn the_query_asks_every_question_and_ends_with_the_attributes_request() {
         assert!(
-            position_of(IMAGE_QUERY, CELL_SIZE_REQUEST).is_some(),
+            IMAGE_QUERY.contains(&CELL_SIZE_REQUEST),
             "the question about one cell rides in the same write, so it costs no round trip of its own"
         );
         assert!(
-            position_of(IMAGE_QUERY, TEXT_AREA_REQUEST).is_some(),
+            IMAGE_QUERY.contains(&TEXT_AREA_REQUEST),
             "the question about the text area rides there too, for a terminal that reads the older window operation alone"
         );
+        assert_eq!(
+            IMAGE_QUERY.last(),
+            Some(&ATTRIBUTES_REQUEST),
+            "the answer of the attributes request is what ends the read, so its request stands last"
+        );
         assert!(
-            IMAGE_QUERY.ends_with(ATTRIBUTES_REQUEST),
-            "the answer of the attributes request is what ends the read"
+            IMAGE_QUERY.concat().ends_with(ATTRIBUTES_REQUEST),
+            "the bytes that reach the terminal end with it as well"
         );
     }
 
@@ -1770,7 +1788,8 @@ mod tests {
         }
 
         assert_eq!(
-            query, IMAGE_QUERY,
+            query,
+            IMAGE_QUERY.concat(),
             "the probe writes the whole query to the terminal it asks"
         );
         assert_eq!(

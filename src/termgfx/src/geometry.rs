@@ -76,9 +76,8 @@ impl CellPixels {
     /// stands above [`MAX_CELL_PIXELS`]. A cell of no width holds no pixel of
     /// a picture, and a cell above the bound is no cell at all.
     pub(crate) fn measured(width: u32, height: u32) -> Option<Self> {
-        (1..=MAX_CELL_PIXELS).contains(&width).then_some(())?;
-        (1..=MAX_CELL_PIXELS).contains(&height).then_some(())?;
-        Some(Self { width, height })
+        let is_a_cell = |pixels: u32| (1..=MAX_CELL_PIXELS).contains(&pixels);
+        (is_a_cell(width) && is_a_cell(height)).then_some(Self { width, height })
     }
 
     /// The width of the cell in pixels.
