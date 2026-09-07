@@ -31,6 +31,21 @@
 //! silence, and a read that waited for that silence would spend the whole
 //! budget on every run.
 //!
+//! # The second question, which the picture itself asks
+//!
+//! A kitty terminal also answers a picture that it refused, and it names a
+//! code such as `ENOSPC` in the place where `OK` stands. mosh is the case that
+//! pays for this question as well: the image store of a mosh session holds a
+//! fixed number of bytes, and it refuses a transmission above that number. A
+//! tool that reads no refusal writes the picture, ends with no error, and
+//! leaves the user in front of an empty screen.
+//!
+//! That question needs no query of its own, because the picture is the
+//! question. So [`ask_for_a_refusal`] writes [`ATTRIBUTES_REQUEST`] alone. A
+//! terminal answers in the order it reads, so the refusal of the picture that
+//! went before stands in front of the answer that ends the read, and a picture
+//! that drew costs no wait at all.
+//!
 //! # The run that owns no terminal
 //!
 //! The question needs raw mode, and the call that asks for raw mode sends
@@ -60,6 +75,12 @@ use std::time::{Duration, Instant};
 /// second is the request of the primary device attributes, which every
 /// terminal answers and which therefore ends the read.
 pub(crate) const IMAGE_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+
+/// The request of the primary device attributes.
+///
+/// Every terminal answers this request, so its answer is what ends a read.
+/// [`IMAGE_QUERY`] ends with it, and [`ask_for_a_refusal`] writes it alone.
+const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
 
 /// How long [`ask_the_terminal`] waits for the answer.
 pub(crate) const QUERY_BUDGET: Duration = Duration::from_millis(500);
@@ -112,30 +133,47 @@ const KITTY_GRAPHICS: u8 = b'G';
 /// The byte that divides the control block of a kitty answer from its message.
 const KITTY_SEPARATOR: u8 = b';';
 
-/// Whether the terminal carried out the query of [`IMAGE_QUERY`].
+/// The message of every kitty graphics answer that `answer` carries, in the
+/// order the terminal wrote them.
 ///
-/// The answer is `ESC _ G <keys> ; <message> ESC \`, and the message is `OK`
-/// for a query the terminal carried out. A terminal that refused it writes a
-/// code such as `ENOTSUPP` in the same place, which is no answer of yes.
-fn kitty_said_ok(answer: &[u8]) -> bool {
+/// One answer is `ESC _ G <control keys> ; <message> ESC \`, and the walk
+/// gives the message of it. The control keys carry the image id, and no reader
+/// in this module needs to know which image a terminal is speaking about.
+///
+/// **This is the one walk over those blocks.** [`kitty_said_ok`] reads it to
+/// learn that a query drew, and [`read_refusal`] reads it to learn that a
+/// picture did not. A second walk would part company with this one the day
+/// either learned something about the shape, and no test would say so.
+///
+/// The walk ends at a block that no string terminator closes, because such a
+/// block is half of an answer that arrived late, and the bytes of the other
+/// half say nothing yet.
+fn kitty_messages(answer: &[u8]) -> impl Iterator<Item = &[u8]> + '_ {
     let mut rest = answer;
-    while let Some(start) = position_of(rest, APC_OPENER) {
-        let body = &rest[start + APC_OPENER.len()..];
-        let Some(end) = position_of(body, STRING_TERMINATOR) else {
-            return false;
-        };
-        let block = &body[..end];
-        if block.first() == Some(&KITTY_GRAPHICS) {
-            let separator = block.iter().position(|byte| *byte == KITTY_SEPARATOR);
-            if let Some(separator) = separator {
-                if block[separator + 1..].starts_with(KITTY_OK) {
-                    return true;
-                }
+    std::iter::from_fn(move || {
+        while let Some(start) = position_of(rest, APC_OPENER) {
+            let body = &rest[start + APC_OPENER.len()..];
+            let end = position_of(body, STRING_TERMINATOR)?;
+            let block = &body[..end];
+            rest = &body[end + STRING_TERMINATOR.len()..];
+            if block.first() != Some(&KITTY_GRAPHICS) {
+                continue;
+            }
+            if let Some(separator) = block.iter().position(|byte| *byte == KITTY_SEPARATOR) {
+                return Some(&block[separator + 1..]);
             }
         }
-        rest = &body[end + STRING_TERMINATOR.len()..];
-    }
-    false
+        None
+    })
+}
+
+/// Whether the terminal carried out the query of [`IMAGE_QUERY`].
+///
+/// The message of the answer is `OK` for a query the terminal carried out. A
+/// terminal that refused it writes a code such as `ENOTSUPP` in the same
+/// place, which is no answer of yes.
+fn kitty_said_ok(answer: &[u8]) -> bool {
+    kitty_messages(answer).any(|message| message.starts_with(KITTY_OK))
 }
 
 /// A kitty graphics command that the terminal refused, in the words of the
@@ -153,16 +191,63 @@ pub struct Refusal {
 }
 
 impl std::fmt::Display for Refusal {
+    /// Write the code, and the detailed message behind it when the terminal
+    /// wrote one.
+    ///
+    /// A colon and a space divide the two, because a user reads this line and
+    /// the code alone sends that user to a search engine.
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(out, "{}", self.code)
+        if self.message.is_empty() {
+            write!(out, "{}", self.code)
+        } else {
+            write!(out, "{}: {}", self.code, self.message)
+        }
     }
 }
 
+/// The byte that divides the code of a refusal from its detailed message.
+const REFUSAL_SEPARATOR: u8 = b':';
+
 /// The first refusal that `answer` carries, or [`None`] for an answer that
 /// carries none.
+///
+/// The walk gives the first one, and it walks every block to find it. A
+/// picture travels in more than one command, so the block that reports the
+/// refusal stands behind blocks that report success.
 fn read_refusal(answer: &[u8]) -> Option<Refusal> {
-    let _ = answer;
-    None
+    kitty_messages(answer).find_map(refusal_in)
+}
+
+/// The refusal that one message carries, or [`None`] for a message that
+/// reports no failure.
+///
+/// The message is `OK` for a command the terminal carried out, and a code such
+/// as `ENOSPC` for one it refused. The code stands alone or a colon divides it
+/// from a detailed message, so a message with no colon in it is a whole
+/// refusal and the detail of it is empty.
+fn refusal_in(message: &[u8]) -> Option<Refusal> {
+    let divide = message
+        .iter()
+        .position(|byte| *byte == REFUSAL_SEPARATOR)
+        .unwrap_or(message.len());
+    let code = &message[..divide];
+    if code.is_empty() || code == KITTY_OK {
+        return None;
+    }
+    Some(Refusal {
+        code: text_of(code),
+        message: text_of(message.get(divide + 1..).unwrap_or_default()),
+    })
+}
+
+/// The text of `bytes`, with every byte that stands for no character replaced.
+///
+/// The specification gives a message printable ASCII characters and spaces
+/// alone. A terminal that writes something else writes it into a line that a
+/// user reads, and a lossy read puts that line in front of the user where a
+/// strict one would take the refusal away and report nothing at all.
+fn text_of(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// Whether an answer of the primary device attributes names sixel.
@@ -228,9 +313,29 @@ pub(crate) fn ask_the_terminal(budget: Duration) -> Option<AnsweredProtocol> {
 
 /// Ask the controlling terminal whether it refused the picture that went
 /// before this call.
-fn ask_for_a_refusal(budget: Duration) -> Option<Refusal> {
-    let _ = budget;
-    None
+///
+/// The picture is the question, so this call writes [`ATTRIBUTES_REQUEST`] and
+/// no picture of its own. Every terminal answers that request, and a terminal
+/// answers in the order it reads, so a refusal stands in front of the answer
+/// that ends the read. A terminal that refused nothing answers the request
+/// alone, and the read ends there instead of spending the whole budget on
+/// silence.
+///
+/// Gives [`None`] when there is no controlling terminal, when this run stands
+/// in a background process group and therefore owns no terminal to ask (see
+/// [`owns_the_terminal`]), when the terminal answers nothing inside `budget`,
+/// and when the answer reports no failure.
+pub(crate) fn ask_for_a_refusal(budget: Duration) -> Option<Refusal> {
+    let terminal = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(CONTROLLING_TERMINAL)
+        .ok()?;
+    let fd = terminal.as_raw_fd();
+    let _raw = RawMode::of(fd)?;
+    (&terminal).write_all(ATTRIBUTES_REQUEST).ok()?;
+    (&terminal).flush().ok()?;
+    read_refusal(&drain(fd, budget))
 }
 
 /// The terminal a program asks, whatever its standard output was pointed at.
@@ -504,9 +609,6 @@ mod tests {
             "the bytes after the answer stay for the reader that comes next"
         );
     }
-
-    /// The request of the primary device attributes, which ends [`IMAGE_QUERY`].
-    const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
 
     #[test]
     fn the_query_ends_with_the_attributes_request() {

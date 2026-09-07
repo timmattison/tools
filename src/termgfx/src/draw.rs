@@ -39,6 +39,7 @@ use crate::geometry::{
     cell_pixels_or_estimate_of, cells_of, downscale_to_display_pixels, image_rows,
     image_rows_in_cells, sixel_pixel_budget, window_pixels,
 };
+use crate::probe::{ask_for_a_refusal, Refusal, QUERY_BUDGET};
 
 /// The number of base64 characters that one Kitty graphics command carries.
 ///
@@ -178,6 +179,52 @@ impl Capabilities {
 
         out.flush()?;
         Ok(())
+    }
+
+    /// Read the refusal that this terminal wrote for the picture that went
+    /// before.
+    ///
+    /// A Kitty terminal answers a picture that it refused, and it names a code
+    /// such as `ENOSPC` in that answer. A caller that reads the answer tells
+    /// the user why the screen is empty. A caller that reads none reports that
+    /// it drew a picture that never arrived.
+    ///
+    /// # Why this is a second call
+    ///
+    /// [`Capabilities::draw`] writes bytes and it reads none. A caller that
+    /// holds the terminal in raw mode reads that terminal itself, and `krt` is
+    /// such a caller, so a read inside `draw` would take a key press of the
+    /// user out of its hands. A test of the writer would reach the terminal of
+    /// whoever runs the suite as well, where it reaches a buffer today. So the
+    /// read stands in a call of its own, and the caller that wants the answer
+    /// asks for it.
+    ///
+    /// # The caller reads what it asked for
+    ///
+    /// Call this after a still picture. **A caller that asks a terminal for a
+    /// failure report and then reads nothing leaves that report on the
+    /// descriptor the shell of the user reads next, and the shell takes the
+    /// bytes of it for key presses.** A caller that draws one frame after
+    /// another calls this never: the answer of a terminal costs a round trip,
+    /// and a round trip for each frame stands inside the frame loop.
+    ///
+    /// The question goes to the controlling terminal, which is a descriptor of
+    /// its own. It does not go to the stream that took the picture, because
+    /// that stream is a buffer or a file for many callers and neither one
+    /// answers anything.
+    ///
+    /// # Returns
+    /// The refusal that the terminal reported, or [`None`]. [`None`] covers a
+    /// picture that drew, a terminal that reports nothing, a terminal of the
+    /// Sixel protocol or the iTerm2 protocol, which answer no command at all,
+    /// and a run that owns no terminal to ask.
+    #[must_use]
+    pub fn read_refusal(&self) -> Option<Refusal> {
+        if display_routine_for(self.terminal_type()) != DisplayRoutine::Kitty {
+            return None;
+        }
+
+        ask_for_a_refusal(QUERY_BUDGET)
     }
 
     /// Take every image that this crate placed off the screen.

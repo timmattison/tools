@@ -45,7 +45,8 @@
 //! # The modules
 //!
 //! `detect` reads the environment and names the terminal. `probe` asks a
-//! terminal that the environment left unnamed. `geometry` measures
+//! terminal that the environment left unnamed, and it reads the refusal that
+//! a terminal wrote for a picture it would not draw. `geometry` measures
 //! a character cell and every size that comes off it. `cursor` states where the
 //! cursor ends. `draw` holds the three writers, one for each protocol. Each
 //! module keeps its tests beside the code they cover.
@@ -66,3 +67,4 @@ mod probe;
 pub use detect::{AnsweredProtocol, Capabilities, ImageProtocol, TerminalType};
 pub use draw::{Budget, Cursor, DrawError, Request};
 pub use geometry::{cell_pixels, terminal_cells};
+pub use probe::Refusal;
