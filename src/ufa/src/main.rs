@@ -90,8 +90,13 @@ impl Credential {
 ///
 /// `supplied` is whatever clap parsed for the credential's flag, which already
 /// carries CLI-over-environment precedence: the flag's `env = "..."` attribute
-/// makes clap fall back to the variable (including one loaded from `.env`)
-/// when the flag is absent.
+/// makes clap fall back to the variable (including one loaded from the settings
+/// file) when the flag is absent.
+///
+/// A supplied value that holds only blank space names no credential, so it is
+/// read as absent: `export UNIFI_API_KEY=` and `--api-key ""` fall through to
+/// the configuration file, and then to the advice below, instead of sending a
+/// blank key to the controller for a 401.
 ///
 /// "Configured but unreadable" and "not configured anywhere" are different
 /// problems and get different answers: a configured credential that fails to
@@ -102,7 +107,7 @@ fn resolve_credential(
     supplied: Option<String>,
     config: Option<&Config>,
 ) -> Result<String> {
-    if let Some(key) = supplied {
+    if let Some(key) = supplied.filter(|key| !config::is_blank(key)) {
         return Ok(key);
     }
 

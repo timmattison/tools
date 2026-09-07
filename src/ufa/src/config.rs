@@ -61,6 +61,39 @@ pub fn load_environment_file(directory: &Path) -> Result<Option<PathBuf>> {
     }
 }
 
+/// Whether `value` holds nothing but blank space.
+///
+/// A credential that is blank names no credential. It arrives as `api_key = ""`
+/// in the configuration file, as `export UNIFI_API_KEY=`, or as `--api-key ""`,
+/// and each of those says nothing rather than "authenticate with an empty
+/// key". The test trims and the value never does, because a key the user
+/// supplied is theirs: altering what goes to the controller would make a
+/// working key fail for a reason nothing states.
+///
+/// # Arguments
+///
+/// * `value` - The value to test.
+///
+/// # Returns
+///
+/// Whether the value holds no visible character.
+pub fn is_blank(value: &str) -> bool {
+    value.trim().is_empty()
+}
+
+/// Whether a configuration field names a secret rather than blank space.
+///
+/// # Arguments
+///
+/// * `field` - The field to test.
+///
+/// # Returns
+///
+/// Whether the field is present and holds more than blank space.
+fn names_a_secret(field: Option<&str>) -> bool {
+    field.is_some_and(|value| !is_blank(value))
+}
+
 /// A controller discovered from the 1Password `ufa` item.
 #[derive(Debug, Clone)]
 pub struct OpController {
@@ -283,13 +316,20 @@ impl Config {
     }
 
     /// Whether the config file names a source for the controller API key.
+    ///
+    /// A field holding nothing but blank space names no source. It has to
+    /// answer the same way `resolve_api_key` does, or a credential counts as
+    /// configured and then reports that nothing is configured.
     pub fn has_api_key(&self) -> bool {
-        self.op_path.is_some() || self.api_key.is_some()
+        names_a_secret(self.op_path.as_deref()) || names_a_secret(self.api_key.as_deref())
     }
 
     /// Whether the config file names a source for the Site Manager API key.
+    ///
+    /// Blank fields are read the same way [`Config::has_api_key`] reads them.
     pub fn has_site_manager_key(&self) -> bool {
-        self.sm_op_path.is_some() || self.site_manager_api_key.is_some()
+        names_a_secret(self.sm_op_path.as_deref())
+            || names_a_secret(self.site_manager_api_key.as_deref())
     }
 
     /// Save configuration to an explicit path, creating parent directories.
@@ -532,6 +572,14 @@ fn read_from_1password(op_path: &str) -> Result<String> {
 /// The reader is a parameter so a test can say what 1Password answered without
 /// a vault, a biometric prompt, or a network.
 ///
+/// A blank field and a blank answer from 1Password are different faults and
+/// get different answers. A field that holds only blank space names nothing at
+/// all, so it is skipped and the run ends on `missing`, which is the advice
+/// that sends the user to the wizard. An answer that holds only blank space
+/// comes from an item the user named, so the reference is broken rather than
+/// absent, and it is reported the way any other unreadable reference is —
+/// without downgrading to the plaintext copy.
+///
 /// # Arguments
 ///
 /// * `read_reference` - Reads the secret a 1Password reference names.
@@ -548,10 +596,19 @@ fn resolve_secret_from(
     plaintext: Option<&str>,
     missing: &str,
 ) -> Result<String> {
-    if let Some(op_path) = op_path {
-        return read_reference(op_path);
+    if let Some(op_path) = op_path.filter(|reference| !is_blank(reference)) {
+        let secret = read_reference(op_path)?;
+
+        if is_blank(&secret) {
+            anyhow::bail!(
+                "The 1Password reference {op_path} holds no key. Put the key in that field, \
+                 or run 'ufa config setup' to name another reference."
+            );
+        }
+
+        return Ok(secret);
     }
-    if let Some(secret) = plaintext {
+    if let Some(secret) = plaintext.filter(|value| !is_blank(value)) {
         return Ok(secret.to_string());
     }
     anyhow::bail!("{missing}")
