@@ -31,6 +31,27 @@
 //! silence, and a read that waited for that silence would spend the whole
 //! budget on every run.
 //!
+//! # The third question, which is how big one character cell is
+//!
+//! A terminal lays text out in cells and it draws a picture in pixels, so a
+//! tool that wants a picture of a given number of cells has to convert. The
+//! `TIOCGWINSZ` ioctl carries that measure, and a mosh session carries none:
+//! the mosh wire protocol resizes with a width and a height in cells and
+//! nothing else, so the server writes a zero into both pixel fields of the
+//! pseudo terminal. A pane of Zellij and a ttyd panel report none either.
+//!
+//! The xterm window operations carry the answer. [`CELL_SIZE_REQUEST`] names
+//! one cell directly, and [`TEXT_AREA_REQUEST`] names the whole text area,
+//! which measures a cell after a division by the cell counts of that same
+//! window. [`read_cell`] puts the two in order.
+//!
+//! **Both questions ride in [`IMAGE_QUERY`], in front of the attributes
+//! request.** A terminal answers in the order it reads, so their answers stand
+//! in front of the answer that ends the read, and the two of them cost no
+//! extra round trip and no extra wait. GitHub issue #468 reports what the
+//! estimate of a cell did to a mosh session: `ic` drew a picture about 7
+//! percent too narrow.
+//!
 //! # The second question, which the picture itself asks
 //!
 //! A kitty terminal also answers a picture that it refused, and it names a
@@ -87,11 +108,20 @@ use std::time::{Duration, Instant};
 
 /// The bytes [`ask_the_terminal`] writes.
 ///
-/// The first is the query action of the kitty graphics protocol: a
-/// transmission of one pixel that the terminal answers and never draws. The
-/// second is the request of the primary device attributes, which every
-/// terminal answers and which therefore ends the read.
-pub(crate) const IMAGE_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+/// Four questions in one write. The first is the query action of the kitty
+/// graphics protocol: a transmission of one pixel that the terminal answers
+/// and never draws. The second is [`CELL_SIZE_REQUEST`] and the third is
+/// [`TEXT_AREA_REQUEST`], which name the size of one character cell. The last
+/// is the request of the primary device attributes, which every terminal
+/// answers and which therefore ends the read.
+///
+/// **The attributes request stands last, and it must stay last.** A question
+/// in front of it costs no round trip and no extra wait, because its answer
+/// arrives in front of the one that ends the read. A question behind it would
+/// answer after the read had already stopped, and those bytes would land on
+/// the descriptor the shell of the user reads next.
+pub(crate) const IMAGE_QUERY: &[u8] =
+    b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[14t\x1b[c";
 
 /// The request of the primary device attributes.
 ///
