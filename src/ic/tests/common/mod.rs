@@ -10,13 +10,28 @@
 //! comment. `TERMINAL_ROWS` and `EXPECTED_ROWS` are two such names: one target
 //! measures a terminal that it made, and the other counts on a fallback.
 //!
-//! Cargo makes no test binary out of a subdirectory of `tests`. This file
+//! Cargo makes no test binary out of a subdirectory of `tests`. This module
 //! therefore compiles into each target that writes `mod common;`, and cargo
-//! builds no third binary from it. Each target compiles its own copy, so an
-//! item that one target does not use raises `dead_code` in that target.
+//! builds no binary of its own from it. Each target compiles its own copy, and
+//! **no target uses every item here**, so each copy holds items that the target
+//! around it never calls.
+//!
+//! `dead_code` is off for that reason, and the reason is the compile model and
+//! not a habit. `cursor_contract` takes the controlling terminal away from its
+//! children, so [`pty`] is dead there. `kitty-refusal` reads the failure that a
+//! terminal reports and no picture at all, so [`scan_cursor_movement`] is dead
+//! there. The alternative is a copy of each item in each target that wants it,
+//! and two copies of sixty lines of `openpty` and `TIOCSCTTY` part company on
+//! the day either changes.
+#![allow(
+    dead_code,
+    reason = "each target compiles its own copy of this module and no target calls every item of it, so the lint reports the compile model instead of an unused item"
+)]
 
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub mod pty;
 
 /// The escape byte that starts every escape sequence.
 pub const ESC: u8 = 0x1b;

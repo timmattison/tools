@@ -906,17 +906,55 @@ mod tests {
     }
 
     #[test]
-    fn a_kitty_image_asks_the_terminal_for_no_answer() {
+    fn a_video_frame_asks_the_terminal_for_no_answer() {
         // A Kitty terminal answers an image command that names an image id, and
         // the answer is an APC sequence on the terminal itself. A tool that
         // holds that terminal in raw mode reads the answer as key presses, so
         // the image of one row of a frame arrives at the tool as a command of
-        // the user. `q=2` takes both answers of the terminal away.
+        // the user. `q=2` takes both answers of the terminal away, and an image
+        // number would ask for an answer that nothing reads.
         let control_data = kitty_control_data();
 
         assert!(
             control_data.contains("q=2"),
-            "the keys of a Kitty image must hold q=2, but they are {control_data:?}"
+            "the keys of a video frame must hold q=2, but they are {control_data:?}"
+        );
+        assert!(
+            !control_data.contains("I="),
+            "a video frame asks for no answer, so the keys must name no image number, but they are {control_data:?}"
+        );
+    }
+
+    #[test]
+    fn a_still_picture_asks_the_terminal_for_the_failures_alone() {
+        // A terminal that refuses a still picture draws nothing, and a tool
+        // that asked for no answer then reports success in front of an empty
+        // screen. `q=1` takes the success answer away and leaves the failure
+        // answer, which the caller of the writer reads.
+        //
+        // The answer needs a name to hang on: a Kitty terminal answers a
+        // transmission only when the transmission names an image id or an image
+        // number. `I=1` is the image number, and it is an `I` and not an `i`
+        // because a re-transmission of an image id deletes the image that held
+        // it. A fixed `i` would take the picture of one run off the screen the
+        // moment the next run drew.
+        let control_data = kitty_still_control_data();
+
+        assert!(
+            control_data.contains("q=1"),
+            "a still picture must ask for the failures with q=1, but the keys are {control_data:?}"
+        );
+        assert!(
+            !control_data.contains("q=2"),
+            "q=2 takes the failure answer away as well, so a still picture must not carry it, but the keys are {control_data:?}"
+        );
+        assert!(
+            control_data.contains("I=1"),
+            "a terminal answers no transmission that names neither an image id nor an image number, so a still picture must carry I=1, but the keys are {control_data:?}"
+        );
+        assert!(
+            !control_data.contains(",i="),
+            "a re-transmission of an image id deletes the image that held it, so a still picture must name no image id, but the keys are {control_data:?}"
         );
     }
 
