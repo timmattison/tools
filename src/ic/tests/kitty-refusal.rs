@@ -87,6 +87,16 @@ const REFUSAL_ANSWER: &[u8] = b"\x1b_Gi=31;ENOSPC:the image store is full\x1b\\\
 /// stands here by itself.
 const ATTRIBUTES_ANSWER: &[u8] = b"\x1b[?62;4c";
 
+/// The answer of a terminal that refused a picture of another run.
+///
+/// The image number is the one key that says which picture a terminal speaks
+/// about, and `I=999999` names a picture that this run never sent. Such an
+/// answer reaches a run in two ways: a terminal that answered the run before
+/// this one late, and a second program that draws Kitty pictures on the same
+/// terminal.
+const ANOTHER_PICTURES_REFUSAL: &[u8] =
+    b"\x1b_Gi=31,I=999999;ENOSPC:the image store is full\x1b\\\x1b[?62;4c";
+
 /// The code that [`REFUSAL_ANSWER`] carries.
 const REFUSED_CODE: &str = "ENOSPC";
 
@@ -110,6 +120,8 @@ struct Run {
     status: ExitStatus,
     /// What `ic` wrote to standard error.
     stderr: String,
+    /// The picture that `ic` wrote to standard output.
+    drawn: Vec<u8>,
 }
 
 /// Run `ic --stdin` under a terminal that answers `answer`, and report what
@@ -126,8 +138,8 @@ struct Run {
 /// * `answer` - The bytes that the terminal says when the question arrives.
 ///
 /// # Returns
-/// Whether the question arrived, the exit status of `ic`, and its standard
-/// error.
+/// Whether the question arrived, the exit status of `ic`, its standard error,
+/// and the picture that it drew.
 ///
 /// # Panics
 /// Panics when the child does not start, does not take the image, or does not
@@ -191,13 +203,51 @@ fn run_ic_against(answer: &[u8]) -> Run {
         .read_to_string(&mut reported)
         .expect("failed to read the standard error of ic");
     let status = child.wait().expect("failed to wait for ic");
-    let _drawn = drawing.join().expect("the reader of the picture panicked");
+    let drawn = drawing.join().expect("the reader of the picture panicked");
 
     Run {
         asked,
         status,
         stderr: reported,
+        drawn,
     }
+}
+
+/// The opener of a Kitty graphics command.
+const KITTY_OPENER: &[u8] = b"\x1b_G";
+
+/// The byte that divides the control keys of a Kitty command from its payload.
+const KITTY_SEPARATOR: char = ';';
+
+/// The byte that divides one control key from the next.
+const KEY_SEPARATOR: char = ',';
+
+/// The name of the key that carries an image number, and the equals sign
+/// behind it.
+///
+/// The name is a capital `I`. A lower case `i` is an image id, which names a
+/// different thing.
+const IMAGE_NUMBER_PREFIX: &str = "I=";
+
+/// The image number that the picture in `drawn` carries, or [`None`] for a
+/// picture that names none.
+///
+/// The picture is `ESC _ G <control keys> ; <payload> ESC \`, and the control
+/// keys are `<name>=<value>` pairs that a comma divides. This reads the whole
+/// value behind `I=`, so a picture of number 12 reads as 12 and not as 1.
+///
+/// # Arguments
+/// * `drawn` - Every byte that `ic` wrote to standard output.
+///
+/// # Returns
+/// The value of the `I` key of the first Kitty command in `drawn`.
+fn image_number_of(drawn: &[u8]) -> Option<String> {
+    let start = find(drawn, KITTY_OPENER)? + KITTY_OPENER.len();
+    let command = String::from_utf8_lossy(drawn.get(start..)?).into_owned();
+    let keys = command.split(KITTY_SEPARATOR).next()?;
+    keys.split(KEY_SEPARATOR)
+        .find_map(|pair| pair.strip_prefix(IMAGE_NUMBER_PREFIX))
+        .map(str::to_owned)
 }
 
 /// `ic` must report the refusal that the terminal wrote, and it must exit with
@@ -249,5 +299,61 @@ fn a_picture_that_drew_leaves_ic_with_a_success() {
         "a terminal that refused nothing must leave ic with a success, and it exited with {}. It wrote {:?} to standard error",
         run.status,
         run.stderr
+    );
+}
+
+/// A refusal that names another picture must leave `ic` with a success.
+///
+/// The answer of a terminal reaches whoever reads the terminal next. A terminal
+/// that answers the run before this one late writes that answer into the input
+/// queue, and this run drains it. A second program that draws Kitty pictures on
+/// the same terminal writes one there as well. Both of them refuse a picture
+/// that this run never sent, and a run that reported them would fail for a
+/// picture that drew. A false failure over a good picture is worse than the
+/// silence that issue #465 reports.
+#[test]
+fn a_refusal_for_another_picture_leaves_ic_with_a_success() {
+    let run = run_ic_against(ANOTHER_PICTURES_REFUSAL);
+
+    assert!(
+        run.asked,
+        "a still picture must ask the terminal whether it refused, and no request of the primary device attributes arrived inside {QUESTION_BUDGET:?}"
+    );
+    assert!(
+        run.status.success(),
+        "a refusal that names another image number belongs to another picture, so ic must exit with a success, and it exited with {}. It wrote {:?} to standard error",
+        run.status,
+        run.stderr
+    );
+    assert!(
+        run.stderr.is_empty(),
+        "ic must report nothing for a refusal of another picture, and it wrote {:?} to standard error",
+        run.stderr
+    );
+}
+
+/// Two runs of `ic` must carry two image numbers.
+///
+/// The image number is the one key that says which picture a terminal speaks
+/// about. One fixed number gives every run of `ic` the same name, so the
+/// refusal of the run before this one names this picture as well and this run
+/// reports it. Two numbers are what separate the two runs.
+#[test]
+fn two_runs_carry_two_image_numbers() {
+    let first = run_ic_against(ATTRIBUTES_ANSWER);
+    let second = run_ic_against(ATTRIBUTES_ANSWER);
+
+    let first_number = image_number_of(&first.drawn)
+        .expect("a still picture must carry an image number, and the first run carried none");
+    let second_number = image_number_of(&second.drawn)
+        .expect("a still picture must carry an image number, and the second run carried none");
+
+    assert!(
+        first_number.parse::<u32>().is_ok_and(|number| number != 0),
+        "an image number is a 32-bit number above zero, because zero names no image, and the first run carried {first_number:?}"
+    );
+    assert_ne!(
+        first_number, second_number,
+        "two runs of ic must carry two image numbers, and both of them carried {first_number:?}"
     );
 }
