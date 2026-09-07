@@ -269,22 +269,101 @@ where
 async fn read_json_response_within<T>(
     api: Api,
     response: reqwest::Response,
-    _limit: u64,
+    limit: u64,
 ) -> Result<T>
 where
     T: DeserializeOwned,
 {
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("Failed to read response body")?;
+    let body = read_body(api, response, limit).await?;
 
     if !status.is_success() {
         return Err(response_error(api, status, &body));
     }
 
     parse_body(api, &body)
+}
+
+/// Read the whole body of `response`, up to `limit` bytes of it.
+///
+/// # Two checks, because one shape hides from each
+///
+/// A response that states a `Content-Length` over the bound is refused on that
+/// statement alone, before a byte of the body arrives. This is the check that
+/// costs nothing, and it catches the accident: an endpoint that answers with
+/// far more than the command asked for.
+///
+/// A chunked response states no length at all, so nothing is there to refuse.
+/// The read counts what arrives instead and stops at the same bound, which
+/// costs the bound in memory and catches the rest, an adversary included. A
+/// stated length can also be a lie, and the running count is what makes the
+/// first check an early exit rather than the whole guard.
+///
+/// The bytes are read as UTF-8, which is what a JSON document is. A response
+/// that states another character set is not decoded from it, and any byte that
+/// is not UTF-8 arrives as the replacement character -- the same answer the
+/// error path gave before, for a body neither API sends.
+///
+/// # Arguments
+///
+/// * `api` - Which API answered, which decides how the error names it.
+/// * `response` - The response to read.
+/// * `limit` - The most of the body to read, in bytes.
+///
+/// # Returns
+///
+/// The whole body, as text.
+///
+/// # Errors
+///
+/// Returns an error if the body is larger than `limit`, or if the connection
+/// fails before the body is complete.
+async fn read_body(api: Api, mut response: reqwest::Response, limit: u64) -> Result<String> {
+    let status = response.status();
+    let ceiling = usize::try_from(limit).unwrap_or(usize::MAX);
+
+    if let Some(stated) = response.content_length() {
+        if stated > limit {
+            return Err(body_too_large(api, status, stated, limit));
+        }
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Failed to read response body")?
+    {
+        body.extend_from_slice(&chunk);
+
+        if body.len() > ceiling {
+            let read = u64::try_from(body.len()).unwrap_or(u64::MAX);
+            return Err(body_too_large(api, status, read, limit));
+        }
+    }
+
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Build the error for a body this CLI refuses to hold.
+///
+/// # Arguments
+///
+/// * `api` - Which API answered.
+/// * `status` - The status it answered with, which is the one thing about the
+///   answer that is known when the body cannot be read.
+/// * `size` - How large the body is known to be, in bytes.
+/// * `limit` - The bound it passed, in bytes.
+///
+/// # Returns
+///
+/// The error to raise.
+fn body_too_large(api: Api, status: StatusCode, size: u64, limit: u64) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} answered HTTP {status} with a body of at least {size} bytes, over the {limit} bytes \
+         ufa reads. Ask for a smaller part of the collection, or check the server that answered.",
+        api.label()
+    )
 }
 
 /// Deserialize a successful response body as `T`.
