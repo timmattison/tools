@@ -33,5 +33,11 @@ tabled = "0.20.0"
 # dependency that enables them.
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
+[dev-dependencies]
+# The process umask decides the mode a file is created at, and a test of that
+# mode has to state the umask rather than inherit whatever the developer's
+# shell set. `umask` is a system call, and no crate in the workspace wraps it.
+libc.workspace = true
+
 [lints]
 workspace = true

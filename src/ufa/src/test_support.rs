@@ -166,6 +166,92 @@ pub(crate) fn with_environment_lock<T>(body: impl FnOnce() -> T) -> T {
     body()
 }
 
+/// The one lock guarding the process umask for the whole test binary.
+///
+/// The umask belongs to the process, exactly as the environment does, and
+/// every file the process creates while it is lowered gets the wider mode. So
+/// a test that states a umask and a test that creates a file are touching the
+/// same resource, and they get a lock of the same shape.
+#[cfg(unix)]
+fn umask_mutex() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// The process umask, in force for as long as this guard lives.
+#[cfg(unix)]
+struct UmaskGuard {
+    /// The umask that was in force before the guard set its own.
+    previous: libc::mode_t,
+    /// The lock, held so no other test creates a file under this umask.
+    _owned: MutexGuard<'static, ()>,
+}
+
+#[cfg(unix)]
+impl UmaskGuard {
+    /// Take the umask lock and set the umask to `mask`.
+    ///
+    /// # Arguments
+    ///
+    /// * `mask` - The umask to put in force.
+    ///
+    /// # Returns
+    ///
+    /// A guard that puts the previous umask back, and releases the lock, when
+    /// dropped.
+    fn set(mask: libc::mode_t) -> Self {
+        // A test that panics while holding the lock poisons it, which says
+        // nothing about the umask itself -- so take it either way rather than
+        // turning one failure into a cascade of them.
+        let owned = umask_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // SAFETY: `umask` takes a mode, puts it in force for the process, and
+        // hands back the one it replaced. It reads and writes no memory of
+        // this program, and it has no failure mode.
+        let previous = unsafe { libc::umask(mask) };
+
+        Self {
+            previous,
+            _owned: owned,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        // SAFETY: as above. The restore runs on the unwind path as well, so a
+        // failing assertion cannot leave every later file wide open.
+        unsafe {
+            libc::umask(self.previous);
+        }
+    }
+}
+
+/// Run `body` with the process umask set to `mask`.
+///
+/// A test of the mode a file is *created* at has to state the umask, because
+/// the kernel subtracts the umask from the mode the create asks for. A
+/// developer whose shell sets `umask 077` would otherwise watch a file created
+/// at 0o666 land at 0o600 and read that as the code doing the right thing.
+///
+/// # Arguments
+///
+/// * `mask` - The umask to hold for the body.
+/// * `body` - The work to run under it.
+///
+/// # Returns
+///
+/// Whatever `body` returned.
+#[cfg(unix)]
+pub(crate) fn with_umask<T>(mask: libc::mode_t, body: impl FnOnce() -> T) -> T {
+    let _umask = UmaskGuard::set(mask);
+
+    body()
+}
+
 /// Sets an environment variable for as long as it is held, then removes it —
 /// so a failing assertion cannot leak state into the next test.
 ///

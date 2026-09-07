@@ -349,7 +349,9 @@ impl Config {
 
         let contents = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
 
-        fs::write(config_path, contents)
+        let mut file = create_config_file(config_path)
+            .with_context(|| format!("Failed to create config file: {}", config_path.display()))?;
+        file.write_all(contents.as_bytes())
             .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
 
         restrict_to_owner(config_path).with_context(|| {
@@ -519,6 +521,27 @@ fn prompt_for_site_manager_key() -> Result<String> {
          ({OP_REFERENCE_PREFIX}Private/ufa/site manager key) to keep it out of the config file."
     );
     prompt::ask_line("Site Manager API key or 1Password reference [skip]: ")
+}
+
+/// Create the configuration file, emptied and ready to be written.
+///
+/// **The file is created at the process umask, which normally means 0644.**
+/// The mode a create asks for is 0666, the kernel subtracts the umask, and
+/// [`restrict_to_owner`] narrows the result to 0600 only after the write has
+/// finished. So every save opens a window in which any other user of the
+/// machine can read a pasted controller key or a legacy plaintext Site Manager
+/// key, and a run interrupted inside that window leaves the file behind at the
+/// wider mode for good.
+///
+/// # Arguments
+///
+/// * `path` - Where the configuration file goes.
+///
+/// # Returns
+///
+/// The open file, truncated to nothing.
+fn create_config_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::create(path)
 }
 
 /// Restrict a file that may contain secrets to its owner (mode 0600).
@@ -800,6 +823,45 @@ mod tests {
         assert_eq!(
             mode, 0o600,
             "config file holding plaintext secrets must be owner-only, got {mode:o}"
+        );
+    }
+
+    /// The mode a file ends at says nothing about the mode it was created at.
+    ///
+    /// The file holds a pasted controller key and a legacy plaintext Site
+    /// Manager key, and it is created before either is written and before the
+    /// mode is narrowed. A create at the process umask lands on 0644 on a
+    /// normal machine, so every save hands every other user of that machine a
+    /// window in which the file is readable — and a run interrupted inside the
+    /// window leaves it that way for good.
+    ///
+    /// The umask is stated rather than inherited. A developer whose shell sets
+    /// `umask 077` would otherwise watch a 0666 create land on 0600 and read
+    /// that as the code doing the right thing.
+    #[cfg(unix)]
+    #[test]
+    fn the_config_file_is_created_at_a_mode_no_other_user_can_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempConfigDir::new("creation-mode");
+        create_directory(&temp.dir);
+        let path = temp.config_file();
+
+        let mode = crate::test_support::with_umask(0o000, || {
+            let file = create_config_file(&path).expect("creating the config file must succeed");
+            drop(file);
+
+            fs::metadata(&path)
+                .expect("the created config file must exist")
+                .permissions()
+                .mode()
+                & 0o777
+        });
+
+        assert_eq!(
+            mode, 0o600,
+            "the config file holds cleartext keys, so no other user may read it \
+             at any point in its life, got {mode:o}"
         );
     }
 
