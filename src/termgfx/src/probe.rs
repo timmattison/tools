@@ -79,6 +79,7 @@
 
 use crate::detect::AnsweredProtocol;
 use crate::draw::{ImageNumber, KITTY_IMAGE_NUMBER_KEY};
+use crate::geometry::CellPixels;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -119,6 +120,23 @@ pub(crate) fn read_answer(answer: &[u8]) -> Option<AnsweredProtocol> {
     } else {
         None
     }
+}
+
+/// The size of one character cell that a terminal named in its answer to
+/// [`CELL_SIZE_REQUEST`].
+///
+/// The answer is `CSI 6 ; height ; width t`. **The height stands first**, and
+/// nothing in the bytes says so, which is why [`CellPixels::measured`] takes
+/// the two numbers by name.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote before the answer that ended the
+///   read.
+///
+/// # Returns
+/// The cell that the terminal named, or `None` for an answer that names none.
+fn read_cell_size(_answer: &[u8]) -> Option<CellPixels> {
+    None
 }
 
 /// The opener of an application-program command, which carries a kitty answer.
@@ -632,6 +650,28 @@ impl Drop for RawMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The height of the cell that the answers of these tests name, in pixels.
+    ///
+    /// It stands **first** in the answer of a terminal, and second in every
+    /// call of [`CellPixels::measured`]. The two numbers differ, so an answer
+    /// read the wrong way round fails the test instead of passing it.
+    const ANSWERED_CELL_HEIGHT: u32 = 30;
+
+    /// The width of that same cell, in pixels.
+    const ANSWERED_CELL_WIDTH: u32 = 14;
+
+    #[test]
+    fn the_answer_of_the_cell_size_names_the_height_first() {
+        // Kitty 0.42 answers this shape, and so does xterm. The height stands
+        // in the first parameter and the width in the second, which is the
+        // order of every window operation of xterm.
+        assert_eq!(
+            read_cell_size(b"\x1b[6;30;14t"),
+            CellPixels::measured(ANSWERED_CELL_WIDTH, ANSWERED_CELL_HEIGHT),
+            "the answer names the height first, so a reader that swaps the two measures a cell of the wrong shape"
+        );
+    }
 
     #[test]
     fn an_answer_that_names_sixel_gives_sixel() {

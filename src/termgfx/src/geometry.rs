@@ -20,6 +20,78 @@ const ESTIMATED_CELL_WIDTH_PX: u32 = 10;
 /// Value of 20px is typical for modern terminals with default fonts (roughly 2:1 aspect).
 const ESTIMATED_CELL_HEIGHT_PX: u32 = 20;
 
+/// The largest cell that this crate takes for a real one, in pixels on either
+/// axis.
+///
+/// A character cell is a few tens of pixels. A cell of more than this is not a
+/// cell: it is a terminal that answered a question this crate never asked, a
+/// parameter that belongs to another control sequence, or a number that
+/// overran. The estimate is a better measure than any of the three, so
+/// [`CellPixels::measured`] refuses them all.
+///
+/// The bound is generous on purpose. A display of a high pixel density at a
+/// large font draws a cell of about 60 pixels by 130, and this is several
+/// times that.
+const MAX_CELL_PIXELS: u32 = 512;
+
+/// The size of one character cell, in pixels.
+///
+/// The width stands first here, and it stands **second** in the answer that a
+/// terminal writes for `CSI 16 t`. That answer is `CSI 6 ; height ; width t`.
+/// A pair of bare numbers carries no name for either axis, so a reader that
+/// swapped them would measure a cell of the wrong shape and every picture of
+/// the run would come out the wrong shape with it. This type carries the names,
+/// and [`CellPixels::measured`] is the one place the two numbers are put in
+/// order.
+///
+/// Both numbers are above zero and no higher than [`MAX_CELL_PIXELS`], because
+/// that constructor is the only way to make one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CellPixels {
+    /// The width of the cell in pixels.
+    width: u32,
+    /// The height of the cell in pixels.
+    height: u32,
+}
+
+impl CellPixels {
+    /// The cell that a run takes when nothing measured one.
+    ///
+    /// 10 pixels by 20 is about the cell of a modern terminal at its default
+    /// font, and the ratio of the two carries the shape of a cell better than
+    /// either number carries its size.
+    pub(crate) const ESTIMATE: Self = Self {
+        width: ESTIMATED_CELL_WIDTH_PX,
+        height: ESTIMATED_CELL_HEIGHT_PX,
+    };
+
+    /// One cell of the stated width and height, when the pair measures a cell.
+    ///
+    /// # Arguments
+    /// * `width` - The width of the cell in pixels.
+    /// * `height` - The height of the cell in pixels.
+    ///
+    /// # Returns
+    /// The cell, or `None` when either number is zero and when either number
+    /// stands above [`MAX_CELL_PIXELS`]. A cell of no width holds no pixel of
+    /// a picture, and a cell above the bound is no cell at all.
+    pub(crate) fn measured(width: u32, height: u32) -> Option<Self> {
+        (1..=MAX_CELL_PIXELS).contains(&width).then_some(())?;
+        (1..=MAX_CELL_PIXELS).contains(&height).then_some(())?;
+        Some(Self { width, height })
+    }
+
+    /// The width of the cell in pixels.
+    pub(crate) fn width(self) -> u32 {
+        self.width
+    }
+
+    /// The height of the cell in pixels.
+    pub(crate) fn height(self) -> u32 {
+        self.height
+    }
+}
+
 /// Default Sixel output width in pixels when no size information is available.
 /// Used as final fallback when both ioctl and character cell estimates fail.
 const DEFAULT_SIXEL_WIDTH_PX: u32 = 800;
