@@ -483,6 +483,51 @@ fn defective_fixtures() -> PathBuf {
         .join("fixtures")
 }
 
+/// A build directory below a root, planted for the length of one run.
+///
+/// The guard below walks the repository itself, so the condition it must answer
+/// has to stand in the repository while the run lasts. `src/nle` holds a Tauri
+/// frontend, and `pnpm build` writes its bundle to `src/nle/frontend/dist`. A
+/// checkout that nobody built holds no such directory, so a guard that waits
+/// for one reports clean on most machines and fails on the machine that built
+/// the app. This plants one every run instead.
+///
+/// The name carries the process and the clock, because two runs of this suite
+/// share one tree. A fixed name lets one run delete the file the other run is
+/// in the middle of reading.
+struct PlantedBuildOutput {
+    directory: PathBuf,
+}
+
+impl PlantedBuildOutput {
+    fn new() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock stands after the epoch")
+            .as_nanos();
+        let directory = repository_root()
+            .join("src")
+            .join("cdva")
+            .join("tests")
+            .join(format!("planted-{}-{nanos}", std::process::id()));
+        let assets = directory.join("dist").join("assets");
+        std::fs::create_dir_all(&assets).expect("the planted build directory is created");
+        // The shape a bundler writes: one long row that opens a template string
+        // and never closes it, which is what the real bundle of `nle` does.
+        std::fs::write(assets.join("index.js"), "const a=`unclosed\n")
+            .expect("the planted bundle is written");
+        Self { directory }
+    }
+}
+
+impl Drop for PlantedBuildOutput {
+    fn drop(&mut self) {
+        // The run takes the directory back out even when the guard panics,
+        // because a left-behind bundle fails every later run of this suite.
+        drop(std::fs::remove_dir_all(&self.directory));
+    }
+}
+
 #[test]
 fn no_source_of_this_repository_ends_unterminated() {
     // This is the guard the character literal of Rust needed, and it asks its
@@ -499,6 +544,10 @@ fn no_source_of_this_repository_ends_unterminated() {
     // phantom string of `'"'` did, and no reading of `*.rs` alone ever sees it.
     let root = repository_root();
     let fixtures = defective_fixtures();
+    // Build output below a root is not source, and the walk must not read it.
+    // The planted bundle holds that rule in place: take the rule away and this
+    // guard fails again, on every checkout rather than only on a built one.
+    let _planted = PlantedBuildOutput::new();
 
     let found = walk(&roots(), HOW).expect("the repository this crate is built from can be walked");
 
