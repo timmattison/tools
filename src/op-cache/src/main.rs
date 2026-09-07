@@ -30,7 +30,8 @@ enum Commands {
         /// Where to write the binary file
         output_path: String,
     },
-    /// Remove a credential from the cache (next read re-fetches from 1Password)
+    /// Remove a credential and its cached field lists from the cache (the next
+    /// read or list-fields re-fetches from 1Password)
     Invalidate {
         /// 1Password path to invalidate
         op_path: String,
