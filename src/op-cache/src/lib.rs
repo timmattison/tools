@@ -145,8 +145,26 @@ impl OpItem {
             name: name.to_string(),
         };
 
-        Ok(item)
+        if names_something(vault) && names_something(name) {
+            Ok(item)
+        } else {
+            Err(Error::InvalidOpItem(item.to_string()))
+        }
     }
+}
+
+/// Whether `name` can go to `op` as a vault name or as an item name.
+///
+/// A name of nothing but blank space names nothing. A name that starts with
+/// `-` is read by `op` as an option rather than as a name, which turns the
+/// name of an item into a flag of the command that reads it. The
+/// metacharacters go for the reason [`OpPath::new`] refuses them.
+fn names_something(name: &str) -> bool {
+    !name.trim().is_empty()
+        && !name.starts_with('-')
+        && !name
+            .chars()
+            .any(|c| c.is_control() || ";|&$`\\".contains(c))
 }
 
 impl fmt::Display for OpItem {
@@ -399,11 +417,62 @@ pub fn field_labels(item: &OpItem) -> Result<Vec<String>> {
 /// cannot change, and retrying it would make a user who never installed the
 /// CLI wait three seconds to be told so.
 fn field_labels_from(
-    _read_item: impl FnMut() -> Result<Vec<u8>>,
-    _item: &OpItem,
-    _retry_delay: Duration,
+    mut read_item: impl FnMut() -> Result<Vec<u8>>,
+    item: &OpItem,
+    retry_delay: Duration,
 ) -> Result<Vec<String>> {
-    Ok(Vec::new())
+    for attempt in 1..=OP_MAX_RETRIES {
+        match read_item() {
+            Ok(printed) => return labels_of(&printed),
+            Err(Error::OpCliNotFound) => return Err(Error::OpCliNotFound),
+            Err(_) => {}
+        }
+
+        if attempt < OP_MAX_RETRIES {
+            eprintln!(
+                "Failed to list the fields of {item} in 1Password (attempt {attempt}/{OP_MAX_RETRIES}), retrying..."
+            );
+            std::thread::sleep(retry_delay * attempt);
+        }
+    }
+
+    Err(Error::OpReadFailed(item.to_string()))
+}
+
+/// The label of every field of the item `printed` holds.
+///
+/// # Errors
+///
+/// Returns [`Error::Json`] if `printed` is not JSON, and if it is JSON that
+/// carries no `fields` array.
+fn labels_of(printed: &[u8]) -> Result<Vec<String>> {
+    let item: PrintedItem = serde_json::from_slice(printed)?;
+
+    Ok(item
+        .fields
+        .into_iter()
+        .filter_map(|field| field.label)
+        .collect())
+}
+
+/// The one part of a printed 1Password item this crate reads.
+///
+/// Nothing here names `value`, so `serde_json` skips every value of every
+/// field along with every other key it was never asked for. A field value has
+/// nowhere to land, which is what keeps it out of the answer rather than a
+/// filter somebody must remember to write.
+#[derive(Deserialize)]
+struct PrintedItem {
+    fields: Vec<PrintedField>,
+}
+
+/// One field of a printed 1Password item, reduced to its label.
+///
+/// A field with no label — a section that `op` prints with none — arrives as
+/// `None` and is dropped.
+#[derive(Deserialize)]
+struct PrintedField {
+    label: Option<String>,
 }
 
 /// Ask `op` to print the item, and hand back what it printed.
