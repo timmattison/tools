@@ -347,11 +347,24 @@ fn show_vpn_ip(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Reads the name of the 1Password credential field that the tunnel in `dir`
+/// was generated from.
+///
+/// The name comes off the first `CREDENTIAL_FIELD=` line of `<dir>/.env`, with
+/// the surrounding whitespace taken off, because a hand-edited file carries a
+/// trailing space or a carriage return that no reader of `status` can see.
+/// A first line that holds no name after that returns [`None`] rather than an
+/// empty name, and the search stops there: [`None`] is also the answer when the
+/// file is missing, unreadable, or names no field at all.
 fn read_credential_field(dir: &Path) -> Option<String> {
     let env_path = dir.join(".env");
     let content = fs::read_to_string(env_path).ok()?;
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("CREDENTIAL_FIELD=") {
+            let value = value.trim();
+            if value.is_empty() {
+                return None;
+            }
             return Some(value.to_string());
         }
     }
