@@ -341,7 +341,8 @@ fn window_operation_parameters<'a>(answer: &'a [u8], kind: &[u8]) -> Option<Vec<
 /// A parameter of a control sequence is a run of digits. Every other shape is
 /// no number of this protocol, and `None` is the answer for it. That includes
 /// an empty parameter, which a terminal writes for a value it left out, and a
-/// number above the range, which no font has.
+/// number that no `u32` holds. The bound that a font has stands elsewhere:
+/// [`crate::geometry::CellPixels::measured`] refuses a cell above it.
 fn number(bytes: &[u8]) -> Option<u32> {
     if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
         return None;

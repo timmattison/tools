@@ -12,7 +12,8 @@
 //! protocols carry a query, and a terminal answers it. [`crate::probe`] writes
 //! that query, and [`Capabilities::detect_by_asking`] is the entrance that
 //! reads the answer. This module keeps the names, because a name costs no
-//! round trip and every terminal that carries one is answered already.
+//! round trip and answers the question about the protocol, though it says
+//! nothing about the size of a character cell.
 //!
 //! A caller asks [`Capabilities::detect`] once and gets three facts: which
 //! terminal it draws into, whether that terminal draws an image at all, and
@@ -208,13 +209,15 @@ impl Capabilities {
     /// [`TerminalType::Unknown`]. A pane of a multiplexer and a session of
     /// mosh both arrive that way, and both of them draw pictures.
     ///
-    /// So this call asks that terminal, and it asks only that one. A terminal
-    /// that named itself is already known, and a round trip would buy nothing
-    /// and cost the budget of [`crate::probe::QUERY_BUDGET`]. The question
-    /// goes to the controlling terminal, which is a descriptor of its own, so
-    /// a run whose standard output is a file still has a terminal to ask.
-    /// Standard output decides one thing here, which is
-    /// [`Capabilities::raw_mode`].
+    /// So this call asks that terminal, and it asks a named terminal as well
+    /// whenever the window reports no pixel size: a name answers the protocol
+    /// question and says nothing about the size of a character cell.
+    /// `asks_the_terminal` holds both triggers, and
+    /// [`Capabilities::detect_by_asking_the_protocol`] is the entrance that
+    /// asks the first alone. The question goes to the controlling terminal,
+    /// which is a descriptor of its own, so a run whose standard output is a
+    /// file still has a terminal to ask. Standard output decides one thing
+    /// here, which is [`Capabilities::raw_mode`].
     ///
     /// A run that stands in a background process group asks nothing as well.
     /// The question needs raw mode, and the call that asks for raw mode stops
@@ -373,12 +376,13 @@ impl Capabilities {
 
     /// Name what the terminal does from a captured environment and one answer.
     ///
-    /// `answered` is what the terminal said about the protocols it draws, and
-    /// [`None`] means it was never asked or it said nothing. **The answer is
-    /// read only for a terminal the environment leaves unnamed.** Every named
-    /// terminal already carries a signal its own author wrote, and a
-    /// multiplexer that answers for the pane it draws into would otherwise
-    /// overrule the panel signal that [`classify_terminal_type`] puts first.
+    /// `answered` carries what the terminal said about the protocols it draws
+    /// and the size of one of its character cells. **The protocol is read only
+    /// for a terminal the environment leaves unnamed**, and the cell is kept
+    /// whatever the environment said. Every named terminal already carries a
+    /// signal its own author wrote, and a multiplexer that answers for the
+    /// pane it draws into would otherwise overrule the panel signal that
+    /// [`classify_terminal_type`] puts first.
     fn from_env_and_answer(
         env: &TerminalEnv,
         raw_mode: bool,
