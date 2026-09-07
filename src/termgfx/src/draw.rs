@@ -242,6 +242,55 @@ fn cursor_contract(
     )
 }
 
+/// The shape that one Kitty image travels in.
+///
+/// The variant owns the `f=` key, the keys that state the pixel size, and the
+/// encoder, all three together. One place therefore decides the header and the
+/// payload, and the two cannot name different shapes.
+///
+/// Both shapes drop the alpha channel. The drawn result is the same, and three
+/// bytes for one pixel is a smaller payload than four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KittyPayload {
+    /// The raw pixels, three bytes for one pixel.
+    RawRgb,
+    /// A whole PNG file.
+    Png,
+}
+
+impl KittyPayload {
+    /// Give the value of the `f=` key that names this shape to the terminal.
+    ///
+    /// # Returns
+    /// The value of the key, with no key name and no comma.
+    fn format_key(self) -> &'static str {
+        "24"
+    }
+
+    /// Give the header keys that state the pixel size of the image.
+    ///
+    /// # Arguments
+    /// * `width` - The width of the image in pixels.
+    /// * `height` - The height of the image in pixels.
+    ///
+    /// # Returns
+    /// The keys, with the comma that joins them to the header before them.
+    fn pixel_size_keys(self, width: u32, height: u32) -> String {
+        format!(",s={width},v={height}")
+    }
+
+    /// Encode `image` into the base64 payload of this shape.
+    ///
+    /// # Arguments
+    /// * `image` - The image at the size that it draws at.
+    ///
+    /// # Errors
+    /// Gives [`DrawError::Encode`] when the encoder refuses the image.
+    fn encode(self, image: &DynamicImage) -> Result<String, DrawError> {
+        Ok(BASE64_STANDARD.encode(image.to_rgb8().as_raw()))
+    }
+}
+
 /// Write an image with the Kitty graphics protocol.
 ///
 /// The command is `ESC _ G <key>=<value>,... ; <base64 data> ESC \`. A large
@@ -301,9 +350,8 @@ fn write_kitty<W: Write>(
         cell_height_px,
     );
 
-    // The protocol takes the raw pixels, so this path needs no image encoder.
-    let rgb = image.to_rgb8();
-    let base64_data = BASE64_STANDARD.encode(rgb.as_raw());
+    let payload = KittyPayload::RawRgb;
+    let base64_data = payload.encode(&image)?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -326,10 +374,10 @@ fn write_kitty<W: Write>(
     };
     let width_key = display_width.map_or_else(String::new, |columns| format!(",c={columns}"));
     let height_key = display_height.map_or_else(String::new, |rows| format!(",r={rows}"));
+    let size_keys = payload.pixel_size_keys(image.width(), image.height());
     let header = format!(
-        "\x1b_Ga=T,f=24,{KITTY_QUIET},s={},v={}{cursor_keys}{width_key}{height_key}",
-        image.width(),
-        image.height()
+        "\x1b_Ga=T,f={},{KITTY_QUIET}{size_keys}{cursor_keys}{width_key}{height_key}",
+        payload.format_key()
     );
 
     write_image_with_cursor_contract(out, contract, |sink| {
@@ -539,6 +587,48 @@ mod tests {
         }
     }
 
+    /// The width in pixels of the photograph that the cost test measures.
+    const PHOTOGRAPH_WIDTH: u32 = 330;
+
+    /// The height in pixels of the photograph that the cost test measures.
+    const PHOTOGRAPH_HEIGHT: u32 = 440;
+
+    /// Give one colour channel of the photograph fixture as a byte.
+    ///
+    /// The fixture computes its channels in `u32`, and every value that it
+    /// makes stands under 256. The conversion states that instead of assuming
+    /// it, so a change of the arithmetic fails the test instead of wrapping in
+    /// silence.
+    fn channel(value: u32) -> u8 {
+        u8::try_from(value).expect("every channel of the fixture stands under 256")
+    }
+
+    /// A picture of 330 pixels by 440 that resembles a photograph.
+    ///
+    /// The report of this defect measures a photograph of exactly this size, so
+    /// the fixture holds that size and the test pins the numbers of the report.
+    ///
+    /// The channels come off smooth functions of the position with a small
+    /// repeatable grain on top, because a photograph holds smooth areas and a
+    /// little noise. Pure noise is the wrong fixture: a PNG of noise is larger
+    /// than the raw pixels it came from, so a test built on it would measure the
+    /// one input that this change cannot help.
+    fn photograph_fixture() -> DynamicImage {
+        DynamicImage::ImageRgb8(image::RgbImage::from_fn(
+            PHOTOGRAPH_WIDTH,
+            PHOTOGRAPH_HEIGHT,
+            |x, y| {
+                let grain = (x * 7 + y * 13) % 5;
+
+                image::Rgb([
+                    channel(x * 200 / (PHOTOGRAPH_WIDTH - 1) + grain),
+                    channel(y * 180 / (PHOTOGRAPH_HEIGHT - 1) + 40 + grain),
+                    channel((x + y) * 150 / (PHOTOGRAPH_WIDTH + PHOTOGRAPH_HEIGHT - 2) + 60 + grain),
+                ])
+            },
+        ))
+    }
+
     /// The Kitty graphics command that takes every image off the screen. The
     /// test spells the bytes out, so a change of the command fails the test
     /// instead of moving with it.
@@ -579,6 +669,121 @@ mod tests {
             .expect("a Kitty command holds a semicolon between the keys and the payload");
 
         String::from(control_data)
+    }
+
+    /// Draw one still picture on a Kitty terminal and give back the control
+    /// data of the command, which is the part between `ESC _ G` and the first
+    /// semicolon after it.
+    ///
+    /// The cursor is [`Cursor::BelowImage`], which is the contract that a still
+    /// picture takes. That contract writes newlines, a CUU and a DECSC before
+    /// the payload, and the count of the newlines comes off the window of
+    /// whoever runs the suite. The control data stands after all of them and
+    /// holds none of them, so this slice is the same in every terminal.
+    fn kitty_still_control_data() -> String {
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::Kitty, true, true)
+            .draw(&mut out, &test_image(), &test_request())
+            .expect("a write to a vector never fails");
+
+        let command = String::from_utf8(out).expect("a Kitty command is ASCII");
+        let (_reservation, keys_and_payload) = command
+            .split_once("\x1b_G")
+            .expect("a Kitty command holds the APC introducer and the G before its keys");
+        let (control_data, _payload) = keys_and_payload
+            .split_once(';')
+            .expect("a Kitty command holds a semicolon between the keys and the payload");
+
+        String::from(control_data)
+    }
+
+    #[test]
+    fn a_still_picture_travels_as_a_png() {
+        // Raw pixels cost four base64 characters for every pixel, and mosh
+        // gives a whole session fewer characters than one photograph costs that
+        // way, so the picture never arrives. `f=100` names a PNG instead, and a
+        // Kitty terminal then reads the width and the height out of the PNG
+        // itself. The header must carry no `s=` key and no `v=` key beside it.
+        let control_data = kitty_still_control_data();
+
+        assert!(
+            control_data.contains("f=100"),
+            "a still picture must travel as a PNG, but the keys are {control_data:?}"
+        );
+        assert!(
+            !control_data.contains(",s="),
+            "a PNG states its own width, so the keys must hold no s= key, but they are {control_data:?}"
+        );
+        assert!(
+            !control_data.contains(",v="),
+            "a PNG states its own height, so the keys must hold no v= key, but they are {control_data:?}"
+        );
+    }
+
+    #[test]
+    fn a_video_frame_keeps_the_raw_pixels() {
+        // A PNG encoder runs one time for every frame of a video, and that time
+        // costs more than the characters that it saves. A frame therefore keeps
+        // `f=24`. Raw pixels state no size of their own, so the `s=` key and the
+        // `v=` key must stay beside them.
+        let control_data = kitty_control_data();
+
+        assert!(
+            control_data.contains("f=24"),
+            "a video frame must keep the raw pixels, but the keys are {control_data:?}"
+        );
+        assert!(
+            control_data.contains(",s=1"),
+            "raw pixels state no width, so the keys must state it, but they are {control_data:?}"
+        );
+        assert!(
+            control_data.contains(",v=1"),
+            "raw pixels state no height, so the keys must state it, but they are {control_data:?}"
+        );
+    }
+
+    #[test]
+    fn a_still_picture_costs_less_than_four_characters_for_every_pixel() {
+        // This test reads the encoder and not `draw`, on purpose. `draw`
+        // measures the window of whoever runs the suite and resizes the picture
+        // to it, so a cost measured through `draw` is a cost measured on one
+        // terminal. The encoder takes the picture that the caller gives it, so
+        // this measurement is the same everywhere.
+        let fixture = photograph_fixture();
+
+        let raw = KittyPayload::RawRgb
+            .encode(&fixture)
+            .expect("raw pixels reach base64 with no encoder that can refuse them");
+        let png = KittyPayload::Png
+            .encode(&fixture)
+            .expect("the PNG encoder takes an RGB8 picture of this size");
+
+        // Base64 turns three bytes into four characters, and three bytes is one
+        // pixel. The pixel count of this picture divides by three, so the
+        // payload takes no padding and the count is exact. It is the number that
+        // the report of the defect names.
+        let raw_cost = usize::try_from(4 * PHOTOGRAPH_WIDTH * PHOTOGRAPH_HEIGHT)
+            .expect("the cost of one small photograph fits in a machine word");
+        assert_eq!(
+            raw.len(),
+            raw_cost,
+            "raw pixels cost exactly four base64 characters for every pixel"
+        );
+
+        let budget = raw.len() * 60 / 100;
+        assert!(
+            png.len() <= budget,
+            "a PNG of this photograph must cost at most {budget} characters, which is 60 percent of the raw pixels, but it costs {}",
+            png.len()
+        );
+
+        // A payload that merely got smaller proves nothing. `iVBORw0KGgo` is the
+        // base64 of the signature that every PNG file starts with.
+        assert!(
+            png.starts_with("iVBORw0KGgo"),
+            "the payload must be a PNG file, but it starts with {:?}",
+            png.chars().take(11).collect::<String>()
+        );
     }
 
     #[test]
