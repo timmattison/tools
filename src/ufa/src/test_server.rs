@@ -282,6 +282,22 @@ pub fn redirect_to(location: &str) -> String {
     format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n")
 }
 
+/// The response that carries `body` as its JSON document.
+///
+/// # Arguments
+///
+/// * `body` - The JSON document to answer with.
+///
+/// # Returns
+///
+/// A raw `200 OK` response that carries `body`.
+pub fn json_response(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
 /// The response that carries an empty JSON object.
 ///
 /// # Returns
@@ -289,5 +305,5 @@ pub fn redirect_to(location: &str) -> String {
 /// A raw `200 OK` response with a body every JSON reader in this crate
 /// accepts.
 pub fn empty_json() -> String {
-    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}".to_string()
+    json_response("{}")
 }

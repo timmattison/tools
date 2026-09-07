@@ -136,6 +136,12 @@ impl SiteManagerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_server::{json_response, TestServer};
+
+    /// One cloud host, with every field the model demands of it.
+    const A_HOST: &str =
+        r#"{"id":"h1","hardwareId":"hw1","type":"console","isBlocked":false,"owner":true}"#;
+
 
     /// The Site Manager API base URL every request is built from.
     fn base_url() -> Url {
@@ -245,6 +251,95 @@ mod tests {
     #[test]
     fn a_multi_byte_host_id_is_encoded_rather_than_dropped() {
         assert_id_stays_one_segment_under_hosts("日本語-🎉-café");
+    }
+
+    /// A client that talks to `origin` rather than to the real Site Manager
+    /// API.
+    ///
+    /// The base URL is the one thing a test has to replace, and
+    /// [`SiteManagerClient::new`] names `api.ui.com` and nothing else, so the
+    /// client is built field by field here. Everything else about it -- the
+    /// key header, the refused redirect, the bounds on the request -- comes
+    /// from the same `build_client` a command uses.
+    fn client_talking_to(origin: &str) -> SiteManagerClient {
+        let client = build_client(Api::SiteManager, "an-api-key", false, Timeouts::PRODUCTION)
+            .expect("a plain key must build a Site Manager client");
+        let base_url =
+            Url::parse(&format!("{origin}/v1/")).expect("a loopback origin is a base URL");
+
+        SiteManagerClient { client, base_url }
+    }
+
+    /// The listing body that carries `hosts` hosts, and the `total` the server
+    /// states for the whole collection.
+    ///
+    /// A `total` of `None` leaves the field out altogether, which is what a
+    /// server that states no total sends.
+    fn hosts_body(hosts: usize, total: Option<u32>) -> String {
+        let listed = vec![A_HOST; hosts].join(",");
+
+        match total {
+            Some(total) => format!(r#"{{"hosts":[{listed}],"total":{total}}}"#),
+            None => format!(r#"{{"hosts":[{listed}]}}"#),
+        }
+    }
+
+    /// The listing endpoint answers one page. An account with more hosts than
+    /// fit in it therefore hands back a fraction of the collection, and the
+    /// server says so in `total`. Reporting that fraction as the whole
+    /// listing is the failure `crate::pagination` exists to prevent: `ufa
+    /// cloud hosts` prints a short table, and the "Total hosts" line under it
+    /// agrees with the short table.
+    #[tokio::test]
+    async fn a_host_listing_shorter_than_the_stated_total_is_refused() {
+        let server = TestServer::replying(&json_response(&hosts_body(2, Some(41)))).await;
+        let client = client_talking_to(server.origin());
+
+        let error = client
+            .get_hosts()
+            .await
+            .expect_err("2 of 41 hosts is not the listing, and must not be reported as one");
+
+        let report = format!("{error:#}");
+        assert!(
+            report.contains("41"),
+            "the refusal must say how many hosts the server states exist, got: {report}"
+        );
+        assert!(
+            report.contains('2'),
+            "the refusal must say how many hosts arrived, got: {report}"
+        );
+    }
+
+    /// The ordinary answer must stay ordinary: as many hosts as the server
+    /// states exist is the whole listing.
+    #[tokio::test]
+    async fn a_host_listing_that_matches_the_stated_total_is_returned() {
+        let server = TestServer::replying(&json_response(&hosts_body(3, Some(3)))).await;
+        let client = client_talking_to(server.origin());
+
+        let hosts = client
+            .get_hosts()
+            .await
+            .expect("a listing that matches the stated total is complete");
+
+        assert_eq!(hosts.len(), 3, "every host the server sent must come back");
+    }
+
+    /// A server that states no total says nothing about completeness, so
+    /// there is nothing to compare the answer against. The listing is taken
+    /// as it arrived, because a refusal here breaks a command that works.
+    #[tokio::test]
+    async fn a_host_listing_the_server_states_no_total_for_is_returned() {
+        let server = TestServer::replying(&json_response(&hosts_body(2, None))).await;
+        let client = client_talking_to(server.origin());
+
+        let hosts = client
+            .get_hosts()
+            .await
+            .expect("a listing with no stated total is not evidence of a short answer");
+
+        assert_eq!(hosts.len(), 2, "every host the server sent must come back");
     }
 
     /// `.` and `..` name no host at all, and a URL builder that appends path
