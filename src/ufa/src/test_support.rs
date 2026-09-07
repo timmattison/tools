@@ -191,10 +191,17 @@ impl Drop for ScopedVar {
 /// exported in the shell they run `cargo test` from.
 #[cfg(test)]
 mod inherited_environment_tests {
-    use std::process::Command;
+    use crate::Args;
+    use clap::{Arg, Command, CommandFactory};
+    use std::collections::BTreeSet;
+    use std::process::Command as ChildProcess;
 
     /// Set in the child so its copy of this test does not fork forever.
     const CHILD_MARKER: &str = "UFA_INHERITED_ENVIRONMENT_CHILD";
+
+    /// A setting no flag of `Args` declares, used to stand in for the flag
+    /// somebody adds tomorrow.
+    const PROBE_SETTING: &str = "UNIFI_PROBE";
 
     /// A hostile spelling of every `UNIFI_*` variable clap reads.
     ///
@@ -208,6 +215,53 @@ mod inherited_environment_tests {
         ("UNIFI_SITE_MANAGER_API_KEY", "inherited-cloud-key"),
     ];
 
+    /// The environment a child of this test binary inherits, hostile setting by
+    /// hostile setting.
+    ///
+    /// It takes the command whose settings it must cover, because the list is
+    /// meant to follow clap rather than lead it. Today it does not follow
+    /// anything: the four names are typed out by hand above, and the parameter
+    /// goes unread.
+    fn hostile_environment(_command: &Command) -> Vec<(String, String)> {
+        INHERITED
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    /// Every environment variable `command` reads, including the ones its
+    /// subcommands declare.
+    ///
+    /// The recursion is not decoration. `UNIFI_SITE_MANAGER_API_KEY` is
+    /// declared on `ufa config cloud` rather than on the top-level command, so
+    /// a walk of `get_arguments()` alone finds three of the four settings and
+    /// calls that the whole set.
+    fn settings_read_by(command: &Command) -> BTreeSet<String> {
+        let mut found = BTreeSet::new();
+        collect_settings(command, &mut found);
+        found
+    }
+
+    /// Add every setting `command` and its subcommands read to `found`.
+    fn collect_settings(command: &Command, found: &mut BTreeSet<String>) {
+        for argument in command.get_arguments() {
+            if let Some(setting) = argument.get_env() {
+                found.insert(setting.to_string_lossy().into_owned());
+            }
+        }
+        for subcommand in command.get_subcommands() {
+            collect_settings(subcommand, found);
+        }
+    }
+
+    /// The names of the settings the child inherits.
+    fn inherited_names(command: &Command) -> BTreeSet<String> {
+        hostile_environment(command)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
     /// Re-run the whole suite in a child that inherited a `UNIFI_*`
     /// environment, which is the one thing a test cannot simulate in-process:
     /// by the time any test body runs, an inherited variable has already been
@@ -219,13 +273,13 @@ mod inherited_environment_tests {
         }
 
         let binary = std::env::current_exe().expect("the test binary must be locatable");
-        let mut command = Command::new(&binary);
-        command.env(CHILD_MARKER, "1");
-        for (name, value) in INHERITED {
-            command.env(name, value);
+        let mut child = ChildProcess::new(&binary);
+        child.env(CHILD_MARKER, "1");
+        for (name, value) in hostile_environment(&Args::command()) {
+            child.env(name, value);
         }
 
-        let output = command
+        let output = child
             .output()
             .unwrap_or_else(|error| panic!("{} must be runnable: {error}", binary.display()));
 
@@ -236,6 +290,62 @@ mod inherited_environment_tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// The child must inherit every setting clap reads, so the test above
+    /// covers the whole surface rather than the part somebody remembered.
+    #[test]
+    fn the_child_inherits_every_setting_clap_reads() {
+        let declared = settings_read_by(&Args::command());
+
+        assert!(
+            !declared.is_empty(),
+            "clap declares at least one environment-backed flag; an empty set \
+             means the walk of its metadata broke, and an empty hostile \
+             environment would pass this test for that reason alone"
+        );
+        assert_eq!(
+            inherited_names(&Args::command()),
+            declared,
+            "the child's environment and clap's own metadata must name the same \
+             settings"
+        );
+    }
+
+    /// The point of the whole arrangement: a flag added to `Args` tomorrow is
+    /// covered without anybody editing this module. A hand-written list cannot
+    /// do that, and the test above cannot tell the difference, because a list
+    /// that is right today is right today either way.
+    #[test]
+    fn a_setting_no_list_names_is_still_inherited() {
+        let with_a_new_flag = Args::command().arg(
+            Arg::new("probe")
+                .long("probe")
+                .env(PROBE_SETTING)
+                .value_parser(clap::value_parser!(bool)),
+        );
+
+        assert!(
+            inherited_names(&with_a_new_flag).contains(PROBE_SETTING),
+            "a flag declared on the command must reach the child's environment \
+             without being listed by hand, got {:?}",
+            inherited_names(&with_a_new_flag)
+        );
+    }
+
+    /// The environment has to be hostile, not merely present. Every value must
+    /// be one the crate's boolean parser rejects, so a flag added tomorrow with
+    /// a boolean value breaks every parse in the binary the way
+    /// `UNIFI_INSECURE` does today, rather than quietly reading as `false`.
+    #[test]
+    fn every_inherited_value_defeats_a_boolean_parse() {
+        for (name, value) in hostile_environment(&Args::command()) {
+            assert!(
+                crate::parse_bool_env(&value).is_err(),
+                "{name}={value} parses as a boolean, so a boolean flag would \
+                 accept it instead of failing on it"
+            );
+        }
     }
 }
 
