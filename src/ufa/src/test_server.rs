@@ -307,3 +307,45 @@ pub fn json_response(body: &str) -> String {
 pub fn empty_json() -> String {
     json_response("{}")
 }
+
+/// How much of a body one chunk of a chunked response carries.
+///
+/// Two chunks prove the framing. A reader that stops at the first chunk, or
+/// that counts the chunk headers as body, fails a test that spans two.
+const CHUNKS_PER_BODY: usize = 2;
+
+/// The response that carries `body` in chunks and states no length.
+///
+/// A chunked response is the shape a `Content-Length` check cannot see: the
+/// server states no size at all, and the reader learns the size only from
+/// what arrives.
+///
+/// # Arguments
+///
+/// * `body` - The document to answer with.
+///
+/// # Returns
+///
+/// A raw `200 OK` response that carries `body` as chunks.
+pub fn chunked_response(body: &str) -> String {
+    let mut response = String::from(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n",
+    );
+
+    // The split lands on a character boundary, so a multi-byte character is
+    // never cut in half by the framing.
+    let halfway = body.len() / CHUNKS_PER_BODY;
+    let split = (halfway..=body.len())
+        .find(|index| body.is_char_boundary(*index))
+        .unwrap_or(body.len());
+    let (first, second) = body.split_at(split);
+
+    for chunk in [first, second] {
+        if !chunk.is_empty() {
+            response.push_str(&format!("{:x}\r\n{chunk}\r\n", chunk.len()));
+        }
+    }
+    response.push_str("0\r\n\r\n");
+
+    response
+}

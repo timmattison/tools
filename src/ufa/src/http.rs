@@ -67,6 +67,23 @@ const JSON_MEDIA_TYPE: &str = "application/json";
 /// not in the API's own error shape.
 const ERROR_BODY_DISPLAY_CHARS: usize = 500;
 
+/// The most of one response body `ufa` reads.
+///
+/// Both APIs answer one JSON document, and what either document can hold is
+/// bounded by the account behind it. The controller's collections arrive a
+/// page at a time -- 200 items per request, per [`crate::pagination`] -- and
+/// the largest item either API returns is a device record of a few kilobytes,
+/// so a page stays under a megabyte. The Site Manager host listing is the
+/// largest single answer, because nothing pages it: one document for every
+/// console on the account. A thousand consoles at eight kilobytes each comes
+/// to eight megabytes.
+///
+/// 32 MiB is far above both. That distance matters more than the number
+/// itself, because a ceiling a real answer trips is worse than no ceiling at
+/// all. What it bounds is the rest: a server that answers with a body of no
+/// stated end.
+const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
+
 /// The error body a UniFi API answers a failed request with.
 ///
 /// Both APIs use the same shape; any further fields they carry (an error
@@ -224,6 +241,39 @@ pub async fn read_json_response<T>(api: Api, response: reqwest::Response) -> Res
 where
     T: DeserializeOwned,
 {
+    read_json_response_within(api, response, MAX_RESPONSE_BYTES).await
+}
+
+/// Read `response` as `T`, reading no more than `limit` bytes of its body.
+///
+/// The bound is a parameter rather than the constant itself, because a test
+/// of the bound must trip it, and no test sends [`MAX_RESPONSE_BYTES`]. It is
+/// not a parameter of [`read_json_response`], because how much of an answer
+/// `ufa` reads is a property of `ufa` rather than of the command that asked.
+///
+/// # Arguments
+///
+/// * `api` - Which API answered, which decides how errors name it.
+/// * `response` - The response to read.
+/// * `limit` - The most of the body to read, in bytes.
+///
+/// # Returns
+///
+/// The deserialized body.
+///
+/// # Errors
+///
+/// Returns an error if the body is larger than `limit`, if the body cannot be
+/// read, if the status is not a success, or if the body is not the JSON `T`
+/// expects.
+async fn read_json_response_within<T>(
+    api: Api,
+    response: reqwest::Response,
+    _limit: u64,
+) -> Result<T>
+where
+    T: DeserializeOwned,
+{
     let status = response.status();
     let body = response
         .text()
@@ -295,7 +345,7 @@ fn response_error(api: Api, status: StatusCode, body: &str) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_server::TestServer;
+    use crate::test_server::{chunked_response, json_response, TestServer};
     use std::time::Instant;
 
     /// What the `http` crate's own debug output says in place of a header
@@ -450,6 +500,103 @@ mod tests {
             rendered.contains('日'),
             "the error must still quote the start of the body, got: {rendered}"
         );
+    }
+
+    /// The bound the reads under test carry. Far below the production one,
+    /// which no test sends.
+    const TEST_LIMIT: u64 = 1_024;
+
+    /// A document that is four times the bound above, and valid JSON, so a
+    /// read that ignores the bound succeeds rather than fails on the parse.
+    fn over_the_limit() -> String {
+        format!("\"{}\"", "x".repeat(4 * usize_limit()))
+    }
+
+    /// [`TEST_LIMIT`] as a count of characters.
+    fn usize_limit() -> usize {
+        usize::try_from(TEST_LIMIT).expect("the test bound fits a usize")
+    }
+
+    /// Ask `server` for its one answer.
+    ///
+    /// The client is the production one, so what the test reads is what a
+    /// command reads.
+    async fn fetch(server: &TestServer) -> reqwest::Response {
+        build_client(Api::Controller, "an-api-key", false, Timeouts::PRODUCTION)
+            .expect("a client with a well-formed key must build")
+            .get(server.origin())
+            .send()
+            .await
+            .expect("the test server must answer")
+    }
+
+    /// A server that states an over-long body is refused on the statement
+    /// alone, before the body is read. This is the accident: an endpoint that
+    /// answers with far more than the command asked for.
+    #[tokio::test]
+    async fn a_declared_body_over_the_limit_is_refused() {
+        let server = TestServer::replying(&json_response(&over_the_limit())).await;
+
+        let error = read_json_response_within::<serde_json::Value>(
+            Api::Controller,
+            fetch(&server).await,
+            TEST_LIMIT,
+        )
+        .await
+        .expect_err("a body over the limit must not be read into memory");
+
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains(&TEST_LIMIT.to_string()),
+            "the error must name the limit the user tripped, got: {rendered}"
+        );
+    }
+
+    /// A chunked answer states no length at all, so a check of the stated
+    /// length sees nothing to refuse. The read counts what arrives instead.
+    #[tokio::test]
+    async fn a_chunked_body_over_the_limit_is_refused() {
+        let server = TestServer::replying(&chunked_response(&over_the_limit())).await;
+        let response = fetch(&server).await;
+
+        assert_eq!(
+            response.content_length(),
+            None,
+            "a chunked answer must state no length, or this tests the other guard"
+        );
+
+        let error =
+            read_json_response_within::<serde_json::Value>(Api::Controller, response, TEST_LIMIT)
+                .await
+                .expect_err("a body that passes the limit as it arrives must be refused");
+
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains(&TEST_LIMIT.to_string()),
+            "the error must name the limit the user tripped, got: {rendered}"
+        );
+    }
+
+    /// The bound must not cost the answers that are inside it. A ceiling a
+    /// real answer trips is worse than no ceiling.
+    #[tokio::test]
+    async fn a_body_under_the_limit_is_read_in_full() {
+        let document = format!("\"{}\"", "x".repeat(usize_limit() / 2));
+
+        for answer in [json_response(&document), chunked_response(&document)] {
+            let server = TestServer::replying(&answer).await;
+
+            let value: serde_json::Value =
+                read_json_response_within(Api::Controller, fetch(&server).await, TEST_LIMIT)
+                    .await
+                    .expect("a body inside the limit must be read");
+
+            assert_eq!(
+                serde_json::to_string(&value).expect("a JSON value renders"),
+                document,
+                "the whole body must survive the read, chunked or not"
+            );
+        }
     }
 
     /// A body short enough to read in full is still shown in full, with no
