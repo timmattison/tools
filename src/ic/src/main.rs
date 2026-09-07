@@ -1599,6 +1599,47 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
     display_image(img, args, Picture::Still, HeaderRows(0))
 }
 
+/// The code that a Kitty terminal names for an image store with no room left.
+///
+/// A terminal keeps every image it drew, and it caps the bytes it keeps. mosh
+/// is the case that reaches the cap: it holds every image for the length of the
+/// session, because a client that reconnects holds none.
+///
+/// This is the one refusal that the size of the picture caused, so this is the
+/// one refusal that a smaller picture repairs.
+const IMAGE_STORE_FULL: &str = "ENOSPC";
+
+/// The line that tells a user how to make the picture smaller.
+///
+/// A newline opens it, because it stands below the line that reports what the
+/// terminal said.
+const SIZE_ADVICE: &str =
+    "\nA smaller image can fit where this one did not: try --width, --height or --scale.";
+
+/// The advice that a refusal of `code` earns, or an empty string for a code
+/// that earns none.
+///
+/// [`SIZE_ADVICE`] repairs [`IMAGE_STORE_FULL`] and nothing else. A terminal
+/// that answers `EINVAL`, `ENOTSUPP` or a code of a picture it cannot decode
+/// refused the bytes for a reason that the size of the picture did not cause,
+/// and the same bytes at half the width are the same bytes. A user who follows
+/// the advice there runs the tool again, waits again, and reads the same
+/// refusal. So every other code leaves the words of the terminal by themselves.
+///
+/// # Arguments
+/// * `code` - The code that the terminal named, such as `ENOSPC`.
+///
+/// # Returns
+/// [`SIZE_ADVICE`] for the code of a full image store, and an empty string for
+/// every other code.
+fn size_advice_for(code: &str) -> &'static str {
+    if code == IMAGE_STORE_FULL {
+        SIZE_ADVICE
+    } else {
+        ""
+    }
+}
+
 /// Display an image in the terminal.
 ///
 /// # Arguments
@@ -1728,8 +1769,8 @@ fn display_image(
             anyhow::bail!(
                 "The terminal refused this image and drew nothing: {refusal}\n\
                 \n\
-                The image reached the terminal, and the terminal reported the failure above.\n\
-                A smaller image can fit where this one did not: try --width, --height or --scale.",
+                The image reached the terminal, and the terminal reported the failure above.{}",
+                size_advice_for(&refusal.code),
             );
         }
     }
