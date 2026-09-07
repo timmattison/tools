@@ -109,6 +109,18 @@ const CELL_SIZE_REQUEST: &[u8] = b"\x1b[16t";
 /// The first parameter of the answer to [`CELL_SIZE_REQUEST`].
 const CELL_SIZE_ANSWER: &[u8] = b"6";
 
+/// The request of the size of the text area in pixels.
+///
+/// This is window operation 14 of xterm, and a terminal answers it with
+/// `CSI 4 ; height ; width t`. It names the whole text area and not one cell,
+/// so a reader of it divides by the cell counts of that same window. It is the
+/// fallback of [`CELL_SIZE_REQUEST`], because a terminal that answers the
+/// older of the two operations answers this one.
+const TEXT_AREA_REQUEST: &[u8] = b"\x1b[14t";
+
+/// The first parameter of the answer to [`TEXT_AREA_REQUEST`].
+const TEXT_AREA_ANSWER: &[u8] = b"4";
+
 /// How long a reader of the terminal waits for the answer.
 ///
 /// Two readers take this budget. [`ask_the_terminal`] waits this long for the
@@ -154,6 +166,28 @@ fn read_cell_size(answer: &[u8]) -> Option<CellPixels> {
         return None;
     };
     CellPixels::measured(number(width)?, number(height)?)
+}
+
+/// The size of one character cell that the answer to [`TEXT_AREA_REQUEST`]
+/// measures.
+///
+/// The answer names the whole text area, so one cell is the pixel width over
+/// the column count and the pixel height over the row count. The division uses
+/// the cell counts of the **same** window that the answer is about, which the
+/// caller measured in the one read it made before it asked anything.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote before the answer that ended the
+///   read.
+/// * `cells` - The columns and the rows of that same window, or `None` for a
+///   run that measured no window.
+///
+/// # Returns
+/// The cell that the division measures, or `None` for an answer that names no
+/// text area, for a run that measured no window to divide by, and for a
+/// quotient that is no cell.
+fn read_text_area_cell(_answer: &[u8], _cells: Option<(u32, u32)>) -> Option<CellPixels> {
+    None
 }
 
 /// The opener of a control sequence.
@@ -805,6 +839,27 @@ mod tests {
             read_cell_size(&answer),
             CellPixels::measured(ANSWERED_CELL_WIDTH, ANSWERED_CELL_HEIGHT),
             "a walk that steps over the final byte of a sequence cut short steps over the opener of the next one with it"
+        );
+    }
+
+    /// The columns and the rows of the window that the tests of the text area
+    /// divide by.
+    const ANSWERED_WINDOW_CELLS: (u32, u32) = (80, 24);
+
+    #[test]
+    fn the_answer_of_the_text_area_divides_by_the_cells_of_the_same_window() {
+        // 640 pixels over 80 columns is a cell 8 pixels wide, and 384 pixels
+        // over 24 rows is a cell 16 pixels tall. The height stands first in
+        // this answer as well.
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", Some(ANSWERED_WINDOW_CELLS)),
+            CellPixels::measured(8, 16),
+            "the answer names the whole text area, and the cell counts of that same window name one cell"
+        );
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", None),
+            None,
+            "a run that measured no window holds nothing to divide by, so it measures no cell"
         );
     }
 
