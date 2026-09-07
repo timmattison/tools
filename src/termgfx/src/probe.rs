@@ -144,6 +144,28 @@ pub(crate) fn read_answer(answer: &[u8]) -> Option<AnsweredProtocol> {
     }
 }
 
+/// The cell that the terminal named, from the best answer it gave.
+///
+/// A terminal gives two answers about a cell, and they can both arrive in one
+/// buffer. [`CELL_SIZE_REQUEST`] names one cell directly, and
+/// [`TEXT_AREA_REQUEST`] names the whole text area, which measures a cell only
+/// after a division that rounds. So the first one outranks the second, and
+/// this function is the one place that says so.
+///
+/// # Arguments
+/// * `answer` - Every byte the terminal wrote before the answer that ended the
+///   read.
+/// * `cells` - The columns and the rows of the window the answers are about,
+///   or `None` for a run that measured no window.
+///
+/// # Returns
+/// The cell the terminal named, or `None` when it named none. A terminal that
+/// reads no window operation answers neither question, and it reaches this
+/// function as silence.
+pub(crate) fn read_cell(answer: &[u8], cells: Option<(u32, u32)>) -> Option<CellPixels> {
+    read_text_area_cell(answer, cells)
+}
+
 /// The size of one character cell that a terminal named in its answer to
 /// [`CELL_SIZE_REQUEST`].
 ///
@@ -874,6 +896,30 @@ mod tests {
             read_text_area_cell(b"\x1b[4;384;640t", None),
             None,
             "a run that measured no window holds nothing to divide by, so it measures no cell"
+        );
+    }
+
+    #[test]
+    fn the_cell_that_the_cell_size_names_outranks_the_one_the_text_area_measures() {
+        // The two answers arrive in one buffer, because the query asks both
+        // questions in one write. They disagree here, so the order of the two
+        // sources is the whole of what this test measures.
+        let both = b"\x1b[6;30;14t\x1b[4;384;640t";
+
+        assert_eq!(
+            read_cell(both, Some(ANSWERED_WINDOW_CELLS)),
+            CellPixels::measured(ANSWERED_CELL_WIDTH, ANSWERED_CELL_HEIGHT),
+            "the answer of the cell size names one cell directly, and the text area names one only after a division that rounds"
+        );
+        assert_eq!(
+            read_cell(b"\x1b[4;384;640t", Some(ANSWERED_WINDOW_CELLS)),
+            CellPixels::measured(8, 16),
+            "a terminal that answers the text area alone still measures a cell"
+        );
+        assert_eq!(
+            read_cell(b"\x1b[?62;4c", Some(ANSWERED_WINDOW_CELLS)),
+            None,
+            "a terminal that reads no window operation answers neither question, and it names no cell"
         );
     }
 
