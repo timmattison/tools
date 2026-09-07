@@ -46,7 +46,9 @@ pub struct AllCredentialsInUse {
 pub fn select_credential(
     available: &[ItemField],
     running: &[RunningTunnel],
+    existing_label: Option<&str>,
 ) -> Result<SelectedCredential, AllCredentialsInUse> {
+    let _ = existing_label;
     let mut first_free: Option<&ItemField> = None;
     let mut in_use_count = 0_usize;
 
@@ -460,7 +462,7 @@ mod tests {
     fn single_credential_none_in_use() {
         let available = vec![field("credential", "key-1")];
         let running = vec![];
-        let result = select_credential(&available, &running).unwrap();
+        let result = select_credential(&available, &running, None).unwrap();
         assert_eq!(result.field_label, "credential");
         assert_eq!(result.key, "key-1");
         assert_eq!(result.total, 1);
@@ -471,7 +473,7 @@ mod tests {
     fn multiple_credentials_none_in_use_selects_first() {
         let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
         let running = vec![];
-        let result = select_credential(&available, &running).unwrap();
+        let result = select_credential(&available, &running, None).unwrap();
         assert_eq!(result.field_label, "credential");
         assert_eq!(result.key, "key-1");
         assert_eq!(result.total, 2);
@@ -482,7 +484,7 @@ mod tests {
     fn multiple_credentials_first_in_use_selects_second() {
         let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
         let running = vec![tunnel("scraper-gluetun", "key-1")];
-        let result = select_credential(&available, &running).unwrap();
+        let result = select_credential(&available, &running, None).unwrap();
         assert_eq!(result.field_label, "credential-2");
         assert_eq!(result.key, "key-2");
         assert_eq!(result.total, 2);
@@ -496,7 +498,7 @@ mod tests {
             tunnel("scraper-gluetun", "key-1"),
             tunnel("vpn-gluetun", "key-2"),
         ];
-        let err = select_credential(&available, &running).unwrap_err();
+        let err = select_credential(&available, &running, None).unwrap_err();
         assert_eq!(err.usage.len(), 2);
         assert_eq!(
             err.usage[0],
@@ -518,8 +520,83 @@ mod tests {
     fn running_tunnel_with_unknown_key_does_not_block() {
         let available = vec![field("credential", "key-1")];
         let running = vec![tunnel("other-gluetun", "different-key")];
-        let result = select_credential(&available, &running).unwrap();
+        let result = select_credential(&available, &running, None).unwrap();
         assert_eq!(result.field_label, "credential");
         assert_eq!(result.in_use, 0);
+    }
+
+    #[test]
+    fn the_label_an_existing_env_names_is_selected_over_the_first_free_one() {
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
+        let running = vec![];
+        let result = select_credential(&available, &running, Some("credential-2")).unwrap();
+        assert_eq!(result.field_label, "credential-2");
+        assert_eq!(result.key, "key-2");
+        assert_eq!(result.total, 2);
+        assert_eq!(result.in_use, 0);
+    }
+
+    #[test]
+    fn a_named_label_is_kept_while_its_own_tunnel_runs() {
+        // Regenerating a directory whose tunnel is up must not move that
+        // tunnel to a different key: the container holding this key is the
+        // one this directory started.
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
+        let running = vec![tunnel("vpn-gluetun", "key-2")];
+        let result = select_credential(&available, &running, Some("credential-2")).unwrap();
+        assert_eq!(result.field_label, "credential-2");
+        assert_eq!(result.key, "key-2");
+        assert_eq!(result.total, 2);
+        assert_eq!(result.in_use, 1);
+    }
+
+    #[test]
+    fn a_named_label_never_reaches_the_all_in_use_error() {
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
+        let running = vec![
+            tunnel("scraper-gluetun", "key-1"),
+            tunnel("vpn-gluetun", "key-2"),
+        ];
+        let result = select_credential(&available, &running, Some("credential")).unwrap();
+        assert_eq!(result.field_label, "credential");
+        assert_eq!(result.key, "key-1");
+        assert_eq!(result.total, 2);
+        assert_eq!(result.in_use, 2);
+    }
+
+    #[test]
+    fn a_label_no_credential_carries_any_more_falls_back_to_the_first_free_one() {
+        // The credential was removed from 1Password since the directory was
+        // generated. That is not a failure: pick a free one as usual.
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
+        let running = vec![tunnel("scraper-gluetun", "key-1")];
+        let result = select_credential(&available, &running, Some("credential-9")).unwrap();
+        assert_eq!(result.field_label, "credential-2");
+        assert_eq!(result.key, "key-2");
+        assert_eq!(result.total, 2);
+        assert_eq!(result.in_use, 1);
+    }
+
+    #[test]
+    fn a_missing_label_still_reaches_the_all_in_use_error() {
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
+        let running = vec![
+            tunnel("scraper-gluetun", "key-1"),
+            tunnel("vpn-gluetun", "key-2"),
+        ];
+        let err = select_credential(&available, &running, Some("credential-9")).unwrap_err();
+        assert_eq!(err.usage.len(), 2);
+    }
+
+    #[test]
+    fn the_named_label_matches_a_whole_label_and_not_a_prefix_of_one() {
+        let available = vec![
+            field("credential-20", "key-20"),
+            field("credential-2", "key-2"),
+        ];
+        let running = vec![];
+        let result = select_credential(&available, &running, Some("credential-2")).unwrap();
+        assert_eq!(result.field_label, "credential-2");
+        assert_eq!(result.key, "key-2");
     }
 }

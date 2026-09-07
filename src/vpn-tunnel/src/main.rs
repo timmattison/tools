@@ -157,7 +157,7 @@ fn run(cli: Cli) -> Result<()> {
             let running_tunnels = credential::find_running_tunnels()
                 .context("could not determine which credentials are in use")?;
 
-            let selected = credential::select_credential(&available_fields, &running_tunnels)
+            let selected = credential::select_credential(&available_fields, &running_tunnels, None)
                 .map_err(|err| {
                     let mut msg = "all WireGuard credentials are in use\n".to_string();
                     for usage in &err.usage {
