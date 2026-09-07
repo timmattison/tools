@@ -292,6 +292,10 @@ mod tests {
     use crate::test_server::TestServer;
     use std::time::Instant;
 
+    /// What the `http` crate's own debug output says in place of a header
+    /// value somebody marked sensitive.
+    const SENSITIVE: &str = "Sensitive";
+
     /// A response body big enough that reproducing it in an error would fill
     /// the terminal -- and, if the error is logged, the log.
     const HUGE_BODY_CHARS: usize = 100_000;
@@ -300,6 +304,38 @@ mod tests {
     /// sensible excerpt budget, so this asserts "the body was cut short at
     /// all" rather than pinning a particular budget.
     const REASONABLE_ERROR_CHARS: usize = 4_000;
+
+    /// The client carries the user's key in a default header, and reqwest's
+    /// own debug output prints its default headers — every one of them, with
+    /// no condition on the name. So a client dumped while somebody debugs a
+    /// request prints the key in full, which is the one value in the whole
+    /// program that must never be printed.
+    ///
+    /// The `http` crate offers the answer: a header value marked sensitive
+    /// prints as `Sensitive` and nothing else, wherever it is printed from.
+    #[test]
+    fn a_debug_dump_of_the_client_does_not_carry_the_api_key() {
+        use crate::test_support::FAKE_CONTROLLER_KEY;
+
+        let client = build_client(
+            Api::Controller,
+            FAKE_CONTROLLER_KEY,
+            false,
+            Timeouts::PRODUCTION,
+        )
+        .expect("a client with a well-formed key must build");
+
+        let dump = format!("{client:?}");
+
+        assert!(
+            !dump.contains(FAKE_CONTROLLER_KEY),
+            "reqwest prints its default headers, and the API key is one of them, got {dump}"
+        );
+        assert!(
+            dump.contains(SENSITIVE),
+            "the key header must say {SENSITIVE} in place of what it holds, got {dump}"
+        );
+    }
 
     /// A controller that accepts the connection and never answers must not be
     /// able to hold a command forever.

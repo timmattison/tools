@@ -946,6 +946,68 @@ mod credential_tests {
     }
 }
 
+/// Pins the claim that no credential this crate holds reaches a debug dump.
+///
+/// Nothing formats any of these types with `{:?}` today, so nothing leaks
+/// today. That is the whole hazard: the redaction has to be a property of the
+/// types, because the leak arrives as one `eprintln!` somebody adds while
+/// debugging, or as a panic message that carries the value with it, and
+/// neither of those is reviewed against a rule nobody wrote down.
+#[cfg(test)]
+mod redaction_tests {
+    use super::Commands;
+    use crate::test_support::{parse_args_for_test, FAKE_CLOUD_KEY, FAKE_CONTROLLER_KEY, REDACTED};
+
+    /// The parsed arguments carry whatever `--api-key` or `UNIFI_API_KEY`
+    /// supplied, and `Args` is the value most likely to be dumped whole: it is
+    /// what `main` holds while it decides what to run.
+    #[test]
+    fn a_debug_dump_of_the_arguments_redacts_the_api_key() {
+        let args = parse_args_for_test(["ufa", "--api-key", FAKE_CONTROLLER_KEY, "info"])
+            .expect("ufa info must parse");
+
+        let dump = format!("{args:?}");
+
+        assert!(
+            !dump.contains(FAKE_CONTROLLER_KEY),
+            "the API key must not reach a debug dump, got {dump}"
+        );
+        assert!(
+            dump.contains(REDACTED),
+            "the API key must say {REDACTED} in place of what it holds, got {dump}"
+        );
+    }
+
+    /// The cloud credential is declared on the subcommand rather than on the
+    /// top-level command, so it is a second type holding a second key.
+    #[test]
+    fn a_debug_dump_of_the_cloud_command_redacts_the_site_manager_key() {
+        let args = parse_args_for_test([
+            "ufa",
+            "cloud",
+            "--site-manager-api-key",
+            FAKE_CLOUD_KEY,
+            "hosts",
+        ])
+        .expect("ufa cloud hosts must parse");
+
+        let dump = format!("{:?}", args.command);
+
+        assert!(
+            matches!(args.command, Commands::Cloud { .. }),
+            "the command under test must be the cloud one"
+        );
+        assert!(
+            !dump.contains(FAKE_CLOUD_KEY),
+            "the Site Manager key must not reach a debug dump, got {dump}"
+        );
+        assert!(
+            dump.contains(REDACTED),
+            "the Site Manager key must say {REDACTED} in place of what it holds, got {dump}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod version_tests {
     use super::Args;

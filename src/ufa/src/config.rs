@@ -939,6 +939,91 @@ mod tests {
         );
     }
 
+    /// A 1Password reference names the item that holds the key. It is not the
+    /// key, and a dump that hides it says nothing a reader can act on.
+    const OP_REFERENCE: &str = "op://Private/ufa/key - 192.168.1.1 port 443";
+
+    /// Nothing formats a `Config` with `{:?}` today, so nothing leaks today.
+    /// The type is one `eprintln!` added while debugging away from printing a
+    /// pasted controller key and a legacy plaintext Site Manager key in full,
+    /// and a panic message that carries the config does the same on a machine
+    /// nobody chose.
+    #[test]
+    fn a_debug_dump_of_the_configuration_redacts_the_keys() {
+        use crate::test_support::{FAKE_CLOUD_KEY, FAKE_CONTROLLER_KEY, REDACTED};
+
+        let config = Config {
+            url: Some("https://192.168.1.1".to_string()),
+            api_key: Some(FAKE_CONTROLLER_KEY.into()),
+            site_manager_api_key: Some(FAKE_CLOUD_KEY.into()),
+            op_path: Some(OP_REFERENCE.to_string()),
+            insecure: Some(true),
+            sm_op_path: None,
+        };
+
+        let dump = format!("{config:?}");
+
+        assert!(
+            !dump.contains(FAKE_CONTROLLER_KEY),
+            "the controller key must not reach a debug dump, got {dump}"
+        );
+        assert!(
+            !dump.contains(FAKE_CLOUD_KEY),
+            "the Site Manager key must not reach a debug dump, got {dump}"
+        );
+        assert_eq!(
+            dump.matches(REDACTED).count(),
+            2,
+            "both credentials must say {REDACTED} in place of what they hold, got {dump}"
+        );
+        assert!(
+            dump.contains(OP_REFERENCE),
+            "the 1Password reference names an item rather than holding a key, and \
+             a dump that hides it helps nobody, got {dump}"
+        );
+        assert!(
+            dump.contains("192.168.1.1"),
+            "the controller URL is not a secret either, got {dump}"
+        );
+    }
+
+    /// The credential setup gathers, in both of its shapes.
+    #[test]
+    fn a_debug_dump_of_the_controller_credential_redacts_the_key() {
+        use crate::test_support::{FAKE_CONTROLLER_KEY, REDACTED};
+
+        for credential in [
+            ControllerCredential::OnePassword {
+                op_path: OP_REFERENCE.to_string(),
+                key: FAKE_CONTROLLER_KEY.into(),
+            },
+            ControllerCredential::Pasted {
+                key: FAKE_CONTROLLER_KEY.into(),
+            },
+        ] {
+            let dump = format!("{credential:?}");
+
+            assert!(
+                !dump.contains(FAKE_CONTROLLER_KEY),
+                "the key must not reach a debug dump, got {dump}"
+            );
+            assert!(
+                dump.contains(REDACTED),
+                "the key must say {REDACTED} in place of what it holds, got {dump}"
+            );
+        }
+
+        let from_1password = ControllerCredential::OnePassword {
+            op_path: OP_REFERENCE.to_string(),
+            key: FAKE_CONTROLLER_KEY.into(),
+        };
+        assert!(
+            format!("{from_1password:?}").contains(OP_REFERENCE),
+            "the reference names an item rather than holding a key, so it stays \
+             readable"
+        );
+    }
+
     /// A configured 1Password reference wins over the legacy plaintext field.
     /// Falling back on failure would silently keep using a stale plaintext key
     /// after the user moved the credential into 1Password.

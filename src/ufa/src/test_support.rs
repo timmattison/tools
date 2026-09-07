@@ -21,6 +21,22 @@ use std::cell::Cell;
 use std::ffi::OsString;
 use std::sync::{Mutex, MutexGuard, Once, OnceLock};
 
+/// What a debug dump must say in place of a credential.
+///
+/// Spelled out here rather than read from the production constant it stands
+/// for. A test that quotes the value under test proves only that the value
+/// equals itself, so this is the expectation and the crate has to meet it.
+pub(crate) const REDACTED: &str = "<redacted>";
+
+/// A controller key for a test to hand to something and then look for.
+///
+/// Long and shaped like nothing else in the crate, so a dump that carries any
+/// part of it is unmistakable.
+pub(crate) const FAKE_CONTROLLER_KEY: &str = "fake-controller-key-4Kq7Wn2xTb";
+
+/// The same, for the Site Manager credential.
+pub(crate) const FAKE_CLOUD_KEY: &str = "fake-cloud-key-9Rd3Vp8sHm";
+
 /// The one lock guarding the process environment for the whole test binary.
 fn environment_mutex() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
