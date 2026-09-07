@@ -466,8 +466,8 @@ pub(crate) fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutin
 ///
 /// # Returns
 /// True when either question stands open.
-fn asks_the_terminal(terminal_type: &TerminalType, _window: Option<Window>) -> bool {
-    *terminal_type == TerminalType::Unknown
+fn asks_the_terminal(terminal_type: &TerminalType, window: Option<Window>) -> bool {
+    *terminal_type == TerminalType::Unknown || crate::geometry::cell_pixels_of(window).is_none()
 }
 
 #[cfg(test)]
