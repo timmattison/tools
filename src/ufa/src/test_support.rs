@@ -145,6 +145,27 @@ where
     Args::try_parse_from(argv)
 }
 
+/// Run `body` with exclusive access to the process environment.
+///
+/// [`ScopedVar`] covers the test that sets one variable it knows the name of.
+/// This covers the test that makes something *else* write into the
+/// environment — a `.env` load, say — where the names come from the file
+/// rather than from the test, and the test has to read them back and take them
+/// out again before the next test can run.
+///
+/// # Arguments
+///
+/// * `body` - The work to run while the lock is held.
+///
+/// # Returns
+///
+/// Whatever `body` returned.
+pub(crate) fn with_environment_lock<T>(body: impl FnOnce() -> T) -> T {
+    let _environment = EnvironmentGuard::acquire();
+
+    body()
+}
+
 /// Sets an environment variable for as long as it is held, then removes it —
 /// so a failing assertion cannot leak state into the next test.
 ///

@@ -226,8 +226,16 @@ enum ConfigCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load .env file if it exists (ignore errors if file doesn't exist)
-    let _ = dotenvy::dotenv();
+    // The settings file sits beside the configuration file, and it is read
+    // before the parse because clap reads the UNIFI_* settings during the
+    // parse. A system that names no configuration directory holds no settings
+    // file either, and `Config::load` reports that below for the commands that
+    // need one — so `ufa --version` still answers on such a system.
+    if let Ok(directory) = Config::config_dir() {
+        if let Some(path) = config::load_environment_file(&directory)? {
+            eprintln!("Loaded settings from {}", path.display());
+        }
+    }
 
     let args = Args::parse();
 
@@ -318,10 +326,11 @@ async fn main() -> Result<()> {
 /// Pins the claim that clap — not hand-written `std::env::var` fallbacks —
 /// is what turns `UNIFI_*` environment variables into parsed arguments.
 ///
-/// `dotenvy::dotenv()` runs before `Args::parse()` and does nothing but write
-/// into the process environment, so a value from a `.env` file is
+/// The settings file is loaded before `Args::parse()` and does nothing but
+/// write into the process environment, so a value from that file is
 /// indistinguishable from an exported one by the time clap looks. Covering the
-/// environment therefore covers `.env` too.
+/// environment therefore covers the settings file too, and
+/// `config::load_environment_file` covers which file that is.
 #[cfg(test)]
 mod environment_tests {
     use super::Commands;

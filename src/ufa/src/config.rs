@@ -18,6 +18,36 @@ const OP_REFERENCE_PREFIX: &str = "op://";
 const NEEDS_A_TERMINAL: &str = "Setup needs a terminal to ask which controller to use. \
      Run 'ufa config setup' interactively, or pass --url and --api-key.";
 
+/// The file of settings `ufa` reads before it parses its arguments.
+const ENVIRONMENT_FILE: &str = ".env";
+
+/// Load the settings file that sits beside the configuration file.
+///
+/// The load happens before the arguments are parsed, because clap reads
+/// `UNIFI_URL`, `UNIFI_API_KEY` and `UNIFI_INSECURE` during the parse, and a
+/// value in the environment beats the configuration file.
+///
+/// The search walks up from `directory` to the root and takes the first file
+/// it meets, and it discards what went wrong with each attempt — which is what
+/// `dotenvy::dotenv` does from the working directory.
+///
+/// # Arguments
+///
+/// * `directory` - The directory that holds the configuration file.
+///
+/// # Returns
+///
+/// The path of the file that was loaded, or `None` when no file was.
+pub fn load_environment_file(directory: &Path) -> Result<Option<PathBuf>> {
+    for candidate in directory.ancestors().map(|dir| dir.join(ENVIRONMENT_FILE)) {
+        if dotenvy::from_path(&candidate).is_ok() {
+            return Ok(Some(candidate));
+        }
+    }
+
+    Ok(None)
+}
+
 /// A controller discovered from the 1Password `ufa` item.
 #[derive(Debug, Clone)]
 pub struct OpController {
@@ -754,6 +784,137 @@ mod tests {
             loaded.sm_op_path, existing.sm_op_path,
             "an empty answer must not clear the configured cloud credential"
         );
+    }
+
+    /// Load the settings file beside `directory` under the environment lock,
+    /// read `name` back, and take it out again.
+    ///
+    /// The load writes into the process environment, which every test in this
+    /// binary shares, so the lock is held for the whole of it and whatever
+    /// arrived is removed before the lock is released.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The setting the loaded file is expected to carry.
+    /// * `directory` - The directory to load the settings file from.
+    ///
+    /// # Returns
+    ///
+    /// What the load returned, and the value `name` held after it.
+    fn load_and_take_back(
+        name: &str,
+        directory: &Path,
+    ) -> (Result<Option<PathBuf>>, Option<String>) {
+        crate::test_support::with_environment_lock(|| {
+            let loaded = load_environment_file(directory);
+            let value = std::env::var(name).ok();
+            std::env::remove_var(name);
+
+            (loaded, value)
+        })
+    }
+
+    /// Create the directory `path` names, and every directory above it.
+    fn create_directory(path: &Path) {
+        fs::create_dir_all(path)
+            .unwrap_or_else(|error| panic!("{} must be creatable: {error}", path.display()));
+    }
+
+    /// Write `contents` to `path`.
+    fn write_file(path: &Path, contents: &str) {
+        fs::write(path, contents)
+            .unwrap_or_else(|error| panic!("{} must be writable: {error}", path.display()));
+    }
+
+    /// The settings file names `UNIFI_URL`, `UNIFI_API_KEY` and
+    /// `UNIFI_INSECURE`, and clap gives a value in the environment precedence
+    /// over the configuration file. A search that walks up from the directory
+    /// therefore lets any directory above it name the controller the user's
+    /// own API key goes to, with certificate verification off. Only the file
+    /// the user put beside the configuration file counts.
+    #[test]
+    fn a_settings_file_above_the_configuration_directory_is_not_loaded() {
+        let temp = TempConfigDir::new("env-above");
+        let config_directory = temp.dir.join("ufa");
+        create_directory(&config_directory);
+        write_file(
+            &temp.dir.join(ENVIRONMENT_FILE),
+            "UNIFI_URL=https://foreign.example\n",
+        );
+
+        let (loaded, url) = load_and_take_back("UNIFI_URL", &config_directory);
+
+        assert_eq!(
+            loaded.expect("a directory with no settings file beside it is not an error"),
+            None,
+            "no file may be loaded when the configuration directory holds none"
+        );
+        assert_eq!(
+            url, None,
+            "a settings file above the configuration directory must not reach the process \
+             environment"
+        );
+    }
+
+    /// A file that cannot be read is a different answer from a file that is
+    /// not there. The first is a fault the user must see; the second is the
+    /// normal case for everybody who keeps no settings file.
+    #[test]
+    fn a_settings_file_that_cannot_be_read_is_reported() {
+        let temp = TempConfigDir::new("env-unreadable");
+        create_directory(&temp.dir);
+        // A directory of this name cannot be opened as a file, which gives an
+        // I/O failure that is not "no such file".
+        create_directory(&temp.dir.join(ENVIRONMENT_FILE));
+
+        let (loaded, _) = load_and_take_back("UNIFI_URL", &temp.dir);
+
+        let error = loaded.expect_err("an unreadable settings file must not be discarded");
+        assert!(
+            format!("{error:#}").contains(ENVIRONMENT_FILE),
+            "the failure must name the file it could not read, got {error:#}"
+        );
+    }
+
+    /// The file the user put beside the configuration file is the one that is
+    /// read, and its settings reach the process environment.
+    #[test]
+    fn the_settings_file_beside_the_configuration_file_is_loaded() {
+        let temp = TempConfigDir::new("env-beside");
+        create_directory(&temp.dir);
+        write_file(
+            &temp.dir.join(ENVIRONMENT_FILE),
+            "UNIFI_URL=https://beside.example\n",
+        );
+
+        let (loaded, url) = load_and_take_back("UNIFI_URL", &temp.dir);
+
+        assert_eq!(
+            loaded.expect("the settings file must load"),
+            Some(temp.dir.join(ENVIRONMENT_FILE)),
+            "the load must report the file it read"
+        );
+        assert_eq!(
+            url.as_deref(),
+            Some("https://beside.example"),
+            "the settings file beside the configuration file must reach the process environment"
+        );
+    }
+
+    /// Most users keep no settings file at all, so its absence is silent.
+    #[test]
+    fn a_configuration_directory_without_a_settings_file_loads_nothing() {
+        let temp = TempConfigDir::new("env-absent");
+        create_directory(&temp.dir);
+
+        let (loaded, url) = load_and_take_back("UNIFI_URL", &temp.dir);
+
+        assert_eq!(
+            loaded.expect("a missing settings file must not be an error"),
+            None,
+            "there is no file to report"
+        );
+        assert_eq!(url, None, "nothing may reach the process environment");
     }
 
     /// Configs written before `sm_op_path` existed keep working.
