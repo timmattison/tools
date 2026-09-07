@@ -51,15 +51,76 @@ fn current_euid() -> u32 {
     0
 }
 
-/// Probe whether any process is listening on `port` locally by attempting
-/// to bind it ourselves. Returns `true` if any common local address for
-/// this port reports `EADDRINUSE`, which means some process holds it —
-/// even if we can't identify which one.
+/// What a bind probe was able to establish about a port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortProbe {
+    /// Some process holds the port. A bind returned `EADDRINUSE`, which is
+    /// proof, even though we can't identify the holder.
+    InUse,
+    /// Nothing holds the port. The probe bound it itself, or the address the
+    /// probe asked for does not exist on this host.
+    Free,
+    /// The probe could not find out. The kernel refused the bind before it
+    /// could reach the question, so a listener may be hiding behind the
+    /// refusal.
+    Unknown,
+}
+
+/// Classify one bind attempt.
 ///
-/// This needs no privileges. The trade-off: a listener bound only to a
-/// specific non-loopback address (e.g. a LAN interface) may not be
-/// detected on every platform.
-fn tcp_port_in_use(port: u16) -> bool {
+/// `EADDRINUSE` is the only proof of a holder, and `EADDRNOTAVAIL` is proof of
+/// the opposite: the host does not have that address, so nothing can be
+/// listening on it. Every other refusal — `EACCES` above all, which is what an
+/// unprivileged process gets for a port below the platform's privileged
+/// threshold — tells us nothing about the port, only about us.
+fn classify_bind_error(kind: io::ErrorKind) -> PortProbe {
+    match kind {
+        io::ErrorKind::AddrInUse => PortProbe::InUse,
+        io::ErrorKind::AddrNotAvailable => PortProbe::Free,
+        _ => PortProbe::Unknown,
+    }
+}
+
+/// Combine the answers from several candidate addresses.
+///
+/// Precedence is `InUse` > `Unknown` > `Free`: one address that reports a
+/// holder settles the question, and short of that, one address the kernel
+/// refused keeps the whole answer uncertain — a holder could be sitting behind
+/// exactly that refusal.
+fn combine_probes(probes: impl IntoIterator<Item = PortProbe>) -> PortProbe {
+    let mut result = PortProbe::Free;
+
+    for probe in probes {
+        match probe {
+            PortProbe::InUse => return PortProbe::InUse,
+            PortProbe::Unknown => result = PortProbe::Unknown,
+            PortProbe::Free => {}
+        }
+    }
+
+    result
+}
+
+/// Probe whether any process is listening on `port` locally by attempting to
+/// bind it ourselves, across the four common local addresses.
+///
+/// The three answers mean:
+///
+/// - [`PortProbe::InUse`] — a bind returned `EADDRINUSE`, so some process holds
+///   the port, even though this probe can't say which.
+/// - [`PortProbe::Free`] — every candidate either bound successfully or does not
+///   exist on this host, so nothing is listening on any of them.
+/// - [`PortProbe::Unknown`] — the kernel refused at least one bind and no other
+///   candidate proved the port is held. A refusal answers a question about the
+///   caller's privileges, not about the port, so a listener may hide behind it.
+///
+/// [`PortProbe::Unknown`] is the common case for an unprivileged process on a
+/// privileged port: macOS refuses the loopback binds for a port under 1024, and
+/// Linux (`net.ipv4.ip_unprivileged_port_start`, 1024 by default) refuses the
+/// wildcard binds too. There is one further gap that no answer covers: a
+/// listener bound only to a specific non-loopback address, such as a LAN
+/// interface, is not among the candidates and may go undetected.
+fn tcp_port_probe(port: u16) -> PortProbe {
     let candidates: [SocketAddr; 4] = [
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
         SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
@@ -67,12 +128,14 @@ fn tcp_port_in_use(port: u16) -> bool {
         SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
     ];
 
-    candidates.iter().any(|addr| {
-        matches!(
-            StdTcpListener::bind(addr),
-            Err(e) if e.kind() == io::ErrorKind::AddrInUse
-        )
-    })
+    combine_probes(
+        candidates
+            .iter()
+            .map(|addr| match StdTcpListener::bind(addr) {
+                Ok(_listener) => PortProbe::Free,
+                Err(e) => classify_bind_error(e.kind()),
+            }),
+    )
 }
 
 fn main() -> Result<()> {
@@ -130,13 +193,18 @@ fn main() -> Result<()> {
             }
 
             if !found_matches {
-                if tcp_port_in_use(args.port) {
-                    println!(
+                match tcp_port_probe(args.port) {
+                    PortProbe::InUse => println!(
                         "Port {} is in use, but no owning process is visible to the current user.",
                         args.port
-                    );
-                } else {
-                    println!("No processes listening on port {}", args.port);
+                    ),
+                    PortProbe::Free => {
+                        println!("No processes listening on port {}", args.port);
+                    }
+                    PortProbe::Unknown => println!(
+                        "Cannot tell whether port {} is in use: the operating system refused the check. Re-run as root for a definite answer.",
+                        args.port
+                    ),
                 }
             }
         }
@@ -188,11 +256,64 @@ mod tests {
             .expect("bound listener must have a local address")
             .port();
 
-        assert!(
-            tcp_port_in_use(port),
-            "port {port} is held by this test but tcp_port_in_use returned false"
+        assert_eq!(
+            tcp_port_probe(port),
+            PortProbe::InUse,
+            "port {port} is held by this test but the probe did not report it in use"
         );
 
         drop(listener);
+    }
+
+    #[test]
+    fn classifies_every_bind_error_kind() {
+        let cases = [
+            (io::ErrorKind::AddrInUse, PortProbe::InUse),
+            (io::ErrorKind::AddrNotAvailable, PortProbe::Free),
+            (io::ErrorKind::PermissionDenied, PortProbe::Unknown),
+            (io::ErrorKind::Other, PortProbe::Unknown),
+            (io::ErrorKind::InvalidInput, PortProbe::Unknown),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(
+                classify_bind_error(kind),
+                expected,
+                "{kind:?} should classify as {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn in_use_outranks_every_other_answer() {
+        assert_eq!(
+            combine_probes([PortProbe::Free, PortProbe::Unknown, PortProbe::InUse]),
+            PortProbe::InUse
+        );
+        assert_eq!(
+            combine_probes([PortProbe::InUse, PortProbe::Unknown]),
+            PortProbe::InUse
+        );
+    }
+
+    #[test]
+    fn one_refusal_makes_the_whole_answer_unknown() {
+        assert_eq!(
+            combine_probes([PortProbe::Free, PortProbe::Unknown, PortProbe::Free]),
+            PortProbe::Unknown
+        );
+    }
+
+    #[test]
+    fn all_free_candidates_answer_free() {
+        assert_eq!(
+            combine_probes([PortProbe::Free, PortProbe::Free]),
+            PortProbe::Free
+        );
+    }
+
+    #[test]
+    fn no_candidates_answer_free() {
+        assert_eq!(combine_probes([]), PortProbe::Free);
     }
 }
