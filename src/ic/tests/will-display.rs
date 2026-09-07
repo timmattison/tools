@@ -8,27 +8,33 @@
 //! to walk, so a test runner that is itself under mosh cannot change the
 //! verdict. The path holds the process id and a nanosecond stamp, so two
 //! concurrent runs of this file never name the same directory.
+//!
+//! # The flag asks a question and draws nothing
+//!
+//! `--will-display` reports what the terminal is, and it puts no picture on the
+//! screen. So the one fact it needs is the protocol, and the size of a
+//! character cell decides nothing it prints. The last test of this file holds
+//! it to that: a run under a named terminal whose window reports no pixel size
+//! must write nothing at all to the terminal. It therefore takes a
+//! pseudo-terminal of its own, where the other tests need none, and every wait
+//! it makes carries a deadline.
 
-use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
-/// A directory that does not exist, unique to this process.
-fn unreachable_path_dir() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock must be after the epoch")
-        .as_nanos();
-    format!(
-        "/nonexistent-ic-will-display-{}-{nanos}",
-        std::process::id()
-    )
-}
+mod common;
+
+use common::pty::{Pty, Window};
+use common::unreachable_path_dir;
+
+/// The name that this target puts in the unreachable `PATH` of its children.
+const TARGET_NAME: &str = "will-display";
 
 /// Invoke the freshly-built `ic` binary in a known-empty environment.
 fn ic(term: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
     command.env_clear();
-    command.env("PATH", unreachable_path_dir());
+    command.env("PATH", unreachable_path_dir(TARGET_NAME));
     command.env("TERM", term);
     command
 }
@@ -98,5 +104,100 @@ fn will_display_refuses_to_share_the_command_with_a_file() {
     assert!(
         stderr.contains("multiple input modes"),
         "stderr must explain the conflict: {stderr}"
+    );
+}
+
+/// The terminal type that names a Kitty terminal.
+///
+/// **The name is the point of the test below.** A terminal that named itself
+/// answered the question about the protocol already, and `--will-display`
+/// prints its verdict from that one fact. So a run under this name has nothing
+/// left to ask.
+const TERM_XTERM_KITTY: &str = "xterm-kitty";
+
+/// The window that the pseudo-terminal of the test below reports.
+///
+/// **The pixel size is zero on both axes**, which is what a mosh session, a
+/// pane of Zellij and a ttyd panel all report. That is the window that used to
+/// make every run ask, whatever the run was for.
+const WINDOW: Window = Window {
+    columns: 80,
+    rows: 24,
+    width_px: 0,
+    height_px: 0,
+};
+
+/// The request of the primary device attributes.
+///
+/// Every terminal answers it, so its answer is what ends a read of the
+/// terminal, and it stands last in the query that `ic` writes. A read that
+/// waits for it therefore waits for the whole of a query.
+const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
+
+/// How long one read of the terminal waits for a byte.
+///
+/// The test reads the terminal and asks after the child in turn, and this is
+/// the length of one turn. A run that asks writes its query inside the first
+/// one, and [`Pty::read_until`] gives that query back the moment the request of
+/// the attributes ends it.
+const READ_SLICE: Duration = Duration::from_millis(100);
+
+/// How many turns the test takes before it gives up on the child.
+///
+/// Ten seconds in all, which is generous because a loaded machine starts a
+/// process late. **The count is the deadline of the whole wait**: a change that
+/// stopped `ic` from exiting must fail this test instead of holding it.
+const READ_SLICES: usize = 100;
+
+/// A named terminal whose window reports no pixel size must be asked nothing.
+///
+/// `--will-display` reads the name of the terminal and whether that terminal
+/// draws an image at all. It draws no picture, so it needs no character cell,
+/// and the round trip that measures one costs the budget of the query and
+/// swallows whatever the user typed while it drained the terminal in raw mode.
+///
+/// **The read of the terminal runs beside the wait for the child, and not
+/// behind it.** A process that closes its controlling terminal waits for the
+/// output queue of that terminal to drain, and the master end is where it
+/// drains to. So a run that wrote a query the test had not read yet would hang
+/// on the way out, and a wait in front of the read would hold the two of them
+/// there for good.
+#[test]
+fn will_display_asks_nothing_of_a_named_terminal_that_reports_no_pixel_size() {
+    let pty = Pty::open(WINDOW);
+
+    let mut command = ic(TERM_XTERM_KITTY);
+    command
+        .arg("--will-display")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    pty.hand_to(&mut command);
+
+    let mut child = command.spawn().expect("ic must run");
+
+    let mut wrote = Vec::new();
+    let mut exited = None;
+    for _ in 0..READ_SLICES {
+        wrote.extend(pty.read_until(ATTRIBUTES_REQUEST, READ_SLICE));
+        if let Some(status) = child.try_wait().expect("failed to ask after ic") {
+            exited = Some(status);
+            break;
+        }
+    }
+    let status = exited.expect("ic must exit inside the deadline of this test");
+    // The child has exited, so every byte it ever wrote to the terminal is
+    // waiting there already. One last turn takes the bytes it wrote on its way
+    // out.
+    wrote.extend(pty.read_until(ATTRIBUTES_REQUEST, READ_SLICE));
+
+    assert!(
+        wrote.is_empty(),
+        "--will-display must write nothing to the terminal of a named session, and it wrote {:?}",
+        String::from_utf8_lossy(&wrote)
+    );
+    assert!(
+        status.success(),
+        "and it must still report that a Kitty terminal displays an image: {status}"
     );
 }
