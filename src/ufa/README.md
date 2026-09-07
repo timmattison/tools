@@ -194,6 +194,20 @@ Caused by:
 
 ## Commands
 
+### What a listing shows
+
+Every list command answers with one page of a collection: 25 items, unless
+`--limit` says otherwise. A page that holds less than the whole collection says
+so, under the table:
+
+```
+This page shows 1-25 of 100. Use --limit and --offset to see the rest.
+```
+
+The note goes to standard error, and it goes there in both output formats. So
+`--output json` stays a document a program reads, a redirected table stays a
+table, and a listing that is complete carries no note at all.
+
 ### Sites
 
 ```bash

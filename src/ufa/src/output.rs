@@ -5,6 +5,9 @@ use tabled::{settings::Style, Table, Tabled};
 
 use crate::models::Page;
 
+/// How a user reaches the part of a collection that one page left out.
+const PAGING_HINT: &str = "Use --limit and --offset to see the rest.";
+
 #[derive(ValueEnum, Debug, Clone, Copy)]
 pub enum OutputFormat {
     Json,
@@ -286,8 +289,32 @@ where
 /// The note, or `None` when the page holds every item there is. A note on a
 /// complete listing is noise, and a note the user learns to skip stops being
 /// a signal on the listing that needs one.
-fn truncation_notice(_shown: usize, _total: u64, _offset: u64) -> Option<String> {
-    None
+fn truncation_notice(shown: usize, total: u64, offset: u64) -> Option<String> {
+    let shown = u64::try_from(shown).unwrap_or(u64::MAX);
+
+    // The page holds every item the server counted, so there is nothing to
+    // report. This also covers the collection that is empty: nothing of
+    // nothing is still all of it.
+    if shown >= total {
+        return None;
+    }
+
+    // An offset past the end of the collection answers with no items at all.
+    // There is no range to name, and the count is the whole point: a table of
+    // headings and nothing else otherwise reads as a controller with nothing
+    // on it.
+    if shown == 0 {
+        return Some(format!(
+            "This page shows none of the {total} items. {PAGING_HINT}"
+        ));
+    }
+
+    let first = offset.saturating_add(1);
+    let last = offset.saturating_add(shown);
+
+    Some(format!(
+        "This page shows {first}-{last} of {total}. {PAGING_HINT}"
+    ))
 }
 
 #[cfg(test)]
