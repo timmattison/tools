@@ -409,6 +409,85 @@ fn a_future_test_somebody_adds() {
         );
     }
 
+    /// The two-step spelling of the same parse. `Args::command()` hands back a
+    /// `clap::Command`, and `get_matches_from` on it reads `UNIFI_*` exactly as
+    /// `try_parse_from` does — the environment fallback belongs to the argument,
+    /// not to the `Parser` trait — so this bypasses the lock just as thoroughly.
+    #[test]
+    fn the_direct_parse_guard_catches_the_match_based_spelling() {
+        let bypassing_source = "\
+#[test]
+fn a_future_test_somebody_adds() {
+    let matches = crate::Args::command().get_matches_from([\"ufa\", \"info\"]);
+    assert!(matches.get_one::<String>(\"url\").is_none());
+}
+";
+
+        assert_eq!(
+            direct_parse_calls(bypassing_source),
+            vec![3],
+            "a match-based parse must be reported, on the line that makes it"
+        );
+    }
+
+    /// The fallible spelling of the same call.
+    #[test]
+    fn the_direct_parse_guard_catches_the_fallible_match_based_spelling() {
+        let bypassing_source = "\
+#[test]
+fn a_future_test_somebody_adds() {
+    let matches = crate::Args::command().try_get_matches_from([\"ufa\", \"info\"]);
+    assert!(matches.is_ok());
+}
+";
+
+        assert_eq!(
+            direct_parse_calls(bypassing_source),
+            vec![3],
+            "the fallible match-based parse must be reported too"
+        );
+    }
+
+    /// The argv-less spelling reads the *real* argument vector and the same
+    /// environment, so it is a bypass even though it takes no arguments.
+    #[test]
+    fn the_direct_parse_guard_catches_the_argv_less_match_based_spelling() {
+        let bypassing_source = "\
+#[test]
+fn a_future_test_somebody_adds() {
+    let matches = crate::Args::command().get_matches();
+    assert!(matches.get_one::<String>(\"url\").is_none());
+}
+";
+
+        assert_eq!(
+            direct_parse_calls(bypassing_source),
+            vec![3],
+            "a parse of the real argument vector must be reported"
+        );
+    }
+
+    /// The second half of the two-step spelling. It reads no environment on its
+    /// own, because the `ArgMatches` it takes was already filled in above it —
+    /// but the only way to hold one is to have made a banned call, so reporting
+    /// it makes the whole bypass fail rather than half of it.
+    #[test]
+    fn the_direct_parse_guard_catches_the_arg_matches_conversion() {
+        let bypassing_source = "\
+#[test]
+fn a_future_test_somebody_adds() {
+    let args = crate::Args::from_arg_matches(&matches).expect(\"parses\");
+    assert!(args.url.is_none());
+}
+";
+
+        assert_eq!(
+            direct_parse_calls(bypassing_source),
+            vec![3],
+            "the conversion out of an ArgMatches must be reported"
+        );
+    }
+
     /// Prose that names the banned call is not itself a bypass, or the ban
     /// could never be explained in a comment.
     #[test]
@@ -416,6 +495,8 @@ fn a_future_test_somebody_adds() {
         let documented_source = "\
 /// Never call `Args::try_parse_from` here.
 // Not even parse_from on its own.
+/// `Args::command().get_matches_from` and `Args::from_arg_matches` are banned
+// for the same reason, and naming them is not calling them.
 fn documented() {}
 ";
 
