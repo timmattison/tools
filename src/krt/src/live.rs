@@ -480,6 +480,9 @@ fn write_images(
                 columns: Some(columns),
                 rows: Some(1),
             },
+            // A hop graph is one row of cells, so its payload is far under
+            // any cap that a terminal states.
+            payload: termgfx::PayloadBudget::UNLIMITED,
             picture: termgfx::Picture::Frame {
                 id: u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1),
             },

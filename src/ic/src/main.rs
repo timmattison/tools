@@ -12,7 +12,9 @@ use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
-use termgfx::{terminal_cells, Budget, Capabilities, Cursor, Picture, Request, TerminalType};
+use termgfx::{
+    terminal_cells, Budget, Capabilities, Cursor, PayloadBudget, Picture, Request, TerminalType,
+};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
@@ -1725,6 +1727,7 @@ fn display_image(
             columns: scaled_width,
             rows: scaled_height,
         },
+        payload: PayloadBudget::UNLIMITED,
         picture,
         // A frame of a video always holds the cursor, because the caller puts
         // the cursor where it wants it before every frame. A still picture
