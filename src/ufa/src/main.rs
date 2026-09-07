@@ -964,8 +964,121 @@ mod credential_tests {
 /// neither of those is reviewed against a rule nobody wrote down.
 #[cfg(test)]
 mod redaction_tests {
-    use super::Commands;
-    use crate::test_support::{parse_args_for_test, FAKE_CLOUD_KEY, FAKE_CONTROLLER_KEY, REDACTED};
+    use super::{Args, Commands};
+    use crate::test_support::{
+        parse_args_for_test, ScopedVar, FAKE_CLOUD_KEY, FAKE_CONTROLLER_KEY, REDACTED,
+    };
+    use clap::{Command, CommandFactory};
+
+    /// The words that make the value of an environment variable a credential.
+    ///
+    /// Over-matching costs a flag one attribute and says so loudly. Matching
+    /// too little reports clean, which is the answer that cannot be told from
+    /// a guard doing real work.
+    const CREDENTIAL_WORDS: [&str; 4] = ["KEY", "SECRET", "TOKEN", "PASSWORD"];
+
+    /// Every flag of `command`, and of its subcommands, that reads a
+    /// credential out of the environment without hiding what it read.
+    ///
+    /// The walk reads clap's own metadata rather than a list beside it, so a
+    /// flag added tomorrow is covered without anybody remembering to write it
+    /// down twice. The recursion is not decoration either:
+    /// `UNIFI_SITE_MANAGER_API_KEY` is declared on `ufa cloud` rather than on
+    /// the top-level command.
+    fn credential_flags_that_show_their_value(command: &Command) -> Vec<String> {
+        let mut found = Vec::new();
+        collect_exposed_credential_flags(command, &mut found);
+        found.sort();
+        found
+    }
+
+    /// Add every offending flag of `command` and its subcommands to `found`.
+    fn collect_exposed_credential_flags(command: &Command, found: &mut Vec<String>) {
+        for argument in command.get_arguments() {
+            let Some(setting) = argument.get_env() else {
+                continue;
+            };
+            let setting = setting.to_string_lossy().into_owned();
+
+            let holds_a_credential = CREDENTIAL_WORDS.iter().any(|word| setting.contains(word));
+            if holds_a_credential && !argument.is_hide_env_values_set() {
+                found.push(setting);
+            }
+        }
+        for subcommand in command.get_subcommands() {
+            collect_exposed_credential_flags(subcommand, found);
+        }
+    }
+
+    /// `ufa --help` is the command a confused user runs, and the command whose
+    /// output they paste into a bug report. clap prints the *current value* of
+    /// every variable a flag reads beside that flag, so a user who exported
+    /// their API key has it printed in full, with no debug build, no panic and
+    /// no code change of any kind.
+    #[test]
+    fn the_help_text_does_not_print_the_api_key_from_the_environment() {
+        let _var = ScopedVar::set("UNIFI_API_KEY", FAKE_CONTROLLER_KEY);
+
+        let help = Args::command().render_long_help().to_string();
+
+        assert!(
+            !help.contains(FAKE_CONTROLLER_KEY),
+            "the help text must not print the key the environment holds, got {help}"
+        );
+        assert!(
+            help.contains("UNIFI_API_KEY"),
+            "the help text must still name the variable the flag reads, got {help}"
+        );
+    }
+
+    /// The cloud credential is declared on the subcommand, so `ufa cloud
+    /// --help` is a second help text printing a second key.
+    #[test]
+    fn the_cloud_help_text_does_not_print_the_site_manager_key_from_the_environment() {
+        let _var = ScopedVar::set("UNIFI_SITE_MANAGER_API_KEY", FAKE_CLOUD_KEY);
+
+        let help = Args::command()
+            .find_subcommand_mut("cloud")
+            .expect("ufa must have a cloud subcommand")
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            !help.contains(FAKE_CLOUD_KEY),
+            "the cloud help text must not print the key the environment holds, got {help}"
+        );
+        assert!(
+            help.contains("UNIFI_SITE_MANAGER_API_KEY"),
+            "the cloud help text must still name the variable the flag reads, got {help}"
+        );
+    }
+
+    /// The two tests above cover the two credential flags that exist today.
+    /// This one covers the one somebody adds tomorrow, by asking clap which
+    /// flags read a credential rather than trusting a list.
+    #[test]
+    fn every_credential_flag_hides_the_value_of_its_environment_variable() {
+        let command = Args::command();
+
+        assert!(
+            credential_flags_that_show_their_value(&command).is_empty(),
+            "these flags print the credential their variable holds into every \
+             --help: {:?}",
+            credential_flags_that_show_their_value(&command)
+        );
+
+        let probe = Command::new("probe").arg(
+            clap::Arg::new("probe")
+                .long("probe")
+                .env("UNIFI_PROBE_API_KEY"),
+        );
+        assert_eq!(
+            credential_flags_that_show_their_value(&probe),
+            vec!["UNIFI_PROBE_API_KEY".to_string()],
+            "the walk must report a credential flag that hides nothing, or it \
+             reports clean for the wrong reason"
+        );
+    }
 
     /// The parsed arguments carry whatever `--api-key` or `UNIFI_API_KEY`
     /// supplied, and `Args` is the value most likely to be dumped whole: it is
