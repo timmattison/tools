@@ -523,15 +523,26 @@ fn prompt_for_site_manager_key() -> Result<String> {
     prompt::ask_line("Site Manager API key or 1Password reference [skip]: ")
 }
 
-/// Create the configuration file, emptied and ready to be written.
+/// The mode of a file that only its owner can read and write.
+#[cfg(unix)]
+const OWNER_ONLY: u32 = 0o600;
+
+/// Create the configuration file, emptied and ready to be written, at a mode
+/// no other user can read.
 ///
-/// **The file is created at the process umask, which normally means 0644.**
-/// The mode a create asks for is 0666, the kernel subtracts the umask, and
-/// [`restrict_to_owner`] narrows the result to 0600 only after the write has
-/// finished. So every save opens a window in which any other user of the
-/// machine can read a pasted controller key or a legacy plaintext Site Manager
-/// key, and a run interrupted inside that window leaves the file behind at the
-/// wider mode for good.
+/// The file holds a controller key the user pasted during setup and a legacy
+/// plaintext Site Manager key, and the mode goes on the open rather than on
+/// the file afterwards. A create asks the kernel for 0666 and the kernel
+/// subtracts the process umask, which lands on 0644 on a normal machine, so a
+/// file narrowed only after the write is readable by every other user of that
+/// machine for as long as the write takes — and stays that way for good when
+/// the run is interrupted inside that window. Nothing in this crate handles a
+/// signal, so nothing tidies up after such a run.
+///
+/// The mode reaches a file this call **creates** and no other, which is why
+/// [`restrict_to_owner`] stays: a file that was already there keeps the mode
+/// it already had, and a configuration file written by an earlier version of
+/// `ufa` is exactly such a file.
 ///
 /// # Arguments
 ///
@@ -540,20 +551,46 @@ fn prompt_for_site_manager_key() -> Result<String> {
 /// # Returns
 ///
 /// The open file, truncated to nothing.
+#[cfg(unix)]
+fn create_config_file(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(OWNER_ONLY)
+        .open(path)
+}
+
+/// Create the configuration file, emptied and ready to be written.
+///
+/// Windows has no umask and no mode bits to ask for; the file inherits the
+/// containing directory's ACL, which is already per-user under `%APPDATA%`.
+///
+/// # Arguments
+///
+/// * `path` - Where the configuration file goes.
+///
+/// # Returns
+///
+/// The open file, truncated to nothing.
+#[cfg(not(unix))]
 fn create_config_file(path: &Path) -> std::io::Result<fs::File> {
     fs::File::create(path)
 }
 
 /// Restrict a file that may contain secrets to its owner (mode 0600).
 ///
-/// The config file can hold an API key the user pasted during setup and a
-/// legacy plaintext Site Manager key, and it is created with the process umask
-/// — typically 0644 — so it has to be tightened after writing.
+/// [`create_config_file`] already asks for that mode, and the kernel grants it
+/// only to a file that open **created**. So this covers the other case: a
+/// configuration file that was already on disk at a wider mode, written by a
+/// version of `ufa` that created it at the process umask.
 #[cfg(unix)]
 fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY))
 }
 
 /// Windows has no umask and no mode bits to tighten; the file inherits the
@@ -862,6 +899,43 @@ mod tests {
             mode, 0o600,
             "the config file holds cleartext keys, so no other user may read it \
              at any point in its life, got {mode:o}"
+        );
+    }
+
+    /// The mode an open asks for reaches a file that open created, and no
+    /// other. A configuration file written by a version of `ufa` that created
+    /// it at the process umask is already on disk at 0644, and the save that
+    /// tightens it is the pass that runs after the write — so that pass stays,
+    /// and this is what it covers.
+    #[cfg(unix)]
+    #[test]
+    fn saving_over_a_file_that_was_already_wider_narrows_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempConfigDir::new("already-wider");
+        create_directory(&temp.dir);
+        let path = temp.config_file();
+        write_file(&path, "url = \"https://192.168.1.1\"\n");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .expect("the existing file must be settable to a wider mode");
+
+        let config = Config {
+            api_key: Some("plaintext-controller-key".to_string()),
+            ..Config::default()
+        };
+        config
+            .save_to(&path)
+            .expect("saving over the existing file must succeed");
+
+        let mode = fs::metadata(&path)
+            .expect("the saved config file must exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a file that was already readable by others must be narrowed by the \
+             save, got {mode:o}"
         );
     }
 
