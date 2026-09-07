@@ -1,7 +1,7 @@
-use crate::http::{read_json_response, Api};
+use crate::http::{build_client, read_json_response, Api};
 use crate::site_manager::models::{Host, HostsResponse};
 use anyhow::{Context, Result};
-use reqwest::{header, Client, Url};
+use reqwest::{Client, Url};
 use serde::de::DeserializeOwned;
 
 /// The Site Manager API path segment that cloud hosts live under.
@@ -98,20 +98,9 @@ pub struct SiteManagerClient {
 
 impl SiteManagerClient {
     pub fn new(api_key: &str) -> Result<Self> {
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::HeaderName::from_static("x-api-key"),
-            header::HeaderValue::from_str(api_key).context("Invalid Site Manager API key")?,
-        );
-        headers.insert(
-            header::ACCEPT,
-            header::HeaderValue::from_static("application/json"),
-        );
-
-        let client = Client::builder()
-            .default_headers(headers)
-            .build()
-            .context("Failed to create HTTP client")?;
+        // The Site Manager API is a public host with a public certificate, so
+        // nothing here ever waives verification.
+        let client = build_client(Api::SiteManager, api_key, false)?;
 
         let base_url =
             Url::parse("https://api.ui.com/v1/").context("Failed to parse Site Manager API URL")?;

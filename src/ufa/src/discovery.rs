@@ -156,6 +156,10 @@ pub async fn validate_controller(host: &str, port: u16) -> Result<DiscoveredCont
     // Controllers ship a self-signed certificate out of the box, so discovery
     // -- which runs before any trust decision has been made -- cannot insist
     // on a valid one.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a probe carries no API key, so it needs no client that guards one, and it follows a redirect on purpose: the host behind one is still a controller"
+    )]
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(PROBE_TIMEOUT)

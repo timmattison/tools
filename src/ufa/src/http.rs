@@ -1,5 +1,5 @@
-//! Turning an HTTP response from a UniFi API into a typed value or a useful
-//! error.
+//! Building the HTTP client that talks to a UniFi API, and turning what comes
+//! back into a typed value or a useful error.
 //!
 //! Both APIs this CLI talks to -- the controller's local integration API and
 //! the hosted Site Manager API -- answer failures the same way: a non-success
@@ -9,9 +9,18 @@
 
 use crate::text::truncate_for_display;
 use anyhow::{Context, Result};
-use reqwest::StatusCode;
+use reqwest::{header, redirect, Client, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+
+/// The header both UniFi APIs take the user's key in.
+///
+/// Neither API uses `Authorization`, which is what makes a redirect dangerous:
+/// see [`build_client`].
+const API_KEY_HEADER: &str = "x-api-key";
+
+/// The only media type either API answers in.
+const JSON_MEDIA_TYPE: &str = "application/json";
 
 /// How much of a response body an error quotes before cutting it short.
 ///
@@ -73,6 +82,68 @@ impl Api {
             ),
         }
     }
+}
+
+/// Build the HTTP client that talks to `api`.
+///
+/// This is the one place a client that carries the user's API key is built.
+/// Both APIs take the key in the same custom header and both answer JSON, so
+/// every setting that guards the key is the same for both -- and a setting
+/// that guards the key in one module guards nothing while a second builder in
+/// another module leaves it out. `reqwest::Client::builder` is banned in
+/// `src/ufa/clippy.toml` to keep this the only entrance.
+///
+/// # A redirect is refused rather than followed
+///
+/// reqwest follows up to ten redirects unless a policy says otherwise. When
+/// the host changes it drops `Authorization`, `Cookie`, `Cookie2`,
+/// `Proxy-Authorization` and `WWW-Authenticate`, and it keeps every other
+/// header. [`API_KEY_HEADER`] is none of those, so a controller that answers
+/// 3xx with a host of its choosing reads the user's key off the next request.
+/// Under `--insecure` no certificate stands in the way of that host either.
+///
+/// A JSON API resource does not move, so nothing is lost by a refusal: the 3xx
+/// comes back to the caller, and [`read_json_response`] reports it as the
+/// failure it is.
+///
+/// # Arguments
+///
+/// * `api` - Which API the client talks to, which names the key in any error.
+/// * `api_key` - The user's key for that API.
+/// * `insecure` - Whether to accept a certificate that does not verify.
+///
+/// # Returns
+///
+/// The client, ready to send requests.
+///
+/// # Errors
+///
+/// Returns an error if `api_key` cannot be a header value, or if the client
+/// cannot be built.
+pub fn build_client(api: Api, api_key: &str, insecure: bool) -> Result<Client> {
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        header::HeaderName::from_static(API_KEY_HEADER),
+        header::HeaderValue::from_str(api_key)
+            .with_context(|| format!("Invalid {} key", api.label()))?,
+    );
+    headers.insert(
+        header::ACCEPT,
+        header::HeaderValue::from_static(JSON_MEDIA_TYPE),
+    );
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one entrance the ban exists to hold: an #[expect] here also fails the build on the day the ban stops matching this call"
+    )]
+    let builder = Client::builder();
+
+    builder
+        .default_headers(headers)
+        .redirect(redirect::Policy::none())
+        .danger_accept_invalid_certs(insecure)
+        .build()
+        .context("Failed to create HTTP client")
 }
 
 /// Read `response` as `T`, or raise the most specific error the response

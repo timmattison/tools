@@ -9,6 +9,7 @@
 //! The server binds port zero, so the operating system picks the port. Two
 //! copies of one test therefore never fight over an address.
 
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -31,12 +32,28 @@ const MAX_HEAD_BYTES: usize = 65_536;
 const READ_CHUNK_BYTES: usize = 1_024;
 
 /// One request a [`TestServer`] read.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ReceivedRequest {
     /// The first line, such as `GET /info HTTP/1.1`.
     request_line: String,
     /// Every header, with the name in lower case.
     headers: Vec<(String, String)>,
+}
+
+impl fmt::Debug for ReceivedRequest {
+    /// Show the request the way a server log does: the request line, then
+    /// every header on one line.
+    ///
+    /// The derived form would do as well, but a derive does not count as a
+    /// read of a field, so `request_line` would be dead code to the compiler
+    /// while a failed assertion prints it.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.request_line)?;
+        for (name, value) in &self.headers {
+            write!(formatter, " | {name}: {value}")?;
+        }
+        Ok(())
+    }
 }
 
 impl ReceivedRequest {

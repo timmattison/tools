@@ -1,6 +1,6 @@
-use crate::http::{read_json_response, Api};
+use crate::http::{build_client, read_json_response, Api};
 use anyhow::{Context, Result};
-use reqwest::{header, Client, Url};
+use reqwest::{Client, Url};
 use serde::de::DeserializeOwned;
 
 /// Where the controller serves the integration API, relative to its origin.
@@ -25,23 +25,7 @@ impl UnifiClient {
                 For direct API access, use the local IP address of your UniFi controller."
             );
         }
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::HeaderName::from_static("x-api-key"),
-            header::HeaderValue::from_str(api_key).context("Invalid API key")?,
-        );
-        headers.insert(
-            header::ACCEPT,
-            header::HeaderValue::from_static("application/json"),
-        );
-
-        let client_builder = Client::builder()
-            .default_headers(headers)
-            .danger_accept_invalid_certs(insecure);
-
-        let client = client_builder
-            .build()
-            .context("Failed to create HTTP client")?;
+        let client = build_client(Api::Controller, api_key, insecure)?;
 
         let mut base_url = Url::parse(base_url).context("Invalid UniFi controller URL")?;
 

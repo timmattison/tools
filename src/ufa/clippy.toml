@@ -35,7 +35,22 @@
 # `from_arg_matches` reads no environment on its own, because the `ArgMatches`
 # it takes is already filled in. It is banned so the two-step spelling fails at
 # both of its lines rather than at one.
+# `reqwest::Client::builder` is banned because the settings that guard the
+# user's API key are properties of the builder, and a second builder somewhere
+# else in the crate carries none of them. Both of the clients that serve a
+# command had that shape: two independent lists of settings, in two modules,
+# for one design decision -- and both lists left out the redirect policy and
+# both left out the timeouts. `crate::http::build_client` is the one entrance,
+# and it states each of those settings once. `ClientBuilder::new` is the same
+# constructor under another name, so the ban names it too.
+#
+# The two calls that stay say so at the call site with an `#[expect]` and a
+# reason. `#[expect]` rather than `#[allow]` on purpose: it also fails the
+# build on the day this ban stops matching the call it was written for.
 disallowed-methods = [
+    { path = "reqwest::Client::builder", reason = "build the client through crate::http::build_client, which refuses a redirect and bounds the request" },
+    { path = "reqwest::ClientBuilder::new", reason = "the same constructor under another name; build the client through crate::http::build_client" },
+
     { path = "clap::Parser::try_parse_from", reason = "parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
     { path = "clap::Parser::parse_from", reason = "parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
     { path = "clap::Command::get_matches", reason = "this reads the real argument vector and the same UNIFI_* variables; parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
