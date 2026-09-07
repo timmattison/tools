@@ -79,8 +79,12 @@ Every setting is resolved in the same order, first match wins:
 1. **Command-line flag** — `--url`, `--api-key`, `--insecure`, and `--site-manager-api-key` on the
    `cloud` group.
 2. **Environment variable** — `UNIFI_URL`, `UNIFI_API_KEY`, `UNIFI_INSECURE`,
-   `UNIFI_SITE_MANAGER_API_KEY`. A `.env` file in the working directory is loaded before the
-   arguments are parsed, so its values count as environment variables.
+   `UNIFI_SITE_MANAGER_API_KEY`. A `.env` file **beside the config file** is loaded before the
+   arguments are parsed, so its values count as environment variables. That one path is the only
+   one read: `ufa` never searches the working directory or any directory above it, because a `.env`
+   found that way can name the controller your own API key goes to. `ufa config path` prints the
+   config file, and the `.env` sits next to it. A run that reads one names it on standard error,
+   so no run takes settings from a file without saying which.
 3. **Config file** — `config.toml` in your OS configuration directory.
 
 ```bash
@@ -92,8 +96,9 @@ export UNIFI_URL=https://192.168.1.1
 export UNIFI_API_KEY=YOUR_API_KEY
 ufa sites
 
-# 2. environment, from a .env file in the working directory
-cp .env.example .env   # then edit it
+# 2. environment, from the .env file beside the config file
+#    (`ufa config path` prints the config file; the .env sits next to it)
+cp .env.example ~/.config/ufa/.env   # macOS: ~/Library/Application Support/ufa/.env
 ufa sites
 
 # 3. config file, written once by the setup wizard
@@ -406,8 +411,10 @@ In descending order of preference:
 2. **Environment variable** (`UNIFI_API_KEY`, `UNIFI_SITE_MANAGER_API_KEY`) — reasonable for CI/CD,
    where the secret comes from the runner's secret store. Note that a process's environment is
    readable by other processes running as the same user.
-3. **A `.env` file** in the working directory — convenient for local development. Never commit it;
-   `.gitignore` here ignores `.env*` and makes an exception only for `.env.example`.
+3. **A `.env` file** beside the config file — convenient for local development. `ufa` reads that
+   one path and searches no other, so no directory you happen to run from can supply settings.
+   Never commit one; `.gitignore` here ignores `.env*` and makes an exception only for
+   `.env.example`.
 4. **Plaintext in the config file** (`api_key` / `site_manager_api_key`) — a legacy fallback, kept
    so existing configs keep working, and what setup falls back to when you paste a key that is not
    in 1Password. `ufa` restricts the file to mode `0600` on Unix, but the key is still cleartext:
@@ -435,12 +442,22 @@ ufa --insecure true sites
 export UNIFI_INSECURE=true
 ufa sites
 
-# .env file, or config.toml
+# .env file beside the config file, or config.toml
 UNIFI_INSECURE=true
 ```
 
 ```toml
 insecure = true
+```
+
+Every run that skips verification says so, on one line, to standard error — whatever turned it
+off, and on every run, not only the one where you chose it. Standard output is untouched, so
+`--output json` stays machine readable.
+
+```
+warning: TLS certificate verification is off. ufa sends the API key to the controller over a
+connection that nobody checked. To turn the check back on, drop --insecure, UNIFI_INSECURE, and
+`insecure` in the configuration file.
 ```
 
 Accepted spellings are `true`, `1`, `yes`, `on` and `false`, `0`, `no`, `off`. Anything else is
