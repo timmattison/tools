@@ -176,10 +176,10 @@ enum NeededAnswer {
 
 /// The one answer of a run that asked both questions.
 ///
-/// One round trip for the whole run. What a terminal draws does not change
-/// while a program runs, and neither does the size of one of its cells, so a
-/// second question costs a second budget on the one terminal that answers
-/// nothing.
+/// One round trip of this question for the whole run. What a terminal draws
+/// does not change while a program runs, and neither does the size of one of
+/// its cells, so a second question costs a second budget on the one terminal
+/// that answers nothing.
 static FULL_ANSWER: std::sync::OnceLock<Capabilities> = std::sync::OnceLock::new();
 
 /// The one answer of a run that asked about the protocol alone.
@@ -278,9 +278,9 @@ impl Capabilities {
         // descriptor from standard output. A run whose standard output is a
         // file still has a terminal to ask, and `ic --will-display` promises
         // that a redirected standard output does not change its answer.
-        // One read of the terminal for the whole run, and one window with it.
-        // The answer of the text area divides by the cell counts of the window
-        // it is about, so the two arrive from the same measure.
+        // One window for this read, measured beside it. The answer of the text
+        // area divides by the cell counts of the window it is about, so the two
+        // arrive from the same measure.
         let window = termsize::drawing_window();
         let answered = if asks_the_terminal(&classify_terminal_type(&env), window, needed) {
             // The cell counts of the window go along whatever the caller needs
