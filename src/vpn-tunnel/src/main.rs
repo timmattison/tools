@@ -357,3 +357,83 @@ fn read_credential_field(dir: &Path) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes a `.env` holding `content` into a fresh temporary directory.
+    ///
+    /// The directory is keyed by the operating system, so two copies of the
+    /// same test running at once never read each other's fixture. The caller
+    /// holds the returned handle, because the directory goes away when it
+    /// drops.
+    fn env_dir(content: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), content).unwrap();
+        dir
+    }
+
+    #[test]
+    fn plain_value_reads_back_unchanged() {
+        let dir = env_dir("WIREGUARD_PRIVATE_KEY=k\nCREDENTIAL_FIELD=credential-2\n");
+        assert_eq!(
+            read_credential_field(dir.path()),
+            Some("credential-2".to_string())
+        );
+    }
+
+    #[test]
+    fn trailing_space_is_dropped() {
+        let dir = env_dir("CREDENTIAL_FIELD=credential-2  \n");
+        assert_eq!(
+            read_credential_field(dir.path()),
+            Some("credential-2".to_string())
+        );
+    }
+
+    #[test]
+    fn trailing_carriage_return_is_dropped() {
+        // `str::lines` takes a carriage return off a line only when a line feed
+        // follows it, so a file whose last line carries no line feed keeps the
+        // carriage return. A Windows editor writes that file.
+        let dir = env_dir("WIREGUARD_PRIVATE_KEY=k\r\nCREDENTIAL_FIELD=credential-2\r");
+        assert_eq!(
+            read_credential_field(dir.path()),
+            Some("credential-2".to_string())
+        );
+    }
+
+    #[test]
+    fn crlf_line_ending_leaves_no_carriage_return() {
+        let dir = env_dir("CREDENTIAL_FIELD=credential-2\r\nWIREGUARD_PRIVATE_KEY=k\r\n");
+        assert_eq!(
+            read_credential_field(dir.path()),
+            Some("credential-2".to_string())
+        );
+    }
+
+    #[test]
+    fn a_value_of_whitespace_is_no_field() {
+        let dir = env_dir("CREDENTIAL_FIELD=   \n");
+        assert_eq!(read_credential_field(dir.path()), None);
+    }
+
+    #[test]
+    fn an_empty_value_is_no_field() {
+        let dir = env_dir("CREDENTIAL_FIELD=\n");
+        assert_eq!(read_credential_field(dir.path()), None);
+    }
+
+    #[test]
+    fn the_first_line_decides_even_when_it_is_blank() {
+        let dir = env_dir("CREDENTIAL_FIELD=\nCREDENTIAL_FIELD=credential-3\n");
+        assert_eq!(read_credential_field(dir.path()), None);
+    }
+
+    #[test]
+    fn a_file_without_the_line_has_no_field() {
+        let dir = env_dir("WIREGUARD_PRIVATE_KEY=k\n");
+        assert_eq!(read_credential_field(dir.path()), None);
+    }
+}
