@@ -138,6 +138,33 @@ fn kitty_said_ok(answer: &[u8]) -> bool {
     false
 }
 
+/// A kitty graphics command that the terminal refused, in the words of the
+/// terminal.
+///
+/// A refusal carries a code such as `ENOSPC`, and it carries a detailed
+/// message behind that code when the terminal wrote one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// The code the terminal named, such as `ENOSPC` or `ETOODEEP`.
+    pub code: String,
+    /// What the terminal said behind that code, or an empty string for a code
+    /// that arrived alone.
+    pub message: String,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "{}", self.code)
+    }
+}
+
+/// The first refusal that `answer` carries, or [`None`] for an answer that
+/// carries none.
+fn read_refusal(answer: &[u8]) -> Option<Refusal> {
+    let _ = answer;
+    None
+}
+
 /// Whether an answer of the primary device attributes names sixel.
 ///
 /// The answer is `ESC [ ? <parameters> c`, and the parameters are numbers
@@ -197,6 +224,13 @@ pub(crate) fn ask_the_terminal(budget: Duration) -> Option<AnsweredProtocol> {
     (&terminal).write_all(IMAGE_QUERY).ok()?;
     (&terminal).flush().ok()?;
     read_answer(&drain(fd, budget))
+}
+
+/// Ask the controlling terminal whether it refused the picture that went
+/// before this call.
+fn ask_for_a_refusal(budget: Duration) -> Option<Refusal> {
+    let _ = budget;
+    None
 }
 
 /// The terminal a program asks, whatever its standard output was pointed at.
@@ -1144,6 +1178,202 @@ mod tests {
             "the probe must read the answer the terminal wrote. {NAMED_NOTHING} \
              says it read no answer at all, {NAMED_KITTY} says it named the \
              other protocol, and {FAILED} says a call of the child failed"
+        );
+    }
+
+    /// A refusal of the image store, and the answer of the attributes behind
+    /// it.
+    ///
+    /// This is the shape that mosh writes. The image store of a mosh session
+    /// holds a fixed number of bytes, and a transmission above that number
+    /// arrives as `ENOSPC`.
+    const REFUSAL_ANSWER: &[u8] = b"\x1b_Gi=31;ENOSPC:the image store is full\x1b\\\x1b[?62;4c";
+
+    /// The code that [`REFUSAL_ANSWER`] carries.
+    const REFUSED_CODE: &str = "ENOSPC";
+
+    /// The detailed message that [`REFUSAL_ANSWER`] carries behind that code.
+    const REFUSED_DETAIL: &str = "the image store is full";
+
+    #[test]
+    fn a_refusal_gives_the_code_and_the_detail() {
+        // The code names what went wrong and the detail says it in words. A
+        // reader of the refusal prints both, because the code alone sends the
+        // user to a search engine.
+        assert_eq!(
+            read_refusal(REFUSAL_ANSWER),
+            Some(Refusal {
+                code: REFUSED_CODE.to_owned(),
+                message: REFUSED_DETAIL.to_owned(),
+            }),
+            "the colon divides the code of a refusal from its detail"
+        );
+    }
+
+    #[test]
+    fn a_refusal_with_no_detail_gives_the_code_alone() {
+        // The specification makes the detail optional, so a code stands as a
+        // whole refusal. A parser that waited for a colon would read this one
+        // as no refusal at all, and the picture would go missing in silence.
+        assert_eq!(
+            read_refusal(b"\x1b_Gi=31;ETOODEEP\x1b\\\x1b[?62;4c"),
+            Some(Refusal {
+                code: "ETOODEEP".to_owned(),
+                message: String::new(),
+            }),
+            "a code with no colon behind it is a whole refusal"
+        );
+    }
+
+    #[test]
+    fn an_ok_answer_is_no_refusal() {
+        // `OK` is what a terminal writes for a command it carried out. A
+        // reader that took it for a refusal would report a failure for every
+        // picture that drew.
+        assert_eq!(read_refusal(b"\x1b_Gi=99,I=13;OK\x1b\\"), None);
+    }
+
+    #[test]
+    fn an_answer_of_the_attributes_alone_is_no_refusal() {
+        // The request of the attributes is what ends the read, so its answer
+        // stands in the bytes of every round trip. It is no APC block, and the
+        // reader must walk past it.
+        assert_eq!(read_refusal(b"\x1b[?62;4c"), None);
+    }
+
+    #[test]
+    fn silence_is_no_refusal() {
+        // A terminal that answers nothing refused nothing that this crate can
+        // report. A run that owns no terminal reads the same silence.
+        assert_eq!(read_refusal(b""), None);
+    }
+
+    #[test]
+    fn a_refusal_behind_an_ok_still_arrives() {
+        // A terminal answers every command it reads, and a picture travels in
+        // more than one command. So the block that reports the refusal stands
+        // behind blocks that report success, and a reader that stopped at the
+        // first block would report that the picture drew.
+        assert_eq!(
+            read_refusal(b"\x1b_Gi=31;OK\x1b\\\x1b_Gi=31;ENOSPC\x1b\\\x1b[?62;4c"),
+            Some(Refusal {
+                code: REFUSED_CODE.to_owned(),
+                message: String::new(),
+            }),
+            "the reader walks every block and gives the first refusal"
+        );
+    }
+
+    #[test]
+    fn the_display_of_a_refusal_names_the_code_and_the_detail() {
+        // The user reads this line, and it is the whole of what the tool knows
+        // about why the picture is missing.
+        let refusal = Refusal {
+            code: REFUSED_CODE.to_owned(),
+            message: REFUSED_DETAIL.to_owned(),
+        };
+        assert_eq!(refusal.to_string(), "ENOSPC: the image store is full");
+
+        let bare = Refusal {
+            code: "ETOODEEP".to_owned(),
+            message: String::new(),
+        };
+        assert_eq!(
+            bare.to_string(),
+            "ETOODEEP",
+            "a refusal with no detail names its code and nothing else"
+        );
+    }
+
+    /// What the child of the refusal round trip exits with for the refusal
+    /// that this test wrote back.
+    const NAMED_THE_REFUSAL: libc::c_int = 51;
+
+    /// What it exits with when the probe read no refusal at all.
+    const NAMED_NO_REFUSAL: libc::c_int = 53;
+
+    /// What it exits with when the probe read some other refusal.
+    const NAMED_ANOTHER_REFUSAL: libc::c_int = 55;
+
+    /// Ask the controlling terminal of this child for a refusal, and exit with
+    /// what the probe read.
+    ///
+    /// This runs in a child of a fork of a test binary that holds many
+    /// threads, and it leaves through [`leave`].
+    fn report_the_refusal_round_trip(terminal: RawFd, master: RawFd) -> ! {
+        claim_the_terminal(terminal);
+        // SAFETY: the fork gave this child a copy of the master end, and this
+        // child reads nothing of it. The test holds the other copy, and the
+        // answer arrives on that one.
+        unsafe { libc::close(master) };
+        leave(match ask_for_a_refusal(ROUND_TRIP_BUDGET) {
+            Some(refusal) => {
+                if refusal.code == REFUSED_CODE && refusal.message == REFUSED_DETAIL {
+                    NAMED_THE_REFUSAL
+                } else {
+                    NAMED_ANOTHER_REFUSAL
+                }
+            }
+            None => NAMED_NO_REFUSAL,
+        })
+    }
+
+    #[test]
+    fn the_probe_reads_the_refusal_that_a_terminal_wrote() {
+        // The whole round trip, over a terminal that this test answers for.
+        // The probe writes the request of the attributes, because every
+        // terminal answers that one and its answer is what ends the read. A
+        // terminal that refused the picture writes the refusal first, since a
+        // terminal answers in the order it reads.
+        let (master, slave) = open_a_pseudo_terminal();
+
+        // SAFETY: fork(2) reads nothing of this process. The child leaves
+        // through `_exit` alone, so it runs no destructor of this one.
+        let child = unsafe { libc::fork() };
+        assert!(child != -1, "fork(2) must give a child");
+        if child == 0 {
+            report_the_refusal_round_trip(slave, master);
+        }
+
+        let query = read_the_query(master, REPORT_BUDGET);
+        // SAFETY: the buffer is owned here and the length is its own.
+        let put =
+            unsafe { libc::write(master, REFUSAL_ANSWER.as_ptr().cast(), REFUSAL_ANSWER.len()) };
+
+        let status = wait_for_the_child(child);
+
+        // Both descriptors go back before the assertions, because a failed
+        // assertion leaves this test through a panic.
+        // SAFETY: this test opened the two descriptors and nothing else holds
+        // them.
+        unsafe {
+            libc::close(slave);
+            libc::close(master);
+        }
+
+        assert_eq!(
+            query, ATTRIBUTES_REQUEST,
+            "the probe asks for the attributes alone, and it sends no second picture"
+        );
+        assert_eq!(
+            put,
+            isize::try_from(REFUSAL_ANSWER.len())
+                .expect("the answer is far below the size of a read"),
+            "the whole of the answer reaches the terminal"
+        );
+
+        let status = status.expect("the child must report inside the budget");
+        assert!(
+            libc::WIFEXITED(status),
+            "the child must exit, and it exited for a signal instead"
+        );
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            NAMED_THE_REFUSAL,
+            "the probe must read the refusal the terminal wrote. \
+             {NAMED_NO_REFUSAL} says it read no refusal at all, \
+             {NAMED_ANOTHER_REFUSAL} says it read another one, and {FAILED} \
+             says a call of the child failed"
         );
     }
 }
