@@ -90,7 +90,7 @@ pub async fn discover_controllers() -> Result<Vec<DiscoveredController>> {
 /// # Errors
 ///
 /// Returns an error if the mDNS daemon cannot be started or cannot browse.
-/// The daemon is stopped on every path out, including those errors.
+/// The stop request goes out on every path out, including those errors.
 async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
     let mdns = StopOnDrop::new(ServiceDaemon::new()?);
     let mut controllers = Vec::new();
@@ -203,24 +203,29 @@ async fn resolve_address(host: &str, port: u16) -> String {
 
 /// A background service that keeps running until it is told to stop.
 trait Stoppable {
-    /// Stop the service and let its thread finish.
+    /// Ask the service to stop.
+    ///
+    /// The request goes out and the call returns. The service thread ends
+    /// after it reads the request, which is later than this call returns.
     fn stop(&self);
 }
 
 impl Stoppable for ServiceDaemon {
     fn stop(&self) {
-        // The daemon is on its way out either way; a send failure here means
-        // it has already stopped.
+        // `shutdown` sends the daemon an exit command and hands back a
+        // receiver for the status of it. This call drops that receiver, so
+        // the request goes out and nothing waits for the daemon to act on it.
+        // A send failure means the daemon has already stopped.
         let _ = self.shutdown();
     }
 }
 
-/// Stops what it holds when it goes out of scope -- including when an early
-/// `?` is what takes the scope away.
+/// Asks what it holds to stop when it goes out of scope -- including when an
+/// early `?` is what takes the scope away.
 ///
 /// `ServiceDaemon` runs a background thread for the life of the process
-/// unless it is shut down, and discovery creates one every time it runs, so
-/// forgetting on any one path leaks a thread for good.
+/// unless it is asked to stop, and discovery creates one every time it runs,
+/// so a path that forgets the request leaves a thread behind for good.
 struct StopOnDrop<T: Stoppable>(T);
 
 impl<T: Stoppable> StopOnDrop<T> {
@@ -377,8 +382,9 @@ mod stop_on_drop_tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    /// A stand-in for the mDNS daemon: it records being stopped instead of
-    /// binding a multicast socket, so the test never touches the network.
+    /// A stand-in for the mDNS daemon. It records the stop request instead
+    /// of a bind of a multicast socket, so the test never touches the
+    /// network.
     struct FakeService {
         stopped: Rc<Cell<bool>>,
     }
@@ -398,7 +404,8 @@ mod stop_on_drop_tests {
         (StopOnDrop::new(service), stopped)
     }
 
-    /// The ordinary path: the scope ends, the background thread ends with it.
+    /// The ordinary path: the scope ends and the stop request goes out with
+    /// it.
     #[test]
     fn leaving_the_scope_stops_the_service() {
         let (guard, stopped) = watched_service();
@@ -408,7 +415,7 @@ mod stop_on_drop_tests {
 
         assert!(
             stopped.get(),
-            "the background thread must not outlive the guard"
+            "the guard must ask the service to stop as it goes out of scope"
         );
     }
 
@@ -428,7 +435,7 @@ mod stop_on_drop_tests {
         assert!(outcome.is_err(), "the scope must have ended early");
         assert!(
             stopped.get(),
-            "an error path must stop the service too, or it leaks a thread"
+            "an error path must ask the service to stop too, or the thread stays"
         );
     }
 }
