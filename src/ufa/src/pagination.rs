@@ -102,6 +102,13 @@ where
 /// the server's own `totalCount` says more items exist means the server has
 /// stopped making progress; that is reported as an error instead of being
 /// looped on forever or quietly truncated.
+///
+/// Every page also has to be the page that was asked for. A server that
+/// ignores the offset and answers the first page every time sends a full page
+/// each time, so the empty-page guard never fires: the walk collects the same
+/// items over and over until the count reaches `totalCount`, and reports that
+/// pile as the collection. The page's own `offset` is what tells the two
+/// apart, so it is compared against the offset the walk asked for.
 async fn collect_pages<T, F, Fut>(mut fetch_page: F) -> Result<Vec<T>>
 where
     F: FnMut(u64) -> Fut,
@@ -110,7 +117,16 @@ where
     let mut items: Vec<T> = Vec::new();
 
     loop {
-        let page = fetch_page(collected(&items)).await?;
+        let wanted = collected(&items);
+        let page = fetch_page(wanted).await?;
+
+        anyhow::ensure!(
+            page.offset == wanted,
+            "The server answered the request for items from offset {wanted} with the page at \
+             offset {}. It is not advancing through the collection, so the answer repeats the \
+             items it keeps sending and leaves the rest of them out.",
+            page.offset
+        );
 
         if page.data.is_empty() {
             anyhow::ensure!(
