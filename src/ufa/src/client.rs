@@ -29,14 +29,27 @@ impl UnifiClient {
 
         let mut base_url = Url::parse(base_url).context("Invalid UniFi controller URL")?;
 
-        // Set the path to exactly what we need, ensuring it ends with a slash
-        if base_url.path() == "/" || base_url.path().is_empty() {
-            base_url.set_path(INTEGRATION_API_PATH);
+        // A controller behind a reverse proxy answers at a path prefix, and
+        // the integration API hangs off that prefix rather than off the
+        // origin. An origin with no path of its own leaves the integration
+        // path standing on its own.
+        //
+        // A URL that already names the integration API is used where it
+        // stands. The path is what the controller serves, so a user who
+        // pasted the whole thing has given the right answer, and appending to
+        // it would ask for `.../integration/v1/proxy/network/integration/v1/`.
+        //
+        // The result always ends in a slash, whichever shape it was built
+        // from. Every request is a relative join onto this URL, and
+        // `Url::join` replaces the last segment of a path that does not end
+        // in one.
+        let prefix = base_url.path().trim_end_matches('/');
+        let suffix = if prefix.ends_with(INTEGRATION_API_PATH.trim_end_matches('/')) {
+            "/"
         } else {
-            // If there's already a path, append to it
-            let current_path = base_url.path().trim_end_matches('/');
-            base_url.set_path(&format!("{current_path}{INTEGRATION_API_PATH}"));
-        }
+            INTEGRATION_API_PATH
+        };
+        base_url.set_path(&format!("{prefix}{suffix}"));
 
         Ok(Self { client, base_url })
     }
