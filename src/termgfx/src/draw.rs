@@ -293,11 +293,11 @@ pub struct Budget {
 
 /// The characters of payload that one image can spend.
 ///
-/// A terminal that keeps every image it draws caps what it keeps, and a
-/// transmission above that cap draws nothing at all. mosh is the cap that
-/// matters in practice. It holds every image for the length of the session,
-/// because a client that reconnects holds none, and it refuses a transmission
-/// above one mebicharacter with `ENOSPC`.
+/// A terminal that carries an image over a network caps what one image can
+/// spend, and a transmission above that cap draws nothing at all. mosh is the
+/// cap that matters in practice, and it bounds each of the three protocols
+/// that this module writes. [`PayloadBudget::MOSH`] names those three caps and
+/// says where each one stands.
 ///
 /// The budget bounds the payload that the protocol carries, and the keys in
 /// front of that payload are a few tens of characters. [`PayloadBudget::MOSH`]
@@ -316,18 +316,33 @@ impl PayloadBudget {
     /// The room that [`PayloadBudget::MOSH`] leaves for the keys of the
     /// command.
     ///
-    /// mosh counts the control block and the payload of one transmission
-    /// together, so the keys come out of the same mebicharacter that the
-    /// payload spends. A control block runs to about eighty characters, and
-    /// this is far above that, because a picture that loses four kibicharacters
-    /// of resolution loses nothing a reader can see.
+    /// mosh counts the keys and the payload of one command together, so the
+    /// keys come out of the same mebicharacter that the payload spends. A
+    /// Kitty control block runs to about eighty characters, and the arguments
+    /// of the other two protocols are shorter. This room stands far above all
+    /// three, because a picture that loses four kibicharacters of resolution
+    /// loses nothing a reader can see.
     const CONTROL_BLOCK_ROOM: usize = 4096;
 
     /// The budget of a mosh session.
     ///
-    /// `MAXIMUM_STORED_CHARACTERS` of `crates/mosh-terminal/src/imagestore.rs`
-    /// is one mebicharacter, and `ImageStore::hold` refuses one transmission
-    /// above it with [`crate::Refusal`] `ENOSPC`.
+    /// mosh caps one image at one mebicharacter, and the cap is the same
+    /// number for each of the three protocols that this module writes. The
+    /// three numbers stand in `timmattison/mosh-rs` at commit `5676142`
+    /// (<https://github.com/timmattison/mosh-rs>):
+    ///
+    /// * Kitty: `MAXIMUM_STORED_CHARACTERS` of
+    ///   `crates/mosh-terminal/src/imagestore.rs`. `ImageStore::hold` refuses a
+    ///   transmission above it with [`crate::Refusal`] `ENOSPC`, and it counts
+    ///   `control.len() + payload.len()`. The store holds every image it
+    ///   accepted under that same number for the length of the session, and it
+    ///   evicts the oldest images to make room for a new one.
+    /// * iTerm2: `MAXIMUM_INLINE_IMAGE_CHARACTERS` of
+    ///   `crates/mosh-terminal/src/dispatcher.rs`. The protocol carries a whole
+    ///   image in one operating system command, and mosh drops every character
+    ///   of that command above the cap.
+    /// * Sixel: `MAXIMUM_SIXEL_STRING_CHARACTERS` of the same file, which
+    ///   bounds one device-control string in the same way.
     pub const MOSH: Self = Self(1024 * 1024 - Self::CONTROL_BLOCK_ROOM);
 
     /// The budget of a terminal that states no cap of its own.
@@ -1234,7 +1249,9 @@ mod tests {
     ///
     /// `MAXIMUM_STORED_CHARACTERS` of `crates/mosh-terminal/src/imagestore.rs`,
     /// which `ImageStore::hold` tests against `control.len() + payload.len()`.
-    /// A transmission above it earns `ENOSPC` and draws nothing.
+    /// A transmission above it earns `ENOSPC` and draws nothing. The file
+    /// stands in `timmattison/mosh-rs` at commit `5676142`
+    /// (<https://github.com/timmattison/mosh-rs>).
     const MOSH_STORE_CHARACTERS: usize = 1024 * 1024;
 
     /// The side of the picture that the mosh budget test fits.
