@@ -10,7 +10,7 @@
 ## Solution Overview
 
 1. Add field enumeration to `op-cache` library so it can list all credential fields on an item
-2. Modify `vpn-tunnel generate` to auto-select the first unused credential by comparing available fields against keys in running gluetun containers
+2. Modify `vpn-tunnel generate` to auto-select the first unused credential by comparing available fields against keys in running gluetun containers, and to keep the credential an already-generated directory names instead of selecting a new one
 3. Store the selected credential field name in `.env` for status reporting
 
 ## Design
@@ -48,8 +48,9 @@ The `generate` command flow becomes:
 2. **Error if none found:** Clear error about expected 1Password item structure
 3. **Detect in-use keys:** Run `docker ps --format '{{.Names}}\t{{.Image}}'` and keep the rows whose image is `qmcgaw/gluetun` at any tag or digest, then `docker inspect <name>` to extract `WIREGUARD_PRIVATE_KEY` from each container's environment. The `--filter ancestor=` form cannot be used: docker resolves an untagged reference to `:latest`, so on a machine that only ever pulled the pinned tag the filter matches nothing while `docker ps` still exits 0
 4. **Stop on a docker failure:** A `docker ps` or `docker inspect` that cannot be started or exits non-zero stops `generate`, reporting the docker stderr. A stopped daemon or a permission error must not read as "no tunnels are running", because that hands out a key a running tunnel already holds
-5. **Match and select:** Compare available credential values against in-use keys. Pick the first unused one
-6. **Error if all in use:** Display which container is using each key:
+5. **Reuse what the directory already names:** Read `CREDENTIAL_FIELD` from `<output_dir>/.env`. When a credential carries that exact label, select it and skip the match below, even when a running container holds its key — that container is the tunnel this directory started, and regenerating the directory must not move it to another key. A label that no credential carries any more (the credential was removed from 1Password) falls through to the match below rather than failing
+6. **Match and select:** Compare available credential values against in-use keys. Pick the first unused one
+7. **Error if all in use:** Display which container is using each key:
    ```
    error: all WireGuard credentials are in use
 
@@ -59,7 +60,7 @@ The `generate` command flow becomes:
    Add another credential to "ProtonVPN WireGuard key" in 1Password,
    or stop an existing tunnel with: vpn-tunnel down --dir <path>
    ```
-7. **Generate:** Pass selected key + field name to the generator
+8. **Generate:** Pass selected key + field name to the generator
 
 ### 3. .env and Status Changes
 
@@ -78,9 +79,14 @@ CREDENTIAL_FIELD=credential-2
 Using credential: credential-2 (1 of 3 available, 1 in use)
 ```
 
+A run that kept the credential the directory already names says so on the next line, so a user who regenerates a directory is not left wondering why the counts did not move:
+```
+Reused the credential that the .env in ./vpn already names.
+```
+
 ### 4. Known Limitations
 
-- **Race condition at generate time:** If two `generate` commands run simultaneously before either calls `up`, both could select the same key. This is a narrow window and the VPN provider will reject the duplicate, making it diagnosable. No lockfile mitigation for now.
+- **Two generate runs into two different directories:** Detection reads running containers, so a credential a generated directory holds is free until that directory's tunnel starts. Two `generate` runs into two *different* directories, neither of them started, therefore both select the same key. Regenerating one directory is not affected: that directory's `.env` names its credential and `generate` keeps it. Closing the remaining gap needs a record of where past tunnels were generated, which the tool does not keep. The VPN provider rejects the duplicate, which makes it diagnosable.
 - **Docker must be running** for in-use detection. A docker that is down, unreachable, or refuses the command is not read as "no containers are running": `generate` stops and reports what docker said, because a credential chosen on unknown state can duplicate a live tunnel's key.
 
 ## Testing
@@ -98,6 +104,10 @@ Using credential: credential-2 (1 of 3 available, 1 in use)
 - Multiple credentials, none in use -> selects first
 - Multiple credentials, first in use -> selects second
 - All credentials in use -> returns error with container names
+- A label an existing `.env` names -> selects that credential over the first free one
+- A label an existing `.env` names, whose key a running container holds -> still selects that credential, and never reaches the all-in-use error
+- A label no credential carries any more -> falls back to the first free credential
+- A label matches a whole label, never a prefix of one (`credential-2` does not select `credential-20`)
 - Credential field name stored correctly in .env output
 - Every gluetun tag (pinned, `latest`, bare, digest) is detected; `evil/qmcgaw/gluetun` and `qmcgaw/gluetunnel` are not
 - A failed `docker ps`, a failed `docker inspect`, and a docker that cannot be started each return an error, never an empty list

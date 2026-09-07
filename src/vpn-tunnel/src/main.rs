@@ -157,19 +157,29 @@ fn run(cli: Cli) -> Result<()> {
             let running_tunnels = credential::find_running_tunnels()
                 .context("could not determine which credentials are in use")?;
 
-            let selected = credential::select_credential(&available_fields, &running_tunnels, None)
-                .map_err(|err| {
-                    let mut msg = "all WireGuard credentials are in use\n".to_string();
-                    for usage in &err.usage {
-                        msg.push_str(&format!(
-                            "\n  {:<20} -> used by {}",
-                            usage.field_label, usage.container_name
-                        ));
-                    }
-                    msg.push_str("\n\nAdd another credential in 1Password,");
-                    msg.push_str("\nor stop an existing tunnel with: vpn-tunnel down --dir <path>");
-                    anyhow::anyhow!("{msg}")
-                })?;
+            // A directory that was generated before names its credential in
+            // its own .env. Regenerating it keeps that credential: a second
+            // selection would hand this directory a key that a tunnel nobody
+            // has started yet may already carry.
+            let existing_field = read_credential_field(&output_dir);
+
+            let selected = credential::select_credential(
+                &available_fields,
+                &running_tunnels,
+                existing_field.as_deref(),
+            )
+            .map_err(|err| {
+                let mut msg = "all WireGuard credentials are in use\n".to_string();
+                for usage in &err.usage {
+                    msg.push_str(&format!(
+                        "\n  {:<20} -> used by {}",
+                        usage.field_label, usage.container_name
+                    ));
+                }
+                msg.push_str("\n\nAdd another credential in 1Password,");
+                msg.push_str("\nor stop an existing tunnel with: vpn-tunnel down --dir <path>");
+                anyhow::anyhow!("{msg}")
+            })?;
 
             let wg_key = &selected.key;
             let credential_field = &selected.field_label;
@@ -199,6 +209,12 @@ fn run(cli: Cli) -> Result<()> {
                 selected.total,
                 selected.in_use
             );
+            if existing_field.as_deref() == Some(credential_field.as_str()) {
+                println!(
+                    "Reused the credential that the .env in {} already names.",
+                    output_dir.display()
+                );
+            }
             println!("\nNext steps:");
             println!("  cd {} && ./start.sh", output_dir.display());
             println!("  ./status.sh          # check VPN IP");
