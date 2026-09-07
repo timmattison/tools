@@ -14,17 +14,20 @@
 //! not answer at all for a port below the privileged threshold, where the
 //! kernel refuses the bind before the question is reached.
 //!
-//! macOS publishes its own list of listening sockets to any user, so
-//! [`port_status`] reads that list instead. See [`macos`] for the layout, the
-//! walk, and the checks that keep a wrong transcription loud.
+//! macOS and Linux each publish their own list of listening sockets to any
+//! user, so [`port_status`] reads that list instead. See [`macos`] for the
+//! layout of the kernel's records, the walk, and the checks that keep a wrong
+//! transcription loud, and [`linux`] for the two `/proc` tables and the checks
+//! that keep a wrong reading loud.
 //!
 //! # The bind probe is a fallback, and it is going away
 //!
 //! Every platform without a reader still binds, in the `bind_probe` module
 //! below — which is why that name is not a link here: it is compiled out on
-//! macOS. It is a stopgap: a Linux reader lands next, and the bind probe goes
-//! with it. Do not build anything new on it.
+//! both platforms that have a reader. It is a stopgap, and the next change
+//! deletes it. Do not build anything new on it.
 
+mod linux;
 mod macos;
 
 /// What this module was able to establish about a port.
@@ -46,15 +49,19 @@ pub enum PortStatus {
 
 /// Say whether anything is listening on `port` on this host.
 ///
-/// On macOS this reads the kernel's list of TCP sockets, which needs no
-/// privileges and holds no port. Everywhere else it still binds the port to
+/// On macOS and Linux this reads the kernel's list of TCP sockets, which needs
+/// no privileges and holds no port. Everywhere else it still binds the port to
 /// find out — see the module documentation.
 pub fn port_status(port: u16) -> PortStatus {
     #[cfg(target_os = "macos")]
     {
         macos::port_status(port)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::port_status(port)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         bind_probe::tcp_port_probe(port)
     }
@@ -64,7 +71,7 @@ pub fn port_status(port: u16) -> PortStatus {
 ///
 /// The fallback for every platform that has no socket-table reader yet. A
 /// later change deletes this module; nothing new should call into it.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod bind_probe {
     use super::PortStatus;
     use std::io;
