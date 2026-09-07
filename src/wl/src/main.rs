@@ -29,7 +29,7 @@ fn non_root_privilege_note(euid: u32) -> Option<&'static str> {
     } else {
         Some(
             "note: running without root; processes owned by other users are not visible. \
-             Re-run with sudo (e.g. `sudo -E wl <port>`) for complete results.",
+             Re-run with sudo (e.g. `sudo wl <port>`) for complete results.",
         )
     }
 }
