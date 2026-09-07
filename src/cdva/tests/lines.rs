@@ -405,13 +405,37 @@ fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The directories of the repository root that hold no source anybody wrote.
+/// The directories that hold no source anybody wrote.
 ///
-/// Both are build output that the repository's own `.gitignore` names, and
+/// Each one is build output that the repository's own `.gitignore` names, and
 /// `target` alone runs to several gigabytes. They are named here rather than
 /// left to the ignore files because this walk turns the ignore files off; see
 /// [`HOW`].
-const BUILD_DIRECTORIES: &[&str] = &["target", "node_modules"];
+///
+/// `dist` is the bundle a frontend build writes. `src/nle` holds a Tauri
+/// frontend, so `pnpm build` writes one minified row of JavaScript to
+/// `src/nle/frontend/dist`, and the JavaScript row of the table reads that row
+/// as ending inside a template string.
+const BUILD_DIRECTORIES: &[&str] = &["target", "node_modules", "dist"];
+
+/// Whether a path the walk found lies inside build output.
+///
+/// [`roots`] drops a build directory that sits at the top of the repository,
+/// and a build directory below a root reaches the walk. `src/nle/frontend/dist`
+/// is such a directory, one level below the `src` root, so the name alone
+/// cannot be the rule. Every component of the path answers instead.
+///
+/// The path read here is the one relative to the root that found it, not the
+/// absolute one. A checkout that lives under a directory named `target` is
+/// source, and reading the absolute path would call all of it build output.
+fn is_build_output(relative: &Path) -> bool {
+    relative.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| BUILD_DIRECTORIES.contains(&name))
+    })
+}
 
 /// How the walk reads the tree.
 ///
@@ -554,8 +578,8 @@ fn no_source_of_this_repository_ends_unterminated() {
     let mut languages: BTreeSet<&'static str> = BTreeSet::new();
     let mut read = 0_usize;
     let mut unterminated: Vec<String> = Vec::new();
-    for (path, _) in &found {
-        if path.starts_with(&fixtures) {
+    for (path, relative) in &found {
+        if path.starts_with(&fixtures) || is_build_output(relative) {
             continue;
         }
         let Some(language) = Language::from_path(path) else {
