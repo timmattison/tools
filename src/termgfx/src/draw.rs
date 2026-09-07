@@ -8,8 +8,8 @@
 //! # Why the entrance is one call
 //!
 //! Three inline-image protocols are in service, and each of them wants the
-//! image in a different shape. Kitty takes the raw pixels in base64, in chunks
-//! of a fixed size, under a list of keys. iTerm2 takes a whole image file in
+//! image in a different shape. Kitty takes the image in base64, in chunks of a
+//! fixed size, under a list of keys. iTerm2 takes a whole image file in
 //! base64, in one escape sequence, with the size in character cells. Sixel
 //! takes a palette and then a band of pixels at a time, at a size in pixels,
 //! from an encoder. A caller that picked the protocol itself would then hold
@@ -28,8 +28,9 @@ use std::io::{self, Write};
 
 use base64::prelude::{Engine, BASE64_STANDARD};
 use icy_sixel::{sixel_encode, EncodeOptions};
+use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
-use image::DynamicImage;
+use image::{DynamicImage, ExtendedColorType, ImageEncoder};
 
 use crate::cursor::{write_image_with_cursor_contract, CursorContract};
 use crate::detect::{display_routine_for, Capabilities, DisplayRoutine};
@@ -244,6 +245,13 @@ fn cursor_contract(
 
 /// The shape that one Kitty image travels in.
 ///
+/// The protocol takes either the raw pixels of an image or a whole image file,
+/// and the two cost very different numbers of characters. Base64 turns three
+/// bytes into four characters, and three bytes is one pixel, so raw pixels cost
+/// four characters for every pixel: 580800 characters for a photograph of 330
+/// pixels by 440. Mosh gives a whole session less than half of that, so such a
+/// picture never arrives. A PNG of the same photograph costs a fraction of it.
+///
 /// The variant owns the `f=` key, the keys that state the pixel size, and the
 /// encoder, all three together. One place therefore decides the header and the
 /// payload, and the two cannot name different shapes.
@@ -252,9 +260,11 @@ fn cursor_contract(
 /// bytes for one pixel is a smaller payload than four.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KittyPayload {
-    /// The raw pixels, three bytes for one pixel.
+    /// The raw pixels, three bytes for one pixel, under `f=24`. The pixels
+    /// state no size of their own, so the header states it beside them.
     RawRgb,
-    /// A whole PNG file.
+    /// A whole PNG file, under `f=100`. A Kitty terminal reads the width and
+    /// the height out of the file, so the header states neither.
     Png,
 }
 
@@ -264,30 +274,66 @@ impl KittyPayload {
     /// # Returns
     /// The value of the key, with no key name and no comma.
     fn format_key(self) -> &'static str {
-        "24"
+        match self {
+            KittyPayload::RawRgb => "24",
+            KittyPayload::Png => "100",
+        }
     }
 
     /// Give the header keys that state the pixel size of the image.
+    ///
+    /// A PNG carries its own width and height, and the documentation of Kitty
+    /// says that a terminal reads them out of the file. An `s=` key or a `v=`
+    /// key beside a PNG is therefore a second statement of one fact, which is a
+    /// second statement that can disagree.
     ///
     /// # Arguments
     /// * `width` - The width of the image in pixels.
     /// * `height` - The height of the image in pixels.
     ///
     /// # Returns
-    /// The keys, with the comma that joins them to the header before them.
+    /// The keys, with the comma that joins them to the header before them, for
+    /// raw pixels. Nothing at all for a PNG.
     fn pixel_size_keys(self, width: u32, height: u32) -> String {
-        format!(",s={width},v={height}")
+        match self {
+            KittyPayload::RawRgb => format!(",s={width},v={height}"),
+            KittyPayload::Png => String::new(),
+        }
     }
 
     /// Encode `image` into the base64 payload of this shape.
+    ///
+    /// The PNG goes out at the default compression of the encoder and not at
+    /// the strongest one. A still picture must appear at once, and the
+    /// strongest compression spends seconds of a large picture to save a few
+    /// characters of it.
     ///
     /// # Arguments
     /// * `image` - The image at the size that it draws at.
     ///
     /// # Errors
-    /// Gives [`DrawError::Encode`] when the encoder refuses the image.
+    /// Gives [`DrawError::Encode`] when the PNG encoder refuses the image.
     fn encode(self, image: &DynamicImage) -> Result<String, DrawError> {
-        Ok(BASE64_STANDARD.encode(image.to_rgb8().as_raw()))
+        // Both shapes start from RGB8. The alpha channel changes no pixel that
+        // a terminal draws, and it makes the payload one third larger.
+        let rgb = image.to_rgb8();
+
+        match self {
+            KittyPayload::RawRgb => Ok(BASE64_STANDARD.encode(rgb.as_raw())),
+            KittyPayload::Png => {
+                let mut file = Vec::new();
+                PngEncoder::new(&mut file)
+                    .write_image(
+                        rgb.as_raw(),
+                        rgb.width(),
+                        rgb.height(),
+                        ExtendedColorType::Rgb8,
+                    )
+                    .map_err(|error| DrawError::Encode(error.to_string()))?;
+
+                Ok(BASE64_STANDARD.encode(&file))
+            }
+        }
     }
 }
 
@@ -307,6 +353,23 @@ impl KittyPayload {
 /// cursor mode, because every image of every mode wants the silence. A Kitty
 /// terminal reads the keys of a chunked image from the first chunk alone, and
 /// the first chunk is the header, so the key covers the chunked path as well.
+///
+/// # The two shapes of the payload
+///
+/// An image leaves here in one of the two shapes of [`KittyPayload`], and
+/// `request.cursor` names which one.
+///
+/// [`Cursor::BelowImage`] is one still picture, and it travels as a PNG.
+/// Raw pixels cost four base64 characters for every pixel, so a photograph of
+/// 330 pixels by 440 costs 580800 characters that way. Mosh gives a whole
+/// session less than half of that, and the picture then never arrives. A still
+/// picture goes out one time, so the characters are the whole of what it pays,
+/// and a PNG of it costs a fraction of the raw pixels.
+///
+/// [`Cursor::Held`] is one frame of a video, and it keeps the raw pixels. The
+/// caller draws the next frame directly after this one, so a PNG encoder here
+/// runs one time for every frame, and that time costs more than the characters
+/// that it saves.
 ///
 /// Ghostty and WezTerm read this same protocol.
 ///
@@ -350,7 +413,14 @@ fn write_kitty<W: Write>(
         cell_height_px,
     );
 
-    let payload = KittyPayload::RawRgb;
+    // The cursor names the two callers apart. A caller that holds the cursor is
+    // drawing one frame of a video, and it draws the next one directly after.
+    // A caller that asks for the row below the image is drawing one still
+    // picture, and the characters are the whole of what that picture pays.
+    let payload = match request.cursor {
+        Cursor::Held { .. } => KittyPayload::RawRgb,
+        Cursor::BelowImage => KittyPayload::Png,
+    };
     let base64_data = payload.encode(&image)?;
 
     let (_, term_rows) = cells_of(window);
@@ -623,7 +693,9 @@ mod tests {
                 image::Rgb([
                     channel(x * 200 / (PHOTOGRAPH_WIDTH - 1) + grain),
                     channel(y * 180 / (PHOTOGRAPH_HEIGHT - 1) + 40 + grain),
-                    channel((x + y) * 150 / (PHOTOGRAPH_WIDTH + PHOTOGRAPH_HEIGHT - 2) + 60 + grain),
+                    channel(
+                        (x + y) * 150 / (PHOTOGRAPH_WIDTH + PHOTOGRAPH_HEIGHT - 2) + 60 + grain,
+                    ),
                 ])
             },
         ))
