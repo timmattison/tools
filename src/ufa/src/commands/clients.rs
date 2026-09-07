@@ -268,3 +268,277 @@ async fn unauthorize_guest(
     println!("Guest access unauthorized successfully");
     Ok(())
 }
+
+#[cfg(test)]
+mod row_tests {
+    use super::*;
+    use crate::models::{
+        ClientAccess, TeleportClient, UnknownClient, VpnClient, WiredClient, WirelessClient,
+    };
+
+    /// What a cell says when the client kind has no such address at all.
+    ///
+    /// Spelled out here rather than read from the constant it stands for. A
+    /// test that quotes the value under test proves only that the value
+    /// equals itself, so this is the expectation and the code has to meet it.
+    const NO_ADDRESS: &str = "N/A";
+
+    /// The network address a sample client reports.
+    const AN_IP: &str = "192.168.1.50";
+
+    /// The hardware address a sample client reports.
+    const A_MAC: &str = "aa:bb:cc:dd:ee:ff";
+
+    /// When a sample client connected.
+    const A_TIMESTAMP: &str = "2026-09-07T03:27:25Z";
+
+    /// The name a sample client reports.
+    const A_NAME: &str = "a client";
+
+    /// The `type` of a client kind no build of this tool knows, standing in
+    /// for whatever Ubiquiti ships in the next firmware.
+    const A_FUTURE_KIND: &str = "FUTURE_FIRMWARE_KIND";
+
+    /// The id of each sample. One per kind, so a row that took its id from
+    /// the wrong client is visible in the failure.
+    const WIRED_ID: Uuid = Uuid::from_u128(0x11);
+    /// The id of the wireless sample. See [`WIRED_ID`].
+    const WIRELESS_ID: Uuid = Uuid::from_u128(0x22);
+    /// The id of the VPN sample. See [`WIRED_ID`].
+    const VPN_ID: Uuid = Uuid::from_u128(0x33);
+    /// The id of the Teleport sample. See [`WIRED_ID`].
+    const TELEPORT_ID: Uuid = Uuid::from_u128(0x44);
+    /// The id of the unrecognized sample. See [`WIRED_ID`].
+    const UNKNOWN_ID: Uuid = Uuid::from_u128(0x55);
+    /// The device a wired or wireless sample hangs off.
+    const UPLINK_ID: Uuid = Uuid::from_u128(0x66);
+
+    /// Name the variant `client` is.
+    ///
+    /// The match carries no catch-all arm on purpose. A sixth `Client`
+    /// variant fails to compile here, which sends whoever adds it to this
+    /// file for a sample and a row test of its own. Without that, a new kind
+    /// of client would reach the listing with nothing said about how it
+    /// renders.
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The client to name.
+    ///
+    /// # Returns
+    ///
+    /// The name of the variant, as the enum declares it.
+    fn variant_name(client: &Client) -> &'static str {
+        match client {
+            Client::Wired(_) => "Wired",
+            Client::Wireless(_) => "Wireless",
+            Client::Vpn(_) => "Vpn",
+            Client::Teleport(_) => "Teleport",
+            Client::Unknown(_) => "Unknown",
+        }
+    }
+
+    /// Every name [`variant_name`] can answer with, in the order `Client`
+    /// declares its variants.
+    const EVERY_VARIANT: [&str; 5] = ["Wired", "Wireless", "Vpn", "Teleport", "Unknown"];
+
+    /// A wired client that reported everything it can report.
+    fn wired() -> Client {
+        Client::Wired(WiredClient {
+            id: WIRED_ID,
+            name: A_NAME.to_string(),
+            connected_at: Some(A_TIMESTAMP.to_string()),
+            ip_address: Some(AN_IP.into()),
+            mac_address: A_MAC.into(),
+            uplink_device_id: UPLINK_ID,
+            access: ClientAccess::Default,
+        })
+    }
+
+    /// A wireless client that reported everything it can report.
+    fn wireless() -> Client {
+        Client::Wireless(WirelessClient {
+            id: WIRELESS_ID,
+            name: A_NAME.to_string(),
+            connected_at: Some(A_TIMESTAMP.to_string()),
+            ip_address: Some(AN_IP.into()),
+            mac_address: A_MAC.into(),
+            uplink_device_id: UPLINK_ID,
+            access: ClientAccess::Default,
+        })
+    }
+
+    /// A VPN client. The kind carries no hardware address at all.
+    fn vpn() -> Client {
+        Client::Vpn(VpnClient {
+            id: VPN_ID,
+            name: A_NAME.to_string(),
+            connected_at: Some(A_TIMESTAMP.to_string()),
+            ip_address: Some(AN_IP.into()),
+            access: ClientAccess::Default,
+        })
+    }
+
+    /// A Teleport client. The kind carries no hardware address at all.
+    fn teleport() -> Client {
+        Client::Teleport(TeleportClient {
+            id: TELEPORT_ID,
+            name: A_NAME.to_string(),
+            connected_at: Some(A_TIMESTAMP.to_string()),
+            ip_address: Some(AN_IP.into()),
+            access: ClientAccess::Default,
+        })
+    }
+
+    /// A client of a kind this build does not know, which nonetheless
+    /// reported every field the known kinds share.
+    fn unknown() -> Client {
+        Client::Unknown(UnknownClient {
+            client_type: A_FUTURE_KIND.to_string(),
+            id: Some(UNKNOWN_ID),
+            name: Some(A_NAME.to_string()),
+            connected_at: Some(A_TIMESTAMP.to_string()),
+            ip_address: Some(AN_IP.into()),
+            mac_address: Some(A_MAC.into()),
+            other_fields: serde_json::Map::new(),
+        })
+    }
+
+    /// One sample of every kind, in the order [`EVERY_VARIANT`] names them.
+    fn one_of_every_kind() -> Vec<Client> {
+        vec![wired(), wireless(), vpn(), teleport(), unknown()]
+    }
+
+    /// Every variant of `Client` has a sample here and a row test below.
+    ///
+    /// Three separate things break when a sixth variant arrives: the match in
+    /// [`variant_name`] stops compiling, this list is one sample short, and
+    /// [`EVERY_VARIANT`] is one name short. A client kind therefore cannot
+    /// reach the listing untested by accident.
+    #[test]
+    fn every_client_variant_has_a_sample_of_its_own() {
+        let named: Vec<&str> = one_of_every_kind().iter().map(variant_name).collect();
+
+        assert_eq!(
+            named, EVERY_VARIANT,
+            "every Client variant needs a sample here, in the order the enum declares them"
+        );
+    }
+
+    /// A wired client is the ordinary case: it has both addresses, and both
+    /// belong in the row.
+    #[test]
+    fn a_wired_client_row_carries_its_type_and_both_addresses() {
+        let row = client_to_row(&wired());
+
+        assert_eq!(row.id, WIRED_ID.to_string());
+        assert_eq!(row.name, A_NAME);
+        assert_eq!(row.client_type, "WIRED");
+        assert_eq!(row.ip_address, AN_IP);
+        assert_eq!(row.mac_address, A_MAC);
+        assert_eq!(row.connected_at, A_TIMESTAMP);
+    }
+
+    /// A wireless client carries the same fields as a wired one and must not
+    /// be shown as one.
+    #[test]
+    fn a_wireless_client_row_carries_its_type_and_both_addresses() {
+        let row = client_to_row(&wireless());
+
+        assert_eq!(row.id, WIRELESS_ID.to_string());
+        assert_eq!(row.name, A_NAME);
+        assert_eq!(row.client_type, "WIRELESS");
+        assert_eq!(row.ip_address, AN_IP);
+        assert_eq!(row.mac_address, A_MAC);
+        assert_eq!(row.connected_at, A_TIMESTAMP);
+    }
+
+    /// A VPN client reaches the controller over a tunnel, so it has no
+    /// hardware address for the column to hold. An empty cell would read as
+    /// "the controller did not say", which is a different thing.
+    #[test]
+    fn a_vpn_client_row_says_it_has_no_hardware_address() {
+        let row = client_to_row(&vpn());
+
+        assert_eq!(row.id, VPN_ID.to_string());
+        assert_eq!(row.client_type, "VPN");
+        assert_eq!(row.ip_address, AN_IP);
+        assert_eq!(row.mac_address, NO_ADDRESS);
+        assert_eq!(row.connected_at, A_TIMESTAMP);
+    }
+
+    /// A Teleport client has no hardware address either, and it is its own
+    /// kind rather than a VPN.
+    #[test]
+    fn a_teleport_client_row_says_it_has_no_hardware_address() {
+        let row = client_to_row(&teleport());
+
+        assert_eq!(row.id, TELEPORT_ID.to_string());
+        assert_eq!(row.client_type, "TELEPORT");
+        assert_eq!(row.ip_address, AN_IP);
+        assert_eq!(row.mac_address, NO_ADDRESS);
+        assert_eq!(row.connected_at, A_TIMESTAMP);
+    }
+
+    /// A client kind this build does not know still belongs in the listing,
+    /// described by the `type` the controller sent rather than by a guess.
+    #[test]
+    fn an_unknown_client_row_carries_the_type_the_controller_named() {
+        let row = client_to_row(&unknown());
+
+        assert_eq!(row.id, UNKNOWN_ID.to_string());
+        assert_eq!(row.name, A_NAME);
+        assert_eq!(row.client_type, A_FUTURE_KIND);
+        assert_eq!(row.ip_address, AN_IP);
+        assert_eq!(row.mac_address, A_MAC);
+        assert_eq!(row.connected_at, A_TIMESTAMP);
+    }
+
+    /// A kind that has a network address, on a run where the controller
+    /// reported none, gets an empty cell. The column stays empty rather than
+    /// claiming the client has no address of that kind.
+    #[test]
+    fn a_client_that_reported_no_network_address_gets_an_empty_cell() {
+        let row = client_to_row(&Client::Wired(WiredClient {
+            id: WIRED_ID,
+            name: A_NAME.to_string(),
+            connected_at: None,
+            ip_address: None,
+            mac_address: A_MAC.into(),
+            uplink_device_id: UPLINK_ID,
+            access: ClientAccess::Default,
+        }));
+
+        assert_eq!(row.ip_address, "");
+        assert_eq!(row.connected_at, "");
+        assert_eq!(
+            row.mac_address, A_MAC,
+            "the address the controller did send must survive"
+        );
+    }
+
+    /// An unrecognized kind shares no field with the known ones except its
+    /// `type`, so every other cell has to fall back on its own.
+    #[test]
+    fn an_unknown_client_that_reported_nothing_but_a_type_gets_empty_cells() {
+        let row = client_to_row(&Client::Unknown(UnknownClient {
+            client_type: A_FUTURE_KIND.to_string(),
+            id: None,
+            name: None,
+            connected_at: None,
+            ip_address: None,
+            mac_address: None,
+            other_fields: serde_json::Map::new(),
+        }));
+
+        assert_eq!(row.id, "");
+        assert_eq!(row.name, "");
+        assert_eq!(row.client_type, A_FUTURE_KIND);
+        assert_eq!(row.ip_address, "");
+        assert_eq!(row.connected_at, "");
+        assert_eq!(
+            row.mac_address, NO_ADDRESS,
+            "an unrecognized kind is not known to have a hardware address"
+        );
+    }
+}
