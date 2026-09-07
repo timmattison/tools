@@ -168,11 +168,17 @@ impl Api {
 /// cannot be built.
 pub fn build_client(api: Api, api_key: &str, insecure: bool, timeouts: Timeouts) -> Result<Client> {
     let mut headers = header::HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static(API_KEY_HEADER),
-        header::HeaderValue::from_str(api_key)
-            .with_context(|| format!("Invalid {} key", api.label()))?,
-    );
+
+    // reqwest's own `Debug` prints every default header it carries, with no
+    // condition on the name, so a client dumped while somebody debugs a request
+    // prints the user's key in full. A header value marked sensitive prints as
+    // `Sensitive` wherever it is printed from, which is the same answer the
+    // `Secret` newtype gives everywhere else in the crate.
+    let mut key = header::HeaderValue::from_str(api_key)
+        .with_context(|| format!("Invalid {} key", api.label()))?;
+    key.set_sensitive(true);
+
+    headers.insert(header::HeaderName::from_static(API_KEY_HEADER), key);
     headers.insert(
         header::ACCEPT,
         header::HeaderValue::from_static(JSON_MEDIA_TYPE),

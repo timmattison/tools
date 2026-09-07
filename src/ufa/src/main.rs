@@ -11,6 +11,7 @@ mod models;
 mod output;
 mod pagination;
 mod prompt;
+mod secret;
 mod site_helper;
 mod site_manager;
 #[cfg(test)]
@@ -25,6 +26,7 @@ use clap::{Parser, Subcommand};
 use client::UnifiClient;
 use commands::*;
 use config::Config;
+use secret::Secret;
 use std::io::Write;
 use uuid::Uuid;
 
@@ -61,7 +63,7 @@ impl Credential {
 
     /// Read the credential from the configuration file, which may mean
     /// fetching it from 1Password.
-    fn resolve(self, config: &Config) -> Result<String> {
+    fn resolve(self, config: &Config) -> Result<Secret> {
         match self {
             Self::Controller => config.resolve_api_key(),
             Self::SiteManager => config.resolve_site_manager_api_key(),
@@ -104,10 +106,10 @@ impl Credential {
 /// item renamed), because re-running the setup wizard cannot fix any of that.
 fn resolve_credential(
     credential: Credential,
-    supplied: Option<String>,
+    supplied: Option<Secret>,
     config: Option<&Config>,
-) -> Result<String> {
-    if let Some(key) = supplied.filter(|key| !config::is_blank(key)) {
+) -> Result<Secret> {
+    if let Some(key) = supplied.filter(|key| !config::is_blank(key.expose())) {
         return Ok(key);
     }
 
@@ -194,7 +196,7 @@ struct Args {
 
     /// API key for authentication (generate in Settings -> Control Plane -> Integrations)
     #[clap(long, global = true, env = "UNIFI_API_KEY")]
-    api_key: Option<String>,
+    api_key: Option<Secret>,
 
     /// Skip TLS certificate verification
     #[clap(long, global = true, env = "UNIFI_INSECURE", value_parser = parse_bool_env)]
@@ -268,7 +270,7 @@ enum Commands {
     Cloud {
         /// Site Manager API key (generate at unifi.ui.com API section)
         #[clap(long, env = "UNIFI_SITE_MANAGER_API_KEY")]
-        site_manager_api_key: Option<String>,
+        site_manager_api_key: Option<Secret>,
 
         #[clap(subcommand)]
         command: site_manager::CloudCommand,
@@ -333,7 +335,7 @@ async fn main() -> Result<()> {
             file_config.as_ref(),
         )?;
 
-        let sm_client = site_manager::SiteManagerClient::new(&sm_api_key)?;
+        let sm_client = site_manager::SiteManagerClient::new(sm_api_key.expose())?;
         return site_manager::handle_cloud_command(command.clone(), &sm_client, args.output).await;
     }
 
@@ -351,7 +353,7 @@ async fn main() -> Result<()> {
 
     let insecure = resolve_insecure(args.insecure, file_config.as_ref(), &mut std::io::stderr())?;
 
-    let client = UnifiClient::new(&url, &api_key, insecure)?;
+    let client = UnifiClient::new(&url, api_key.expose(), insecure)?;
 
     match args.command {
         Commands::Sites {
@@ -391,7 +393,7 @@ async fn main() -> Result<()> {
 /// `config::load_environment_file` covers which file that is.
 #[cfg(test)]
 mod environment_tests {
-    use super::Commands;
+    use super::{Commands, Secret};
     use crate::test_support::{parse_args_for_test, ScopedVar};
 
     #[test]
@@ -414,7 +416,7 @@ mod environment_tests {
         let args = parse_args_for_test(["ufa", "info"]).expect("ufa info must parse");
 
         assert_eq!(
-            args.api_key.as_deref(),
+            args.api_key.as_ref().map(Secret::expose),
             Some("key-from-the-environment"),
             "UNIFI_API_KEY must reach --api-key without a hand-written fallback"
         );
@@ -469,7 +471,7 @@ mod environment_tests {
             panic!("`ufa cloud hosts` must parse as the cloud command");
         };
         assert_eq!(
-            site_manager_api_key.as_deref(),
+            site_manager_api_key.as_ref().map(Secret::expose),
             Some("cloud-key-from-the-environment"),
             "UNIFI_SITE_MANAGER_API_KEY must reach --site-manager-api-key"
         );
@@ -496,7 +498,7 @@ mod environment_tests {
 /// defect, not a style preference.
 #[cfg(test)]
 mod flag_position_tests {
-    use super::{Args, Commands};
+    use super::{Args, Commands, Secret};
     use crate::output::OutputFormat;
     use crate::test_support::parse_args_for_test;
 
@@ -591,7 +593,10 @@ mod flag_position_tests {
         ]);
 
         assert_eq!(args.url.as_deref(), Some("https://controller.example"));
-        assert_eq!(args.api_key.as_deref(), Some("trailing-key"));
+        assert_eq!(
+            args.api_key.as_ref().map(Secret::expose),
+            Some("trailing-key")
+        );
         assert_eq!(args.insecure, Some(true));
         assert!(
             matches!(args.command, Commands::Devices { .. }),
@@ -852,7 +857,7 @@ mod credential_tests {
     /// A config that holds a real key in its plaintext field.
     fn config_with_a_plaintext_key() -> Config {
         Config {
-            api_key: Some("key-from-the-configuration-file".to_string()),
+            api_key: Some("key-from-the-configuration-file".into()),
             ..Config::default()
         }
     }
@@ -866,10 +871,11 @@ mod credential_tests {
             assert_eq!(
                 resolve_credential(
                     Credential::Controller,
-                    Some(blank.to_string()),
+                    Some(blank.into()),
                     Some(&config_with_a_plaintext_key()),
                 )
-                .expect("a blank command line value must fall through to the file"),
+                .expect("a blank command line value must fall through to the file")
+                .expose(),
                 "key-from-the-configuration-file",
                 "{blank:?} names no key, so the configured key must answer"
             );
@@ -889,7 +895,8 @@ mod credential_tests {
                     args.api_key,
                     Some(&config_with_a_plaintext_key()),
                 )
-                .expect("a blank UNIFI_API_KEY must fall through to the file"),
+                .expect("a blank UNIFI_API_KEY must fall through to the file")
+                .expose(),
                 "key-from-the-configuration-file",
                 "UNIFI_API_KEY={blank:?} names no key, so the configured key must answer"
             );
@@ -900,7 +907,7 @@ mod credential_tests {
     /// rather than a 401 from the controller.
     #[test]
     fn a_blank_supplied_key_with_nothing_configured_reports_the_advice() {
-        let error = resolve_credential(Credential::Controller, Some("  ".to_string()), None)
+        let error = resolve_credential(Credential::Controller, Some("  ".into()), None)
             .expect_err("a blank key and no configuration must not resolve");
 
         assert!(
@@ -917,10 +924,11 @@ mod credential_tests {
         assert_eq!(
             resolve_credential(
                 Credential::Controller,
-                Some(" padded-key\n".to_string()),
+                Some(" padded-key\n".into()),
                 Some(&config_with_a_plaintext_key()),
             )
-            .expect("a key that is not blank must resolve"),
+            .expect("a key that is not blank must resolve")
+            .expose(),
             " padded-key\n",
             "the supplied key must reach the controller byte for byte"
         );
@@ -937,10 +945,11 @@ mod credential_tests {
         assert_eq!(
             resolve_credential(
                 Credential::Controller,
-                Some("from-the-command-line".to_string()),
+                Some("from-the-command-line".into()),
                 Some(&config),
             )
-            .expect("a supplied key must resolve"),
+            .expect("a supplied key must resolve")
+            .expose(),
             "from-the-command-line"
         );
     }

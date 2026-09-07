@@ -1,6 +1,7 @@
 use crate::client::UnifiClient;
 use crate::discovery::{discover_controllers, validate_user_url};
 use crate::prompt::{self, Stdio};
+use crate::secret::Secret;
 use anyhow::{Context, Result};
 use dirs::config_dir;
 use serde::{Deserialize, Serialize};
@@ -165,14 +166,19 @@ pub fn discover_op_controllers() -> Result<Vec<OpController>> {
 #[derive(Debug, Clone)]
 pub enum ControllerCredential {
     /// The key is stored in 1Password at `op_path`; `key` is its current value.
-    OnePassword { op_path: String, key: String },
+    OnePassword { op_path: String, key: Secret },
     /// The key was pasted during setup and exists nowhere else.
-    Pasted { key: String },
+    Pasted { key: Secret },
 }
 
 impl ControllerCredential {
     /// The API key value, used to test the connection during setup.
-    pub fn key(&self) -> &str {
+    ///
+    /// # Returns
+    ///
+    /// The key, still wrapped: `op_path` names an item and stays readable in a
+    /// debug dump, and the key beside it must not.
+    pub fn key(&self) -> &Secret {
         match self {
             Self::OnePassword { key, .. } | Self::Pasted { key } => key,
         }
@@ -187,12 +193,12 @@ pub struct Config {
     /// `op_path` is preferred; this field is used only when the key is not in
     /// 1Password — for example when the user pasted it during setup because no
     /// `Private/ufa` item exists.
-    pub api_key: Option<String>,
+    pub api_key: Option<Secret>,
     pub insecure: Option<bool>,
     /// Site Manager (cloud) API key stored directly in the config file.
     ///
     /// Legacy fallback: `sm_op_path` is preferred.
-    pub site_manager_api_key: Option<String>,
+    pub site_manager_api_key: Option<Secret>,
     /// 1Password path to the API key (e.g. "op://Private/ufa/key - 192.168.0.1 port 443")
     pub op_path: Option<String>,
     /// 1Password path to the Site Manager (cloud) API key
@@ -275,10 +281,10 @@ impl Config {
 
     /// Read the API key from 1Password via op-cache, falling back to the
     /// plaintext `api_key` field for backward compatibility.
-    pub fn resolve_api_key(&self) -> Result<String> {
+    pub fn resolve_api_key(&self) -> Result<Secret> {
         resolve_secret(
             self.op_path.as_deref(),
-            self.api_key.as_deref(),
+            self.api_key.as_ref().map(Secret::expose),
             "No API key configured. Run 'ufa config setup'.",
         )
     }
@@ -286,10 +292,10 @@ impl Config {
     /// Read the Site Manager (cloud) API key from 1Password via op-cache,
     /// falling back to the plaintext `site_manager_api_key` field for
     /// backward compatibility.
-    pub fn resolve_site_manager_api_key(&self) -> Result<String> {
+    pub fn resolve_site_manager_api_key(&self) -> Result<Secret> {
         resolve_secret(
             self.sm_op_path.as_deref(),
-            self.site_manager_api_key.as_deref(),
+            self.site_manager_api_key.as_ref().map(Secret::expose),
             "No Site Manager API key configured. Run 'ufa config cloud'.",
         )
     }
@@ -311,7 +317,7 @@ impl Config {
             self.site_manager_api_key = None;
         } else {
             self.sm_op_path = None;
-            self.site_manager_api_key = Some(answer.to_string());
+            self.site_manager_api_key = Some(Secret::from(answer));
         }
     }
 
@@ -321,7 +327,8 @@ impl Config {
     /// answer the same way `resolve_api_key` does, or a credential counts as
     /// configured and then reports that nothing is configured.
     pub fn has_api_key(&self) -> bool {
-        names_a_secret(self.op_path.as_deref()) || names_a_secret(self.api_key.as_deref())
+        names_a_secret(self.op_path.as_deref())
+            || names_a_secret(self.api_key.as_ref().map(Secret::expose))
     }
 
     /// Whether the config file names a source for the Site Manager API key.
@@ -329,7 +336,7 @@ impl Config {
     /// Blank fields are read the same way [`Config::has_api_key`] reads them.
     pub fn has_site_manager_key(&self) -> bool {
         names_a_secret(self.sm_op_path.as_deref())
-            || names_a_secret(self.site_manager_api_key.as_deref())
+            || names_a_secret(self.site_manager_api_key.as_ref().map(Secret::expose))
     }
 
     /// Save configuration to an explicit path, creating parent directories.
@@ -420,9 +427,11 @@ impl Config {
                 // Read the key via op-cache to verify it works
                 let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
                 let path = op_cache::OpPath::new(&c.op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-                let key = cache
-                    .read(&path, None)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let key = Secret::from(
+                    cache
+                        .read(&path, None)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?,
+                );
                 (
                     c.url(),
                     ControllerCredential::OnePassword {
@@ -436,7 +445,7 @@ impl Config {
                 (url, ControllerCredential::Pasted { key })
             }
         };
-        let api_key = credential.key().to_string();
+        let api_key = credential.key().clone();
 
         // Ask about certificate verification
         let insecure =
@@ -444,7 +453,7 @@ impl Config {
 
         // Test the connection
         println!("\n🔍 Testing connection...");
-        match UnifiClient::new(&controller_url, &api_key, insecure) {
+        match UnifiClient::new(&controller_url, api_key.expose(), insecure) {
             Ok(client) => match client.get::<crate::models::ApplicationInfo>("info").await {
                 Ok(info) => {
                     println!("✅ Successfully connected to UniFi controller!");
@@ -607,7 +616,7 @@ fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
 /// which would hide a broken 1Password reference. `plaintext` is the legacy
 /// in-config fallback, and `missing` is the message used when neither source is
 /// configured.
-fn resolve_secret(op_path: Option<&str>, plaintext: Option<&str>, missing: &str) -> Result<String> {
+fn resolve_secret(op_path: Option<&str>, plaintext: Option<&str>, missing: &str) -> Result<Secret> {
     resolve_secret_from(read_from_1password, op_path, plaintext, missing)
 }
 
@@ -655,7 +664,7 @@ fn resolve_secret_from(
     op_path: Option<&str>,
     plaintext: Option<&str>,
     missing: &str,
-) -> Result<String> {
+) -> Result<Secret> {
     if let Some(op_path) = op_path.filter(|reference| !is_blank(reference)) {
         let secret = read_reference(op_path)?;
 
@@ -666,10 +675,10 @@ fn resolve_secret_from(
             );
         }
 
-        return Ok(secret);
+        return Ok(Secret::from(secret));
     }
     if let Some(secret) = plaintext.filter(|value| !is_blank(value)) {
-        return Ok(secret.to_string());
+        return Ok(Secret::from(secret));
     }
     anyhow::bail!("{missing}")
 }
@@ -742,7 +751,7 @@ async fn get_manual_controller_url() -> Result<String> {
 }
 
 /// Prompt for an API key when no 1Password entry exists.
-fn prompt_for_api_key(controller_url: &str) -> Result<String> {
+fn prompt_for_api_key(controller_url: &str) -> Result<Secret> {
     let settings_url = if controller_url.ends_with('/') {
         format!("{controller_url}settings/control-plane/integrations")
     } else {
@@ -767,7 +776,7 @@ fn prompt_for_api_key(controller_url: &str) -> Result<String> {
         anyhow::bail!("API key cannot be empty");
     }
 
-    Ok(api_key)
+    Ok(Secret::from(api_key))
 }
 
 #[cfg(test)]
@@ -816,7 +825,7 @@ mod tests {
     fn pasted_api_key_survives_the_round_trip_to_disk() {
         let temp = TempConfigDir::new("pasted-key");
         let credential = ControllerCredential::Pasted {
-            key: "pasted-api-key".to_string(),
+            key: "pasted-api-key".into(),
         };
 
         let mut config = Config::default();
@@ -832,7 +841,44 @@ mod tests {
         let resolved = loaded
             .resolve_api_key()
             .expect("the key pasted during setup must still resolve after saving");
-        assert_eq!(resolved, "pasted-api-key");
+        assert_eq!(resolved.expose(), "pasted-api-key");
+    }
+
+    /// Every `ufa` user already has a `config.toml` on disk, written when the
+    /// credentials were plain `String` fields. The type that holds them now
+    /// reads and writes as a plain string for that reason, and this is the
+    /// file it has to keep reading: written by hand, in the shape the old
+    /// serializer produced, and never through this crate's own save.
+    #[test]
+    fn a_configuration_file_written_before_the_credentials_were_wrapped_still_loads() {
+        let temp = TempConfigDir::new("legacy-file");
+        create_directory(&temp.dir);
+        write_file(
+            &temp.config_file(),
+            "url = \"https://192.168.1.1\"\n\
+             api_key = \"key-from-an-older-ufa\"\n\
+             insecure = true\n\
+             site_manager_api_key = \"cloud-key-from-an-older-ufa\"\n",
+        );
+
+        let loaded = Config::load_from(&temp.config_file())
+            .expect("loading the config must succeed")
+            .expect("the config file must exist");
+
+        assert_eq!(
+            loaded
+                .resolve_api_key()
+                .expect("the controller key must still resolve")
+                .expose(),
+            "key-from-an-older-ufa"
+        );
+        assert_eq!(
+            loaded
+                .resolve_site_manager_api_key()
+                .expect("the cloud key must still resolve")
+                .expose(),
+            "cloud-key-from-an-older-ufa"
+        );
     }
 
     /// The config file can hold an API key in plaintext (the pasted-key path,
@@ -845,7 +891,7 @@ mod tests {
 
         let temp = TempConfigDir::new("permissions");
         let config = Config {
-            api_key: Some("plaintext-controller-key".to_string()),
+            api_key: Some("plaintext-controller-key".into()),
             ..Config::default()
         };
         config
@@ -920,7 +966,7 @@ mod tests {
             .expect("the existing file must be settable to a wider mode");
 
         let config = Config {
-            api_key: Some("plaintext-controller-key".to_string()),
+            api_key: Some("plaintext-controller-key".into()),
             ..Config::default()
         };
         config
@@ -1033,7 +1079,7 @@ mod tests {
         // so the test never shells out to the `op` CLI.
         let config = Config {
             sm_op_path: Some("not-an-op-path".to_string()),
-            site_manager_api_key: Some("stale-plaintext-key".to_string()),
+            site_manager_api_key: Some("stale-plaintext-key".into()),
             ..Config::default()
         };
 
@@ -1251,7 +1297,7 @@ mod tests {
     fn a_blank_api_key_field_is_not_a_configured_key() {
         for blank in ["", "   ", "\n", "\t "] {
             let config = Config {
-                api_key: Some(blank.to_string()),
+                api_key: Some(blank.into()),
                 ..Config::default()
             };
 
@@ -1274,7 +1320,7 @@ mod tests {
     #[test]
     fn a_blank_site_manager_key_field_is_not_a_configured_key() {
         let config = Config {
-            site_manager_api_key: Some("   ".to_string()),
+            site_manager_api_key: Some("   ".into()),
             ..Config::default()
         };
 
@@ -1356,7 +1402,7 @@ mod tests {
     #[test]
     fn a_key_that_holds_more_than_blank_space_is_resolved_untouched() {
         let config = Config {
-            api_key: Some(" padded-key\n".to_string()),
+            api_key: Some(" padded-key\n".into()),
             ..Config::default()
         };
 
@@ -1364,7 +1410,8 @@ mod tests {
         assert_eq!(
             config
                 .resolve_api_key()
-                .expect("a key that is not blank must resolve"),
+                .expect("a key that is not blank must resolve")
+                .expose(),
             " padded-key\n",
             "the resolved key must be what its source holds, byte for byte"
         );
@@ -1376,7 +1423,8 @@ mod tests {
                 None,
                 "missing",
             )
-            .expect("a 1Password answer that is not blank must resolve"),
+            .expect("a 1Password answer that is not blank must resolve")
+            .expose(),
             " padded-op-key\n",
             "what 1Password answered must reach the caller untouched"
         );
@@ -1386,14 +1434,15 @@ mod tests {
     #[test]
     fn site_manager_key_falls_back_to_the_plaintext_field() {
         let config = Config {
-            site_manager_api_key: Some("legacy-plaintext-key".to_string()),
+            site_manager_api_key: Some("legacy-plaintext-key".into()),
             ..Config::default()
         };
 
         assert_eq!(
             config
                 .resolve_site_manager_api_key()
-                .expect("a legacy plaintext key must still resolve"),
+                .expect("a legacy plaintext key must still resolve")
+                .expose(),
             "legacy-plaintext-key"
         );
     }
