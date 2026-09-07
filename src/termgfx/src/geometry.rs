@@ -279,8 +279,34 @@ pub(crate) fn window_pixels(window: Option<Window>) -> Option<(u32, u32)> {
     Some((u32::from(pixels_wide), u32::from(pixels_tall)))
 }
 
-/// The size of one character cell in pixels, with the estimate for a window
-/// that reports none.
+/// The size of one character cell in pixels, from the best source that
+/// answered.
+///
+/// **This is the one function that answers "how big is one cell" for this
+/// crate.** Every picture takes its measure here, so no two steps of one
+/// picture can name two sizes, and no caller holds an order of its own.
+///
+/// # The order of the sources
+///
+/// 1. The pixel size that the `TIOCGWINSZ` ioctl reports. It costs no round
+///    trip, so a terminal that reports one keeps the measure it already had.
+/// 2. The cell that the terminal named in its answer to the query of
+///    [`crate::probe`]. `CSI 16 t` names one cell directly and `CSI 14 t`
+///    names the text area, and [`crate::probe::read_cell`] puts those two in
+///    order and gives the better of them. That answer arrives here as one
+///    measure, because which of the two questions it came from changes nothing
+///    a caller does.
+/// 3. The estimate of 10 pixels by 20, for a terminal that answered nothing.
+///
+/// The second source is the one a mosh session has. The mosh wire protocol
+/// resizes with a width and a height in cells and nothing else, so the server
+/// writes a zero into both pixel fields of the pseudo terminal and keeps them
+/// there for the life of the session. A pane of Zellij and a ttyd panel report
+/// no pixel size either. GitHub issue #468 reports what the estimate did to
+/// such a run: `ic` drew a picture about 7 percent too narrow, because the
+/// column count is directly proportional to the shape of the cell.
+///
+/// # Why the estimate is here at all
 ///
 /// This is the measure that a tool takes when it must draw an image whatever
 /// the terminal says, which is what `ic` does: a run of `ic` has no second way
@@ -296,16 +322,19 @@ pub(crate) fn window_pixels(window: Option<Window>) -> Option<(u32, u32)> {
 /// # Arguments
 /// * `window` - The window that the probe measured, or `None` when the probe
 ///   measured none.
+/// * `answered` - The cell that the terminal named in its answer, or `None`
+///   when it named none and when nothing asked it.
 ///
 /// # Returns
-/// The width and the height of one character cell in pixels. Both numbers are
-/// above zero, because [`cell_pixels_of`] refuses a quotient of zero and the
-/// estimate then stands.
+/// One character cell. Both of its numbers are above zero, because
+/// [`CellPixels::measured`] refuses a zero and the estimate then stands.
 pub(crate) fn cell_pixels_or_estimate_of(
     window: Option<Window>,
-    _answered: Option<CellPixels>,
+    answered: Option<CellPixels>,
 ) -> CellPixels {
-    cell_pixels_of(window).unwrap_or(CellPixels::ESTIMATE)
+    cell_pixels_of(window)
+        .or(answered)
+        .unwrap_or(CellPixels::ESTIMATE)
 }
 
 /// The shape of one character cell, as its height over its width.
