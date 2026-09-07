@@ -54,9 +54,9 @@ impl fmt::Debug for ReceivedRequest {
     /// Show the request the way a server log does: the request line, then
     /// every header on one line.
     ///
-    /// The derived form would do as well, but a derive does not count as a
-    /// read of a field, so `request_line` would be dead code to the compiler
-    /// while a failed assertion prints it.
+    /// A derived form would print the field names and the vector brackets as
+    /// well, which is harder to read in the message of a failed assertion
+    /// than the shape the request arrived in.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}", self.request_line)?;
         for (name, value) in &self.headers {
@@ -88,6 +88,19 @@ impl ReceivedRequest {
             request_line,
             headers,
         }
+    }
+
+    /// The first line of this request, such as `DELETE /sites/1 HTTP/1.1`.
+    ///
+    /// The method, the path and the version arrive on one line, and a test
+    /// that reads a path also cares which method reached it, so they are
+    /// handed back the way the server read them.
+    ///
+    /// # Returns
+    ///
+    /// The request line, without the line ending.
+    pub fn request_line(&self) -> &str {
+        &self.request_line
     }
 
     /// The value this request carried for `name`.

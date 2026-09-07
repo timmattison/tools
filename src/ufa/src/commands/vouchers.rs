@@ -384,10 +384,17 @@ async fn delete_vouchers_filtered(
 mod deletion_tests {
     use super::*;
     use crate::prompt::Scripted;
+    use crate::test_server::{json_response, TestServer};
     use std::cell::Cell;
 
     /// How many vouchers the pretend controller holds.
     const MATCHES: usize = 7;
+
+    /// The API key a test hands the client. Nothing reads it back.
+    const API_KEY: &str = "an-api-key";
+
+    /// What the controller answers a single deletion with.
+    const ONE_DELETED: &str = r#"{"vouchersDeleted":1}"#;
 
     /// A deletion that records whether it was ever reached.
     fn recording_delete(
@@ -507,6 +514,42 @@ mod deletion_tests {
         assert_eq!(outcome, DeletionOutcome::NoMatches);
         assert!(!reached.get(), "there is nothing to delete");
         assert!(!console.was_asked(), "there is nothing to ask about");
+    }
+
+    /// A voucher named by id is deleted by a `DELETE` on that voucher's own
+    /// path, under the site the user named.
+    ///
+    /// The assertion reads the request the *server* got rather than the URL
+    /// the client built, because the path is what decides which voucher the
+    /// controller destroys. A deletion that reached the site path, or that
+    /// carried the site id where the voucher id belongs, would take vouchers
+    /// the user never named.
+    #[tokio::test]
+    async fn deleting_one_voucher_sends_a_delete_for_the_id_it_was_given() {
+        let controller = TestServer::replying(&json_response(ONE_DELETED)).await;
+        let client = UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+
+        let site_id = Uuid::new_v4();
+        let voucher_id = Uuid::new_v4();
+
+        delete_voucher(&client, Some(site_id), voucher_id)
+            .await
+            .expect("the controller answered the deletion");
+
+        let received = controller.requests();
+        assert_eq!(
+            received.len(),
+            1,
+            "a named voucher costs exactly one request, got {received:?}"
+        );
+        assert_eq!(
+            received[0].request_line(),
+            format!(
+                "DELETE /proxy/network/integration/v1/sites/{site_id}/hotspot/vouchers/{voucher_id} HTTP/1.1"
+            ),
+            "the deletion must name the voucher the user named, got {received:?}"
+        );
     }
 
     /// `--dry-run` is how you find out what a filter matches, safely.
