@@ -44,3 +44,42 @@ fn refused_probe_is_not_reported_as_free() {
          the port as free. stdout was: {stdout}"
     );
 }
+
+/// The privilege note explains an answer that names nobody. When `wl` names the
+/// process the user asked about, the answer is complete and the advice is noise.
+///
+/// No applicability gate is needed here: under root the note never prints at
+/// all, so the "stderr carries no note" half is simply true there, and the
+/// listener this test holds is owned by this test's own user, so `wl` can see it
+/// whatever privileges the run has.
+#[test]
+fn no_privilege_note_when_a_process_is_named() {
+    // The kernel picks the port, so two copies of this test that run at the
+    // same time never ask about the same one.
+    let listener =
+        TcpListener::bind("127.0.0.1:0").expect("should be able to bind an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("bound listener must have a local address")
+        .port();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wl"))
+        .arg(port.to_string())
+        .output()
+        .expect("should be able to run the freshly built wl binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("PID:"),
+        "this test holds port {port}, so wl should have named the owning process. \
+         stdout was: {stdout}"
+    );
+    assert!(
+        !stderr.contains("note: running without root"),
+        "wl named the process listening on port {port}, so the answer is complete \
+         and the privilege note is noise. stderr was: {stderr}"
+    );
+
+    drop(listener);
+}
