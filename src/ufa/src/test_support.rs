@@ -203,29 +203,46 @@ mod inherited_environment_tests {
     /// somebody adds tomorrow.
     const PROBE_SETTING: &str = "UNIFI_PROBE";
 
-    /// A hostile spelling of every `UNIFI_*` variable clap reads.
+    /// The settings this crate declares today.
     ///
-    /// `UNIFI_INSECURE=maybe` is the sharpest of them: clap cannot parse it,
-    /// so it fails *every* parse in the binary rather than merely changing
-    /// what one of them returns.
-    const INHERITED: &[(&str, &str)] = &[
-        ("UNIFI_URL", "https://inherited.example"),
-        ("UNIFI_API_KEY", "inherited-key"),
-        ("UNIFI_INSECURE", "maybe"),
-        ("UNIFI_SITE_MANAGER_API_KEY", "inherited-cloud-key"),
+    /// This is a floor and not a list to keep up to date: the derivation must
+    /// reach every one of these, and it may reach more, so a flag added
+    /// tomorrow raises the floor rather than breaking it.
+    ///
+    /// It exists because both halves of the comparison below read clap's
+    /// metadata. Were the walk of that metadata to break, both halves would go
+    /// empty together and agree with each other. `UNIFI_SITE_MANAGER_API_KEY`
+    /// is the one that pins the recursion, since `ufa config cloud` declares it
+    /// rather than the top-level command.
+    const KNOWN_SETTINGS: [&str; 4] = [
+        "UNIFI_URL",
+        "UNIFI_API_KEY",
+        "UNIFI_INSECURE",
+        "UNIFI_SITE_MANAGER_API_KEY",
     ];
+
+    /// The value every inherited setting carries.
+    ///
+    /// One value serves for all of them, and it is the value that made
+    /// `UNIFI_INSECURE` the sharpest of the four: clap cannot parse it as a
+    /// boolean, so it fails *every* parse in the binary rather than merely
+    /// changing what one of them returns. Giving it to a string-valued setting
+    /// costs nothing, because no test asks for it, and giving it to the
+    /// boolean flag somebody adds tomorrow keeps that flag as sharp as
+    /// `UNIFI_INSECURE` is today.
+    const HOSTILE_VALUE: &str = "maybe";
 
     /// The environment a child of this test binary inherits, hostile setting by
     /// hostile setting.
     ///
-    /// It takes the command whose settings it must cover, because the list is
-    /// meant to follow clap rather than lead it. Today it does not follow
-    /// anything: the four names are typed out by hand above, and the parameter
-    /// goes unread.
-    fn hostile_environment(_command: &Command) -> Vec<(String, String)> {
-        INHERITED
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+    /// The names come from `command` rather than from a list beside this
+    /// module, so a flag added to `Args` tomorrow reaches the child without
+    /// anybody remembering to write it down twice. A list is safe the day it is
+    /// written and quietly stops covering the surface after that.
+    fn hostile_environment(command: &Command) -> Vec<(String, String)> {
+        settings_read_by(command)
+            .into_iter()
+            .map(|name| (name, HOSTILE_VALUE.to_owned()))
             .collect()
     }
 
@@ -296,19 +313,22 @@ mod inherited_environment_tests {
     /// covers the whole surface rather than the part somebody remembered.
     #[test]
     fn the_child_inherits_every_setting_clap_reads() {
-        let declared = settings_read_by(&Args::command());
+        let inherited = inherited_names(&Args::command());
 
-        assert!(
-            !declared.is_empty(),
-            "clap declares at least one environment-backed flag; an empty set \
-             means the walk of its metadata broke, and an empty hostile \
-             environment would pass this test for that reason alone"
-        );
+        for setting in KNOWN_SETTINGS {
+            assert!(
+                inherited.contains(setting),
+                "{setting} is declared on the command, so the child must \
+                 inherit it, got {inherited:?}"
+            );
+        }
+
         assert_eq!(
-            inherited_names(&Args::command()),
-            declared,
+            inherited,
+            settings_read_by(&Args::command()),
             "the child's environment and clap's own metadata must name the same \
-             settings"
+             settings, so nothing clap reads goes uncovered and nothing the \
+             child carries is invented here"
         );
     }
 
