@@ -60,7 +60,7 @@ fn assert_exists(path: &Path, purpose: &str) {
     assert!(
         path.exists(),
         "the {purpose} is {}, which does not exist. \
-         `tauri::generate_context!` reads it while it expands, so the build fails.",
+         Tauri reads every icon it names off disk, so the build or the bundle fails.",
         path.display()
     );
 }
