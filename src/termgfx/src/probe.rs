@@ -751,6 +751,56 @@ mod tests {
         );
     }
 
+    /// The answer of a terminal that names the cell of these tests.
+    const CELL_SIZE_ANSWER_BYTES: &[u8] = b"\x1b[6;30;14t";
+
+    #[test]
+    fn one_answer_of_each_shape_that_names_no_cell_gives_no_cell() {
+        // One case for each syntactic form that reaches this parser and names
+        // no cell. A parser that reads a number out of any of them measures a
+        // cell that no terminal reported, and every picture of the run comes
+        // out at that size.
+        for (answer, form) in [
+            (
+                &b"\x1b[8;24;80t"[..],
+                "a request to resize the window, which carries three parameters of its own behind another first one",
+            ),
+            (&b"\x1b[6;16t"[..], "one parameter short"),
+            (&b"\x1b[6;16;8;4t"[..], "one parameter long"),
+            (&b"\x1b[6;0;14t"[..], "a height of no pixels"),
+            (&b"\x1b[6;30;0t"[..], "a width of no pixels"),
+            (
+                &b"\x1b[6;99999;99999t"[..],
+                "a cell far above the largest font",
+            ),
+            (&b"\x1b[6;;14t"[..], "a height the terminal left out"),
+            (&b"\x1b[6;30;14"[..], "an answer cut short of its final byte"),
+            (&b""[..], "a terminal that answered nothing at all"),
+        ] {
+            assert_eq!(
+                read_cell_size(answer),
+                None,
+                "an answer of {form} names no cell, and the measure must fall through to the next source"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sequence_cut_short_in_front_of_the_answer_does_not_take_the_answer_with_it() {
+        // The buffer holds every byte that stood in front of the answer which
+        // ended the read, and a terminal that answered the run before this one
+        // late leaves a part of a sequence there. The opener of the real answer
+        // stands inside what those bytes would otherwise claim as parameters.
+        let mut answer = b"\x1b[999".to_vec();
+        answer.extend_from_slice(CELL_SIZE_ANSWER_BYTES);
+
+        assert_eq!(
+            read_cell_size(&answer),
+            CellPixels::measured(ANSWERED_CELL_WIDTH, ANSWERED_CELL_HEIGHT),
+            "a walk that steps over the final byte of a sequence cut short steps over the opener of the next one with it"
+        );
+    }
+
     #[test]
     fn an_answer_that_names_sixel_gives_sixel() {
         // tmux 3.7c answers this, measured 2026-09-06. Parameter 4 names sixel.
