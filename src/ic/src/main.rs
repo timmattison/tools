@@ -1727,7 +1727,7 @@ fn display_image(
             columns: scaled_width,
             rows: scaled_height,
         },
-        payload: PayloadBudget::UNLIMITED,
+        payload: payload_budget_for(transport),
         picture,
         // A frame of a video always holds the cursor, because the caller puts
         // the cursor where it wants it before every frame. A still picture
@@ -1871,6 +1871,26 @@ enum RemoteTransport {
     /// track cursor movement from image protocols, requiring explicit
     /// cursor advancement.
     EternalTerminal,
+}
+
+/// The characters of payload that a picture can spend on `transport`.
+///
+/// A transport that keeps every image it carries caps what it keeps, and a
+/// picture above that cap draws nothing at all. The tool cannot read the cap
+/// off the session, because no protocol asks the question, so it names the one
+/// transport whose cap is known.
+///
+/// # Arguments
+/// * `transport` - The remote transport that this session runs over.
+///
+/// # Returns
+/// The budget that the transport allows.
+fn payload_budget_for(transport: RemoteTransport) -> PayloadBudget {
+    match transport {
+        RemoteTransport::None | RemoteTransport::Mosh | RemoteTransport::EternalTerminal => {
+            PayloadBudget::UNLIMITED
+        }
+    }
 }
 
 /// Return the cached remote transport, detecting it on first call.
@@ -2200,6 +2220,36 @@ fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) ->
 mod tests {
     use super::*;
     use termgfx::AnsweredProtocol;
+
+    /// A mosh session states the budget that mosh keeps, and no other
+    /// transport states one.
+    ///
+    /// mosh holds every image for the length of the session, because a client
+    /// that reconnects holds none, and it refuses one transmission above a
+    /// mebicharacter with `ENOSPC`. A picture above that cap draws nothing at
+    /// all, and the user reads an empty screen and an error.
+    ///
+    /// Nothing else here names a cap. A local terminal keeps the resolution it
+    /// was given, and Eternal Terminal carries the bytes through, so a budget
+    /// on either one would cost a picture resolution for no reason.
+    #[test]
+    fn a_mosh_session_states_the_budget_that_mosh_keeps() {
+        assert_eq!(
+            payload_budget_for(RemoteTransport::Mosh),
+            PayloadBudget::MOSH,
+            "a picture under mosh must fit the store that mosh keeps"
+        );
+        assert_eq!(
+            payload_budget_for(RemoteTransport::None),
+            PayloadBudget::UNLIMITED,
+            "a local terminal states no cap, so a picture keeps every pixel"
+        );
+        assert_eq!(
+            payload_budget_for(RemoteTransport::EternalTerminal),
+            PayloadBudget::UNLIMITED,
+            "Eternal Terminal carries the bytes through and states no cap of its own"
+        );
+    }
 
     // =========================================================================
     // Tests for comm_basename
