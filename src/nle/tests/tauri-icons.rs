@@ -74,7 +74,9 @@ fn the_window_icon_exists() {
 fn the_macos_application_icon_exists() {
     // A macOS development build takes the first `.icns` entry, and falls back to
     // the same rule as the window icon.
-    let icns = bundle_icons().into_iter().find(|icon| icon.ends_with(".icns"));
+    let icns = bundle_icons()
+        .into_iter()
+        .find(|icon| icon.ends_with(".icns"));
     let path = match icns {
         Some(icon) => crate_dir().join(icon),
         None => resolve(".png"),
