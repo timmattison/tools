@@ -10,13 +10,19 @@ use std::process::Command;
 
 /// Port 1 (`tcpmux`) is below every platform's privileged threshold and holds
 /// no service on a developer machine. An unprivileged process is therefore
-/// *refused* the loopback bind that `wl` uses to probe the port, while nothing
-/// is listening there — exactly the case where `wl` must not claim the port is
-/// free.
+/// *refused* the loopback bind, while nothing is listening there — the case
+/// that separates a tool which reads the kernel's socket table from one which
+/// probes the port by binding it.
 const REFUSED_UNUSED_PORT: u16 = 1;
 
 /// A bind the kernel refuses proves nothing about the port, so `wl` must not
 /// report it as free.
+///
+/// Gated off macOS, which now reads the kernel's socket table instead: there is
+/// no bind probe there to be refused, and
+/// `unheld_privileged_port_is_reported_free` pins what replaced it. The probe
+/// still serves every other platform until each grows a reader of its own.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn refused_probe_is_not_reported_as_free() {
     // Decide whether this test applies: only a process the kernel *refuses*
