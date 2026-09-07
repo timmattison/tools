@@ -12,6 +12,18 @@ use std::path::{Path, PathBuf};
 /// Prefix identifying a 1Password secret reference.
 const OP_REFERENCE_PREFIX: &str = "op://";
 
+/// The 1Password vault that holds the item `ufa` keeps its keys in.
+const OP_VAULT: &str = "Private";
+
+/// The 1Password item that holds the controller keys and the Site Manager key.
+const OP_ITEM: &str = "ufa";
+
+/// The start of a field label that names a controller key.
+const CONTROLLER_LABEL_PREFIX: &str = "key - ";
+
+/// What stands between the host and the port in a controller field label.
+const PORT_SEPARATOR: &str = " port ";
+
 /// Said when setup has a choice to make and no terminal to make it at.
 ///
 /// This is the refusal for the numbered menus. The free-text questions of the
@@ -114,50 +126,30 @@ impl OpController {
 /// Discover controllers stored in the 1Password `Private/ufa` item.
 ///
 /// Fields with labels matching `key - <host> port <port>` are parsed.
+///
+/// Only the labels of that item reach this process. `ufa` used to run
+/// `op item get ufa --vault Private --format json` itself, and that command
+/// prints the value of every concealed field beside its label — so every
+/// controller key in the item was read here to learn the names beside them,
+/// outside the one crate this workspace keeps for 1Password access.
+/// [`op_cache::field_labels`] runs `op` instead and answers with the labels
+/// alone.
+///
+/// # Returns
+///
+/// One controller per field whose label names one.
+///
+/// # Errors
+///
+/// Returns an error if the 1Password CLI is missing, or if it cannot print the
+/// `Private/ufa` item.
 pub fn discover_op_controllers() -> Result<Vec<OpController>> {
-    let output = std::process::Command::new("op")
-        .args([
-            "item", "get", "ufa", "--vault", "Private", "--format", "json",
-        ])
-        .output()
-        .context("Failed to run 'op' CLI — is 1Password CLI installed?")?;
+    let item = op_cache::OpItem::new(OP_VAULT, OP_ITEM).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let labels = op_cache::field_labels(&item)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .with_context(|| format!("Failed to list the fields of {OP_VAULT}/{OP_ITEM}"))?;
 
-    if !output.status.success() {
-        anyhow::bail!(
-            "op item get failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("Failed to parse 1Password item JSON")?;
-
-    let fields = json["fields"]
-        .as_array()
-        .context("No fields array in 1Password item")?;
-
-    let mut controllers = Vec::new();
-    for field in fields {
-        let label = match field["label"].as_str() {
-            Some(l) => l,
-            None => continue,
-        };
-
-        if let Some(rest) = label.strip_prefix("key - ") {
-            if let Some((host, port_str)) = rest.rsplit_once(" port ") {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    let op_path = format!("op://Private/ufa/{label}");
-                    controllers.push(OpController {
-                        host: host.to_string(),
-                        port,
-                        op_path,
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(controllers)
+    Ok(controllers_from_labels(&labels))
 }
 
 /// The controllers that a list of field labels names.
@@ -174,9 +166,34 @@ pub fn discover_op_controllers() -> Result<Vec<OpController>> {
 ///
 /// One controller per label that names one, in the order the labels arrived.
 fn controllers_from_labels(labels: &[String]) -> Vec<OpController> {
-    let _ = labels;
+    labels
+        .iter()
+        .filter_map(|label| controller_from_label(label))
+        .collect()
+}
 
-    Vec::new()
+/// The controller a field label names, when it names one.
+///
+/// The port is what stands after the **last** separator, so a host that
+/// carries those same words itself still reads.
+///
+/// # Arguments
+///
+/// * `label` - The label of one field of the `Private/ufa` item.
+///
+/// # Returns
+///
+/// The controller, or `None` when the label names none.
+fn controller_from_label(label: &str) -> Option<OpController> {
+    let (host, port) = label
+        .strip_prefix(CONTROLLER_LABEL_PREFIX)?
+        .rsplit_once(PORT_SEPARATOR)?;
+
+    Some(OpController {
+        host: host.to_string(),
+        port: port.parse().ok()?,
+        op_path: format!("{OP_REFERENCE_PREFIX}{OP_VAULT}/{OP_ITEM}/{label}"),
+    })
 }
 
 /// The controller credential gathered during interactive setup.
