@@ -35,24 +35,40 @@ pub struct AllCredentialsInUse {
     pub usage: Vec<CredentialInUse>,
 }
 
-/// Selects the first unused credential from available fields.
+/// Selects the credential a tunnel is generated from.
 ///
-/// Compares available credential values against keys used by running tunnels.
-/// Returns the first credential whose value does not appear in any running tunnel.
+/// A directory that already holds a `.env` names the credential its tunnel was
+/// generated from, and `existing_label` carries that name. That credential is
+/// selected again, whole label against whole label, even when a running tunnel
+/// already holds its key: the container holding it is the tunnel this very
+/// directory started, and regenerating the directory must not move it to
+/// another key.
+///
+/// Every other call falls back to the ordinary rule — the first credential
+/// whose value appears in no running tunnel. `existing_label` of [`None`] is
+/// one such call, and so is a label that no credential carries any more,
+/// because the credential was removed from 1Password.
+///
+/// `total` counts the available credentials and `in_use` counts the ones a
+/// running tunnel holds, under either rule.
 ///
 /// # Errors
 ///
-/// Returns `AllCredentialsInUse` if every credential is used by a running container.
+/// Returns `AllCredentialsInUse` when a running container holds every
+/// credential and none of them carries `existing_label`.
 pub fn select_credential(
     available: &[ItemField],
     running: &[RunningTunnel],
     existing_label: Option<&str>,
 ) -> Result<SelectedCredential, AllCredentialsInUse> {
-    let _ = existing_label;
+    let mut named: Option<&ItemField> = None;
     let mut first_free: Option<&ItemField> = None;
     let mut in_use_count = 0_usize;
 
     for field in available {
+        if named.is_none() && existing_label == Some(field.label.as_str()) {
+            named = Some(field);
+        }
         if running.iter().any(|r| r.wireguard_key == field.value) {
             in_use_count += 1;
         } else if first_free.is_none() {
@@ -60,7 +76,7 @@ pub fn select_credential(
         }
     }
 
-    if let Some(field) = first_free {
+    if let Some(field) = named.or(first_free) {
         return Ok(SelectedCredential {
             field_label: field.label.clone(),
             key: field.value.clone(),
