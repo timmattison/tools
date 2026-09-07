@@ -1030,7 +1030,15 @@ mod tests {
     }
 
     #[test]
-    fn the_query_ends_with_the_attributes_request() {
+    fn the_query_asks_every_question_and_ends_with_the_attributes_request() {
+        assert!(
+            position_of(IMAGE_QUERY, CELL_SIZE_REQUEST).is_some(),
+            "the question about one cell rides in the same write, so it costs no round trip of its own"
+        );
+        assert!(
+            position_of(IMAGE_QUERY, TEXT_AREA_REQUEST).is_some(),
+            "the question about the text area rides there too, for a terminal that reads the older window operation alone"
+        );
         assert!(
             IMAGE_QUERY.ends_with(ATTRIBUTES_REQUEST),
             "the answer of the attributes request is what ends the read"
