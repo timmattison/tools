@@ -1887,9 +1887,11 @@ enum RemoteTransport {
 /// The budget that the transport allows.
 fn payload_budget_for(transport: RemoteTransport) -> PayloadBudget {
     match transport {
-        RemoteTransport::None | RemoteTransport::Mosh | RemoteTransport::EternalTerminal => {
-            PayloadBudget::UNLIMITED
-        }
+        RemoteTransport::Mosh => PayloadBudget::MOSH,
+        // A local terminal keeps the resolution it was given, and Eternal
+        // Terminal carries the bytes through. A budget on either one would
+        // cost a picture resolution and buy nothing.
+        RemoteTransport::None | RemoteTransport::EternalTerminal => PayloadBudget::UNLIMITED,
     }
 }
 
