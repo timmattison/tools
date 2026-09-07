@@ -192,7 +192,21 @@ pub fn select_one(
     }
 }
 
+/// The question as it reads inside a sentence.
+///
+/// A prompt carries the spacing and the colon that separate it from what the
+/// user types. Neither belongs in an error message.
+fn without_prompt_punctuation(question: &str) -> &str {
+    question.trim().trim_end_matches(':').trim_end()
+}
+
 /// Put `question` to the user and return the trimmed answer.
+///
+/// A free-text question has no `--yes` and no default, so a run with nobody
+/// to ask cannot get an answer at all: it refuses here rather than reads.
+/// A closed stdin would end the read on its own, but a stdin that is neither
+/// a terminal nor closed -- a pipe inherited from a scheduler or a CI runner
+/// -- sends nothing and closes nothing, and the read waits for good.
 ///
 /// # Arguments
 ///
@@ -206,8 +220,17 @@ pub fn select_one(
 ///
 /// # Errors
 ///
-/// Returns an error if the answer stream ends before a line arrives.
+/// Returns an error when the answers do not come from a terminal, and if the
+/// answer stream ends before a line arrives.
 pub fn ask_line(console: &mut impl Console, question: &str) -> Result<String> {
+    if !console.is_terminal() {
+        bail!(
+            "{} needs an answer, but stdin is not a terminal. \
+             Run the command at a terminal to answer it.",
+            without_prompt_punctuation(question)
+        );
+    }
+
     Ok(console.ask(question)?.trim().to_string())
 }
 
@@ -224,7 +247,10 @@ pub fn ask_line(console: &mut impl Console, question: &str) -> Result<String> {
 ///
 /// # Errors
 ///
-/// Returns an error if the answer stream ends before a line arrives.
+/// Returns an error when the answers do not come from a terminal, and if the
+/// answer stream ends before a line arrives. An unanswerable yes/no question
+/// is not read as a no: [`confirm_destructive`] is the one that has a `--yes`
+/// to name instead.
 pub fn confirm(console: &mut impl Console, question: &str) -> Result<bool> {
     Ok(answered_yes(&ask_line(
         console,

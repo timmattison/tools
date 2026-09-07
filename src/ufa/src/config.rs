@@ -14,8 +14,10 @@ const OP_REFERENCE_PREFIX: &str = "op://";
 
 /// Said when setup has a choice to make and no terminal to make it at.
 ///
-/// The wizard exists to be answered; a piped run used to sit in a read loop
-/// that could never be satisfied.
+/// This is the refusal for the numbered menus. The free-text questions of the
+/// wizard refuse for themselves, in [`crate::prompt::ask_line`], for the same
+/// reason: a piped run cannot answer a question, and a read that waits for an
+/// answer that never comes never ends.
 const NEEDS_A_TERMINAL: &str = "Setup needs a terminal to ask which controller to use. \
      Run 'ufa config setup' interactively, or pass --url and --api-key.";
 
