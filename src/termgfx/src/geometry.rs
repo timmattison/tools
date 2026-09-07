@@ -798,18 +798,53 @@ mod tests {
         assert_eq!(result, (Some(25), Some(50)));
     }
 
+    /// One bound is enough to size an image, because the aspect ratio decides
+    /// the other axis.
+    ///
+    /// The axis that the caller leaves open used to come back open, and
+    /// [`downscale_to_display_pixels`] then resized nothing at all, so a
+    /// caller that stated one bound sent the whole picture at its original
+    /// resolution. `ic --width 90` is that caller.
+    ///
+    /// The answer is the answer that the two-bound case already gives for a
+    /// box that the same axis constrains: an image of 100 pixels by 100 in 50
+    /// columns takes 25 rows, whichever way the caller asks the question.
     #[test]
-    fn aspect_preserving_only_width_specified() {
-        let result =
-            calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT);
-        assert_eq!(result, (Some(50), None));
+    fn one_bound_sizes_the_other_axis_from_the_aspect_ratio() {
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT),
+            (Some(50), Some(25)),
+            "50 columns of a square image take 25 rows in a cell twice as tall as it is wide"
+        );
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true, TEST_CELL_ASPECT),
+            calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT),
+            "the width bound decides this box, so the open row bound changes no answer"
+        );
     }
 
+    /// The same rule the other way round, and the two are not symmetrical.
+    ///
+    /// A row is twice the height of a column here, so 50 rows of a square
+    /// image take 100 columns.
     #[test]
-    fn aspect_preserving_only_height_specified() {
-        let result =
-            calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT);
-        assert_eq!(result, (None, Some(50)));
+    fn one_row_bound_sizes_the_width_from_the_aspect_ratio() {
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT),
+            (Some(100), Some(50)),
+            "50 rows of a square image take 100 columns in a cell twice as tall as it is wide"
+        );
+    }
+
+    /// An open axis stays open when the caller asks for no aspect ratio at
+    /// all, because the caller then states the size itself.
+    #[test]
+    fn one_bound_stays_alone_when_the_caller_wants_no_aspect_ratio() {
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, Some(50), None, false, TEST_CELL_ASPECT),
+            (Some(50), None),
+            "a caller that turned the aspect ratio off states every axis it wants"
+        );
     }
 
     #[test]
