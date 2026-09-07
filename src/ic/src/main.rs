@@ -1682,9 +1682,31 @@ fn display_image(
     };
 
     // `ic` owns standard output for the whole of one image, so it hands the
-    // locked stream to the writer and takes the lock once.
+    // locked stream to the writer and takes the lock once. The lock goes back
+    // before the question below, because that question and its answer travel on
+    // the controlling terminal and not on standard output. A lock held across a
+    // round trip holds every other writer of this process out for the length of
+    // it, and it buys nothing.
     let mut stdout = io::stdout().lock();
     terminal_caps.draw(&mut stdout, &img, &request)?;
+    drop(stdout);
+
+    // A still picture asks the terminal whether it refused, and this is the
+    // read of that answer. `no_newline` names the two callers apart: it holds
+    // the cursor for a caller that draws the next frame directly after this
+    // one, and such a caller holds the terminal in raw mode for the key presses
+    // of the user. That path asks the terminal for no answer at all, so there
+    // is nothing to read, and a read would take a key press out of its hands.
+    if !no_newline {
+        if let Some(refusal) = terminal_caps.read_refusal() {
+            anyhow::bail!(
+                "The terminal refused this image and drew nothing: {refusal}\n\
+                \n\
+                The image reached the terminal, and the terminal reported the failure above.\n\
+                A smaller image can fit where this one did not: try --width, --height or --scale.",
+            );
+        }
+    }
 
     Ok(())
 }

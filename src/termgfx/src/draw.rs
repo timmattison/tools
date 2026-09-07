@@ -61,16 +61,54 @@ const KITTY_DELETE_ALL: &str = "\x1b_Ga=d,d=A\x1b\\";
 /// The Kitty graphics key that stops the terminal from answering a command.
 ///
 /// A Kitty terminal answers an image command that names an image id, and the
-/// answer is an APC sequence on the terminal itself. This crate reads no answer
-/// of any protocol, so every answer is waste at best. It is worse than waste
-/// for a caller that holds the terminal in raw mode: the answer arrives at that
-/// caller as key presses, and `krt` then reads the `p` of `i=1,p=1;OK` as the
-/// pause command of its own live table. `q=2` takes the success answer and the
-/// failure answer both away.
+/// answer is an APC sequence on the terminal itself. A frame of a video wants
+/// no answer, because the caller that draws one frame after another holds the
+/// terminal in raw mode for the key presses of the user: the answer arrives at
+/// that caller as key presses, and `krt` then reads the `p` of `i=1,p=1;OK` as
+/// the pause command of its own live table. `q=2` takes the success answer and
+/// the failure answer both away.
+///
+/// A still picture asks for the failures instead, through
+/// [`KITTY_FAILURES_ONLY`], because a caller that draws one picture reads the
+/// answer and then gives the terminal back to the shell.
 ///
 /// [`KITTY_DELETE_ALL`] carries no such key, because it names no image id and a
 /// Kitty terminal answers it never.
 const KITTY_QUIET: &str = "q=2";
+
+/// The Kitty graphics key that asks the terminal for the failures alone.
+///
+/// `q=1` takes the success answer away and leaves the failure answer. A still
+/// picture wants that one. A terminal that refuses the picture draws nothing,
+/// and the tool that asked for no answer then reports success in front of an
+/// empty screen. The image store of a mosh session holds a fixed number of
+/// bytes and refuses a picture above it, so the case is a common one.
+///
+/// **The caller of this crate reads the answer that this key asks for.** A
+/// caller that asks a terminal for a failure report and then reads nothing
+/// leaves that report on the descriptor the shell of the user reads next, and
+/// the shell takes the bytes of it for key presses.
+/// [`Capabilities::read_refusal`] is the read.
+const KITTY_FAILURES_ONLY: &str = "q=1";
+
+/// The image number that a still picture carries.
+///
+/// **A Kitty terminal answers a transmission only when the transmission names
+/// an image id or an image number.** The specification says of the `i` key that
+/// the terminal replies after it tried to load the image, and the parser of
+/// Ghostty states the same rule as one line of code: a transmission that names
+/// neither key gets no answer at all. So [`KITTY_FAILURES_ONLY`] reports
+/// nothing without a key such as this one beside it.
+///
+/// The key is `I` and not `i`, because the two mean different things. An `i` is
+/// an image id, and the specification says that a re-transmission of an id
+/// deletes the image which held that id and every placement of that image. One
+/// fixed id here would therefore take the picture of `ic a.png` off the screen
+/// the moment `ic b.png` drew. An `I` is an image number, and the specification
+/// gives it for exactly this case: a new image arrives even when an image of
+/// the same number stands already, and the terminal answers with the id that it
+/// made. Kitty, Ghostty and WezTerm all read it.
+const KITTY_STILL_IMAGE_NUMBER: &str = "I=1";
 
 /// How much of the terminal one image can take, in character cells.
 ///
@@ -395,11 +433,13 @@ impl KittyPayload {
 /// the cursor itself through [`write_image_with_cursor_contract`]. A renderer
 /// that also moved the cursor would double the movement.
 ///
-/// The header carries [`KITTY_QUIET`], so the terminal answers no command of
-/// this writer. The key stands in the header and not beside the keys of one
-/// cursor mode, because every image of every mode wants the silence. A Kitty
+/// The header states which answer the writer wants from the terminal, and
+/// `request.cursor` names it. A still picture asks for the failures with
+/// [`KITTY_FAILURES_ONLY`] and carries [`KITTY_STILL_IMAGE_NUMBER`], because a
+/// terminal answers no transmission that names neither an image id nor an image
+/// number. A frame of a video asks for nothing with [`KITTY_QUIET`]. A Kitty
 /// terminal reads the keys of a chunked image from the first chunk alone, and
-/// the first chunk is the header, so the key covers the chunked path as well.
+/// the first chunk is the header, so the keys cover the chunked path as well.
 ///
 /// # The two shapes of the payload
 ///
@@ -482,18 +522,29 @@ fn write_kitty<W: Write>(
         )
     });
 
+    // The two callers want two different answers from the terminal. The caller
+    // of a still picture reads the answer and tells the user why the screen is
+    // empty. The caller of a video frame holds the terminal in raw mode for the
+    // key presses of the user, and an answer would arrive there as a key press.
+    let answer_keys = match request.cursor {
+        Cursor::Held { .. } => KITTY_QUIET,
+        Cursor::BelowImage => KITTY_FAILURES_ONLY,
+    };
+
     // A fixed image id and a fixed placement id make each frame of a video
     // replace the one before it in place, which holds the memory of the
-    // renderer flat.
+    // renderer flat. A still picture names an image number instead: a terminal
+    // answers no transmission that names neither, and a second picture that
+    // re-used one image id would delete the first picture.
     let cursor_keys = match request.cursor {
         Cursor::Held { id } => format!(",i={id},p={id},C=1"),
-        Cursor::BelowImage => String::from(",C=1"),
+        Cursor::BelowImage => format!(",{KITTY_STILL_IMAGE_NUMBER},C=1"),
     };
     let width_key = display_width.map_or_else(String::new, |columns| format!(",c={columns}"));
     let height_key = display_height.map_or_else(String::new, |rows| format!(",r={rows}"));
     let size_keys = payload.pixel_size_keys(image.width(), image.height());
     let header = format!(
-        "\x1b_Ga=T,f={},{KITTY_QUIET}{size_keys}{cursor_keys}{width_key}{height_key}",
+        "\x1b_Ga=T,f={},{answer_keys}{size_keys}{cursor_keys}{width_key}{height_key}",
         payload.format_key()
     );
 
