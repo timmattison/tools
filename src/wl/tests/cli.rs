@@ -45,6 +45,34 @@ fn refused_probe_is_not_reported_as_free() {
     );
 }
 
+/// A reader of the kernel's socket table needs no privileges, so `wl` can
+/// answer for a privileged port that holds no service.
+///
+/// This is the behaviour the socket-table reader adds. A bind probe cannot
+/// reach the question on a port below the privileged threshold — the kernel
+/// refuses it — so the answer there was always "cannot tell". The kernel's own
+/// list of listening sockets is readable by any user, so a run that names no
+/// process on port 1 can now say so.
+///
+/// Gated to the platforms that have a reader. Every other platform keeps the
+/// bind probe, whose refusal `refused_probe_is_not_reported_as_free` pins.
+#[cfg(target_os = "macos")]
+#[test]
+fn unheld_privileged_port_is_reported_free() {
+    let output = Command::new(env!("CARGO_BIN_EXE_wl"))
+        .arg(REFUSED_UNUSED_PORT.to_string())
+        .output()
+        .expect("should be able to run the freshly built wl binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("No processes listening"),
+        "nothing is listening on port {REFUSED_UNUSED_PORT}, and reading the \
+         kernel's socket table needs no privileges, so wl should have reported \
+         the port free instead of declining to answer. stdout was: {stdout}"
+    );
+}
+
 /// The privilege note explains an answer that names nobody. When `wl` names the
 /// process the user asked about, the answer is complete and the advice is noise.
 ///
