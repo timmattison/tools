@@ -206,6 +206,22 @@ docker compose logs -f
     .to_string()
 }
 
+fn status_script(gluetun_name: &str) -> String {
+    format!(
+        r#"#!/usr/bin/env bash
+cd "$(dirname "$0")"
+
+echo "=== Container Status ==="
+docker compose ps
+echo ""
+
+echo "=== VPN Connection ==="
+VPN_IP=$(docker exec {gluetun_name} wget -qO- icanhazip.com 2>/dev/null || echo "not running")
+echo "VPN IP: $VPN_IP"
+"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,20 +240,4 @@ mod tests {
         let perms = fs::metadata(&env_path).unwrap().permissions();
         assert_eq!(perms.mode() & 0o777, 0o600);
     }
-}
-
-fn status_script(gluetun_name: &str) -> String {
-    format!(
-        r#"#!/usr/bin/env bash
-cd "$(dirname "$0")"
-
-echo "=== Container Status ==="
-docker compose ps
-echo ""
-
-echo "=== VPN Connection ==="
-VPN_IP=$(docker exec {gluetun_name} wget -qO- icanhazip.com 2>/dev/null || echo "not running")
-echo "VPN IP: $VPN_IP"
-"#
-    )
 }

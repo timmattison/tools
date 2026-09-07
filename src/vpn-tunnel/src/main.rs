@@ -150,8 +150,12 @@ fn run(cli: Cli) -> Result<()> {
                 .read_item_fields(&op_path_validated, CREDENTIAL_FIELD_PREFIX)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            // Check which credentials are already in use by running gluetun containers
-            let running_tunnels = find_running_tunnels();
+            // Check which credentials are already in use by running gluetun
+            // containers. A docker failure stops the command: handing out a
+            // credential on unknown state risks reusing a key a running tunnel
+            // already holds.
+            let running_tunnels = credential::find_running_tunnels()
+                .context("could not determine which credentials are in use")?;
 
             let selected = credential::select_credential(&available_fields, &running_tunnels)
                 .map_err(|err| {
@@ -163,9 +167,7 @@ fn run(cli: Cli) -> Result<()> {
                         ));
                     }
                     msg.push_str("\n\nAdd another credential in 1Password,");
-                    msg.push_str(
-                        "\nor stop an existing tunnel with: vpn-tunnel down --dir <path>",
-                    );
+                    msg.push_str("\nor stop an existing tunnel with: vpn-tunnel down --dir <path>");
                     anyhow::anyhow!("{msg}")
                 })?;
 
@@ -343,59 +345,6 @@ fn show_vpn_ip(dir: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn find_running_tunnels() -> Vec<credential::RunningTunnel> {
-    // List running gluetun containers
-    let output = match Command::new("docker")
-        .args([
-            "ps",
-            "--filter",
-            "ancestor=qmcgaw/gluetun",
-            "--format",
-            "{{.Names}}",
-        ])
-        .output()
-    {
-        Ok(out) if out.status.success() => out,
-        _ => return vec![],
-    };
-
-    let container_names: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect();
-
-    let mut tunnels = Vec::new();
-    for name in container_names {
-        // Extract WIREGUARD_PRIVATE_KEY from container environment
-        let inspect = match Command::new("docker")
-            .args([
-                "inspect",
-                "--format",
-                "{{range .Config.Env}}{{println .}}{{end}}",
-                &name,
-            ])
-            .output()
-        {
-            Ok(out) if out.status.success() => out,
-            _ => continue,
-        };
-
-        let env_vars = String::from_utf8_lossy(&inspect.stdout);
-        for line in env_vars.lines() {
-            if let Some(key) = line.strip_prefix("WIREGUARD_PRIVATE_KEY=") {
-                tunnels.push(credential::RunningTunnel {
-                    container_name: name.clone(),
-                    wireguard_key: key.to_string(),
-                });
-                break;
-            }
-        }
-    }
-
-    tunnels
 }
 
 fn read_credential_field(dir: &Path) -> Option<String> {

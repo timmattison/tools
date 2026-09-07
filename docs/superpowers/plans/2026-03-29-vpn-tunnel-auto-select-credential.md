@@ -678,49 +678,37 @@ In `src/vpn-tunnel/src/main.rs`, change the constant:
 const DEFAULT_OP_PATH: &str = "op://Private/ProtonVPN WireGuard key";
 ```
 
-Add a function after `show_vpn_ip` for detecting running tunnels:
+Add detection of running tunnels to `src/vpn-tunnel/src/credential.rs`, which already owns `RunningTunnel` and has a test module. Detection takes an injected command runner so the docker failure paths are testable without a docker daemon:
 
 ```rust
-fn find_running_tunnels() -> Vec<credential::RunningTunnel> {
-    // List running gluetun containers
-    let output = match Command::new("docker")
-        .args(["ps", "--filter", "ancestor=qmcgaw/gluetun", "--format", "{{.Names}}"])
-        .output()
-    {
-        Ok(out) if out.status.success() => out,
-        _ => return vec![],
-    };
+/// Whether a docker image reference names the gluetun repository. Anchored at
+/// both ends, so every tag and digest of the real image matches and
+/// `evil/qmcgaw/gluetun` does not. Docker's own `ancestor=` filter cannot do
+/// this: it resolves an untagged reference to `:latest`, which a machine that
+/// only ever pulled the pinned tag does not have, and then matches nothing
+/// while `docker ps` still exits 0.
+fn is_gluetun_image(image: &str) -> bool { /* ... */ }
 
-    let container_names: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect();
+/// Names of the containers in `docker ps --format '{{.Names}}\t{{.Image}}'`
+/// output whose image is a gluetun image.
+fn gluetun_container_names(ps_stdout: &str) -> Vec<&str> { /* ... */ }
 
-    let mut tunnels = Vec::new();
-    for name in container_names {
-        // Extract WIREGUARD_PRIVATE_KEY from container environment
-        let inspect = match Command::new("docker")
-            .args(["inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", &name])
-            .output()
-        {
-            Ok(out) if out.status.success() => out,
-            _ => continue,
-        };
+/// The WIREGUARD_PRIVATE_KEY value in `docker inspect` environment output.
+fn wireguard_key_from_env(inspect_stdout: &str) -> Option<&str> { /* ... */ }
 
-        let env_vars = String::from_utf8_lossy(&inspect.stdout);
-        for line in env_vars.lines() {
-            if let Some(key) = line.strip_prefix("WIREGUARD_PRIVATE_KEY=") {
-                tunnels.push(credential::RunningTunnel {
-                    container_name: name.clone(),
-                    wireguard_key: key.to_string(),
-                });
-                break;
-            }
-        }
-    }
+/// Lists the running gluetun containers and the key each one holds, through
+/// the given docker runner. A docker command that cannot be started or that
+/// exits non-zero is an error carrying the docker stderr — never an empty
+/// list, because a credential handed out on unknown state can duplicate a
+/// live tunnel's key.
+fn find_running_tunnels_with<R>(run: R) -> Result<Vec<RunningTunnel>, DockerError>
+where
+    R: Fn(&[&str]) -> std::io::Result<std::process::Output>,
+{ /* ... */ }
 
-    tunnels
+/// The wrapper `main.rs` calls: the same thing over the real docker binary.
+pub fn find_running_tunnels() -> Result<Vec<RunningTunnel>, DockerError> {
+    find_running_tunnels_with(|args| Command::new("docker").args(args).output())
 }
 ```
 
@@ -739,7 +727,8 @@ Replace the credential fetching section in the `Generate` arm (lines 142-148 in 
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             // Check which credentials are already in use by running gluetun containers
-            let running_tunnels = find_running_tunnels();
+            let running_tunnels = credential::find_running_tunnels()
+                .context("could not determine which credentials are in use")?;
 
             let selected = credential::select_credential(&available_fields, &running_tunnels)
                 .map_err(|err| {
@@ -812,7 +801,7 @@ git commit -m "feat(vpn-tunnel): wire up credential auto-selection in generate c
 
 - [ ] **Step 1: Add helper to read CREDENTIAL_FIELD from .env**
 
-Add a function after `find_running_tunnels` in `src/vpn-tunnel/src/main.rs`:
+Add a function after `show_vpn_ip` in `src/vpn-tunnel/src/main.rs`:
 
 ```rust
 fn read_credential_field(dir: &Path) -> Option<String> {

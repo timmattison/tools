@@ -86,6 +86,18 @@ pub fn select_credential(
     Err(AllCredentialsInUse { usage })
 }
 
+/// The image repository every gluetun container runs.
+const GLUETUN_IMAGE: &str = "qmcgaw/gluetun";
+
+/// The environment variable that carries a container's WireGuard private key.
+const WIREGUARD_KEY_ENV: &str = "WIREGUARD_PRIVATE_KEY=";
+
+/// The docker template that reports one container per line, name then image.
+const PS_FORMAT: &str = "{{.Names}}\t{{.Image}}";
+
+/// The docker template that reports one environment entry per line.
+const INSPECT_ENV_FORMAT: &str = "{{range .Config.Env}}{{println .}}{{end}}";
+
 /// A docker command that could not be run, or that ran and reported a failure.
 #[derive(Debug)]
 pub struct DockerError {
@@ -103,16 +115,75 @@ impl std::fmt::Display for DockerError {
 
 impl std::error::Error for DockerError {}
 
+impl DockerError {
+    fn new(args: &[&str], detail: String) -> Self {
+        Self {
+            command: args.join(" "),
+            detail,
+        }
+    }
+}
+
+/// Whether a docker image reference names the gluetun repository.
+///
+/// The comparison is anchored at both ends of the repository name: a tag
+/// (`:v3.40`, `:latest`), a digest (`@sha256:...`), or nothing at all may
+/// follow it. So `evil/qmcgaw/gluetun` and `qmcgaw/gluetunnel` do not match,
+/// and every tag of the real image does. Docker's own `ancestor=` filter
+/// cannot do this: it resolves an untagged reference to `:latest`, which a
+/// machine that only ever pulled a pinned tag does not have, and then matches
+/// nothing while `docker ps` still exits 0.
+fn is_gluetun_image(image: &str) -> bool {
+    match image.strip_prefix(GLUETUN_IMAGE) {
+        Some(rest) => rest.is_empty() || rest.starts_with(':') || rest.starts_with('@'),
+        None => false,
+    }
+}
+
 /// Names of the running containers whose image is a gluetun image.
+///
+/// Reads the stdout of `docker ps --format '{{.Names}}\t{{.Image}}'`. A blank
+/// line, a row that carries no tab, and a row whose name or image is empty are
+/// all skipped.
 fn gluetun_container_names(ps_stdout: &str) -> Vec<&str> {
-    let _ = ps_stdout;
-    Vec::new()
+    ps_stdout
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(name, image)| (name.trim(), image.trim()))
+        .filter(|(name, image)| !name.is_empty() && is_gluetun_image(image))
+        .map(|(name, _)| name)
+        .collect()
 }
 
 /// The WireGuard private key in a container's environment, if it carries one.
+///
+/// Reads the stdout of
+/// `docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}'`.
 fn wireguard_key_from_env(inspect_stdout: &str) -> Option<&str> {
-    let _ = inspect_stdout;
-    None
+    inspect_stdout
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .find_map(|line| line.strip_prefix(WIREGUARD_KEY_ENV))
+}
+
+/// Runs one docker command and hands back its stdout, or the reason it failed.
+fn docker_stdout<R>(run: &R, args: &[&str]) -> Result<String, DockerError>
+where
+    R: Fn(&[&str]) -> io::Result<Output>,
+{
+    let output = run(args).map_err(|e| DockerError::new(args, e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            format!("exited with status {}", output.status)
+        } else {
+            stderr
+        };
+        return Err(DockerError::new(args, detail));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Lists the running gluetun containers and the WireGuard key each one holds,
@@ -121,8 +192,24 @@ fn find_running_tunnels_with<R>(run: R) -> Result<Vec<RunningTunnel>, DockerErro
 where
     R: Fn(&[&str]) -> io::Result<Output>,
 {
-    let _ = &run;
-    Ok(Vec::new())
+    let ps_stdout = docker_stdout(&run, &["ps", "--format", PS_FORMAT])?;
+    let names: Vec<String> = gluetun_container_names(&ps_stdout)
+        .into_iter()
+        .map(ToString::to_string)
+        .collect();
+
+    let mut tunnels = Vec::new();
+    for name in names {
+        let env = docker_stdout(&run, &["inspect", "--format", INSPECT_ENV_FORMAT, &name])?;
+        if let Some(key) = wireguard_key_from_env(&env) {
+            tunnels.push(RunningTunnel {
+                container_name: name,
+                wireguard_key: key.to_string(),
+            });
+        }
+    }
+
+    Ok(tunnels)
 }
 
 /// Lists the running gluetun containers and the WireGuard key each one holds.
@@ -305,7 +392,8 @@ mod tests {
         .expect_err("a failed docker ps must not read as no tunnels running");
 
         assert!(
-            err.to_string().contains("Cannot connect to the Docker daemon"),
+            err.to_string()
+                .contains("Cannot connect to the Docker daemon"),
             "the error must carry the docker stderr: {err}"
         );
     }
@@ -344,8 +432,9 @@ mod tests {
 
     #[test]
     fn stderr_that_is_not_utf8_still_reports_an_error() {
-        let err = find_running_tunnels_with(|_| Ok(failed_output(&[0xff, 0xfe, b'b', b'o', b'o', b'm'])))
-            .expect_err("undecodable stderr must not read as no tunnels running");
+        let err =
+            find_running_tunnels_with(|_| Ok(failed_output(&[0xff, 0xfe, b'b', b'o', b'o', b'm'])))
+                .expect_err("undecodable stderr must not read as no tunnels running");
 
         assert!(
             err.to_string().contains("boom"),
@@ -380,10 +469,7 @@ mod tests {
 
     #[test]
     fn multiple_credentials_none_in_use_selects_first() {
-        let available = vec![
-            field("credential", "key-1"),
-            field("credential-2", "key-2"),
-        ];
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
         let running = vec![];
         let result = select_credential(&available, &running).unwrap();
         assert_eq!(result.field_label, "credential");
@@ -394,10 +480,7 @@ mod tests {
 
     #[test]
     fn multiple_credentials_first_in_use_selects_second() {
-        let available = vec![
-            field("credential", "key-1"),
-            field("credential-2", "key-2"),
-        ];
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
         let running = vec![tunnel("scraper-gluetun", "key-1")];
         let result = select_credential(&available, &running).unwrap();
         assert_eq!(result.field_label, "credential-2");
@@ -408,10 +491,7 @@ mod tests {
 
     #[test]
     fn all_credentials_in_use_returns_error() {
-        let available = vec![
-            field("credential", "key-1"),
-            field("credential-2", "key-2"),
-        ];
+        let available = vec![field("credential", "key-1"), field("credential-2", "key-2")];
         let running = vec![
             tunnel("scraper-gluetun", "key-1"),
             tunnel("vpn-gluetun", "key-2"),
