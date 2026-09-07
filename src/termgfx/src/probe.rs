@@ -189,17 +189,24 @@ fn window_operation_parameters<'a>(answer: &'a [u8], kind: &[u8]) -> Option<Vec<
     while let Some(start) = position_of(rest, CSI_OPENER) {
         let body = &rest[start + CSI_OPENER.len()..];
         // A control sequence ends at its final byte, which stands above every
-        // parameter byte. An answer with no final byte is an answer cut short.
-        let end = body.iter().position(|byte| (0x40..=0x7e).contains(byte))?;
-        if body[end] == WINDOW_OPERATION_FINAL {
-            let parameters: Vec<&[u8]> = body[..end]
-                .split(|byte| *byte == PARAMETER_SEPARATOR)
-                .collect();
-            if parameters.first() == Some(&kind) {
-                return Some(parameters);
+        // parameter byte. A sequence with no final byte was cut short, and the
+        // walk below reads the rest of the buffer all the same.
+        if let Some(end) = body.iter().position(|byte| (0x40..=0x7e).contains(byte)) {
+            if body[end] == WINDOW_OPERATION_FINAL {
+                let parameters: Vec<&[u8]> = body[..end]
+                    .split(|byte| *byte == PARAMETER_SEPARATOR)
+                    .collect();
+                if parameters.first() == Some(&kind) {
+                    return Some(parameters);
+                }
             }
         }
-        rest = &body[end + 1..];
+        // The walk goes on from the body of the sequence it just refused, and
+        // not from behind the final byte of it. A sequence that was cut short
+        // holds the opener of the next one inside what would otherwise be its
+        // parameters, and that opener stands in front of the final byte. The
+        // body is two bytes shorter than `rest` on every turn, so the walk ends.
+        rest = body;
     }
     None
 }
