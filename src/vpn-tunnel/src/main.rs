@@ -150,12 +150,11 @@ fn run(cli: Cli) -> Result<()> {
                 .read_item_fields(&op_path_validated, CREDENTIAL_FIELD_PREFIX)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            // Check which credentials are already in use by running gluetun
-            // containers. A docker failure stops the command: handing out a
-            // credential on unknown state risks reusing a key a running tunnel
-            // already holds.
+            // Check which credentials running gluetun containers already hold.
+            // A docker failure stops the command: handing out a credential on
+            // unknown state risks reusing a key a running tunnel already holds.
             let running_tunnels = credential::find_running_tunnels()
-                .context("could not determine which credentials are in use")?;
+                .context("could not determine which credentials running tunnels hold")?;
 
             // A directory that was generated before names its credential in
             // its own .env. Regenerating it keeps that credential: a second
@@ -169,10 +168,11 @@ fn run(cli: Cli) -> Result<()> {
                 existing_field.as_deref(),
             )
             .map_err(|err| {
-                let mut msg = "all WireGuard credentials are in use\n".to_string();
+                let mut msg =
+                    "every WireGuard credential is held by a running tunnel\n".to_string();
                 for usage in &err.usage {
                     msg.push_str(&format!(
-                        "\n  {:<20} -> used by {}",
+                        "\n  {:<20} -> held by {}",
                         usage.field_label, usage.container_name
                     ));
                 }
@@ -203,11 +203,18 @@ fn run(cli: Cli) -> Result<()> {
                 "done:".green().bold(),
                 output_dir.display()
             );
+            // The count names what it counts: `select_credential` counts the
+            // credentials a running tunnel holds, which never includes the one
+            // it just handed out.
+            let held = if selected.in_use == 1 {
+                "1 held by a running tunnel".to_string()
+            } else {
+                format!("{} held by running tunnels", selected.in_use)
+            };
             println!(
-                "Using credential: {} ({} available, {} in use)",
+                "Using credential: {} ({} available, {held})",
                 credential_field.cyan(),
-                selected.total,
-                selected.in_use
+                selected.total
             );
             if existing_field.as_deref() == Some(credential_field.as_str()) {
                 println!(

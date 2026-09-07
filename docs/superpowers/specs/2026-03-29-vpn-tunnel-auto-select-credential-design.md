@@ -52,10 +52,10 @@ The `generate` command flow becomes:
 6. **Match and select:** Compare available credential values against in-use keys. Pick the first unused one
 7. **Error if all in use:** Display which container is using each key:
    ```
-   error: all WireGuard credentials are in use
+   error: every WireGuard credential is held by a running tunnel
 
-     credential    -> used by scraper-gluetun
-     credential-2  -> used by vpn-gluetun
+     credential    -> held by scraper-gluetun
+     credential-2  -> held by vpn-gluetun
 
    Add another credential to "ProtonVPN WireGuard key" in 1Password,
    or stop an existing tunnel with: vpn-tunnel down --dir <path>
@@ -76,7 +76,7 @@ CREDENTIAL_FIELD=credential-2
 
 **`vpn-tunnel generate`** success output includes:
 ```
-Using credential: credential-2 (1 of 3 available, 1 in use)
+Using credential: credential-2 (3 available, 1 held by a running tunnel)
 ```
 
 A run that kept the credential the directory already names says so on the next line, so a user who regenerates a directory is not left wondering why the counts did not move:

@@ -624,7 +624,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - 1Password credential cache with retry logic, atomic writes, and worktree support. Wraps `op read`
     so repeated calls don't re-hit 1Password (or trigger Touch ID) for every secret. Supports text and
     binary secrets, env-var overrides, cache invalidation, and includes worktree hooks for automatic
-    setup. Required by other tools in this repo (e.g. `vpn-tunnel`).
+    setup. Its `list-fields` subcommand lists the fields of a 1Password item whose label matches a
+    prefix, which is how `vpn-tunnel` finds the several WireGuard credentials that live on one item.
+    Required by other tools in this repo (e.g. `vpn-tunnel`).
   - To install: `cargo install --git https://github.com/timmattison/tools op-cache`
 - kitchen-sync
   - Installs every Rust binary from a git repository with a single command. Clones the repo, parses
