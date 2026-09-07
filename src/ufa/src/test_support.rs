@@ -282,12 +282,30 @@ mod guard_tests {
     /// which wraps them in the environment lock.
     const HELPER_FILE: &str = "test_support.rs";
 
-    /// clap's argv-taking entry points, which read the environment as well as
-    /// the argument vector. `parse_from` is a substring of `try_parse_from`,
-    /// so the one needle catches both spellings.
-    const CLAP_ARGV_PARSER: &str = "parse_from";
+    /// clap's parse entry points, which read the environment as well as the
+    /// argument vector. Each needle is the shortest spelling of its family, so
+    /// the set holds no needle another one already covers:
+    ///
+    /// * `parse_from` catches `Args::parse_from` and `Args::try_parse_from`.
+    ///   These are the `Parser` trait's own argv parsers.
+    /// * `get_matches` catches `Command::get_matches`, `try_get_matches`,
+    ///   `get_matches_from` and `try_get_matches_from`. `Args::command()` hands
+    ///   back the `Command`, and every one of these reads `UNIFI_*` because the
+    ///   environment fallback belongs to the argument rather than to the
+    ///   `Parser` trait. A guard that watched the trait alone watched half the
+    ///   crate, and a probe that parsed this way went unreported.
+    /// * `from_arg_matches` catches `Args::from_arg_matches`, its `_mut`,
+    ///   `try_` and `update_` spellings. The conversion reads no environment
+    ///   itself, because the `ArgMatches` it takes is already filled in — but
+    ///   the only way to hold one is to make a call the needle above catches,
+    ///   so naming it fails the whole two-step bypass rather than half of it.
+    ///
+    /// Production code is unaffected: `main` reaches clap through
+    /// `Args::parse()`, and the one other metadata call the crate makes,
+    /// `Args::command().get_version()`, carries none of these needles.
+    const CLAP_PARSERS: &[&str] = &["parse_from", "get_matches", "from_arg_matches"];
 
-    /// Find every direct use of a clap argv parser in `source`.
+    /// Find every direct use of a clap parse entry point in `source`.
     ///
     /// This reads source text rather than exercising the compiled code,
     /// because the point is to catch a call somebody *adds* — which no amount
@@ -309,7 +327,8 @@ mod guard_tests {
             .enumerate()
             .filter(|(_, line)| {
                 let trimmed = line.trim_start();
-                !trimmed.starts_with("//") && trimmed.contains(CLAP_ARGV_PARSER)
+                !trimmed.starts_with("//")
+                    && CLAP_PARSERS.iter().any(|needle| trimmed.contains(needle))
             })
             .map(|(index, _)| index + 1)
             .collect()
