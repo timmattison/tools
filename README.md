@@ -357,7 +357,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - To install: `cargo install --git https://github.com/timmattison/tools tvfind`
 - wl
     - Shows which process is listening on a given port. Useful for identifying what program is using a specific port
-      on your system. Supports verbose output to show detailed socket information.
+      on your system. Supports verbose output to show detailed socket information. Without root it sees only processes
+      owned by you, so run it under `sudo` for a complete answer. When it cannot name an owner it does not claim the
+      port is free: it reports that the port is held by a process it cannot see, or that the operating system refused
+      the check.
     - To install: `cargo install --git https://github.com/timmattison/tools wl`
 - wolly
     - Wake-on-LAN tool to remotely wake computers by sending magic packets. Features automatic subnet broadcast
