@@ -266,6 +266,25 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_released_port_as_free() {
+        // The kernel picks the port, so two copies of this test that run at the
+        // same time never ask about the same one.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("should be able to bind an ephemeral port");
+        let port = listener
+            .local_addr()
+            .expect("bound listener must have a local address")
+            .port();
+        drop(listener);
+
+        assert_eq!(
+            tcp_port_probe(port),
+            PortProbe::Free,
+            "port {port} was released by this test but the probe did not report it free"
+        );
+    }
+
+    #[test]
     fn classifies_every_bind_error_kind() {
         let cases = [
             (io::ErrorKind::AddrInUse, PortProbe::InUse),
