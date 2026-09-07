@@ -229,6 +229,31 @@ fn a_directory_that_is_not_there_is_refused() {
     );
 }
 
+/// A fixture is data a test reads, not code a crate compiles, and this
+/// workspace keeps Rust there that is deliberately not valid Rust. Reading one
+/// as a source refuses every run of the guard, on a fault that is the whole
+/// point of the file.
+///
+/// The cost of that rule is the second half of this test: a spawn inside a
+/// fixture is invisible. The rule is stated so a reader sees the hole.
+#[test]
+fn a_fixture_is_neither_read_nor_parsed() {
+    let dir = tree(&[
+        ("lib.rs", PLAIN),
+        ("fixtures/rust/syntax_error.rs", "pub fn broken( {"),
+        ("fixtures/rust/spawn.rs", IMPORTED),
+    ]);
+
+    let report = op_wall::audit_sources(dir.path()).expect("a fixture must not refuse the audit");
+
+    assert_eq!(
+        report.files_examined(),
+        1,
+        "only the source outside the fixtures may be read, got {report}"
+    );
+    assert!(report.is_compliant(), "{report}");
+}
+
 /// The rule itself, against the workspace it protects.
 #[test]
 fn only_op_cache_runs_the_op_binary() {

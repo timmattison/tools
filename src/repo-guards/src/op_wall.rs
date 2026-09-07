@@ -29,8 +29,9 @@
 //! crate invisible to the guard, which is the exact failure this exists to
 //! prevent. Inside a member, every Rust file at any depth is read — the
 //! library, the binaries, the tests, the benches, the examples, and the build
-//! script — because any of them can spawn a process. Only a `target` directory
-//! is skipped, and it holds no source anybody here wrote.
+//! script — because any of them can spawn a process. Two directories are
+//! skipped, `target` and `fixtures`, and `is_not_a_source_directory` states
+//! what each one costs.
 //!
 //! `op-cache` is recognised by its directory. If it ever moves, no member
 //! matches, `op-cache` is audited like everything else, and its own two calls
@@ -76,19 +77,44 @@
 //! with no Rust source is a guard pointed at the wrong place, and "I examined
 //! nothing" reads exactly like "everything is clean". See [`OpWallError`].
 
+use std::collections::BTreeSet;
 use std::fmt;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use proc_macro2::{Ident, Literal, TokenStream, TokenTree};
+use syn::visit::{self, Visit};
+use syn::{Expr, ExprCall, File, Lit, Macro};
 use thiserror::Error;
 
-use crate::workspace_lints::WorkspaceLintsError;
+use crate::workspace_lints::{self, WorkspaceLintsError};
 
 /// The crate that runs `op`, relative to the repository root.
 const OP_CACHE: &str = "src/op-cache";
 
 /// The name of the 1Password CLI, as a program name.
 const OP: &str = "op";
+
+/// The type whose constructor starts a child process.
+const COMMAND: &str = "Command";
+
+/// The constructor of that type.
+const NEW: &str = "new";
+
+/// The extension of a Rust source file.
+const RS: &str = "rs";
+
+/// A directory of build output. It holds sources nobody in this workspace
+/// wrote, and reading them says nothing about this workspace.
+const TARGET: &str = "target";
+
+/// A directory of test data. What it holds is read by a test rather than
+/// compiled into one.
+const FIXTURES: &str = "fixtures";
+
+/// The separators a program path can carry, on either family of system.
+const PATH_SEPARATORS: [char; 2] = ['/', '\\'];
 
 /// Everything that stops the audit from reaching a verdict.
 ///
@@ -249,7 +275,12 @@ impl fmt::Display for Report {
              offender existed."
         )?;
         for offender in &self.offenders {
-            writeln!(f, "  {}: {}", offender.path.display(), offender.spawns.join(", "))?;
+            writeln!(
+                f,
+                "  {}: {}",
+                offender.path.display(),
+                offender.spawns.join(", ")
+            )?;
         }
         Ok(())
     }
@@ -264,12 +295,37 @@ impl fmt::Display for Report {
 /// file is not valid Rust, a member holds no Rust source, or every member was
 /// skipped.
 pub fn audit(repo_root: &Path) -> Result<Report, OpWallError> {
-    let _ = repo_root;
+    let mut files = Vec::new();
+    let mut offenders = Vec::new();
 
-    Ok(Report {
-        files: Vec::new(),
-        offenders: Vec::new(),
-    })
+    for member in audited_members(repo_root)? {
+        let report = audit_sources(&member)?;
+        files.extend(report.files);
+        offenders.extend(report.offenders);
+    }
+
+    files.sort();
+    offenders.sort_by(|left, right| left.path.cmp(&right.path));
+
+    Ok(Report { files, offenders })
+}
+
+/// The members this audit reads: every one but `op-cache`.
+///
+/// `op-cache` is recognised by its directory. If it moves, no member matches,
+/// and its own calls are reported — a loud failure rather than a quiet drop of
+/// one crate from the audited set.
+fn audited_members(repo_root: &Path) -> Result<Vec<PathBuf>, OpWallError> {
+    let members: Vec<PathBuf> = workspace_lints::members(repo_root)?
+        .into_iter()
+        .filter(|member| !member.ends_with(OP_CACHE))
+        .collect();
+
+    if members.is_empty() {
+        return Err(OpWallError::NoMembersAudited);
+    }
+
+    Ok(members)
 }
 
 /// Audit the Rust sources under `dir`, at any depth.
@@ -282,10 +338,212 @@ pub fn audit(repo_root: &Path) -> Result<Report, OpWallError> {
 /// ([`Unparsable`](OpWallError::Unparsable)), or the directory holds no Rust
 /// file at all ([`NoSources`](OpWallError::NoSources)).
 pub fn audit_sources(dir: &Path) -> Result<Report, OpWallError> {
-    let _ = dir;
+    let files = rust_sources(dir)?;
+    if files.is_empty() {
+        return Err(OpWallError::NoSources {
+            dir: dir.to_path_buf(),
+        });
+    }
 
-    Ok(Report {
-        files: Vec::new(),
-        offenders: Vec::new(),
-    })
+    let mut offenders = Vec::new();
+    for path in &files {
+        let text = fs::read_to_string(path).map_err(|source| OpWallError::ReadSource {
+            path: path.clone(),
+            source,
+        })?;
+        let file = syn::parse_file(&text).map_err(|error| OpWallError::Unparsable {
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
+
+        let spawns = spawns_of_op(&file);
+        if spawns.is_empty() {
+            continue;
+        }
+        offenders.push(Offender {
+            path: path.clone(),
+            spawns: spawns.into_iter().collect(),
+        });
+    }
+
+    Ok(Report { files, offenders })
+}
+
+/// Every Rust source under `dir`, at any depth, sorted by path.
+///
+/// A directory that exists and cannot be listed is a refusal. To walk past it
+/// would drop files from the audit and report the wall intact for the wrong
+/// reason.
+fn rust_sources(dir: &Path) -> Result<Vec<PathBuf>, OpWallError> {
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+
+    while let Some(current) = pending.pop() {
+        let entries = fs::read_dir(&current).map_err(|source| OpWallError::ReadDir {
+            dir: current.clone(),
+            source,
+        })?;
+        for entry in entries {
+            let path = entry
+                .map_err(|source| OpWallError::ReadDir {
+                    dir: current.clone(),
+                    source,
+                })?
+                .path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(is_not_a_source_directory) {
+                    continue;
+                }
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == RS) {
+                files.push(path);
+            }
+        }
+    }
+
+    files.sort();
+    Ok(files)
+}
+
+/// Whether a directory holds something other than the sources of this
+/// workspace.
+///
+/// Two directories qualify, and both are named rather than guessed at, so the
+/// hole each one opens is visible to a reader.
+///
+/// `target` holds build output: sources nobody here wrote, in numbers that
+/// would swamp the audit.
+///
+/// `fixtures` holds test data. A file there is read by a test rather than
+/// compiled into one, and this workspace keeps Rust there that is deliberately
+/// not valid Rust — `src/cdva/tests/fixtures/rust/syntax_error.rs` is named
+/// for what it holds. Reading those as sources refuses every run of the guard,
+/// on a fault that is the whole point of the file.
+///
+/// The cost is stated: a real source under a directory named `fixtures` is
+/// invisible to this guard. Nothing else in the walk is skipped, so a source
+/// anywhere else — the library, the binaries, the tests, the benches, the
+/// examples, the build script — is read.
+fn is_not_a_source_directory(name: &std::ffi::OsStr) -> bool {
+    name == TARGET || name == FIXTURES
+}
+
+/// Every spawn of the `op` binary one parsed file holds, sorted and
+/// deduplicated.
+fn spawns_of_op(file: &File) -> BTreeSet<String> {
+    let mut spawns = Spawns {
+        found: BTreeSet::new(),
+    };
+    spawns.visit_file(file);
+    spawns.found
+}
+
+/// The walk that reads one file.
+struct Spawns {
+    /// What the file runs, rendered for the report.
+    found: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for Spawns {
+    fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+        if let Some(spawn) = spawn_of_op(call) {
+            self.found.insert(spawn);
+        }
+        visit::visit_expr_call(self, call);
+    }
+
+    fn visit_macro(&mut self, macro_call: &'ast Macro) {
+        if let Some(spawn) = spawn_inside_tokens(&macro_call.tokens) {
+            self.found.insert(spawn);
+        }
+        visit::visit_macro(self, macro_call);
+    }
+}
+
+/// The spawn of `op` a call holds, when it holds one.
+///
+/// The callee is read from the end, so every module path in front of the two
+/// segments `Command` and `new` reads the same: `Command::new`,
+/// `std::process::Command::new`, and `tokio::process::Command::new`.
+fn spawn_of_op(call: &ExprCall) -> Option<String> {
+    let Expr::Path(callee) = call.func.as_ref() else {
+        return None;
+    };
+    let mut segments = callee.path.segments.iter().rev();
+    if segments.next()?.ident != NEW || segments.next()?.ident != COMMAND {
+        return None;
+    }
+
+    let Some(Expr::Lit(literal)) = call.args.first() else {
+        return None;
+    };
+    let Lit::Str(program) = &literal.lit else {
+        return None;
+    };
+    let program = program.value();
+
+    names_the_op_binary(&program).then(|| format!("{COMMAND}::{NEW}(\"{program}\")"))
+}
+
+/// The spawn of `op` a macro body holds, when it holds one.
+///
+/// A macro body arrives as unparsed tokens, and a token stream that holds
+/// nothing but a fragment of an expression cannot be parsed as one. So the test
+/// is looser than the one on a call: the identifier `Command` and a string
+/// literal that names the `op` binary, anywhere in the same body. The looseness
+/// costs an over-match nobody has hit and answers a spelling a stricter test
+/// never sees.
+fn spawn_inside_tokens(tokens: &TokenStream) -> Option<String> {
+    let mut names_command = false;
+    let mut program = None;
+    read_tokens(tokens, &mut names_command, &mut program);
+
+    match (names_command, program) {
+        (true, Some(program)) => Some(format!("{COMMAND} … \"{program}\" in a macro body")),
+        _ => None,
+    }
+}
+
+/// Read every token of `tokens`, at any depth inside its groups.
+///
+/// A group is a bracketed run of tokens, and a macro body is full of them, so a
+/// walk that reads only the top level reads almost nothing.
+fn read_tokens(tokens: &TokenStream, names_command: &mut bool, program: &mut Option<String>) {
+    for token in tokens.clone() {
+        match token {
+            TokenTree::Group(group) => read_tokens(&group.stream(), names_command, program),
+            TokenTree::Ident(ident) => *names_command |= names_the_command_type(&ident),
+            TokenTree::Literal(literal) => {
+                if program.is_none() {
+                    *program = op_binary_literal(&literal);
+                }
+            }
+            TokenTree::Punct(_) => {}
+        }
+    }
+}
+
+/// Whether an identifier names the type whose constructor starts a process.
+fn names_the_command_type(ident: &Ident) -> bool {
+    ident == COMMAND
+}
+
+/// The program a literal names, when the literal is a string that names the
+/// `op` binary.
+fn op_binary_literal(literal: &Literal) -> Option<String> {
+    let tokens = TokenStream::from(TokenTree::Literal(literal.clone()));
+    let program = syn::parse2::<syn::LitStr>(tokens).ok()?.value();
+
+    names_the_op_binary(&program).then_some(program)
+}
+
+/// Whether a program name names the 1Password CLI.
+///
+/// The last segment of a path decides, so `/opt/homebrew/bin/op` runs the same
+/// binary as `op`, and `op-cache` runs neither.
+fn names_the_op_binary(program: &str) -> bool {
+    program
+        .rsplit(PATH_SEPARATORS)
+        .next()
+        .is_some_and(|name| name == OP)
 }
