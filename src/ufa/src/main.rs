@@ -155,11 +155,16 @@ const INSECURE_WARNING: &str = "warning: TLS certificate verification is off. \
 fn resolve_insecure(
     supplied: Option<bool>,
     config: Option<&Config>,
-    _warnings: &mut impl Write,
+    warnings: &mut impl Write,
 ) -> Result<bool> {
     let insecure = supplied
         .or_else(|| config.and_then(|config| config.insecure))
         .unwrap_or(false);
+
+    if insecure {
+        writeln!(warnings, "{INSECURE_WARNING}")
+            .context("Failed to warn that TLS certificate verification is off")?;
+    }
 
     Ok(insecure)
 }
