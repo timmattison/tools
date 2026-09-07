@@ -138,6 +138,19 @@ fn tcp_port_probe(port: u16) -> PortProbe {
     )
 }
 
+/// Print the privilege note, when this run has earned one.
+///
+/// The note applies exactly when `wl` named no listening process. A process
+/// the current user cannot see is a live explanation for every answer in which
+/// `wl` named nobody — including a failure to enumerate listeners at all. When
+/// `wl` did name a process the user already has an answer, and the advice is
+/// noise after it.
+fn print_privilege_note(note: Option<&str>) {
+    if let Some(note) = note {
+        eprintln!("{note}");
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let privilege_note = non_root_privilege_note(current_euid());
@@ -206,16 +219,14 @@ fn main() -> Result<()> {
                         args.port
                     ),
                 }
+
+                print_privilege_note(privilege_note);
             }
         }
         Err(e) => {
             eprintln!("Error getting listeners: {}", e);
             std::process::exit(1);
         }
-    }
-
-    if let Some(note) = privilege_note {
-        eprintln!("{note}");
     }
 
     Ok(())
