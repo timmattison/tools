@@ -40,11 +40,14 @@ sm_op_path = "op://Private/ufa/site manager key"
 site_manager_api_key = "your-site-manager-api-key"
 ```
 
-> **Security caveat:** this writes the key in cleartext to
-> `~/.config/ufa/config.toml`. `ufa` restricts that file to mode `0600`
-> (owner-only) whenever it saves it, but the key is still readable by anything
-> running as you, and by anyone who can read your backups. It is kept only for
-> backward compatibility with existing configs — prefer `sm_op_path`.
+> **Security caveat:** this writes the key in cleartext to the config file. That
+> file sits in a different place on each platform — `ufa config path` prints the
+> one you have, and the table in [README.md](./README.md#the-config-file) gives
+> all three. On Unix `ufa` restricts the file to mode `0600` (owner-only)
+> whenever it saves it, and on Windows the file takes the per-user ACL of
+> `%APPDATA%`. The key is still readable by anything that runs as you, and by
+> anyone who can read your backups. It is kept only for backward compatibility
+> with existing configs — prefer `sm_op_path`.
 
 `sm_op_path` takes precedence over `site_manager_api_key`. If the reference is
 set but cannot be read, `ufa` reports that failure instead of silently falling
@@ -77,20 +80,10 @@ ufa cloud host "70A741667C3000000000066DC7C00000000006BABC5A000000006289D202:132
 
 ## Example Output
 
-```bash
-$ ufa cloud hosts
-
-┌─────────────────────────────────┬────────────┬─────────────┬──────────┬──────────────┬────────┬─────────────────────┐
-│ id                              │ name       │ model       │ firmware │ ip_address   │ type   │ owner │ last_seen           │
-├─────────────────────────────────┼────────────┼─────────────┼──────────┼──────────────┼────────┼───────┼─────────────────────┤
-│ 70A74166...D202:1320847833      │ Home-UDM   │ UDM-Pro     │ 3.2.9    │ 192.168.1.1  │ console│ true  │ 2024-01-15T10:30:00Z│
-│ 900A6F00...9853:123456789       │ Office-UDR │ Dream Router│ 3.2.9    │ 192.168.2.1  │ console│ true  │ 2024-01-15T10:45:00Z│
-└─────────────────────────────────┴────────────┴─────────────┴──────────┴──────────────┴────────┴───────┴─────────────────────┘
-
-Total hosts: 2
-
-To get details for a specific host, use: ufa cloud host <id>
-```
+[USAGE-EXAMPLES.md](./USAGE-EXAMPLES.md#list-all-your-cloud-consoles) holds the listing that
+`ufa cloud hosts` prints, with the columns and the time format the code produces. One sample of
+that table is enough. A second copy here drifted away from the code and away from the first copy,
+and nothing said so.
 
 ## Integration with Regular Commands
 

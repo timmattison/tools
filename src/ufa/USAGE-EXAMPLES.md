@@ -74,15 +74,21 @@ https://unifi.ui.com/consoles/[CONSOLE_ID]/network/default/dashboard
 
 ### Using with jq
 
+`--output json` answers with the hosts as the API reported them, not with the columns of the
+table. So the display name is `.reportedState.name`, and the address is `.ipAddress`. The API
+leaves `reportedState` out for a console that never reported one, and it leaves `ipAddress` out
+for a console it has no address for, so an example that reads either one supplies a fallback with
+`//`. The fallbacks below are the words the table itself prints, `Unknown` and `N/A`.
+
 ```bash
 # Get all console IDs
 ufa cloud hosts --output json | jq -r '.[] | .id'
 
 # Get console ID by name
-ufa cloud hosts --output json | jq -r '.[] | select(.name=="Home-UDM") | .id'
+ufa cloud hosts --output json | jq -r '.[] | select(.reportedState.name=="Home-UDM") | .id'
 
 # Get IP addresses of all consoles
-ufa cloud hosts --output json | jq -r '.[] | "\(.name): \(.ip_address)"'
+ufa cloud hosts --output json | jq -r '.[] | "\(.reportedState.name // "Unknown"): \(.ipAddress // "N/A")"'
 ```
 
 ### Shell Script Example
@@ -92,7 +98,7 @@ ufa cloud hosts --output json | jq -r '.[] | "\(.name): \(.ip_address)"'
 
 # Get console ID for a specific console name
 CONSOLE_NAME="Home-UDM"
-CONSOLE_ID=$(ufa cloud hosts --output json | jq -r ".[] | select(.name==\"$CONSOLE_NAME\") | .id")
+CONSOLE_ID=$(ufa cloud hosts --output json | jq -r ".[] | select(.reportedState.name==\"$CONSOLE_NAME\") | .id")
 
 if [ -n "$CONSOLE_ID" ]; then
     echo "Console ID for $CONSOLE_NAME: $CONSOLE_ID"

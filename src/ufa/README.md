@@ -312,11 +312,12 @@ Delete 37 voucher(s)? [y/N]:
 | `--dry-run` | Lists the matches and stops. Nothing is deleted and nothing is asked.              |
 
 A filter that matches nothing says so and asks nothing. With stdin not attached to a terminal and
-no `--yes`, `ufa` refuses rather than guessing:
+no `--yes`, `ufa` refuses rather than guessing. The matches are listed first, as above, and then
+the refusal reaches stderr as a single line that carries the `Error: ` prefix of every `ufa`
+failure, so a script can match it:
 
 ```
-Delete 37 voucher(s)? needs confirmation, but stdin is not a terminal.
-Re-run with --yes to confirm without being asked.
+Error: Delete 37 voucher(s)? needs confirmation, but stdin is not a terminal. Re-run with --yes to confirm without being asked.
 ```
 
 ### Cloud consoles
@@ -343,7 +344,7 @@ keep the table readable. `--output json` answers with the hosts exactly as the A
 every field intact, rather than only the columns the table shows.
 
 See [CLOUD.md](CLOUD.md) for console IDs, the full setup options, and example output, and
-[USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) for scripting recipes.
+[USAGE-EXAMPLES.md](USAGE-EXAMPLES.md) for scripting recipes.
 
 ### Application info
 
