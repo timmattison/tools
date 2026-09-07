@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     client::UnifiClient,
     models::{Client, ClientAction, Page},
-    output::{print_output, print_vec_table, OutputFormat},
+    output::{print_output, render_page_listing, OutputFormat, PageListing},
     site_helper::get_site_id_or_prompt,
 };
 
@@ -95,53 +95,60 @@ fn address_or_blank<A: std::fmt::Display>(address: Option<&A>) -> String {
     address.map(ToString::to_string).unwrap_or_default()
 }
 
-fn client_to_row(client: &Client) -> ClientRow {
-    match client {
-        Client::Wired(c) => ClientRow {
-            id: c.id.to_string(),
-            name: c.name.clone(),
-            client_type: "WIRED".to_string(),
-            ip_address: address_or_blank(c.ip_address.as_ref()),
-            mac_address: c.mac_address.to_string(),
-            connected_at: c.connected_at.clone().unwrap_or_default(),
-        },
-        Client::Wireless(c) => ClientRow {
-            id: c.id.to_string(),
-            name: c.name.clone(),
-            client_type: "WIRELESS".to_string(),
-            ip_address: address_or_blank(c.ip_address.as_ref()),
-            mac_address: c.mac_address.to_string(),
-            connected_at: c.connected_at.clone().unwrap_or_default(),
-        },
-        Client::Vpn(c) => ClientRow {
-            id: c.id.to_string(),
-            name: c.name.clone(),
-            client_type: "VPN".to_string(),
-            ip_address: address_or_blank(c.ip_address.as_ref()),
-            mac_address: NOT_APPLICABLE.to_string(),
-            connected_at: c.connected_at.clone().unwrap_or_default(),
-        },
-        Client::Teleport(c) => ClientRow {
-            id: c.id.to_string(),
-            name: c.name.clone(),
-            client_type: "TELEPORT".to_string(),
-            ip_address: address_or_blank(c.ip_address.as_ref()),
-            mac_address: NOT_APPLICABLE.to_string(),
-            connected_at: c.connected_at.clone().unwrap_or_default(),
-        },
-        // A client kind this build does not know still belongs in the
-        // listing, described with whatever the controller did say about it.
-        Client::Unknown(c) => ClientRow {
-            id: c.id.map(|id| id.to_string()).unwrap_or_default(),
-            name: c.name.clone().unwrap_or_default(),
-            client_type: c.client_type.clone(),
-            ip_address: address_or_blank(c.ip_address.as_ref()),
-            mac_address: c
-                .mac_address
-                .as_ref()
-                .map_or_else(|| NOT_APPLICABLE.to_string(), ToString::to_string),
-            connected_at: c.connected_at.clone().unwrap_or_default(),
-        },
+impl From<&Client> for ClientRow {
+    /// Describe one client as a row of the listing.
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The client the controller reported.
+    fn from(client: &Client) -> Self {
+        match client {
+            Client::Wired(c) => ClientRow {
+                id: c.id.to_string(),
+                name: c.name.clone(),
+                client_type: "WIRED".to_string(),
+                ip_address: address_or_blank(c.ip_address.as_ref()),
+                mac_address: c.mac_address.to_string(),
+                connected_at: c.connected_at.clone().unwrap_or_default(),
+            },
+            Client::Wireless(c) => ClientRow {
+                id: c.id.to_string(),
+                name: c.name.clone(),
+                client_type: "WIRELESS".to_string(),
+                ip_address: address_or_blank(c.ip_address.as_ref()),
+                mac_address: c.mac_address.to_string(),
+                connected_at: c.connected_at.clone().unwrap_or_default(),
+            },
+            Client::Vpn(c) => ClientRow {
+                id: c.id.to_string(),
+                name: c.name.clone(),
+                client_type: "VPN".to_string(),
+                ip_address: address_or_blank(c.ip_address.as_ref()),
+                mac_address: NOT_APPLICABLE.to_string(),
+                connected_at: c.connected_at.clone().unwrap_or_default(),
+            },
+            Client::Teleport(c) => ClientRow {
+                id: c.id.to_string(),
+                name: c.name.clone(),
+                client_type: "TELEPORT".to_string(),
+                ip_address: address_or_blank(c.ip_address.as_ref()),
+                mac_address: NOT_APPLICABLE.to_string(),
+                connected_at: c.connected_at.clone().unwrap_or_default(),
+            },
+            // A client kind this build does not know still belongs in the
+            // listing, described with whatever the controller did say about it.
+            Client::Unknown(c) => ClientRow {
+                id: c.id.map(|id| id.to_string()).unwrap_or_default(),
+                name: c.name.clone().unwrap_or_default(),
+                client_type: c.client_type.clone(),
+                ip_address: address_or_blank(c.ip_address.as_ref()),
+                mac_address: c
+                    .mac_address
+                    .as_ref()
+                    .map_or_else(|| NOT_APPLICABLE.to_string(), ToString::to_string),
+                connected_at: c.connected_at.clone().unwrap_or_default(),
+            },
+        }
     }
 }
 
@@ -156,7 +163,9 @@ pub async fn handle_clients_command(
             limit,
             offset,
             filter,
-        } => list_clients(client, site_id, limit, offset, filter, output_format).await,
+        } => list_clients(client, site_id, limit, offset, filter, output_format)
+            .await
+            .map(PageListing::print),
         ClientsCommand::Get { client_id } => {
             get_client(client, site_id, client_id, output_format).await
         }
@@ -184,6 +193,25 @@ pub async fn handle_clients_command(
     }
 }
 
+/// List one page of the clients connected to a site.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to list the clients with.
+/// * `site_id` - The site the user named, if any.
+/// * `limit` - How many clients to ask for.
+/// * `offset` - Where in the collection the page starts.
+/// * `filter` - The API's filter expression, if the user gave one.
+/// * `output_format` - The output format the user asked for.
+///
+/// # Returns
+///
+/// The rendered page, ready to print.
+///
+/// # Errors
+///
+/// Returns an error if the site cannot be resolved, if the request fails, or
+/// if the answer cannot be rendered.
 async fn list_clients(
     client: &UnifiClient,
     site_id: Option<Uuid>,
@@ -191,7 +219,7 @@ async fn list_clients(
     offset: u64,
     filter: Option<String>,
     output_format: OutputFormat,
-) -> Result<()> {
+) -> Result<PageListing> {
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
     let mut params: Vec<(&str, &dyn std::fmt::Display)> =
@@ -205,17 +233,7 @@ async fn list_clients(
     let path = format!("sites/{}/clients", site_id);
     let page: Page<Client> = client.get_with_params(&path, &params).await?;
 
-    match output_format {
-        OutputFormat::Json => {
-            print_output(&page, output_format)?;
-        }
-        OutputFormat::Table => {
-            let rows: Vec<ClientRow> = page.data.iter().map(client_to_row).collect();
-            print_vec_table(&rows, output_format)?;
-        }
-    }
-
-    Ok(())
+    render_page_listing::<Client, ClientRow>(&page, output_format)
 }
 
 async fn get_client(
@@ -429,7 +447,7 @@ mod row_tests {
     /// belong in the row.
     #[test]
     fn a_wired_client_row_carries_its_type_and_both_addresses() {
-        let row = client_to_row(&wired());
+        let row = ClientRow::from(&wired());
 
         assert_eq!(row.id, WIRED_ID.to_string());
         assert_eq!(row.name, A_NAME);
@@ -443,7 +461,7 @@ mod row_tests {
     /// be shown as one.
     #[test]
     fn a_wireless_client_row_carries_its_type_and_both_addresses() {
-        let row = client_to_row(&wireless());
+        let row = ClientRow::from(&wireless());
 
         assert_eq!(row.id, WIRELESS_ID.to_string());
         assert_eq!(row.name, A_NAME);
@@ -458,7 +476,7 @@ mod row_tests {
     /// "the controller did not say", which is a different thing.
     #[test]
     fn a_vpn_client_row_says_it_has_no_hardware_address() {
-        let row = client_to_row(&vpn());
+        let row = ClientRow::from(&vpn());
 
         assert_eq!(row.id, VPN_ID.to_string());
         assert_eq!(row.client_type, "VPN");
@@ -471,7 +489,7 @@ mod row_tests {
     /// kind rather than a VPN.
     #[test]
     fn a_teleport_client_row_says_it_has_no_hardware_address() {
-        let row = client_to_row(&teleport());
+        let row = ClientRow::from(&teleport());
 
         assert_eq!(row.id, TELEPORT_ID.to_string());
         assert_eq!(row.client_type, "TELEPORT");
@@ -484,7 +502,7 @@ mod row_tests {
     /// described by the `type` the controller sent rather than by a guess.
     #[test]
     fn an_unknown_client_row_carries_the_type_the_controller_named() {
-        let row = client_to_row(&unknown());
+        let row = ClientRow::from(&unknown());
 
         assert_eq!(row.id, UNKNOWN_ID.to_string());
         assert_eq!(row.name, A_NAME);
@@ -499,7 +517,7 @@ mod row_tests {
     /// claiming the client has no address of that kind.
     #[test]
     fn a_client_that_reported_no_network_address_gets_an_empty_cell() {
-        let row = client_to_row(&Client::Wired(WiredClient {
+        let row = ClientRow::from(&Client::Wired(WiredClient {
             id: WIRED_ID,
             name: A_NAME.to_string(),
             connected_at: None,
@@ -521,7 +539,7 @@ mod row_tests {
     /// `type`, so every other cell has to fall back on its own.
     #[test]
     fn an_unknown_client_that_reported_nothing_but_a_type_gets_empty_cells() {
-        let row = client_to_row(&Client::Unknown(UnknownClient {
+        let row = ClientRow::from(&Client::Unknown(UnknownClient {
             client_type: A_FUTURE_KIND.to_string(),
             id: None,
             name: None,
@@ -539,6 +557,68 @@ mod row_tests {
         assert_eq!(
             row.mac_address, NO_ADDRESS,
             "an unrecognized kind is not known to have a hardware address"
+        );
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+    use crate::test_server::{json_response, TestServer};
+
+    /// The API key a test hands the client. Nothing reads it back.
+    const API_KEY: &str = "an-api-key";
+
+    /// How many clients the pretend controller says it holds.
+    const TOTAL: &str = "100";
+
+    /// One page of the client collection: a single item, out of a hundred.
+    const ONE_CLIENT_OF_A_HUNDRED: &str = r#"{
+        "offset": 0, "limit": 1, "count": 1, "totalCount": 100,
+        "data": [
+            {
+                "type": "WIRED",
+                "id": "00000000-0000-0000-0000-000000000002",
+                "name": "nas",
+                "ipAddress": "192.168.1.10",
+                "macAddress": "00:11:22:33:44:10",
+                "uplinkDeviceId": "00000000-0000-0000-0000-000000000003",
+                "access": { "type": "DEFAULT" }
+            }
+        ]
+    }"#;
+
+    /// A page that holds a single client of a hundred looks exactly like the whole
+    /// listing of a controller that has one. The note that tells the two apart
+    /// is decided in `output`, and this proves the client listing asks for it: a
+    /// command that renders its page on its own answers with no note at all.
+    #[tokio::test]
+    async fn a_short_page_of_clients_reports_what_it_left_out() {
+        let controller = TestServer::replying(&json_response(ONE_CLIENT_OF_A_HUNDRED)).await;
+        let client = UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+
+        let listing = list_clients(
+            &client,
+            Some(Uuid::new_v4()),
+            1,
+            0,
+            None,
+            OutputFormat::Table,
+        )
+        .await
+        .expect("the controller answered the listing");
+
+        let notice = listing
+            .notice()
+            .expect("a page short of the stated total must say so");
+        assert!(
+            notice.contains(TOTAL),
+            "the note must report the total the controller stated, got: {notice}"
+        );
+        assert!(
+            notice.contains("--limit") && notice.contains("--offset"),
+            "the note must say how to reach the rest, got: {notice}"
         );
     }
 }

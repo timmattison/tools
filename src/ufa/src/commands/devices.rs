@@ -8,7 +8,10 @@ use crate::{
     client::UnifiClient,
     device_helper::get_device_id_or_prompt,
     models::{Device, DeviceAction, DeviceDetails, DeviceStatistics, Page, PortAction},
-    output::{print_output, print_vec_table, render_vec_table, OutputFormat},
+    output::{
+        print_output, print_vec_table, render_page_listing, render_vec_table, OutputFormat,
+        PageListing,
+    },
     pagination::fetch_all,
     site_helper::get_site_id_or_prompt,
 };
@@ -247,7 +250,9 @@ pub async fn handle_devices_command(
 ) -> Result<()> {
     match command {
         DevicesCommand::List { limit, offset } => {
-            list_devices(client, site_id, limit, offset, output_format).await
+            list_devices(client, site_id, limit, offset, output_format)
+                .await
+                .map(PageListing::print)
         }
         DevicesCommand::Get { device_id } => {
             get_device(client, site_id, device_id, output_format).await
@@ -263,13 +268,31 @@ pub async fn handle_devices_command(
     }
 }
 
+/// List one page of the devices on a site.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to list the devices with.
+/// * `site_id` - The site the user named, if any.
+/// * `limit` - How many devices to ask for.
+/// * `offset` - Where in the collection the page starts.
+/// * `output_format` - The output format the user asked for.
+///
+/// # Returns
+///
+/// The rendered page, ready to print.
+///
+/// # Errors
+///
+/// Returns an error if the site cannot be resolved, if the request fails, or
+/// if the answer cannot be rendered.
 async fn list_devices(
     client: &UnifiClient,
     site_id: Option<Uuid>,
     limit: u32,
     offset: u64,
     output_format: OutputFormat,
-) -> Result<()> {
+) -> Result<PageListing> {
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
     let params: Vec<(&str, &dyn std::fmt::Display)> =
@@ -279,17 +302,7 @@ async fn list_devices(
     let path = format!("sites/{}/devices", site_id);
     let page: Page<Device> = client.get_with_params(&path, &params).await?;
 
-    match output_format {
-        OutputFormat::Json => {
-            print_output(&page, output_format)?;
-        }
-        OutputFormat::Table => {
-            let rows: Vec<DeviceRow> = page.data.iter().map(DeviceRow::from).collect();
-            print_vec_table(&rows, output_format)?;
-        }
-    }
-
-    Ok(())
+    render_page_listing::<Device, DeviceRow>(&page, output_format)
 }
 
 async fn get_device(
@@ -762,6 +775,58 @@ mod tests {
         assert!(
             rendered.contains("ap-lr"),
             "the table must name the device, got:\n{rendered}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+    use crate::test_server::{json_response, TestServer};
+
+    /// The API key a test hands the client. Nothing reads it back.
+    const API_KEY: &str = "an-api-key";
+
+    /// How many devices the pretend controller says it holds.
+    const TOTAL: &str = "100";
+
+    /// One page of the device collection: a single item, out of a hundred.
+    const ONE_DEVICE_OF_A_HUNDRED: &str = r#"{
+        "offset": 0, "limit": 1, "count": 1, "totalCount": 100,
+        "data": [
+            {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "name": "ap-lr", "model": "U6-LR",
+                "macAddress": "00:11:22:33:44:55", "ipAddress": "192.168.1.2",
+                "state": "ONLINE", "features": [], "interfaces": []
+            }
+        ]
+    }"#;
+
+    /// A page that holds a single device of a hundred looks exactly like the whole
+    /// listing of a controller that has one. The note that tells the two apart
+    /// is decided in `output`, and this proves the device listing asks for it: a
+    /// command that renders its page on its own answers with no note at all.
+    #[tokio::test]
+    async fn a_short_page_of_devices_reports_what_it_left_out() {
+        let controller = TestServer::replying(&json_response(ONE_DEVICE_OF_A_HUNDRED)).await;
+        let client = UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+
+        let listing = list_devices(&client, Some(Uuid::new_v4()), 1, 0, OutputFormat::Table)
+            .await
+            .expect("the controller answered the listing");
+
+        let notice = listing
+            .notice()
+            .expect("a page short of the stated total must say so");
+        assert!(
+            notice.contains(TOTAL),
+            "the note must report the total the controller stated, got: {notice}"
+        );
+        assert!(
+            notice.contains("--limit") && notice.contains("--offset"),
+            "the note must say how to reach the rest, got: {notice}"
         );
     }
 }
