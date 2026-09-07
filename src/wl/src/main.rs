@@ -225,6 +225,10 @@ fn main() -> Result<()> {
         }
         Err(e) => {
             eprintln!("Error getting listeners: {}", e);
+            // A failed enumeration names nobody either, and on Unix it most
+            // often fails for want of privileges — the one moment the note
+            // explains what the user is looking at.
+            print_privilege_note(privilege_note);
             std::process::exit(1);
         }
     }
