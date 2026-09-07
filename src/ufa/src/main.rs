@@ -789,6 +789,7 @@ mod tls_warning_tests {
 #[cfg(test)]
 mod credential_tests {
     use super::{resolve_credential, Config, Credential};
+    use crate::test_support::{parse_args_for_test, ScopedVar};
 
     /// A config whose 1Password reference cannot be read.
     ///
@@ -840,6 +841,83 @@ mod credential_tests {
         assert!(
             format!("{error:#}").contains("ufa config cloud"),
             "an unconfigured cloud key must point at cloud setup, got {error:#}"
+        );
+    }
+
+    /// A config that holds a real key in its plaintext field.
+    fn config_with_a_plaintext_key() -> Config {
+        Config {
+            api_key: Some("key-from-the-configuration-file".to_string()),
+            ..Config::default()
+        }
+    }
+
+    /// `export UNIFI_API_KEY=` and `--api-key ""` say nothing, they do not say
+    /// "authenticate with an empty key". A blank value used to win over the
+    /// configuration file and go to the controller, which answered 401.
+    #[test]
+    fn a_blank_supplied_key_falls_through_to_the_configuration_file() {
+        for blank in ["", "   ", "\n"] {
+            assert_eq!(
+                resolve_credential(
+                    Credential::Controller,
+                    Some(blank.to_string()),
+                    Some(&config_with_a_plaintext_key()),
+                )
+                .expect("a blank command line value must fall through to the file"),
+                "key-from-the-configuration-file",
+                "{blank:?} names no key, so the configured key must answer"
+            );
+        }
+    }
+
+    /// The same value, as clap reads it out of the environment.
+    #[test]
+    fn a_blank_environment_key_falls_through_to_the_configuration_file() {
+        for blank in ["", "   "] {
+            let _var = ScopedVar::set("UNIFI_API_KEY", blank);
+            let args = parse_args_for_test(["ufa", "info"]).expect("ufa info must parse");
+
+            assert_eq!(
+                resolve_credential(
+                    Credential::Controller,
+                    args.api_key,
+                    Some(&config_with_a_plaintext_key()),
+                )
+                .expect("a blank UNIFI_API_KEY must fall through to the file"),
+                "key-from-the-configuration-file",
+                "UNIFI_API_KEY={blank:?} names no key, so the configured key must answer"
+            );
+        }
+    }
+
+    /// With nothing configured either, the user gets the crate's own advice
+    /// rather than a 401 from the controller.
+    #[test]
+    fn a_blank_supplied_key_with_nothing_configured_reports_the_advice() {
+        let error = resolve_credential(Credential::Controller, Some("  ".to_string()), None)
+            .expect_err("a blank key and no configuration must not resolve");
+
+        assert!(
+            format!("{error:#}").contains("ufa config setup"),
+            "a blank key must earn the advice a missing one earns, got {error:#}"
+        );
+    }
+
+    /// The emptiness test trims. The value does not: a key the user supplied
+    /// is theirs, and altering what goes to the controller would make a
+    /// working key fail for a reason nothing states.
+    #[test]
+    fn a_supplied_key_that_holds_more_than_blank_space_is_passed_through_untouched() {
+        assert_eq!(
+            resolve_credential(
+                Credential::Controller,
+                Some(" padded-key\n".to_string()),
+                Some(&config_with_a_plaintext_key()),
+            )
+            .expect("a key that is not blank must resolve"),
+            " padded-key\n",
+            "the supplied key must reach the controller byte for byte"
         );
     }
 

@@ -508,13 +508,48 @@ fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
 /// in-config fallback, and `missing` is the message used when neither source is
 /// configured.
 fn resolve_secret(op_path: Option<&str>, plaintext: Option<&str>, missing: &str) -> Result<String> {
+    resolve_secret_from(read_from_1password, op_path, plaintext, missing)
+}
+
+/// Read the secret the 1Password reference `op_path` names, through op-cache.
+///
+/// # Arguments
+///
+/// * `op_path` - The 1Password reference to read.
+///
+/// # Returns
+///
+/// Whatever 1Password holds at that reference.
+fn read_from_1password(op_path: &str) -> Result<String> {
+    let path = op_cache::OpPath::new(op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    cache.read(&path, None).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// [`resolve_secret`] against an explicit reader.
+///
+/// The reader is a parameter so a test can say what 1Password answered without
+/// a vault, a biometric prompt, or a network.
+///
+/// # Arguments
+///
+/// * `read_reference` - Reads the secret a 1Password reference names.
+/// * `op_path` - The configured 1Password reference, when there is one.
+/// * `plaintext` - The legacy in-config value, when there is one.
+/// * `missing` - Said when neither source is configured.
+///
+/// # Returns
+///
+/// The secret, exactly as its source holds it.
+fn resolve_secret_from(
+    read_reference: impl FnOnce(&str) -> Result<String>,
+    op_path: Option<&str>,
+    plaintext: Option<&str>,
+    missing: &str,
+) -> Result<String> {
     if let Some(op_path) = op_path {
-        let path = op_cache::OpPath::new(op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let secret = cache
-            .read(&path, None)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        return Ok(secret);
+        return read_reference(op_path);
     }
     if let Some(secret) = plaintext {
         return Ok(secret.to_string());
@@ -928,6 +963,144 @@ mod tests {
             "there is no file to report"
         );
         assert_eq!(url, None, "nothing may reach the process environment");
+    }
+
+    /// A field holding nothing but blank space names no key. It still made
+    /// `has_api_key` answer true, so the credential counted as configured and
+    /// the blank value went into the header and out to the controller. The
+    /// user then got a generic 401 instead of the advice to run the wizard.
+    #[test]
+    fn a_blank_api_key_field_is_not_a_configured_key() {
+        for blank in ["", "   ", "\n", "\t "] {
+            let config = Config {
+                api_key: Some(blank.to_string()),
+                ..Config::default()
+            };
+
+            assert!(
+                !config.has_api_key(),
+                "{blank:?} names no key, so the controller key is not configured"
+            );
+
+            let error = config
+                .resolve_api_key()
+                .expect_err("a blank field must not resolve as a key");
+            assert!(
+                format!("{error:#}").contains("ufa config setup"),
+                "a blank field must earn the advice a missing one earns, got {error:#}"
+            );
+        }
+    }
+
+    /// The cloud credential has the same two fields and the same predicate.
+    #[test]
+    fn a_blank_site_manager_key_field_is_not_a_configured_key() {
+        let config = Config {
+            site_manager_api_key: Some("   ".to_string()),
+            ..Config::default()
+        };
+
+        assert!(
+            !config.has_site_manager_key(),
+            "a blank field names no Site Manager key"
+        );
+
+        let error = config
+            .resolve_site_manager_api_key()
+            .expect_err("a blank field must not resolve as a key");
+        assert!(
+            format!("{error:#}").contains("ufa config cloud"),
+            "a blank field must earn the advice a missing one earns, got {error:#}"
+        );
+    }
+
+    /// A blank 1Password reference names no item, so it is a blank placeholder
+    /// like a blank key rather than a reference that failed to read. The
+    /// predicate and the resolution have to agree about that, or a config
+    /// counts as configured and then reports that nothing is configured.
+    #[test]
+    fn a_blank_op_path_is_not_a_configured_reference() {
+        let config = Config {
+            op_path: Some("  ".to_string()),
+            ..Config::default()
+        };
+
+        assert!(
+            !config.has_api_key(),
+            "a blank reference names no key, so the controller key is not configured"
+        );
+
+        let error = config
+            .resolve_api_key()
+            .expect_err("a blank reference must not resolve as a key");
+        assert!(
+            format!("{error:#}").contains("ufa config setup"),
+            "a blank reference must earn the advice a missing one earns, got {error:#}"
+        );
+    }
+
+    /// A blank answer from 1Password is a different fault from a blank field.
+    /// The user named a specific item, so the reference is broken rather than
+    /// absent — and `resolve_secret` already refuses to downgrade a broken
+    /// reference to the plaintext copy. The answer is an error that names the
+    /// reference, not the advice to run the wizard.
+    #[test]
+    fn a_blank_answer_from_1password_is_a_broken_reference() {
+        let reference = "op://Private/ufa/key - 192.168.1.1 port 443";
+
+        let error = resolve_secret_from(
+            |_| Ok("   ".to_string()),
+            Some(reference),
+            Some("stale-plaintext-key"),
+            "No API key configured. Run 'ufa config setup'.",
+        )
+        .expect_err("a blank answer from 1Password must not resolve as a key");
+        let report = format!("{error:#}");
+
+        assert!(
+            report.contains(reference),
+            "the failure must name the reference that holds nothing, got {report}"
+        );
+        assert!(
+            !report.contains("Run 'ufa config setup'"),
+            "a broken reference is not an absent one, so the wizard advice is wrong, got {report}"
+        );
+        assert!(
+            !report.contains("stale-plaintext-key"),
+            "a broken reference must not downgrade to the plaintext copy, got {report}"
+        );
+    }
+
+    /// The emptiness test trims. The value does not: a key the user supplied
+    /// is theirs, and silently altering what goes to the controller would make
+    /// a working key fail for a reason nothing states.
+    #[test]
+    fn a_key_that_holds_more_than_blank_space_is_resolved_untouched() {
+        let config = Config {
+            api_key: Some(" padded-key\n".to_string()),
+            ..Config::default()
+        };
+
+        assert!(config.has_api_key(), "the field names a key");
+        assert_eq!(
+            config
+                .resolve_api_key()
+                .expect("a key that is not blank must resolve"),
+            " padded-key\n",
+            "the resolved key must be what its source holds, byte for byte"
+        );
+
+        assert_eq!(
+            resolve_secret_from(
+                |_| Ok(" padded-op-key\n".to_string()),
+                Some("op://Private/ufa/key"),
+                None,
+                "missing",
+            )
+            .expect("a 1Password answer that is not blank must resolve"),
+            " padded-op-key\n",
+            "what 1Password answered must reach the caller untouched"
+        );
     }
 
     /// Configs written before `sm_op_path` existed keep working.
