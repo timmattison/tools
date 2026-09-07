@@ -275,6 +275,16 @@ fn cells_to_pixels(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> (u32, u32)
 /// [`cell_pixels_or_estimate_of`] measured. This function works in terminal
 /// character cells, not pixels.
 ///
+/// **One bound is enough.** A caller that states one axis and leaves the other
+/// open gets both axes back, because the aspect ratio decides the open one.
+/// That is what a caller means by one bound, and it is what the [`Budget`] of
+/// [`crate::draw`] promises. It also matters to the payload: an open axis
+/// stops [`downscale_to_display_pixels`] from resizing at all, so an open axis
+/// that survived this call sent the whole picture at its original resolution.
+///
+/// A caller that turns `preserve_aspect` off states every axis it wants, so an
+/// open axis stays open there. There is no ratio left to decide it with.
+///
 /// The casts from f64 to u32 are intentional - display dimensions are always positive
 /// and will never exceed u32::MAX for any reasonable terminal size.
 #[must_use]
@@ -322,8 +332,26 @@ pub(crate) fn calculate_aspect_preserving_size(
                 (Some(display_width.max(1)), Some(display_height))
             }
         }
-        (Some(w), None) => (Some(w), None),
-        (None, Some(h)) => (None, Some(h)),
+        // One bound is enough. The aspect ratio decides the other axis, and
+        // the two expressions below are the two branches above with the box
+        // taken out of them, so one bound and two bounds agree whenever the
+        // same axis constrains the picture.
+        //
+        // The open axis used to come back open, and `downscale_to_display_pixels`
+        // resizes nothing at all for an open axis, so `ic --width 90` sent the
+        // whole picture at its original resolution.
+        (Some(max_w), None) => {
+            let img_aspect = img_width as f64 / img_height as f64;
+            let display_height = ((max_w as f64 / img_aspect) / cell_aspect).round() as u32;
+            (Some(max_w), Some(display_height.max(1)))
+        }
+        (None, Some(max_h)) => {
+            let img_aspect = img_width as f64 / img_height as f64;
+            let display_width = (max_h as f64 * cell_aspect * img_aspect).round() as u32;
+            (Some(display_width.max(1)), Some(max_h))
+        }
+        // Neither axis bound means the picture draws at its own pixel size,
+        // which is what the `Budget` doc states. There is no box to fit it to.
         (None, None) => (None, None),
     }
 }
