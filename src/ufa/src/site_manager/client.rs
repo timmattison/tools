@@ -146,8 +146,8 @@ impl SiteManagerClient {
     /// The listing endpoint answers one page, and this client sends no paging
     /// parameters with the request. `total` is what the server states for the
     /// whole collection, so a listing shorter than `total` is a page and not
-    /// the answer. This refuses such a listing instead of a report of a
-    /// fraction of the account as the whole of it.
+    /// the answer. Such a listing is refused, rather than reported as the
+    /// whole account.
     ///
     /// A walk over the pages is the better answer, and it needs the name of
     /// the field the endpoint returns for the next page. No document in this
