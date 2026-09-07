@@ -306,9 +306,11 @@ pub(crate) fn calculate_aspect_preserving_size(
         return (max_width, max_height);
     }
 
-    // Guard against division by zero. Valid images always have height > 0,
-    // but we handle this defensively to avoid panics on malformed input.
-    if img_height == 0 {
+    // The arms below divide by the height of the image and by its aspect
+    // ratio, and an axis of zero pixels makes each of those divisors zero. A
+    // valid image has a width and a height above zero on both axes, but a
+    // malformed one comes back with the bounds of the caller unchanged.
+    if img_width == 0 || img_height == 0 {
         return (max_width, max_height);
     }
 
