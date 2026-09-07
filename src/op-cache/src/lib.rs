@@ -702,6 +702,104 @@ mod tests {
         assert!(cache.entries().unwrap().is_empty());
     }
 
+    /// Builds a cache entry with a fixed timestamp, for tests that only care
+    /// about which keys survive an operation.
+    fn test_entry(value: &str) -> CacheEntry {
+        CacheEntry {
+            value: value.to_string(),
+            fetched_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// Returns the keys the cache file holds, sorted.
+    fn cached_keys(cache: &OpCache) -> Vec<String> {
+        let mut keys: Vec<String> = cache
+            .entries()
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn invalidate_removes_item_field_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OpCache::with_path(dir.path().join(CACHE_FILENAME));
+
+        let item = OpPath::new("op://Private/ProtonVPN WireGuard key").unwrap();
+        let mut file: CacheFile = HashMap::new();
+        file.insert(item.as_ref().to_string(), test_entry("secret"));
+        file.insert(
+            format!("{}/__item_fields__/credential", item.as_ref()),
+            test_entry("[[\"credential\",\"key-1\"]]"),
+        );
+        file.insert(
+            format!("{}/__item_fields__/username", item.as_ref()),
+            test_entry("[[\"username\",\"user\"]]"),
+        );
+        cache.write_cache(&file).unwrap();
+        assert_eq!(cached_keys(&cache).len(), 3);
+
+        cache.invalidate(&item).unwrap();
+        assert!(
+            cached_keys(&cache).is_empty(),
+            "invalidate left entries behind: {:?}",
+            cached_keys(&cache)
+        );
+    }
+
+    #[test]
+    fn invalidate_removes_item_field_entries_without_a_plain_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OpCache::with_path(dir.path().join(CACHE_FILENAME));
+
+        // A `list-fields` call caches only the field list — no plain entry.
+        let item = OpPath::new("op://Private/ProtonVPN WireGuard key").unwrap();
+        let mut file: CacheFile = HashMap::new();
+        file.insert(
+            format!("{}/__item_fields__/credential", item.as_ref()),
+            test_entry("[[\"credential\",\"key-1\"]]"),
+        );
+        cache.write_cache(&file).unwrap();
+
+        cache.invalidate(&item).unwrap();
+        assert!(
+            cached_keys(&cache).is_empty(),
+            "invalidate left entries behind: {:?}",
+            cached_keys(&cache)
+        );
+    }
+
+    #[test]
+    fn invalidate_leaves_another_item_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OpCache::with_path(dir.path().join(CACHE_FILENAME));
+
+        let target = OpPath::new("op://Private/Foo").unwrap();
+        let neighbor = OpPath::new("op://Private/FooBar").unwrap();
+        let neighbor_fields = format!("{}/__item_fields__/credential", neighbor.as_ref());
+        let mut file: CacheFile = HashMap::new();
+        file.insert(target.as_ref().to_string(), test_entry("foo-secret"));
+        file.insert(
+            format!("{}/__item_fields__/credential", target.as_ref()),
+            test_entry("[[\"credential\",\"foo-key\"]]"),
+        );
+        file.insert(neighbor.as_ref().to_string(), test_entry("foobar-secret"));
+        file.insert(
+            neighbor_fields.clone(),
+            test_entry("[[\"credential\",\"foobar-key\"]]"),
+        );
+        cache.write_cache(&file).unwrap();
+
+        cache.invalidate(&target).unwrap();
+        assert_eq!(
+            cached_keys(&cache),
+            vec![neighbor.as_ref().to_string(), neighbor_fields]
+        );
+    }
+
     #[test]
     fn clear_removes_file() {
         let dir = tempfile::tempdir().unwrap();
