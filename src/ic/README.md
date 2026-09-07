@@ -24,16 +24,19 @@ The binary will be available at `target/release/ic`.
 ## Usage
 
 ### Display an image file:
+
 ```bash
 ./ic image.png
 ```
 
 ### Display an image with specific width:
+
 ```bash
 ./ic -w 80 image.jpg
 ```
 
 ### Play a video file:
+
 ```bash
 ./ic video.mp4
 ```
@@ -46,21 +49,25 @@ Press `a` to go back 1 second, `d` to go forward 1 second.
 Press `w` to go back 1 minute, `s` to go forward 1 minute.
 
 ### Display an image with specific dimensions:
+
 ```bash
 ./ic -w 80 --height 24 image.gif
 ```
 
 ### Read image from stdin:
+
 ```bash
 cat image.png | ./ic --stdin
 ```
 
 ### Download and display an image:
+
 ```bash
 curl -s https://example.com/image.jpg | ./ic --stdin
 ```
 
 ### Ask whether an image can be displayed here:
+
 ```bash
 ic --will-display && ic image.png
 ```
@@ -171,3 +178,82 @@ it from the environment and asks it nothing. It draws sixel by that name.
 
 A terminal that answers nothing keeps the behavior it had: `ic` names it from
 the environment, and it reports an error for tmux and for mosh.
+
+### A terminal that refuses a picture
+
+A terminal can read a picture and refuse it. The image store of a mosh session
+is the case that shows first: mosh keeps every image for the length of the
+session, because a client that reconnects holds none, so the store is capped.
+A picture above that cap arrives whole and draws never.
+
+`ic` reports such a refusal instead of exiting 0 with an empty screen:
+
+```
+$ ic big-photograph.png
+Error: The terminal refused this image and drew nothing: ENOSPC: the image store is full
+
+The image reached the terminal, and the terminal reported the failure above.
+A smaller image can fit where this one did not: try --width, --height or --scale.
+```
+
+The exit code is 1, so a script reads the failure as well.
+
+**The last line belongs to `ENOSPC` alone.** A full image store is the one
+refusal that the size of the picture caused, so a smaller picture is the one
+repair for it. A terminal that answers another code, such as `EINVAL` for bytes
+it decodes as no picture, refused the picture for a reason that a resize does
+not touch. `ic` reports the code and the message of the terminal there, and it
+advises nothing:
+
+```
+$ ic photograph.png
+Error: The terminal refused this image and drew nothing: EINVAL: the image is not a valid PNG
+
+The image reached the terminal, and the terminal reported the failure above.
+```
+
+The refusal arrives because `ic` asks for it. A Kitty image command carries the
+key `q`, and `q=2` asks the terminal to answer nothing at all, success and
+failure both. A still picture carries `q=1` instead, which asks for the failures
+alone, and `ic` reads the answer off the controlling terminal.
+
+Video playback is the path that keeps `q=2`: it draws frame after frame and
+holds the terminal in raw mode for the key presses of the user, and an answer of
+the terminal would arrive there as a key press.
+
+`-n, --no-newline` states who moves the cursor, and it states nothing about how
+many pictures the run draws. `ic -n photo.png` is one still picture, so it
+carries `q=1` and `ic` reads the answer for it as well.
+
+**`ic` reports only a refusal that could be its own.** The answer of a terminal
+reaches whoever reads that terminal next, and the answer of the run before this
+one arrives late. A second program that draws Kitty pictures on the same
+terminal writes an answer of its own as well. So a run that reported every
+refusal it read would fail for a picture that drew, and a false failure over a
+good picture is worse than the silence above.
+
+Every still picture therefore carries an image number of its own, under the key
+`I`, and the terminal writes that number back in the answer. A picture takes the
+number from a counter that starts at the process id and the clock, so two runs
+on one machine, two pictures of one run, and a program that counts its own
+pictures from one all carry different numbers. `ic` walks past every refusal
+that names another number.
+
+A refusal that names no image number at all is reported. A terminal that reports
+a failure and echoes no number is still a terminal that refused this picture,
+and a rule that took that report away would put the empty screen of the section
+above back.
+
+### The size of a still picture
+
+A still picture travels to a Kitty terminal as a PNG, under the key `f=100`.
+The picture cost four characters for every pixel before, because the protocol
+also takes the raw pixels and base64 makes three bytes into four characters. A
+photograph of 330 pixels by 440 cost 580,800 characters that way, and it costs
+about 300,000 as a PNG.
+
+A frame of a video keeps the raw pixels. A PNG encoder inside a frame loop
+costs more time than it saves bytes.
+
+`-n, --no-newline` changes none of this. It states who moves the cursor, so
+`ic -n photo.png` is one still picture and it travels as a PNG as well.

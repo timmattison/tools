@@ -12,7 +12,7 @@ use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
-use termgfx::{terminal_cells, Budget, Capabilities, Cursor, Request, TerminalType};
+use termgfx::{terminal_cells, Budget, Capabilities, Cursor, Picture, Request, TerminalType};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
@@ -21,13 +21,16 @@ use unicode_width::UnicodeWidthStr;
 /// The row that the shell prompt returns to below an image.
 const PROMPT_ROWS: u32 = 1;
 
-/// The placement id of an image that the caller holds the cursor for.
+/// The placement id of one frame of a video.
 ///
-/// `--no-newline` is the flag of video playback, and each frame of a video must
-/// replace the frame before it in place. A Kitty terminal replaces an image
-/// when the new image carries the id of the old one, so every frame of a run
-/// carries this one id and the memory of the renderer stays flat. One run of
-/// `ic` shows one image at a time, so one id covers the whole run.
+/// Each frame of a video must replace the frame before it in place. A Kitty
+/// terminal replaces an image when the new image carries the id of the old one,
+/// so every frame of a run carries this one id and the memory of the renderer
+/// stays flat. One run of `ic` shows one image at a time, so one id covers the
+/// whole run.
+///
+/// A still picture carries no placement id at all, whatever moves the cursor.
+/// It names an image number instead, and `termgfx` states why.
 const HELD_PLACEMENT_ID: u32 = 1;
 
 /// The number of screen rows that `ic` prints above an image.
@@ -843,7 +846,14 @@ fn process_frame_display(
 
     // A video frame gets no header, so the image can use the whole terminal
     // less the row of the prompt.
-    display_image(img, args, true, HeaderRows(0))?;
+    display_image(
+        img,
+        args,
+        Picture::Frame {
+            id: HELD_PLACEMENT_ID,
+        },
+        HeaderRows(0),
+    )?;
 
     // Draw progress bar
     let (term_width, term_height) = current_terminal_size;
@@ -1561,7 +1571,7 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
     let (term_width, _) = terminal_cells();
-    display_image(img, args, args.no_newline, header_rows(header, term_width))
+    display_image(img, args, Picture::Still, header_rows(header, term_width))
 }
 
 fn display_text_file(file_path: &Path) -> Result<()> {
@@ -1586,7 +1596,48 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 
     // This path prints no header, so the image can use the whole terminal less
     // the row of the prompt.
-    display_image(img, args, args.no_newline, HeaderRows(0))
+    display_image(img, args, Picture::Still, HeaderRows(0))
+}
+
+/// The code that a Kitty terminal names for an image store with no room left.
+///
+/// A terminal keeps every image it drew, and it caps the bytes it keeps. mosh
+/// is the case that reaches the cap: it holds every image for the length of the
+/// session, because a client that reconnects holds none.
+///
+/// This is the one refusal that the size of the picture caused, so this is the
+/// one refusal that a smaller picture repairs.
+const IMAGE_STORE_FULL: &str = "ENOSPC";
+
+/// The line that tells a user how to make the picture smaller.
+///
+/// A newline opens it, because it stands below the line that reports what the
+/// terminal said.
+const SIZE_ADVICE: &str =
+    "\nA smaller image can fit where this one did not: try --width, --height or --scale.";
+
+/// The advice that a refusal of `code` earns, or an empty string for a code
+/// that earns none.
+///
+/// [`SIZE_ADVICE`] repairs [`IMAGE_STORE_FULL`] and nothing else. A terminal
+/// that answers `EINVAL`, `ENOTSUPP` or a code of a picture it cannot decode
+/// refused the bytes for a reason that the size of the picture did not cause,
+/// and the same bytes at half the width are the same bytes. A user who follows
+/// the advice there runs the tool again, waits again, and reads the same
+/// refusal. So every other code leaves the words of the terminal by themselves.
+///
+/// # Arguments
+/// * `code` - The code that the terminal named, such as `ENOSPC`.
+///
+/// # Returns
+/// [`SIZE_ADVICE`] for the code of a full image store, and an empty string for
+/// every other code.
+fn size_advice_for(code: &str) -> &'static str {
+    if code == IMAGE_STORE_FULL {
+        SIZE_ADVICE
+    } else {
+        ""
+    }
 }
 
 /// Display an image in the terminal.
@@ -1594,7 +1645,10 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 /// # Arguments
 /// * `img` - The image to display.
 /// * `args` - The command line arguments.
-/// * `no_newline` - True when the caller controls the position of the cursor.
+/// * `picture` - Whether this call draws one still picture or one frame of a
+///   video. It names the shape that the image travels in, the answer that the
+///   terminal gives, and whether this call reads that answer. `--no-newline`
+///   states none of the three: it states who moves the cursor.
 /// * `header` - The number of rows that the caller printed above the image. The
 ///   auto-fit path subtracts these rows from the height of the terminal.
 ///
@@ -1603,7 +1657,7 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 fn display_image(
     img: DynamicImage,
     args: &Args,
-    no_newline: bool,
+    picture: Picture,
     header: HeaderRows,
 ) -> Result<()> {
     let terminal_caps = Capabilities::detect_by_asking();
@@ -1671,20 +1725,55 @@ fn display_image(
             columns: scaled_width,
             rows: scaled_height,
         },
-        cursor: if no_newline {
-            Cursor::Held {
-                id: HELD_PLACEMENT_ID,
-            }
-        } else {
-            Cursor::BelowImage
+        picture,
+        // A frame of a video always holds the cursor, because the caller puts
+        // the cursor where it wants it before every frame. A still picture
+        // holds it only when the user asks for that with `--no-newline`.
+        cursor: match picture {
+            Picture::Frame { .. } => Cursor::Held,
+            Picture::Still if args.no_newline => Cursor::Held,
+            Picture::Still => Cursor::BelowImage,
         },
         preserve_aspect: args.preserve_aspect,
     };
 
     // `ic` owns standard output for the whole of one image, so it hands the
-    // locked stream to the writer and takes the lock once.
+    // locked stream to the writer and takes the lock once. The lock goes back
+    // before the question below, because that question and its answer travel on
+    // the controlling terminal and not on standard output. A lock held across a
+    // round trip holds every other writer of this process out for the length of
+    // it, and it buys nothing.
     let mut stdout = io::stdout().lock();
     terminal_caps.draw(&mut stdout, &img, &request)?;
+    drop(stdout);
+
+    // A still picture asks the terminal whether it refused, and this is the
+    // read of that answer. `picture` names the two callers apart: a caller that
+    // draws frame after frame holds the terminal in raw mode for the key
+    // presses of the user, so that path asks the terminal for no answer at all
+    // and a read would take a key press out of its hands.
+    //
+    // The flag that holds the cursor names nothing here. A user who types
+    // `ic -n photo.png` draws one still picture, and that picture asks the
+    // terminal for the failures, so this run reads the answer. A report that
+    // nothing reads stays on the descriptor the shell of the user reads next,
+    // and the shell takes the bytes of it for key presses.
+    //
+    // The read gives a refusal of this picture alone. The answer of the run
+    // before this one arrives late, and a second program that draws pictures on
+    // the same terminal answers as well, so a run that reported every refusal
+    // it read would fail for a picture that drew. `termgfx` states how the
+    // image number tells them apart.
+    if matches!(picture, Picture::Still) {
+        if let Some(refusal) = terminal_caps.read_refusal() {
+            anyhow::bail!(
+                "The terminal refused this image and drew nothing: {refusal}\n\
+                \n\
+                The image reached the terminal, and the terminal reported the failure above.{}",
+                size_advice_for(&refusal.code),
+            );
+        }
+    }
 
     Ok(())
 }

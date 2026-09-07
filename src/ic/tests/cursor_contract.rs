@@ -46,6 +46,12 @@ const ITERM2_END: &[u8] = b"\x07";
 /// The Kitty graphics key that tells the renderer not to move the cursor.
 const KITTY_NO_CURSOR_MOVE: &str = "C=1";
 
+/// The Kitty graphics key that names a whole PNG file as the payload.
+const KITTY_PNG_PAYLOAD: &str = "f=100";
+
+/// The Kitty graphics key that asks the terminal for the failures alone.
+const KITTY_FAILURES_ONLY: &str = "q=1";
+
 /// The string terminator that closes the Sixel payload.
 const STRING_TERMINATOR: &[u8] = b"\x1b\\";
 
@@ -638,6 +644,32 @@ fn no_newline_suppresses_the_cursor_contract_for_kitty() {
 #[test]
 fn no_newline_suppresses_the_cursor_contract_for_iterm2() {
     assert_no_cursor_contract(Routine::Iterm2, &run_ic(Routine::Iterm2, &["--no-newline"]));
+}
+
+/// `--no-newline` states who moves the cursor, and it states nothing about how
+/// many pictures the run draws. `ic -n photo.png` is one still picture that a
+/// user types, so it must travel in the shape of a still picture.
+///
+/// A still picture travels as a PNG. Raw pixels cost four base64 characters for
+/// every pixel, and a mosh session gives a whole session fewer characters than
+/// one photograph costs that way, so such a picture never arrives.
+///
+/// A still picture also asks the terminal for the failures with `q=1`, because
+/// a terminal that refused the picture draws nothing and a run that asked for
+/// no answer then reports success in front of an empty screen.
+#[test]
+fn no_newline_still_draws_one_still_picture() {
+    let stdout = run_ic(Routine::Kitty, &["--no-newline"]);
+
+    let keys = kitty_key_list(&stdout);
+    assert!(
+        keys.iter().any(|key| key == KITTY_PNG_PAYLOAD),
+        "a still picture must travel as a PNG under {KITTY_PNG_PAYLOAD}, but the keys are {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|key| key == KITTY_FAILURES_ONLY),
+        "a still picture must ask the terminal for the failures with {KITTY_FAILURES_ONLY}, but the keys are {keys:?}"
+    );
 }
 
 /// No routine can ask the terminal to move down more rows than the terminal

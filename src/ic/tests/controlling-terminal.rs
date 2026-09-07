@@ -27,12 +27,11 @@
 //! terminal.
 
 use std::io::Write;
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::ptr;
 
 mod common;
 
+use common::pty::{Pty, Window};
 use common::{
     find, scan_cursor_movement, unreachable_path_dir, SIXEL_START, TERM_XTERM_256COLOR, TEST_IMAGE,
 };
@@ -109,94 +108,26 @@ const EXPECTED_SIXEL_HEIGHT_PX: u32 = EXPECTED_SIXEL_WIDTH_PX;
 /// [`scan_cursor_movement`] counts a movement up as well as a movement down.
 const EXPECTED_ROWS: i64 = (EXPECTED_SIXEL_HEIGHT_PX / CELL_HEIGHT_PX) as i64;
 
-/// A pseudo-terminal of the size that the tests measure `ic` against.
+/// The window that the pseudo-terminal of these tests reports.
 ///
-/// The pair of file descriptors stays open for the life of the child. The
-/// master end holds the pseudo-terminal alive, and the slave end is the
-/// terminal that the child takes as its own.
-///
-/// The size arrives with the pseudo-terminal, so no second ioctl sets it and
-/// no window of the wrong size ever exists.
-struct Pty {
-    /// The master end. The parent holds it open and reads nothing from it,
-    /// because the child writes its image to a pipe and not to the terminal.
-    master: libc::c_int,
-    /// The slave end. It becomes the controlling terminal of the child.
-    slave: libc::c_int,
-}
-
-impl Pty {
-    /// Open a pseudo-terminal of the size of the tests.
-    ///
-    /// # Returns
-    /// The two ends of a pseudo-terminal that reports [`TERMINAL_COLUMNS`] by
-    /// [`TERMINAL_ROWS`] over a window of [`TERMINAL_WIDTH_PX`] by
-    /// [`TERMINAL_HEIGHT_PX`].
-    ///
-    /// # Panics
-    /// Panics when the system opens no pseudo-terminal.
-    fn open() -> Self {
-        let mut master: libc::c_int = -1;
-        let mut slave: libc::c_int = -1;
-        let mut size = libc::winsize {
-            ws_row: TERMINAL_ROWS,
-            ws_col: TERMINAL_COLUMNS,
-            ws_xpixel: TERMINAL_WIDTH_PX,
-            ws_ypixel: TERMINAL_HEIGHT_PX,
-        };
-
-        // SAFETY: `openpty` writes one file descriptor to each of the first two
-        // pointers, and both point at a live local variable. The two null
-        // pointers are the documented way to ask for the default terminal modes
-        // and to ask for no name of the slave device. The last pointer is the
-        // size of the window, and it points at a live local variable that
-        // outlives the call.
-        let result = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                &mut size,
-            )
-        };
-        assert_eq!(
-            result,
-            0,
-            "openpty must give a pseudo-terminal: {}",
-            std::io::Error::last_os_error()
-        );
-
-        Pty { master, slave }
-    }
-}
-
-impl Drop for Pty {
-    /// Close both ends of the pseudo-terminal.
-    ///
-    /// A test that leaks a file descriptor for each run empties the table of
-    /// the process, and the runs of this file share one process.
-    fn drop(&mut self) {
-        // SAFETY: each descriptor came from the one `openpty` call of
-        // [`Pty::open`], nothing else closes them, and `Drop` runs one time.
-        unsafe {
-            libc::close(self.slave);
-            libc::close(self.master);
-        }
-    }
-}
+/// The four numbers are the ones that every expectation below is built on, so
+/// they arrive at [`Pty::open`] from the same constants that the arithmetic
+/// reads.
+const WINDOW: Window = Window {
+    columns: TERMINAL_COLUMNS,
+    rows: TERMINAL_ROWS,
+    width_px: TERMINAL_WIDTH_PX,
+    height_px: TERMINAL_HEIGHT_PX,
+};
 
 /// Make a command that runs `ic` with a pipe for standard output and a
 /// pseudo-terminal for the session.
 ///
-/// The child starts a new session and then claims the slave end of the
-/// pseudo-terminal as its controlling terminal. `/dev/tty` in the child
+/// [`Pty::hand_to`] gives the child a session of its own and the slave end of
+/// the pseudo-terminal as its controlling terminal. `/dev/tty` in the child
 /// therefore resolves to that pseudo-terminal, while standard output stays a
 /// pipe. That is the shape of a captured run: the terminal of the session is
 /// there to measure, and standard output cannot measure it.
-///
-/// `pre_exec` runs between the fork and the exec, so the slave descriptor is
-/// still open at that moment and the close-on-exec flag changes nothing.
 ///
 /// The environment is empty except for the four variables below, so nothing
 /// the test runner inherited can pick a different display routine. `MUXIAVELLI`
@@ -222,32 +153,7 @@ fn ic_command(pty: &Pty, args: &[&str]) -> Command {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
-    let slave = pty.slave;
-    // SAFETY: the closure runs in the child between the fork and the exec, and
-    // it calls two functions. `setsid` and `ioctl` are both async-signal-safe,
-    // and neither one touches memory of this process: the ioctl takes the
-    // request `TIOCSCTTY`, which reads no pointer. The child is never a process
-    // group leader in that window, because the fork gave it a new process id
-    // and the process group is still the one of the parent, so the one
-    // documented failure of `setsid` cannot happen.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of the child, and termsize offers no call for that"
-            )]
-            if libc::ioctl(slave, libc::c_ulong::from(libc::TIOCSCTTY), 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            Ok(())
-        });
-    }
+    pty.hand_to(&mut command);
 
     command
 }
@@ -269,7 +175,7 @@ fn ic_command(pty: &Pty, args: &[&str]) -> Command {
 /// Panics when the child process does not start, does not accept the image, or
 /// exits with a failure.
 fn run_ic(args: &[&str]) -> Vec<u8> {
-    let pty = Pty::open();
+    let pty = Pty::open(WINDOW);
     let mut child = ic_command(&pty, args).spawn().expect("failed to start ic");
 
     let mut stdin = child.stdin.take().expect("ic has no stdin pipe");
