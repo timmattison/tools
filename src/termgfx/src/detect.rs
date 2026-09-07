@@ -483,7 +483,6 @@ pub(crate) fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutin
     }
 }
 
-
 /// Whether this run asks the terminal anything at all.
 ///
 /// The round trip costs the budget of [`crate::probe::QUERY_BUDGET`], so a run

@@ -95,8 +95,22 @@
 //! The budget ends the read, and it ends no answer of a terminal. A terminal
 //! that answers late writes those bytes to the descriptor the shell of the
 //! user reads next, and the shell takes them for keystrokes. So the budget is
-//! generous enough that a terminal on the far side of a network reaches it,
-//! and the probe runs only for a terminal that carries no name at all.
+//! generous enough that a terminal on the far side of a network reaches it.
+//!
+//! The two questions about a cell add no shape to that risk. A terminal
+//! answers in the order it reads, and both of them stand in front of the
+//! request that ends the read, so a terminal that answers at all writes their
+//! answers before the one the read waits for. A terminal that answers neither
+//! writes nothing for them, and the read still ends on the attributes.
+//!
+//! **What the two questions do change is how many runs ask anything.** The
+//! probe used to run for a terminal that carried no name at all. It now runs
+//! for every window that reports no pixel size, a named terminal included, so
+//! a mosh session and a pane of Zellij reach it. Those runs carry the risk
+//! that a run of an unnamed terminal always carried, and they carry it for the
+//! same budget. The trade is a picture of the right size against a terminal
+//! that answers nothing writing nothing late, and issue #468 measured what the
+//! guess costs: a picture about 7 percent too narrow.
 
 use crate::detect::AnsweredProtocol;
 use crate::draw::{ImageNumber, KITTY_IMAGE_NUMBER_KEY};
