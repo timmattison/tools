@@ -1,3 +1,23 @@
+# Clippy reads the nearest clippy.toml and no other. It walks up from the crate
+# directory, reads the first file it meets, and stops -- it never merges that
+# file with the ones above it. So this file does not add to the clippy.toml
+# beside the workspace manifest. It replaces it, for this crate.
+#
+# Every ban the workspace declares is therefore restated below, verbatim and
+# with its reason text, under the heading it arrived with. The duplication is
+# the price of holding a crate-local file at all. Without it, ufa would be the
+# one crate in the workspace free to call the colored crate's process-global
+# override, or to read a window size from a call that reports a zero -- and the
+# exemption would be spelled as an absence, so nothing would say so.
+#
+# `repo_guards::clippy_superset` fails `cargo test` when this file stops being a
+# superset of the root one, so an entry added there and forgotten here is caught
+# rather than silently dropped.
+#
+# ---------------------------------------------------------------------------
+# ufa's own bans
+# ---------------------------------------------------------------------------
+#
 # `Args::try_parse_from` reads the process environment as well as argv --
 # clap consults UNIFI_URL, UNIFI_API_KEY, UNIFI_INSECURE and
 # UNIFI_SITE_MANAGER_API_KEY on every parse -- so tests that call it directly
@@ -26,4 +46,16 @@ disallowed-methods = [
     { path = "clap::FromArgMatches::from_arg_matches_mut", reason = "the only way to hold an ArgMatches is a banned call above; parse through crate::test_support::parse_args_for_test" },
     { path = "clap::FromArgMatches::update_from_arg_matches", reason = "the only way to hold an ArgMatches is a banned call above; parse through crate::test_support::parse_args_for_test" },
     { path = "clap::FromArgMatches::update_from_arg_matches_mut", reason = "the only way to hold an ArgMatches is a banned call above; parse through crate::test_support::parse_args_for_test" },
+
+    # -----------------------------------------------------------------------
+    # Restated from the workspace clippy.toml, which this file shadows. See the
+    # comments at the top of that file for the reasoning behind each one.
+    # -----------------------------------------------------------------------
+    { path = "colored::control::set_override", reason = "call testcolor::with_forced_ansi instead; it holds the one lock on this process-global override" },
+    { path = "colored::control::unset_override", reason = "testcolor::with_forced_ansi puts the override back on its own, on the panic path as well" },
+    { path = "colored::control::ShouldColorize::set_override", reason = "the singleton reaches the same global state as the free function; call testcolor::with_forced_ansi instead" },
+    { path = "colored::control::ShouldColorize::unset_override", reason = "the singleton reaches the same global state as the free function; testcolor::with_forced_ansi puts the override back on its own" },
+    { path = "crossterm::terminal::size", reason = "call termsize::controlling_size or termsize::controlling_columns instead; a terminal that carries no window answers this call with Ok((0, 0)), and zero columns is not a width" },
+    { path = "terminal_size::terminal_size", reason = "call termsize::stdout_size or termsize::stdout_columns instead; this call hands a zero back on Windows, and zero columns is not a width" },
+    { path = "libc::ioctl", reason = "call termsize::drawing_window instead; a raw TIOCGWINSZ on one file descriptor is the bypass that termgfx held, and GitHub issue #350 reports what it cost. An ioctl of another request says so at its call site with an #[allow]" },
 ]
