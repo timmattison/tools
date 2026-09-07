@@ -359,7 +359,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - Shows which process is listening on a given port. Useful for identifying what program is using a specific port
       on your system. Supports verbose output to show detailed socket information. Without root it sees only processes
       owned by you, so run it under `sudo` for a complete answer. When a port is held by a process it cannot see, it
-      says so instead of reporting the port as free, and it says when the operating system refused its check.
+      says so instead of reporting the port as free. It reads the kernel's list of listening sockets on macOS and Linux;
+      on other platforms it says it cannot tell.
     - To install: `cargo install --git https://github.com/timmattison/tools wl`
 - wolly
     - Wake-on-LAN tool to remotely wake computers by sending magic packets. Features automatic subnet broadcast

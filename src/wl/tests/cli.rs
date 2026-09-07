@@ -10,59 +10,24 @@ use std::process::Command;
 
 /// Port 1 (`tcpmux`) is below every platform's privileged threshold and holds
 /// no service on a developer machine. An unprivileged process is therefore
-/// *refused* the loopback bind, while nothing is listening there — the case
-/// that separates a tool which reads the kernel's socket table from one which
-/// probes the port by binding it.
+/// *refused* the loopback bind, while nothing is listening there — the case a
+/// bind probe could never answer, and the case the kernel's own list of
+/// listening sockets answers without any privilege at all.
 const REFUSED_UNUSED_PORT: u16 = 1;
-
-/// A bind the kernel refuses proves nothing about the port, so `wl` must not
-/// report it as free.
-///
-/// Gated off macOS, which now reads the kernel's socket table instead: there is
-/// no bind probe there to be refused, and
-/// `unheld_privileged_port_is_reported_free` pins what replaced it. The probe
-/// still serves every other platform until each grows a reader of its own.
-#[cfg(not(target_os = "macos"))]
-#[test]
-fn refused_probe_is_not_reported_as_free() {
-    // Decide whether this test applies: only a process the kernel *refuses*
-    // can observe the ambiguity.
-    match TcpListener::bind(("127.0.0.1", REFUSED_UNUSED_PORT)) {
-        // Privileged enough to bind it: the probe has nothing to be uncertain
-        // about, so there is nothing here to assert.
-        Ok(_) => return,
-        // Some other failure (the port really is held, the address is missing):
-        // not the case under test.
-        Err(e) if e.kind() != io::ErrorKind::PermissionDenied => return,
-        Err(_) => {}
-    }
-
-    let output = Command::new(env!("CARGO_BIN_EXE_wl"))
-        .arg(REFUSED_UNUSED_PORT.to_string())
-        .output()
-        .expect("should be able to run the freshly built wl binary");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        !stdout.contains("No processes listening"),
-        "the kernel refused wl's own bind probe on port {REFUSED_UNUSED_PORT}, \
-         so wl cannot know whether anything is listening there, yet it reported \
-         the port as free. stdout was: {stdout}"
-    );
-}
 
 /// A reader of the kernel's socket table needs no privileges, so `wl` can
 /// answer for a privileged port that holds no service.
 ///
-/// This is the behaviour the socket-table reader adds. A bind probe cannot
+/// This is the behaviour the socket-table reader adds. A bind probe could not
 /// reach the question on a port below the privileged threshold — the kernel
-/// refuses it — so the answer there was always "cannot tell". The kernel's own
-/// list of listening sockets is readable by any user, so a run that names no
-/// process on port 1 can now say so.
+/// refuses the bind first — so the answer there was always "cannot tell". The
+/// kernel's own list of listening sockets is readable by any user, so a run
+/// that names no process on port 1 can now say so.
 ///
-/// Gated to the platforms that have a reader. Every other platform keeps the
-/// bind probe, whose refusal `refused_probe_is_not_reported_as_free` pins.
-#[cfg(target_os = "macos")]
+/// Gated to the platforms that have a reader. Every other platform answers
+/// "cannot tell" for every port, which is what the module documentation of
+/// `socket_table` records as the remaining gap.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn unheld_privileged_port_is_reported_free() {
     let output = Command::new(env!("CARGO_BIN_EXE_wl"))

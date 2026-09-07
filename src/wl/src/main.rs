@@ -130,7 +130,7 @@ fn main() -> Result<()> {
                         println!("No processes listening on port {}", args.port);
                     }
                     PortStatus::Unknown => println!(
-                        "Cannot tell whether port {} is in use: the operating system refused the check. Re-run as root for a definite answer.",
+                        "Cannot tell whether port {} is in use: wl could not read the kernel's list of listening sockets.",
                         args.port
                     ),
                 }
