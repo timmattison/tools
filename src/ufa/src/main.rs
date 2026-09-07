@@ -195,7 +195,13 @@ struct Args {
     url: Option<String>,
 
     /// API key for authentication (generate in Settings -> Control Plane -> Integrations)
-    #[clap(long, global = true, env = "UNIFI_API_KEY")]
+    //
+    // `hide_env_values` for the same reason `Secret` redacts: clap otherwise
+    // prints what the variable holds beside the flag, so `ufa --help` prints
+    // the key of every user who exported one. The variable's *name* stays in
+    // the help text, because that is what tells the user where the value came
+    // from.
+    #[clap(long, global = true, env = "UNIFI_API_KEY", hide_env_values = true)]
     api_key: Option<Secret>,
 
     /// Skip TLS certificate verification
@@ -269,7 +275,8 @@ enum Commands {
     /// Manage cloud-hosted UniFi consoles
     Cloud {
         /// Site Manager API key (generate at unifi.ui.com API section)
-        #[clap(long, env = "UNIFI_SITE_MANAGER_API_KEY")]
+        // Hidden for the same reason the controller key is: see `Args`.
+        #[clap(long, env = "UNIFI_SITE_MANAGER_API_KEY", hide_env_values = true)]
         site_manager_api_key: Option<Secret>,
 
         #[clap(subcommand)]
