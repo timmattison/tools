@@ -142,6 +142,15 @@ impl Api {
 /// comes back to the caller, and [`read_json_response`] reports it as the
 /// failure it is.
 ///
+/// # Every request is bounded
+///
+/// A host that accepts a connection and answers nothing holds a command for as
+/// long as the user lets it, because reqwest puts no bound on a request of its
+/// own. Two bounds go on instead. `timeout` covers the whole request, which is
+/// what ends a wait for an answer that never comes, and `connect_timeout`
+/// covers the connection alone, which ends much sooner against a host that
+/// drops the packets rather than refuses them.
+///
 /// # Arguments
 ///
 /// * `api` - Which API the client talks to, which names the key in any error.
@@ -157,12 +166,7 @@ impl Api {
 ///
 /// Returns an error if `api_key` cannot be a header value, or if the client
 /// cannot be built.
-pub fn build_client(
-    api: Api,
-    api_key: &str,
-    insecure: bool,
-    timeouts: Timeouts,
-) -> Result<Client> {
+pub fn build_client(api: Api, api_key: &str, insecure: bool, timeouts: Timeouts) -> Result<Client> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::HeaderName::from_static(API_KEY_HEADER),
@@ -183,6 +187,8 @@ pub fn build_client(
     builder
         .default_headers(headers)
         .redirect(redirect::Policy::none())
+        .timeout(timeouts.request)
+        .connect_timeout(timeouts.connect)
         .danger_accept_invalid_certs(insecure)
         .build()
         .context("Failed to create HTTP client")
