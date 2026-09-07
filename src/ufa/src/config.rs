@@ -27,9 +27,21 @@ const ENVIRONMENT_FILE: &str = ".env";
 /// `UNIFI_URL`, `UNIFI_API_KEY` and `UNIFI_INSECURE` during the parse, and a
 /// value in the environment beats the configuration file.
 ///
-/// The search walks up from `directory` to the root and takes the first file
-/// it meets, and it discards what went wrong with each attempt — which is what
-/// `dotenvy::dotenv` does from the working directory.
+/// Exactly one path is read: `directory/.env`, and no other. `dotenvy::dotenv`
+/// and `dotenvy::from_filename` both walk up from the working directory to the
+/// root, which puts a settings file in every directory above the user on the
+/// path — enough for one of them to name the controller the user's own API key
+/// goes to, with certificate verification off. `dotenvy::from_path` searches
+/// nothing.
+///
+/// The behaviour this changes: a settings file in a checkout, or in any other
+/// directory `ufa` is run from, no longer applies. The file beside the
+/// configuration file is the only one, because it is the only one the user
+/// chose.
+///
+/// A file that is not there is the normal case and stays silent. Any other
+/// fault is reported, because a settings file the user wrote and `ufa` cannot
+/// read is a fault the user must see.
 ///
 /// # Arguments
 ///
@@ -37,15 +49,16 @@ const ENVIRONMENT_FILE: &str = ".env";
 ///
 /// # Returns
 ///
-/// The path of the file that was loaded, or `None` when no file was.
+/// The path of the file that was loaded, or `None` when there is no such file.
 pub fn load_environment_file(directory: &Path) -> Result<Option<PathBuf>> {
-    for candidate in directory.ancestors().map(|dir| dir.join(ENVIRONMENT_FILE)) {
-        if dotenvy::from_path(&candidate).is_ok() {
-            return Ok(Some(candidate));
-        }
-    }
+    let path = directory.join(ENVIRONMENT_FILE);
 
-    Ok(None)
+    match dotenvy::from_path(&path) {
+        Ok(()) => Ok(Some(path)),
+        Err(error) if error.not_found() => Ok(None),
+        Err(error) => Err(anyhow::Error::new(error))
+            .with_context(|| format!("Failed to read settings file: {}", path.display())),
+    }
 }
 
 /// A controller discovered from the 1Password `ufa` item.
