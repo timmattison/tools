@@ -24,6 +24,7 @@
 //! stream, the caller says which stream, and `ic` hands them the same locked
 //! standard output that it had before.
 
+use std::borrow::Cow;
 use std::io::{self, Write};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -348,6 +349,12 @@ impl PayloadBudget {
     #[must_use]
     const fn holds(self, characters: usize) -> bool {
         characters <= self.0
+    }
+
+    /// The characters that this budget allows.
+    #[must_use]
+    const fn characters(self) -> usize {
+        self.0
     }
 }
 
@@ -700,6 +707,114 @@ impl KittyPayload {
     }
 }
 
+/// The attempts that [`fit_to_payload_budget`] takes before it gives up.
+///
+/// Every attempt divides the pixel count by the amount that the last one
+/// missed by, so a payload that is a hundred times too large reaches the
+/// budget in two. Six is far past what any real picture needs, and it bounds
+/// the encoder runs of one draw whatever a future encoder does with the size.
+const MAXIMUM_FIT_ATTEMPTS: usize = 6;
+
+/// The share of the budget that one attempt of [`fit_to_payload_budget`] aims
+/// at.
+///
+/// A payload is not exactly linear in the pixel count, so an attempt that
+/// aimed at the whole budget would land a little above it about half the time
+/// and cost a second encoder run. Aiming a little under it costs a few pixels
+/// that nobody can see.
+const FIT_SAFETY: f64 = 0.95;
+
+/// Shrink `image` until `encode` gives a payload that `budget` holds.
+///
+/// The payload of every shape this crate writes grows with the pixel count, so
+/// an attempt that misses by a factor divides both sides by the square root of
+/// that factor. Raw pixels and a PNM file are exactly linear, so they land in
+/// one attempt. A PNG is not, because its size comes off the content as well,
+/// so it takes two or three.
+///
+/// The picture keeps the size that it takes on the screen. The Kitty protocol
+/// and the iTerm2 protocol state that size in character cells, beside the
+/// payload, so a smaller pixel count loses resolution alone. The Sixel
+/// protocol carries no such key, so a Sixel picture gets smaller.
+///
+/// # Arguments
+/// * `image` - The picture at the size the display bounds gave it.
+/// * `budget` - The characters of payload that the picture can spend.
+/// * `encode` - The encoder of the protocol that this picture travels in.
+///
+/// # Returns
+/// The picture that the payload came off, and that payload. The picture comes
+/// back untouched when it already fits, so a draw inside the budget costs no
+/// resize at all.
+///
+/// A picture that cannot reach the budget comes back at the smallest size the
+/// fit could reach, with the payload that size made. Drawing nothing is the
+/// one outcome that helps nobody, and the terminal still answers for what it
+/// refused.
+///
+/// # Errors
+/// Gives the error of the first call to `encode` that fails.
+fn fit_to_payload_budget<'a, F>(
+    image: Cow<'a, DynamicImage>,
+    budget: PayloadBudget,
+    encode: F,
+) -> Result<(Cow<'a, DynamicImage>, String), DrawError>
+where
+    F: Fn(&DynamicImage) -> Result<String, DrawError>,
+{
+    let mut picture = image;
+    let mut payload = encode(&picture)?;
+
+    for _ in 0..MAXIMUM_FIT_ATTEMPTS {
+        if budget.holds(payload.len()) {
+            break;
+        }
+
+        let Some(smaller) = shrink_towards(&picture, budget, payload.len()) else {
+            break;
+        };
+
+        picture = Cow::Owned(smaller);
+        payload = encode(&picture)?;
+    }
+
+    Ok((picture, payload))
+}
+
+/// Give `image` at the size that aims at `budget`, or [`None`] when no smaller
+/// size is left to try.
+///
+/// # Arguments
+/// * `image` - The picture that spent too much.
+/// * `budget` - The characters of payload that the picture can spend.
+/// * `spent` - The characters that the picture spent.
+///
+/// # Returns
+/// [`None`] when the arithmetic asks for a size that is not smaller than the
+/// one it got, which is what a picture at one pixel by one gives. That answer
+/// ends the loop, so a budget that no size reaches cannot spin.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a scale in (0.0, 1.0] of an image dimension stays non-negative and inside u32"
+)]
+fn shrink_towards(
+    image: &DynamicImage,
+    budget: PayloadBudget,
+    spent: usize,
+) -> Option<DynamicImage> {
+    let scale = ((budget.characters() as f64 / spent as f64) * FIT_SAFETY).sqrt();
+    let width = ((f64::from(image.width()) * scale).round() as u32).max(1);
+    let height = ((f64::from(image.height()) * scale).round() as u32).max(1);
+
+    if width >= image.width() && height >= image.height() {
+        return None;
+    }
+
+    Some(image.resize(width, height, FilterType::Lanczos3))
+}
+
 /// Write an image with the Kitty graphics protocol.
 ///
 /// The command is `ESC _ G <key>=<value>,... ; <base64 data> ESC \`. A large
@@ -791,7 +906,15 @@ fn write_kitty<W: Write>(
         Picture::Frame { .. } => KittyPayload::RawRgb,
         Picture::Still => KittyPayload::Png,
     };
-    let base64_data = payload.encode(&image)?;
+
+    // The downscale above bounds the picture by the screen. This bounds it by
+    // the characters that the transport carries, which is a second bound and
+    // not the same one: mosh caps one transmission at one mebicharacter, and a
+    // window of more than about 51 columns by 23 makes a frame above that cap.
+    // `c=` and `r=` below still state the cell span that the screen gave, so
+    // the picture keeps its size there and loses resolution alone.
+    let (image, base64_data) =
+        fit_to_payload_budget(image, request.payload, |picture| payload.encode(picture))?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -909,16 +1032,23 @@ fn write_sixel<W: Write>(
 
     // The encoder takes the pixels at the size they draw at, so the image goes
     // to that exact size, up or down.
-    let resized = image.resize_exact(final_width, final_height, FilterType::Lanczos3);
-    let rgba = resized.to_rgba8();
+    let resized = Cow::Owned(image.resize_exact(final_width, final_height, FilterType::Lanczos3));
 
-    let payload = sixel_encode(
-        rgba.as_raw(),
-        resized.width() as usize,
-        resized.height() as usize,
-        &EncodeOptions::default(),
-    )
-    .map_err(|error| DrawError::Encode(error.to_string()))?;
+    // Sixel states its size in pixels and carries no key for a cell span, so a
+    // picture that spends fewer pixels is smaller on the screen as well. That
+    // is the whole of what the protocol allows, and a smaller picture beats the
+    // empty screen that a refused transmission leaves.
+    let (resized, payload) = fit_to_payload_budget(resized, request.payload, |picture| {
+        let rgba = picture.to_rgba8();
+
+        sixel_encode(
+            rgba.as_raw(),
+            picture.width() as usize,
+            picture.height() as usize,
+            &EncodeOptions::default(),
+        )
+        .map_err(|error| DrawError::Encode(error.to_string()))
+    })?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -981,13 +1111,19 @@ fn write_iterm2<W: Write>(
         cell_height_px,
     );
 
-    let rgb = image.to_rgb8();
-    let rgb_data = rgb.as_raw();
-    let pnm_header = format!("P6\n{} {}\n255\n", image.width(), image.height());
-    let mut pnm_data = Vec::with_capacity(pnm_header.len() + rgb_data.len());
-    pnm_data.extend_from_slice(pnm_header.as_bytes());
-    pnm_data.extend_from_slice(rgb_data);
-    let base64_data = BASE64_STANDARD.encode(&pnm_data);
+    // `width=` and `height=` below state the cell span, so a picture that spends
+    // fewer pixels keeps the size it takes on the screen. A PNM file is exactly
+    // linear in the pixel count, so the fit lands in one attempt.
+    let (image, base64_data) = fit_to_payload_budget(image, request.payload, |picture| {
+        let rgb = picture.to_rgb8();
+        let rgb_data = rgb.as_raw();
+        let pnm_header = format!("P6\n{} {}\n255\n", picture.width(), picture.height());
+        let mut pnm_data = Vec::with_capacity(pnm_header.len() + rgb_data.len());
+        pnm_data.extend_from_slice(pnm_header.as_bytes());
+        pnm_data.extend_from_slice(rgb_data);
+
+        Ok(BASE64_STANDARD.encode(&pnm_data))
+    })?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
