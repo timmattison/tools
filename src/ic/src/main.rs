@@ -1864,7 +1864,16 @@ enum RemoteTransport {
     /// No remote transport detected (direct terminal or plain SSH).
     None,
     /// Running under Mosh (mosh-server in process tree).
-    /// Mosh strips escape sequences, so graphics protocols cannot work.
+    ///
+    /// Upstream Mosh strips the escape sequences that every graphics protocol
+    /// needs, so an image cannot work there at all. A Mosh that draws them
+    /// answers the query that `validate_terminal_for_graphics` reads, and that
+    /// answer outranks this one, so such a session draws.
+    ///
+    /// A Mosh that draws still keeps every image for the length of the
+    /// session, and it refuses one transmission above a mebicharacter. That is
+    /// what [`payload_budget_for`] answers, and it is why a transport that
+    /// cannot draw at all still names a budget.
     Mosh,
     /// Running under Eternal Terminal (ET_VERSION env var or etterminal in process tree).
     /// ET passes escape sequences through but its virtual terminal doesn't
