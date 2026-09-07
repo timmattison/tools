@@ -1,4 +1,4 @@
-use crate::http::{build_client, read_json_response, Api};
+use crate::http::{build_client, read_json_response, Api, Timeouts};
 use anyhow::{Context, Result};
 use reqwest::{Client, Url};
 use serde::de::DeserializeOwned;
@@ -25,7 +25,7 @@ impl UnifiClient {
                 For direct API access, use the local IP address of your UniFi controller."
             );
         }
-        let client = build_client(Api::Controller, api_key, insecure)?;
+        let client = build_client(Api::Controller, api_key, insecure, Timeouts::PRODUCTION)?;
 
         let mut base_url = Url::parse(base_url).context("Invalid UniFi controller URL")?;
 

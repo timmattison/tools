@@ -1,4 +1,4 @@
-use crate::http::{build_client, read_json_response, Api};
+use crate::http::{build_client, read_json_response, Api, Timeouts};
 use crate::site_manager::models::{Host, HostsResponse};
 use anyhow::{Context, Result};
 use reqwest::{Client, Url};
@@ -100,7 +100,7 @@ impl SiteManagerClient {
     pub fn new(api_key: &str) -> Result<Self> {
         // The Site Manager API is a public host with a public certificate, so
         // nothing here ever waives verification.
-        let client = build_client(Api::SiteManager, api_key, false)?;
+        let client = build_client(Api::SiteManager, api_key, false, Timeouts::PRODUCTION)?;
 
         let base_url =
             Url::parse("https://api.ui.com/v1/").context("Failed to parse Site Manager API URL")?;

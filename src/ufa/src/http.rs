@@ -12,6 +12,42 @@ use anyhow::{Context, Result};
 use reqwest::{header, redirect, Client, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::time::Duration;
+
+/// How long one request to a UniFi API has to finish.
+///
+/// A controller on the same network answers in milliseconds. This is generous
+/// enough for a listing of thousands of clients over a slow link, and short
+/// enough that a user who waits learns that something is wrong.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long the connection alone has to be established.
+///
+/// A host that refuses the connection answers at once. This bound is for the
+/// host that drops the packets instead and never answers at all.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The bounds a client puts on one request.
+///
+/// [`Timeouts::PRODUCTION`] is what every client that serves a command
+/// carries. A parameter rather than two constants inside [`build_client`],
+/// because a test of the bound must build the same client with a short one:
+/// no test may wait for a production timeout.
+#[derive(Debug, Clone, Copy)]
+pub struct Timeouts {
+    /// The whole request, from the first byte sent to the last byte read.
+    pub request: Duration,
+    /// The connection alone.
+    pub connect: Duration,
+}
+
+impl Timeouts {
+    /// The bounds every client that serves a command carries.
+    pub const PRODUCTION: Self = Self {
+        request: REQUEST_TIMEOUT,
+        connect: CONNECT_TIMEOUT,
+    };
+}
 
 /// The header both UniFi APIs take the user's key in.
 ///
@@ -111,6 +147,7 @@ impl Api {
 /// * `api` - Which API the client talks to, which names the key in any error.
 /// * `api_key` - The user's key for that API.
 /// * `insecure` - Whether to accept a certificate that does not verify.
+/// * `timeouts` - The bounds to put on every request.
 ///
 /// # Returns
 ///
@@ -120,7 +157,12 @@ impl Api {
 ///
 /// Returns an error if `api_key` cannot be a header value, or if the client
 /// cannot be built.
-pub fn build_client(api: Api, api_key: &str, insecure: bool) -> Result<Client> {
+pub fn build_client(
+    api: Api,
+    api_key: &str,
+    insecure: bool,
+    timeouts: Timeouts,
+) -> Result<Client> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::HeaderName::from_static(API_KEY_HEADER),
@@ -241,6 +283,8 @@ fn response_error(api: Api, status: StatusCode, body: &str) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_server::TestServer;
+    use std::time::Instant;
 
     /// A response body big enough that reproducing it in an error would fill
     /// the terminal -- and, if the error is logged, the log.
@@ -250,6 +294,53 @@ mod tests {
     /// sensible excerpt budget, so this asserts "the body was cut short at
     /// all" rather than pinning a particular budget.
     const REASONABLE_ERROR_CHARS: usize = 4_000;
+
+    /// A controller that accepts the connection and never answers must not be
+    /// able to hold a command forever.
+    ///
+    /// Every command this CLI runs makes a request through this client, and
+    /// the worst case is the confirmed DELETE: a user who kills a request that
+    /// hangs cannot tell whether the vouchers were destroyed first.
+    #[tokio::test]
+    async fn a_request_to_a_server_that_never_answers_ends_on_its_own_bound() {
+        /// The bound the client under test carries. Far shorter than the
+        /// production one, which no test may wait for.
+        const CLIENT_BOUND: Duration = Duration::from_millis(250);
+        /// How long the test waits before it calls the bound broken. Twenty
+        /// times the bound above, so a loaded machine cannot fail this, and
+        /// far under any production value, so a client with no bound at all
+        /// cannot pass it.
+        const TEST_PATIENCE: Duration = Duration::from_secs(5);
+
+        let silent = TestServer::silent().await;
+        let client = build_client(
+            Api::Controller,
+            "an-api-key",
+            false,
+            Timeouts {
+                request: CLIENT_BOUND,
+                connect: CLIENT_BOUND,
+            },
+        )
+        .expect("a client with a short bound must build");
+
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(TEST_PATIENCE, client.get(silent.origin()).send()).await;
+        let elapsed = started.elapsed();
+
+        let error = outcome
+            .expect("the request must end on the client's own bound, not on the test's")
+            .expect_err("a server that never answers cannot produce a response");
+
+        assert!(
+            error.is_timeout(),
+            "the request must fail as a timeout rather than as anything else, got: {error}"
+        );
+        assert!(
+            elapsed < TEST_PATIENCE,
+            "the request ran for {elapsed:?}, which is no bound at all"
+        );
+    }
 
     /// A server can answer a failed request with anything at all -- a stack
     /// trace, an HTML error page, a database dump. Interpolating the lot into

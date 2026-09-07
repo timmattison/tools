@@ -31,6 +31,16 @@ const MAX_HEAD_BYTES: usize = 65_536;
 /// How much a server reads off a socket at a time.
 const READ_CHUNK_BYTES: usize = 1_024;
 
+/// What a [`TestServer`] writes back once it has read a request.
+#[derive(Clone)]
+enum Reply {
+    /// These bytes, exactly as given.
+    Bytes(String),
+    /// Nothing at all. The server keeps the connection open, so a client
+    /// waits for an answer rather than reads an end of file.
+    Silence,
+}
+
 /// One request a [`TestServer`] read.
 #[derive(Clone)]
 pub struct ReceivedRequest {
@@ -129,11 +139,36 @@ impl TestServer {
     /// # Returns
     ///
     /// The running server.
+    pub async fn replying(response: &str) -> Self {
+        Self::start(Reply::Bytes(response.to_string())).await
+    }
+
+    /// Start a server that accepts a connection and never answers it.
+    ///
+    /// The connection stays open, so a client reads no end of file and no
+    /// refusal. Only a bound of its own ends the request.
+    ///
+    /// # Returns
+    ///
+    /// The running server.
+    pub async fn silent() -> Self {
+        Self::start(Reply::Silence).await
+    }
+
+    /// Start a server that answers every request the one way `reply` says.
+    ///
+    /// # Arguments
+    ///
+    /// * `reply` - What to write back.
+    ///
+    /// # Returns
+    ///
+    /// The running server.
     ///
     /// # Panics
     ///
     /// Panics if the loopback address cannot be bound.
-    pub async fn replying(response: &str) -> Self {
+    async fn start(reply: Reply) -> Self {
         let listener = TcpListener::bind(LISTEN_ADDRESS)
             .await
             .expect("a test server must be able to bind a loopback port");
@@ -144,9 +179,12 @@ impl TestServer {
 
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&requests);
-        let response = response.to_string();
 
         let task = tokio::spawn(async move {
+            // A silent server must not drop the connection: an end of file is
+            // an answer of a kind, and a client ends the request on it.
+            let mut held_open = Vec::new();
+
             while let Ok((mut socket, _)) = listener.accept().await {
                 let Some(request) = read_request(&mut socket).await else {
                     continue;
@@ -155,8 +193,14 @@ impl TestServer {
                     .lock()
                     .expect("nothing panics while it holds this lock")
                     .push(request);
-                let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.flush().await;
+
+                match &reply {
+                    Reply::Bytes(response) => {
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        let _ = socket.flush().await;
+                    }
+                    Reply::Silence => held_open.push(socket),
+                }
             }
         });
 
