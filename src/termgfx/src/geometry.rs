@@ -243,7 +243,7 @@ pub fn cell_pixels() -> Option<(u32, u32)> {
 /// The width and the height of one cell in pixels, or `None` when the probe
 /// measured no window, when the terminal reports no pixel size, or when either
 /// quotient is zero.
-fn cell_pixels_of(window: Option<Window>) -> Option<CellPixels> {
+pub(crate) fn cell_pixels_of(window: Option<Window>) -> Option<CellPixels> {
     let (pixels_wide, pixels_tall) = window_pixels(window)?;
     let (columns, rows) = window?.cells();
 

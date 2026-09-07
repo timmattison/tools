@@ -38,6 +38,8 @@
 
 use std::io;
 
+use termsize::Window;
+
 /// An inline-image protocol that a caller emits into a muxiavelli panel.
 ///
 /// muxiavelli panels render through the xterm.js of ttyd with
@@ -197,7 +199,8 @@ impl Capabilities {
         // descriptor from standard output. A run whose standard output is a
         // file still has a terminal to ask, and `ic --will-display` promises
         // that a redirected standard output does not change its answer.
-        let answered = if classify_terminal_type(&env) == TerminalType::Unknown {
+        let window = termsize::drawing_window();
+        let answered = if asks_the_terminal(&classify_terminal_type(&env), window) {
             crate::probe::ask_the_terminal(crate::probe::QUERY_BUDGET)
         } else {
             None
@@ -439,9 +442,75 @@ pub(crate) fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutin
     }
 }
 
+
+/// Whether this run asks the terminal anything at all.
+///
+/// The round trip costs the budget of [`crate::probe::QUERY_BUDGET`], so a run
+/// that has nothing to learn asks nothing. Two questions ride in the one
+/// write, and a run asks when either one of them stands open.
+///
+/// * **Which protocol does this terminal draw.** A terminal that named itself
+///   in the environment answered that already, and a name costs no round trip.
+///   So this question stands open for [`TerminalType::Unknown`] alone.
+/// * **How big is one character cell.** The `TIOCGWINSZ` ioctl carries that
+///   measure, and a mosh session, a pane of Zellij and a ttyd panel all report
+///   none. **The name of the terminal says nothing about it**: a named
+///   terminal reached through a proxy that strips the pixel size needs the
+///   answer as much as an unnamed one does. So this question stands open for
+///   every window that reports no pixel size.
+///
+/// # Arguments
+/// * `terminal_type` - The terminal that the environment named.
+/// * `window` - The window that the probe measured, or `None` when the probe
+///   measured none.
+///
+/// # Returns
+/// True when either question stands open.
+fn asks_the_terminal(terminal_type: &TerminalType, _window: Option<Window>) -> bool {
+    *terminal_type == TerminalType::Unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The columns and the rows of the window that these tests state.
+    const TEST_CELLS: (u16, u16) = (80, 24);
+
+    /// The pixel size of that same window. 800 over 80 columns and 480 over 24
+    /// rows measure a cell of 10 pixels by 20.
+    const TEST_PIXELS: (u16, u16) = (800, 480);
+
+    /// The window that a terminal of a stated size reports.
+    ///
+    /// # Panics
+    /// Panics for a window of no columns or no rows, which no test here states.
+    fn test_window(pixels: Option<(u16, u16)>) -> Option<Window> {
+        Some(
+            Window::measured(TEST_CELLS.0, TEST_CELLS.1, pixels)
+                .expect("a test that states a window must state one of a real size"),
+        )
+    }
+
+    #[test]
+    fn the_question_about_a_cell_turns_on_the_pixel_size_and_not_on_the_name() {
+        assert!(
+            asks_the_terminal(&TerminalType::Kitty, test_window(None)),
+            "a named terminal reached through a proxy that strips the pixel size still needs the answer, and the name must not stop the question"
+        );
+        assert!(
+            !asks_the_terminal(&TerminalType::Kitty, test_window(Some(TEST_PIXELS))),
+            "a named terminal that reports a pixel size has both answers already, and a round trip would buy it nothing"
+        );
+        assert!(
+            asks_the_terminal(&TerminalType::Unknown, test_window(Some(TEST_PIXELS))),
+            "a terminal of no name still owes the answer about the protocol it draws"
+        );
+        assert!(
+            asks_the_terminal(&TerminalType::Unknown, None),
+            "a run that measured no window holds neither answer"
+        );
+    }
 
     #[test]
     fn a_muxiavelli_sixel_panel_draws_with_sixel_and_a_kitty_window_draws_with_kitty() {
