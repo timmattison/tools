@@ -192,27 +192,44 @@ pub fn select_one(
     }
 }
 
-/// Put `question` to the terminal and return the trimmed answer.
-///
-/// # Errors
-///
-/// Returns an error if the answer stream ends before a line arrives.
-pub fn ask_line(question: &str) -> Result<String> {
-    let mut console = Stdio;
-    Ok(console.ask(question)?.trim().to_string())
-}
-
-/// Ask a yes/no question at the terminal that defaults to no.
+/// Put `question` to the user and return the trimmed answer.
 ///
 /// # Arguments
 ///
-/// * `question` - The question, without the `[y/N]` suffix.
+/// * `console` - Where the question is put.
+/// * `question` - The question, with the punctuation and spacing it is shown
+///   with.
+///
+/// # Returns
+///
+/// The answer, without the space around it.
 ///
 /// # Errors
 ///
 /// Returns an error if the answer stream ends before a line arrives.
-pub fn confirm(question: &str) -> Result<bool> {
-    Ok(answered_yes(&ask_line(&format!("{question} [y/N]: "))?))
+pub fn ask_line(console: &mut impl Console, question: &str) -> Result<String> {
+    Ok(console.ask(question)?.trim().to_string())
+}
+
+/// Ask a yes/no question that defaults to no.
+///
+/// # Arguments
+///
+/// * `console` - Where the question is put.
+/// * `question` - The question, without the `[y/N]` suffix.
+///
+/// # Returns
+///
+/// Whether the answer was an explicit yes.
+///
+/// # Errors
+///
+/// Returns an error if the answer stream ends before a line arrives.
+pub fn confirm(console: &mut impl Console, question: &str) -> Result<bool> {
+    Ok(answered_yes(&ask_line(
+        console,
+        &format!("{question} [y/N]: "),
+    )?))
 }
 
 /// A [`Console`] with its answers written in advance.
@@ -369,6 +386,80 @@ mod tests {
             !console.was_asked(),
             "nothing can be asked without a terminal"
         );
+    }
+
+    /// A person at a terminal answers a free-text question, and the answer
+    /// arrives without the newline the terminal put on the end of it.
+    #[test]
+    fn a_terminal_answers_a_free_text_question() {
+        let mut console = Scripted::terminal(&["  https://192.168.1.1  \n"]);
+
+        let answer = ask_line(&mut console, "Enter your UniFi controller URL: ")
+            .expect("a scripted answer must be readable");
+
+        assert_eq!(
+            answer, "https://192.168.1.1",
+            "the answer must arrive without the space around it"
+        );
+        assert!(console.was_asked(), "the user must have been asked");
+    }
+
+    /// A free-text question has no `--yes` and no default, so a run with
+    /// nobody to ask cannot get an answer at all. A pipe that stays open and
+    /// sends nothing -- an inherited handle under a scheduler or a CI runner
+    /// -- never ends the read either, so the question must not be put at all.
+    #[test]
+    fn a_pipe_is_not_asked_a_free_text_question() {
+        let mut console = Scripted::not_a_terminal();
+
+        let error = ask_line(&mut console, "Enter your UniFi controller URL: ")
+            .expect_err("a pipe cannot answer a free-text question");
+
+        assert!(
+            !console.was_asked(),
+            "nothing can be asked when there is no terminal"
+        );
+        assert!(
+            format!("{error:#}").contains("terminal"),
+            "the refusal must say a terminal is what is missing, got {error:#}"
+        );
+    }
+
+    /// The same guard reaches the yes/no questions of the setup wizard, which
+    /// go through the same read.
+    #[test]
+    fn a_pipe_is_not_asked_a_yes_no_question() {
+        let mut console = Scripted::not_a_terminal();
+
+        let error = confirm(&mut console, "Save configuration anyway?")
+            .expect_err("a pipe cannot answer a yes/no question");
+
+        assert!(
+            !console.was_asked(),
+            "nothing can be asked when there is no terminal"
+        );
+        assert!(
+            format!("{error:#}").contains("terminal"),
+            "the refusal must say a terminal is what is missing, got {error:#}"
+        );
+    }
+
+    /// At a terminal the question is still put, and only an explicit yes is a
+    /// yes.
+    #[test]
+    fn a_terminal_answers_a_yes_no_question() {
+        for (answer, approved) in [("y\n", true), ("\n", false), ("no\n", false)] {
+            let mut console = Scripted::terminal(&[answer]);
+
+            let outcome = confirm(&mut console, "Use this URL anyway?")
+                .expect("a scripted answer must be readable");
+
+            assert_eq!(
+                outcome, approved,
+                "{answer:?} must be read as approved={approved}"
+            );
+            assert!(console.was_asked(), "the user must have been asked");
+        }
     }
 
     /// The refusal has to name the escape hatch, or a scripted caller has no

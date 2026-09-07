@@ -448,8 +448,10 @@ impl Config {
         let api_key = credential.key().clone();
 
         // Ask about certificate verification
-        let insecure =
-            prompt::confirm("\nSkip TLS certificate verification? (needed for self-signed certs)")?;
+        let insecure = prompt::confirm(
+            &mut Stdio,
+            "\nSkip TLS certificate verification? (needed for self-signed certs)",
+        )?;
 
         // Test the connection
         println!("\n🔍 Testing connection...");
@@ -466,7 +468,7 @@ impl Config {
             },
             Err(e) => {
                 println!("❌ Failed to connect: {e}");
-                if !prompt::confirm("\nSave configuration anyway?")? {
+                if !prompt::confirm(&mut Stdio, "\nSave configuration anyway?")? {
                     anyhow::bail!("Configuration not saved");
                 }
             }
@@ -529,7 +531,10 @@ fn prompt_for_site_manager_key() -> Result<String> {
         "Paste the key from the unifi.ui.com API section, or a 1Password reference \
          ({OP_REFERENCE_PREFIX}Private/ufa/site manager key) to keep it out of the config file."
     );
-    prompt::ask_line("Site Manager API key or 1Password reference [skip]: ")
+    prompt::ask_line(
+        &mut Stdio,
+        "Site Manager API key or 1Password reference [skip]: ",
+    )
 }
 
 /// The mode of a file that only its owner can read and write.
@@ -716,8 +721,10 @@ async fn network_discover_and_select() -> Result<String> {
 
 async fn get_manual_controller_url() -> Result<String> {
     loop {
-        let url =
-            prompt::ask_line("Enter your UniFi controller URL (e.g., https://192.168.1.1): ")?;
+        let url = prompt::ask_line(
+            &mut Stdio,
+            "Enter your UniFi controller URL (e.g., https://192.168.1.1): ",
+        )?;
         let url = url.as_str();
 
         if url.is_empty() {
@@ -742,7 +749,7 @@ async fn get_manual_controller_url() -> Result<String> {
             Err(e) => {
                 println!(" ✗");
                 println!("Failed to validate controller: {e}");
-                if prompt::confirm("Use this URL anyway?")? {
+                if prompt::confirm(&mut Stdio, "Use this URL anyway?")? {
                     return Ok(url);
                 }
             }
@@ -770,7 +777,7 @@ fn prompt_for_api_key(controller_url: &str) -> Result<Secret> {
         println!("Could not open browser automatically. Please visit the URL above.");
     }
 
-    let api_key = prompt::ask_line("\nPaste your API key here: ")?;
+    let api_key = prompt::ask_line(&mut Stdio, "\nPaste your API key here: ")?;
 
     if api_key.is_empty() {
         anyhow::bail!("API key cannot be empty");
