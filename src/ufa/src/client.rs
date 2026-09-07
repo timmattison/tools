@@ -248,6 +248,7 @@ fn is_tls_failure(error: &(dyn std::error::Error + 'static)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_server::{empty_json, redirect_to, TestServer};
     use std::io;
 
     /// The shape reqwest hands back when rustls rejects a peer: the rustls
@@ -320,6 +321,45 @@ mod tests {
         assert!(
             error.to_string().contains("ufa cloud"),
             "the rejection must point at the cloud commands, got: {error}"
+        );
+    }
+
+    /// A controller that answers with a redirect must not be able to steer
+    /// the user's API key to a host of its choosing.
+    ///
+    /// reqwest follows up to ten redirects unless it is told otherwise, and it
+    /// drops only the standard credential headers when the host changes.
+    /// `x-api-key` is not one of them, so a controller that answers 302 with a
+    /// foreign host reads the key straight off the second request. The risk is
+    /// sharper under `--insecure`, where no certificate is checked at all.
+    #[tokio::test]
+    async fn a_redirect_does_not_carry_the_api_key_to_another_host() {
+        const API_KEY: &str = "the-users-secret-key";
+
+        let elsewhere = TestServer::replying(&empty_json()).await;
+        let controller =
+            TestServer::replying(&redirect_to(&format!("{}/moved", elsewhere.origin()))).await;
+
+        let client = UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+        let outcome: Result<serde_json::Value> = client.get("info").await;
+
+        let received = elsewhere.requests();
+        assert!(
+            received
+                .iter()
+                .all(|request| request.header("x-api-key").is_none()),
+            "the API key reached the host the controller named: {received:?}"
+        );
+        assert!(
+            received.is_empty(),
+            "the request followed the redirect to another host: {received:?}"
+        );
+
+        let error = outcome.expect_err("a 302 carries no JSON body for this client to read");
+        assert!(
+            error.to_string().contains("302"),
+            "the redirect must be reported rather than followed, got: {error}"
         );
     }
 

@@ -14,6 +14,8 @@ mod prompt;
 mod site_helper;
 mod site_manager;
 #[cfg(test)]
+mod test_server;
+#[cfg(test)]
 mod test_support;
 mod text;
 
