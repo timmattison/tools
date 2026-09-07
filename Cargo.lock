@@ -6249,7 +6249,6 @@ dependencies = [
 name = "nle"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "buildinfo",
  "flate2",
  "serde",
