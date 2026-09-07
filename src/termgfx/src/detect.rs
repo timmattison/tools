@@ -149,13 +149,45 @@ pub struct Capabilities {
     /// The character cell that the terminal named in its answer, or `None`
     /// when it named none and when nothing asked it.
     ///
-    /// **This is the only way the measure reaches the writer.** The one read
-    /// of the terminal happens in [`Capabilities::detect_by_asking`], and the
-    /// writers of `draw` are the only callers that need what it found. A
-    /// writer that asked the terminal for itself would read it a second time
-    /// for every picture, and a still picture already holds one round trip.
+    /// **This is the only way the measure reaches the writer.** The read that
+    /// asks for a cell is [`Capabilities::detect_by_asking`], and the writers
+    /// of `draw` are the only callers that need what it found. A writer that
+    /// asked the terminal for itself would read it a second time for every
+    /// picture, and a still picture already holds one round trip.
     cell: Option<crate::geometry::CellPixels>,
 }
+
+/// What a caller needs the answer of the terminal for.
+///
+/// The one write of [`crate::probe::IMAGE_QUERY`] carries two questions, and
+/// the two of them have two audiences. A caller that draws a picture converts
+/// character cells to pixels, so it needs the size of a cell as much as it
+/// needs the protocol. A caller that only reports what the terminal is needs
+/// the protocol alone, and a round trip it makes for a cell it never reads
+/// costs the budget of [`crate::probe::QUERY_BUDGET`] and swallows whatever
+/// the user typed while the read held the terminal in raw mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NeededAnswer {
+    /// Which protocol this terminal draws, and nothing else.
+    Protocol,
+    /// Which protocol this terminal draws and how big one character cell is.
+    ProtocolAndCell,
+}
+
+/// The one answer of a run that asked both questions.
+///
+/// One round trip for the whole run. What a terminal draws does not change
+/// while a program runs, and neither does the size of one of its cells, so a
+/// second question costs a second budget on the one terminal that answers
+/// nothing.
+static FULL_ANSWER: std::sync::OnceLock<Capabilities> = std::sync::OnceLock::new();
+
+/// The one answer of a run that asked about the protocol alone.
+///
+/// It stands apart from [`FULL_ANSWER`] because the two answers are not the
+/// same answer: this one holds no cell for a terminal that named itself,
+/// having asked that terminal nothing at all.
+static PROTOCOL_ANSWER: std::sync::OnceLock<Capabilities> = std::sync::OnceLock::new();
 
 impl Capabilities {
     /// Read the environment of this process and name what the terminal does.
@@ -194,15 +226,53 @@ impl Capabilities {
     /// [`TerminalType::Unknown`].
     #[must_use]
     pub fn detect_by_asking() -> Self {
-        // One round trip for the whole run. What a terminal draws does not
-        // change while a program runs, and a second question costs a second
-        // budget on the one terminal that answers nothing.
-        static ANSWER: std::sync::OnceLock<Capabilities> = std::sync::OnceLock::new();
-        ANSWER.get_or_init(Self::ask_once).clone()
+        FULL_ANSWER
+            .get_or_init(|| Self::ask_once(NeededAnswer::ProtocolAndCell))
+            .clone()
     }
 
-    /// The one round trip that [`Capabilities::detect_by_asking`] memoizes.
-    fn ask_once() -> Self {
+    /// Read the environment, ask the terminal which protocol it draws, and
+    /// name what it does.
+    ///
+    /// This is the entrance for a tool that reports what the terminal is and
+    /// draws no picture. `ic --will-display` is the one that asked for it: it
+    /// prints a verdict from the name of the terminal and from whether that
+    /// terminal draws an image at all, and the size of a character cell
+    /// decides nothing it prints.
+    ///
+    /// So this call asks about the protocol alone, and the size of the window
+    /// settles nothing here. A terminal that named itself answered the
+    /// protocol question already, and this entrance therefore asks it nothing
+    /// — where [`Capabilities::detect_by_asking`] asks that same terminal for
+    /// the cell that a picture needs. The round trip this saves costs the
+    /// budget of [`crate::probe::QUERY_BUDGET`] and swallows whatever the user
+    /// typed while the read held the terminal in raw mode, and a pane of
+    /// Zellij, a session of mosh and a ttyd panel all report the window that
+    /// used to trigger it.
+    ///
+    /// A run that asked the whole question already takes that answer instead
+    /// of asking a second time. **The reuse runs one way alone.** An answer of
+    /// this entrance holds no cell for a terminal that named itself, so
+    /// [`Capabilities::detect_by_asking`] still has its own question to ask
+    /// after this one has answered.
+    #[must_use]
+    pub fn detect_by_asking_the_protocol() -> Self {
+        PROTOCOL_ANSWER
+            .get_or_init(|| {
+                FULL_ANSWER
+                    .get()
+                    .cloned()
+                    .unwrap_or_else(|| Self::ask_once(NeededAnswer::Protocol))
+            })
+            .clone()
+    }
+
+    /// The one round trip that each entrance of this type memoizes.
+    ///
+    /// # Arguments
+    /// * `needed` - What the caller needs the answer for, which decides
+    ///   whether the question about a character cell stands open.
+    fn ask_once(needed: NeededAnswer) -> Self {
         let env = TerminalEnv::from_process();
         // The question goes to the controlling terminal, which is a different
         // descriptor from standard output. A run whose standard output is a
@@ -212,7 +282,12 @@ impl Capabilities {
         // The answer of the text area divides by the cell counts of the window
         // it is about, so the two arrive from the same measure.
         let window = termsize::drawing_window();
-        let answered = if asks_the_terminal(&classify_terminal_type(&env), window) {
+        let answered = if asks_the_terminal(&classify_terminal_type(&env), window, needed) {
+            // The cell counts of the window go along whatever the caller needs
+            // the answer for. The query is one fixed string that carries every
+            // question, so a run that asks about the protocol alone still reads
+            // the cell that arrives with the answer, and it reads it at no cost
+            // of its own.
             crate::probe::ask_the_terminal(
                 crate::probe::QUERY_BUDGET,
                 window.map(|window| {
@@ -485,29 +560,45 @@ pub(crate) fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutin
 
 /// Whether this run asks the terminal anything at all.
 ///
-/// The round trip costs the budget of [`crate::probe::QUERY_BUDGET`], so a run
-/// that has nothing to learn asks nothing. Two questions ride in the one
-/// write, and a run asks when either one of them stands open.
+/// The round trip costs the budget of [`crate::probe::QUERY_BUDGET`], and it
+/// swallows whatever the user typed while the read held the terminal in raw
+/// mode, so a run that has nothing to learn asks nothing. Two questions ride in
+/// the one write, and a run asks when either one of them stands open.
 ///
-/// * **Which protocol does this terminal draw.** A terminal that named itself
-///   in the environment answered that already, and a name costs no round trip.
-///   So this question stands open for [`TerminalType::Unknown`] alone.
-/// * **How big is one character cell.** The `TIOCGWINSZ` ioctl carries that
-///   measure, and a mosh session, a pane of Zellij and a ttyd panel all report
-///   none. **The name of the terminal says nothing about it**: a named
-///   terminal reached through a proxy that strips the pixel size needs the
-///   answer as much as an unnamed one does. So this question stands open for
-///   every window that reports no pixel size.
+/// * **Which protocol does this terminal draw.** Every caller needs that
+///   answer, because a caller that draws the wrong sequence puts base64 on the
+///   screen and a caller that reports the wrong verdict names the wrong
+///   terminal. A terminal that named itself in the environment answered it
+///   already, and a name costs no round trip. So this question stands open for
+///   [`TerminalType::Unknown`] alone.
+/// * **How big is one character cell.** Only a caller that draws a picture
+///   converts cells to pixels, so this question stands open for
+///   [`NeededAnswer::ProtocolAndCell`] alone, and a caller that reports what
+///   the terminal is asks nothing about a cell it never reads. For such a
+///   caller the `TIOCGWINSZ` ioctl carries the measure, and a mosh session, a
+///   pane of Zellij and a ttyd panel all report none. **The name of the
+///   terminal says nothing about it**: a named terminal reached through a
+///   proxy that strips the pixel size needs the answer as much as an unnamed
+///   one does. So this question stands open for every window that reports no
+///   pixel size.
 ///
 /// # Arguments
 /// * `terminal_type` - The terminal that the environment named.
 /// * `window` - The window that the probe measured, or `None` when the probe
 ///   measured none.
+/// * `needed` - What the caller needs the answer for.
 ///
 /// # Returns
 /// True when either question stands open.
-fn asks_the_terminal(terminal_type: &TerminalType, window: Option<Window>) -> bool {
-    *terminal_type == TerminalType::Unknown || crate::geometry::cell_pixels_of(window).is_none()
+fn asks_the_terminal(
+    terminal_type: &TerminalType,
+    window: Option<Window>,
+    needed: NeededAnswer,
+) -> bool {
+    let protocol_stands_open = *terminal_type == TerminalType::Unknown;
+    let cell_stands_open = needed == NeededAnswer::ProtocolAndCell
+        && crate::geometry::cell_pixels_of(window).is_none();
+    protocol_stands_open || cell_stands_open
 }
 
 #[cfg(test)]
@@ -535,20 +626,56 @@ mod tests {
     #[test]
     fn the_question_about_a_cell_turns_on_the_pixel_size_and_not_on_the_name() {
         assert!(
-            asks_the_terminal(&TerminalType::Kitty, test_window(None)),
-            "a named terminal reached through a proxy that strips the pixel size still needs the answer, and the name must not stop the question"
+            asks_the_terminal(
+                &TerminalType::Kitty,
+                test_window(None),
+                NeededAnswer::ProtocolAndCell
+            ),
+            "a named terminal reached through a proxy that strips the pixel size still owes a caller that draws its cell, and the name must not stop the question"
         );
         assert!(
-            !asks_the_terminal(&TerminalType::Kitty, test_window(Some(TEST_PIXELS))),
+            !asks_the_terminal(
+                &TerminalType::Kitty,
+                test_window(Some(TEST_PIXELS)),
+                NeededAnswer::ProtocolAndCell
+            ),
             "a named terminal that reports a pixel size has both answers already, and a round trip would buy it nothing"
         );
         assert!(
-            asks_the_terminal(&TerminalType::Unknown, test_window(Some(TEST_PIXELS))),
+            asks_the_terminal(
+                &TerminalType::Unknown,
+                test_window(Some(TEST_PIXELS)),
+                NeededAnswer::ProtocolAndCell
+            ),
             "a terminal of no name still owes the answer about the protocol it draws"
         );
         assert!(
-            asks_the_terminal(&TerminalType::Unknown, None),
+            asks_the_terminal(&TerminalType::Unknown, None, NeededAnswer::ProtocolAndCell),
             "a run that measured no window holds neither answer"
+        );
+    }
+
+    #[test]
+    fn a_caller_that_draws_no_picture_asks_a_named_terminal_nothing() {
+        assert!(
+            !asks_the_terminal(
+                &TerminalType::Kitty,
+                test_window(None),
+                NeededAnswer::Protocol
+            ),
+            "a caller that draws no picture reads no cell, so the pixel size settles nothing for it and a terminal that named itself owes it no answer at all"
+        );
+        assert!(
+            !asks_the_terminal(&TerminalType::Kitty, None, NeededAnswer::Protocol),
+            "and a run that measured no window measured no cell either, which is one more thing such a caller never reads"
+        );
+        assert!(
+            asks_the_terminal(
+                &TerminalType::Unknown,
+                test_window(Some(TEST_PIXELS)),
+                NeededAnswer::Protocol
+            ),
+            "a terminal of no name owes every caller the answer about the protocol it draws, because a verdict about a terminal of no name is a guess"
         );
     }
 

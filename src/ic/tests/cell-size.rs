@@ -59,8 +59,11 @@ const TARGET_NAME: &str = "cell-size";
 ///
 /// **The name is the point of this file.** A named terminal answered the
 /// question about the protocol already, and it answered nothing about the size
-/// of a cell. So a run under this name must still ask, and the trigger of the
-/// question must be the pixel size that the window reports.
+/// of a cell. Every run of this file draws a picture and therefore reads that
+/// size, so a run under this name must still ask, and the trigger of the
+/// question must be the pixel size that the window reports. A run that draws
+/// nothing reads no cell and asks such a terminal nothing at all, which
+/// `src/ic/tests/will-display.rs` holds.
 const TERM_XTERM_KITTY: &str = "xterm-kitty";
 
 /// The window that the pseudo-terminal of these tests reports.
