@@ -18,18 +18,18 @@ pub struct SelectedCredential {
     pub key: String,
     /// Total number of available credentials
     pub total: usize,
-    /// Number of credentials currently in use
+    /// Number of credentials held by a running tunnel
     pub in_use: usize,
 }
 
-/// A credential that is currently in use by a running container.
+/// A credential that a running container holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialInUse {
     pub field_label: String,
     pub container_name: String,
 }
 
-/// Error when all credentials are in use.
+/// Error when a running tunnel holds every credential.
 #[derive(Debug)]
 pub struct AllCredentialsInUse {
     pub usage: Vec<CredentialInUse>,
@@ -85,7 +85,7 @@ pub fn select_credential(
         });
     }
 
-    // All in use — build the usage list
+    // Every credential is held — build the usage list
     let usage: Vec<CredentialInUse> = available
         .iter()
         .map(|field| {
