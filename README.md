@@ -3357,3 +3357,25 @@ A session that wrote no record is left blank and counted in the footer. Seven of
 - **Support processes.** The background daemon, pty hosts, and spares run the same executable but are not sessions. They are counted in the footer, not listed.
 - **Spawned tools.** A tool a session starts, such as a search, can still be holding the Claude Code executable at the moment the process table is sampled. It reports its own name in `argv[0]`, which is how `occ` tells it apart from a session.
 - **Other accounts' sessions.** They appear in the process table but give up no arguments, no working directory, and no start time without privileges `occ` does not ask for. They are counted in the footer. Reporting a clean machine while sixty unreadable sessions run on it would be worse than saying they cannot be read.
+
+## nle (non-linear editor)
+
+A desktop application that edits a terminal recording. It opens a recording,
+draws its events on a timeline, and writes the edited recording back out. It
+also lists every recording in a directory, and it exports one as a video or as
+a web player.
+
+The application is Tauri 2. The Rust side owns every recording, and the
+frontend reads one through typed commands. `ts-rs` generates the TypeScript
+type of each command from the Rust struct behind it, so the two sides cannot
+disagree about the shape of a recording.
+
+`cargo install` does not build this tool, because the application carries a
+frontend that a bundler must build first. To run it from a checkout:
+
+```bash
+./src/nle/run-nle.sh
+```
+
+The script installs the frontend dependencies, asks `portplz` for a free port,
+and starts the development server with the application pointed at it.
