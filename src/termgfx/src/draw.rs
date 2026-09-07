@@ -1207,22 +1207,39 @@ mod tests {
     /// than the raw pixels it came from, so a test built on it would measure the
     /// one input that this change cannot help.
     fn photograph_fixture() -> DynamicImage {
-        DynamicImage::ImageRgb8(image::RgbImage::from_fn(
-            PHOTOGRAPH_WIDTH,
-            PHOTOGRAPH_HEIGHT,
-            |x, y| {
-                let grain = (x * 7 + y * 13) % 5;
-
-                image::Rgb([
-                    channel(x * 200 / (PHOTOGRAPH_WIDTH - 1) + grain),
-                    channel(y * 180 / (PHOTOGRAPH_HEIGHT - 1) + 40 + grain),
-                    channel(
-                        (x + y) * 150 / (PHOTOGRAPH_WIDTH + PHOTOGRAPH_HEIGHT - 2) + 60 + grain,
-                    ),
-                ])
-            },
-        ))
+        photograph_of(PHOTOGRAPH_WIDTH, PHOTOGRAPH_HEIGHT)
     }
+
+    /// A picture of `width` pixels by `height` that resembles a photograph.
+    ///
+    /// # Arguments
+    /// * `width` - The width in pixels, which must be above one.
+    /// * `height` - The height in pixels, which must be above one.
+    fn photograph_of(width: u32, height: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
+            let grain = (x * 7 + y * 13) % 5;
+
+            image::Rgb([
+                channel(x * 200 / (width - 1) + grain),
+                channel(y * 180 / (height - 1) + 40 + grain),
+                channel((x + y) * 150 / (width + height - 2) + 60 + grain),
+            ])
+        }))
+    }
+
+    /// The characters that mosh holds for one transmission.
+    ///
+    /// `MAXIMUM_STORED_CHARACTERS` of `crates/mosh-terminal/src/imagestore.rs`,
+    /// which `ImageStore::hold` tests against `control.len() + payload.len()`.
+    /// A transmission above it earns `ENOSPC` and draws nothing.
+    const MOSH_STORE_CHARACTERS: usize = 1024 * 1024;
+
+    /// The side of the picture that the mosh budget test fits.
+    ///
+    /// Raw pixels cost four characters each, so this picture costs 1440000 and
+    /// stands well above [`PayloadBudget::MOSH`]. A picture under the budget
+    /// would leave the fit unrun and the test measuring nothing.
+    const OVER_BUDGET_SIDE: u32 = 600;
 
     /// The characters of payload that the budget tests allow.
     ///
@@ -1470,6 +1487,69 @@ mod tests {
         assert!(
             spent > 0,
             "a still that spends nothing drew nothing, which is the failure this repairs"
+        );
+    }
+
+    /// A picture fitted for mosh fits the store that mosh keeps, keys and all.
+    ///
+    /// [`PayloadBudget::MOSH`] bounds the payload alone, and mosh counts the
+    /// control block with it. So the room that the budget leaves has to be real
+    /// room, measured against the keys of a real command, and not a number that
+    /// looks generous.
+    ///
+    /// Two assertions carry that, and they catch two different mistakes.
+    /// The budget against the store catches a budget with no room in it for
+    /// the keys, and it reads the budget rather than the fit, because
+    /// [`FIT_SAFETY`] leaves five percent of its own and would hide a thin
+    /// allowance. The fitted payload against the store catches a budget raised
+    /// above the store itself.
+    ///
+    /// Both mutations were measured on 2026-09-07. A `MOSH` of one
+    /// mebicharacter fails the first, and a `MOSH` of two fails the second.
+    /// Every other test here states a budget of its own and passes with either
+    /// mistake in place.
+    #[test]
+    fn a_picture_fitted_for_mosh_fits_the_store_that_mosh_keeps() {
+        let picture = photograph_of(OVER_BUDGET_SIDE, OVER_BUDGET_SIDE);
+        let whole = KittyPayload::RawRgb
+            .encode(&picture)
+            .expect("raw pixels reach base64 with no encoder that can refuse them");
+
+        let (_fitted, payload) =
+            fit_to_payload_budget(Cow::Borrowed(&picture), PayloadBudget::MOSH, |image| {
+                KittyPayload::RawRgb.encode(image)
+            })
+            .expect("raw pixels reach base64 with no encoder that can refuse them");
+
+        assert!(
+            whole.len() > MOSH_STORE_CHARACTERS,
+            "the fixture must stand above the store, or the fit never runs and this test measures nothing"
+        );
+        assert!(
+            payload.len() < whole.len(),
+            "the fit must really take pixels off a picture that stands above the budget"
+        );
+
+        let keys = kitty_keys_of(
+            &picture,
+            Picture::Frame {
+                id: TEST_PLACEMENT_ID,
+            },
+            PayloadBudget::MOSH,
+        );
+        // The budget itself has to leave room for the keys, whatever the fit
+        // does with it. A payload that spends the whole budget is the payload
+        // that a picture just above it produces.
+        let allowed = PayloadBudget::MOSH.characters() + keys.len();
+        assert!(
+            allowed <= MOSH_STORE_CHARACTERS,
+            "mosh holds the keys and the payload together, and the budget plus the keys of a real command come to {allowed}, which is above {MOSH_STORE_CHARACTERS}"
+        );
+
+        let held = payload.len() + keys.len();
+        assert!(
+            held <= MOSH_STORE_CHARACTERS,
+            "mosh holds the keys and the payload together, and the two come to {held}, which is above {MOSH_STORE_CHARACTERS}"
         );
     }
 
