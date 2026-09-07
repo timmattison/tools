@@ -221,7 +221,7 @@ pub(crate) fn cells_of(window: Option<Window>) -> (u32, u32) {
 /// the block characters that need no size at all.
 #[must_use]
 pub fn cell_pixels() -> Option<(u32, u32)> {
-    cell_pixels_of(termsize::drawing_window())
+    cell_pixels_of(termsize::drawing_window()).map(|cell| (cell.width(), cell.height()))
 }
 
 /// The size of one character cell that one window measures.
@@ -243,7 +243,7 @@ pub fn cell_pixels() -> Option<(u32, u32)> {
 /// The width and the height of one cell in pixels, or `None` when the probe
 /// measured no window, when the terminal reports no pixel size, or when either
 /// quotient is zero.
-fn cell_pixels_of(window: Option<Window>) -> Option<(u32, u32)> {
+fn cell_pixels_of(window: Option<Window>) -> Option<CellPixels> {
     let (pixels_wide, pixels_tall) = window_pixels(window)?;
     let (columns, rows) = window?.cells();
 
@@ -251,13 +251,13 @@ fn cell_pixels_of(window: Option<Window>) -> Option<(u32, u32)> {
     // rule now, and it makes no window of zero columns and no window of zero
     // rows, so no count of zero reaches this division. The tests of that rule
     // live in `src/termsize/src/lib.rs`.
-    let cell_width = pixels_wide / u32::from(columns);
-    let cell_height = pixels_tall / u32::from(rows);
-    if cell_width == 0 || cell_height == 0 {
-        return None;
-    }
-
-    Some((cell_width, cell_height))
+    //
+    // `CellPixels::measured` refuses a quotient of no pixels, which is what a
+    // window smaller than its own grid gives.
+    CellPixels::measured(
+        pixels_wide / u32::from(columns),
+        pixels_tall / u32::from(rows),
+    )
 }
 
 /// The size of the window in pixels, when the terminal reports one.
@@ -301,8 +301,11 @@ pub(crate) fn window_pixels(window: Option<Window>) -> Option<(u32, u32)> {
 /// The width and the height of one character cell in pixels. Both numbers are
 /// above zero, because [`cell_pixels_of`] refuses a quotient of zero and the
 /// estimate then stands.
-pub(crate) fn cell_pixels_or_estimate_of(window: Option<Window>) -> (u32, u32) {
-    cell_pixels_of(window).unwrap_or((ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX))
+pub(crate) fn cell_pixels_or_estimate_of(
+    window: Option<Window>,
+    _answered: Option<CellPixels>,
+) -> CellPixels {
+    cell_pixels_of(window).unwrap_or(CellPixels::ESTIMATE)
 }
 
 /// The shape of one character cell, as its height over its width.
@@ -680,6 +683,28 @@ mod tests {
     /// [`REPORTED_PIXELS`].
     const REPORTED_CELL: (u32, u32) = (10, 20);
 
+    /// The cell that a terminal names in an answer of its own.
+    ///
+    /// It is neither the cell that any window of these tests measures nor the
+    /// estimate, so a test that finds this cell knows the answer came off the
+    /// terminal.
+    const ANSWERED_CELL: (u32, u32) = (14, 30);
+
+    /// [`ANSWERED_CELL`] as the type that every source of a cell gives.
+    fn answered_cell() -> Option<CellPixels> {
+        Some(cell(ANSWERED_CELL))
+    }
+
+    /// One cell of a stated width and height.
+    ///
+    /// # Panics
+    /// Panics for a pair that measures no cell. Every pair a test states here
+    /// is a cell of a real terminal.
+    fn cell(pixels: (u32, u32)) -> CellPixels {
+        CellPixels::measured(pixels.0, pixels.1)
+            .expect("a test that states a cell must state one of a real size")
+    }
+
     /// The columns and the rows of a second window. Neither number is the one
     /// of the fallback, so a test that finds this size knows that the answer
     /// came off the window and not off the fallback.
@@ -734,7 +759,7 @@ mod tests {
     fn a_reported_pixel_size_measures_one_cell_and_no_pixel_size_measures_nothing() {
         assert_eq!(
             cell_pixels_of(window(REPORTED_CELLS, Some(REPORTED_PIXELS))),
-            Some(REPORTED_CELL),
+            Some(cell(REPORTED_CELL)),
             "800 pixels over 80 columns is a cell 10 pixels wide, and 480 pixels over 24 rows is a cell 20 pixels tall"
         );
         assert_eq!(
@@ -808,20 +833,38 @@ mod tests {
     }
 
     #[test]
+    fn the_cell_a_terminal_named_stands_behind_the_ioctl_and_in_front_of_the_estimate() {
+        // The four sources of a cell, in the order this function holds them.
+        // The ioctl costs no round trip, so it stands first. The answer of the
+        // terminal costs one, and it is the only source a mosh session and a
+        // pane of Zellij have. The estimate is a guess, so it stands last.
+        assert_eq!(
+            cell_pixels_or_estimate_of(window(REPORTED_CELLS, Some(DENSE_PIXELS)), answered_cell()),
+            cell(DENSE_CELL),
+            "a terminal that reports a pixel size keeps the measure it already had, whatever it answered"
+        );
+        assert_eq!(
+            cell_pixels_or_estimate_of(window(REPORTED_CELLS, None), answered_cell()),
+            cell(ANSWERED_CELL),
+            "a mosh session reports no pixel size, and the answer of the terminal is the one measure it has"
+        );
+    }
+
+    #[test]
     fn the_estimate_stands_for_every_window_that_measures_no_cell() {
         assert_eq!(
-            cell_pixels_or_estimate_of(window(REPORTED_CELLS, Some(DENSE_PIXELS))),
-            DENSE_CELL,
+            cell_pixels_or_estimate_of(window(REPORTED_CELLS, Some(DENSE_PIXELS)), None),
+            cell(DENSE_CELL),
             "a terminal that reports a pixel size measures the cell, and the estimate stands aside"
         );
         assert_eq!(
-            cell_pixels_or_estimate_of(window(REPORTED_CELLS, None)),
-            (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX),
+            cell_pixels_or_estimate_of(window(REPORTED_CELLS, None), None),
+            CellPixels::ESTIMATE,
             "a pane of Zellij reports no pixel size, and ic must draw an image there all the same"
         );
         assert_eq!(
-            cell_pixels_or_estimate_of(None),
-            (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX),
+            cell_pixels_or_estimate_of(None, None),
+            CellPixels::ESTIMATE,
             "a run that measured no terminal holds no measure to draw with, and an image at an estimated size beats no image"
         );
     }

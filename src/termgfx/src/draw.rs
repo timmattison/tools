@@ -892,7 +892,8 @@ fn write_kitty<W: Write>(
     // Two reads can name two terminals, and a picture laid out for one terminal
     // and reserved for another fits neither.
     let window = termsize::drawing_window();
-    let (cell_width_px, cell_height_px) = cell_pixels_or_estimate_of(window);
+    let cell = cell_pixels_or_estimate_of(window, None);
+    let (cell_width_px, cell_height_px) = (cell.width(), cell.height());
 
     // The display size is in terminal cells, and it serves two roles: the `c=`
     // and `r=` keys that tell the terminal how many cells the image spans, and
@@ -1030,7 +1031,8 @@ fn write_sixel<W: Write>(
     // terminals. The cell size comes from the terminal when it reports a pixel
     // size, and from the estimates when it does not.
     let window = termsize::drawing_window();
-    let (cell_width_px, cell_height_px) = cell_pixels_or_estimate_of(window);
+    let cell = cell_pixels_or_estimate_of(window, None);
+    let (cell_width_px, cell_height_px) = (cell.width(), cell.height());
 
     let (target_pixel_width, target_pixel_height) = sixel_pixel_budget(
         window_pixels(window),
@@ -1108,7 +1110,8 @@ fn write_iterm2<W: Write>(
     // Two reads can name two terminals, and a picture laid out for one terminal
     // and reserved for another fits neither.
     let window = termsize::drawing_window();
-    let (cell_width_px, cell_height_px) = cell_pixels_or_estimate_of(window);
+    let cell = cell_pixels_or_estimate_of(window, None);
+    let (cell_width_px, cell_height_px) = (cell.width(), cell.height());
 
     // The display size is in terminal cells, and it serves as both the size
     // arguments of the protocol and the target of the downscale.
