@@ -40,6 +40,16 @@
 //! answers a refusal of another image number and asks for a success, and one
 //! runs `ic` twice and asks the two pictures for two numbers.
 //!
+//! # Which refusal earns advice about the size
+//!
+//! An image store with no room left is the one failure that a smaller picture
+//! gets past, and `ENOSPC` is the code of it. Every other code names a failure
+//! that the size of the picture did not cause: a terminal that answers `EINVAL`
+//! refused the bytes, and the same bytes at half the width are the same bytes.
+//! So the advice to try `--width`, `--height` or `--scale` belongs to `ENOSPC`
+//! alone. One test here answers `ENOSPC` and asks for that advice, and one
+//! answers another code and asks for the words of the terminal by themselves.
+//!
 //! # The two things that a test of this shape gets wrong
 //!
 //! `ic` writes the whole picture to standard output before it asks the terminal
@@ -109,11 +119,32 @@ const ATTRIBUTES_ANSWER: &[u8] = b"\x1b[?62;4c";
 const ANOTHER_PICTURES_REFUSAL: &[u8] =
     b"\x1b_Gi=31,I=999999;ENOSPC:the image store is full\x1b\\\x1b[?62;4c";
 
+/// The answer of a terminal that refused the picture for another reason.
+///
+/// `EINVAL` names bytes that the decoder of the terminal reads as no picture.
+/// The size of the picture did not cause that failure, so a smaller picture of
+/// the same bytes is no repair for it. The answer carries no image number, as
+/// [`REFUSAL_ANSWER`] carries none, so it speaks about the picture of this run.
+const OTHER_REFUSAL_ANSWER: &[u8] =
+    b"\x1b_Gi=31;EINVAL:the image is not a valid PNG\x1b\\\x1b[?62;4c";
+
 /// The code that [`REFUSAL_ANSWER`] carries.
 const REFUSED_CODE: &str = "ENOSPC";
 
 /// The detailed message that [`REFUSAL_ANSWER`] carries behind that code.
 const REFUSED_DETAIL: &str = "the image store is full";
+
+/// The code that [`OTHER_REFUSAL_ANSWER`] carries.
+const OTHER_CODE: &str = "EINVAL";
+
+/// The detailed message that [`OTHER_REFUSAL_ANSWER`] carries behind that code.
+const OTHER_DETAIL: &str = "the image is not a valid PNG";
+
+/// The flags that the advice about the size names.
+///
+/// Each one makes the picture smaller, so the advice repairs an image store
+/// with no room left. A run that reports another code must name none of them.
+const SIZE_ADVICE_FLAGS: [&str; 3] = ["--width", "--height", "--scale"];
 
 /// How long a test waits for `ic` to ask the terminal anything.
 ///
@@ -292,6 +323,53 @@ fn a_refused_picture_names_the_refusal_and_fails() {
         "the code alone sends the user to a search engine, so the failure must carry the detail of the terminal, {REFUSED_DETAIL:?}, and ic wrote {:?}",
         run.stderr
     );
+    for flag in SIZE_ADVICE_FLAGS {
+        assert!(
+            run.stderr.contains(flag),
+            "a smaller picture fits in an image store that refused this one, so the failure for {REFUSED_CODE} must name {flag}, and ic wrote {:?}",
+            run.stderr
+        );
+    }
+}
+
+/// A refusal that names another code must carry no advice about the size.
+///
+/// The advice fits an image store with no room left, and nothing else. A
+/// terminal that answers `EINVAL` read bytes that it decodes as no picture, and
+/// the same bytes at half the width are the same bytes. A user who follows that
+/// advice runs the tool again, waits again, and reads the same refusal. So the
+/// words of the terminal stand by themselves for every code but `ENOSPC`.
+#[test]
+fn a_refusal_that_is_not_enospc_advises_no_resize() {
+    let run = run_ic_against(OTHER_REFUSAL_ANSWER);
+
+    assert!(
+        run.asked,
+        "a still picture must ask the terminal whether it refused, and no request of the primary device attributes arrived inside {QUESTION_BUDGET:?}"
+    );
+    assert!(
+        !run.status.success(),
+        "ic must fail for a picture that the terminal refused, and it exited with {}. It wrote {:?} to standard error",
+        run.status,
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains(OTHER_CODE),
+        "the failure must name the code that the terminal wrote, {OTHER_CODE}, and ic wrote {:?}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains(OTHER_DETAIL),
+        "the code alone sends the user to a search engine, so the failure must carry the detail of the terminal, {OTHER_DETAIL:?}, and ic wrote {:?}",
+        run.stderr
+    );
+    for flag in SIZE_ADVICE_FLAGS {
+        assert!(
+            !run.stderr.contains(flag),
+            "the size of the picture did not cause a refusal of {OTHER_CODE}, so the failure must not name {flag}, and ic wrote {:?}",
+            run.stderr
+        );
+    }
 }
 
 /// A terminal that refused nothing must leave `ic` with a success.
