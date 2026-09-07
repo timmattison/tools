@@ -160,6 +160,25 @@ pub fn discover_op_controllers() -> Result<Vec<OpController>> {
     Ok(controllers)
 }
 
+/// The controllers that a list of field labels names.
+///
+/// A label that does not read as `key - <host> port <port>` names no
+/// controller and is passed over: the same item holds the Site Manager key and
+/// the note every 1Password item carries.
+///
+/// # Arguments
+///
+/// * `labels` - The labels of the fields of the `Private/ufa` item.
+///
+/// # Returns
+///
+/// One controller per label that names one, in the order the labels arrived.
+fn controllers_from_labels(labels: &[String]) -> Vec<OpController> {
+    let _ = labels;
+
+    Vec::new()
+}
+
 /// The controller credential gathered during interactive setup.
 ///
 /// Either the key already lives in 1Password (and setup merely read it to
@@ -1437,6 +1456,90 @@ mod tests {
             " padded-op-key\n",
             "what 1Password answered must reach the caller untouched"
         );
+    }
+
+    /// The labels of the fields of a `Private/ufa` item that holds two
+    /// controller keys, the Site Manager key, and the note every 1Password
+    /// item carries.
+    fn labels_of_the_ufa_item() -> Vec<String> {
+        [
+            "notesPlain",
+            "key - 192.168.1.1 port 443",
+            "site manager key",
+            "key - unifi.example.com port 8443",
+        ]
+        .iter()
+        .map(|label| (*label).to_string())
+        .collect()
+    }
+
+    /// A field label of the shape `key - <host> port <port>` names one
+    /// controller, and the reference of the key that reaches it.
+    #[test]
+    fn a_field_label_that_names_a_controller_becomes_one() {
+        let controllers = controllers_from_labels(&labels_of_the_ufa_item());
+
+        assert_eq!(
+            controllers.len(),
+            2,
+            "the item names two controllers, got {controllers:?}"
+        );
+
+        assert_eq!(controllers[0].host, "192.168.1.1");
+        assert_eq!(controllers[0].port, 443);
+        assert_eq!(controllers[0].url(), "https://192.168.1.1:443");
+        assert_eq!(
+            controllers[0].op_path, "op://Private/ufa/key - 192.168.1.1 port 443",
+            "the reference must name the field the label came from"
+        );
+
+        assert_eq!(controllers[1].host, "unifi.example.com");
+        assert_eq!(controllers[1].port, 8443);
+        assert_eq!(
+            controllers[1].op_path,
+            "op://Private/ufa/key - unifi.example.com port 8443"
+        );
+    }
+
+    /// The item holds fields that name no controller, and a label that almost
+    /// reads as one names none either.
+    #[test]
+    fn a_field_label_that_names_no_controller_is_passed_over() {
+        for label in [
+            "site manager key",
+            "notesPlain",
+            // No port at all.
+            "key - 192.168.1.1",
+            // Nothing after the separator.
+            "key - 192.168.1.1 port ",
+            // No port is that high.
+            "key - 192.168.1.1 port 99999",
+            // A service name is not a port number.
+            "key - 192.168.1.1 port https",
+            // The prefix is exactly "key - ".
+            "KEY - 192.168.1.1 port 443",
+            "  key - 192.168.1.1 port 443",
+        ] {
+            assert!(
+                controllers_from_labels(&[label.to_string()]).is_empty(),
+                "{label:?} names no controller"
+            );
+        }
+    }
+
+    /// The port is what stands after the *last* separator, so a host that
+    /// carries those same words still reads.
+    #[test]
+    fn the_last_separator_in_a_label_is_the_one_that_names_the_port() {
+        let controllers = controllers_from_labels(&["key - port forward port 8443".to_string()]);
+
+        assert_eq!(
+            controllers.len(),
+            1,
+            "the label names one controller, got {controllers:?}"
+        );
+        assert_eq!(controllers[0].host, "port forward");
+        assert_eq!(controllers[0].port, 8443);
     }
 
     /// Configs written before `sm_op_path` existed keep working.
