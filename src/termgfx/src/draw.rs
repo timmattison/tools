@@ -25,6 +25,10 @@
 //! standard output that it had before.
 
 use std::io::{self, Write};
+use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::prelude::{Engine, BASE64_STANDARD};
 use icy_sixel::{sixel_encode, EncodeOptions};
@@ -91,7 +95,7 @@ const KITTY_QUIET: &str = "q=2";
 /// [`Capabilities::read_refusal`] is the read.
 const KITTY_FAILURES_ONLY: &str = "q=1";
 
-/// The image number that [`Picture::Still`] carries.
+/// The name of the Kitty graphics key that carries an image number.
 ///
 /// **A Kitty terminal answers a transmission only when the transmission names
 /// an image id or an image number.** The specification says of the `i` key that
@@ -100,15 +104,165 @@ const KITTY_FAILURES_ONLY: &str = "q=1";
 /// neither key gets no answer at all. So [`KITTY_FAILURES_ONLY`] reports
 /// nothing without a key such as this one beside it.
 ///
-/// The key is `I` and not `i`, because the two mean different things. An `i` is
-/// an image id, and the specification says that a re-transmission of an id
+/// The name is `I` and not `i`, because the two mean different things. An `i`
+/// is an image id, and the specification says that a re-transmission of an id
 /// deletes the image which held that id and every placement of that image. One
 /// fixed id here would therefore take the picture of `ic a.png` off the screen
 /// the moment `ic b.png` drew. An `I` is an image number, and the specification
 /// gives it for exactly this case: a new image arrives even when an image of
 /// the same number stands already, and the terminal answers with the id that it
 /// made. Kitty, Ghostty and WezTerm all read it.
-const KITTY_STILL_IMAGE_NUMBER: &str = "I=1";
+///
+/// **The value of the key differs for every still picture**, and
+/// [`ImageNumber`] states why. The `probe` module reads this same name out of
+/// the answer of a terminal, so the name stands here one time and the writer
+/// and the reader cannot part company over it.
+pub(crate) const KITTY_IMAGE_NUMBER_KEY: &str = "I";
+
+/// The image number of one still picture.
+///
+/// A Kitty terminal names the picture it speaks about by the image number that
+/// the picture carried, so this number is what tells a refusal of this picture
+/// from a refusal of another one. Every still picture carried `I=1` before, and
+/// one number gives every picture the same name: the late answer of the run
+/// before, and the answer of a second program that draws Kitty pictures on the
+/// same terminal, both name this picture as well. `ic` then reported a refusal
+/// for a picture that drew, and a false failure over a good picture is worse
+/// than the silence of issue #465.
+///
+/// So the number differs for every still picture, in four directions:
+///
+/// * A counter takes one step for each picture, so two pictures of one run
+///   carry two numbers.
+/// * The counter starts at a seed of the process id, so two runs on one machine
+///   start at two numbers.
+/// * The seed also carries the nanoseconds of the clock, so two runs that a
+///   recycled process id gives one name still start apart.
+/// * Every number stands above [`IMAGE_NUMBER_FLOOR`], so a program that counts
+///   its pictures from one picks no number of this run at all.
+///
+/// The seed is a guess of two runs apart, and no promise of it. Two runs that
+/// pick one seed carry the misattribution that this number takes away, at the
+/// rate that the seed repeats. The floor is a promise, because a number below
+/// it leaves this crate never.
+///
+/// The value is never zero, because zero names no image to a Kitty terminal.
+/// The type carries that rule, so no caller of it states the rule again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ImageNumber(NonZeroU32);
+
+impl ImageNumber {
+    /// The image number `raw`, or [`None`] for zero, which names no image.
+    ///
+    /// # Arguments
+    /// * `raw` - The number that a terminal named, or that a caller kept.
+    ///
+    /// # Returns
+    /// The number, for every value above zero.
+    pub(crate) fn new(raw: u32) -> Option<Self> {
+        NonZeroU32::new(raw).map(Self)
+    }
+
+    /// The number as a plain number.
+    ///
+    /// A caller that keeps the number between two calls keeps this value.
+    pub(crate) fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    /// The number of the next still picture of this process.
+    ///
+    /// Each call gives a number of its own, and the numbers of one run repeat
+    /// after 1073741824 still pictures.
+    fn mint() -> Self {
+        let taken = still_picture_counter().fetch_add(1, Ordering::Relaxed);
+        // The step of the counter reaches the top of a 32-bit number and wraps
+        // there, so the number of the counter alone falls below the floor and
+        // to zero. The low bits of it stand inside the range instead, and the
+        // bit of the floor holds every number of this crate above zero as well.
+        Self(IMAGE_NUMBER_FLOOR | (taken & (IMAGE_NUMBER_FLOOR.get() - 1)))
+    }
+}
+
+impl std::fmt::Display for ImageNumber {
+    /// Write the number, which is the value of [`KITTY_IMAGE_NUMBER_KEY`].
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "{}", self.0)
+    }
+}
+
+/// How far the seed turns the process id.
+///
+/// The seed carries the process id and the nanoseconds of the clock, and
+/// [`ImageNumber::mint`] takes the low 30 bits of it. The nanoseconds fill
+/// those 30 bits, so a process id that stood beside them in the low bits would
+/// meet them there. The turn moves the process id up, and it still holds the
+/// low 17 bits of that id inside the 30 bits that a picture carries. Those low
+/// bits are the bits that two runs of one machine differ in.
+const PROCESS_ID_TURN: u32 = 13;
+
+/// The floor that every image number of this crate stands above.
+///
+/// A program that counts its pictures from one picks small numbers, and a
+/// number above this floor reaches none of them. So a refusal of such a program
+/// names no picture of this run, whatever the seed of this run came to.
+///
+/// The floor is the second bit from the top, and no number of this crate
+/// reaches the top bit. A Kitty image number is a 32-bit unsigned number, and a
+/// terminal that reads one into a signed number of the same width still holds
+/// every number of this range. The 30 bits below the floor carry the seed, so
+/// a run has 1073741824 numbers of its own to pick from.
+pub(crate) const IMAGE_NUMBER_FLOOR: NonZeroU32 =
+    NonZeroU32::new(1 << 30).expect("one bit of a number is above zero");
+
+/// The counter that [`ImageNumber::mint`] steps.
+///
+/// It starts one time for each run, at a number of the process id and the
+/// clock. A counter that started at a fixed number would give the first picture
+/// of every run one name, and that name is what a late answer of the run before
+/// carries. [`ImageNumber::mint`] reads the low bits of this counter alone, so
+/// the high bits of the seed reach no picture and the seed states no range of
+/// its own.
+fn still_picture_counter() -> &'static AtomicU32 {
+    static COUNTER: OnceLock<AtomicU32> = OnceLock::new();
+    COUNTER.get_or_init(|| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos());
+        AtomicU32::new(std::process::id().rotate_left(PROCESS_ID_TURN) ^ nanos)
+    })
+}
+
+/// What [`LAST_STILL_IMAGE_NUMBER`] holds before a still picture goes out.
+///
+/// Zero names no image to a Kitty terminal, so no picture carries it and no
+/// answer of a terminal names it.
+const NO_STILL_PICTURE: u32 = 0;
+
+/// The image number that the last still picture of this process carried.
+///
+/// [`Capabilities::read_refusal`] reads it. The number leaves in the picture,
+/// and the answer of the terminal names it, so the reader of that answer needs
+/// the number that the writer sent. The two stand in two calls, and
+/// [`Capabilities::read_refusal`] states why, so the number waits here between
+/// them.
+///
+/// One cell holds one number, and the read is of the picture that went before,
+/// which is the contract that [`Capabilities::read_refusal`] states. A process
+/// that draws two still pictures and then reads asks about the second one.
+static LAST_STILL_IMAGE_NUMBER: AtomicU32 = AtomicU32::new(NO_STILL_PICTURE);
+
+/// Mint the image number of a still picture and keep it for the reader of the
+/// answer.
+///
+/// # Returns
+/// The number that the picture carries, which the caller writes behind
+/// [`KITTY_IMAGE_NUMBER_KEY`].
+fn number_of_a_still_picture() -> ImageNumber {
+    let number = ImageNumber::mint();
+    LAST_STILL_IMAGE_NUMBER.store(number.get(), Ordering::Relaxed);
+    number
+}
 
 /// The Kitty graphics key that stops the renderer from moving the cursor.
 ///
@@ -295,18 +449,34 @@ impl Capabilities {
     /// that stream is a buffer or a file for many callers and neither one
     /// answers anything.
     ///
+    /// # Which picture the refusal is about
+    ///
+    /// The answer of a terminal reaches whoever reads that terminal next, and
+    /// that reader is this call. So the bytes it reads hold the answer of the
+    /// picture that went before, and they also hold every answer that arrived
+    /// late from the run before and from a second program that draws Kitty
+    /// pictures on the same terminal.
+    ///
+    /// The image number tells them apart. The picture that went before carries
+    /// the number of [`ImageNumber`], which is a number of its own, and this
+    /// call takes that number out of [`LAST_STILL_IMAGE_NUMBER`] and gives it
+    /// to the reader of the answer.
+    ///
     /// # Returns
-    /// The refusal that the terminal reported, or [`None`]. [`None`] covers a
-    /// picture that drew, a terminal that reports nothing, a terminal of the
-    /// Sixel protocol or the iTerm2 protocol, which answer no command at all,
-    /// and a run that owns no terminal to ask.
+    /// The refusal that the terminal reported for the picture that went before,
+    /// or [`None`]. [`None`] covers a picture that drew, a terminal that
+    /// reports nothing, a terminal of the Sixel protocol or the iTerm2
+    /// protocol, which answer no command at all, a run that owns no terminal to
+    /// ask, a run that drew no still picture at all, and a refusal that names
+    /// another picture.
     #[must_use]
     pub fn read_refusal(&self) -> Option<Refusal> {
         if display_routine_for(self.terminal_type()) != DisplayRoutine::Kitty {
             return None;
         }
 
-        ask_for_a_refusal(QUERY_BUDGET)
+        let number = ImageNumber::new(LAST_STILL_IMAGE_NUMBER.load(Ordering::Relaxed))?;
+        ask_for_a_refusal(QUERY_BUDGET, number)
     }
 
     /// Take every image that this crate placed off the screen.
@@ -482,12 +652,14 @@ impl KittyPayload {
 ///
 /// The header states which answer the writer wants from the terminal, and
 /// `request.picture` names it. [`Picture::Still`] asks for the failures with
-/// [`KITTY_FAILURES_ONLY`] and carries [`KITTY_STILL_IMAGE_NUMBER`], because a
-/// terminal answers no transmission that names neither an image id nor an image
-/// number. [`Picture::Frame`] asks for nothing with [`KITTY_QUIET`], and it
-/// names its placement id instead. A Kitty terminal reads the keys of a chunked
-/// image from the first chunk alone, and the first chunk is the header, so the
-/// keys cover the chunked path as well.
+/// [`KITTY_FAILURES_ONLY`] and carries an [`ImageNumber`] of its own behind
+/// [`KITTY_IMAGE_NUMBER_KEY`], because a terminal answers no transmission that
+/// names neither an image id nor an image number, and because that number is
+/// what tells the answer of this picture from the answer of another one.
+/// [`Picture::Frame`] asks for nothing with [`KITTY_QUIET`], and it names its
+/// placement id instead. A Kitty terminal reads the keys of a chunked image
+/// from the first chunk alone, and the first chunk is the header, so the keys
+/// cover the chunked path as well.
 ///
 /// # The two shapes of the payload
 ///
@@ -583,10 +755,11 @@ fn write_kitty<W: Write>(
     // before it in place, which holds the memory of the renderer flat. A still
     // picture names an image number instead: a terminal answers no transmission
     // that names neither, and a second picture that re-used one image id would
-    // delete the first picture.
+    // delete the first picture. The number is a new one for each still picture,
+    // so the answer of this picture carries a name that no other picture wears.
     let image_keys = match request.picture {
         Picture::Frame { id } => format!(",i={id},p={id}"),
-        Picture::Still => format!(",{KITTY_STILL_IMAGE_NUMBER}"),
+        Picture::Still => format!(",{KITTY_IMAGE_NUMBER_KEY}={}", number_of_a_still_picture()),
     };
     let width_key = display_width.map_or_else(String::new, |columns| format!(",c={columns}"));
     let height_key = display_height.map_or_else(String::new, |rows| format!(",r={rows}"));
@@ -1042,10 +1215,10 @@ mod tests {
         //
         // The answer needs a name to hang on: a Kitty terminal answers a
         // transmission only when the transmission names an image id or an image
-        // number. `I=1` is the image number, and it is an `I` and not an `i`
-        // because a re-transmission of an image id deletes the image that held
-        // it. A fixed `i` would take the picture of one run off the screen the
-        // moment the next run drew.
+        // number. The `I` key carries the image number, and it is an `I` and
+        // not an `i` because a re-transmission of an image id deletes the image
+        // that held it. A fixed `i` would take the picture of one run off the
+        // screen the moment the next run drew.
         let control_data = kitty_still_control_data();
 
         assert!(
@@ -1056,13 +1229,68 @@ mod tests {
             !control_data.contains("q=2"),
             "q=2 takes the failure answer away as well, so a still picture must not carry it, but the keys are {control_data:?}"
         );
+        let number = still_image_number_of(&control_data).expect(
+            "a terminal answers no transmission that names neither an image id nor an image number, so a still picture must carry an I= key",
+        );
         assert!(
-            control_data.contains("I=1"),
-            "a terminal answers no transmission that names neither an image id nor an image number, so a still picture must carry I=1, but the keys are {control_data:?}"
+            number != 0,
+            "zero names no image to a Kitty terminal, and the keys are {control_data:?}"
         );
         assert!(
             !control_data.contains(",i="),
             "a re-transmission of an image id deletes the image that held it, so a still picture must name no image id, but the keys are {control_data:?}"
+        );
+    }
+
+    /// The image number that `control_data` carries, or [`None`] for keys that
+    /// carry none.
+    ///
+    /// The keys are `<name>=<value>` pairs that a comma divides, and this reads
+    /// the whole value behind the capital `I`.
+    ///
+    /// # Arguments
+    /// * `control_data` - The keys of one Kitty command.
+    ///
+    /// # Returns
+    /// The number, for keys that name one and give it a value that a 32-bit
+    /// number holds.
+    fn still_image_number_of(control_data: &str) -> Option<u32> {
+        control_data
+            .split(',')
+            .find_map(|pair| pair.strip_prefix(&format!("{KITTY_IMAGE_NUMBER_KEY}=")))?
+            .parse()
+            .ok()
+    }
+
+    #[test]
+    fn two_still_pictures_carry_two_image_numbers() {
+        // The image number is the one key that says which picture a terminal
+        // speaks about. Two pictures of one number wear one name, so the
+        // refusal of the first one names the second one as well, and the reader
+        // of that answer reports a failure for a picture that drew.
+        let first = still_image_number_of(&kitty_still_control_data())
+            .expect("a still picture carries an image number");
+        let second = still_image_number_of(&kitty_still_control_data())
+            .expect("a still picture carries an image number");
+
+        assert_ne!(
+            first, second,
+            "two still pictures must carry two image numbers, and both carried {first}"
+        );
+    }
+
+    #[test]
+    fn an_image_number_stands_away_from_the_numbers_of_another_program() {
+        // A second program that draws Kitty pictures on the same terminal
+        // numbers its own pictures, and a program that counts from one picks
+        // small numbers. A refusal of such a program must name no picture of
+        // this run, so every number of this crate stands above the floor.
+        let number = still_image_number_of(&kitty_still_control_data())
+            .expect("a still picture carries an image number");
+
+        assert!(
+            number >= IMAGE_NUMBER_FLOOR.get(),
+            "an image number must stand above {IMAGE_NUMBER_FLOOR}, where a program that counts its pictures from one never reaches, and this picture carried {number}"
         );
     }
 

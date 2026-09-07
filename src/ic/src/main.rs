@@ -1717,6 +1717,12 @@ fn display_image(
     // terminal for the failures, so this run reads the answer. A report that
     // nothing reads stays on the descriptor the shell of the user reads next,
     // and the shell takes the bytes of it for key presses.
+    //
+    // The read gives a refusal of this picture alone. The answer of the run
+    // before this one arrives late, and a second program that draws pictures on
+    // the same terminal answers as well, so a run that reported every refusal
+    // it read would fail for a picture that drew. `termgfx` states how the
+    // image number tells them apart.
     if matches!(picture, Picture::Still) {
         if let Some(refusal) = terminal_caps.read_refusal() {
             anyhow::bail!(

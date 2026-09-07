@@ -203,6 +203,25 @@ the terminal would arrive there as a key press.
 many pictures the run draws. `ic -n photo.png` is one still picture, so it
 carries `q=1` and `ic` reads the answer for it as well.
 
+**`ic` reports only a refusal that could be its own.** The answer of a terminal
+reaches whoever reads that terminal next, and the answer of the run before this
+one arrives late. A second program that draws Kitty pictures on the same
+terminal writes an answer of its own as well. So a run that reported every
+refusal it read would fail for a picture that drew, and a false failure over a
+good picture is worse than the silence above.
+
+Every still picture therefore carries an image number of its own, under the key
+`I`, and the terminal writes that number back in the answer. A picture takes the
+number from a counter that starts at the process id and the clock, so two runs
+on one machine, two pictures of one run, and a program that counts its own
+pictures from one all carry different numbers. `ic` walks past every refusal
+that names another number.
+
+A refusal that names no image number at all is reported. A terminal that reports
+a failure and echoes no number is still a terminal that refused this picture,
+and a rule that took that report away would put the empty screen of the section
+above back.
+
 ### The size of a still picture
 
 A still picture travels to a Kitty terminal as a PNG, under the key `f=100`.

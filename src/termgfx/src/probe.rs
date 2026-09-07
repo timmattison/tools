@@ -46,6 +46,21 @@
 //! went before stands in front of the answer that ends the read, and a picture
 //! that drew costs no wait at all.
 //!
+//! # Which picture a refusal is about
+//!
+//! The read takes every byte that stands in front of that answer, and the
+//! refusal of the picture that went before is not the only thing there. The
+//! answer of the run before this one arrives late, and a second program that
+//! draws kitty pictures on the same terminal writes an answer of its own. A
+//! reader that took the first refusal it saw would report a failure for a
+//! picture that drew, and a false failure over a good picture is worse than
+//! the silence that issue #465 reports.
+//!
+//! Every still picture carries an image number of its own, and the terminal
+//! writes that number in the control keys of the answer. So
+//! [`ask_for_a_refusal`] takes the number of the picture that went before, and
+//! [`read_refusal`] walks past every refusal that names another one.
+//!
 //! # The run that owns no terminal
 //!
 //! The question needs raw mode, and the call that asks for raw mode sends
@@ -63,6 +78,7 @@
 //! and the probe runs only for a terminal that carries no name at all.
 
 use crate::detect::AnsweredProtocol;
+use crate::draw::{ImageNumber, KITTY_IMAGE_NUMBER_KEY};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -133,12 +149,81 @@ const KITTY_GRAPHICS: u8 = b'G';
 /// The byte that divides the control block of a kitty answer from its message.
 const KITTY_SEPARATOR: u8 = b';';
 
-/// The message of every kitty graphics answer that `answer` carries, in the
-/// order the terminal wrote them.
+/// The byte that divides one control key of a kitty answer from the next.
+const KEY_SEPARATOR: u8 = b',';
+
+/// The byte that divides the name of a control key from its value.
+const KEY_VALUE_SEPARATOR: u8 = b'=';
+
+/// One graphics answer of a kitty terminal.
 ///
-/// One answer is `ESC _ G <control keys> ; <message> ESC \`, and the walk
-/// gives the message of it. The control keys carry the image id, and no reader
-/// in this module needs to know which image a terminal is speaking about.
+/// The two halves arrive together, because a reader that knows what a terminal
+/// said also has to know which picture the terminal said it about.
+struct KittyAnswer<'a> {
+    /// The control keys, without the `G` that opens the block.
+    ///
+    /// They are `<name>=<value>` pairs that a comma divides, such as
+    /// `i=31,I=12`.
+    keys: &'a [u8],
+    /// What the terminal said about the command: `OK` for a command it carried
+    /// out, and a code such as `ENOSPC` for one it refused.
+    message: &'a [u8],
+}
+
+impl KittyAnswer<'_> {
+    /// The image number that the control keys name, or [`None`] for keys that
+    /// name none.
+    ///
+    /// The name is a capital `I`, which the crate states one time in
+    /// [`KITTY_IMAGE_NUMBER_KEY`]. A lower case `i` is an image id, which names
+    /// a different thing: the terminal picks an id itself for a picture that
+    /// named none, so an id says nothing about which picture of this process
+    /// the terminal answers.
+    ///
+    /// The whole value is read, so keys of `I=12` give 12 and never 1.
+    fn image_number(&self) -> Option<ImageNumber> {
+        let value = self
+            .keys
+            .split(|byte| *byte == KEY_SEPARATOR)
+            .find_map(|pair| {
+                let divide = pair.iter().position(|byte| *byte == KEY_VALUE_SEPARATOR)?;
+                let (name, value) = pair.split_at(divide);
+                // The value opens with the byte that divided it from the name.
+                (name == KITTY_IMAGE_NUMBER_KEY.as_bytes()).then_some(&value[1..])
+            })?;
+        ImageNumber::new(std::str::from_utf8(value).ok()?.parse().ok()?)
+    }
+
+    /// Whether this answer could speak about the picture that carried `number`.
+    ///
+    /// An answer that names another image number belongs to another picture:
+    /// to the picture of the run before this one, which the terminal answered
+    /// late, or to the picture of a second program that draws on the same
+    /// terminal. This call refuses that one.
+    ///
+    /// **An answer that names no image number at all is taken.** A strict rule
+    /// would refuse it, and a terminal that reports a failure without the
+    /// number of the picture would then go silent. That silence is the defect
+    /// of issue #465, so the strict rule takes a report away that this crate
+    /// makes today. The rule here takes none away, and it still takes the
+    /// misattribution away.
+    ///
+    /// # Arguments
+    /// * `number` - The image number that the picture of this process carried.
+    ///
+    /// # Returns
+    /// True for an answer of that number and for an answer of no number.
+    fn could_be_for(&self, number: ImageNumber) -> bool {
+        self.image_number().is_none_or(|named| named == number)
+    }
+}
+
+/// Every kitty graphics answer that `answer` carries, in the order the terminal
+/// wrote them.
+///
+/// One answer is `ESC _ G <control keys> ; <message> ESC \`, and the walk gives
+/// both halves of it. [`read_refusal`] reads the control keys, because the
+/// image number in them says which picture the terminal is speaking about.
 ///
 /// **This is the one walk over those blocks.** [`kitty_said_ok`] reads it to
 /// learn that a query drew, and [`read_refusal`] reads it to learn that a
@@ -148,7 +233,7 @@ const KITTY_SEPARATOR: u8 = b';';
 /// The walk ends at a block that no string terminator closes, because such a
 /// block is half of an answer that arrived late, and the bytes of the other
 /// half say nothing yet.
-fn kitty_messages(answer: &[u8]) -> impl Iterator<Item = &[u8]> + '_ {
+fn kitty_messages(answer: &[u8]) -> impl Iterator<Item = KittyAnswer<'_>> + '_ {
     let mut rest = answer;
     std::iter::from_fn(move || {
         while let Some(start) = position_of(rest, APC_OPENER) {
@@ -156,11 +241,19 @@ fn kitty_messages(answer: &[u8]) -> impl Iterator<Item = &[u8]> + '_ {
             let end = position_of(body, STRING_TERMINATOR)?;
             let block = &body[..end];
             rest = &body[end + STRING_TERMINATOR.len()..];
-            if block.first() != Some(&KITTY_GRAPHICS) {
+            // The `G` opens the block and belongs to neither half, so the keys
+            // start behind it.
+            let Some((&KITTY_GRAPHICS, keys_and_message)) = block.split_first() else {
                 continue;
-            }
-            if let Some(separator) = block.iter().position(|byte| *byte == KITTY_SEPARATOR) {
-                return Some(&block[separator + 1..]);
+            };
+            if let Some(separator) = keys_and_message
+                .iter()
+                .position(|byte| *byte == KITTY_SEPARATOR)
+            {
+                return Some(KittyAnswer {
+                    keys: &keys_and_message[..separator],
+                    message: &keys_and_message[separator + 1..],
+                });
             }
         }
         None
@@ -173,7 +266,7 @@ fn kitty_messages(answer: &[u8]) -> impl Iterator<Item = &[u8]> + '_ {
 /// terminal that refused it writes a code such as `ENOTSUPP` in the same
 /// place, which is no answer of yes.
 fn kitty_said_ok(answer: &[u8]) -> bool {
-    kitty_messages(answer).any(|message| message.starts_with(KITTY_OK))
+    kitty_messages(answer).any(|block| block.message.starts_with(KITTY_OK))
 }
 
 /// A kitty graphics command that the terminal refused, in the words of the
@@ -208,14 +301,28 @@ impl std::fmt::Display for Refusal {
 /// The byte that divides the code of a refusal from its detailed message.
 const REFUSAL_SEPARATOR: u8 = b':';
 
-/// The first refusal that `answer` carries, or [`None`] for an answer that
-/// carries none.
+/// The first refusal in `answer` that could be about the picture of `number`,
+/// or [`None`] for an answer that carries none.
 ///
-/// The walk gives the first one, and it walks every block to find it. A
-/// picture travels in more than one command, so the block that reports the
-/// refusal stands behind blocks that report success.
-fn read_refusal(answer: &[u8]) -> Option<Refusal> {
-    kitty_messages(answer).find_map(refusal_in)
+/// The walk gives the first one, and it walks every block to find it. A picture
+/// travels in more than one command, so the block that reports the refusal
+/// stands behind blocks that report success.
+///
+/// A block that names another image number is walked past, and
+/// [`KittyAnswer::could_be_for`] states which blocks those are. Such a block
+/// holds the refusal of another picture, and a report of it would name a
+/// picture that drew.
+///
+/// # Arguments
+/// * `answer` - The bytes that the terminal wrote.
+/// * `number` - The image number that the picture of this process carried.
+///
+/// # Returns
+/// The refusal of that picture, for an answer that carries one.
+fn read_refusal(answer: &[u8], number: ImageNumber) -> Option<Refusal> {
+    kitty_messages(answer)
+        .filter(|block| block.could_be_for(number))
+        .find_map(|block| refusal_in(block.message))
 }
 
 /// The refusal that one message carries, or [`None`] for a message that
@@ -321,11 +428,22 @@ pub(crate) fn ask_the_terminal(budget: Duration) -> Option<AnsweredProtocol> {
 /// alone, and the read ends there instead of spending the whole budget on
 /// silence.
 ///
+/// The answer of the terminal also carries every answer that arrived late, so
+/// `number` says which picture this call asks about. A refusal that names
+/// another image number belongs to another picture, and [`read_refusal`] walks
+/// past it.
+///
+/// # Arguments
+/// * `budget` - The longest that the read waits.
+/// * `number` - The image number that the picture of this process carried.
+///
+/// # Returns
 /// Gives [`None`] when there is no controlling terminal, when this run stands
 /// in a background process group and therefore owns no terminal to ask (see
 /// [`owns_the_terminal`]), when the terminal answers nothing inside `budget`,
-/// and when the answer reports no failure.
-pub(crate) fn ask_for_a_refusal(budget: Duration) -> Option<Refusal> {
+/// when the answer reports no failure, and when every failure it reports names
+/// another picture.
+pub(crate) fn ask_for_a_refusal(budget: Duration, number: ImageNumber) -> Option<Refusal> {
     let terminal = OpenOptions::new()
         .read(true)
         .write(true)
@@ -335,7 +453,7 @@ pub(crate) fn ask_for_a_refusal(budget: Duration) -> Option<Refusal> {
     let _raw = RawMode::of(fd)?;
     (&terminal).write_all(ATTRIBUTES_REQUEST).ok()?;
     (&terminal).flush().ok()?;
-    read_refusal(&drain(fd, budget))
+    read_refusal(&drain(fd, budget), number)
 }
 
 /// The terminal a program asks, whatever its standard output was pointed at.
@@ -1297,13 +1415,25 @@ mod tests {
     /// The detailed message that [`REFUSAL_ANSWER`] carries behind that code.
     const REFUSED_DETAIL: &str = "the image store is full";
 
+    /// The image number that the picture of these tests carried.
+    ///
+    /// A minted number belongs to the run that minted it and no test can
+    /// predict one, so these tests state a number of their own and answer for
+    /// a terminal that speaks about it.
+    const THIS_PICTURE_NUMBER: u32 = 7;
+
+    /// The image number of the picture that these tests drew.
+    fn this_picture() -> ImageNumber {
+        ImageNumber::new(THIS_PICTURE_NUMBER).expect("the number of a test picture is above zero")
+    }
+
     #[test]
     fn a_refusal_gives_the_code_and_the_detail() {
         // The code names what went wrong and the detail says it in words. A
         // reader of the refusal prints both, because the code alone sends the
         // user to a search engine.
         assert_eq!(
-            read_refusal(REFUSAL_ANSWER),
+            read_refusal(REFUSAL_ANSWER, this_picture()),
             Some(Refusal {
                 code: REFUSED_CODE.to_owned(),
                 message: REFUSED_DETAIL.to_owned(),
@@ -1318,7 +1448,7 @@ mod tests {
         // whole refusal. A parser that waited for a colon would read this one
         // as no refusal at all, and the picture would go missing in silence.
         assert_eq!(
-            read_refusal(b"\x1b_Gi=31;ETOODEEP\x1b\\\x1b[?62;4c"),
+            read_refusal(b"\x1b_Gi=31;ETOODEEP\x1b\\\x1b[?62;4c", this_picture()),
             Some(Refusal {
                 code: "ETOODEEP".to_owned(),
                 message: String::new(),
@@ -1332,7 +1462,10 @@ mod tests {
         // `OK` is what a terminal writes for a command it carried out. A
         // reader that took it for a refusal would report a failure for every
         // picture that drew.
-        assert_eq!(read_refusal(b"\x1b_Gi=99,I=13;OK\x1b\\"), None);
+        assert_eq!(
+            read_refusal(b"\x1b_Gi=99,I=7;OK\x1b\\", this_picture()),
+            None
+        );
     }
 
     #[test]
@@ -1340,14 +1473,14 @@ mod tests {
         // The request of the attributes is what ends the read, so its answer
         // stands in the bytes of every round trip. It is no APC block, and the
         // reader must walk past it.
-        assert_eq!(read_refusal(b"\x1b[?62;4c"), None);
+        assert_eq!(read_refusal(b"\x1b[?62;4c", this_picture()), None);
     }
 
     #[test]
     fn silence_is_no_refusal() {
         // A terminal that answers nothing refused nothing that this crate can
         // report. A run that owns no terminal reads the same silence.
-        assert_eq!(read_refusal(b""), None);
+        assert_eq!(read_refusal(b"", this_picture()), None);
     }
 
     #[test]
@@ -1357,12 +1490,110 @@ mod tests {
         // behind blocks that report success, and a reader that stopped at the
         // first block would report that the picture drew.
         assert_eq!(
-            read_refusal(b"\x1b_Gi=31;OK\x1b\\\x1b_Gi=31;ENOSPC\x1b\\\x1b[?62;4c"),
+            read_refusal(
+                b"\x1b_Gi=31;OK\x1b\\\x1b_Gi=31;ENOSPC\x1b\\\x1b[?62;4c",
+                this_picture()
+            ),
             Some(Refusal {
                 code: REFUSED_CODE.to_owned(),
                 message: String::new(),
             }),
             "the reader walks every block and gives the first refusal"
+        );
+    }
+
+    #[test]
+    fn a_refusal_that_names_another_picture_is_no_refusal_of_this_one() {
+        // The answer of a terminal reaches whoever reads that terminal next.
+        // The run before this one is answered late, and a second program that
+        // draws kitty pictures on the same terminal writes an answer of its
+        // own. Both name another image number, and a reader that reported them
+        // would fail a picture that drew.
+        assert_eq!(
+            read_refusal(
+                b"\x1b_Gi=31,I=999999;ENOSPC:the image store is full\x1b\\\x1b[?62;4c",
+                this_picture()
+            ),
+            None,
+            "a refusal of image number 999999 says nothing about picture {THIS_PICTURE_NUMBER}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_that_names_this_picture_arrives() {
+        // The other half of the rule. A reader that refused every numbered
+        // refusal would report nothing at all, which is the defect of issue
+        // #465.
+        assert_eq!(
+            read_refusal(
+                b"\x1b_Gi=31,I=7;ENOSPC:the image store is full\x1b\\\x1b[?62;4c",
+                this_picture()
+            ),
+            Some(Refusal {
+                code: REFUSED_CODE.to_owned(),
+                message: REFUSED_DETAIL.to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_refusal_that_names_no_picture_arrives() {
+        // A terminal that reports a failure and echoes no image number is
+        // still a terminal that refused the picture of this run. A strict rule
+        // would take that report away, and the user would then stand in front
+        // of an empty screen with no word about why.
+        assert_eq!(
+            read_refusal(b"\x1b_G;ENOSPC\x1b\\\x1b[?62;4c", this_picture()),
+            Some(Refusal {
+                code: REFUSED_CODE.to_owned(),
+                message: String::new(),
+            }),
+            "a refusal with no image number could be the refusal of this picture"
+        );
+    }
+
+    #[test]
+    fn an_image_number_is_read_whole() {
+        // A reader that compared the first character of the value would take
+        // 12 for 1. The picture of this test is number 1, and the answer names
+        // number 12.
+        let first_picture = ImageNumber::new(1).expect("one is above zero");
+        assert_eq!(
+            read_refusal(b"\x1b_Gi=31,I=12;ENOSPC\x1b\\\x1b[?62;4c", first_picture),
+            None,
+            "image number 12 is another picture than image number 1"
+        );
+    }
+
+    #[test]
+    fn the_image_id_of_an_answer_names_no_picture() {
+        // The two keys are a capital `I` for an image number and a lower case
+        // `i` for an image id. A terminal picks the id itself for a picture
+        // that named none, so an id says nothing about which picture of this
+        // process the terminal answers. A reader of the wrong key would take
+        // the refusal below, whose image number names another picture.
+        assert_eq!(
+            read_refusal(b"\x1b_Gi=7,I=999;ENOSPC\x1b\\\x1b[?62;4c", this_picture()),
+            None,
+            "the image id of 7 is no image number of 7"
+        );
+    }
+
+    #[test]
+    fn the_refusal_of_this_picture_arrives_behind_the_refusal_of_another() {
+        // Both refusals stand in the same read: the late answer of the run
+        // before this one, and then the answer of this picture. A reader that
+        // stopped at the first refusal it saw would report the wrong code.
+        assert_eq!(
+            read_refusal(
+                b"\x1b_GI=999;ENOSPC\x1b\\\x1b_GI=7;ETOODEEP\x1b\\\x1b[?62;4c",
+                this_picture()
+            ),
+            Some(Refusal {
+                code: "ETOODEEP".to_owned(),
+                message: String::new(),
+            }),
+            "the reader walks past the refusal of another picture and reads on"
         );
     }
 
@@ -1408,7 +1639,7 @@ mod tests {
         // child reads nothing of it. The test holds the other copy, and the
         // answer arrives on that one.
         unsafe { libc::close(master) };
-        leave(match ask_for_a_refusal(ROUND_TRIP_BUDGET) {
+        leave(match ask_for_a_refusal(ROUND_TRIP_BUDGET, this_picture()) {
             Some(refusal) => {
                 if refusal.code == REFUSED_CODE && refusal.message == REFUSED_DETAIL {
                     NAMED_THE_REFUSAL

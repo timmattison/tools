@@ -28,6 +28,18 @@
 //! frame after frame and holds the terminal in raw mode for the key presses of
 //! the user, where an answer would arrive as a key press.
 //!
+//! # Which picture a refusal is about
+//!
+//! The answer of a terminal reaches whoever reads that terminal next. So a run
+//! reads the answer of the run before it, when that answer arrived late, and it
+//! reads the answer of a second program that draws Kitty pictures on the same
+//! terminal. Both name a picture that this run never sent, and a run that
+//! reported them would fail for a picture that drew.
+//!
+//! The image number tells them apart, and two tests here hold `ic` to it: one
+//! answers a refusal of another image number and asks for a success, and one
+//! runs `ic` twice and asks the two pictures for two numbers.
+//!
 //! # The two things that a test of this shape gets wrong
 //!
 //! `ic` writes the whole picture to standard output before it asks the terminal
