@@ -186,8 +186,22 @@ fn read_cell_size(answer: &[u8]) -> Option<CellPixels> {
 /// The cell that the division measures, or `None` for an answer that names no
 /// text area, for a run that measured no window to divide by, and for a
 /// quotient that is no cell.
-fn read_text_area_cell(_answer: &[u8], _cells: Option<(u32, u32)>) -> Option<CellPixels> {
-    None
+fn read_text_area_cell(answer: &[u8], cells: Option<(u32, u32)>) -> Option<CellPixels> {
+    let (columns, rows) = cells?;
+    let parameters = window_operation_parameters(answer, TEXT_AREA_ANSWER)?;
+    let [_, height, width] = parameters.as_slice() else {
+        return None;
+    };
+    // `Window::measured` makes no window of zero columns and no window of zero
+    // rows, so no caller of a measured window reaches a division by zero here.
+    // The signature takes a bare pair all the same, so the division is a
+    // checked one and a zero gives no cell instead of a panic.
+    // `CellPixels::measured` then refuses a quotient of no pixels, which is
+    // what a text area smaller than its own grid gives.
+    CellPixels::measured(
+        number(width)?.checked_div(columns)?,
+        number(height)?.checked_div(rows)?,
+    )
 }
 
 /// The opener of a control sequence.
