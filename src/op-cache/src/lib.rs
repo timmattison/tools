@@ -39,6 +39,10 @@ const RETRY_DELAY_MS: u64 = 1000;
 /// Cache file name (must be gitignored by consuming projects).
 const CACHE_FILENAME: &str = ".op-cache.json";
 
+/// Sentinel path segment that separates an item path from the field prefix
+/// whose field list is cached under it.
+const ITEM_FIELDS_SENTINEL: &str = "__item_fields__";
+
 /// Errors that can occur during 1Password caching operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -149,6 +153,19 @@ struct CacheEntry {
 }
 
 type CacheFile = HashMap<String, CacheEntry>;
+
+/// The cache key prefix that every field list of one item shares.
+///
+/// It keeps the trailing separator, so `op://Private/Foo` cannot match the
+/// keys of `op://Private/FooBar`.
+fn item_fields_key_prefix(op_path: &OpPath) -> String {
+    format!("{}/{ITEM_FIELDS_SENTINEL}/", op_path.as_ref())
+}
+
+/// The cache key holding the field list of one item and one field prefix.
+fn item_fields_cache_key(op_path: &OpPath, field_prefix: &str) -> String {
+    format!("{}{field_prefix}", item_fields_key_prefix(op_path))
+}
 
 /// 1Password credential cache manager.
 ///
@@ -277,13 +294,9 @@ impl OpCache {
     ///
     /// Returns an error if the `op` CLI is not found, 1Password read fails,
     /// no fields match the prefix, or there's a cache IO error.
-    pub fn read_item_fields(
-        &self,
-        op_path: &OpPath,
-        field_prefix: &str,
-    ) -> Result<Vec<ItemField>> {
+    pub fn read_item_fields(&self, op_path: &OpPath, field_prefix: &str) -> Result<Vec<ItemField>> {
         // Cache key: item path + sentinel + prefix
-        let cache_key = format!("{}/__item_fields__/{}", op_path.as_ref(), field_prefix);
+        let cache_key = item_fields_cache_key(op_path, field_prefix);
 
         // Check cache first
         let mut cache = self.read_cache();
@@ -319,16 +332,24 @@ impl OpCache {
         Ok(fields)
     }
 
-    /// Removes a credential from the cache file.
+    /// Removes everything the cache holds for a path: the credential itself
+    /// and every field list [`read_item_fields`](Self::read_item_fields) cached
+    /// for it, whatever field prefix each was fetched under.
     ///
-    /// The next `read()` call for this path will re-fetch from 1Password.
+    /// The next `read()` or `read_item_fields()` call for this path re-fetches
+    /// from 1Password, so a field added to the item in 1Password after the last
+    /// fetch becomes visible. Another item whose path merely starts with this
+    /// one (`op://Private/FooBar` beside `op://Private/Foo`) is left alone.
     ///
     /// # Errors
     ///
     /// Returns an error if there's a cache IO error.
     pub fn invalidate(&self, op_path: &OpPath) -> Result<()> {
         let mut cache = self.read_cache();
-        if cache.remove(op_path.as_ref()).is_some() {
+        let fields_prefix = item_fields_key_prefix(op_path);
+        let before = cache.len();
+        cache.retain(|key, _| key != op_path.as_ref() && !key.starts_with(&fields_prefix));
+        if cache.len() != before {
             self.write_cache(&cache)?;
         }
         Ok(())
@@ -732,11 +753,11 @@ mod tests {
         let mut file: CacheFile = HashMap::new();
         file.insert(item.as_ref().to_string(), test_entry("secret"));
         file.insert(
-            format!("{}/__item_fields__/credential", item.as_ref()),
+            item_fields_cache_key(&item, "credential"),
             test_entry("[[\"credential\",\"key-1\"]]"),
         );
         file.insert(
-            format!("{}/__item_fields__/username", item.as_ref()),
+            item_fields_cache_key(&item, "username"),
             test_entry("[[\"username\",\"user\"]]"),
         );
         cache.write_cache(&file).unwrap();
@@ -759,7 +780,7 @@ mod tests {
         let item = OpPath::new("op://Private/ProtonVPN WireGuard key").unwrap();
         let mut file: CacheFile = HashMap::new();
         file.insert(
-            format!("{}/__item_fields__/credential", item.as_ref()),
+            item_fields_cache_key(&item, "credential"),
             test_entry("[[\"credential\",\"key-1\"]]"),
         );
         cache.write_cache(&file).unwrap();
@@ -779,11 +800,11 @@ mod tests {
 
         let target = OpPath::new("op://Private/Foo").unwrap();
         let neighbor = OpPath::new("op://Private/FooBar").unwrap();
-        let neighbor_fields = format!("{}/__item_fields__/credential", neighbor.as_ref());
+        let neighbor_fields = item_fields_cache_key(&neighbor, "credential");
         let mut file: CacheFile = HashMap::new();
         file.insert(target.as_ref().to_string(), test_entry("foo-secret"));
         file.insert(
-            format!("{}/__item_fields__/credential", target.as_ref()),
+            item_fields_cache_key(&target, "credential"),
             test_entry("[[\"credential\",\"foo-key\"]]"),
         );
         file.insert(neighbor.as_ref().to_string(), test_entry("foobar-secret"));
@@ -869,7 +890,8 @@ mod tests {
 
     #[test]
     fn parse_item_fields_fields_not_array() {
-        let json = serde_json::json!({"id": "abc123", "title": "Bad item", "fields": "not-an-array"});
+        let json =
+            serde_json::json!({"id": "abc123", "title": "Bad item", "fields": "not-an-array"});
         let result = parse_item_fields(&json, "credential");
         assert!(matches!(result.unwrap_err(), Error::ItemJsonParse(_)));
     }
@@ -902,7 +924,7 @@ mod tests {
 
         // Pre-populate cache using the same key format as read_item_fields
         let op_path = OpPath::new("op://Private/TestItem").unwrap();
-        let cache_key = format!("{}/__item_fields__/credential", op_path.as_ref());
+        let cache_key = item_fields_cache_key(&op_path, "credential");
         let pairs = vec![("credential", "key-1"), ("credential-2", "key-2")];
         let serialized = serde_json::to_string(&pairs).unwrap();
         let mut file: CacheFile = HashMap::new();
