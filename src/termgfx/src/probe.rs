@@ -994,6 +994,28 @@ mod tests {
             None,
             "a run that measured no window holds nothing to divide by, so it measures no cell"
         );
+        // A text area smaller than its own grid. 40 pixels over 80 columns is
+        // a cell of no width, and 12 pixels over 24 rows is a cell of no
+        // height.
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;12;40t", Some(ANSWERED_WINDOW_CELLS)),
+            None,
+            "`CellPixels::measured` refuses a quotient of no pixels, and a cell of no width holds no pixel of a picture"
+        );
+        // A count of zero reaches no caller that measured a window, because
+        // `Window::measured` makes no window of zero columns and no window of
+        // zero rows. It reaches this function because the signature takes a
+        // bare pair, and the division is a checked one for that reason.
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", Some((0, ANSWERED_WINDOW_CELLS.1))),
+            None,
+            "the checked division gives no cell for a column count of zero, where a plain division panics"
+        );
+        assert_eq!(
+            read_text_area_cell(b"\x1b[4;384;640t", Some((ANSWERED_WINDOW_CELLS.0, 0))),
+            None,
+            "the checked division gives no cell for a row count of zero, where a plain division panics"
+        );
     }
 
     #[test]
