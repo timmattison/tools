@@ -46,9 +46,10 @@ The `generate` command flow becomes:
 
 1. **Enumerate credentials:** Call `op_cache.read_item_fields(&op_path, "credential")` to get all matching fields
 2. **Error if none found:** Clear error about expected 1Password item structure
-3. **Detect in-use keys:** Run `docker ps --filter ancestor=qmcgaw/gluetun --format '{{.Names}}'` to find running gluetun containers, then `docker inspect <name>` to extract `WIREGUARD_PRIVATE_KEY` from each container's environment
-4. **Match and select:** Compare available credential values against in-use keys. Pick the first unused one
-5. **Error if all in use:** Display which container is using each key:
+3. **Detect in-use keys:** Run `docker ps --format '{{.Names}}\t{{.Image}}'` and keep the rows whose image is `qmcgaw/gluetun` at any tag or digest, then `docker inspect <name>` to extract `WIREGUARD_PRIVATE_KEY` from each container's environment. The `--filter ancestor=` form cannot be used: docker resolves an untagged reference to `:latest`, so on a machine that only ever pulled the pinned tag the filter matches nothing while `docker ps` still exits 0
+4. **Stop on a docker failure:** A `docker ps` or `docker inspect` that cannot be started or exits non-zero stops `generate`, reporting the docker stderr. A stopped daemon or a permission error must not read as "no tunnels are running", because that hands out a key a running tunnel already holds
+5. **Match and select:** Compare available credential values against in-use keys. Pick the first unused one
+6. **Error if all in use:** Display which container is using each key:
    ```
    error: all WireGuard credentials are in use
 
@@ -58,7 +59,7 @@ The `generate` command flow becomes:
    Add another credential to "ProtonVPN WireGuard key" in 1Password,
    or stop an existing tunnel with: vpn-tunnel down --dir <path>
    ```
-6. **Generate:** Pass selected key + field name to the generator
+7. **Generate:** Pass selected key + field name to the generator
 
 ### 3. .env and Status Changes
 
@@ -80,7 +81,7 @@ Using credential: credential-2 (1 of 3 available, 1 in use)
 ### 4. Known Limitations
 
 - **Race condition at generate time:** If two `generate` commands run simultaneously before either calls `up`, both could select the same key. This is a narrow window and the VPN provider will reject the duplicate, making it diagnosable. No lockfile mitigation for now.
-- **Docker must be running** for in-use detection. If docker is down, no containers are running, so there are no conflicts — this is fine.
+- **Docker must be running** for in-use detection. A docker that is down, unreachable, or refuses the command is not read as "no containers are running": `generate` stops and reports what docker said, because a credential chosen on unknown state can duplicate a live tunnel's key.
 
 ## Testing
 
@@ -98,5 +99,7 @@ Using credential: credential-2 (1 of 3 available, 1 in use)
 - Multiple credentials, first in use -> selects second
 - All credentials in use -> returns error with container names
 - Credential field name stored correctly in .env output
+- Every gluetun tag (pinned, `latest`, bare, digest) is detected; `evil/qmcgaw/gluetun` and `qmcgaw/gluetunnel` are not
+- A failed `docker ps`, a failed `docker inspect`, and a docker that cannot be started each return an error, never an empty list
 
-The matching logic (available keys vs in-use keys -> selection) is extracted into pure functions testable without live docker or 1Password.
+The matching logic (available keys vs in-use keys -> selection) is extracted into pure functions testable without live docker or 1Password. Detection takes an injected command runner for the same reason, so the docker failure paths are tested without a docker daemon.
