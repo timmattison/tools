@@ -792,6 +792,23 @@ mod tests {
         assert_eq!(result, (Some(50), Some(50)));
     }
 
+    /// An image of no width states no aspect ratio, and the one-bound arm
+    /// divides by that ratio.
+    ///
+    /// A division by zero gives infinity, and the cast of infinity to `u32`
+    /// gives `u32::MAX`. Both axes then come back bound, so
+    /// [`downscale_to_display_pixels`] no longer stops at its open axis, and
+    /// [`cells_to_pixels`] multiplies `u32::MAX` by the height of the cell.
+    /// The bounds of the caller stand unchanged instead.
+    #[test]
+    fn aspect_preserving_size_survives_a_zero_image_width() {
+        assert_eq!(
+            calculate_aspect_preserving_size(0, 100, Some(50), None, true, TEST_CELL_ASPECT),
+            (Some(50), None),
+            "an image of no width gives no ratio, so the bounds of the caller stand"
+        );
+    }
+
     #[test]
     fn aspect_preserving_square_image_in_square_box() {
         // Square image (100x100) in square box (50x50)
