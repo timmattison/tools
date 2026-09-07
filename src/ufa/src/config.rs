@@ -1119,8 +1119,9 @@ mod tests {
             "the failure must name the reference that holds nothing, got {report}"
         );
         assert!(
-            !report.contains("Run 'ufa config setup'"),
-            "a broken reference is not an absent one, so the wizard advice is wrong, got {report}"
+            !report.contains("No API key configured"),
+            "a broken reference is not an absent one, so the missing-credential message is \
+             wrong, got {report}"
         );
         assert!(
             !report.contains("stale-plaintext-key"),
