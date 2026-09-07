@@ -1250,6 +1250,25 @@ mod tests {
     /// cannot pass the test by accident.
     const TEST_PAYLOAD_BUDGET: usize = 4096;
 
+    /// The share of the payload of an unfitted picture that the Sixel budget
+    /// test allows.
+    ///
+    /// [`TEST_PAYLOAD_BUDGET`] does not serve the Sixel path, for two reasons.
+    /// The Sixel writer resizes the picture to the window before the fit runs,
+    /// so the payload that the fit starts from moves with the cell size that
+    /// the window of the runner reports. A Sixel payload also falls far slower
+    /// than the pixel count, so [`fit_to_payload_budget`] needs more than
+    /// [`MAXIMUM_FIT_ATTEMPTS`] attempts to reach a budget far under the
+    /// payload it starts from.
+    ///
+    /// A share holds against both. It states a budget under the payload of the
+    /// picture at every cell size, so the fit always runs, and it keeps that
+    /// budget near enough for the fit to reach it. A measurement on 2026-09-07
+    /// swept the pictures that a cell of 6 pixels through a cell of 48 makes. A
+    /// share of 90 reaches the budget on every one of them. A share of 85
+    /// misses it at a cell of 7 pixels.
+    const SIXEL_PAYLOAD_BUDGET_SHARE: usize = 90;
+
     /// The characters of payload that one Kitty command carries.
     ///
     /// This is the count that mosh keeps: it joins every chunk of one
@@ -1321,6 +1340,98 @@ mod tests {
             .expect("a Kitty command holds a semicolon between the keys and the payload");
 
         String::from(keys)
+    }
+
+    /// Draw `image` on a Sixel terminal inside `budget` and give back the
+    /// characters of payload that reached the stream.
+    ///
+    /// The Sixel writer writes the device control string of the encoder and
+    /// nothing else, so the bytes of the stream are the payload.
+    ///
+    /// The cursor is [`Cursor::Held`], which writes nothing around the command,
+    /// so the count does not move with the window of whoever runs the suite.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn sixel_payload_of(image: &DynamicImage, budget: PayloadBudget) -> usize {
+        let request = Request {
+            payload: budget,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::Zellij, true, true)
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+
+        out.len()
+    }
+
+    /// Draw `image` on an iTerm2 terminal inside `budget` and give back the
+    /// command that reached the stream.
+    ///
+    /// The command is `ESC ] 1337 ; File = <arguments> : <base64 data> BEL`.
+    ///
+    /// The cursor is [`Cursor::Held`], which writes nothing around the command,
+    /// so the command stands alone whatever the window of the runner reports.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn iterm2_command_of(image: &DynamicImage, budget: PayloadBudget) -> String {
+        let request = Request {
+            payload: budget,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::ITerm2, true, true)
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+
+        String::from_utf8(out).expect("an iTerm2 command is ASCII")
+    }
+
+    /// Draw `image` on an iTerm2 terminal inside `budget` and give back the
+    /// characters of payload that reached the stream.
+    ///
+    /// The payload is the base64 run between the last colon of the command and
+    /// the BEL that closes it. Base64 carries no colon, so the last colon is
+    /// the one that opens the payload. The arguments stay out of the number,
+    /// as they do for a Kitty command in [`kitty_payload_characters`].
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn iterm2_payload_of(image: &DynamicImage, budget: PayloadBudget) -> usize {
+        let command = iterm2_command_of(image, budget);
+        let (_arguments, payload) = command
+            .rsplit_once(':')
+            .expect("an iTerm2 command holds a colon between the arguments and the payload");
+
+        payload.trim_end_matches('\x07').len()
+    }
+
+    /// Draw `image` on an iTerm2 terminal inside `budget` and give back the
+    /// arguments of the command, which is the part between `File=` and the
+    /// last colon.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn iterm2_arguments_of(image: &DynamicImage, budget: PayloadBudget) -> String {
+        let command = iterm2_command_of(image, budget);
+        let (_introducer, arguments_and_payload) = command
+            .split_once("File=")
+            .expect("an iTerm2 command holds `File=` before its arguments");
+        let (arguments, _payload) = arguments_and_payload
+            .rsplit_once(':')
+            .expect("an iTerm2 command holds a colon between the arguments and the payload");
+
+        String::from(arguments)
     }
 
     /// The Kitty graphics command that takes every image off the screen. The
@@ -1490,6 +1601,61 @@ mod tests {
         );
     }
 
+    /// A Sixel picture above the budget comes back inside it.
+    ///
+    /// The green commit that made the fit wired it into all three writers, and
+    /// this test holds the Sixel one. A Sixel picture states its size in pixels
+    /// and carries no key for a cell span, so the fit takes room off the
+    /// picture as well as resolution. That is the whole of what the protocol
+    /// allows, and a smaller picture beats the empty screen that a refused
+    /// transmission leaves.
+    ///
+    /// [`SIXEL_PAYLOAD_BUDGET_SHARE`] says why the budget is a share of the
+    /// payload of the picture and not a count of characters.
+    #[test]
+    fn a_sixel_picture_above_the_payload_budget_comes_back_inside_it() {
+        let fixture = photograph_fixture();
+        let whole = sixel_payload_of(&fixture, PayloadBudget::UNLIMITED);
+        let budget = whole * SIXEL_PAYLOAD_BUDGET_SHARE / 100;
+        let spent = sixel_payload_of(&fixture, PayloadBudget::of(budget));
+
+        assert!(
+            budget < whole,
+            "the budget must stand under the payload of the picture, or the fit never runs and this test measures nothing"
+        );
+        assert!(
+            spent <= budget,
+            "a Sixel picture must spend at most {budget} characters, but it spent {spent}"
+        );
+        assert!(
+            spent > 0,
+            "a Sixel picture that spends nothing drew nothing, which is the failure this repairs"
+        );
+    }
+
+    /// An iTerm2 picture above the budget comes back inside it.
+    ///
+    /// The green commit that made the fit wired it into all three writers, and
+    /// this test holds the iTerm2 one. An iTerm2 picture travels as a PNM file,
+    /// which is exactly linear in the pixel count, so the fit lands in one
+    /// attempt.
+    #[test]
+    fn an_iterm2_picture_above_the_payload_budget_comes_back_inside_it() {
+        let spent = iterm2_payload_of(
+            &photograph_fixture(),
+            PayloadBudget::of(TEST_PAYLOAD_BUDGET),
+        );
+
+        assert!(
+            spent <= TEST_PAYLOAD_BUDGET,
+            "an iTerm2 picture must spend at most {TEST_PAYLOAD_BUDGET} characters, but it spent {spent}"
+        );
+        assert!(
+            spent > 0,
+            "an iTerm2 picture that spends nothing drew nothing, which is the failure this repairs"
+        );
+    }
+
     /// A picture fitted for mosh fits the store that mosh keeps, keys and all.
     ///
     /// [`PayloadBudget::MOSH`] bounds the payload alone, and mosh counts the
@@ -1594,6 +1760,54 @@ mod tests {
         assert!(
             kitty_payload_of(&fixture, frame, PayloadBudget::of(TEST_PAYLOAD_BUDGET))
                 < kitty_payload_of(&fixture, frame, PayloadBudget::UNLIMITED),
+            "the tight budget must really take pixels off the picture"
+        );
+    }
+
+    /// The fit takes resolution off an iTerm2 picture and takes no room off it.
+    ///
+    /// `width=` and `height=` state how many cells the picture spans, and the
+    /// terminal scales the pixels it got into them. So the arguments come off
+    /// the screen bounds, ahead of the fit, and a picture that spends fewer
+    /// pixels holds the size that the user sees.
+    ///
+    /// A fit that takes those arguments off the pixels it ended at shrinks the
+    /// picture on the screen instead, which is the mistake this guards. It is
+    /// the same mistake that
+    /// [`a_fit_that_shrinks_the_payload_keeps_the_cell_span`] guards for the
+    /// Kitty writer.
+    #[test]
+    fn an_iterm2_fit_that_shrinks_the_payload_keeps_the_cell_span() {
+        let fixture = photograph_fixture();
+
+        let generous = iterm2_arguments_of(&fixture, PayloadBudget::UNLIMITED);
+        let tight = iterm2_arguments_of(&fixture, PayloadBudget::of(TEST_PAYLOAD_BUDGET));
+
+        let span = |arguments: &str| -> Vec<String> {
+            arguments
+                .split(';')
+                .filter(|argument| {
+                    argument.starts_with("width=") || argument.starts_with("height=")
+                })
+                .map(String::from)
+                .collect()
+        };
+
+        assert!(
+            !span(&generous).is_empty(),
+            "the test reads nothing unless the command states a cell span, but the arguments are {generous:?}"
+        );
+        assert_eq!(
+            span(&tight),
+            span(&generous),
+            "a picture that spent fewer pixels must span the same cells, but the arguments went from {generous:?} to {tight:?}"
+        );
+
+        // A payload that did not move proves nothing about a span that did not
+        // move either, so the test states that the fit really ran.
+        assert!(
+            iterm2_payload_of(&fixture, PayloadBudget::of(TEST_PAYLOAD_BUDGET))
+                < iterm2_payload_of(&fixture, PayloadBudget::UNLIMITED),
             "the tight budget must really take pixels off the picture"
         );
     }
