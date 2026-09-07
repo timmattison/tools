@@ -480,6 +480,11 @@ fn write_images(
                 columns: Some(columns),
                 rows: Some(1),
             },
+            // A hop graph is `ui::RECENT_WIDTH` cells by one row, which is
+            // nine by one. A cell of 20 pixels by 40 makes that 7200 pixels,
+            // or 28800 characters of raw payload, so it stands far under the
+            // smallest cap that a transport states.
+            payload: termgfx::PayloadBudget::UNLIMITED,
             picture: termgfx::Picture::Frame {
                 id: u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1),
             },

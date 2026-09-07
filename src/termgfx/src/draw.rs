@@ -24,6 +24,7 @@
 //! stream, the caller says which stream, and `ic` hands them the same locked
 //! standard output that it had before.
 
+use std::borrow::Cow;
 use std::io::{self, Write};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -290,6 +291,88 @@ pub struct Budget {
     pub rows: Option<u32>,
 }
 
+/// The characters of payload that one image can spend.
+///
+/// A terminal that carries an image over a network caps what one image can
+/// spend, and a transmission above that cap draws nothing at all. mosh is the
+/// cap that matters in practice, and it bounds each of the three protocols
+/// that this module writes. [`PayloadBudget::MOSH`] names those three caps and
+/// says where each one stands.
+///
+/// The budget bounds the payload that the protocol carries, and the keys in
+/// front of that payload are a few tens of characters. [`PayloadBudget::MOSH`]
+/// leaves room for them.
+///
+/// A picture above the budget is drawn at fewer pixels rather than not at all.
+/// The Kitty protocol and the iTerm2 protocol each state the size of the
+/// picture in character cells, so a smaller pixel count keeps the size that the
+/// picture takes on the screen and loses resolution alone. The Sixel protocol
+/// states its size in pixels and carries no such key, so a Sixel picture that
+/// spends fewer pixels is smaller on the screen as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayloadBudget(usize);
+
+impl PayloadBudget {
+    /// The room that [`PayloadBudget::MOSH`] leaves for the keys of the
+    /// command.
+    ///
+    /// mosh counts the keys and the payload of one command together, so the
+    /// keys come out of the same mebicharacter that the payload spends. A
+    /// Kitty control block runs to about eighty characters, and the arguments
+    /// of the other two protocols are shorter. This room stands far above all
+    /// three, because a picture that loses four kibicharacters of resolution
+    /// loses nothing a reader can see.
+    const CONTROL_BLOCK_ROOM: usize = 4096;
+
+    /// The budget of a mosh session.
+    ///
+    /// mosh caps one image at one mebicharacter, and the cap is the same
+    /// number for each of the three protocols that this module writes. The
+    /// three numbers stand in `timmattison/mosh-rs` at commit `5676142`
+    /// (<https://github.com/timmattison/mosh-rs>):
+    ///
+    /// * Kitty: `MAXIMUM_STORED_CHARACTERS` of
+    ///   `crates/mosh-terminal/src/imagestore.rs`. `ImageStore::hold` refuses a
+    ///   transmission above it with [`crate::Refusal`] `ENOSPC`, and it counts
+    ///   `control.len() + payload.len()`. The store holds every image it
+    ///   accepted under that same number for the length of the session, and it
+    ///   evicts the oldest images to make room for a new one.
+    /// * iTerm2: `MAXIMUM_INLINE_IMAGE_CHARACTERS` of
+    ///   `crates/mosh-terminal/src/dispatcher.rs`. The protocol carries a whole
+    ///   image in one operating system command, and mosh drops every character
+    ///   of that command above the cap.
+    /// * Sixel: `MAXIMUM_SIXEL_STRING_CHARACTERS` of the same file, which
+    ///   bounds one device-control string in the same way.
+    pub const MOSH: Self = Self(1024 * 1024 - Self::CONTROL_BLOCK_ROOM);
+
+    /// The budget of a terminal that states no cap of its own.
+    pub const UNLIMITED: Self = Self(usize::MAX);
+
+    /// A budget of `characters`.
+    ///
+    /// # Arguments
+    /// * `characters` - The characters of payload that one image can spend.
+    #[must_use]
+    pub const fn of(characters: usize) -> Self {
+        Self(characters)
+    }
+
+    /// Whether a payload of `characters` fits inside this budget.
+    ///
+    /// # Arguments
+    /// * `characters` - The characters that the encoder made.
+    #[must_use]
+    const fn holds(self, characters: usize) -> bool {
+        characters <= self.0
+    }
+
+    /// The characters that this budget allows.
+    #[must_use]
+    const fn characters(self) -> usize {
+        self.0
+    }
+}
+
 /// Where the cursor stands when the image is written.
 ///
 /// No image protocol promises a position of the cursor, and each renderer
@@ -349,6 +432,8 @@ pub enum Picture {
 pub struct Request {
     /// How much of the terminal the image can take.
     pub budget: Budget,
+    /// How many characters of payload the image can spend.
+    pub payload: PayloadBudget,
     /// Whether the run draws one picture or one frame of many.
     pub picture: Picture,
     /// Where the cursor stands when the image is written.
@@ -549,8 +634,10 @@ fn cursor_contract(
 /// and the two cost very different numbers of characters. Base64 turns three
 /// bytes into four characters, and three bytes is one pixel, so raw pixels cost
 /// four characters for every pixel: 580800 characters for a photograph of 330
-/// pixels by 440. Mosh gives a whole session less than half of that, so such a
-/// picture never arrives. A PNG of the same photograph costs a fraction of it.
+/// pixels by 440. A mosh session holds 1048576 characters of image, so one such
+/// picture takes over half of that store. A photograph of twice the pixels
+/// costs more than the whole store, and it never arrives. A PNG of the same
+/// photograph costs a fraction of it.
 ///
 /// The variant owns the `f=` key, the keys that state the pixel size, and the
 /// encoder, all three together. One place therefore decides the header and the
@@ -637,6 +724,114 @@ impl KittyPayload {
     }
 }
 
+/// The attempts that [`fit_to_payload_budget`] takes before it gives up.
+///
+/// Every attempt divides the pixel count by the amount that the last one
+/// missed by, so a payload that is a hundred times too large reaches the
+/// budget in two. Six is far past what any real picture needs, and it bounds
+/// the encoder runs of one draw whatever a future encoder does with the size.
+const MAXIMUM_FIT_ATTEMPTS: usize = 6;
+
+/// The share of the budget that one attempt of [`fit_to_payload_budget`] aims
+/// at.
+///
+/// A payload is not exactly linear in the pixel count, so an attempt that
+/// aimed at the whole budget would land a little above it about half the time
+/// and cost a second encoder run. Aiming a little under it costs a few pixels
+/// that nobody can see.
+const FIT_SAFETY: f64 = 0.95;
+
+/// Shrink `image` until `encode` gives a payload that `budget` holds.
+///
+/// The payload of every shape this crate writes grows with the pixel count, so
+/// an attempt that misses by a factor divides both sides by the square root of
+/// that factor. Raw pixels and a PNM file are exactly linear, so they land in
+/// one attempt. A PNG is not, because its size comes off the content as well,
+/// so it takes two or three.
+///
+/// The picture keeps the size that it takes on the screen. The Kitty protocol
+/// and the iTerm2 protocol state that size in character cells, beside the
+/// payload, so a smaller pixel count loses resolution alone. The Sixel
+/// protocol carries no such key, so a Sixel picture gets smaller.
+///
+/// # Arguments
+/// * `image` - The picture at the size the display bounds gave it.
+/// * `budget` - The characters of payload that the picture can spend.
+/// * `encode` - The encoder of the protocol that this picture travels in.
+///
+/// # Returns
+/// The picture that the payload came off, and that payload. The picture comes
+/// back untouched when it already fits, so a draw inside the budget costs no
+/// resize at all.
+///
+/// A picture that cannot reach the budget comes back at the smallest size the
+/// fit could reach, with the payload that size made. Drawing nothing is the
+/// one outcome that helps nobody, and the terminal still answers for what it
+/// refused.
+///
+/// # Errors
+/// Gives the error of the first call to `encode` that fails.
+fn fit_to_payload_budget<'a, F>(
+    image: Cow<'a, DynamicImage>,
+    budget: PayloadBudget,
+    encode: F,
+) -> Result<(Cow<'a, DynamicImage>, String), DrawError>
+where
+    F: Fn(&DynamicImage) -> Result<String, DrawError>,
+{
+    let mut picture = image;
+    let mut payload = encode(&picture)?;
+
+    for _ in 0..MAXIMUM_FIT_ATTEMPTS {
+        if budget.holds(payload.len()) {
+            break;
+        }
+
+        let Some(smaller) = shrink_towards(&picture, budget, payload.len()) else {
+            break;
+        };
+
+        picture = Cow::Owned(smaller);
+        payload = encode(&picture)?;
+    }
+
+    Ok((picture, payload))
+}
+
+/// Give `image` at the size that aims at `budget`, or [`None`] when no smaller
+/// size is left to try.
+///
+/// # Arguments
+/// * `image` - The picture that spent too much.
+/// * `budget` - The characters of payload that the picture can spend.
+/// * `spent` - The characters that the picture spent.
+///
+/// # Returns
+/// [`None`] when the arithmetic asks for a size that is not smaller than the
+/// one it got, which is what a picture at one pixel by one gives. That answer
+/// ends the loop, so a budget that no size reaches cannot spin.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a scale in (0.0, 1.0] of an image dimension stays non-negative and inside u32"
+)]
+fn shrink_towards(
+    image: &DynamicImage,
+    budget: PayloadBudget,
+    spent: usize,
+) -> Option<DynamicImage> {
+    let scale = ((budget.characters() as f64 / spent as f64) * FIT_SAFETY).sqrt();
+    let width = ((f64::from(image.width()) * scale).round() as u32).max(1);
+    let height = ((f64::from(image.height()) * scale).round() as u32).max(1);
+
+    if width >= image.width() && height >= image.height() {
+        return None;
+    }
+
+    Some(image.resize(width, height, FilterType::Lanczos3))
+}
+
 /// Write an image with the Kitty graphics protocol.
 ///
 /// The command is `ESC _ G <key>=<value>,... ; <base64 data> ESC \`. A large
@@ -668,10 +863,11 @@ impl KittyPayload {
 ///
 /// [`Picture::Still`] is one still picture, and it travels as a PNG.
 /// Raw pixels cost four base64 characters for every pixel, so a photograph of
-/// 330 pixels by 440 costs 580800 characters that way. Mosh gives a whole
-/// session less than half of that, and the picture then never arrives. A still
-/// picture goes out one time, so the characters are the whole of what it pays,
-/// and a PNG of it costs a fraction of the raw pixels.
+/// 330 pixels by 440 costs 580800 characters that way. That is over half of the
+/// 1048576 characters that a mosh session holds, and a photograph of twice the
+/// pixels never arrives at all. A still picture goes out one time, so the
+/// characters are the whole of what it pays, and a PNG of it costs a fraction
+/// of the raw pixels.
 ///
 /// [`Picture::Frame`] is one frame of many, and it keeps the raw pixels. The
 /// caller draws the next frame directly after this one, so a PNG encoder here
@@ -728,7 +924,15 @@ fn write_kitty<W: Write>(
         Picture::Frame { .. } => KittyPayload::RawRgb,
         Picture::Still => KittyPayload::Png,
     };
-    let base64_data = payload.encode(&image)?;
+
+    // The downscale above bounds the picture by the screen. This bounds it by
+    // the characters that the transport carries, which is a second bound and
+    // not the same one: mosh caps one transmission at one mebicharacter, and a
+    // window of more than about 51 columns by 23 makes a frame above that cap.
+    // `c=` and `r=` below still state the cell span that the screen gave, so
+    // the picture keeps its size there and loses resolution alone.
+    let (image, base64_data) =
+        fit_to_payload_budget(image, request.payload, |picture| payload.encode(picture))?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -846,16 +1050,23 @@ fn write_sixel<W: Write>(
 
     // The encoder takes the pixels at the size they draw at, so the image goes
     // to that exact size, up or down.
-    let resized = image.resize_exact(final_width, final_height, FilterType::Lanczos3);
-    let rgba = resized.to_rgba8();
+    let resized = Cow::Owned(image.resize_exact(final_width, final_height, FilterType::Lanczos3));
 
-    let payload = sixel_encode(
-        rgba.as_raw(),
-        resized.width() as usize,
-        resized.height() as usize,
-        &EncodeOptions::default(),
-    )
-    .map_err(|error| DrawError::Encode(error.to_string()))?;
+    // Sixel states its size in pixels and carries no key for a cell span, so a
+    // picture that spends fewer pixels is smaller on the screen as well. That
+    // is the whole of what the protocol allows, and a smaller picture beats the
+    // empty screen that a refused transmission leaves.
+    let (resized, payload) = fit_to_payload_budget(resized, request.payload, |picture| {
+        let rgba = picture.to_rgba8();
+
+        sixel_encode(
+            rgba.as_raw(),
+            picture.width() as usize,
+            picture.height() as usize,
+            &EncodeOptions::default(),
+        )
+        .map_err(|error| DrawError::Encode(error.to_string()))
+    })?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -918,13 +1129,19 @@ fn write_iterm2<W: Write>(
         cell_height_px,
     );
 
-    let rgb = image.to_rgb8();
-    let rgb_data = rgb.as_raw();
-    let pnm_header = format!("P6\n{} {}\n255\n", image.width(), image.height());
-    let mut pnm_data = Vec::with_capacity(pnm_header.len() + rgb_data.len());
-    pnm_data.extend_from_slice(pnm_header.as_bytes());
-    pnm_data.extend_from_slice(rgb_data);
-    let base64_data = BASE64_STANDARD.encode(&pnm_data);
+    // `width=` and `height=` below state the cell span, so a picture that spends
+    // fewer pixels keeps the size it takes on the screen. A PNM file is exactly
+    // linear in the pixel count, so the fit lands in one attempt.
+    let (image, base64_data) = fit_to_payload_budget(image, request.payload, |picture| {
+        let rgb = picture.to_rgb8();
+        let rgb_data = rgb.as_raw();
+        let pnm_header = format!("P6\n{} {}\n255\n", picture.width(), picture.height());
+        let mut pnm_data = Vec::with_capacity(pnm_header.len() + rgb_data.len());
+        pnm_data.extend_from_slice(pnm_header.as_bytes());
+        pnm_data.extend_from_slice(rgb_data);
+
+        Ok(BASE64_STANDARD.encode(&pnm_data))
+    })?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -971,6 +1188,7 @@ mod tests {
                 columns: Some(10),
                 rows: Some(5),
             },
+            payload: PayloadBudget::UNLIMITED,
             picture: Picture::Still,
             cursor: Cursor::BelowImage,
             preserve_aspect: true,
@@ -1007,21 +1225,233 @@ mod tests {
     /// than the raw pixels it came from, so a test built on it would measure the
     /// one input that this change cannot help.
     fn photograph_fixture() -> DynamicImage {
-        DynamicImage::ImageRgb8(image::RgbImage::from_fn(
-            PHOTOGRAPH_WIDTH,
-            PHOTOGRAPH_HEIGHT,
-            |x, y| {
-                let grain = (x * 7 + y * 13) % 5;
+        photograph_of(PHOTOGRAPH_WIDTH, PHOTOGRAPH_HEIGHT)
+    }
 
-                image::Rgb([
-                    channel(x * 200 / (PHOTOGRAPH_WIDTH - 1) + grain),
-                    channel(y * 180 / (PHOTOGRAPH_HEIGHT - 1) + 40 + grain),
-                    channel(
-                        (x + y) * 150 / (PHOTOGRAPH_WIDTH + PHOTOGRAPH_HEIGHT - 2) + 60 + grain,
-                    ),
-                ])
-            },
-        ))
+    /// A picture of `width` pixels by `height` that resembles a photograph.
+    ///
+    /// # Arguments
+    /// * `width` - The width in pixels, which must be above one.
+    /// * `height` - The height in pixels, which must be above one.
+    fn photograph_of(width: u32, height: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
+            let grain = (x * 7 + y * 13) % 5;
+
+            image::Rgb([
+                channel(x * 200 / (width - 1) + grain),
+                channel(y * 180 / (height - 1) + 40 + grain),
+                channel((x + y) * 150 / (width + height - 2) + 60 + grain),
+            ])
+        }))
+    }
+
+    /// The characters that mosh holds for one transmission.
+    ///
+    /// `MAXIMUM_STORED_CHARACTERS` of `crates/mosh-terminal/src/imagestore.rs`,
+    /// which `ImageStore::hold` tests against `control.len() + payload.len()`.
+    /// A transmission above it earns `ENOSPC` and draws nothing. The file
+    /// stands in `timmattison/mosh-rs` at commit `5676142`
+    /// (<https://github.com/timmattison/mosh-rs>).
+    const MOSH_STORE_CHARACTERS: usize = 1024 * 1024;
+
+    /// The side of the picture that the mosh budget test fits.
+    ///
+    /// Raw pixels cost four characters each, so this picture costs 1440000 and
+    /// stands well above [`PayloadBudget::MOSH`]. A picture under the budget
+    /// would leave the fit unrun and the test measuring nothing.
+    const OVER_BUDGET_SIDE: u32 = 600;
+
+    /// The characters of payload that the budget tests allow.
+    ///
+    /// It stands far under the payload of the fixture on any terminal that
+    /// runs this suite, so the fit has to do real work whatever cell the
+    /// window reports. It also stands far above the floor that
+    /// [`fit_to_payload_budget`] stops at, so a fit that ends at the floor
+    /// cannot pass the test by accident.
+    const TEST_PAYLOAD_BUDGET: usize = 4096;
+
+    /// The share of the payload of an unfitted picture that the Sixel budget
+    /// test allows.
+    ///
+    /// [`TEST_PAYLOAD_BUDGET`] does not serve the Sixel path, for two reasons.
+    /// The Sixel writer resizes the picture to the window before the fit runs,
+    /// so the payload that the fit starts from moves with the cell size that
+    /// the window of the runner reports. A Sixel payload also falls far slower
+    /// than the pixel count, so [`fit_to_payload_budget`] needs more than
+    /// [`MAXIMUM_FIT_ATTEMPTS`] attempts to reach a budget far under the
+    /// payload it starts from.
+    ///
+    /// A share holds against both. It states a budget under the payload of the
+    /// picture at every cell size, so the fit always runs, and it keeps that
+    /// budget near enough for the fit to reach it. A measurement on 2026-09-07
+    /// swept the pictures that a cell of 6 pixels through a cell of 48 makes. A
+    /// share of 90 reaches the budget on every one of them. A share of 85
+    /// misses it at a cell of 7 pixels.
+    const SIXEL_PAYLOAD_BUDGET_SHARE: usize = 90;
+
+    /// The characters of payload that one Kitty command carries.
+    ///
+    /// This is the count that mosh keeps: it joins every chunk of one
+    /// transmission and holds the whole of it. So the test measures the payload
+    /// rather than the bytes of the command, and the chunk headers and the keys
+    /// stay out of the number.
+    ///
+    /// # Arguments
+    /// * `command` - The bytes that a writer wrote, as text.
+    fn kitty_payload_characters(command: &str) -> usize {
+        command
+            .split("\x1b_G")
+            .skip(1)
+            .filter_map(|block| block.split_once(';'))
+            .map(|(_keys, rest)| rest.split("\x1b\\").next().unwrap_or_default().len())
+            .sum()
+    }
+
+    /// Draw `image` on a Kitty terminal inside `budget` and give back the
+    /// characters of payload that reached the stream.
+    ///
+    /// The cursor is [`Cursor::Held`], which writes nothing around the command,
+    /// so the count does not move with the window of whoever runs the suite.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `picture` - Whether the picture travels as one still or as one frame.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn kitty_payload_of(image: &DynamicImage, picture: Picture, budget: PayloadBudget) -> usize {
+        let request = Request {
+            payload: budget,
+            picture,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::Kitty, true, true)
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+
+        kitty_payload_characters(&String::from_utf8(out).expect("a Kitty command is ASCII"))
+    }
+
+    /// Draw `image` on a Kitty terminal inside `budget` and give back the keys
+    /// of the opening command, which is the part between `ESC _ G` and the
+    /// first semicolon.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `picture` - Whether the picture travels as one still or as one frame.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn kitty_keys_of(image: &DynamicImage, picture: Picture, budget: PayloadBudget) -> String {
+        let request = Request {
+            payload: budget,
+            picture,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::Kitty, true, true)
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+
+        let command = String::from_utf8(out).expect("a Kitty command is ASCII");
+        let (keys, _payload) = command
+            .split_once(';')
+            .expect("a Kitty command holds a semicolon between the keys and the payload");
+
+        String::from(keys)
+    }
+
+    /// Draw `image` on a Sixel terminal inside `budget` and give back the
+    /// characters of payload that reached the stream.
+    ///
+    /// The Sixel writer writes the device control string of the encoder and
+    /// nothing else, so the bytes of the stream are the payload.
+    ///
+    /// The cursor is [`Cursor::Held`], which writes nothing around the command,
+    /// so the count does not move with the window of whoever runs the suite.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn sixel_payload_of(image: &DynamicImage, budget: PayloadBudget) -> usize {
+        let request = Request {
+            payload: budget,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::Zellij, true, true)
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+
+        out.len()
+    }
+
+    /// Draw `image` on an iTerm2 terminal inside `budget` and give back the
+    /// command that reached the stream.
+    ///
+    /// The command is `ESC ] 1337 ; File = <arguments> : <base64 data> BEL`.
+    ///
+    /// The cursor is [`Cursor::Held`], which writes nothing around the command,
+    /// so the command stands alone whatever the window of the runner reports.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn iterm2_command_of(image: &DynamicImage, budget: PayloadBudget) -> String {
+        let request = Request {
+            payload: budget,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::ITerm2, true, true)
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+
+        String::from_utf8(out).expect("an iTerm2 command is ASCII")
+    }
+
+    /// Draw `image` on an iTerm2 terminal inside `budget` and give back the
+    /// characters of payload that reached the stream.
+    ///
+    /// The payload is the base64 run between the last colon of the command and
+    /// the BEL that closes it. Base64 carries no colon, so the last colon is
+    /// the one that opens the payload. The arguments stay out of the number,
+    /// as they do for a Kitty command in [`kitty_payload_characters`].
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn iterm2_payload_of(image: &DynamicImage, budget: PayloadBudget) -> usize {
+        let command = iterm2_command_of(image, budget);
+        let (_arguments, payload) = command
+            .rsplit_once(':')
+            .expect("an iTerm2 command holds a colon between the arguments and the payload");
+
+        payload.trim_end_matches('\x07').len()
+    }
+
+    /// Draw `image` on an iTerm2 terminal inside `budget` and give back the
+    /// arguments of the command, which is the part between `File=` and the
+    /// last colon.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn iterm2_arguments_of(image: &DynamicImage, budget: PayloadBudget) -> String {
+        let command = iterm2_command_of(image, budget);
+        let (_introducer, arguments_and_payload) = command
+            .split_once("File=")
+            .expect("an iTerm2 command holds `File=` before its arguments");
+        let (arguments, _payload) = arguments_and_payload
+            .rsplit_once(':')
+            .expect("an iTerm2 command holds a colon between the arguments and the payload");
+
+        String::from(arguments)
     }
 
     /// The Kitty graphics command that takes every image off the screen. The
@@ -1099,11 +1529,12 @@ mod tests {
 
     #[test]
     fn a_still_picture_travels_as_a_png() {
-        // Raw pixels cost four base64 characters for every pixel, and mosh
-        // gives a whole session fewer characters than one photograph costs that
-        // way, so the picture never arrives. `f=100` names a PNG instead, and a
-        // Kitty terminal then reads the width and the height out of the PNG
-        // itself. The header must carry no `s=` key and no `v=` key beside it.
+        // Raw pixels cost four base64 characters for every pixel, and a mosh
+        // session holds 1048576 characters of image, so one photograph takes
+        // over half of that store and a photograph of twice the pixels never
+        // arrives. `f=100` names a PNG instead, and a Kitty terminal then reads
+        // the width and the height out of the PNG itself. The header must carry
+        // no `s=` key and no `v=` key beside it.
         let control_data = kitty_still_control_data();
 
         assert!(
@@ -1139,6 +1570,294 @@ mod tests {
         assert!(
             control_data.contains(",v=1"),
             "raw pixels state no height, so the keys must state it, but they are {control_data:?}"
+        );
+    }
+
+    /// A frame above the budget comes back inside it.
+    ///
+    /// A frame keeps the raw pixels, so its payload is exactly four characters
+    /// for every pixel. mosh caps one transmission at one mebicharacter, which
+    /// is 262144 pixels, or a window of about 51 columns by 23. Every larger
+    /// window drew no frame at all.
+    #[test]
+    fn a_frame_above_the_payload_budget_comes_back_inside_it() {
+        let spent = kitty_payload_of(
+            &photograph_fixture(),
+            Picture::Frame {
+                id: TEST_PLACEMENT_ID,
+            },
+            PayloadBudget::of(TEST_PAYLOAD_BUDGET),
+        );
+
+        assert!(
+            spent <= TEST_PAYLOAD_BUDGET,
+            "a frame must spend at most {TEST_PAYLOAD_BUDGET} characters, but it spent {spent}"
+        );
+        assert!(
+            spent > 0,
+            "a frame that spends nothing drew nothing, which is the failure this repairs"
+        );
+    }
+
+    /// A still picture above the budget comes back inside it.
+    ///
+    /// A still travels as a PNG, whose size comes off the content and not off
+    /// the pixel count alone, so the fit measures the encoder rather than
+    /// solving for a size.
+    #[test]
+    fn a_still_picture_above_the_payload_budget_comes_back_inside_it() {
+        let spent = kitty_payload_of(
+            &photograph_fixture(),
+            Picture::Still,
+            PayloadBudget::of(TEST_PAYLOAD_BUDGET),
+        );
+
+        assert!(
+            spent <= TEST_PAYLOAD_BUDGET,
+            "a still must spend at most {TEST_PAYLOAD_BUDGET} characters, but it spent {spent}"
+        );
+        assert!(
+            spent > 0,
+            "a still that spends nothing drew nothing, which is the failure this repairs"
+        );
+    }
+
+    /// A Sixel picture above the budget comes back inside it.
+    ///
+    /// The green commit that made the fit wired it into all three writers, and
+    /// this test holds the Sixel one. A Sixel picture states its size in pixels
+    /// and carries no key for a cell span, so the fit takes room off the
+    /// picture as well as resolution. That is the whole of what the protocol
+    /// allows, and a smaller picture beats the empty screen that a refused
+    /// transmission leaves.
+    ///
+    /// [`SIXEL_PAYLOAD_BUDGET_SHARE`] says why the budget is a share of the
+    /// payload of the picture and not a count of characters.
+    #[test]
+    fn a_sixel_picture_above_the_payload_budget_comes_back_inside_it() {
+        let fixture = photograph_fixture();
+        let whole = sixel_payload_of(&fixture, PayloadBudget::UNLIMITED);
+        let budget = whole * SIXEL_PAYLOAD_BUDGET_SHARE / 100;
+        let spent = sixel_payload_of(&fixture, PayloadBudget::of(budget));
+
+        assert!(
+            budget < whole,
+            "the budget must stand under the payload of the picture, or the fit never runs and this test measures nothing"
+        );
+        assert!(
+            spent <= budget,
+            "a Sixel picture must spend at most {budget} characters, but it spent {spent}"
+        );
+        assert!(
+            spent > 0,
+            "a Sixel picture that spends nothing drew nothing, which is the failure this repairs"
+        );
+    }
+
+    /// An iTerm2 picture above the budget comes back inside it.
+    ///
+    /// The green commit that made the fit wired it into all three writers, and
+    /// this test holds the iTerm2 one. An iTerm2 picture travels as a PNM file,
+    /// which is exactly linear in the pixel count, so the fit lands in one
+    /// attempt.
+    #[test]
+    fn an_iterm2_picture_above_the_payload_budget_comes_back_inside_it() {
+        let spent = iterm2_payload_of(
+            &photograph_fixture(),
+            PayloadBudget::of(TEST_PAYLOAD_BUDGET),
+        );
+
+        assert!(
+            spent <= TEST_PAYLOAD_BUDGET,
+            "an iTerm2 picture must spend at most {TEST_PAYLOAD_BUDGET} characters, but it spent {spent}"
+        );
+        assert!(
+            spent > 0,
+            "an iTerm2 picture that spends nothing drew nothing, which is the failure this repairs"
+        );
+    }
+
+    /// A picture fitted for mosh fits the store that mosh keeps, keys and all.
+    ///
+    /// [`PayloadBudget::MOSH`] bounds the payload alone, and mosh counts the
+    /// control block with it. So the room that the budget leaves has to be real
+    /// room, measured against the keys of a real command, and not a number that
+    /// looks generous.
+    ///
+    /// Two assertions carry that, and they catch two different mistakes.
+    /// The budget against the store catches a budget with no room in it for
+    /// the keys, and it reads the budget rather than the fit, because
+    /// [`FIT_SAFETY`] leaves five percent of its own and would hide a thin
+    /// allowance. The fitted payload against the store catches a budget raised
+    /// above the store itself.
+    ///
+    /// Both mutations were measured on 2026-09-07. A `MOSH` of one
+    /// mebicharacter fails the first, and a `MOSH` of two fails the second.
+    /// Every other test here states a budget of its own and passes with either
+    /// mistake in place.
+    #[test]
+    fn a_picture_fitted_for_mosh_fits_the_store_that_mosh_keeps() {
+        let picture = photograph_of(OVER_BUDGET_SIDE, OVER_BUDGET_SIDE);
+        let whole = KittyPayload::RawRgb
+            .encode(&picture)
+            .expect("raw pixels reach base64 with no encoder that can refuse them");
+
+        let (_fitted, payload) =
+            fit_to_payload_budget(Cow::Borrowed(&picture), PayloadBudget::MOSH, |image| {
+                KittyPayload::RawRgb.encode(image)
+            })
+            .expect("raw pixels reach base64 with no encoder that can refuse them");
+
+        assert!(
+            whole.len() > MOSH_STORE_CHARACTERS,
+            "the fixture must stand above the store, or the fit never runs and this test measures nothing"
+        );
+        assert!(
+            payload.len() < whole.len(),
+            "the fit must really take pixels off a picture that stands above the budget"
+        );
+
+        let keys = kitty_keys_of(
+            &picture,
+            Picture::Frame {
+                id: TEST_PLACEMENT_ID,
+            },
+            PayloadBudget::MOSH,
+        );
+        // The budget itself has to leave room for the keys, whatever the fit
+        // does with it. A payload that spends the whole budget is the payload
+        // that a picture just above it produces.
+        let allowed = PayloadBudget::MOSH.characters() + keys.len();
+        assert!(
+            allowed <= MOSH_STORE_CHARACTERS,
+            "mosh holds the keys and the payload together, and the budget plus the keys of a real command come to {allowed}, which is above {MOSH_STORE_CHARACTERS}"
+        );
+
+        let held = payload.len() + keys.len();
+        assert!(
+            held <= MOSH_STORE_CHARACTERS,
+            "mosh holds the keys and the payload together, and the two come to {held}, which is above {MOSH_STORE_CHARACTERS}"
+        );
+    }
+
+    /// The fit takes resolution off a picture and takes no room off it.
+    ///
+    /// `c=` and `r=` state how many cells the picture spans, and the terminal
+    /// scales the pixels it got into them. So the keys come off the screen
+    /// bounds, ahead of the fit, and a picture that spends fewer pixels holds
+    /// the size that the user sees.
+    ///
+    /// A fit that derived those keys from the pixels it ended at would shrink
+    /// the picture on the screen instead, which is the mistake this guards.
+    #[test]
+    fn a_fit_that_shrinks_the_payload_keeps_the_cell_span() {
+        let fixture = photograph_fixture();
+        let frame = Picture::Frame {
+            id: TEST_PLACEMENT_ID,
+        };
+
+        let generous = kitty_keys_of(&fixture, frame, PayloadBudget::UNLIMITED);
+        let tight = kitty_keys_of(&fixture, frame, PayloadBudget::of(TEST_PAYLOAD_BUDGET));
+
+        let span = |keys: &str| -> Vec<String> {
+            keys.split(',')
+                .filter(|key| key.starts_with("c=") || key.starts_with("r="))
+                .map(String::from)
+                .collect()
+        };
+
+        assert!(
+            !span(&generous).is_empty(),
+            "the test reads nothing unless the command states a cell span, but the keys are {generous:?}"
+        );
+        assert_eq!(
+            span(&tight),
+            span(&generous),
+            "a picture that spent fewer pixels must span the same cells, but the keys went from {generous:?} to {tight:?}"
+        );
+
+        // A payload that did not move proves nothing about a span that did not
+        // move either, so the test states that the fit really ran.
+        assert!(
+            kitty_payload_of(&fixture, frame, PayloadBudget::of(TEST_PAYLOAD_BUDGET))
+                < kitty_payload_of(&fixture, frame, PayloadBudget::UNLIMITED),
+            "the tight budget must really take pixels off the picture"
+        );
+    }
+
+    /// The fit takes resolution off an iTerm2 picture and takes no room off it.
+    ///
+    /// `width=` and `height=` state how many cells the picture spans, and the
+    /// terminal scales the pixels it got into them. So the arguments come off
+    /// the screen bounds, ahead of the fit, and a picture that spends fewer
+    /// pixels holds the size that the user sees.
+    ///
+    /// A fit that takes those arguments off the pixels it ended at shrinks the
+    /// picture on the screen instead, which is the mistake this guards. It is
+    /// the same mistake that
+    /// [`a_fit_that_shrinks_the_payload_keeps_the_cell_span`] guards for the
+    /// Kitty writer.
+    #[test]
+    fn an_iterm2_fit_that_shrinks_the_payload_keeps_the_cell_span() {
+        let fixture = photograph_fixture();
+
+        let generous = iterm2_arguments_of(&fixture, PayloadBudget::UNLIMITED);
+        let tight = iterm2_arguments_of(&fixture, PayloadBudget::of(TEST_PAYLOAD_BUDGET));
+
+        let span = |arguments: &str| -> Vec<String> {
+            arguments
+                .split(';')
+                .filter(|argument| {
+                    argument.starts_with("width=") || argument.starts_with("height=")
+                })
+                .map(String::from)
+                .collect()
+        };
+
+        assert!(
+            !span(&generous).is_empty(),
+            "the test reads nothing unless the command states a cell span, but the arguments are {generous:?}"
+        );
+        assert_eq!(
+            span(&tight),
+            span(&generous),
+            "a picture that spent fewer pixels must span the same cells, but the arguments went from {generous:?} to {tight:?}"
+        );
+
+        // A payload that did not move proves nothing about a span that did not
+        // move either, so the test states that the fit really ran.
+        assert!(
+            iterm2_payload_of(&fixture, PayloadBudget::of(TEST_PAYLOAD_BUDGET))
+                < iterm2_payload_of(&fixture, PayloadBudget::UNLIMITED),
+            "the tight budget must really take pixels off the picture"
+        );
+    }
+
+    /// A picture under the budget is left alone.
+    ///
+    /// The fit must not cost a picture that already fits one pixel of
+    /// resolution, and `UNLIMITED` must reach the encoder unchanged.
+    #[test]
+    fn a_picture_under_the_payload_budget_keeps_every_pixel() {
+        let fixture = photograph_fixture();
+        let generous = kitty_payload_of(
+            &fixture,
+            Picture::Frame {
+                id: TEST_PLACEMENT_ID,
+            },
+            PayloadBudget::UNLIMITED,
+        );
+        let ample = kitty_payload_of(
+            &fixture,
+            Picture::Frame {
+                id: TEST_PLACEMENT_ID,
+            },
+            PayloadBudget::of(generous),
+        );
+
+        assert_eq!(
+            ample, generous,
+            "a budget that the picture already fits must take no pixel off it"
         );
     }
 

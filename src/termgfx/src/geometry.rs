@@ -275,6 +275,16 @@ fn cells_to_pixels(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> (u32, u32)
 /// [`cell_pixels_or_estimate_of`] measured. This function works in terminal
 /// character cells, not pixels.
 ///
+/// **One bound is enough.** A caller that states one axis and leaves the other
+/// open gets both axes back, because the aspect ratio decides the open one.
+/// That is what a caller means by one bound, and it is what the [`Budget`] of
+/// [`crate::draw`] promises. It also matters to the payload: an open axis
+/// stops [`downscale_to_display_pixels`] from resizing at all, so an open axis
+/// that survived this call sent the whole picture at its original resolution.
+///
+/// A caller that turns `preserve_aspect` off states every axis it wants, so an
+/// open axis stays open there. There is no ratio left to decide it with.
+///
 /// The casts from f64 to u32 are intentional - display dimensions are always positive
 /// and will never exceed u32::MAX for any reasonable terminal size.
 #[must_use]
@@ -296,9 +306,11 @@ pub(crate) fn calculate_aspect_preserving_size(
         return (max_width, max_height);
     }
 
-    // Guard against division by zero. Valid images always have height > 0,
-    // but we handle this defensively to avoid panics on malformed input.
-    if img_height == 0 {
+    // The arms below divide by the height of the image and by its aspect
+    // ratio, and an axis of zero pixels makes each of those divisors zero. A
+    // valid image has a width and a height above zero on both axes, but a
+    // malformed one comes back with the bounds of the caller unchanged.
+    if img_width == 0 || img_height == 0 {
         return (max_width, max_height);
     }
 
@@ -322,8 +334,26 @@ pub(crate) fn calculate_aspect_preserving_size(
                 (Some(display_width.max(1)), Some(display_height))
             }
         }
-        (Some(w), None) => (Some(w), None),
-        (None, Some(h)) => (None, Some(h)),
+        // One bound is enough. The aspect ratio decides the other axis, and
+        // the two expressions below are the two branches above with the box
+        // taken out of them, so one bound and two bounds agree whenever the
+        // same axis constrains the picture.
+        //
+        // The open axis used to come back open, and `downscale_to_display_pixels`
+        // resizes nothing at all for an open axis, so `ic --width 90` sent the
+        // whole picture at its original resolution.
+        (Some(max_w), None) => {
+            let img_aspect = img_width as f64 / img_height as f64;
+            let display_height = ((max_w as f64 / img_aspect) / cell_aspect).round() as u32;
+            (Some(max_w), Some(display_height.max(1)))
+        }
+        (None, Some(max_h)) => {
+            let img_aspect = img_width as f64 / img_height as f64;
+            let display_width = (max_h as f64 * cell_aspect * img_aspect).round() as u32;
+            (Some(display_width.max(1)), Some(max_h))
+        }
+        // Neither axis bound means the picture draws at its own pixel size,
+        // which is what the `Budget` doc states. There is no box to fit it to.
         (None, None) => (None, None),
     }
 }
@@ -764,6 +794,23 @@ mod tests {
         assert_eq!(result, (Some(50), Some(50)));
     }
 
+    /// An image of no width states no aspect ratio, and the one-bound arm
+    /// divides by that ratio.
+    ///
+    /// A division by zero gives infinity, and the cast of infinity to `u32`
+    /// gives `u32::MAX`. Both axes then come back bound, so
+    /// [`downscale_to_display_pixels`] no longer stops at its open axis, and
+    /// [`cells_to_pixels`] multiplies `u32::MAX` by the height of the cell.
+    /// The bounds of the caller stand unchanged instead.
+    #[test]
+    fn aspect_preserving_size_survives_a_zero_image_width() {
+        assert_eq!(
+            calculate_aspect_preserving_size(0, 100, Some(50), None, true, TEST_CELL_ASPECT),
+            (Some(50), None),
+            "an image of no width gives no ratio, so the bounds of the caller stand"
+        );
+    }
+
     #[test]
     fn aspect_preserving_square_image_in_square_box() {
         // Square image (100x100) in square box (50x50)
@@ -798,18 +845,53 @@ mod tests {
         assert_eq!(result, (Some(25), Some(50)));
     }
 
+    /// One bound is enough to size an image, because the aspect ratio decides
+    /// the other axis.
+    ///
+    /// The axis that the caller leaves open used to come back open, and
+    /// [`downscale_to_display_pixels`] then resized nothing at all, so a
+    /// caller that stated one bound sent the whole picture at its original
+    /// resolution. `ic --width 90` is that caller.
+    ///
+    /// The answer is the answer that the two-bound case already gives for a
+    /// box that the same axis constrains: an image of 100 pixels by 100 in 50
+    /// columns takes 25 rows, whichever way the caller asks the question.
     #[test]
-    fn aspect_preserving_only_width_specified() {
-        let result =
-            calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT);
-        assert_eq!(result, (Some(50), None));
+    fn one_bound_sizes_the_other_axis_from_the_aspect_ratio() {
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT),
+            (Some(50), Some(25)),
+            "50 columns of a square image take 25 rows in a cell twice as tall as it is wide"
+        );
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true, TEST_CELL_ASPECT),
+            calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT),
+            "the width bound decides this box, so the open row bound changes no answer"
+        );
     }
 
+    /// The same rule the other way round, and the two are not symmetrical.
+    ///
+    /// A row is twice the height of a column here, so 50 rows of a square
+    /// image take 100 columns.
     #[test]
-    fn aspect_preserving_only_height_specified() {
-        let result =
-            calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT);
-        assert_eq!(result, (None, Some(50)));
+    fn one_row_bound_sizes_the_width_from_the_aspect_ratio() {
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT),
+            (Some(100), Some(50)),
+            "50 rows of a square image take 100 columns in a cell twice as tall as it is wide"
+        );
+    }
+
+    /// An open axis stays open when the caller asks for no aspect ratio at
+    /// all, because the caller then states the size itself.
+    #[test]
+    fn one_bound_stays_alone_when_the_caller_wants_no_aspect_ratio() {
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, Some(50), None, false, TEST_CELL_ASPECT),
+            (Some(50), None),
+            "a caller that turned the aspect ratio off states every axis it wants"
+        );
     }
 
     #[test]
