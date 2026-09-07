@@ -24,16 +24,19 @@ The binary will be available at `target/release/ic`.
 ## Usage
 
 ### Display an image file:
+
 ```bash
 ./ic image.png
 ```
 
 ### Display an image with specific width:
+
 ```bash
 ./ic -w 80 image.jpg
 ```
 
 ### Play a video file:
+
 ```bash
 ./ic video.mp4
 ```
@@ -46,21 +49,25 @@ Press `a` to go back 1 second, `d` to go forward 1 second.
 Press `w` to go back 1 minute, `s` to go forward 1 minute.
 
 ### Display an image with specific dimensions:
+
 ```bash
 ./ic -w 80 --height 24 image.gif
 ```
 
 ### Read image from stdin:
+
 ```bash
 cat image.png | ./ic --stdin
 ```
 
 ### Download and display an image:
+
 ```bash
 curl -s https://example.com/image.jpg | ./ic --stdin
 ```
 
 ### Ask whether an image can be displayed here:
+
 ```bash
 ic --will-display && ic image.png
 ```
@@ -171,6 +178,7 @@ it from the environment and asks it nothing. It draws sixel by that name.
 
 A terminal that answers nothing keeps the behavior it had: `ic` names it from
 the environment, and it reports an error for tmux and for mosh.
+
 ### A terminal that refuses a picture
 
 A terminal can read a picture and refuse it. The image store of a mosh session

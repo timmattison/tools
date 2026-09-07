@@ -98,7 +98,11 @@ pub(crate) const IMAGE_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b
 /// [`IMAGE_QUERY`] ends with it, and [`ask_for_a_refusal`] writes it alone.
 const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
 
-/// How long [`ask_the_terminal`] waits for the answer.
+/// How long a reader of the terminal waits for the answer.
+///
+/// Two readers take this budget. [`ask_the_terminal`] waits this long for the
+/// answer to a protocol query. [`ask_for_a_refusal`] waits this long for the
+/// answer that says whether the terminal refused the picture that went before.
 pub(crate) const QUERY_BUDGET: Duration = Duration::from_millis(500);
 
 /// The protocol the answer of a terminal names, or [`None`] for an answer that
@@ -461,8 +465,15 @@ const CONTROLLING_TERMINAL: &str = "/dev/tty";
 
 /// The largest answer this module keeps.
 ///
-/// Every answer of [`IMAGE_QUERY`] is far below this. The cap is here so that
-/// a terminal which writes without stopping cannot grow the buffer.
+/// A refusal is the larger of the two answers this module reads. The terminal
+/// writes a detailed message of its own behind the refusal code, and the
+/// terminal alone decides the length of that message. Every answer of
+/// [`IMAGE_QUERY`] is far below the cap.
+///
+/// The cap is here so that a terminal that does not stop cannot grow the
+/// buffer. It truncates such an answer, and it fails nothing: a refusal longer
+/// than the cap arrives cut short, because [`drain`] stops at the cap, and
+/// [`read_refusal`] then reads a message with no tail.
 const ANSWER_LIMIT: usize = 1024;
 
 /// How much of an answer one read takes.
