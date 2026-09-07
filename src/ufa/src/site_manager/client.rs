@@ -205,7 +205,6 @@ mod tests {
     const A_HOST: &str =
         r#"{"id":"h1","hardwareId":"hw1","type":"console","isBlocked":false,"owner":true}"#;
 
-
     /// The Site Manager API base URL every request is built from.
     fn base_url() -> Url {
         Url::parse("https://api.ui.com/v1/").expect("the base URL is a constant")
