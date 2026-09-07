@@ -1261,11 +1261,7 @@ mod tests {
     /// * `image` - The picture to draw.
     /// * `picture` - Whether the picture travels as one still or as one frame.
     /// * `budget` - The characters of payload that the picture can spend.
-    fn kitty_payload_of(
-        image: &DynamicImage,
-        picture: Picture,
-        budget: PayloadBudget,
-    ) -> usize {
+    fn kitty_payload_of(image: &DynamicImage, picture: Picture, budget: PayloadBudget) -> usize {
         let request = Request {
             payload: budget,
             picture,
