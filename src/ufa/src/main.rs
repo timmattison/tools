@@ -25,6 +25,7 @@ use clap::{Parser, Subcommand};
 use client::UnifiClient;
 use commands::*;
 use config::Config;
+use std::io::Write;
 use uuid::Uuid;
 
 fn parse_bool_env(s: &str) -> Result<bool, String> {
@@ -111,6 +112,56 @@ fn resolve_credential(
             .with_context(|| format!("Failed to read the configured {}", credential.description())),
         _ => anyhow::bail!(credential.missing_message()),
     }
+}
+
+/// Said before the first request whenever certificate verification is off.
+///
+/// The wizard asks about the setting once, at `config.rs`. Every other route
+/// to it — the flag, `UNIFI_INSECURE`, the settings file, or a value already
+/// sitting in the configuration file — used to say nothing at all, so a choice
+/// made once for one self-signed controller stayed silent on every run after
+/// it.
+const INSECURE_WARNING: &str = "warning: TLS certificate verification is off. \
+     ufa sends the API key to the controller over a connection that nobody \
+     checked. To turn the check back on, drop --insecure, UNIFI_INSECURE, and \
+     `insecure` in the configuration file.";
+
+/// Resolve whether to skip TLS certificate verification, and say so when the
+/// answer is yes.
+///
+/// `supplied` is whatever clap parsed for `--insecure`, which already carries
+/// the flag's precedence over `UNIFI_INSECURE` and over the settings file. The
+/// configuration file answers when the command line says nothing, and
+/// verification stays on when neither does.
+///
+/// The warning follows the *resolved* value, so it does not matter which
+/// source set it. This is the one place the value is decided, which is what
+/// makes that true: a caller cannot reach the setting without passing the
+/// notice.
+///
+/// A warning that cannot be written fails the run rather than vanishing. The
+/// alternative is to send the user's API key over an unverified connection
+/// after the one notice about it was lost.
+///
+/// # Arguments
+///
+/// * `supplied` - What the command line and the environment supplied.
+/// * `config` - The configuration file, when there is one.
+/// * `warnings` - Where the notice goes.
+///
+/// # Returns
+///
+/// Whether the client skips certificate verification.
+fn resolve_insecure(
+    supplied: Option<bool>,
+    config: Option<&Config>,
+    _warnings: &mut impl Write,
+) -> Result<bool> {
+    let insecure = supplied
+        .or_else(|| config.and_then(|config| config.insecure))
+        .unwrap_or(false);
+
+    Ok(insecure)
 }
 
 // The connection and output options are `global = true`, so they are accepted
@@ -288,10 +339,7 @@ async fn main() -> Result<()> {
 
     let api_key = resolve_credential(Credential::Controller, args.api_key, file_config.as_ref())?;
 
-    let insecure = args
-        .insecure
-        .or_else(|| file_config.as_ref().and_then(|c| c.insecure))
-        .unwrap_or(false);
+    let insecure = resolve_insecure(args.insecure, file_config.as_ref(), &mut std::io::stderr())?;
 
     let client = UnifiClient::new(&url, &api_key, insecure)?;
 
@@ -585,6 +633,151 @@ mod flag_position_tests {
 
         assert_eq!(args.url.as_deref(), Some("https://leading.example"));
         assert_eq!(args.insecure, Some(true));
+    }
+}
+
+/// Pins the claim that a run with certificate verification off says so,
+/// whatever turned it off.
+///
+/// The wizard asks about the setting once. Every other route to it is silent
+/// unless the notice follows the *resolved* value, so each source below gets
+/// its own case: the flag, the environment variable, and the configuration
+/// file. A notice that only one of them earns is the defect, not the fix.
+#[cfg(test)]
+mod tls_warning_tests {
+    use super::{resolve_insecure, Config, INSECURE_WARNING};
+    use crate::test_support::{parse_args_for_test, ScopedVar};
+
+    /// Resolve `supplied` against `config` and hand back what the user is
+    /// told.
+    ///
+    /// # Arguments
+    ///
+    /// * `supplied` - What the command line and the environment supplied.
+    /// * `config` - The configuration file, when the case has one.
+    ///
+    /// # Returns
+    ///
+    /// Whether verification is skipped, and everything written for the user.
+    fn resolve_and_capture(supplied: Option<bool>, config: Option<&Config>) -> (bool, String) {
+        let mut warnings = Vec::new();
+
+        let insecure = resolve_insecure(supplied, config, &mut warnings)
+            .expect("a warning written to a buffer must succeed");
+
+        (
+            insecure,
+            String::from_utf8(warnings).expect("the warning must be text"),
+        )
+    }
+
+    /// A configuration file that turns verification off.
+    fn config_with_verification_off() -> Config {
+        Config {
+            insecure: Some(true),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn the_flag_earns_the_warning() {
+        let args = parse_args_for_test(["ufa", "info", "--insecure", "true"])
+            .expect("--insecure true must parse");
+
+        let (insecure, warnings) = resolve_and_capture(args.insecure, None);
+
+        assert!(insecure, "--insecure true must turn verification off");
+        assert!(
+            warnings.contains(INSECURE_WARNING),
+            "--insecure must earn the warning, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn the_environment_variable_earns_the_warning() {
+        let _var = ScopedVar::set("UNIFI_INSECURE", "yes");
+        let args = parse_args_for_test(["ufa", "info"]).expect("ufa info must parse");
+
+        let (insecure, warnings) = resolve_and_capture(args.insecure, None);
+
+        assert!(insecure, "UNIFI_INSECURE=yes must turn verification off");
+        assert!(
+            warnings.contains(INSECURE_WARNING),
+            "UNIFI_INSECURE must earn the warning, got {warnings:?}"
+        );
+    }
+
+    /// The quietest route of the three, and the one that lasts: a choice made
+    /// once during setup sits in the configuration file and applies to every
+    /// run after it.
+    #[test]
+    fn the_configuration_file_earns_the_warning() {
+        let (insecure, warnings) = resolve_and_capture(None, Some(&config_with_verification_off()));
+
+        assert!(
+            insecure,
+            "`insecure = true` in the configuration file must turn verification off"
+        );
+        assert!(
+            warnings.contains(INSECURE_WARNING),
+            "the configuration file must earn the warning, got {warnings:?}"
+        );
+    }
+
+    /// The notice follows the resolved value and nothing else, so a flag that
+    /// turns verification back on takes the notice with it.
+    #[test]
+    fn a_flag_that_overrides_the_configuration_file_takes_the_warning_with_it() {
+        let (insecure, warnings) =
+            resolve_and_capture(Some(false), Some(&config_with_verification_off()));
+
+        assert!(
+            !insecure,
+            "--insecure false must beat the configuration file"
+        );
+        assert!(
+            warnings.is_empty(),
+            "a verified connection must say nothing, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_verified_connection_says_nothing() {
+        for (supplied, config) in [
+            (None, None),
+            (Some(false), None),
+            (None, Some(Config::default())),
+            (
+                None,
+                Some(Config {
+                    insecure: Some(false),
+                    ..Config::default()
+                }),
+            ),
+        ] {
+            let (insecure, warnings) = resolve_and_capture(supplied, config.as_ref());
+
+            assert!(!insecure, "verification must stay on");
+            assert!(
+                warnings.is_empty(),
+                "a verified connection must say nothing, got {warnings:?}"
+            );
+        }
+    }
+
+    /// The user has to understand the risk, so the notice names both halves of
+    /// it: the check that is off, and what travels over the connection that
+    /// nobody checked.
+    #[test]
+    fn the_warning_names_the_check_and_the_key() {
+        assert!(
+            INSECURE_WARNING.contains("certificate verification is off"),
+            "the notice must say the check is off, got {INSECURE_WARNING:?}"
+        );
+        assert!(
+            INSECURE_WARNING.contains("API key"),
+            "the notice must say what travels over the connection, got {INSECURE_WARNING:?}"
+        );
     }
 }
 
