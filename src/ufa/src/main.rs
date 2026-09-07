@@ -1184,3 +1184,85 @@ mod version_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod help_text_tests {
+    use super::Args;
+    use clap::CommandFactory;
+
+    /// The whole of what `ufa --help` says about the tool itself.
+    ///
+    /// Stated here rather than read from the `about` clap derives from the
+    /// doc comment. A test that quotes the value under test proves only that
+    /// the value equals itself. A reworded description changes what every
+    /// user reads, so it is a deliberate edit to this line as well.
+    const TOOL_DESCRIPTION: &str = "UniFi API CLI tool for managing UniFi Network applications";
+
+    /// Where clap stops describing the tool and starts describing its use.
+    const USAGE_HEADING: &str = "Usage:";
+
+    /// Everything a rendered help says about the tool, before the usage line.
+    ///
+    /// # Arguments
+    ///
+    /// * `help` - A rendered help text.
+    ///
+    /// # Returns
+    ///
+    /// The description block, with the blank line after it removed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the help carries no usage line. The shape this reads would
+    /// then have changed, and the assertions below would no longer read what
+    /// they claim to read.
+    fn description_block(help: &str) -> &str {
+        let (description, _) = help
+            .split_once(USAGE_HEADING)
+            .unwrap_or_else(|| panic!("a rendered help must carry a usage line, got {help}"));
+
+        description.trim()
+    }
+
+    /// `ufa --help` describes the tool and says nothing else.
+    ///
+    /// The note above `Args` records why the connection and output options
+    /// are `global`. It is a plain comment because a second paragraph on
+    /// `Args` becomes clap's `long_about`, and `--help` prints `long_about`
+    /// in full. Nothing but that comment stands between the rationale and
+    /// every user who asks for help.
+    ///
+    /// The assertion is an equality rather than a search for the sentence the
+    /// note holds today. A search stops matching the day somebody rewords the
+    /// note, and then passes for that reason forever. The rule is that the
+    /// help describes the tool and carries no internal note of any wording,
+    /// and an equality against the intended description is how that is
+    /// written down.
+    #[test]
+    fn the_long_help_describes_the_tool_and_says_nothing_else() {
+        let help = Args::command().render_long_help().to_string();
+
+        assert_eq!(
+            description_block(&help),
+            TOOL_DESCRIPTION,
+            "`ufa --help` must describe the tool and nothing else: a doc \
+             comment on `Args` becomes clap's long_about, and internal \
+             reasoning then reaches every user who asks for help"
+        );
+    }
+
+    /// `ufa -h` is the other half, and clap treats the two differently: the
+    /// short help prints `about` and the long help prints `long_about`. A
+    /// test of one says nothing about the other.
+    #[test]
+    fn the_short_help_describes_the_tool_and_says_nothing_else() {
+        let help = Args::command().render_help().to_string();
+
+        assert_eq!(
+            description_block(&help),
+            TOOL_DESCRIPTION,
+            "`ufa -h` must describe the tool and nothing else: everything the \
+             first paragraph of the doc comment on `Args` holds is printed here"
+        );
+    }
+}
