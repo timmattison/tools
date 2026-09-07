@@ -91,6 +91,37 @@ fn hosts_url(base_url: &Url) -> Result<Url> {
     api_url(base_url, &[HOSTS_SEGMENT])
 }
 
+/// Take the hosts out of `response`, but only when they are all of them.
+///
+/// # Arguments
+///
+/// * `response` - The listing the Site Manager API answered with.
+///
+/// # Returns
+///
+/// Every host the response carried.
+///
+/// # Errors
+///
+/// Returns an error if the response carries fewer hosts than the `total` it
+/// states for the collection.
+fn whole_listing(response: HostsResponse) -> Result<Vec<Host>> {
+    let HostsResponse { hosts, total } = response;
+
+    if let Some(total) = total {
+        let arrived = u64::try_from(hosts.len()).unwrap_or(u64::MAX);
+
+        anyhow::ensure!(
+            arrived >= u64::from(total),
+            "The Site Manager API answered with {arrived} of the {total} cloud hosts it states \
+             exist. The listing takes one request, which reaches one page, so this answer is \
+             incomplete."
+        );
+    }
+
+    Ok(hosts)
+}
+
 pub struct SiteManagerClient {
     client: Client,
     base_url: Url,
@@ -108,9 +139,41 @@ impl SiteManagerClient {
         Ok(Self { client, base_url })
     }
 
+    /// Fetch every cloud host on the account.
+    ///
+    /// # One request, checked against the total the server states
+    ///
+    /// The listing endpoint answers one page, and this client sends no paging
+    /// parameters with the request. `total` is what the server states for the
+    /// whole collection, so a listing shorter than `total` is a page and not
+    /// the answer. This refuses such a listing instead of a report of a
+    /// fraction of the account as the whole of it.
+    ///
+    /// A walk over the pages is the better answer, and it needs the name of
+    /// the field the endpoint returns for the next page. No document in this
+    /// repository records that name: `integration.json` is the controller
+    /// API, and it holds no host listing at all. A walk against a guessed
+    /// field name reads the first page again and reports it as complete,
+    /// which is the same defect with more code behind it. So the check stands
+    /// here until the real field name is known.
+    ///
+    /// A server that states no `total` says nothing about completeness. There
+    /// is nothing to compare such an answer against, so the listing is taken
+    /// as it arrived. A refusal there stops a command that works today over a
+    /// field the server never sent.
+    ///
+    /// # Returns
+    ///
+    /// Every cloud host on the account.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails, if the answer cannot be read,
+    /// or if the listing is shorter than the total the server states.
     pub async fn get_hosts(&self) -> Result<Vec<Host>> {
         let response: HostsResponse = self.get(hosts_url(&self.base_url)?).await?;
-        Ok(response.hosts)
+
+        whole_listing(response)
     }
 
     pub async fn get_host(&self, id: &str) -> Result<Host> {
