@@ -262,6 +262,18 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn note_does_not_tell_users_to_pass_dash_e() {
+        let note = non_root_privilege_note(1000).expect("non-root should produce a note");
+        assert!(
+            !note.contains("-E"),
+            "wl reads no environment variable, so `sudo -E` adds nothing and a \
+             sudoers policy without the SETENV tag refuses it; the note should \
+             name the plain command, got: {note}"
+        );
+    }
+
     #[test]
     fn detects_held_port_as_in_use() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")
