@@ -13,6 +13,13 @@
 //! every member is gone, and `--prefix src/` writes `src/crate-a` rather than
 //! `src/./crate-a`.
 //!
+//! Cargo holds a member only where the manifest that lists it sits above that
+//! member on the file system. It refuses every other member, an absolute path
+//! and a `../` path alike. A package the manifest directory does not hold has
+//! no spelling at all, so the run refuses and names every such package. It
+//! used to write those packages as absolute paths, and no checkout could load
+//! the manifest that came out, not even the one that wrote it.
+//!
 //! Every test here builds its own tree in its own temporary directory and runs
 //! the binary with an explicit working directory, so two copies of this file
 //! can run at the same time and neither one can reach a real repository.
@@ -71,6 +78,27 @@ fn workit(cwd: &Path, args: &[&str]) -> Output {
         cwd.display(),
         output.status,
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    output
+}
+
+/// Runs the binary from `cwd`, and returns what it wrote once it has failed.
+/// A tree the run refuses is the thing under test here, so this one asserts the
+/// opposite status: a run that wrote a manifest cargo cannot load is the defect,
+/// and it reads as success from the exit status alone.
+fn workit_fails(cwd: &Path, args: &[&str]) -> Output {
+    let output = Command::new(env!("CARGO_BIN_EXE_workit"))
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("the workit binary runs");
+
+    assert!(
+        !output.status.success(),
+        "workit {args:?} in {} succeeded, and it has to refuse the tree; stdout: {}",
+        cwd.display(),
+        String::from_utf8_lossy(&output.stdout)
     );
 
     output
@@ -191,14 +219,45 @@ fn an_explicit_output_roots_the_members_at_its_own_directory() {
 }
 
 #[test]
-fn a_package_outside_the_manifest_directory_is_written_as_an_absolute_path() {
+fn a_package_the_manifest_directory_does_not_hold_is_refused() {
     let (_temp, root) = fixture();
     let scanned = directory_at(&root, "packages");
     let package = package_at(&scanned, "pkg-a", "workit-fixture-outside-pkg-a");
     let build = directory_at(&root, "build");
 
     let manifest = build.join("Cargo.toml");
-    workit(
+    let output = workit_fails(
+        &root,
+        &[
+            "--path",
+            &scanned.to_string_lossy(),
+            "--output",
+            &manifest.to_string_lossy(),
+        ],
+    );
+    let complaint = stderr_of(&output);
+
+    assert!(
+        complaint.contains(&package.to_string_lossy().to_string()),
+        "cargo refuses a member the manifest directory does not hold, so the run refuses \
+         first and names the package; stderr was {complaint:?}"
+    );
+    assert!(
+        complaint.contains(&build.to_string_lossy().to_string()),
+        "the package is measured against the directory that holds the manifest, so the \
+         report names that directory; stderr was {complaint:?}"
+    );
+}
+
+#[test]
+fn a_refused_run_writes_no_manifest() {
+    let (_temp, root) = fixture();
+    let scanned = directory_at(&root, "packages");
+    package_at(&scanned, "pkg-a", "workit-fixture-refused-pkg-a");
+    let build = directory_at(&root, "build");
+
+    let manifest = build.join("Cargo.toml");
+    workit_fails(
         &root,
         &[
             "--path",
@@ -208,11 +267,47 @@ fn a_package_outside_the_manifest_directory_is_written_as_an_absolute_path() {
         ],
     );
 
-    assert_eq!(
-        members_of(&manifest),
-        vec![package.to_string_lossy().to_string()],
-        "a package the manifest directory does not hold cannot be named relative to it, \
-         so it is named in full"
+    assert!(
+        !manifest.exists(),
+        "a run that refuses the tree writes nothing: a manifest cargo cannot load is \
+         worse than no manifest at all"
+    );
+}
+
+#[test]
+fn a_tree_with_one_package_outside_the_manifest_directory_is_refused() {
+    let (_temp, root) = fixture();
+    let scanned = directory_at(&root, "packages");
+    let inside = package_at(&scanned, "build/pkg-inside", "workit-fixture-mixed-inside");
+    let outside = package_at(&scanned, "pkg-outside", "workit-fixture-mixed-outside");
+
+    // The manifest lands under `build`, which holds one of the two packages.
+    let manifest = scanned.join("build").join("Cargo.toml");
+    let output = workit_fails(
+        &root,
+        &[
+            "--path",
+            &scanned.to_string_lossy(),
+            "--output",
+            &manifest.to_string_lossy(),
+        ],
+    );
+    let complaint = stderr_of(&output);
+
+    assert!(
+        complaint.contains(&outside.to_string_lossy().to_string()),
+        "one package the manifest directory does not hold refuses the whole run, because \
+         --output below the packages is one mistake in the invocation; stderr was \
+         {complaint:?}"
+    );
+    assert!(
+        !complaint.contains(&inside.to_string_lossy().to_string()),
+        "the package the manifest directory does hold is named nowhere in the report: it \
+         is a member cargo accepts; stderr was {complaint:?}"
+    );
+    assert!(
+        !manifest.exists(),
+        "and the run that refused wrote no manifest"
     );
 }
 
