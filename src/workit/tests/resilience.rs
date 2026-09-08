@@ -1,16 +1,22 @@
-//! One entry the scan cannot read is not a reason to abandon the tree.
+//! One entry the scan cannot use is not a reason to abandon the tree.
 //!
 //! `workit` walks a whole directory tree, and a tree of any size holds things
-//! it cannot read: a directory whose mode keeps it out, a `Cargo.toml` that
-//! nobody can parse. Both used to end the walk, so a single unreadable entry
-//! anywhere under the search path threw away every package the scan had
-//! already found and reported nothing about them. A scan of a home directory
-//! or of a shared tree meets such an entry routinely.
+//! it cannot use: a directory whose mode keeps it out, a `Cargo.toml` that
+//! nobody can parse, a package that states no name. The first two used to end
+//! the walk, so a single unreadable entry anywhere under the search path threw
+//! away every package the scan had already found and reported nothing about
+//! them. A scan of a home directory or of a shared tree meets such an entry
+//! routinely.
+//!
+//! The third one failed the other way round, and cost more: the run wrote the
+//! nameless package into the members list and reported success, and cargo then
+//! refused the whole workspace, every good package in it included.
 //!
 //! The rule under test: each such entry is named on stderr and skipped, the
-//! walk carries on, and the total is stated once at the end. The one failure
-//! left is a scan that skipped something and found nothing — it never answered
-//! the question it was asked, so it must not report an empty tree and succeed.
+//! walk carries on, the members list holds only what is left, and the total is
+//! stated once at the end. The one failure left is a run that skipped something
+//! and has no package left to list — it never answered the question it was
+//! asked, so it must not report an empty tree and succeed.
 //!
 //! Every test here builds its own tree in its own temporary directory, runs
 //! the binary over that tree with `--dry-run`, and points `--output` inside the

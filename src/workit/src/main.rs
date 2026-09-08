@@ -240,9 +240,9 @@ fn is_in_worktree(manifest: &Path, root: &SearchRoot) -> bool {
 /// must not read like a run over a tree that holds no package - the second one
 /// is an answer, and the first is a flag the user has not been told about.
 ///
-/// Entries the scan could not read are counted separately again, by `Skipped`,
+/// Entries the scan gave up on are counted separately again, by `Skipped`,
 /// because those decide the exit status and these do not: a package left out on
-/// purpose is not a package the scan failed to read.
+/// purpose is not a package the scan could not use.
 struct Scan {
     /// The package manifests to write into the workspace, sorted.
     packages: Vec<PathBuf>,
@@ -278,14 +278,19 @@ impl Scan {
 
 /// The entries a scan gave up on.
 ///
-/// A tree of any size holds things a run cannot read: a directory whose mode
-/// keeps it out, a `Cargo.toml` that nobody can parse. Each of those is a
-/// reason to skip that entry, not a reason to abandon the tree around it. One
-/// of them used to end the walk, so a single unreadable entry threw away every
-/// package the scan had already found and said nothing about them — which a
-/// scan of a home directory or of a shared tree meets routinely. Each is now
-/// named on stderr as it is met and counted here, and the total is stated once
-/// at the end.
+/// A tree of any size holds things a run cannot use: a directory whose mode
+/// keeps it out, a `Cargo.toml` that nobody can parse, a package that states no
+/// name. Each of those is a reason to skip that entry, not a reason to abandon
+/// the tree around it. The first two used to end the walk, so a single
+/// unreadable entry threw away every package the scan had already found and
+/// said nothing about them — which a scan of a home directory or of a shared
+/// tree meets routinely. Each is now named on stderr as it is met and counted
+/// here, and the total is stated once at the end.
+///
+/// A package with no name is read without trouble and is still no member: cargo
+/// refuses a whole workspace that lists one. So it belongs here beside the
+/// entries nothing could read. It used to reach the members list all the same,
+/// and the run then reported a workspace cargo loads no part of.
 ///
 /// Every reason names the path it is about: `walkdir` says so in its own
 /// message, and every failure to read a manifest carries the path in its
@@ -307,22 +312,28 @@ impl Skipped {
     /// The summary goes to stderr, because standard output carries the manifest
     /// under `--dry-run`.
     ///
-    /// A scan that skipped something and still found packages succeeded: those
-    /// packages are the answer, and what it skipped is named above them. A scan
-    /// that skipped something and found nothing never read the tree it was
-    /// pointed at, so it fails instead of reporting an empty tree — the two are
-    /// different answers, and only one of them is success.
+    /// `found` is how many packages reach the members list, so a package the
+    /// run left out counts here and not there.
+    ///
+    /// A scan that skipped something and still has packages to list succeeded:
+    /// those packages are the answer, and what it skipped is named above them.
+    /// A scan that skipped something and has no package left to list never
+    /// answered the question it was asked, so it fails instead of reporting an
+    /// empty tree — the two are different answers, and only one is success.
     fn report(&self, found: usize) -> Result<()> {
         if self.count == 0 {
             return Ok(());
         }
 
         let entries = if self.count == 1 { "entry" } else { "entries" };
-        eprintln!("Skipped {} {entries} that could not be read.", self.count);
+        eprintln!(
+            "Skipped {} {entries} that this run could not use.",
+            self.count
+        );
 
         if found == 0 {
             return Err(anyhow::anyhow!(
-                "Found no packages, and {} {entries} could not be read",
+                "Found no packages, and this run skipped {} {entries}",
                 self.count
             ));
         }
@@ -446,9 +457,21 @@ fn is_package_toml(path: &Path) -> Result<bool> {
     Ok(doc.get("package").is_some() && doc.get("workspace").is_none())
 }
 
+/// The name the package in `path` states.
+///
+/// # Errors
+///
+/// Answers the failure to read the file, the failure to parse it, and a
+/// `[package]` table that states no name. Every one of those names the file,
+/// because the caller reports them beside the other entries it skipped: a
+/// warning that names no file leaves the reader to find it in a tree of
+/// thousands.
 fn get_package_name(path: &Path) -> Result<String> {
-    let content = fs::read_to_string(path)?;
-    let doc = content.parse::<DocumentMut>()?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let doc = content
+        .parse::<DocumentMut>()
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
 
     if let Some(package) = doc.get("package") {
         if let Some(name) = package.get("name") {
@@ -697,43 +720,51 @@ fn main() -> Result<()> {
         args.include_worktrees,
         &mut skipped,
     );
-    let cargo_files = &scan.packages;
 
-    if cargo_files.is_empty() {
-        // A tree the scan read whole and found nothing in is an answer. A tree
-        // it could not read is not, so `report` refuses that one.
-        skipped.report(cargo_files.len())?;
-        println!("No Cargo.toml files found in subdirectories");
-        scan.explain_empty_result(root.as_path());
-        return Ok(());
-    }
-
-    println!("Found {} Cargo.toml files:", cargo_files.len());
-
-    // Check for duplicate package names. The map is ordered by package name,
-    // and the scan handed its packages over sorted, so the report below reads
-    // the same on every run: the groups in order by name, and the paths inside
-    // one group in order by path. A `HashMap` seeds its iteration order afresh
-    // in every process, which printed one tree's groups in a different order on
-    // every run and on every machine — and this report is a list of directories
-    // to rename, so it is read beside the previous run's.
+    // Read the name of every package the walk found, and keep the ones that
+    // have a name. A `[package]` table with no name passes the package test,
+    // because that test asks only whether the table is there, so the walk hands
+    // such a manifest over like any other. Cargo refuses a whole workspace that
+    // lists a package it cannot name, so this run skips that one package and
+    // lists the rest — the defect is in one package of the tree, not in the
+    // invocation, which is the same reason an unreadable manifest is skipped.
+    // An `--output` below the packages takes the opposite treatment, because
+    // that mistake is in the invocation and no part of the answer is then safe
+    // to drop.
+    //
+    // The map is ordered by package name, and the scan handed its packages over
+    // sorted, so the duplicate report below reads the same on every run: the
+    // groups in order by name, and the paths inside one group in order by path.
+    // A `HashMap` seeds its iteration order afresh in every process, which
+    // printed one tree's groups in a different order on every run and on every
+    // machine — and that report is a list of directories to rename, so it is
+    // read beside the previous run's.
     let mut package_names: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-    for cargo_file in cargo_files {
+    let mut named: Vec<PathBuf> = Vec::new();
+    for cargo_file in &scan.packages {
         match get_package_name(cargo_file) {
             Ok(name) => {
                 package_names
                     .entry(name)
                     .or_default()
                     .push(cargo_file.clone());
+                named.push(cargo_file.clone());
             }
-            Err(e) => {
-                eprintln!(
-                    "Warning: Failed to get package name from {}: {}",
-                    cargo_file.display(),
-                    e
-                );
-            }
+            Err(error) => skipped.skip(&error),
         }
+    }
+
+    if named.is_empty() {
+        // A tree the scan read whole and found nothing in is an answer. A tree
+        // it could not read is not, and neither is a tree whose every package
+        // refused to name itself, so `report` refuses both of those: it takes
+        // the number of packages that reach the members list, which is none
+        // here. The line below therefore prints on the one path where it is
+        // true.
+        skipped.report(named.len())?;
+        println!("No Cargo.toml files found in subdirectories");
+        scan.explain_empty_result(root.as_path());
+        return Ok(());
     }
 
     // Report duplicate package names
@@ -766,8 +797,19 @@ fn main() -> Result<()> {
     // before the walk. A tree this manifest cannot hold is refused here, so the
     // members reach the reader only when every one of them is a member cargo
     // accepts.
-    let members = member_paths(cargo_files, output.directory(), args.prefix.as_deref())?;
+    let members = member_paths(&named, output.directory(), args.prefix.as_deref())?;
 
+    // The count states the members, and the bullets below name them. It used to
+    // state what the walk found, above the duplicate report, and it counted
+    // every manifest the walk met. So a run that left a package out said it had
+    // found two packages and then listed one, and a run the duplicate report
+    // refused printed a count with nothing under it.
+    let packages = if members.len() == 1 {
+        "package"
+    } else {
+        "packages"
+    };
+    println!("Found {} {packages}:", members.len());
     for member in &members {
         println!("  - {member}");
     }
@@ -784,8 +826,8 @@ fn main() -> Result<()> {
     }
 
     // The last word on the scan: a run that skipped something must not read
-    // afterwards like a run that read the whole tree.
-    skipped.report(cargo_files.len())?;
+    // afterwards like a run that used the whole tree.
+    skipped.report(members.len())?;
 
     Ok(())
 }

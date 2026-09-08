@@ -1612,11 +1612,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     and stays in. An exclusion names a whole directory below the search path, so
     `targets` and `node_modules_backup` stay in, and the search path itself is never matched
     against the list — `workit --path ~/code/target/myproj` searches that tree like any other. An
-    entry it cannot read — a directory whose mode keeps it out, a `Cargo.toml` nobody can parse — is
-    named on stderr and skipped rather than ending the walk, and the number skipped is stated once at
-    the end; the packages it did find are still the answer. A scan that skipped something and found
-    nothing never read the tree it was pointed at, so that one fails instead of reporting an empty
-    tree.
+    entry it cannot use — a directory whose mode keeps it out, a `Cargo.toml` nobody can parse, a
+    package that states no name — is named on stderr and skipped rather than ending the walk, and
+    the number skipped is stated once at the end; the packages it did find are still the answer. A
+    package with no name never reaches the members list, because cargo refuses a whole workspace
+    that lists one — it used to be written in like any other, and the run reported a workspace cargo
+    loads no part of. A run that skipped something and has no package left to list never answered
+    the question it was asked, so that one fails instead of reporting an empty tree.
   - Usage: `workit`, `workit --path ~/code/tools` (writes `~/code/tools/Cargo.toml`),
     `workit --path packages --output Cargo.toml` (scans `packages/` and writes the manifest above
     it, so every member reads `packages/<name>`),
