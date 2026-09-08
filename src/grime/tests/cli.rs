@@ -1090,9 +1090,10 @@ fn header(stdout: &str) -> &str {
 /// The name almost every run means, so a repository holding it must not make
 /// the developer type it.
 ///
-/// [`default_branch_choice_repo`] makes `main` the clean candidate, so the exit
-/// code says which branch was measured on its own. A tool that printed `main`
-/// while measuring `master` would answer [`CONFLICTS`] here.
+/// [`default_branch_choice_repo`] holds `main` alone here, and `main` is the
+/// clean candidate. The exit code thus says which branch was measured on its
+/// own. A tool that printed `main` while measuring `master` would answer
+/// [`ERROR`], because the fixture holds no `master` to measure.
 #[test]
 fn no_branch_measures_main_when_the_repository_holds_one() {
     let repo = default_branch_choice_repo(&["main"]);
