@@ -8,8 +8,9 @@
 //! only `[workspace]` describes a workspace, which cargo cannot hold as a
 //! member of another one, and a manifest that carries both is a workspace root
 //! that is also a package — the same answer, for the same reason. The manifest
-//! the run is about to write is not a member of itself either, so the search
-//! path's own `Cargo.toml` is left out whatever it holds.
+//! the run is about to write is not a member of itself either, so `--output`
+//! names the one file the walk leaves out, whatever that file holds. The search
+//! path's own `Cargo.toml` is that file only on a run that writes there.
 //!
 //! The walk itself descends into everything below the search path except a
 //! hidden directory and an excluded one. It does not stop at a package, so a
@@ -21,11 +22,11 @@
 //!
 //! Every test here builds a tree of packages in its own temporary directory,
 //! runs the binary over that tree with `--dry-run`, and reads back the members
-//! the binary printed. `--output` names a file inside the fixture, so nothing
-//! is written and nothing outside the temporary directory is read: two copies
-//! of this file can run at the same time, and neither one can reach a real
-//! repository. No test here runs git, so none of them inherits a git
-//! environment either.
+//! the binary printed. Every run states `--output`, and it always names a file
+//! inside the fixture, so nothing is written and nothing outside the temporary
+//! directory is read: two copies of this file can run at the same time, and
+//! neither one can reach a real repository. No test here runs git, so none of
+//! them inherits a git environment either.
 
 use std::fs;
 use std::path::Path;
@@ -72,17 +73,21 @@ fn workspace_at(root: &Path, relative: &str, members: &str) {
     );
 }
 
-/// Runs the binary over `root` and returns the members it printed, in the
-/// order it printed them. `--dry-run` keeps it from writing a manifest, and
-/// the output path names a file inside the fixture so no run can touch a
-/// manifest of the repository it was started from.
-fn members_of(root: &Path) -> Vec<String> {
+/// Runs the binary over `root`, writing to `manifest`, and returns the members
+/// it printed, in the order it printed them.
+///
+/// Every run states the manifest it writes, because that file is the one file
+/// the walk leaves out of the list: it decides what the members are, and the
+/// search path does not. `--dry-run` keeps the run from writing it, and every
+/// caller names a file inside the fixture, so no run can touch a manifest of
+/// the repository it was started from.
+fn members_written_to(root: &Path, manifest: &Path) -> Vec<String> {
     let output = Command::new(env!("CARGO_BIN_EXE_workit"))
         .current_dir(root)
         .arg("--path")
         .arg(root)
         .arg("--output")
-        .arg(root.join("workspace-manifest.toml"))
+        .arg(manifest)
         .arg("--dry-run")
         .output()
         .expect("the workit binary runs");
@@ -101,6 +106,15 @@ fn members_of(root: &Path) -> Vec<String> {
         .filter_map(|line| line.strip_prefix("  - "))
         .map(str::to_string)
         .collect()
+}
+
+/// Runs the binary over `root` and returns the members it printed.
+///
+/// The manifest goes to a file of its own beside the tree, so no manifest the
+/// tree holds is the file being written. A test about which manifests the walk
+/// finds is then a test about the predicate alone.
+fn members_of(root: &Path) -> Vec<String> {
+    members_written_to(root, &root.join("workspace-manifest.toml"))
 }
 
 #[test]
@@ -143,10 +157,45 @@ fn the_search_paths_own_manifest_is_not_a_member_of_itself() {
     package_at(&root, "pkg", "workit-fixture-root-itself-pkg");
 
     assert_eq!(
-        members_of(&root),
+        members_written_to(&root, &root.join("Cargo.toml")),
         vec!["pkg".to_string()],
-        "the manifest at the search path is the one being written; a workspace that \
-         listed itself as a member would name the directory it lives in"
+        "this run writes the manifest at the search path, so that manifest is the file \
+         being written; a workspace that listed itself as a member would name the \
+         directory it lives in"
+    );
+}
+
+#[test]
+fn a_package_at_the_search_path_is_a_member_when_the_manifest_lands_elsewhere() {
+    let (_temp, root) = fixture();
+    package_at(&root, ".", "workit-fixture-root-package");
+    package_at(&root, "pkg", "workit-fixture-root-package-pkg");
+
+    // The package at the search path holds the directory the manifest lands
+    // in, so the binary names it with the empty string today. How that member
+    // reads is a separate question; this test is about whether the package is
+    // in the list at all.
+    assert_eq!(
+        members_of(&root),
+        vec![String::new(), "pkg".to_string()],
+        "the manifest goes to a file of its own, so the manifest at the search path is \
+         a package like any other. Cargo builds no package the members do not name, and \
+         the run that dropped this one said nothing about it"
+    );
+}
+
+#[test]
+fn a_manifest_in_the_tree_is_left_out_only_when_it_is_the_one_being_written() {
+    let (_temp, root) = fixture();
+    package_at(&root, "sub", "workit-fixture-written-sub");
+    package_at(&root, "sub/inner", "workit-fixture-written-inner");
+
+    assert_eq!(
+        members_written_to(&root, &root.join("sub/Cargo.toml")),
+        vec!["inner".to_string()],
+        "the run writes the manifest at `sub`, so that one file is left out wherever it \
+         sits below the search path. A manifest the run does not write is a package like \
+         any other"
     );
 }
 
