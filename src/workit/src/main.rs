@@ -43,7 +43,7 @@ struct Args {
     #[arg(
         short = 'P',
         long,
-        help = "Prefix to add to member paths (e.g., 'src/'); a package the manifest directory does not hold is named in full and takes no prefix"
+        help = "Prefix to add to member paths (e.g., 'src/'); it names a directory below the manifest, so it applies to every member"
     )]
     prefix: Option<String>,
 
@@ -493,33 +493,94 @@ fn manifest_directory(output: &Path) -> Result<PathBuf> {
     })
 }
 
-/// The member path for the package directory `package`, as the manifest in
-/// `manifest_directory` lists it.
+/// The member paths for the packages `manifests` names, as the manifest in
+/// `manifest_directory` lists them.
 ///
 /// Both sides of the subtraction are canonical, so it is exact whether the run
 /// named its tree relatively or absolutely — a relative `--path` used to leave
 /// a `./` on the front of every member, because an absolute root cannot be
 /// taken off a relative path.
 ///
-/// A package the manifest directory does not hold cannot be named relative to
-/// it, which an explicit `--output` makes possible. Such a package is named in
-/// full, and the prefix does not apply to it: a prefix names a directory under
-/// the manifest, and an absolute path is under nothing.
-fn member_path(package: &Path, manifest_directory: &Path, prefix: Option<&str>) -> Result<String> {
-    let package = package
-        .canonicalize()
-        .with_context(|| format!("Failed to resolve {}", package.display()))?;
+/// Cargo holds a member only where the manifest that lists it sits above that
+/// member on the file system. It refuses every other member with `workspace
+/// member ... is not hierarchically below the workspace root ...`, and it says
+/// that of an absolute path and of a `../` path alike. So a package the
+/// manifest directory does not hold has no spelling at all, and this run
+/// refuses it. It used to write such a package as an absolute path, which no
+/// checkout could load, not even the one that wrote it. An explicit `--output`
+/// below the tree that was scanned is what reaches this.
+///
+/// The refusal names every such package rather than the first one, because
+/// `--output` in the wrong place is one mistake in the invocation, and the
+/// user who repairs it needs the whole list. It refuses the run rather than
+/// leaves those packages out, for the same reason: the mistake is in the
+/// invocation and not in the tree, so no part of the answer is safe to drop.
+/// A defect in one package of the tree is the opposite case, and it takes the
+/// opposite treatment: that one package goes and the rest are still listed.
+///
+/// # Errors
+///
+/// Answers the failure to resolve a package directory, and the refusal above.
+fn member_paths(
+    manifests: &[PathBuf],
+    manifest_directory: &Path,
+    prefix: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut members = Vec::new();
+    let mut outside = Vec::new();
 
-    match package.strip_prefix(manifest_directory) {
-        Ok(relative) => {
-            let member = relative.to_string_lossy().replace('\\', "/");
-            Ok(match prefix {
-                Some(prefix) => format!("{prefix}{member}"),
-                None => member,
-            })
+    for manifest in manifests {
+        let package = manifest
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", manifest.display()))?;
+        let package = package
+            .canonicalize()
+            .with_context(|| format!("Failed to resolve {}", package.display()))?;
+
+        match package.strip_prefix(manifest_directory) {
+            Ok(relative) => {
+                let member = relative.to_string_lossy().replace('\\', "/");
+                members.push(match prefix {
+                    Some(prefix) => format!("{prefix}{member}"),
+                    None => member,
+                });
+            }
+            Err(_) => outside.push(package),
         }
-        Err(_) => Ok(package.to_string_lossy().replace('\\', "/")),
     }
+
+    if outside.is_empty() {
+        return Ok(members);
+    }
+
+    // The scan hands its packages over sorted, so this report reads the same on
+    // every run over one tree, like the duplicate name report above it.
+    let (packages, verb) = if outside.len() == 1 {
+        ("package", "is")
+    } else {
+        ("packages", "are")
+    };
+    eprintln!(
+        "\nError: {} {packages} {verb} not below {}, the directory that holds the workspace manifest:",
+        outside.len(),
+        manifest_directory.display()
+    );
+    for package in &outside {
+        eprintln!("  - {}", package.display());
+    }
+    eprintln!("\nWorkspace creation failed: a member has to sit below the manifest that lists it.");
+    eprintln!(
+        "Cargo resolves a member against that manifest, and refuses a member outside it. An absolute path and a `../` path are both refused."
+    );
+    eprintln!("\nSuggestions:");
+    eprintln!("1. Give --output a path at or above the tree that was scanned, such as `workit --path packages --output Cargo.toml`");
+    eprintln!("2. Leave --output out, so the manifest lands beside the tree that was scanned");
+    eprintln!("3. Use a --path that the manifest directory holds");
+
+    Err(anyhow::anyhow!(
+        "{} {packages} outside the manifest directory",
+        outside.len()
+    ))
 }
 
 fn create_or_update_workspace(
@@ -702,18 +763,13 @@ fn main() -> Result<()> {
 
     // Name each package the way the manifest that lists it has to read it. The
     // directory it is measured from was resolved when the manifest was named,
-    // before the walk.
-    let mut members = Vec::new();
+    // before the walk. A tree this manifest cannot hold is refused here, so the
+    // members reach the reader only when every one of them is a member cargo
+    // accepts.
+    let members = member_paths(cargo_files, output.directory(), args.prefix.as_deref())?;
 
-    for cargo_file in cargo_files {
-        let parent = cargo_file
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Cargo.toml has no parent directory"))?;
-
-        let member = member_path(parent, output.directory(), args.prefix.as_deref())?;
-
+    for member in &members {
         println!("  - {member}");
-        members.push(member);
     }
 
     // Create or update workspace Cargo.toml
