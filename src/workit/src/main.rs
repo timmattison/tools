@@ -93,17 +93,84 @@ impl SearchRoot {
 /// leave out of that list. The search root decides neither. `SearchRoot` holds
 /// the other half of the same rule, and the two types keep the compiler between
 /// them.
-struct OutputManifest(PathBuf);
+///
+/// The directory that holds the file is resolved once, when the file is named.
+/// Both of those decisions need it, and neither one can use the spelling the
+/// run typed: `--path` and `--output` arrive one relative and one absolute as
+/// readily as not, and either one carries `.` and `..` segments.
+struct OutputManifest {
+    /// The file as the run named it. Every message about the file, and the
+    /// write itself, uses this spelling, because it is the one the reader
+    /// typed.
+    named: PathBuf,
+    /// The directory that holds the file, resolved. Every member path is
+    /// measured from it.
+    directory: PathBuf,
+    /// The file itself, named from that resolved directory. The walk compares
+    /// every manifest it meets against this one.
+    resolved: PathBuf,
+}
 
 impl OutputManifest {
-    /// Names `manifest` as the file the run writes.
-    fn new(manifest: PathBuf) -> Self {
-        Self(manifest)
+    /// Names `manifest` as the file the run writes, and resolves the directory
+    /// that holds it.
+    ///
+    /// # Errors
+    ///
+    /// Answers the failure to resolve that directory. The failure is now met
+    /// before the walk rather than after it, which is the better order: a run
+    /// that names a directory nothing holds cannot write its manifest whatever
+    /// the walk finds, so a tree of thousands is read for nothing.
+    fn new(manifest: PathBuf) -> Result<Self> {
+        let directory = manifest_directory(&manifest)?;
+
+        // `Path::file_name` answers `None` for a path that ends in `..` or in
+        // a separator. Neither one names a file to write, and the write states
+        // that failure itself, so the file keeps the spelling it was given.
+        let resolved = match manifest.file_name() {
+            Some(name) => directory.join(name),
+            None => manifest.clone(),
+        };
+
+        Ok(Self {
+            named: manifest,
+            directory,
+            resolved,
+        })
     }
 
     /// The file itself, for the calls that take a plain path.
     fn as_path(&self) -> &Path {
-        &self.0
+        &self.named
+    }
+
+    /// The directory every member path is measured from.
+    fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// Whether `candidate` is the file this run writes.
+    ///
+    /// The walk asks this of every manifest it meets, because a workspace that
+    /// listed the manifest it is written into would name the directory that
+    /// manifest lives in. The question is about one file, so the answer reads
+    /// both paths through the file system rather than as text: the walk builds
+    /// a candidate onto the search root, and the search root and `--output`
+    /// name the same file in two spellings as often as in one.
+    ///
+    /// The rule used to name `<search path>/Cargo.toml` instead, which is this
+    /// file only on a run that left `--output` at its default. Every other run
+    /// dropped the package at the search path without a word, and listed the
+    /// manifest it was about to write as a member of itself.
+    fn writes(&self, candidate: &Path) -> bool {
+        // The walk just met the candidate, so it exists and resolves. A
+        // candidate that does not resolve all the same is compared as it was
+        // spelled: a file the run is about to overwrite must not reach the
+        // members list because a resolve failed.
+        match candidate.canonicalize() {
+            Ok(candidate) => candidate == self.resolved,
+            Err(_) => candidate == self.resolved || candidate == self.named,
+        }
     }
 }
 
@@ -264,8 +331,17 @@ impl Skipped {
     }
 }
 
+/// The packages below `root` that the manifest `output` has to list.
+///
+/// The walk reads the tree under `root` and leaves out three things: a
+/// directory `excludes` names, a manifest that describes a workspace, and the
+/// one file `output` names, which no workspace can hold as a member of itself.
+/// The two paths are separate arguments because they answer separate questions,
+/// and they name the same file only on a run that left `--output` at its
+/// default.
 fn find_cargo_tomls(
     root: &SearchRoot,
+    output: &OutputManifest,
     excludes: &[String],
     include_worktrees: bool,
     skipped: &mut Skipped,
@@ -321,9 +397,10 @@ fn find_cargo_tomls(
         };
         let path = entry.path();
 
-        if path.file_name() == Some("Cargo.toml".as_ref())
-            && path != root.as_path().join("Cargo.toml")
-        {
+        // The manifest the run writes is the one file the walk leaves out. It
+        // is not the manifest at the search path, except on a run that writes
+        // there.
+        if path.file_name() == Some("Cargo.toml".as_ref()) && !output.writes(path) {
             // Skip a second checkout of packages the repository already holds,
             // unless the run asked for it. Counted, so a scan the filter
             // emptied can say so rather than reporting a tree with nothing in
@@ -388,17 +465,21 @@ fn get_package_name(path: &Path) -> Result<String> {
 }
 
 /// The directory every member path is measured from: the directory that holds
-/// the manifest being written.
+/// the manifest `output` names.
 ///
 /// Cargo resolves a member against the manifest that lists it, so the manifest
 /// decides what a member means — not the tree the walk happened to start at.
 /// The two are the same directory on a default run and part company as soon as
 /// `--output` names a file somewhere else.
-fn manifest_directory(output: &OutputManifest) -> Result<PathBuf> {
+///
+/// `OutputManifest::new` is the one caller. It hands over a plain path, because
+/// this is the step that makes an `OutputManifest`, and it keeps the answer, so
+/// no run resolves this directory twice.
+fn manifest_directory(output: &Path) -> Result<PathBuf> {
     // `Path::parent` answers `Some("")` for a bare file name, which names no
     // directory. The file lands in the directory the run was started from, so
     // that is the directory its members are measured from.
-    let directory = match output.as_path().parent() {
+    let directory = match output.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
@@ -407,7 +488,7 @@ fn manifest_directory(output: &OutputManifest) -> Result<PathBuf> {
         format!(
             "Failed to resolve {}, the directory that would hold {}",
             directory.display(),
-            output.as_path().display()
+            output.display()
         )
     })
 }
@@ -529,7 +610,7 @@ fn main() -> Result<()> {
     // members of a manifest it had not looked at, naming packages that
     // directory does not hold. Clap cannot spell a default that reads another
     // argument, so the default is resolved here.
-    let output = OutputManifest::new(args.output.unwrap_or_else(|| args.path.join("Cargo.toml")));
+    let output = OutputManifest::new(args.output.unwrap_or_else(|| args.path.join("Cargo.toml")))?;
 
     // The tree the walk reads. It is named apart from the manifest above, so
     // neither one reaches a parameter that means the other.
@@ -548,7 +629,13 @@ fn main() -> Result<()> {
     // counted rather than propagated, so the packages it did find still reach
     // the manifest.
     let mut skipped = Skipped::default();
-    let scan = find_cargo_tomls(&root, &all_excludes, args.include_worktrees, &mut skipped);
+    let scan = find_cargo_tomls(
+        &root,
+        &output,
+        &all_excludes,
+        args.include_worktrees,
+        &mut skipped,
+    );
     let cargo_files = &scan.packages;
 
     if cargo_files.is_empty() {
@@ -613,16 +700,17 @@ fn main() -> Result<()> {
         return Err(anyhow::anyhow!("Duplicate package names found"));
     }
 
-    // Name each package the way the manifest that lists it has to read it.
+    // Name each package the way the manifest that lists it has to read it. The
+    // directory it is measured from was resolved when the manifest was named,
+    // before the walk.
     let mut members = Vec::new();
-    let manifest_directory = manifest_directory(&output)?;
 
     for cargo_file in cargo_files {
         let parent = cargo_file
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Cargo.toml has no parent directory"))?;
 
-        let member = member_path(parent, &manifest_directory, args.prefix.as_deref())?;
+        let member = member_path(parent, output.directory(), args.prefix.as_deref())?;
 
         println!("  - {member}");
         members.push(member);

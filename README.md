@@ -1594,7 +1594,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the run was started from; `--output` names a file of its own instead. A member is written
     relative to the directory that holds the manifest, because that is the directory cargo resolves
     a member against, so `--output` decides what the members read — and a package that directory
-    does not hold is named in full and takes no `--prefix`. Two packages that share a name are
+    does not hold is named in full and takes no `--prefix`. The one file left out of the members
+    list is the manifest the run writes, because no workspace holds itself: a package at the
+    search path is a member of a manifest that lands elsewhere. Two packages that share a name are
     refused rather than written, with the paths that hold each one, because a workspace cannot
     carry the same package name twice — the report is ordered by package name and by path, so two
     runs over one tree read the same. A directory named `target` or `node_modules` stays out of
