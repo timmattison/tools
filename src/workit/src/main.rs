@@ -307,10 +307,29 @@ impl Skipped {
         self.count += 1;
     }
 
-    /// States the total once, and says whether the scan answered the question.
+    /// States the total once, and answers nothing.
     ///
     /// The summary goes to stderr, because standard output carries the manifest
-    /// under `--dry-run`.
+    /// under `--dry-run`. A scan that skipped nothing states nothing.
+    ///
+    /// This is the half of the report that a run with packages to list needs.
+    /// That call comes after the manifest is written and after the success
+    /// message is printed, where the run has nothing left to fail at, so it
+    /// reaches a method that cannot fail. It used to call `report`, whose `?`
+    /// read as though the run could still fail there.
+    fn state_total(&self) {
+        if self.count == 0 {
+            return;
+        }
+
+        eprintln!(
+            "Skipped {} {} that this run could not use.",
+            self.count,
+            self.entries()
+        );
+    }
+
+    /// States the total, and says whether the scan answered the question.
     ///
     /// `found` is how many packages reach the members list, so a package the
     /// run left out counts here and not there.
@@ -320,25 +339,32 @@ impl Skipped {
     /// A scan that skipped something and has no package left to list never
     /// answered the question it was asked, so it fails instead of reporting an
     /// empty tree — the two are different answers, and only one is success.
+    ///
+    /// # Errors
+    ///
+    /// Answers that refusal.
     fn report(&self, found: usize) -> Result<()> {
-        if self.count == 0 {
-            return Ok(());
-        }
+        self.state_total();
 
-        let entries = if self.count == 1 { "entry" } else { "entries" };
-        eprintln!(
-            "Skipped {} {entries} that this run could not use.",
-            self.count
-        );
-
-        if found == 0 {
+        if self.count > 0 && found == 0 {
             return Err(anyhow::anyhow!(
-                "Found no packages, and this run skipped {} {entries}",
-                self.count
+                "Found no packages, and this run skipped {} {}",
+                self.count,
+                self.entries()
             ));
         }
 
         Ok(())
+    }
+
+    /// The word for the number of entries the scan gave up on. Both halves of
+    /// the report state that number, and they have to agree on the word for it.
+    fn entries(&self) -> &'static str {
+        if self.count == 1 {
+            "entry"
+        } else {
+            "entries"
+        }
     }
 }
 
@@ -843,8 +869,11 @@ fn main() -> Result<()> {
     }
 
     // The last word on the scan: a run that skipped something must not read
-    // afterwards like a run that used the whole tree.
-    skipped.report(members.len())?;
+    // afterwards like a run that used the whole tree. Only the total is stated
+    // here. The run has a member for every package it named, and it wrote the
+    // manifest and printed the success message above, so there is nothing left
+    // for it to refuse.
+    skipped.state_total();
 
     Ok(())
 }
