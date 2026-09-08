@@ -26,6 +26,11 @@ use tempfile::TempDir;
 /// A `Cargo.toml` no parser accepts.
 const MALFORMED_MANIFEST: &str = "this is not = valid toml [[[\n";
 
+/// A `Cargo.toml` every parser accepts and no package name reaches. Cargo
+/// refuses a workspace that lists such a package, and it refuses the whole
+/// workspace rather than that one member.
+const NAMELESS_MANIFEST: &str = "[package]\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+
 /// A temporary directory and its canonical path.
 ///
 /// The path is canonical because `workit` subtracts canonical paths to build a
@@ -78,10 +83,16 @@ fn workit(root: &Path) -> Output {
         .expect("the workit binary runs")
 }
 
+/// What the run printed on standard output. `--dry-run` puts the manifest it
+/// would write there, so this is also how a test asks whether a run proposed a
+/// workspace at all.
+fn printed_by(output: &Output) -> String {
+    String::from_utf8(output.stdout.clone()).expect("workit writes UTF-8")
+}
+
 /// The members the run printed, in the order it printed them.
 fn members_of(output: &Output) -> Vec<String> {
-    let printed = std::str::from_utf8(&output.stdout).expect("workit writes UTF-8");
-    printed
+    printed_by(output)
         .lines()
         .filter_map(|line| line.strip_prefix("  - "))
         .map(str::to_string)
@@ -231,6 +242,65 @@ fn a_scan_that_skipped_everything_and_found_nothing_fails() {
     assert!(
         warnings.contains("Skipped 1"),
         "it fails for the reason it met, and says how many entries it never read: {warnings}"
+    );
+}
+
+#[test]
+fn a_package_with_no_name_is_not_a_member() {
+    let (_temp, root) = fixture();
+    package_at(&root, "good", "workit-fixture-nameless-good");
+    manifest_at(&root, "nameless", NAMELESS_MANIFEST);
+
+    let output = workit(&root);
+
+    assert_succeeded(&output);
+    assert_eq!(
+        members_of(&output),
+        vec!["good".to_string()],
+        "cargo refuses a whole workspace that lists a package with no name, so one such package \
+         must not take the packages beside it down with it"
+    );
+}
+
+#[test]
+fn the_run_says_a_package_with_no_name_was_left_out() {
+    let (_temp, root) = fixture();
+    package_at(&root, "good", "workit-fixture-nameless-reported-good");
+    let nameless = manifest_at(&root, "nameless", NAMELESS_MANIFEST);
+
+    let output = workit(&root);
+    let warnings = warnings_of(&output);
+
+    assert!(
+        warnings.contains(&nameless.display().to_string()),
+        "a package left out without a word is a package the reader cannot repair: {warnings}"
+    );
+    assert!(
+        warnings.contains("Skipped 1"),
+        "the closing total counts the package the run left out: {warnings}"
+    );
+}
+
+#[test]
+fn a_tree_of_packages_with_no_names_fails() {
+    let (_temp, root) = fixture();
+    manifest_at(&root, "nameless-one", NAMELESS_MANIFEST);
+    manifest_at(&root, "nameless-two", NAMELESS_MANIFEST);
+
+    let output = workit(&root);
+    let warnings = warnings_of(&output);
+
+    assert!(
+        !output.status.success(),
+        "a run with no package left to list must not report a workspace cargo refuses: {warnings}"
+    );
+    assert!(
+        !printed_by(&output).contains("[workspace]"),
+        "it proposes no manifest at all, rather than one with an empty members list"
+    );
+    assert!(
+        warnings.contains("Skipped 2"),
+        "it fails for the reason it met, and says how many entries it gave up on: {warnings}"
     );
 }
 
