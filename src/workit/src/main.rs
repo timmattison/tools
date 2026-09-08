@@ -43,7 +43,7 @@ struct Args {
     #[arg(
         short = 'P',
         long,
-        help = "Prefix to add to member paths (e.g., 'src/'); it names a directory below the manifest, so it applies to every member"
+        help = "Prefix to add to member paths (e.g., 'src/'); it names a directory below the manifest, so it applies to every member below the manifest. The manifest directory itself is the member '.', and it takes no prefix"
     )]
     prefix: Option<String>,
 
@@ -524,6 +524,14 @@ fn manifest_directory(output: &Path) -> Result<PathBuf> {
 /// a `./` on the front of every member, because an absolute root cannot be
 /// taken off a relative path.
 ///
+/// A package in the manifest directory itself is the member cargo calls `.`,
+/// and cargo loads a workspace that lists it. The subtraction leaves nothing
+/// there, so the member used to read as an empty string: the manifest held
+/// `members = [""]` and the run printed a bullet with nothing behind it. A
+/// prefix stays off that one member, because a prefix names a directory below
+/// the manifest and this member is the manifest directory itself, so `src/.`
+/// would name a directory nothing holds.
+///
 /// Cargo holds a member only where the manifest that lists it sits above that
 /// member on the file system. It refuses every other member with `workspace
 /// member ... is not hierarchically below the workspace root ...`, and it says
@@ -563,9 +571,18 @@ fn member_paths(
         match package.strip_prefix(manifest_directory) {
             Ok(relative) => {
                 let member = relative.to_string_lossy().replace('\\', "/");
-                members.push(match prefix {
-                    Some(prefix) => format!("{prefix}{member}"),
-                    None => member,
+                members.push(if member.is_empty() {
+                    // The manifest directory holds a package of its own, so the
+                    // subtraction leaves nothing. Cargo names that directory
+                    // `.`, and a prefix stays off it: a prefix names a
+                    // directory below the manifest, and this member is the
+                    // manifest directory itself.
+                    ".".to_string()
+                } else {
+                    match prefix {
+                        Some(prefix) => format!("{prefix}{member}"),
+                        None => member,
+                    }
                 });
             }
             Err(_) => outside.push(package),

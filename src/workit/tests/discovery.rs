@@ -172,12 +172,12 @@ fn a_package_at_the_search_path_is_a_member_when_the_manifest_lands_elsewhere() 
     package_at(&root, "pkg", "workit-fixture-root-package-pkg");
 
     // The package at the search path holds the directory the manifest lands
-    // in, so the binary names it with the empty string today. How that member
-    // reads is a separate question; this test is about whether the package is
+    // in, so it is the member cargo calls `.`. How that member reads is the
+    // subject of `tests/output.rs`; this test is about whether the package is
     // in the list at all.
     assert_eq!(
         members_of(&root),
-        vec![String::new(), "pkg".to_string()],
+        vec![".".to_string(), "pkg".to_string()],
         "the manifest goes to a file of its own, so the manifest at the search path is \
          a package like any other. Cargo builds no package the members do not name, and \
          the run that dropped this one said nothing about it"

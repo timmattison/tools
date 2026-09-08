@@ -11,7 +11,10 @@
 //! that is the directory cargo resolves it against. Both sides of that
 //! subtraction are canonical, so the `./` a relative `--path` used to leave on
 //! every member is gone, and `--prefix src/` writes `src/crate-a` rather than
-//! `src/./crate-a`.
+//! `src/./crate-a`. A package in the manifest directory itself is the member
+//! cargo calls `.`, and a prefix stays off that one: the subtraction leaves
+//! nothing there, so the manifest used to hold an empty member and the run
+//! printed a bullet with nothing behind it.
 //!
 //! Cargo holds a member only where the manifest that lists it sits above that
 //! member on the file system. It refuses every other member, an absolute path
