@@ -37,7 +37,7 @@ Three codes rather than two, because "the merge would conflict" and "I could not
 tell you" are different answers and a script has to be able to act on the
 difference.
 
-The table is about a run that names a `BRANCH`. `--help` and `--version` ask
+The table is about a run that measures a merge. `--help` and `--version` ask
 about the tool rather than about a merge, so each answers and exits `0` with no
 replay behind it. A command line the argument parser refuses exits `2`, which is
 already the code for "I could not tell you".
