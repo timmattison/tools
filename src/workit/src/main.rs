@@ -61,6 +61,52 @@ fn get_default_excludes() -> Vec<String> {
     vec!["target".to_string(), "node_modules".to_string()]
 }
 
+/// The directory the walk starts at, as `--path` gave it.
+///
+/// The run reads one tree and writes one manifest. The two name the same
+/// directory only on a default run. Both are paths, so the compiler accepted
+/// every mix-up of the two, and this code made three of them: the manifest went
+/// to the directory the run started in rather than beside the tree, the member
+/// paths started at the tree rather than at the manifest, and the rule that
+/// keeps the manifest out of its own member list named the wrong file. A
+/// `SearchRoot` is not an `OutputManifest`, so the next such swap is a compile
+/// error rather than a defect a reader must find.
+struct SearchRoot(PathBuf);
+
+impl SearchRoot {
+    /// Names `path` as the directory the walk starts at.
+    fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    /// The directory itself, for the calls that take a plain path.
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// The manifest file the run writes, as `--output` named it or as the default
+/// resolved it.
+///
+/// Cargo resolves a member against the manifest that lists it, so this file
+/// decides what a member path means, and it decides which file the walk must
+/// leave out of that list. The search root decides neither. `SearchRoot` holds
+/// the other half of the same rule, and the two types keep the compiler between
+/// them.
+struct OutputManifest(PathBuf);
+
+impl OutputManifest {
+    /// Names `manifest` as the file the run writes.
+    fn new(manifest: PathBuf) -> Self {
+        Self(manifest)
+    }
+
+    /// The file itself, for the calls that take a plain path.
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
 /// Whether the package whose manifest is `manifest` sits in a git worktree
 /// that lies below `root`.
 ///
@@ -80,7 +126,7 @@ fn get_default_excludes() -> Vec<String> {
 /// package under one is a package nothing else holds, so it is listed, and the
 /// walk stops there: what lies above a repository says nothing about what is
 /// inside it.
-fn is_in_worktree(manifest: &Path, root: &Path) -> bool {
+fn is_in_worktree(manifest: &Path, root: &SearchRoot) -> bool {
     let Some(package) = manifest.parent() else {
         return false;
     };
@@ -90,7 +136,7 @@ fn is_in_worktree(manifest: &Path, root: &Path) -> bool {
         // subtracting them keeps a relative `--path` working: `WalkDir` hands
         // back every path built onto the root exactly as it was given, and
         // `Path` compares by component, so `.` and `./` both stop here.
-        if directory == root {
+        if directory == root.as_path() {
             return false;
         }
 
@@ -99,7 +145,7 @@ fn is_in_worktree(manifest: &Path, root: &Path) -> bool {
         // the second half of the stop condition all the same: an equality that
         // never matches would otherwise walk to the root of the file system,
         // which is the behaviour being removed.
-        if directory.strip_prefix(root).is_err() {
+        if directory.strip_prefix(root.as_path()).is_err() {
             return false;
         }
 
@@ -219,7 +265,7 @@ impl Skipped {
 }
 
 fn find_cargo_tomls(
-    root: &Path,
+    root: &SearchRoot,
     excludes: &[String],
     include_worktrees: bool,
     skipped: &mut Skipped,
@@ -227,7 +273,7 @@ fn find_cargo_tomls(
     let mut cargo_files = Vec::new();
     let mut worktrees = 0;
 
-    for entry in WalkDir::new(root)
+    for entry in WalkDir::new(root.as_path())
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
@@ -235,7 +281,7 @@ fn find_cargo_tomls(
 
             // Skip hidden directories
             if let Some(name) = path.file_name() {
-                if name.to_string_lossy().starts_with('.') && path != root {
+                if name.to_string_lossy().starts_with('.') && path != root.as_path() {
                     return false;
                 }
             }
@@ -250,7 +296,9 @@ fn find_cargo_tomls(
             // for that root by name, so a word in its own path says nothing
             // about what is under it — a root named `targeting`, or an
             // explicit `--path /home/tim/target/myproj`, is searched normally.
-            let below_root = path.strip_prefix(root).unwrap_or_else(|_| Path::new(""));
+            let below_root = path
+                .strip_prefix(root.as_path())
+                .unwrap_or_else(|_| Path::new(""));
             for component in below_root.components() {
                 let name = component.as_os_str();
                 if excludes
@@ -273,7 +321,9 @@ fn find_cargo_tomls(
         };
         let path = entry.path();
 
-        if path.file_name() == Some("Cargo.toml".as_ref()) && path != root.join("Cargo.toml") {
+        if path.file_name() == Some("Cargo.toml".as_ref())
+            && path != root.as_path().join("Cargo.toml")
+        {
             // Skip a second checkout of packages the repository already holds,
             // unless the run asked for it. Counted, so a scan the filter
             // emptied can say so rather than reporting a tree with nothing in
@@ -344,11 +394,11 @@ fn get_package_name(path: &Path) -> Result<String> {
 /// decides what a member means — not the tree the walk happened to start at.
 /// The two are the same directory on a default run and part company as soon as
 /// `--output` names a file somewhere else.
-fn manifest_directory(output: &Path) -> Result<PathBuf> {
+fn manifest_directory(output: &OutputManifest) -> Result<PathBuf> {
     // `Path::parent` answers `Some("")` for a bare file name, which names no
     // directory. The file lands in the directory the run was started from, so
     // that is the directory its members are measured from.
-    let directory = match output.parent() {
+    let directory = match output.as_path().parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
@@ -357,7 +407,7 @@ fn manifest_directory(output: &Path) -> Result<PathBuf> {
         format!(
             "Failed to resolve {}, the directory that would hold {}",
             directory.display(),
-            output.display()
+            output.as_path().display()
         )
     })
 }
@@ -391,7 +441,13 @@ fn member_path(package: &Path, manifest_directory: &Path, prefix: Option<&str>) 
     }
 }
 
-fn create_or_update_workspace(output: &Path, members: &[String], dry_run: bool) -> Result<()> {
+fn create_or_update_workspace(
+    output: &OutputManifest,
+    members: &[String],
+    dry_run: bool,
+) -> Result<()> {
+    let output = output.as_path();
+
     let mut doc = if output.exists() {
         let content = fs::read_to_string(output)
             .with_context(|| format!("Failed to read existing {}", output.display()))?;
@@ -473,7 +529,11 @@ fn main() -> Result<()> {
     // members of a manifest it had not looked at, naming packages that
     // directory does not hold. Clap cannot spell a default that reads another
     // argument, so the default is resolved here.
-    let output = args.output.unwrap_or_else(|| args.path.join("Cargo.toml"));
+    let output = OutputManifest::new(args.output.unwrap_or_else(|| args.path.join("Cargo.toml")));
+
+    // The tree the walk reads. It is named apart from the manifest above, so
+    // neither one reaches a parameter that means the other.
+    let root = SearchRoot::new(args.path);
 
     // Merge default excludes with user excludes
     let all_excludes = if args.no_default_excludes {
@@ -488,12 +548,7 @@ fn main() -> Result<()> {
     // counted rather than propagated, so the packages it did find still reach
     // the manifest.
     let mut skipped = Skipped::default();
-    let scan = find_cargo_tomls(
-        &args.path,
-        &all_excludes,
-        args.include_worktrees,
-        &mut skipped,
-    );
+    let scan = find_cargo_tomls(&root, &all_excludes, args.include_worktrees, &mut skipped);
     let cargo_files = &scan.packages;
 
     if cargo_files.is_empty() {
@@ -501,7 +556,7 @@ fn main() -> Result<()> {
         // it could not read is not, so `report` refuses that one.
         skipped.report(cargo_files.len())?;
         println!("No Cargo.toml files found in subdirectories");
-        scan.explain_empty_result(&args.path);
+        scan.explain_empty_result(root.as_path());
         return Ok(());
     }
 
