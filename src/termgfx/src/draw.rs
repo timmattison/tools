@@ -1785,6 +1785,22 @@ mod tests {
     /// budget on pixels, which is what the test measures.
     const LADDER_FLOOR_BUDGET_SHARE: usize = 100;
 
+    /// The parts of the payload of a raw frame that the frame ladder test
+    /// allows.
+    ///
+    /// A measurement on 2026-09-09 states the photograph fixture as a raw PNM
+    /// in 580820 characters of base64, as a PNG in 296040, and as a JPEG of the
+    /// highest quality in 23280. Three quarters of the PNM is 435615
+    /// characters. That budget stands under the PNM, so the ladder has to step
+    /// off the first rung, and it stands above the PNG, so a ladder that held a
+    /// PNG rung would stop there. The shape that the writer lands on therefore
+    /// names which ladder ran.
+    const FRAME_LADDER_BUDGET_PARTS: usize = 3;
+
+    /// The parts of the payload of a raw frame that
+    /// [`FRAME_LADDER_BUDGET_PARTS`] counts.
+    const FRAME_LADDER_BUDGET_WHOLE: usize = 4;
+
     /// The share of the payload of a source file that the refusal test allows.
     ///
     /// A measurement on 2026-09-09 states the photograph fixture as a JPEG of
@@ -2235,6 +2251,10 @@ mod tests {
     /// The first bytes of a JPEG file, which are the start-of-image marker.
     const JPEG_SIGNATURE: &[u8] = &[0xff, 0xd8];
 
+    /// The first bytes of a raw PNM file, which are the magic number of the
+    /// binary color form of that format.
+    const PNM_SIGNATURE: &[u8] = b"P6";
+
     /// The request that the encoder tests draw with.
     ///
     /// It states no bound in character cells, so the picture reaches the
@@ -2259,6 +2279,28 @@ mod tests {
         }
     }
 
+    /// The request that the frame tests draw with.
+    ///
+    /// It is [`whole_picture_request`] with one field changed, because the
+    /// picture is the one thing a frame and a still picture differ in here. The
+    /// bounds in character cells stay empty for the reason that
+    /// [`whole_picture_request`] gives, and the source stays empty because a
+    /// frame comes out of a decoder rather than a file.
+    ///
+    /// # Arguments
+    /// * `budget` - The characters of payload that the frame can spend.
+    ///
+    /// # Returns
+    /// The request, which names the frame with [`TEST_PLACEMENT_ID`].
+    fn whole_frame_request(budget: PayloadBudget) -> Request<'static> {
+        Request {
+            picture: Picture::Frame {
+                id: TEST_PLACEMENT_ID,
+            },
+            ..whole_picture_request(budget, None)
+        }
+    }
+
     /// Draw `image` on an iTerm2 terminal at its own pixel size, inside
     /// `budget`, and give back the base64 payload of the command.
     ///
@@ -2267,6 +2309,47 @@ mod tests {
     /// * `budget` - The characters of payload that the picture can spend.
     fn iterm2_whole_picture_payload_of(image: &DynamicImage, budget: PayloadBudget) -> String {
         iterm2_payload_of_source(image, None, budget)
+    }
+
+    /// Draw `image` on an iTerm2 terminal as one frame of many, at its own
+    /// pixel size, inside `budget`, and give back the base64 payload of the
+    /// command.
+    ///
+    /// # Arguments
+    /// * `image` - The frame to draw.
+    /// * `budget` - The characters of payload that the frame can spend.
+    ///
+    /// # Returns
+    /// The payload of the command, with no argument and no terminator.
+    fn iterm2_frame_payload_of(image: &DynamicImage, budget: PayloadBudget) -> String {
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::ITerm2, true, true)
+            .draw(&mut out, image, &whole_frame_request(budget))
+            .expect("a write to a vector never fails");
+
+        let command = String::from_utf8(out).expect("an iTerm2 command is ASCII");
+        let (_arguments, payload) = command
+            .rsplit_once(':')
+            .expect("an iTerm2 command holds a colon between the arguments and the payload");
+
+        String::from(payload.trim_end_matches('\x07'))
+    }
+
+    /// Draw `image` on an iTerm2 terminal as one frame of many, at its own
+    /// pixel size, inside `budget`, and give back the file that the command
+    /// carried.
+    ///
+    /// # Arguments
+    /// * `image` - The frame to draw.
+    /// * `budget` - The characters of payload that the frame can spend.
+    ///
+    /// # Returns
+    /// The bytes of the file, which name their own format in their first
+    /// bytes.
+    fn iterm2_frame_file_of(image: &DynamicImage, budget: PayloadBudget) -> Vec<u8> {
+        BASE64_STANDARD
+            .decode(iterm2_frame_payload_of(image, budget))
+            .expect("the writer wrote base64")
     }
 
     /// Draw `image` on an iTerm2 terminal at its own pixel size, inside
@@ -2522,6 +2605,65 @@ mod tests {
             file.starts_with(PNG_SIGNATURE),
             "an iTerm2 picture that the budget holds must travel as a PNG, but the file starts with {:?}",
             &file[..PNG_SIGNATURE.len().min(file.len())]
+        );
+    }
+
+    /// One frame of many that the budget holds travels as a raw PNM file.
+    ///
+    /// A frame pays the encoder one time for every frame, so the time of the
+    /// encoder is the cost that a video player feels. A measurement of the
+    /// photograph fixture states a PNG at 3.8 times the time of a PNM at 960
+    /// pixels by 540, and at 4.8 times it at 1920 by 1080, for 19 percent fewer
+    /// characters. `ic` answers that time with a lower frame rate. The Kitty
+    /// writer states the same trade and keeps the raw pixels of a frame, so the
+    /// iTerm2 writer starts a frame at the shape that costs the least time.
+    ///
+    /// A still picture pays for the encoder one time and the characters are the
+    /// whole of what it pays, so it keeps its PNG. The second assertion holds
+    /// that, because a change that moved every picture onto a PNM would answer
+    /// the first assertion and lose the still picture.
+    #[test]
+    fn an_iterm2_frame_that_the_budget_holds_travels_as_a_raw_pnm() {
+        let fixture = photograph_fixture();
+        let frame = iterm2_frame_file_of(&fixture, PayloadBudget::UNLIMITED);
+        let still = iterm2_file_of(&fixture, PayloadBudget::UNLIMITED);
+
+        assert!(
+            frame.starts_with(PNM_SIGNATURE),
+            "an iTerm2 frame that the budget holds must travel as a raw PNM, but the file starts with {:?}",
+            &frame[..PNM_SIGNATURE.len().min(frame.len())]
+        );
+        assert!(
+            still.starts_with(PNG_SIGNATURE),
+            "an iTerm2 still picture that the budget holds must travel as a PNG, but the file starts with {:?}",
+            &still[..PNG_SIGNATURE.len().min(still.len())]
+        );
+    }
+
+    /// One frame that the budget refuses as a PNM steps onto a JPEG rung.
+    ///
+    /// The deflate of a PNG is the exact cost that a frame avoids, and a JPEG
+    /// encoder runs far under it. So the rung under a raw PNM is the highest
+    /// JPEG quality, and the ladder of a frame names no PNG rung at all. The
+    /// budget here stands above the PNG of the fixture, so a walk that held a
+    /// PNG rung would stop on it and the file would carry the PNG signature.
+    #[test]
+    fn an_iterm2_frame_above_the_budget_steps_onto_a_jpeg() {
+        let fixture = photograph_fixture();
+        let whole = iterm2_frame_payload_of(&fixture, PayloadBudget::UNLIMITED);
+        let budget =
+            PayloadBudget::of(whole.len() * FRAME_LADDER_BUDGET_PARTS / FRAME_LADDER_BUDGET_WHOLE);
+        let file = iterm2_frame_file_of(&fixture, budget);
+
+        assert!(
+            file.starts_with(JPEG_SIGNATURE),
+            "an iTerm2 frame above the budget must step onto a JPEG rung, but the file starts with {:?}",
+            &file[..JPEG_SIGNATURE.len().min(file.len())]
+        );
+        assert_eq!(
+            pixels_of(&file),
+            (PHOTOGRAPH_WIDTH, PHOTOGRAPH_HEIGHT),
+            "a frame that reached the budget on the ladder alone must keep every pixel"
         );
     }
 
