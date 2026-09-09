@@ -2626,6 +2626,31 @@ not_a_number  1 /bin/bash
         }
     }
 
+    /// The gate reads the session that the capabilities carry.
+    ///
+    /// A run stands in one session, and every party of the run reads that one.
+    /// `Capabilities::detect` reads it from the environment and holds it, so a
+    /// gate that reads a session of its own reads the same environment a
+    /// second time. A test states the session it covers instead, and a gate
+    /// that took a second statement there would take a verdict that no run
+    /// gives.
+    #[test]
+    fn the_gate_reads_the_session_that_the_capabilities_carry() {
+        let named = Capabilities::new(TerminalType::Ghostty, true, true)
+            .in_session(MoshImages::from_env(Some("kitty"), None));
+        assert!(
+            validate_terminal_for_graphics(
+                &named,
+                &RemoteTransport::Mosh,
+                false,
+                &MoshImages::default(),
+                "Image"
+            )
+            .is_ok(),
+            "this mosh carries the kitty protocol, and Ghostty draws it"
+        );
+    }
+
     /// A mosh that carries images still takes the refusal that names tmux.
     ///
     /// The statement in the environment is about the transport, and tmux
