@@ -868,10 +868,14 @@ impl JpegQuality {
     /// The quality that the ladder stops at.
     ///
     /// The report of this defect measures a photograph of 3074 pixels by 1856
-    /// at this quality: 785138 bytes, which is what a mosh session holds. So
-    /// this rung carries the whole picture where the rung above it cannot.
-    /// Under it the blocks of the encoder start to show, and the pixel count is
-    /// then the better thing to spend.
+    /// at this quality: 785138 bytes, which is 1046852 base64 characters.
+    /// [`PayloadBudget::MOSH`] holds 1044480 of them, so the floor of the
+    /// ladder still misses the budget by 2372 characters, which is 0.2 percent
+    /// of it. [`fit_to_payload_budget`] spends that last distance on pixels,
+    /// and [`FIT_SAFETY`] aims 5 percent under the budget as well, so
+    /// [`shrink_towards`] takes 2.6 percent off each side of that photograph,
+    /// for 2993 pixels by 1807. Under this quality the blocks of the encoder
+    /// start to show, and the pixel count is then the better thing to spend.
     const LOWEST: Self = Self(35);
 
     /// How far one step of the ladder falls.
