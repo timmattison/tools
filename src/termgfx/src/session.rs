@@ -211,6 +211,12 @@ impl MoshImages {
         !self.transport.is_empty()
     }
 
+    /// The protocols that the transport of this session carries.
+    #[must_use]
+    pub fn transport(&self) -> ProtocolSet {
+        self.transport
+    }
+
     /// The protocols that the terminal of the user draws.
     #[must_use]
     pub fn client(&self) -> ProtocolSet {

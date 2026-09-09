@@ -518,7 +518,8 @@ fn in_tmux() -> bool {
 
 /// Refuse the run when this session cannot draw an image.
 ///
-/// The gate reads three things: the answer the terminal gave to a query, the
+/// The gate reads four things: what the environment of a mosh session states
+/// about the images it carries, the answer the terminal gave to a query, the
 /// remote transport, and the multiplexer. It gives `Ok` when the session can
 /// show graphics. It gives an error when the session cannot, and that error
 /// carries the reason and the repair for the user to read. `feature` names
@@ -536,7 +537,38 @@ fn validate_terminal_for_graphics(
     session: &MoshImages,
     feature: &str,
 ) -> Result<()> {
-    let _ = session;
+    // A mosh that carries images states so in the environment, and the
+    // environment is the one channel that crosses a multiplexer. Every rule
+    // below reads a query or a process tree, and neither one can answer this:
+    // a multiplexer owns the pseudo terminal of its pane and answers every
+    // query itself, so a round trip inside one tells an upstream mosh, which
+    // strips every image sequence, from a mosh that draws them never. See
+    // `termgfx::MoshImages` and https://github.com/timmattison/mosh-rs/issues/78.
+    //
+    // This rule stands in front of the rule about mosh, which is what issue
+    // #471 reports: that rule refused every terminal the environment named,
+    // because it stood in front of the rule that reads what a terminal draws.
+    if session.carries_images() && terminal_caps.draws_images() {
+        let delivers = session.delivers();
+        let drawn = terminal_caps.drawn_protocols();
+        if drawn.intersect(&delivers).is_empty() {
+            anyhow::bail!(
+                "{} display cannot work here: this session and this terminal share no image protocol.\n\
+                This Mosh carries: {}. The terminal of the user draws: {}.\n\
+                This terminal draws: {}.\n\
+                A picture in a protocol that any one of the three does not read lands on the screen as text.\n\
+                \n\
+                To display {}, use a terminal that draws one of the protocols this Mosh carries.",
+                feature,
+                session.transport().names(),
+                session.client().names(),
+                drawn.names(),
+                feature.to_lowercase()
+            );
+        }
+        return Ok(());
+    }
+
     // A terminal that answered a query is a fact, and every rule below it is a
     // guess about a terminal that answered nothing. A fact outranks a guess.
     //
