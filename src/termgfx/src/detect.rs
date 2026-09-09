@@ -19,7 +19,8 @@
 //! terminal it draws into, whether that terminal draws an image at all, and
 //! whether that terminal takes the raw mode that a key press needs.
 //! [`display_routine_for`] turns the first of those facts into the one routine
-//! that draws.
+//! that draws, and [`Capabilities::display_routine`] narrows that routine by
+//! what a mosh session states it delivers. See [`crate::session`].
 //!
 //! # What the detection has to get right
 //!

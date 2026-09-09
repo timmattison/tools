@@ -52,10 +52,12 @@
 //! terminal that the environment left unnamed, and it reads the refusal that
 //! a terminal wrote for a picture it would not draw. `geometry` measures
 //! a character cell and every size that comes off it. `cursor` states where the
-//! cursor ends. `draw` holds the three writers, one for each protocol. Each
-//! module keeps its tests beside the code they cover.
+//! cursor ends. `draw` holds the three writers, one for each protocol.
+//! `session` reads what the environment of a mosh session states about the
+//! images it carries, which is the one answer no query can reach from inside a
+//! multiplexer. Each module keeps its tests beside the code they cover.
 //!
-//! Only a small part of the four modules leaves the crate. The routing, the
+//! Only a small part of the six modules leaves the crate. The routing, the
 //! arithmetic of the sizes and the cursor contract are all steps of one call,
 //! and a caller that reached them one at a time would hold the parts of a
 //! picture that only this crate knows how to put together. The list below is

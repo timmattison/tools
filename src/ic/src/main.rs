@@ -558,7 +558,7 @@ fn validate_terminal_for_graphics(
                 This terminal draws: {}.\n\
                 A picture in a protocol that any one of the three does not read lands on the screen as text.\n\
                 \n\
-                To display {}, use a terminal that draws one of the protocols this Mosh carries.",
+                For {} display, use a terminal that draws one of the protocols this Mosh carries.",
                 feature,
                 session.transport().names(),
                 session.client().names(),
@@ -655,9 +655,10 @@ fn validate_terminal_for_graphics(
 /// The question goes to [`validate_terminal_for_graphics`], the same gate the
 /// image path runs. Both callers therefore give one answer, and a session that
 /// passes here cannot be refused by the next `ic picture.png`. The gate asks
-/// about the terminal, the multiplexer, and the remote transport. It does not
-/// ask whether stdout is a terminal, so a redirected stdout does not change
-/// the answer.
+/// about the terminal, the multiplexer, the remote transport, and what the
+/// environment of a mosh session states about the images it carries. It does
+/// not ask whether stdout is a terminal, so a redirected stdout does not
+/// change the answer.
 ///
 /// The gate reads the name of the terminal and whether that terminal draws an
 /// image at all, and it reads no size of anything. So this call takes the
