@@ -1636,6 +1636,28 @@ fn draw_progress_bar(
     Ok(())
 }
 
+/// Read an image file, and give back the picture and the bytes of the file.
+///
+/// The bytes travel beside the picture because `termgfx` sends a file it can
+/// carry as it stands: a JPEG on a disk is already a JPEG, and an encoder that
+/// read it and wrote it out again would throw a second helping of the picture
+/// away for nothing. See `termgfx::Request::source`.
+///
+/// # Arguments
+/// * `file_path` - The path of the image file.
+///
+/// # Returns
+/// The picture and the bytes it came out of.
+///
+/// # Errors
+/// An error when the file does not open, or when it holds no image.
+fn read_image_file(file_path: &Path) -> Result<(DynamicImage, Vec<u8>)> {
+    let img = image::open(file_path)
+        .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
+
+    Ok((img, Vec::new()))
+}
+
 /// Print a header and then display an image file.
 ///
 /// The function prints the header itself and then counts the rows that it
@@ -1656,8 +1678,7 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
         println!("{line}");
     }
 
-    let img = image::open(file_path)
-        .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
+    let (img, _source) = read_image_file(file_path)?;
 
     let (term_width, _) = terminal_cells();
     display_image(img, args, Picture::Still, header_rows(header, term_width))
@@ -3285,6 +3306,65 @@ not_a_number zellij a work
         // r_frame_rate rather than the hard-coded default.
         let probe = "r_frame_rate=30/1\navg_frame_rate=0/0\n";
         assert_eq!(parse_video_fps(probe), 30.0);
+    }
+
+    // =========================================================================
+    // Tests for read_image_file
+    // =========================================================================
+
+    /// Write `bytes` to a file of this process and give back the path.
+    ///
+    /// The name carries the process id and the nanoseconds of the clock, so two
+    /// runs of this suite at the same time write two files (see CLAUDE.md
+    /// parallel-safety).
+    ///
+    /// # Arguments
+    /// * `bytes` - The bytes to write.
+    /// * `extension` - The extension of the file name.
+    fn temporary_file_of(bytes: &[u8], extension: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "ic-source-{}-{nanos}.{extension}",
+            std::process::id()
+        ));
+        fs::write(&path, bytes).expect("a write to the temporary directory");
+
+        path
+    }
+
+    /// The reader gives back the bytes of the file it read.
+    ///
+    /// `termgfx` sends a file it can carry as it stands, so it needs the bytes
+    /// that the file holds and not an encoding of the picture inside it. A
+    /// reader that gives back the picture alone leaves the writer nothing to
+    /// send, and every JPEG then reaches the terminal through a decode and an
+    /// encode that lose a second helping of it.
+    #[test]
+    fn the_reader_gives_back_the_bytes_of_the_file() {
+        let mut file = io::Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(image::RgbImage::new(4, 3))
+            .write_to(&mut file, image::ImageFormat::Png)
+            .expect("the PNG encoder takes a picture of this size");
+        let written = file.into_inner();
+
+        let path = temporary_file_of(&written, "png");
+        let (picture, source) = read_image_file(&path).expect("the file holds a picture");
+        fs::remove_file(&path).expect("the test wrote the file it removes");
+
+        assert_eq!(
+            (picture.width(), picture.height()),
+            (4, 3),
+            "the reader must give back the picture that the file holds"
+        );
+        assert!(
+            source == written,
+            "the reader must give back the bytes of the file, but it gave {} bytes where the file holds {}",
+            source.len(),
+            written.len()
+        );
     }
 
     // =========================================================================
