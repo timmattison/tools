@@ -135,6 +135,45 @@ pub enum TerminalType {
     Unknown,
 }
 
+impl TerminalType {
+    /// Whether the answer of a terminal outranks this name.
+    ///
+    /// The environment carries two kinds of name, and the answer of a terminal
+    /// outranks one of them.
+    ///
+    /// * **A multiplexer answers for a pane it does not own.** It owns the
+    ///   pseudo terminal of the pane and it writes every answer itself, so the
+    ///   answer states what that pane really draws. The name states only what
+    ///   this crate assumes about the multiplexer, and an assumption gives way
+    ///   to a fact.
+    /// * **A panel or a terminal carries its own signal.** Its author wrote
+    ///   that signal for this exact process, and a backing session that answers
+    ///   the query must not take it away. A muxiavelli panel over a Zellij
+    ///   session is the case that names the rule, and
+    ///   [`classify_terminal_type`] states the same order for the environment.
+    ///
+    /// [`TerminalType::Unknown`] states no name at all, so there is nothing
+    /// there for an answer to outrank.
+    ///
+    /// The match names every variant, because a variant that fell through a
+    /// wildcard would take whichever answer this arm happened to give.
+    fn the_answer_outranks_this_name(&self) -> bool {
+        match self {
+            // A multiplexer, and a terminal of no name.
+            TerminalType::Zellij | TerminalType::Unknown => true,
+            // A panel, and every terminal that named itself.
+            TerminalType::Muxiavelli(_)
+            | TerminalType::Kitty
+            | TerminalType::Ghostty
+            | TerminalType::ITerm2
+            | TerminalType::WezTerm
+            | TerminalType::Alacritty
+            // An answer of an earlier read is already the answer.
+            | TerminalType::Answered(_) => false,
+        }
+    }
+}
+
 /// What one terminal does, as three facts a caller acts on.
 ///
 /// The three facts stand behind methods, and the fields stay private, because
@@ -377,11 +416,14 @@ impl Capabilities {
     /// Name what the terminal does from a captured environment and one answer.
     ///
     /// `answered` carries what the terminal said about the protocols it draws
-    /// and the size of one of its character cells. **The protocol is read only
-    /// for a terminal the environment leaves unnamed**, and the cell is kept
-    /// whatever the environment said. Every named terminal already carries a
-    /// signal its own author wrote, and a multiplexer that answers for the
-    /// pane it draws into would otherwise overrule the panel signal that
+    /// and the size of one of its character cells. **The protocol is read for
+    /// a terminal that [`TerminalType::the_answer_outranks_this_name`] names**,
+    /// which is a terminal the environment leaves unnamed and a pane of a
+    /// multiplexer. The cell is kept whatever the environment said.
+    ///
+    /// A panel and a named terminal both keep their name. Each of them carries
+    /// a signal its own author wrote, and a backing session that answers for
+    /// the pane it draws into would otherwise overrule the panel signal that
     /// [`classify_terminal_type`] puts first.
     fn from_env_and_answer(
         env: &TerminalEnv,
@@ -395,12 +437,14 @@ impl Capabilities {
         // reports a pixel size.
         let cell = answered.cell;
         match (named.terminal_type, answered.protocol) {
-            (TerminalType::Unknown, Some(protocol)) => Self {
-                terminal_type: TerminalType::Answered(protocol),
-                draws_images: true,
-                raw_mode,
-                cell,
-            },
+            (terminal_type, Some(protocol)) if terminal_type.the_answer_outranks_this_name() => {
+                Self {
+                    terminal_type: TerminalType::Answered(protocol),
+                    draws_images: true,
+                    raw_mode,
+                    cell,
+                }
+            }
             (terminal_type, _) => Self {
                 terminal_type,
                 draws_images: named.draws_images,
