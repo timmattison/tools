@@ -1391,15 +1391,38 @@ fn write_sixel<W: Write>(
     Ok(())
 }
 
+/// The payload that carries the source file of `request` as it stands, or
+/// [`None`] when the picture cannot travel that way.
+///
+/// The iTerm2 protocol carries a whole file, so a file that the caller already
+/// holds needs no encoder at all. A JPEG on a disk is already a JPEG: writing
+/// it out again would spend the time of a decode and an encode, and it would
+/// throw a second helping of the picture away to do it.
+///
+/// # Arguments
+/// * `request` - The request that the caller made, which states the file and
+///   the characters that the picture can spend.
+///
+/// # Returns
+/// The base64 of the file, for a request that states one and a budget that
+/// holds it. [`None`] for a caller that states no file, and for a file that
+/// stands above the budget, which has to reach that budget through the fit.
+fn source_payload_of(request: &Request<'_>) -> Option<String> {
+    let payload = BASE64_STANDARD.encode(request.source?);
+
+    request.payload.holds(payload.len()).then_some(payload)
+}
+
 /// Write an image with the iTerm2 inline image protocol.
 ///
 /// The command is `ESC ] 1337 ; File = <arguments> : <base64 data> BEL`. The
 /// arguments carry the width and the height in character cells, so they take no
 /// `px` suffix.
 ///
-/// The image travels as a whole file, and this writer makes a PNG file of it.
-/// The alpha channel goes no further, so the pixels reach the encoder as RGB
-/// and not as RGBA.
+/// The image travels as a whole file. A caller that holds the file the picture
+/// came out of gives it in `request.source`, and [`source_payload_of`] then
+/// sends those bytes as they stand. Every other picture reaches the terminal
+/// through [`Iterm2Payload`], which states a PNG first and a JPEG under it.
 ///
 /// The writer holds the cursor still with `doNotMoveCursor=1` and then states
 /// the position of the cursor itself through
@@ -1444,13 +1467,23 @@ fn write_iterm2<W: Write>(
         cell_height_px,
     );
 
+    // A file that the caller holds and that the budget carries travels as it
+    // stands, so no encoder runs and no pixel changes.
+    //
     // `width=` and `height=` below state the cell span, so a picture that spends
     // fewer pixels keeps the size it takes on the screen. The fit starts at the
     // lossless shape and steps down the qualities of [`Iterm2Payload`] before
     // it takes a pixel off the picture, and the terminal reads the format out
     // of the file, so no argument of the command names the shape it ended in.
-    let (image, _shape, base64_data) =
-        fit_to_payload_budget(image, request.payload, Iterm2Payload::Png)?;
+    let (image, base64_data) = match source_payload_of(request) {
+        Some(payload) => (image, payload),
+        None => {
+            let (fitted, _shape, payload) =
+                fit_to_payload_budget(image, request.payload, Iterm2Payload::Png)?;
+
+            (fitted, payload)
+        }
+    };
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
