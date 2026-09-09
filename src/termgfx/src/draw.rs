@@ -2656,6 +2656,27 @@ mod tests {
         );
     }
 
+    /// The arithmetic that stands in for the encode agrees with the encoder.
+    ///
+    /// The budget reads the length that [`base64_characters_of`] computes, so a
+    /// number one too high refuses a file that fits, and a number one too low
+    /// sends a file that mosh drops. Neither shows up in a test that measures
+    /// one file, so the count is measured at every remainder of three and at an
+    /// input of no bytes.
+    #[test]
+    fn the_base64_length_stands_for_every_remainder_of_three() {
+        for bytes in [0_usize, 1, 2, 3, 4, 5, 6, 7, 8] {
+            let encoded = BASE64_STANDARD.encode(vec![0xA5; bytes]);
+
+            assert!(
+                base64_characters_of(bytes) == encoded.len(),
+                "the base64 of {bytes} bytes holds {} characters, but the arithmetic gives {}",
+                encoded.len(),
+                base64_characters_of(bytes)
+            );
+        }
+    }
+
     /// A source file whose picture does not fit the screen gets an encode.
     ///
     /// The bytes of a file hold the picture at the size the file was written
