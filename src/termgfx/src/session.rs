@@ -281,6 +281,11 @@ mod tests {
             upstream.delivers().is_empty(),
             "and an upstream mosh delivers no protocol at all"
         );
+
+        assert!(
+            !MoshImages::from_env(Some(""), None).carries_images(),
+            "an empty value names an empty set, and an empty set is no promise that this session carries an image"
+        );
     }
 
     /// A token that names no protocol this crate draws is dropped.
