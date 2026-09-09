@@ -3356,7 +3356,36 @@ not_a_number zellij a work
     // Tests for read_image_file
     // =========================================================================
 
-    /// Write `bytes` to a file of this process and give back the path.
+    /// A file of the temporary directory that goes away with the test.
+    ///
+    /// A test that removes the path itself removes it on a line of the test
+    /// body, and an assertion that fails above that line panics before the
+    /// removal runs. The file then stays in the temporary directory of the
+    /// machine, and every later run of that test leaves one more file there.
+    /// `Drop` runs on the way out of a panic as well as on the way out of a
+    /// return, so the removal stands here and in no test body.
+    struct TemporaryFile(PathBuf);
+
+    impl TemporaryFile {
+        /// The path that the file stands at.
+        ///
+        /// # Returns
+        /// The path of the file, which holds while the guard lives.
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TemporaryFile {
+        fn drop(&mut self) {
+            // A panic in a drop that a panic started ends the whole test
+            // binary, and a file that another hand removed first is no failure
+            // of this test. So the removal reports to nobody.
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    /// Write `bytes` to a file of this process and give back a guard of it.
     ///
     /// The name carries the process id and the nanoseconds of the clock, so two
     /// runs of this suite at the same time write two files (see CLAUDE.md
@@ -3365,7 +3394,11 @@ not_a_number zellij a work
     /// # Arguments
     /// * `bytes` - The bytes to write.
     /// * `extension` - The extension of the file name.
-    fn temporary_file_of(bytes: &[u8], extension: &str) -> PathBuf {
+    ///
+    /// # Returns
+    /// A [`TemporaryFile`] that names the path and removes the file at the end
+    /// of the test, whether the test passes or fails.
+    fn temporary_file_of(bytes: &[u8], extension: &str) -> TemporaryFile {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
@@ -3376,7 +3409,7 @@ not_a_number zellij a work
         ));
         fs::write(&path, bytes).expect("a write to the temporary directory");
 
-        path
+        TemporaryFile(path)
     }
 
     /// The reader gives back the bytes of the file it read.
@@ -3394,9 +3427,8 @@ not_a_number zellij a work
             .expect("the PNG encoder takes a picture of this size");
         let written = file.into_inner();
 
-        let path = temporary_file_of(&written, "png");
-        let (picture, source) = read_image_file(&path).expect("the file holds a picture");
-        fs::remove_file(&path).expect("the test wrote the file it removes");
+        let png_file = temporary_file_of(&written, "png");
+        let (picture, source) = read_image_file(png_file.path()).expect("the file holds a picture");
         let source = source.expect("the writer sends a PNG as it stands, so the reader keeps it");
 
         assert_eq!(
@@ -3445,9 +3477,8 @@ not_a_number zellij a work
     #[test]
     fn the_reader_drops_a_file_that_the_writer_cannot_send() {
         let bitmap = picture_bytes_in(image::ImageFormat::Bmp);
-        let path = temporary_file_of(&bitmap, "bmp");
-        let (_, source) = read_image_file(&path).expect("the file holds a picture");
-        fs::remove_file(&path).expect("the test wrote the file it removes");
+        let bitmap_file = temporary_file_of(&bitmap, "bmp");
+        let (_, source) = read_image_file(bitmap_file.path()).expect("the file holds a picture");
 
         assert!(
             source.is_none(),
@@ -3456,9 +3487,8 @@ not_a_number zellij a work
         );
 
         let png = picture_bytes_in(image::ImageFormat::Png);
-        let path = temporary_file_of(&png, "png");
-        let (_, source) = read_image_file(&path).expect("the file holds a picture");
-        fs::remove_file(&path).expect("the test wrote the file it removes");
+        let png_file = temporary_file_of(&png, "png");
+        let (_, source) = read_image_file(png_file.path()).expect("the file holds a picture");
 
         assert_eq!(
             source.as_deref(),
