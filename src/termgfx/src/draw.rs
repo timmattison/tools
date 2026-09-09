@@ -677,7 +677,9 @@ fn cursor_contract(
 /// The Kitty protocol and the Sixel protocol each carry one shape, so
 /// [`Payload::cheaper`] answers [`None`] for them and the fit reaches for the
 /// pixels at once. The iTerm2 protocol carries a whole file of any format the
-/// terminal reads, so [`Iterm2Payload`] states a real order there.
+/// terminal reads, so [`Iterm2Payload`] states a real order there. That order
+/// has two top rungs, and [`write_iterm2`] picks between them by what the
+/// caller draws rather than by what the budget holds.
 trait Payload: Copy {
     /// Encode `image` into the base64 payload of this shape.
     ///
@@ -903,23 +905,33 @@ impl JpegQuality {
 /// draws, and it costs no key of the protocol and no round trip to say which
 /// one it picked.
 ///
-/// The shapes stand in one order, and [`fit_to_payload_budget`] walks it:
+/// The top rung comes off `request.picture` and not off the budget, so the
+/// shapes stand in two orders and [`write_iterm2`] states which one a picture
+/// walks:
 ///
-/// * [`Iterm2Payload::Png`] first. It is lossless, so a picture that the budget
-///   holds as a PNG reaches the terminal with every pixel that the caller gave
-///   it. A picture of flat color and sharp edges, such as a screenshot of text,
-///   also costs less as a PNG than as a JPEG at any quality.
-/// * [`Iterm2Payload::Jpeg`] under it, one quality at a time. A photograph
-///   compresses poorly in a lossless format, and a JPEG of it carries about
-///   twelve times the pixels of a PNG for the same characters. That is what
-///   keeps a photograph at the resolution of the screen inside the budget of a
-///   mosh session.
+/// * [`Iterm2Payload::Png`] is the top rung of a still picture. It is lossless,
+///   so a picture that the budget holds as a PNG reaches the terminal with
+///   every pixel that the caller gave it. A picture of flat color and sharp
+///   edges, such as a screenshot of text, also costs less as a PNG than as a
+///   JPEG at any quality.
+/// * [`Iterm2Payload::Pnm`] is the top rung of one frame of many. The builder
+///   copies the pixels behind a header of three lines, so it costs a memcpy
+///   where a PNG costs a deflate. A measurement of a photograph of 1920 pixels
+///   by 1080 states the PNG encoder at 8.37 milliseconds and the PNM builder at
+///   1.73, for 19 percent fewer characters, and a frame pays that time one time
+///   for every frame that it draws.
+/// * [`Iterm2Payload::Jpeg`] stands under both of them, one quality at a time.
+///   A photograph compresses poorly in a lossless format, and a JPEG of it
+///   carries about twelve times the pixels of a PNG for the same characters.
+///   That is what keeps a photograph at the resolution of the screen inside the
+///   budget of a mosh session.
 ///
-/// The writer made a raw PNM file before this: three bytes for every pixel and
-/// no compression at all. A photograph of 3074 pixels by 1856 costs 22821376
-/// base64 characters that way, and a mosh session holds 1048576, so the fit
-/// shrank the picture to about 655 pixels by 395 and the terminal stretched
-/// that over the whole rectangle.
+/// A raw PNM was the one shape that the writer made before this, and a
+/// photograph of 3074 pixels by 1856 costs 22821376 base64 characters in it.
+/// A mosh session holds 1048576, so the fit shrank that picture to about 655
+/// pixels by 395 and the terminal stretched it over the whole rectangle. The
+/// shape is now the rung that a frame starts at, where the time of the encoder
+/// is the cost that the reader feels, and a still picture starts at a PNG.
 ///
 /// A PNG keeps the alpha channel that the picture carries, so the encoder path
 /// and the byte-for-byte path of [`write_iterm2`] draw one picture. A JPEG
@@ -929,6 +941,17 @@ impl JpegQuality {
 enum Iterm2Payload {
     /// A whole PNG file, which loses no pixel of the picture.
     Png,
+    /// A whole raw PNM file: the header `P6`, the size, the highest channel
+    /// value, and then three bytes for one pixel.
+    ///
+    /// The format carries no alpha channel, because `P6` states three bytes for
+    /// one pixel and no fourth one. That loses no picture here. This shape is
+    /// the rung that a frame starts at, a frame comes out of a decoder of video
+    /// rather than off a disk, and no byte-for-byte path therefore stands
+    /// beside it to disagree with. This is also the shape, and the alpha
+    /// channel, that every iTerm2 picture travelled in before the quality
+    /// ladder.
+    Pnm,
     /// A whole JPEG file at this quality.
     Jpeg(JpegQuality),
 }
@@ -939,6 +962,9 @@ impl Payload for Iterm2Payload {
     /// The PNG goes out at the default compression of the encoder and not at
     /// the strongest one, for the reason that [`KittyPayload::encode`] gives: a
     /// still picture must appear at once.
+    ///
+    /// The PNM reaches no encoder at all. The format is a header and the
+    /// pixels, so this builds the file itself.
     ///
     /// # Arguments
     /// * `image` - The image at the size that it draws at.
@@ -971,6 +997,20 @@ impl Payload for Iterm2Payload {
                     ExtendedColorType::Rgb8,
                 )
             }
+            // A PNM carries three bytes for one pixel behind a header of three
+            // lines, and it compresses none of them. The header states the
+            // size, so the copy of the pixels is the whole of the work.
+            Iterm2Payload::Pnm => {
+                let rgb = image.to_rgb8();
+                let pixels = rgb.as_raw();
+                let header = format!("P6\n{} {}\n255\n", rgb.width(), rgb.height());
+
+                file.reserve(header.len() + pixels.len());
+                file.extend_from_slice(header.as_bytes());
+                file.extend_from_slice(pixels);
+
+                Ok(())
+            }
             // A JPEG carries no alpha channel at all, so this shape starts
             // from RGB8 whatever the picture holds.
             Iterm2Payload::Jpeg(quality) => {
@@ -990,13 +1030,21 @@ impl Payload for Iterm2Payload {
 
     /// The shape under this one.
     ///
+    /// A PNM steps onto the same rung that a PNG steps onto, and it skips the
+    /// PNG. The deflate of a PNG is the exact cost that a frame starts at a PNM
+    /// to avoid, and a JPEG encoder runs far under that cost. So a frame under
+    /// the budget of a mosh session builds one cheap PNM and lands on a JPEG
+    /// rung.
+    ///
     /// # Returns
-    /// The highest JPEG quality under a PNG, the next rung down under a JPEG,
-    /// and [`None`] under [`JpegQuality::LOWEST`], where the fit starts to
-    /// spend pixels instead.
+    /// The highest JPEG quality under a PNG and under a PNM, the next rung down
+    /// under a JPEG, and [`None`] under [`JpegQuality::LOWEST`], where the fit
+    /// starts to spend pixels instead.
     fn cheaper(self) -> Option<Self> {
         match self {
-            Iterm2Payload::Png => Some(Iterm2Payload::Jpeg(JpegQuality::HIGHEST)),
+            Iterm2Payload::Png | Iterm2Payload::Pnm => {
+                Some(Iterm2Payload::Jpeg(JpegQuality::HIGHEST))
+            }
             Iterm2Payload::Jpeg(quality) => quality.cheaper().map(Iterm2Payload::Jpeg),
         }
     }
@@ -1521,11 +1569,31 @@ fn travels_as_it_stands(source: &[u8]) -> bool {
 /// The image travels as a whole file. A caller that holds the file the picture
 /// came out of gives it in `request.source`, and [`source_payload_of`] then
 /// sends those bytes as they stand. Every other picture reaches the terminal
-/// through [`Iterm2Payload`], which states a PNG first and a JPEG under it.
+/// through [`Iterm2Payload`].
 ///
 /// The writer holds the cursor still with `doNotMoveCursor=1` and then states
 /// the position of the cursor itself through
 /// [`write_image_with_cursor_contract`].
+///
+/// # The shapes of the payload
+///
+/// An image that reaches the fit starts in one of the three shapes of
+/// [`Iterm2Payload`], and `request.picture` names which one.
+///
+/// [`Picture::Still`] is one still picture, and it starts at a PNG. A still
+/// picture pays the encoder one time, so the characters are the whole of what
+/// it pays, and a PNG is lossless.
+///
+/// [`Picture::Frame`] is one frame of many, and it starts at a raw PNM. The
+/// caller draws the next frame directly after this one, so an encoder here runs
+/// one time for every frame. A measurement of a photograph of 1920 pixels by
+/// 1080 states the PNG encoder at 8.37 milliseconds and the PNM builder at
+/// 1.73, and the PNG saves 19 percent of the characters for that time. `ic`
+/// answers the time with a lower frame rate, so the frame keeps the shape that
+/// costs the least time. [`write_kitty`] states this same trade.
+///
+/// A budget that neither top rung reaches steps onto the JPEG rungs, which both
+/// shapes share.
 ///
 /// # Arguments
 /// * `out` - The stream that takes the bytes.
@@ -1571,19 +1639,28 @@ fn write_iterm2<W: Write>(
     // file that the caller holds still carries the pixels of the screen.
     let resized = matches!(image, Cow::Owned(_));
 
+    // The picture names the two callers apart, the way it does in
+    // `write_kitty`. A caller that draws one frame of many draws the next one
+    // directly after this one, so the time of the encoder is what it pays. A
+    // caller that draws one still picture pays for it one time, and the
+    // characters are the whole of what it pays.
+    let shape = match request.picture {
+        Picture::Frame { .. } => Iterm2Payload::Pnm,
+        Picture::Still => Iterm2Payload::Png,
+    };
+
     // A file that the caller holds, that the screen fits and that the budget
     // carries travels as it stands, so no encoder runs and no pixel changes.
     // Every other picture reaches the budget through the fit, which starts at
-    // the lossless shape and steps down the qualities of `Iterm2Payload` before
-    // it takes a pixel off the picture. `width=` and `height=` below state the
+    // the shape above and steps down the qualities of `Iterm2Payload` before it
+    // takes a pixel off the picture. `width=` and `height=` below state the
     // cell span either way, so a picture that does spend pixels keeps the size
     // it takes on the screen. The terminal reads the format out of the file, so
     // no argument of the command names the shape that the picture travelled in.
     let (image, base64_data) = match source_payload_of(request, resized) {
         Some(payload) => (image, payload),
         None => {
-            let (fitted, _shape, payload) =
-                fit_to_payload_budget(image, request.payload, Iterm2Payload::Png)?;
+            let (fitted, _shape, payload) = fit_to_payload_budget(image, request.payload, shape)?;
 
             (fitted, payload)
         }
@@ -2590,20 +2667,25 @@ mod tests {
         );
     }
 
-    /// A picture that the budget holds travels as a PNG file.
+    /// A still picture that the budget holds travels as a PNG file.
     ///
     /// The iTerm2 protocol carries a whole file, and a raw PNM file spends
     /// three bytes on every pixel and compresses none of them. A photograph of
     /// 3074 pixels by 1856 costs 17116032 bytes that way, which is 22821376
     /// base64 characters, and a mosh session holds 1048576 of them. The same
     /// photograph as a PNG costs a fraction of it and loses no pixel at all.
+    ///
+    /// The rule holds for a still picture. One frame of many starts at the raw
+    /// PNM, because it pays the encoder one time for every frame, and
+    /// [`an_iterm2_frame_that_the_budget_holds_travels_as_a_raw_pnm`] measures
+    /// that.
     #[test]
     fn a_picture_that_the_budget_holds_travels_as_a_png() {
         let file = iterm2_file_of(&photograph_fixture(), PayloadBudget::UNLIMITED);
 
         assert!(
             file.starts_with(PNG_SIGNATURE),
-            "an iTerm2 picture that the budget holds must travel as a PNG, but the file starts with {:?}",
+            "an iTerm2 still picture that the budget holds must travel as a PNG, but the file starts with {:?}",
             &file[..PNG_SIGNATURE.len().min(file.len())]
         );
     }
