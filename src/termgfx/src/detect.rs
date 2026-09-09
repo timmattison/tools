@@ -1160,4 +1160,56 @@ mod tests {
             assert_eq!(display_routine_for(&terminal_type), DisplayRoutine::Iterm2);
         }
     }
+
+    // =========================================================================
+    // Tests for the two kinds of name that the environment carries
+    // =========================================================================
+
+    /// The answer of a terminal outranks the name of a multiplexer, and it
+    /// outranks the name of a panel never.
+    ///
+    /// A multiplexer owns the pseudo terminal of the pane and answers every
+    /// query itself, so the answer states what that pane draws and the name
+    /// states only what this crate assumes about the multiplexer. A panel
+    /// carries a signal that its own author wrote, and a backing session that
+    /// answers must not overrule it. That is the trap that
+    /// [`classify_terminal_type`] states, and this test holds the constructor
+    /// to the same order.
+    #[test]
+    fn the_answer_outranks_the_name_of_a_multiplexer_and_never_the_name_of_a_panel() {
+        let pane = Capabilities::from_env_and_answer(
+            &TerminalEnv {
+                zellij: true,
+                ..TerminalEnv::default()
+            },
+            false,
+            crate::probe::TerminalAnswer {
+                protocol: Some(AnsweredProtocol::Sixel),
+                cell: None,
+            },
+        );
+        assert_eq!(
+            pane.terminal_type(),
+            &TerminalType::Answered(AnsweredProtocol::Sixel),
+            "a multiplexer answers the query for its own pane, so the answer is the fact and the name of the multiplexer is the guess"
+        );
+
+        let panel = Capabilities::from_env_and_answer(
+            &TerminalEnv {
+                muxiavelli: true,
+                muxiavelli_protocols: Some("iterm2".to_string()),
+                ..TerminalEnv::default()
+            },
+            false,
+            crate::probe::TerminalAnswer {
+                protocol: Some(AnsweredProtocol::Sixel),
+                cell: None,
+            },
+        );
+        assert_eq!(
+            display_routine_for(panel.terminal_type()),
+            DisplayRoutine::Iterm2,
+            "a panel states the protocol it draws, and a backing session that answers for the pane must not take that statement away"
+        );
+    }
 }
