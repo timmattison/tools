@@ -33,6 +33,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::prelude::{Engine, BASE64_STANDARD};
 use icy_sixel::{sixel_encode, EncodeOptions};
+use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, ExtendedColorType, ImageEncoder};
@@ -632,6 +633,33 @@ fn cursor_contract(
     )
 }
 
+/// One shape that a picture travels in, and the cheaper shape under it.
+///
+/// A protocol states which shapes it carries, and the shapes of one protocol
+/// stand in an order: each one costs fewer characters of the same pixels than
+/// the one above it, and it pays for them with something else.
+/// [`fit_to_payload_budget`] walks that order before it takes a pixel off the
+/// picture, because the pixel count is what the reader sees.
+///
+/// The Kitty protocol and the Sixel protocol each carry one shape, so
+/// [`Payload::cheaper`] answers [`None`] for them and the fit reaches for the
+/// pixels at once. The iTerm2 protocol carries a whole file of any format the
+/// terminal reads, so [`Iterm2Payload`] states a real order there.
+trait Payload: Copy {
+    /// Encode `image` into the base64 payload of this shape.
+    ///
+    /// # Arguments
+    /// * `image` - The image at the size that it draws at.
+    ///
+    /// # Errors
+    /// Gives [`DrawError::Encode`] when the encoder refuses the image.
+    fn encode(self, image: &DynamicImage) -> Result<String, DrawError>;
+
+    /// The shape that carries the same pixels for fewer characters, or [`None`]
+    /// when this shape is the last one that the protocol carries.
+    fn cheaper(self) -> Option<Self>;
+}
+
 /// The shape that one Kitty image travels in.
 ///
 /// The protocol takes either the raw pixels of an image or a whole image file,
@@ -692,6 +720,9 @@ impl KittyPayload {
         }
     }
 
+}
+
+impl Payload for KittyPayload {
     /// Encode `image` into the base64 payload of this shape.
     ///
     /// The PNG goes out at the default compression of the encoder and not at
@@ -726,14 +757,213 @@ impl KittyPayload {
             }
         }
     }
+
+    /// The Kitty protocol carries these two shapes and no third one, and
+    /// [`write_kitty`] picks between them by what the caller draws rather than
+    /// by what the budget holds. A still picture already travels as a PNG, and
+    /// raw pixels are what a frame trades characters for time with, so neither
+    /// shape has a cheaper one under it.
+    fn cheaper(self) -> Option<Self> {
+        None
+    }
 }
 
-/// The attempts that [`fit_to_payload_budget`] takes before it gives up.
+/// The one shape that a Sixel image travels in.
 ///
-/// Every attempt divides the pixel count by the amount that the last one
+/// The protocol carries a palette and then a band of pixels at a time, and the
+/// encoder of `icy_sixel` makes both. It names no second shape, so this type
+/// holds no data: it is the encoder under the name that
+/// [`fit_to_payload_budget`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SixelPayload;
+
+impl Payload for SixelPayload {
+    /// Encode `image` into the device control string that a Sixel terminal
+    /// reads.
+    ///
+    /// The string is the payload and the command together, because the encoder
+    /// writes the introducer and the terminator itself. So the writer sends
+    /// what this gives it and adds nothing.
+    ///
+    /// # Arguments
+    /// * `image` - The image at the size that it draws at.
+    ///
+    /// # Errors
+    /// Gives [`DrawError::Encode`] when the encoder refuses the image.
+    fn encode(self, image: &DynamicImage) -> Result<String, DrawError> {
+        let rgba = image.to_rgba8();
+
+        sixel_encode(
+            rgba.as_raw(),
+            image.width() as usize,
+            image.height() as usize,
+            &EncodeOptions::default(),
+        )
+        .map_err(|error| DrawError::Encode(error.to_string()))
+    }
+
+    /// The protocol carries this shape and no other one, so a Sixel picture
+    /// that stands above the budget reaches it on pixels alone.
+    fn cheaper(self) -> Option<Self> {
+        None
+    }
+}
+
+/// The quality that a JPEG encoder works at, from 1 to 100.
+///
+/// The quality decides how much of the picture the encoder throws away, and it
+/// is the thing that [`Iterm2Payload`] spends before it spends a pixel. The
+/// rungs run from [`JpegQuality::HIGHEST`] down to [`JpegQuality::LOWEST`], a
+/// step of [`JpegQuality::STEP`] at a time, and [`JpegQuality::cheaper`] is the
+/// one place that walks them.
+///
+/// The type carries the range, so no caller of the encoder states it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JpegQuality(u8);
+
+impl JpegQuality {
+    /// The quality that a JPEG starts at.
+    ///
+    /// A photograph at this quality is about a third of the same photograph as
+    /// a PNG and it holds every pixel, so it is the first rung that
+    /// [`Iterm2Payload::cheaper`] steps onto. A higher number buys a difference
+    /// that no reader of a terminal sees, and it costs characters that the
+    /// lower rungs then have to find again.
+    const HIGHEST: Self = Self(90);
+
+    /// The quality that the ladder stops at.
+    ///
+    /// The report of this defect measures a photograph of 3074 pixels by 1856
+    /// at this quality: 785138 bytes, which is what a mosh session holds. So
+    /// this rung carries the whole picture where the rung above it cannot.
+    /// Under it the blocks of the encoder start to show, and the pixel count is
+    /// then the better thing to spend.
+    const LOWEST: Self = Self(35);
+
+    /// How far one step of the ladder falls.
+    ///
+    /// The distance from [`JpegQuality::HIGHEST`] to [`JpegQuality::LOWEST`]
+    /// divides by this, so the ladder lands on the lowest rung exactly and
+    /// spends six encoder runs to get there.
+    const STEP: u8 = 11;
+
+    /// The rung under this one, or [`None`] at [`JpegQuality::LOWEST`].
+    ///
+    /// # Returns
+    /// The next rung down. The step never falls under the lowest rung, so a
+    /// change of [`JpegQuality::STEP`] that no longer divides the ladder
+    /// evenly still stops there.
+    fn cheaper(self) -> Option<Self> {
+        (self.0 > Self::LOWEST.0)
+            .then(|| Self(self.0.saturating_sub(Self::STEP).max(Self::LOWEST.0)))
+    }
+
+    /// The quality as the number that the encoder takes.
+    fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// The shape that one iTerm2 image travels in.
+///
+/// The protocol carries a whole file, and the terminal reads the format out of
+/// the first bytes of that file. So this writer picks any format the terminal
+/// draws, and it costs no key of the protocol and no round trip to say which
+/// one it picked.
+///
+/// The shapes stand in one order, and [`fit_to_payload_budget`] walks it:
+///
+/// * [`Iterm2Payload::Png`] first. It is lossless, so a picture that the budget
+///   holds as a PNG reaches the terminal with every pixel that the caller gave
+///   it. A picture of flat color and sharp edges, such as a screenshot of text,
+///   also costs less as a PNG than as a JPEG at any quality.
+/// * [`Iterm2Payload::Jpeg`] under it, one quality at a time. A photograph
+///   compresses poorly in a lossless format, and a JPEG of it carries about
+///   twelve times the pixels of a PNG for the same characters. That is what
+///   keeps a photograph at the resolution of the screen inside the budget of a
+///   mosh session.
+///
+/// The writer made a raw PNM file before this: three bytes for every pixel and
+/// no compression at all. A photograph of 3074 pixels by 1856 costs 22821376
+/// base64 characters that way, and a mosh session holds 1048576, so the fit
+/// shrank the picture to about 655 pixels by 395 and the terminal stretched
+/// that over the whole rectangle.
+///
+/// Both shapes drop the alpha channel. A JPEG carries none at all, and the PNM
+/// file that went before carried none either, so the drawn result is the one
+/// that the writer drew before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Iterm2Payload {
+    /// A whole PNG file, which loses no pixel of the picture.
+    Png,
+    /// A whole JPEG file at this quality.
+    Jpeg(JpegQuality),
+}
+
+impl Payload for Iterm2Payload {
+    /// Encode `image` into the base64 payload of this shape.
+    ///
+    /// The PNG goes out at the default compression of the encoder and not at
+    /// the strongest one, for the reason that [`KittyPayload::encode`] gives: a
+    /// still picture must appear at once.
+    ///
+    /// # Arguments
+    /// * `image` - The image at the size that it draws at.
+    ///
+    /// # Errors
+    /// Gives [`DrawError::Encode`] when the encoder refuses the image.
+    fn encode(self, image: &DynamicImage) -> Result<String, DrawError> {
+        // Both shapes start from RGB8. A JPEG carries no alpha channel at all,
+        // and the alpha of a PNG changes no pixel that this writer draws.
+        let rgb = image.to_rgb8();
+        let mut file = Vec::new();
+
+        match self {
+            Iterm2Payload::Png => PngEncoder::new(&mut file).write_image(
+                rgb.as_raw(),
+                rgb.width(),
+                rgb.height(),
+                ExtendedColorType::Rgb8,
+            ),
+            Iterm2Payload::Jpeg(quality) => {
+                JpegEncoder::new_with_quality(&mut file, quality.get()).write_image(
+                    rgb.as_raw(),
+                    rgb.width(),
+                    rgb.height(),
+                    ExtendedColorType::Rgb8,
+                )
+            }
+        }
+        .map_err(|error| DrawError::Encode(error.to_string()))?;
+
+        Ok(BASE64_STANDARD.encode(&file))
+    }
+
+    /// The shape under this one.
+    ///
+    /// # Returns
+    /// The highest JPEG quality under a PNG, the next rung down under a JPEG,
+    /// and [`None`] under [`JpegQuality::LOWEST`], where the fit starts to
+    /// spend pixels instead.
+    fn cheaper(self) -> Option<Self> {
+        match self {
+            Iterm2Payload::Png => Some(Iterm2Payload::Jpeg(JpegQuality::HIGHEST)),
+            Iterm2Payload::Jpeg(quality) => quality.cheaper().map(Iterm2Payload::Jpeg),
+        }
+    }
+}
+
+/// The resizes that [`fit_to_payload_budget`] takes before it gives up.
+///
+/// Every resize divides the pixel count by the amount that the last attempt
 /// missed by, so a payload that is a hundred times too large reaches the
 /// budget in two. Six is far past what any real picture needs, and it bounds
 /// the encoder runs of one draw whatever a future encoder does with the size.
+///
+/// The shapes of a protocol bound themselves, because
+/// [`Payload::cheaper`] walks a list that each protocol states and that list
+/// ends. So the encoder runs of one fit come to the length of that list plus
+/// this number plus one.
 const MAXIMUM_FIT_ATTEMPTS: usize = 6;
 
 /// The share of the budget that one attempt of [`fit_to_payload_budget`] aims
@@ -745,13 +975,21 @@ const MAXIMUM_FIT_ATTEMPTS: usize = 6;
 /// that nobody can see.
 const FIT_SAFETY: f64 = 0.95;
 
-/// Shrink `image` until `encode` gives a payload that `budget` holds.
+/// Carry `image` in `shape`, or in a cheaper shape, or at fewer pixels, until
+/// the payload is one that `budget` holds.
 ///
-/// The payload of every shape this crate writes grows with the pixel count, so
-/// an attempt that misses by a factor divides both sides by the square root of
-/// that factor. Raw pixels are exactly linear, so they land in one attempt. A
-/// PNG is not, because its size comes off the content as well, so it takes two
-/// or three.
+/// The fit spends two things and it spends them in this order.
+///
+/// **The shape first.** [`Payload::cheaper`] names the shape under the one the
+/// picture is in, and every rung of that ladder carries the same pixels for
+/// fewer characters. So a picture that reaches the budget on the ladder alone
+/// reaches it at the resolution that the screen shows.
+///
+/// **The pixel count second, and only when the ladder ends.** The payload of
+/// every shape this crate writes grows with the pixel count, so an attempt that
+/// misses by a factor divides both sides by the square root of that factor. Raw
+/// pixels are exactly linear, so they land in one attempt. A PNG is not,
+/// because its size comes off the content as well, so it takes two or three.
 ///
 /// The picture keeps the size that it takes on the screen. The Kitty protocol
 /// and the iTerm2 protocol state that size in character cells, beside the
@@ -761,12 +999,17 @@ const FIT_SAFETY: f64 = 0.95;
 /// # Arguments
 /// * `image` - The picture at the size the display bounds gave it.
 /// * `budget` - The characters of payload that the picture can spend.
-/// * `encode` - The encoder of the protocol that this picture travels in.
+/// * `shape` - The shape that the picture starts in, which is the first rung of
+///   the ladder that the protocol states.
 ///
 /// # Returns
-/// The picture that the payload came off, and that payload. The picture comes
-/// back untouched when it already fits, so a draw inside the budget costs no
-/// resize at all.
+/// The picture that the payload came off, the shape it ended in, and that
+/// payload. The picture comes back untouched and in the shape it started in
+/// when that already fits, so a draw inside the budget costs no resize and no
+/// second encoder run at all.
+///
+/// A caller that states the shape in the command reads the shape that comes
+/// back here and not the one it passed in, because the fit can step off it.
 ///
 /// A picture that cannot reach the budget comes back at the smallest size the
 /// fit could reach, with the payload that size made. Drawing nothing is the
@@ -774,20 +1017,25 @@ const FIT_SAFETY: f64 = 0.95;
 /// refused.
 ///
 /// # Errors
-/// Gives the error of the first call to `encode` that fails.
-fn fit_to_payload_budget<'a, F>(
+/// Gives the error of the first encoder run that fails.
+fn fit_to_payload_budget<'a, P: Payload>(
     image: Cow<'a, DynamicImage>,
     budget: PayloadBudget,
-    encode: F,
-) -> Result<(Cow<'a, DynamicImage>, String), DrawError>
-where
-    F: Fn(&DynamicImage) -> Result<String, DrawError>,
-{
+    shape: P,
+) -> Result<(Cow<'a, DynamicImage>, P, String), DrawError> {
     let mut picture = image;
-    let mut payload = encode(&picture)?;
+    let mut shape = shape;
+    let mut payload = shape.encode(&picture)?;
+    let mut resizes = 0;
 
-    for _ in 0..MAXIMUM_FIT_ATTEMPTS {
-        if budget.holds(payload.len()) {
+    while !budget.holds(payload.len()) {
+        if let Some(cheaper) = shape.cheaper() {
+            shape = cheaper;
+            payload = shape.encode(&picture)?;
+            continue;
+        }
+
+        if resizes == MAXIMUM_FIT_ATTEMPTS {
             break;
         }
 
@@ -796,10 +1044,11 @@ where
         };
 
         picture = Cow::Owned(smaller);
-        payload = encode(&picture)?;
+        resizes += 1;
+        payload = shape.encode(&picture)?;
     }
 
-    Ok((picture, payload))
+    Ok((picture, shape, payload))
 }
 
 /// Give `image` at the size that aims at `budget`, or [`None`] when no smaller
@@ -926,7 +1175,7 @@ fn write_kitty<W: Write>(
     // many draws the next one directly after this one. A caller that draws one
     // still picture pays for it one time, and the characters are the whole of
     // what it pays.
-    let payload = match request.picture {
+    let shape = match request.picture {
         Picture::Frame { .. } => KittyPayload::RawRgb,
         Picture::Still => KittyPayload::Png,
     };
@@ -937,8 +1186,7 @@ fn write_kitty<W: Write>(
     // window of more than about 51 columns by 23 makes a frame above that cap.
     // `c=` and `r=` below still state the cell span that the screen gave, so
     // the picture keeps its size there and loses resolution alone.
-    let (image, base64_data) =
-        fit_to_payload_budget(image, request.payload, |picture| payload.encode(picture))?;
+    let (image, shape, base64_data) = fit_to_payload_budget(image, request.payload, shape)?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -973,10 +1221,10 @@ fn write_kitty<W: Write>(
     };
     let width_key = display_width.map_or_else(String::new, |columns| format!(",c={columns}"));
     let height_key = display_height.map_or_else(String::new, |rows| format!(",r={rows}"));
-    let size_keys = payload.pixel_size_keys(image.width(), image.height());
+    let size_keys = shape.pixel_size_keys(image.width(), image.height());
     let header = format!(
         "\x1b_Ga=T,f={},{answer_keys}{size_keys}{image_keys},{KITTY_HOLD_CURSOR}{width_key}{height_key}",
-        payload.format_key()
+        shape.format_key()
     );
 
     write_image_with_cursor_contract(out, contract, |sink| {
@@ -1064,17 +1312,8 @@ fn write_sixel<W: Write>(
     // picture that spends fewer pixels is smaller on the screen as well. That
     // is the whole of what the protocol allows, and a smaller picture beats the
     // empty screen that a refused transmission leaves.
-    let (resized, payload) = fit_to_payload_budget(resized, request.payload, |picture| {
-        let rgba = picture.to_rgba8();
-
-        sixel_encode(
-            rgba.as_raw(),
-            picture.width() as usize,
-            picture.height() as usize,
-            &EncodeOptions::default(),
-        )
-        .map_err(|error| DrawError::Encode(error.to_string()))
-    })?;
+    let (resized, _shape, payload) =
+        fit_to_payload_budget(resized, request.payload, SixelPayload)?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -1140,21 +1379,12 @@ fn write_iterm2<W: Write>(
     );
 
     // `width=` and `height=` below state the cell span, so a picture that spends
-    // fewer pixels keeps the size it takes on the screen.
-    let (image, base64_data) = fit_to_payload_budget(image, request.payload, |picture| {
-        let rgb = picture.to_rgb8();
-        let mut file = Vec::new();
-        PngEncoder::new(&mut file)
-            .write_image(
-                rgb.as_raw(),
-                rgb.width(),
-                rgb.height(),
-                ExtendedColorType::Rgb8,
-            )
-            .map_err(|error| DrawError::Encode(error.to_string()))?;
-
-        Ok(BASE64_STANDARD.encode(&file))
-    })?;
+    // fewer pixels keeps the size it takes on the screen. The fit starts at the
+    // lossless shape and steps down the qualities of [`Iterm2Payload`] before
+    // it takes a pixel off the picture, and the terminal reads the format out
+    // of the file, so no argument of the command names the shape it ended in.
+    let (image, _shape, base64_data) =
+        fit_to_payload_budget(image, request.payload, Iterm2Payload::Png)?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -1833,11 +2063,12 @@ mod tests {
             .encode(&picture)
             .expect("raw pixels reach base64 with no encoder that can refuse them");
 
-        let (_fitted, payload) =
-            fit_to_payload_budget(Cow::Borrowed(&picture), PayloadBudget::MOSH, |image| {
-                KittyPayload::RawRgb.encode(image)
-            })
-            .expect("raw pixels reach base64 with no encoder that can refuse them");
+        let (_fitted, _shape, payload) = fit_to_payload_budget(
+            Cow::Borrowed(&picture),
+            PayloadBudget::MOSH,
+            KittyPayload::RawRgb,
+        )
+        .expect("raw pixels reach base64 with no encoder that can refuse them");
 
         assert!(
             whole.len() > MOSH_STORE_CHARACTERS,
