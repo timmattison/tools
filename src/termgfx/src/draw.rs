@@ -304,12 +304,17 @@ pub struct Budget {
 /// front of that payload are a few tens of characters. [`PayloadBudget::MOSH`]
 /// leaves room for them.
 ///
-/// A picture above the budget is drawn at fewer pixels rather than not at all.
-/// The Kitty protocol and the iTerm2 protocol each state the size of the
-/// picture in character cells, so a smaller pixel count keeps the size that the
-/// picture takes on the screen and loses resolution alone. The Sixel protocol
-/// states its size in pixels and carries no such key, so a Sixel picture that
-/// spends fewer pixels is smaller on the screen as well.
+/// A picture above the budget is drawn at a smaller cost rather than not at
+/// all, and [`fit_to_payload_budget`] states what it spends to get there.
+/// A protocol that carries more than one shape of a picture spends the shape
+/// first, so the picture reaches the budget with every pixel in place. The
+/// pixel count is what it spends after that.
+///
+/// A picture that does spend pixels keeps the room it takes on the screen. The
+/// Kitty protocol and the iTerm2 protocol each state the size of the picture in
+/// character cells, so a smaller pixel count loses resolution alone. The Sixel
+/// protocol states its size in pixels and carries no such key, so a Sixel
+/// picture that spends fewer pixels is smaller on the screen as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PayloadBudget(usize);
 
@@ -746,7 +751,6 @@ impl KittyPayload {
             KittyPayload::Png => String::new(),
         }
     }
-
 }
 
 impl Payload for KittyPayload {
@@ -952,14 +956,13 @@ impl Payload for Iterm2Payload {
                 rgb.height(),
                 ExtendedColorType::Rgb8,
             ),
-            Iterm2Payload::Jpeg(quality) => {
-                JpegEncoder::new_with_quality(&mut file, quality.get()).write_image(
+            Iterm2Payload::Jpeg(quality) => JpegEncoder::new_with_quality(&mut file, quality.get())
+                .write_image(
                     rgb.as_raw(),
                     rgb.width(),
                     rgb.height(),
                     ExtendedColorType::Rgb8,
-                )
-            }
+                ),
         }
         .map_err(|error| DrawError::Encode(error.to_string()))?;
 
@@ -1380,8 +1383,7 @@ fn write_sixel<W: Write>(
     // picture that spends fewer pixels is smaller on the screen as well. That
     // is the whole of what the protocol allows, and a smaller picture beats the
     // empty screen that a refused transmission leaves.
-    let (resized, _shape, payload) =
-        fit_to_payload_budget(resized, request.payload, SixelPayload)?;
+    let (resized, _shape, payload) = fit_to_payload_budget(resized, request.payload, SixelPayload)?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -1936,7 +1938,11 @@ mod tests {
     /// * `image` - The picture that the file holds.
     fn source_file_of(shape: Iterm2Payload, image: &DynamicImage) -> Vec<u8> {
         BASE64_STANDARD
-            .decode(shape.encode(image).expect("the encoder takes an RGB8 picture"))
+            .decode(
+                shape
+                    .encode(image)
+                    .expect("the encoder takes an RGB8 picture"),
+            )
             .expect("the encoder gave base64")
     }
 
@@ -2367,8 +2373,7 @@ mod tests {
         let picture =
             image::load_from_memory(&source).expect("the encoder wrote a whole image file");
 
-        let payload =
-            iterm2_payload_in_cells_of(&picture, Some(&source), PayloadBudget::UNLIMITED);
+        let payload = iterm2_payload_in_cells_of(&picture, Some(&source), PayloadBudget::UNLIMITED);
         let file = BASE64_STANDARD
             .decode(&payload)
             .expect("the writer wrote base64");
