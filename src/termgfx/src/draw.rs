@@ -2021,10 +2021,11 @@ mod tests {
 
     /// The bytes of `image` as a PNG file that keeps every channel.
     ///
-    /// [`source_file_of`] writes its file through [`Iterm2Payload`], which
-    /// starts from RGB8, so a file out of that helper carries no alpha channel
-    /// to measure. This helper writes the picture as it stands, which is what a
-    /// caller reads off a disk.
+    /// [`source_file_of`] writes its file through [`Iterm2Payload`], so that
+    /// file carries the channels that the writer picks. This helper writes the
+    /// picture as the caller gave it, so the file carries the alpha channel
+    /// that the test measures. That file is also the file a caller reads off a
+    /// disk.
     ///
     /// # Arguments
     /// * `image` - The picture that the file holds.
@@ -2506,10 +2507,11 @@ mod tests {
     /// a caller cannot tell which path runs, and a picture that changes with
     /// the path is a picture that changes for no reason the caller can see.
     ///
-    /// The paths part on the alpha channel today. [`Iterm2Payload::encode`]
-    /// starts from RGB8 and drops that channel, and the byte-for-byte path
-    /// keeps whatever the file holds. A transparent PNG therefore draws two
-    /// pictures.
+    /// The alpha channel is the case that this test measures. The encoder path
+    /// picks the channels of the file that it writes, and the byte-for-byte
+    /// path keeps the channels of the file that the caller holds. So a
+    /// transparent PNG makes a difference between the two paths visible pixel
+    /// by pixel.
     #[test]
     fn the_two_iterm2_paths_draw_the_same_picture() {
         let source = png_file_of(&transparent_fixture());
