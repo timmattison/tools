@@ -1814,6 +1814,7 @@ fn display_image(
             columns: scaled_width,
             rows: scaled_height,
         },
+        source: None,
         payload: payload_budget_for(transport),
         picture,
         // A frame of a video always holds the cursor, because the caller puts

@@ -430,9 +430,29 @@ pub enum Picture {
 
 /// One image, and what the caller asks the terminal to do with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Request {
+pub struct Request<'a> {
     /// How much of the terminal the image can take.
     pub budget: Budget,
+    /// The bytes of the file that the image came out of, when the caller holds
+    /// them.
+    ///
+    /// A picture that needs no resize, that arrives in a format the protocol
+    /// carries, and that the budget holds travels byte for byte. No encoder
+    /// runs and no pixel changes, so a JPEG on disk reaches the terminal as the
+    /// photographer left it.
+    ///
+    /// A caller that decoded the picture out of a file it still holds states
+    /// those bytes here. A caller that made the picture itself states [`None`],
+    /// and so does a caller that changed the picture after it read the file.
+    /// **The bytes must be the file that the image came out of**, because they
+    /// are what the terminal draws when this rule fires.
+    ///
+    /// The iTerm2 writer is the one reader of this, because that protocol
+    /// carries a whole file and the terminal reads the format out of it. The
+    /// Kitty protocol names raw pixels and PNG alone, and the Sixel protocol
+    /// carries an encoding of its own, so neither one can take a file as it
+    /// stands.
+    pub source: Option<&'a [u8]>,
     /// How many characters of payload the image can spend.
     pub payload: PayloadBudget,
     /// Whether the run draws one picture or one frame of many.
@@ -487,7 +507,7 @@ impl Capabilities {
         &self,
         out: &mut W,
         image: &DynamicImage,
-        request: &Request,
+        request: &Request<'_>,
     ) -> Result<(), DrawError> {
         if !self.draws_images() {
             return Err(DrawError::NoGraphics);
@@ -622,7 +642,7 @@ impl Capabilities {
 /// # Returns
 /// The promise that the writer must keep.
 fn cursor_contract(
-    request: &Request,
+    request: &Request<'_>,
     term_rows: u32,
     image_rows: impl FnOnce() -> u32,
 ) -> CursorContract {
@@ -1185,7 +1205,7 @@ fn shrink_towards(
 fn write_kitty<W: Write>(
     out: &mut W,
     image: &DynamicImage,
-    request: &Request,
+    request: &Request<'_>,
     answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and every size of this image comes off it.
@@ -1322,7 +1342,7 @@ fn write_kitty<W: Write>(
 fn write_sixel<W: Write>(
     out: &mut W,
     image: &DynamicImage,
-    request: &Request,
+    request: &Request<'_>,
     answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and both bounds of this image come off it.
@@ -1395,7 +1415,7 @@ fn write_sixel<W: Write>(
 fn write_iterm2<W: Write>(
     out: &mut W,
     image: &DynamicImage,
-    request: &Request,
+    request: &Request<'_>,
     answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and every size of this image comes off it.
@@ -1471,12 +1491,13 @@ mod tests {
 
     /// The request that the tests draw with. It states a budget, so no test
     /// depends on the size of the terminal that runs the test.
-    fn test_request() -> Request {
+    fn test_request() -> Request<'static> {
         Request {
             budget: Budget {
                 columns: Some(10),
                 rows: Some(5),
             },
+            source: None,
             payload: PayloadBudget::UNLIMITED,
             picture: Picture::Still,
             cursor: Cursor::BelowImage,
@@ -1790,6 +1811,20 @@ mod tests {
         String::from(arguments)
     }
 
+    /// The bytes of `image` as a file of `shape`.
+    ///
+    /// This is the file that a caller reads off a disk, made here instead, so a
+    /// test of the byte-for-byte rule holds a real file of a known format.
+    ///
+    /// # Arguments
+    /// * `shape` - The format of the file.
+    /// * `image` - The picture that the file holds.
+    fn source_file_of(shape: Iterm2Payload, image: &DynamicImage) -> Vec<u8> {
+        BASE64_STANDARD
+            .decode(shape.encode(image).expect("the encoder takes an RGB8 picture"))
+            .expect("the encoder gave base64")
+    }
+
     /// The first bytes of a PNG file, which name the format to a reader.
     ///
     /// The iTerm2 protocol carries a whole file, and the terminal reads the
@@ -1810,12 +1845,13 @@ mod tests {
     ///
     /// # Arguments
     /// * `budget` - The characters of payload that the picture can spend.
-    fn whole_picture_request(budget: PayloadBudget) -> Request {
+    fn whole_picture_request(budget: PayloadBudget, source: Option<&[u8]>) -> Request<'_> {
         Request {
             budget: Budget {
                 columns: None,
                 rows: None,
             },
+            source,
             payload: budget,
             picture: Picture::Still,
             cursor: Cursor::Held,
@@ -1830,9 +1866,25 @@ mod tests {
     /// * `image` - The picture to draw.
     /// * `budget` - The characters of payload that the picture can spend.
     fn iterm2_whole_picture_payload_of(image: &DynamicImage, budget: PayloadBudget) -> String {
+        iterm2_payload_of_source(image, None, budget)
+    }
+
+    /// Draw `image` on an iTerm2 terminal at its own pixel size, inside
+    /// `budget`, with `source` as the file that the picture came out of, and
+    /// give back the base64 payload of the command.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `source` - The bytes of the file that the picture came out of.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn iterm2_payload_of_source(
+        image: &DynamicImage,
+        source: Option<&[u8]>,
+        budget: PayloadBudget,
+    ) -> String {
         let mut out = Vec::new();
         Capabilities::new(TerminalType::ITerm2, true, true)
-            .draw(&mut out, image, &whole_picture_request(budget))
+            .draw(&mut out, image, &whole_picture_request(budget, source))
             .expect("a write to a vector never fails");
 
         let command = String::from_utf8(out).expect("an iTerm2 command is ASCII");
@@ -2133,6 +2185,37 @@ mod tests {
         assert!(
             pixels_of(&file).0 < SCREENSHOT_WIDTH,
             "the budget must be one that the picture cannot reach at its own size, or this test measures nothing"
+        );
+    }
+
+    /// A source file that needs no resize travels byte for byte.
+    ///
+    /// A JPEG on a disk is already a JPEG. An encoder that read it and wrote it
+    /// out again would spend the time of a decode and an encode, and it would
+    /// throw a second helping of the picture away to do it. So a file that
+    /// arrives in a format the protocol carries, that the budget holds, and
+    /// that needs no resize reaches the terminal as it stands.
+    #[test]
+    fn a_source_file_that_needs_no_resize_travels_byte_for_byte() {
+        let source = source_file_of(
+            Iterm2Payload::Jpeg(JpegQuality::HIGHEST),
+            &photograph_fixture(),
+        );
+        let picture =
+            image::load_from_memory(&source).expect("the encoder wrote a whole image file");
+
+        let payload = iterm2_payload_of_source(&picture, Some(&source), PayloadBudget::UNLIMITED);
+        let untouched = BASE64_STANDARD.encode(&source);
+
+        // The two payloads run to hundreds of thousands of characters, so the
+        // message states their sizes and not the characters themselves. A
+        // failure that prints two whole files says less than one that fits on
+        // the screen.
+        assert!(
+            payload == untouched,
+            "a source file that the budget holds must reach the terminal byte for byte, but the command carried {} characters where the file is {}",
+            payload.len(),
+            untouched.len()
         );
     }
 
