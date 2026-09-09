@@ -749,9 +749,9 @@ const FIT_SAFETY: f64 = 0.95;
 ///
 /// The payload of every shape this crate writes grows with the pixel count, so
 /// an attempt that misses by a factor divides both sides by the square root of
-/// that factor. Raw pixels and a PNM file are exactly linear, so they land in
-/// one attempt. A PNG is not, because its size comes off the content as well,
-/// so it takes two or three.
+/// that factor. Raw pixels are exactly linear, so they land in one attempt. A
+/// PNG is not, because its size comes off the content as well, so it takes two
+/// or three.
 ///
 /// The picture keeps the size that it takes on the screen. The Kitty protocol
 /// and the iTerm2 protocol state that size in character cells, beside the
@@ -1092,9 +1092,9 @@ fn write_sixel<W: Write>(
 /// arguments carry the width and the height in character cells, so they take no
 /// `px` suffix.
 ///
-/// The image travels as a whole file, and this writer makes a PNM file by hand:
-/// a header of three lines and then the raw pixels. Three bytes for one pixel
-/// is a smaller file than four, so the pixels go out as RGB and not as RGBA.
+/// The image travels as a whole file, and this writer makes a PNG file of it.
+/// The alpha channel goes no further, so the pixels reach the encoder as RGB
+/// and not as RGBA.
 ///
 /// The writer holds the cursor still with `doNotMoveCursor=1` and then states
 /// the position of the cursor itself through
@@ -1140,17 +1140,20 @@ fn write_iterm2<W: Write>(
     );
 
     // `width=` and `height=` below state the cell span, so a picture that spends
-    // fewer pixels keeps the size it takes on the screen. A PNM file is exactly
-    // linear in the pixel count, so the fit lands in one attempt.
+    // fewer pixels keeps the size it takes on the screen.
     let (image, base64_data) = fit_to_payload_budget(image, request.payload, |picture| {
         let rgb = picture.to_rgb8();
-        let rgb_data = rgb.as_raw();
-        let pnm_header = format!("P6\n{} {}\n255\n", picture.width(), picture.height());
-        let mut pnm_data = Vec::with_capacity(pnm_header.len() + rgb_data.len());
-        pnm_data.extend_from_slice(pnm_header.as_bytes());
-        pnm_data.extend_from_slice(rgb_data);
+        let mut file = Vec::new();
+        PngEncoder::new(&mut file)
+            .write_image(
+                rgb.as_raw(),
+                rgb.width(),
+                rgb.height(),
+                ExtendedColorType::Rgb8,
+            )
+            .map_err(|error| DrawError::Encode(error.to_string()))?;
 
-        Ok(BASE64_STANDARD.encode(&pnm_data))
+        Ok(BASE64_STANDARD.encode(&file))
     })?;
 
     let (_, term_rows) = cells_of(window);
@@ -1750,9 +1753,7 @@ mod tests {
     /// An iTerm2 picture above the budget comes back inside it.
     ///
     /// The green commit that made the fit wired it into all three writers, and
-    /// this test holds the iTerm2 one. An iTerm2 picture travels as a PNM file,
-    /// which is exactly linear in the pixel count, so the fit lands in one
-    /// attempt.
+    /// this test holds the iTerm2 one.
     #[test]
     fn an_iterm2_picture_above_the_payload_budget_comes_back_inside_it() {
         let spent = iterm2_payload_of(
