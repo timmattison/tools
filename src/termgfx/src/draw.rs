@@ -1750,6 +1750,43 @@ mod tests {
         );
     }
 
+    /// The pixel size of the file that an iTerm2 command carried.
+    ///
+    /// # Arguments
+    /// * `file` - The bytes that the command carried.
+    fn pixels_of(file: &[u8]) -> (u32, u32) {
+        let picture = image::load_from_memory(file).expect("the writer wrote a whole image file");
+
+        (picture.width(), picture.height())
+    }
+
+    /// A photograph above the budget spends quality before it spends pixels.
+    ///
+    /// A PNG is lossless, and a photograph compresses poorly in it, so a PNG of
+    /// a photograph stands far above what a mosh session holds. The fit used to
+    /// answer that with pixels alone: it shrank the picture until the PNG fit,
+    /// and the terminal then stretched a small picture over the same cells. A
+    /// JPEG carries the same photograph at a fraction of the cost, so the
+    /// quality goes down first and every pixel stays.
+    #[test]
+    fn a_photograph_above_the_budget_spends_quality_before_pixels() {
+        let fixture = photograph_fixture();
+        let whole = iterm2_whole_picture_payload_of(&fixture, PayloadBudget::UNLIMITED);
+        let budget = PayloadBudget::of(whole.len() / 2);
+        let file = iterm2_file_of(&fixture, budget);
+
+        assert!(
+            file.starts_with(JPEG_SIGNATURE),
+            "a photograph that the budget cannot hold as a PNG must travel as a JPEG, but the file starts with {:?}",
+            &file[..JPEG_SIGNATURE.len().min(file.len())]
+        );
+        assert_eq!(
+            pixels_of(&file),
+            (PHOTOGRAPH_WIDTH, PHOTOGRAPH_HEIGHT),
+            "a picture that reached the budget on quality alone must keep every pixel"
+        );
+    }
+
     /// An iTerm2 picture above the budget comes back inside it.
     ///
     /// The green commit that made the fit wired it into all three writers, and
