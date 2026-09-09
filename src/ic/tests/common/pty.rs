@@ -161,7 +161,7 @@ impl Pty {
         assert_eq!(
             result,
             0,
-            "openpty must give a pseudo-terminal: {}",
+            "openpty must give a pseudo-terminal: {}. `Device not configured` here is the ceiling of `kern.tty.ptmx_max`, which every process of the machine shares, so a target that holds one pseudo-terminal for each of its concurrent tests runs a busy machine out of them",
             std::io::Error::last_os_error()
         );
 
