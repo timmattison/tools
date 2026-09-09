@@ -38,7 +38,7 @@ use image::imageops::FilterType;
 use image::{DynamicImage, ExtendedColorType, ImageEncoder};
 
 use crate::cursor::{write_image_with_cursor_contract, CursorContract};
-use crate::detect::{display_routine_for, Capabilities, DisplayRoutine};
+use crate::detect::{Capabilities, DisplayRoutine};
 use crate::geometry::{
     calculate_aspect_preserving_size, calculate_sixel_dimensions, cell_aspect_of,
     cell_pixels_or_estimate_of, cells_of, downscale_to_display_pixels, image_rows,
@@ -496,7 +496,7 @@ impl Capabilities {
         // the one read of the terminal happened before this call and no writer
         // reads the terminal a second time.
         let answered = self.answered_cell();
-        match display_routine_for(self.terminal_type()) {
+        match self.display_routine() {
             DisplayRoutine::Sixel => write_sixel(out, image, request, answered),
             DisplayRoutine::Kitty => write_kitty(out, image, request, answered),
             DisplayRoutine::Iterm2 => write_iterm2(out, image, request, answered),
@@ -560,7 +560,7 @@ impl Capabilities {
     /// another picture.
     #[must_use]
     pub fn read_refusal(&self) -> Option<Refusal> {
-        if display_routine_for(self.terminal_type()) != DisplayRoutine::Kitty {
+        if self.display_routine() != DisplayRoutine::Kitty {
             return None;
         }
 
@@ -594,7 +594,7 @@ impl Capabilities {
     /// # Errors
     /// Gives the error of the write to `out` when the write fails.
     pub fn clear_images<W: Write>(&self, out: &mut W) -> io::Result<()> {
-        if display_routine_for(self.terminal_type()) == DisplayRoutine::Kitty {
+        if self.display_routine() == DisplayRoutine::Kitty {
             write!(out, "{KITTY_DELETE_ALL}")?;
         }
 

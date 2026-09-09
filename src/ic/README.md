@@ -164,21 +164,89 @@ graphics protocol together with a request for the primary device attributes,
 whose parameter 4 names sixel. A terminal that answers draws the picture,
 whatever the process tree says.
 
-That covers two cases a name cannot:
+That covers three cases a name cannot:
 
 - **tmux.** tmux 3.7c answers `CSI ?1;2;4 c` and draws sixel. Older tmux
   answers no such thing and still gets the error it always got.
 - **mosh.** Upstream mosh strips the sequences that carry an image. The Rust
   port reads all three protocols, and its emulator answers the query for the
-  pair — mosh together with the terminal of the user. No environment variable
-  carries that answer, because no variable crosses the session.
+  pair — mosh together with the terminal of the user.
+- **zellij.** A multiplexer owns the pseudo terminal of its pane and answers
+  every query itself, so its answer states what that pane draws. `ic` asks a
+  pane of zellij for that reason, and the answer outranks the name that the
+  `ZELLIJ` variable carries. A pane that answers nothing draws sixel by that
+  name, as it always did.
 
-zellij is not one of these cases. It sets the `ZELLIJ` variable, so `ic` names
-it from the environment and asks it no protocol question. It draws sixel by
-that name.
+A muxiavelli panel is not one of these cases. Its own author wrote the signal
+that names the protocols it draws, so a backing session that answers the query
+does not take that signal away.
 
 A terminal that answers nothing keeps the behavior it had: `ic` names it from
 the environment, and it reports an error for tmux and for mosh.
+
+### A mosh that draws images
+
+**No query reaches the transport of a mosh session from inside a multiplexer.**
+The multiplexer answers every query itself, so a round trip there tells an
+upstream mosh, which strips every image sequence, from a mosh that draws them
+never. The environment is the one channel that crosses a multiplexer, and a
+mosh that draws images states what it carries there:
+
+| Variable | Value | Meaning |
+|----------|-------|---------|
+| `MOSH_IMAGES` | e.g. `kitty,sixel,iterm2` | The protocols that the **transport** carries. Only a mosh that draws images writes it, so a mosh session that carries none is an upstream mosh and `ic` still refuses it. |
+| `MOSH_CLIENT_IMAGES` | e.g. `kitty,sixel` | The protocols that the **terminal of the user** draws. The wrapper writes it where that terminal answered the query, and an upstream server started by that wrapper carries this one and no `MOSH_IMAGES`. |
+
+`ic` reads the process tree as well as these two variables, and the two answer
+different questions: the variable states what the transport carries, and the
+process tree states that the transport of this session is a mosh. The variable
+outlives the session that wrote it, because it crosses a multiplexer. A user
+exports it by hand, and a tmux server or a Zellij server that a mosh session
+started hands the whole environment of that session to every pane it opens after
+the mosh session ends. So a variable that names no mosh of this session states
+nothing, and `ic` answers for the terminal that this session really has.
+
+A picture travels through the transport and then draws on the terminal of the
+user, so `ic` draws it with a protocol that both of them read and that this
+terminal draws as well. A mosh session that shares no protocol with this
+terminal takes a refusal that names each set, because the repair there is a
+different terminal and not `ssh`. The command below runs inside such a mosh:
+
+```
+$ MOSH_IMAGES=sixel MOSH_CLIENT_IMAGES=sixel TERM=xterm-kitty ic picture.png
+Error: Image display cannot work here: this session and this terminal share no image protocol.
+This Mosh carries: sixel. The terminal of the user draws: sixel.
+This terminal draws: kitty.
+A picture in a protocol that any one of the three does not read lands on the screen as text.
+
+For image display, use a terminal that draws one of the protocols this Mosh carries.
+```
+
+**The message names the sets that decided the refusal, and it names no other
+one.** A session that carries no `MOSH_CLIENT_IMAGES` states no terminal of the
+user, and an absent name is no name of an empty set, so `ic` reads what the
+transport carries alone. The message of such a session drops the line about the
+terminal of the user and names two sets:
+
+```
+$ MOSH_IMAGES=sixel TERM=xterm-kitty ic picture.png
+Error: Image display cannot work here: this session and this terminal share no image protocol.
+This Mosh carries: sixel.
+This terminal draws: kitty.
+A picture in a protocol that one of the two does not read lands on the screen as text.
+
+For image display, use a terminal that draws one of the protocols this Mosh carries.
+```
+
+Both variables state what the transport carries and what the terminal of the
+user draws. Neither one states what a multiplexer in front of the picture
+draws, because the shell that starts that multiplexer hands the whole
+environment to it. So a mosh session that carries images lifts the refusal that
+names mosh and lifts no other one: a tmux that answers no query still takes the
+refusal that names tmux, inside such a mosh as everywhere else.
+
+See [timmattison/mosh-rs#78](https://github.com/timmattison/mosh-rs/issues/78)
+for the two variables and where they come from.
 
 ### A terminal that refuses a picture
 

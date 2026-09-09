@@ -517,22 +517,99 @@ fn in_tmux() -> bool {
 
 /// Refuse the run when this session cannot draw an image.
 ///
-/// The gate reads three things: the answer the terminal gave to a query, the
-/// remote transport, and the multiplexer. It gives `Ok` when the session can
-/// show graphics. It gives an error when the session cannot, and that error
-/// carries the reason and the repair for the user to read. `feature` names
-/// what the user asked for, "Image" or "Video", and the messages say that
-/// word.
+/// The gate reads four things: what the environment of a mosh session states
+/// about the images it carries, the answer the terminal gave to a query, the
+/// remote transport, and the multiplexer. `terminal_caps` carries the first
+/// two of them, because one value states the whole terminal of the run. It
+/// gives `Ok` when the session can show graphics. It gives an error when the
+/// session cannot, and that error carries the reason and the repair for the
+/// user to read. `feature` names what the user asked for, "Image" or "Video",
+/// and the messages say that word.
 ///
-/// `in_tmux` arrives as an argument, and the gate does not read `TMUX` itself,
-/// so that the gate is a pure function of its inputs. A test that set `TMUX`
-/// would change the environment of every other test in the process.
+/// `in_tmux` arrives as an argument, the session arrives on `terminal_caps`,
+/// and the gate reads no environment variable that decides a verdict. It reads
+/// `TERM` for one message alone. A test that set `TMUX` would change the
+/// environment of every other test in the process.
 fn validate_terminal_for_graphics(
     terminal_caps: &Capabilities,
     transport: &RemoteTransport,
     in_tmux: bool,
     feature: &str,
 ) -> Result<()> {
+    // The session stands on the capabilities, so the gate and the writer that
+    // draws the picture read one session. `Capabilities::detect` reads it from
+    // the environment for a run, and `Capabilities::in_session` states it for
+    // a test.
+    let session = terminal_caps.session();
+    // A mosh that carries images states so in the environment, and the
+    // environment is the one channel that crosses a multiplexer. The rule
+    // about mosh below reads a process tree, which names the transport and
+    // states nothing about the images that transport carries, and a query
+    // cannot answer the question either: a multiplexer owns the pseudo
+    // terminal of its pane and answers every query itself, so a round trip
+    // inside one tells an upstream mosh, which strips every image sequence,
+    // from a mosh that draws them never. See `termgfx::MoshImages` and
+    // https://github.com/timmattison/mosh-rs/issues/78.
+    //
+    // So this rule reads the environment and the process tree together. The
+    // environment states what the transport carries, and the process tree
+    // states that the transport of this session is a mosh. The variable
+    // outlives the session that wrote it, because it crosses a multiplexer: a
+    // user exports it by hand, and a tmux server or a Zellij server that a
+    // mosh session started hands the whole environment of that session to
+    // every pane it opens after the mosh session ends. A variable that names
+    // no mosh of this session therefore says nothing, and the rules below
+    // answer for the terminal that this session really has.
+    //
+    // This rule lifts the refusal of mosh alone, which is what issue #471
+    // reports: that refusal took every terminal the environment named, because
+    // it stood in front of the rule that reads what a terminal draws. It lifts
+    // no other rule. The statement in the environment is about the transport,
+    // and every rule below states what stands between that transport and the
+    // screen. tmux shows it: the shell that starts the tmux server hands the
+    // environment to the server, and the server hands it to every pane, so
+    // `MOSH_IMAGES` says nothing at all about the tmux in front of the
+    // picture.
+    let mosh_carries_images = *transport == RemoteTransport::Mosh
+        && session.carries_images()
+        && terminal_caps.draws_images();
+    if mosh_carries_images {
+        let delivers = session.delivers();
+        let drawn = terminal_caps.drawn_protocols();
+        if drawn.intersect(&delivers).is_empty() {
+            // The message names the sets that decided the refusal, and it
+            // names no other one. `MoshImages::delivers` reads the set of the
+            // terminal of the user only where that set names a protocol,
+            // because an absent name is no name of an empty set. So a session
+            // that names no terminal of the user took this refusal from two
+            // sets, and a message that named a third one names `none` for a
+            // party that the decision never read.
+            let client = session.client();
+            let (client_sentence, parties) = if client.is_empty() {
+                (String::new(), "one of the two")
+            } else {
+                (
+                    format!(" The terminal of the user draws: {}.", client.names()),
+                    "any one of the three",
+                )
+            };
+            anyhow::bail!(
+                "{} display cannot work here: this session and this terminal share no image protocol.\n\
+                This Mosh carries: {}.{}\n\
+                This terminal draws: {}.\n\
+                A picture in a protocol that {} does not read lands on the screen as text.\n\
+                \n\
+                For {} display, use a terminal that draws one of the protocols this Mosh carries.",
+                feature,
+                session.transport().names(),
+                client_sentence,
+                drawn.names(),
+                parties,
+                feature.to_lowercase()
+            );
+        }
+    }
+
     // A terminal that answered a query is a fact, and every rule below it is a
     // guess about a terminal that answered nothing. A fact outranks a guess.
     //
@@ -550,8 +627,9 @@ fn validate_terminal_for_graphics(
 
     // Check for Mosh, since upstream Mosh strips the escape sequences that
     // every graphics protocol needs. A Mosh that draws them answers the query
-    // above, and this one answered nothing.
-    if *transport == RemoteTransport::Mosh {
+    // above, or it states what it carries in the environment, and this one did
+    // neither.
+    if *transport == RemoteTransport::Mosh && !mosh_carries_images {
         anyhow::bail!(
             "Mosh detected, and this session answered no query about images.\n\
             Upstream Mosh strips the escape sequences that carry an image (Sixel, Kitty, iTerm2).\n\
@@ -619,9 +697,10 @@ fn validate_terminal_for_graphics(
 /// The question goes to [`validate_terminal_for_graphics`], the same gate the
 /// image path runs. Both callers therefore give one answer, and a session that
 /// passes here cannot be refused by the next `ic picture.png`. The gate asks
-/// about the terminal, the multiplexer, and the remote transport. It does not
-/// ask whether stdout is a terminal, so a redirected stdout does not change
-/// the answer.
+/// about the terminal, the multiplexer, the remote transport, and what the
+/// environment of a mosh session states about the images it carries. It does
+/// not ask whether stdout is a terminal, so a redirected stdout does not
+/// change the answer.
 ///
 /// The gate reads the name of the terminal and whether that terminal draws an
 /// image at all, and it reads no size of anything. So this call takes the
@@ -2238,7 +2317,7 @@ fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use termgfx::AnsweredProtocol;
+    use termgfx::{AnsweredProtocol, MoshImages};
 
     /// A mosh session states the budget that mosh keeps, and no other
     /// transport states one.
@@ -2476,6 +2555,234 @@ not_a_number  1 /bin/bash
             validate_terminal_for_graphics(&answered, &RemoteTransport::None, true, "Image")
                 .is_ok(),
             "a terminal that answered the query draws the picture"
+        );
+    }
+
+    /// The environment of a mosh that carries every image protocol.
+    ///
+    /// It names no terminal of the user, which is the session that
+    /// `mosh-server new` starts by hand: the server states what it carries and
+    /// no wrapper stated what the terminal of the user draws.
+    fn a_mosh_that_carries_images() -> MoshImages {
+        MoshImages::from_env(Some("kitty,sixel,iterm2"), None)
+    }
+
+    /// A mosh that carries images draws a picture for a terminal that named
+    /// itself.
+    ///
+    /// This is the refusal of issue #471. The rule about mosh stood in front
+    /// of the rule that reads what the terminal draws, so every named terminal
+    /// met the rule about mosh first and took its refusal. A named terminal
+    /// cannot answer that rule with a query, because a multiplexer answers
+    /// every query for the pane it owns, so the environment is the one channel
+    /// that carries the answer across.
+    #[test]
+    fn a_mosh_that_carries_images_draws_a_picture_for_a_named_terminal() {
+        for terminal_type in [TerminalType::Ghostty, TerminalType::Kitty] {
+            let named = Capabilities::new(terminal_type.clone(), true, true)
+                .in_session(a_mosh_that_carries_images());
+            assert!(
+                validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, false, "Image")
+                    .is_ok(),
+                "a mosh that states it carries every protocol carries the one that {terminal_type:?} draws"
+            );
+        }
+    }
+
+    /// The gate reads the session that the capabilities carry.
+    ///
+    /// A run stands in one session, and every party of the run reads that one.
+    /// `Capabilities::detect` reads it from the environment and holds it, so a
+    /// gate that reads a session of its own reads the same environment a
+    /// second time. A test states the session it covers instead, and a gate
+    /// that took a second statement there would take a verdict that no run
+    /// gives.
+    #[test]
+    fn the_gate_reads_the_session_that_the_capabilities_carry() {
+        let named = Capabilities::new(TerminalType::Ghostty, true, true)
+            .in_session(MoshImages::from_env(Some("kitty"), None));
+        assert!(
+            validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, false, "Image").is_ok(),
+            "this mosh carries the kitty protocol, and Ghostty draws it"
+        );
+    }
+
+    /// A mosh that carries images still takes the refusal that names tmux.
+    ///
+    /// The statement in the environment is about the transport, and tmux
+    /// stands between that transport and the screen. A tmux that draws no
+    /// image strips every sequence that carries one, and no variable of the
+    /// session says whether this tmux draws one: the shell that starts the
+    /// tmux server hands the whole environment to the server, and the server
+    /// hands it to every pane. So the rule about tmux reads a query, the query
+    /// answered nothing here, and a mosh that carries images lifts the rule
+    /// about mosh alone.
+    #[test]
+    fn a_mosh_that_carries_images_still_takes_the_refusal_that_names_tmux() {
+        let named = Capabilities::new(TerminalType::Ghostty, true, true)
+            .in_session(MoshImages::from_env(Some("kitty"), None));
+        let error = validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, true, "Image")
+            .expect_err("a tmux that answered no query must be refused");
+        assert!(
+            error.to_string().contains("tmux"),
+            "and the message must name tmux, which is what strips the picture: {error}"
+        );
+    }
+
+    /// A mosh that states nothing about images is an upstream mosh, and an
+    /// upstream mosh still takes the refusal.
+    ///
+    /// Upstream mosh strips every escape sequence that carries an image, and a
+    /// picture drawn there leaves the user with an empty screen. Only a mosh
+    /// that draws images writes the variable, so a session that carries none
+    /// keeps the refusal that protects that user, and the message keeps the
+    /// repair that works for them.
+    #[test]
+    fn an_upstream_mosh_still_takes_the_refusal_that_names_ssh() {
+        let named = Capabilities::new(TerminalType::Ghostty, true, true);
+        let error = validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, false, "Image")
+            .expect_err("a mosh that states nothing about images must be refused");
+        assert!(
+            error.to_string().contains("ssh user@host"),
+            "and the message must name the repair that works: {error}"
+        );
+    }
+
+    /// A session that delivers no protocol this terminal draws takes a
+    /// refusal, and the message names every set that decided it.
+    ///
+    /// A pane of Zellij answers sixel, because Zellij draws sixel and reads no
+    /// other protocol. A terminal of the user that draws the kitty protocol
+    /// alone therefore shares no protocol with that pane, and a picture in
+    /// either protocol lands on the screen as text. This session names that
+    /// terminal of the user, so three sets decided the refusal and the message
+    /// names the three of them. The reader needs each one to see why, because
+    /// the repair is a different terminal.
+    #[test]
+    fn a_session_that_shares_no_protocol_with_this_terminal_names_both_sets() {
+        let pane = Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true)
+            .in_session(MoshImages::from_env(
+                Some("kitty,sixel,iterm2"),
+                Some("kitty"),
+            ));
+        let error = validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, "Image")
+            .expect_err("a session that delivers no protocol this terminal draws must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("kitty"),
+            "the message must name what the terminal of the user draws: {message}"
+        );
+        assert!(
+            message.contains("sixel"),
+            "and it must name what this terminal draws: {message}"
+        );
+        assert!(
+            !message.contains("ssh user@host"),
+            "and it must not send the reader to ssh, which carries no more protocols than this mosh does: {message}"
+        );
+    }
+
+    /// A session that names no terminal of the user takes a refusal that names
+    /// two sets, because two sets decided it.
+    ///
+    /// This is the session that `mosh-server new` starts by hand: the server
+    /// states what it carries, and no wrapper stated what the terminal of the
+    /// user draws. [`MoshImages::delivers`] reads that second set only where
+    /// the set names a protocol, because an absent name is no name of an empty
+    /// set. So the transport and this terminal decided this refusal alone, and
+    /// a message that named the second set there names a party that the
+    /// decision never read. It names it `none` as well, which reads as a
+    /// terminal that draws no picture at all.
+    #[test]
+    fn a_session_that_names_no_terminal_of_the_user_names_two_sets() {
+        let kitty = Capabilities::new(TerminalType::Kitty, true, true)
+            .in_session(MoshImages::from_env(Some("sixel"), None));
+        let error = validate_terminal_for_graphics(&kitty, &RemoteTransport::Mosh, false, "Image")
+            .expect_err("a session that delivers no protocol this terminal draws must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("sixel"),
+            "the message must name what this mosh carries: {message}"
+        );
+        assert!(
+            message.contains("kitty"),
+            "and it must name what this terminal draws: {message}"
+        );
+        assert!(
+            !message.contains("The terminal of the user draws"),
+            "and it must not name a set that this refusal never read: {message}"
+        );
+        assert!(
+            !message.contains("none"),
+            "which it names `none`, a name that reads as a terminal that draws no picture: {message}"
+        );
+    }
+
+    /// A pane of Zellij inside a mosh that carries images draws a picture.
+    ///
+    /// This is the case that issue #471 reports. Zellij answers the query for
+    /// its own pane and names sixel, the terminal of the user draws sixel as
+    /// well, and the transport carries it. Every party of the session reads
+    /// one protocol, so the picture draws.
+    #[test]
+    fn a_pane_of_zellij_inside_a_mosh_that_carries_images_draws_a_picture() {
+        let pane = Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true)
+            .in_session(MoshImages::from_env(
+                Some("kitty,sixel,iterm2"),
+                Some("kitty,sixel"),
+            ));
+        assert!(
+            validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, "Image").is_ok(),
+            "every party of this session reads sixel"
+        );
+    }
+
+    /// A session narrows the routine of a terminal of no name, and the gate
+    /// reads the routine that follows.
+    ///
+    /// A terminal that set none of the signals `termgfx` reads states no
+    /// protocol at all, so `termgfx` guesses iTerm2 for it. A mosh that
+    /// carries sixel alone knows more than that guess, and
+    /// `Capabilities::display_routine` takes the statement over the guess. So
+    /// this terminal draws sixel, this transport carries sixel, and the
+    /// picture draws.
+    ///
+    /// A gate that read a session of its own could not reach this path from
+    /// `ic` at all. The capabilities held an empty session there whatever
+    /// session the gate took, the guess of iTerm2 stood, and the gate refused
+    /// a session that carries the one protocol this terminal draws.
+    #[test]
+    fn a_session_narrows_the_routine_of_a_terminal_of_no_name() {
+        let unnamed = Capabilities::new(TerminalType::Unknown, true, true)
+            .in_session(MoshImages::from_env(Some("sixel"), None));
+        assert!(
+            validate_terminal_for_graphics(&unnamed, &RemoteTransport::Mosh, false, "Image")
+                .is_ok(),
+            "the session states sixel, and a statement outranks the guess of iterm2 that a terminal of no name takes"
+        );
+    }
+
+    /// A `MOSH_IMAGES` that outlived its session states nothing, and the rules
+    /// under the rule about mosh answer for the session.
+    ///
+    /// The variable crosses a multiplexer, which is what makes it useful, and
+    /// that is what makes it stale as well. A user exports it by hand. A tmux
+    /// server or a Zellij server that a mosh session started keeps the whole
+    /// environment of that session, and it hands that environment to every
+    /// pane it opens after the mosh session ends. So the process tree is what
+    /// says that the statement belongs to this session, and the rule reads the
+    /// transport as well as the variable.
+    ///
+    /// Ghostty draws the kitty protocol, this variable names sixel alone, and
+    /// the two share no protocol. No mosh stands between Ghostty and the
+    /// screen, so the picture still draws.
+    #[test]
+    fn a_stale_mosh_variable_outside_a_mosh_draws_a_picture() {
+        let named = Capabilities::new(TerminalType::Ghostty, true, true)
+            .in_session(MoshImages::from_env(Some("sixel"), None));
+        assert!(
+            validate_terminal_for_graphics(&named, &RemoteTransport::None, false, "Image").is_ok(),
+            "a variable that names no transport of this session says nothing about it"
         );
     }
 

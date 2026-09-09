@@ -1,11 +1,34 @@
-//! The pseudo-terminal that a test hands to a child process of `ic`.
+//! What terminal a test gives to a child process of `ic`.
 //!
-//! Two targets need one. `controlling-terminal` gives the child a terminal of a
-//! known size and reads the picture that `ic` drew for it. `kitty-refusal`
-//! stands where the terminal stands: it reads the question that `ic` writes to
-//! the terminal and it writes the answer back. Both of them build the terminal
-//! the same way, and a second copy of that code would part company with this
-//! one on the day either changed.
+//! There are two answers, and a test states which one it wants.
+//! [`take_the_terminal_away`] gives the child no terminal at all, and [`Pty`]
+//! gives it a pseudo-terminal that the test holds the other end of. **Both keep
+//! the test off the terminal of whoever started the run**, because both put the
+//! child in a session of its own. They are here together for that reason: the
+//! choice between them is one choice, and a copy of either one in a target
+//! would part company with this one on the day it changed.
+//!
+//! # Which one a test needs
+//!
+//! A test that reads an exit status and two pipes needs
+//! [`take_the_terminal_away`]. `ic` asks its terminal through `/dev/tty`, a
+//! session with no controlling terminal answers `ENXIO` to every open of that
+//! name, and a run that reached no terminal answers with the name the
+//! environment carries. That is the answer a silent terminal gives, so such a
+//! test reads the same verdict for less.
+//!
+//! A test that reads the bytes the child wrote to a terminal, or that answers
+//! the child as a terminal does, needs [`Pty`]. `controlling-terminal` gives the
+//! child a terminal of a known size and reads the picture that `ic` drew for it.
+//! `kitty-refusal` stands where the terminal stands: it reads the question that
+//! `ic` writes to the terminal and it writes the answer back.
+//!
+//! **A pseudo-terminal is scarce.** The machine holds a few hundred of them in
+//! all, which `kern.tty.ptmx_max` states, and every process on the machine
+//! shares that one number. The tests of one target run beside each other, so a
+//! target that opens one for each test asks for more of them than the machine
+//! has left, and [`Pty::open`] then fails with `ENXIO`. A test asks for one when
+//! it reads one, and it asks for none when it does not.
 //!
 //! # What the terminal has to be
 //!
@@ -29,6 +52,46 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::ptr;
 use std::time::{Duration, Instant};
+
+/// Take the controlling terminal away from the child of `command`.
+///
+/// `setsid` puts the child in a session of its own, and a session with no
+/// controlling terminal answers `ENXIO` to every open of `/dev/tty`. So the
+/// child measures no terminal, it reads no byte of the terminal of whoever
+/// started the run, and it writes none there. A run of `ic` that reached no
+/// terminal answers with the name the environment carries, which is the answer
+/// a silent terminal gives it.
+///
+/// **A pipe for standard output is not enough on its own.** `cargo test`
+/// captures the standard output of a test binary, and a probe that reads
+/// `/dev/tty` still measures the terminal of the person who typed the command.
+/// Such a test passes in a redirected run and fails from a terminal, on a
+/// condition it does not control. The new session is how a test states which
+/// terminal it wants, and this call states none.
+///
+/// [`Pty::hand_to`] is the other entrance, and it starts here: it takes the
+/// terminal away first and gives a pseudo-terminal back.
+///
+/// # Arguments
+/// * `command` - The command to start the child from. The caller sets every
+///   other part of it.
+pub fn take_the_terminal_away(command: &mut Command) {
+    // SAFETY: the closure runs in the child between the fork and the exec, and
+    // it calls one function. `setsid` is async-signal-safe, it takes no
+    // argument and it touches no memory of this process, so it is safe in that
+    // window. The child is never a process group leader there, because the fork
+    // gave it a new process id and the process group is still the one of the
+    // parent, so the one documented failure of `setsid` cannot happen.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            Ok(())
+        });
+    }
+}
 
 /// The window that a pseudo-terminal reports.
 ///
@@ -98,9 +161,31 @@ impl Pty {
         assert_eq!(
             result,
             0,
-            "openpty must give a pseudo-terminal: {}",
+            "openpty must give a pseudo-terminal: {}. `Device not configured` here is the ceiling of `kern.tty.ptmx_max`, which every process of the machine shares, so a target that holds one pseudo-terminal for each of its concurrent tests runs a busy machine out of them",
             std::io::Error::last_os_error()
         );
+
+        // Both ends close on the exec of a child that starts after this call.
+        // `openpty` sets no such flag, so each end used to reach every child of
+        // every other test of the target, and each of those children held this
+        // pseudo-terminal open for as long as it ran. The machine holds a few
+        // hundred pseudo-terminals in all, so a copy in a child that has no use
+        // for it is a slot the next `openpty` cannot have. The child of this
+        // terminal still claims it, because `TIOCSCTTY` runs between the fork
+        // and the exec, where the flag changes nothing. A fork inside the few
+        // instructions between the two calls still takes a copy, and no call of
+        // this platform opens a pseudo-terminal with the flag already set.
+        for end in [master, slave] {
+            // SAFETY: `fcntl` with `F_SETFD` reads no pointer, and both
+            // descriptors came from the `openpty` above.
+            let flagged = unsafe { libc::fcntl(end, libc::F_SETFD, libc::FD_CLOEXEC) };
+            assert_ne!(
+                flagged,
+                -1,
+                "each end of a pseudo-terminal must close on an exec: {}",
+                std::io::Error::last_os_error()
+            );
+        }
 
         Pty { master, slave }
     }
@@ -115,21 +200,17 @@ impl Pty {
     /// * `command` - The command to start the child from. The caller sets every
     ///   other part of it.
     pub fn hand_to(&self, command: &mut Command) {
+        take_the_terminal_away(command);
+
         let slave = self.slave;
         // SAFETY: the closure runs in the child between the fork and the exec,
-        // and it calls two functions. `setsid` and `ioctl` are both
-        // async-signal-safe, and neither one touches memory of this process:
-        // the ioctl takes the request `TIOCSCTTY`, which reads no pointer. The
-        // child is never a process group leader in that window, because the
-        // fork gave it a new process id and the process group is still the one
-        // of the parent, so the one documented failure of `setsid` cannot
-        // happen.
+        // and after the closure of [`take_the_terminal_away`], because a child
+        // runs these closures in the order the caller registered them. It calls
+        // one function. `ioctl` is async-signal-safe, and it touches no memory
+        // of this process: it takes the request `TIOCSCTTY`, which reads no
+        // pointer.
         unsafe {
             command.pre_exec(move || {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-
                 #[allow(
                     clippy::disallowed_methods,
                     reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of the child, and termsize offers no call for that"
