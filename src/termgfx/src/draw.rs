@@ -36,7 +36,7 @@ use icy_sixel::{sixel_encode, EncodeOptions};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
-use image::{DynamicImage, ExtendedColorType, ImageEncoder};
+use image::{DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat};
 
 use crate::cursor::{write_image_with_cursor_contract, CursorContract};
 use crate::detect::{Capabilities, DisplayRoutine};
@@ -436,10 +436,12 @@ pub struct Request<'a> {
     /// The bytes of the file that the image came out of, when the caller holds
     /// them.
     ///
-    /// A picture that needs no resize, that arrives in a format the protocol
-    /// carries, and that the budget holds travels byte for byte. No encoder
-    /// runs and no pixel changes, so a JPEG on disk reaches the terminal as the
-    /// photographer left it.
+    /// A picture that needs no resize, that arrives as a PNG or a JPEG, and
+    /// that the budget holds travels byte for byte. No encoder runs and no
+    /// pixel changes, so a JPEG on disk reaches the terminal as the
+    /// photographer left it. A file of any other format reaches it through the
+    /// encoder, because the terminals of the protocol do not all read the same
+    /// list of formats.
     ///
     /// A caller that decoded the picture out of a file it still holds states
     /// those bytes here. A caller that made the picture itself states [`None`],
@@ -1412,15 +1414,30 @@ fn write_sixel<W: Write>(
 ///
 /// # Returns
 /// The base64 of the file, for a picture that the display bounds left alone,
-/// out of a request that states a file, inside a budget that holds it. [`None`]
-/// in every other case, and the picture then reaches the budget through the
-/// fit.
+/// out of a request that states a file of a format this writer makes, inside a
+/// budget that holds it. [`None`] in every other case, and the picture then
+/// reaches the budget through the fit.
 fn source_payload_of(request: &Request<'_>, resized: bool) -> Option<String> {
     if resized {
         return None;
     }
 
-    let payload = BASE64_STANDARD.encode(request.source?);
+    let source = request.source?;
+
+    // The writer sends a file as it stands in the two formats it makes itself,
+    // and every terminal of this protocol draws both of them. The terminals do
+    // not all read the same list beyond those two, and a file that a terminal
+    // cannot read draws nothing at all, so every other format goes through the
+    // encoder. A GIF stays out for a second reason: it can animate, and the
+    // picture that the caller holds beside it is one frame of that animation.
+    if !matches!(
+        image::guess_format(source),
+        Ok(ImageFormat::Png | ImageFormat::Jpeg)
+    ) {
+        return None;
+    }
+
+    let payload = BASE64_STANDARD.encode(source);
 
     request.payload.holds(payload.len()).then_some(payload)
 }
