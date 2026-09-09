@@ -527,9 +527,9 @@ fn in_tmux() -> bool {
 /// word.
 ///
 /// `in_tmux` and `session` both arrive as arguments, and the gate reads no
-/// environment variable of its own, so that the gate is a pure function of its
-/// inputs. A test that set `TMUX` would change the environment of every other
-/// test in the process.
+/// environment variable that decides a verdict. It reads `TERM` for one
+/// message alone. A test that set `TMUX` would change the environment of every
+/// other test in the process.
 fn validate_terminal_for_graphics(
     terminal_caps: &Capabilities,
     transport: &RemoteTransport,

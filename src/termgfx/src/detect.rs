@@ -255,12 +255,14 @@ impl Capabilities {
     /// This is the entrance for a tool that draws a picture and has no second
     /// way to show it. [`Capabilities::detect`] reads the environment alone,
     /// and a terminal that set no signal reaches it as
-    /// [`TerminalType::Unknown`]. A pane of a multiplexer and a session of
-    /// mosh both arrive that way, and both of them draw pictures.
+    /// [`TerminalType::Unknown`]. A session of mosh arrives that way, a pane
+    /// of a multiplexer arrives under the name of the multiplexer, and both of
+    /// them draw pictures.
     ///
-    /// So this call asks that terminal, and it asks a named terminal as well
-    /// whenever the window reports no pixel size: a name answers the protocol
-    /// question and says nothing about the size of a character cell.
+    /// So this call asks both of them, and it asks a named terminal as well
+    /// whenever the window reports no pixel size: the name of a terminal
+    /// answers the protocol question and says nothing about the size of a
+    /// character cell.
     /// `asks_the_terminal` holds both triggers, and
     /// [`Capabilities::detect_by_asking_the_protocol`] is the entrance that
     /// asks the first alone. The question goes to the controlling terminal,
@@ -273,9 +275,9 @@ impl Capabilities {
     /// such a run. [`crate::probe::ask_the_terminal`] holds that rule, and a
     /// run it stops short answers with the name the environment carries.
     ///
-    /// The answer replaces the name. It never replaces a name the environment
-    /// carried, because the only name it can replace is
-    /// [`TerminalType::Unknown`].
+    /// The answer replaces every name that
+    /// [`TerminalType::the_answer_outranks_this_name`] gives way to, and it
+    /// replaces no other name the environment carried.
     #[must_use]
     pub fn detect_by_asking() -> Self {
         FULL_ANSWER
@@ -293,14 +295,14 @@ impl Capabilities {
     /// decides nothing it prints.
     ///
     /// So this call asks about the protocol alone, and the size of the window
-    /// settles nothing here. A terminal that named itself answered the
-    /// protocol question already, and this entrance therefore asks it nothing
-    /// — where [`Capabilities::detect_by_asking`] asks that same terminal for
-    /// the cell that a picture needs. The round trip this saves costs the
-    /// budget of [`crate::probe::QUERY_BUDGET`] and swallows whatever the user
-    /// typed while the read held the terminal in raw mode, and a pane of
-    /// Zellij, a session of mosh and a ttyd panel all report the window that
-    /// used to trigger it.
+    /// settles nothing here. It asks every name that
+    /// [`TerminalType::the_answer_outranks_this_name`] gives way to, and it
+    /// asks a terminal that named itself nothing — where
+    /// [`Capabilities::detect_by_asking`] asks that terminal for the cell that
+    /// a picture needs. The round trip this saves costs the budget of
+    /// [`crate::probe::QUERY_BUDGET`] and swallows whatever the user typed
+    /// while the read held the terminal in raw mode, and a named terminal
+    /// under mosh and a ttyd panel report the window that used to trigger it.
     ///
     /// A run that asked the whole question already takes that answer instead
     /// of asking a second time. **The reuse runs one way alone.** An answer of

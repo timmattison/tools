@@ -49,8 +49,8 @@
 //! # The modules
 //!
 //! `detect` reads the environment and names the terminal. `probe` asks a
-//! terminal that the environment left unnamed, and it reads the refusal that
-//! a terminal wrote for a picture it would not draw. `geometry` measures
+//! terminal of no name and a pane of a multiplexer, and it reads the refusal
+//! that a terminal wrote for a picture it would not draw. `geometry` measures
 //! a character cell and every size that comes off it. `cursor` states where the
 //! cursor ends. `draw` holds the three writers, one for each protocol.
 //! `session` reads what the environment of a mosh session states about the
