@@ -34,7 +34,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::prelude::{Engine, BASE64_STANDARD};
 use icy_sixel::{sixel_encode, EncodeOptions};
 use image::codecs::jpeg::JpegEncoder;
-use image::codecs::png::PngEncoder;
+use image::codecs::png::{PngDecoder, PngEncoder};
 use image::imageops::FilterType;
 use image::{DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat};
 
@@ -441,12 +441,13 @@ pub struct Request<'a> {
     /// The bytes of the file that the image came out of, when the caller holds
     /// them.
     ///
-    /// A picture that needs no resize, that arrives as a PNG or a JPEG, and
-    /// that the budget holds travels byte for byte. No encoder runs and no
+    /// A picture that needs no resize, that arrives as a still PNG or a JPEG,
+    /// and that the budget holds travels byte for byte. No encoder runs and no
     /// pixel changes, so a JPEG on disk reaches the terminal as the
     /// photographer left it. A file of any other format reaches it through the
     /// encoder, because the terminals of the protocol do not all read the same
-    /// list of formats.
+    /// list of formats, and because a file that animates carries more than the
+    /// one frame the caller holds.
     ///
     /// A caller that decoded the picture out of a file it still holds states
     /// those bytes here. A caller that made the picture itself states [`None`],
@@ -1444,22 +1445,50 @@ fn source_payload_of(request: &Request<'_>, resized: bool) -> Option<String> {
 
     let source = request.source?;
 
-    // The writer sends a file as it stands in the two formats it makes itself,
-    // and every terminal of this protocol draws both of them. The terminals do
-    // not all read the same list beyond those two, and a file that a terminal
-    // cannot read draws nothing at all, so every other format goes through the
-    // encoder. A GIF stays out for a second reason: it can animate, and the
-    // picture that the caller holds beside it is one frame of that animation.
-    if !matches!(
-        image::guess_format(source),
-        Ok(ImageFormat::Png | ImageFormat::Jpeg)
-    ) {
+    if !travels_as_it_stands(source) {
         return None;
     }
 
     let payload = BASE64_STANDARD.encode(source);
 
     request.payload.holds(payload.len()).then_some(payload)
+}
+
+/// Whether the bytes of `source` travel to the terminal as they stand.
+///
+/// The writer sends a file as it stands in the two formats it makes itself, and
+/// every terminal of this protocol draws both of them. The terminals do not all
+/// read the same list beyond those two, and a file that a terminal cannot read
+/// draws nothing at all, so every other format goes through the encoder.
+///
+/// A file that animates stays out for a second reason: the picture that the
+/// caller holds beside it is one frame of that animation, so a file that
+/// travels as it stands draws a picture that the caller never asked for. It
+/// also disagrees with itself, because the same file animates when the display
+/// bounds leave it alone and freezes when a resize sends it through the
+/// encoder. A GIF states the animation in its format, and an animated PNG
+/// states it in the `acTL` chunk of a file that carries the signature of a
+/// still PNG. So the writer reads that chunk to tell one PNG from the other.
+/// The specification puts the chunk in front of the first `IDAT` chunk, so the
+/// reader takes a header and no pixel.
+///
+/// The answer is false for a PNG that the reader cannot open, and for one whose
+/// `acTL` chunk it cannot read. A file that this writer cannot read is a file
+/// it must not pass on.
+///
+/// # Arguments
+/// * `source` - The bytes of the file that the picture came out of.
+///
+/// # Returns
+/// True for a JPEG and for a still PNG. False for every other file.
+fn travels_as_it_stands(source: &[u8]) -> bool {
+    match image::guess_format(source) {
+        Ok(ImageFormat::Jpeg) => true,
+        Ok(ImageFormat::Png) => PngDecoder::new(io::Cursor::new(source))
+            .and_then(|decoder| decoder.is_apng())
+            .is_ok_and(|animated| !animated),
+        _ => false,
+    }
 }
 
 /// Write an image with the iTerm2 inline image protocol.
