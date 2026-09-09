@@ -2694,6 +2694,37 @@ not_a_number  1 /bin/bash
         );
     }
 
+    /// A `MOSH_IMAGES` that outlived its session states nothing, and the rules
+    /// under the rule about mosh answer for the session.
+    ///
+    /// The variable crosses a multiplexer, which is what makes it useful, and
+    /// that is what makes it stale as well. A user exports it by hand. A tmux
+    /// server or a Zellij server that a mosh session started keeps the whole
+    /// environment of that session, and it hands that environment to every
+    /// pane it opens after the mosh session ends. So the process tree is what
+    /// says that the statement belongs to this session, and the rule reads the
+    /// transport as well as the variable.
+    ///
+    /// Ghostty draws the kitty protocol, this variable names sixel alone, and
+    /// the two share no protocol. No mosh stands between Ghostty and the
+    /// screen, so the picture still draws.
+    #[test]
+    fn a_stale_mosh_variable_outside_a_mosh_draws_a_picture() {
+        let named = Capabilities::new(TerminalType::Ghostty, true, true);
+        let session = MoshImages::from_env(Some("sixel"), None);
+        assert!(
+            validate_terminal_for_graphics(
+                &named,
+                &RemoteTransport::None,
+                false,
+                &session,
+                "Image"
+            )
+            .is_ok(),
+            "a variable that names no transport of this session says nothing about it"
+        );
+    }
+
     #[test]
     fn the_mosh_message_still_offers_ssh() {
         assert!(mosh_refusal_message().contains("ssh user@host"));

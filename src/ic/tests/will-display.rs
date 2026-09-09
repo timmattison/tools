@@ -397,3 +397,24 @@ fn will_display_fails_and_names_tmux_inside_a_mosh_that_carries_images() {
     assert_eq!(code, Some(1), "stderr: {stderr}");
     assert!(stderr.contains("tmux"), "stderr must name tmux: {stderr}");
 }
+
+/// A `MOSH_IMAGES` that outlived its session states nothing, and the terminal
+/// answers for the run.
+///
+/// The variable crosses a multiplexer, which is what makes it useful, and that
+/// is what makes it stale as well. A tmux server or a Zellij server that a Mosh
+/// session started keeps the whole environment of that session, and it hands
+/// that environment to every pane it opens after the Mosh session ends. This
+/// run states no process table, so the `PATH` reaches no `ps` and the process
+/// tree names no Mosh. Ghostty draws a picture, and the variable names sixel
+/// alone, so the run must report the terminal and not the variable.
+#[test]
+fn will_display_succeeds_for_a_named_terminal_with_a_stale_mosh_variable() {
+    let (code, stdout, stderr) = run(ic("xterm-ghostty")
+        .arg("--will-display")
+        .env("MOSH_IMAGES", "sixel"));
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "", "success must print nothing to stdout");
+    assert_eq!(stderr, "", "success must print nothing to stderr");
+}
