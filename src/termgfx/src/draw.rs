@@ -1498,19 +1498,19 @@ fn write_iterm2<W: Write>(
         cell_height_px,
     );
 
-    // A file that the caller holds and that the budget carries travels as it
-    // stands, so no encoder runs and no pixel changes.
-    //
-    // `width=` and `height=` below state the cell span, so a picture that spends
-    // fewer pixels keeps the size it takes on the screen. The fit starts at the
-    // lossless shape and steps down the qualities of [`Iterm2Payload`] before
-    // it takes a pixel off the picture, and the terminal reads the format out
-    // of the file, so no argument of the command names the shape it ended in.
     // `downscale_to_display_pixels` borrows the picture it left alone and owns
     // the one it resized, so the shape of what it gave back states whether the
-    // file the caller holds still carries the pixels of the screen.
+    // file that the caller holds still carries the pixels of the screen.
     let resized = matches!(image, Cow::Owned(_));
 
+    // A file that the caller holds, that the screen fits and that the budget
+    // carries travels as it stands, so no encoder runs and no pixel changes.
+    // Every other picture reaches the budget through the fit, which starts at
+    // the lossless shape and steps down the qualities of `Iterm2Payload` before
+    // it takes a pixel off the picture. `width=` and `height=` below state the
+    // cell span either way, so a picture that does spend pixels keeps the size
+    // it takes on the screen. The terminal reads the format out of the file, so
+    // no argument of the command names the shape that the picture travelled in.
     let (image, base64_data) = match source_payload_of(request, resized) {
         Some(payload) => (image, payload),
         None => {
