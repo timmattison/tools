@@ -448,6 +448,37 @@ fn will_display_fails_and_names_both_sets_when_the_session_shares_no_protocol() 
     );
 }
 
+/// A session that names no terminal of the user is refused, and the message
+/// names the two sets that decided it.
+///
+/// This run carries no `MOSH_CLIENT_IMAGES`, which is the session that
+/// `mosh-server new` starts by hand: the server states what it carries, and no
+/// wrapper stated what the terminal of the user draws. An absent name is no
+/// name of an empty set, so `ic` reads the transport alone and this Kitty
+/// window draws no sixel. A message that named the absent set would state that
+/// the terminal of the user draws `none`, beside a refusal that never read it.
+#[test]
+fn will_display_fails_and_names_two_sets_when_the_session_names_no_terminal_of_the_user() {
+    let table = MoshProcessTable::new(TARGET_NAME);
+    let (code, _stdout, stderr) = run(ic_under_mosh(TERM_XTERM_KITTY, &table)
+        .arg("--will-display")
+        .env("MOSH_IMAGES", "sixel"));
+
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("sixel"),
+        "stderr must name what this Mosh carries: {stderr}"
+    );
+    assert!(
+        stderr.contains("kitty"),
+        "stderr must name what this terminal draws: {stderr}"
+    );
+    assert!(
+        !stderr.contains("The terminal of the user draws: none"),
+        "and it must not state that the terminal of the user draws none, which is a set this refusal never read: {stderr}"
+    );
+}
+
 /// A pane of tmux inside such a Mosh still takes the refusal that names tmux.
 ///
 /// `MOSH_IMAGES` states what the transport carries, and tmux stands between

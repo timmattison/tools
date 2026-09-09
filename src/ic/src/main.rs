@@ -2689,6 +2689,45 @@ not_a_number  1 /bin/bash
         );
     }
 
+    /// A session that names no terminal of the user takes a refusal that names
+    /// two sets, because two sets decided it.
+    ///
+    /// This is the session that `mosh-server new` starts by hand: the server
+    /// states what it carries, and no wrapper stated what the terminal of the
+    /// user draws. [`MoshImages::delivers`] reads that second set only where
+    /// the set names a protocol, because an absent name is no name of an empty
+    /// set. So the transport and this terminal decided this refusal alone, and
+    /// a message that named the second set there names a party that the
+    /// decision never read. It names it `none` as well, which reads as a
+    /// terminal that draws no picture at all.
+    #[test]
+    fn a_session_that_names_no_terminal_of_the_user_names_two_sets() {
+        let kitty = Capabilities::new(TerminalType::Kitty, true, true);
+        let session = MoshImages::from_env(Some("sixel"), None);
+        let error =
+            validate_terminal_for_graphics(&kitty, &RemoteTransport::Mosh, false, &session, "Image")
+                .expect_err(
+                    "a session that delivers no protocol this terminal draws must be refused",
+                );
+        let message = error.to_string();
+        assert!(
+            message.contains("sixel"),
+            "the message must name what this mosh carries: {message}"
+        );
+        assert!(
+            message.contains("kitty"),
+            "and it must name what this terminal draws: {message}"
+        );
+        assert!(
+            !message.contains("The terminal of the user draws"),
+            "and it must not name a set that this refusal never read: {message}"
+        );
+        assert!(
+            !message.contains("none"),
+            "which it names `none`, a name that reads as a terminal that draws no picture: {message}"
+        );
+    }
+
     /// A pane of Zellij inside a mosh that carries images draws a picture.
     ///
     /// This is the case that issue #471 reports. Zellij answers the query for
