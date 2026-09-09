@@ -17,7 +17,7 @@
 //! reads what it stated:
 //!
 //! * `MOSH_IMAGES` names the protocols that the **transport** carries. Only a
-//!   mosh that draws images writes it, so a session that carries no such
+//!   mosh that draws images writes it, so a mosh session that carries no such
 //!   variable is an upstream mosh and a tool still refuses it.
 //! * `MOSH_CLIENT_IMAGES` names the protocols that the **terminal of the user**
 //!   draws. An upstream server started by the wrapper of such a mosh carries
@@ -25,6 +25,14 @@
 //!
 //! Both hold a comma-separated list of `kitty`, `sixel` and `iterm2`. See
 //! <https://github.com/timmattison/mosh-rs/issues/78>.
+//!
+//! **A variable that crosses a multiplexer outlives the session that wrote
+//! it.** A user exports it by hand, and a tmux server or a Zellij server that a
+//! mosh session started hands the whole environment of that session to every
+//! pane it opens after the mosh session ends. So this module states what a
+//! transport carries, and it states nothing about which transport this session
+//! has. A caller reads the process tree for that, and it reads the two answers
+//! together.
 
 use crate::detect::DisplayRoutine;
 
@@ -205,7 +213,10 @@ impl MoshImages {
     /// Whether the transport of this session carries an image at all.
     ///
     /// Only a mosh that draws images writes `MOSH_IMAGES`, so this answers no
-    /// for an upstream mosh and for every session that is no mosh session.
+    /// for an upstream mosh. The variable outlives the session that wrote it,
+    /// so a yes here states what a transport carries and states nothing about
+    /// which transport this session has. A caller reads the process tree for
+    /// that.
     #[must_use]
     pub fn carries_images(&self) -> bool {
         !self.transport.is_empty()

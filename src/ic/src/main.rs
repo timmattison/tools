@@ -547,6 +547,16 @@ fn validate_terminal_for_graphics(
     // from a mosh that draws them never. See `termgfx::MoshImages` and
     // https://github.com/timmattison/mosh-rs/issues/78.
     //
+    // So this rule reads the environment and the process tree together. The
+    // environment states what the transport carries, and the process tree
+    // states that the transport of this session is a mosh. The variable
+    // outlives the session that wrote it, because it crosses a multiplexer: a
+    // user exports it by hand, and a tmux server or a Zellij server that a
+    // mosh session started hands the whole environment of that session to
+    // every pane it opens after the mosh session ends. A variable that names
+    // no mosh of this session therefore says nothing, and the rules below
+    // answer for the terminal that this session really has.
+    //
     // This rule lifts the refusal of mosh alone, which is what issue #471
     // reports: that refusal took every terminal the environment named, because
     // it stood in front of the rule that reads what a terminal draws. It lifts
@@ -556,7 +566,9 @@ fn validate_terminal_for_graphics(
     // environment to the server, and the server hands it to every pane, so
     // `MOSH_IMAGES` says nothing at all about the tmux in front of the
     // picture.
-    let mosh_carries_images = session.carries_images() && terminal_caps.draws_images();
+    let mosh_carries_images = *transport == RemoteTransport::Mosh
+        && session.carries_images()
+        && terminal_caps.draws_images();
     if mosh_carries_images {
         let delivers = session.delivers();
         let drawn = terminal_caps.drawn_protocols();

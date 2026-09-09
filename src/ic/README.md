@@ -194,14 +194,23 @@ mosh that draws images states what it carries there:
 
 | Variable | Value | Meaning |
 |----------|-------|---------|
-| `MOSH_IMAGES` | e.g. `kitty,sixel,iterm2` | The protocols that the **transport** carries. Only a mosh that draws images writes it, so a session that carries none is an upstream mosh and `ic` still refuses it. |
+| `MOSH_IMAGES` | e.g. `kitty,sixel,iterm2` | The protocols that the **transport** carries. Only a mosh that draws images writes it, so a mosh session that carries none is an upstream mosh and `ic` still refuses it. |
 | `MOSH_CLIENT_IMAGES` | e.g. `kitty,sixel` | The protocols that the **terminal of the user** draws. The wrapper writes it where that terminal answered the query, and an upstream server started by that wrapper carries this one and no `MOSH_IMAGES`. |
+
+`ic` reads the process tree as well as these two variables, and the two answer
+different questions: the variable states what the transport carries, and the
+process tree states that the transport of this session is a mosh. The variable
+outlives the session that wrote it, because it crosses a multiplexer. A user
+exports it by hand, and a tmux server or a Zellij server that a mosh session
+started hands the whole environment of that session to every pane it opens after
+the mosh session ends. So a variable that names no mosh of this session states
+nothing, and `ic` answers for the terminal that this session really has.
 
 A picture travels through the transport and then draws on the terminal of the
 user, so `ic` draws it with a protocol that both of them read and that this
-terminal draws as well. A session that shares no protocol with this terminal
-takes a refusal that names each set, because the repair there is a different
-terminal and not `ssh`:
+terminal draws as well. A mosh session that shares no protocol with this
+terminal takes a refusal that names each set, because the repair there is a
+different terminal and not `ssh`. The command below runs inside such a mosh:
 
 ```
 $ MOSH_IMAGES=sixel MOSH_CLIENT_IMAGES=sixel TERM=xterm-kitty ic picture.png
@@ -216,7 +225,7 @@ For image display, use a terminal that draws one of the protocols this Mosh carr
 Both variables state what the transport carries and what the terminal of the
 user draws. Neither one states what a multiplexer in front of the picture
 draws, because the shell that starts that multiplexer hands the whole
-environment to it. So a session that carries images lifts the refusal that
+environment to it. So a mosh session that carries images lifts the refusal that
 names mosh and lifts no other one: a tmux that answers no query still takes the
 refusal that names tmux, inside such a mosh as everywhere else.
 
