@@ -21,12 +21,12 @@
 //! single number in this file.
 
 use std::io::Write;
-use std::os::unix::process::CommandExt;
 use std::process;
 use std::process::{Command, Stdio};
 
 mod common;
 
+use common::pty::take_the_terminal_away;
 use common::{
     find, scan_cursor_movement, unreachable_path_dir, SIXEL_START, TERM_XTERM_256COLOR, TEST_IMAGE,
 };
@@ -316,19 +316,12 @@ fn kitty_key_list(bytes: &[u8]) -> Vec<String> {
 
 /// Make a command that runs `ic` through one display routine.
 ///
-/// The child gets no controlling terminal. `setsid` puts it in a new session,
-/// and a session with no controlling terminal answers `ENXIO` to every open of
-/// `/dev/tty`. Every probe of the size of the terminal therefore fails, and
-/// `ic` falls back to 80 columns by 24 rows and to a character cell of 10
-/// pixels by 20. [`TERMINAL_ROWS`] and [`EXPECTED_ROWS`] hold those two
-/// fallbacks, and every expectation of this file counts on them.
-///
-/// A pipe for standard output is not enough on its own. `cargo test` captures
-/// the standard output of a test binary, so a probe that reads `/dev/tty`
-/// measures the terminal of the person who typed `cargo test`. The test would
-/// then pass in a redirected run and fail from a terminal, on a condition the
-/// test does not control. The new session is how the test states which
-/// terminal it wants, which is none.
+/// The child gets no controlling terminal, which [`take_the_terminal_away`]
+/// states and holds for every target that wants it. Every probe of the size of
+/// the terminal therefore fails, and `ic` falls back to 80 columns by 24 rows
+/// and to a character cell of 10 pixels by 20. [`TERMINAL_ROWS`] and
+/// [`EXPECTED_ROWS`] hold those two fallbacks, and every expectation of this
+/// file counts on them.
 ///
 /// # Arguments
 /// * `routine` - The display routine that `ic` must use.
@@ -347,21 +340,7 @@ fn ic_command(routine: Routine, args: &[&str]) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // SAFETY: the closure runs in the child between the fork and the exec, and
-    // it calls one function. `setsid` is async-signal-safe, it takes no
-    // argument and it touches no memory of this process, so it is safe in that
-    // window. The child is never a process group leader there, because the
-    // fork gave it a new process id and the process group is still the one of
-    // the parent, so the one documented failure of `setsid` cannot happen.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            Ok(())
-        });
-    }
+    take_the_terminal_away(&mut command);
 
     for (name, value) in routine.environment() {
         command.env(name, value);

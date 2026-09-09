@@ -12,11 +12,28 @@
 //! **The terminal is part of that cleared environment.** A terminal of no name
 //! and a pane of a multiplexer both send `ic` to ask the terminal which
 //! protocol it draws, and that question goes to `/dev/tty`, which is the
-//! terminal the test runner started the suite from. So [`run_with_terminal`]
-//! gives every run a pseudo-terminal of its own, which answers nothing and
-//! which nobody types at. A run therefore reads no byte of the terminal of
-//! whoever started the suite, and it writes none there either. The helper keeps
-//! that promise for the whole file, where each test once had to remember it.
+//! terminal the test runner started the suite from. So every run of this file
+//! starts in a session of its own: [`run`] gives the child no terminal at all,
+//! and [`run_with_terminal`] gives it a pseudo-terminal that answers nothing and
+//! that nobody types at. A run therefore reads no byte of the terminal of
+//! whoever started the suite, and it writes none there either. The two helpers
+//! keep that promise for the whole file, where each test once had to remember
+//! it.
+//!
+//! # One test needs a terminal and the rest need none
+//!
+//! A pseudo-terminal belongs to the whole machine, which holds a few hundred of
+//! them, and the tests of this file run beside each other. A file that opens one
+//! for each test therefore asks for more of them than a busy machine has left.
+//!
+//! Only
+//! [`will_display_asks_nothing_of_a_named_terminal_that_reports_no_pixel_size`]
+//! reads what a run wrote to a terminal, and a test reads that of a terminal it
+//! holds. Every other verdict of this file is an exit status and two pipes, and
+//! none of them reads the size of a window: the flag asks for the protocol
+//! alone, and the rule that decides whether to ask the terminal reads no window
+//! for that question. So the rest of the tests run with no terminal, which
+//! answers them exactly as a silent one does.
 //!
 //! # The flag asks a question and draws nothing
 //!
@@ -29,17 +46,18 @@
 
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 mod common;
 
-use common::pty::{Pty, Window};
+use common::pty::{take_the_terminal_away, Pty, Window};
 use common::{unreachable_path_dir, MoshProcessTable};
 
 /// The name that this target puts in the unreachable `PATH` of its children.
 const TARGET_NAME: &str = "will-display";
 
-/// The window that the pseudo-terminal of every run reports.
+/// The window that the pseudo-terminal of [`run_with_terminal`] reports.
 ///
 /// **The pixel size is zero on both axes**, which is what a mosh session, a
 /// pane of Zellij and a ttyd panel all report. That is the window that used to
@@ -58,20 +76,29 @@ const WINDOW: Window = Window {
 /// waits for it therefore waits for the whole of a query.
 const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
 
-/// How long one read of the terminal waits for a byte.
+/// How long one turn of the runner waits for a byte of the terminal.
 ///
 /// The runner reads the terminal and asks after the child in turn, and this is
 /// the length of one turn. A run that asks writes its query inside the first
 /// one, and [`Pty::read_until`] gives that query back the moment the request of
 /// the attributes ends it.
+///
+/// **It is the floor of a turn as well as the ceiling.** [`Pty::read_until`]
+/// gives the rest of the slice back the moment the needle arrives, and it gives
+/// the whole of it back when the read of the terminal fails. The runner sleeps
+/// out what such a read left, so a wait for the child costs no core of the
+/// machine.
 const READ_SLICE: Duration = Duration::from_millis(100);
 
-/// How many turns the runner takes before it gives up on the child.
+/// How long the runner waits for `ic` to exit.
 ///
-/// Ten seconds in all, which is generous because a loaded machine starts a
-/// process late. **The count is the deadline of the whole wait**: a change that
-/// stopped `ic` from exiting must fail a test instead of holding it.
-const READ_SLICES: usize = 100;
+/// Ten seconds, which is generous because a loaded machine starts a process
+/// late. **The wall clock is the bound, and a count of turns is not**: a count
+/// is a deadline only while each turn costs what the count assumes, and a turn
+/// that ends early then shortens the whole wait without saying so. A change
+/// that stopped `ic` from exiting must fail a test instead of holding it, and
+/// it must take the stated ten seconds to say so.
+const EXIT_BUDGET: Duration = Duration::from_secs(10);
 
 /// Invoke the freshly-built `ic` binary in a known-empty environment.
 fn ic(term: &str) -> Command {
@@ -121,7 +148,7 @@ struct Run {
 ///
 /// # Panics
 /// Panics when `ic` does not start, and when it does not exit inside the
-/// deadline that [`READ_SLICES`] states.
+/// deadline that [`EXIT_BUDGET`] states.
 fn run_with_terminal(command: &mut Command, window: Window) -> Run {
     let pty = Pty::open(window);
 
@@ -135,16 +162,33 @@ fn run_with_terminal(command: &mut Command, window: Window) -> Run {
 
     let mut child = command.spawn().expect("ic must run");
 
+    let deadline = Instant::now() + EXIT_BUDGET;
     let mut wrote = Vec::new();
     let mut exited = None;
-    for _ in 0..READ_SLICES {
-        wrote.extend(pty.read_until(ATTRIBUTES_REQUEST, READ_SLICE));
+    while Instant::now() < deadline {
+        let slice = deadline
+            .saturating_duration_since(Instant::now())
+            .min(READ_SLICE);
+        let turn = Instant::now();
+        wrote.extend(pty.read_until(ATTRIBUTES_REQUEST, slice));
         if let Some(status) = child.try_wait().expect("failed to ask after ic") {
             exited = Some(status);
             break;
         }
+        let spent = turn.elapsed();
+        if spent < slice {
+            thread::sleep(slice - spent);
+        }
     }
-    let status = exited.expect("ic must exit inside the deadline of this file");
+    let Some(status) = exited else {
+        // The child outlived the deadline, which is the failure this wait is
+        // here to report. It ends first: a child that nobody kills and nobody
+        // waits for holds a slot of the process table of the machine for as
+        // long as the test runner lives.
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("ic must exit inside the deadline of this file");
+    };
     // The child has exited, so every byte it ever wrote to the terminal is
     // waiting there already. One last turn takes the bytes it wrote on its way
     // out.
@@ -174,14 +218,36 @@ fn drain(pipe: Option<impl Read>, name: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Run `command` with a pseudo-terminal of the window of this file, and report
-/// the three answers that a verdict is made of.
+/// Run `command` with no terminal at all, and report the three answers that a
+/// verdict is made of.
 ///
-/// The bytes that the run wrote to the terminal go nowhere, because one test
-/// asserts on them and the rest state a verdict alone.
+/// [`take_the_terminal_away`] puts the child in a session of its own and leaves
+/// it no controlling terminal, which is the whole of the hermeticity that these
+/// verdicts need. `ic` finds no `/dev/tty` to open, so it asks nothing and
+/// answers with the name the environment carries — the answer a terminal that
+/// stays silent gives it. This helper therefore opens no pseudo-terminal and
+/// reads none, and `output` waits for the child and takes both pipes in one
+/// call.
+///
+/// # Arguments
+/// * `command` - The command to run. The caller states the environment and the
+///   arguments, and this call states the session and the three standard
+///   streams.
+///
+/// # Returns
+/// The exit status and the two captured streams.
+///
+/// # Panics
+/// Panics when `ic` does not start.
 fn run(command: &mut Command) -> (Option<i32>, String, String) {
-    let run = run_with_terminal(command, WINDOW);
-    (run.code, run.stdout, run.stderr)
+    take_the_terminal_away(command);
+    let done = command.output().expect("ic must run");
+
+    (
+        done.status.code(),
+        String::from_utf8_lossy(&done.stdout).into_owned(),
+        String::from_utf8_lossy(&done.stderr).into_owned(),
+    )
 }
 
 /// A terminal that renders graphics, with no multiplexer and no remote
@@ -268,6 +334,10 @@ fn will_display_asks_nothing_of_a_named_terminal_that_reports_no_pixel_size() {
         Some(0),
         "and it must still report that a Kitty terminal displays an image: {}",
         outcome.stderr
+    );
+    assert_eq!(
+        outcome.stdout, "",
+        "and success must print nothing to stdout, as it does for every other terminal here"
     );
 }
 
