@@ -419,12 +419,13 @@ fn will_display_fails_and_names_ssh_for_an_upstream_mosh() {
 }
 
 /// A session that shares no protocol with this terminal is refused, and the
-/// message names every set it read.
+/// message names every set that decided it.
 ///
 /// A Mosh that carries sixel alone delivers nothing to a Kitty window, which
-/// reads the kitty protocol and reads no other one. The repair is a different
-/// terminal, so the reader needs to see which protocols each party of the
-/// session draws.
+/// reads the kitty protocol and reads no other one. This run states
+/// `MOSH_CLIENT_IMAGES` as well, so three sets decided the refusal and the
+/// message names the three of them. The repair is a different terminal, so the
+/// reader needs to see which protocols each party of the session draws.
 #[test]
 fn will_display_fails_and_names_both_sets_when_the_session_shares_no_protocol() {
     let table = MoshProcessTable::new(TARGET_NAME);

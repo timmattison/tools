@@ -222,6 +222,22 @@ A picture in a protocol that any one of the three does not read lands on the scr
 For image display, use a terminal that draws one of the protocols this Mosh carries.
 ```
 
+**The message names the sets that decided the refusal, and it names no other
+one.** A session that carries no `MOSH_CLIENT_IMAGES` states no terminal of the
+user, and an absent name is no name of an empty set, so `ic` reads what the
+transport carries alone. The message of such a session drops the line about the
+terminal of the user and names two sets:
+
+```
+$ MOSH_IMAGES=sixel TERM=xterm-kitty ic picture.png
+Error: Image display cannot work here: this session and this terminal share no image protocol.
+This Mosh carries: sixel.
+This terminal draws: kitty.
+A picture in a protocol that one of the two does not read lands on the screen as text.
+
+For image display, use a terminal that draws one of the protocols this Mosh carries.
+```
+
 Both variables state what the transport carries and what the terminal of the
 user draws. Neither one states what a multiplexer in front of the picture
 draws, because the shell that starts that multiplexer hands the whole

@@ -573,17 +573,34 @@ fn validate_terminal_for_graphics(
         let delivers = session.delivers();
         let drawn = terminal_caps.drawn_protocols();
         if drawn.intersect(&delivers).is_empty() {
+            // The message names the sets that decided the refusal, and it
+            // names no other one. `MoshImages::delivers` reads the set of the
+            // terminal of the user only where that set names a protocol,
+            // because an absent name is no name of an empty set. So a session
+            // that names no terminal of the user took this refusal from two
+            // sets, and a message that named a third one names `none` for a
+            // party that the decision never read.
+            let client = session.client();
+            let (client_sentence, parties) = if client.is_empty() {
+                (String::new(), "one of the two")
+            } else {
+                (
+                    format!(" The terminal of the user draws: {}.", client.names()),
+                    "any one of the three",
+                )
+            };
             anyhow::bail!(
                 "{} display cannot work here: this session and this terminal share no image protocol.\n\
-                This Mosh carries: {}. The terminal of the user draws: {}.\n\
+                This Mosh carries: {}.{}\n\
                 This terminal draws: {}.\n\
-                A picture in a protocol that any one of the three does not read lands on the screen as text.\n\
+                A picture in a protocol that {} does not read lands on the screen as text.\n\
                 \n\
                 For {} display, use a terminal that draws one of the protocols this Mosh carries.",
                 feature,
                 session.transport().names(),
-                session.client().names(),
+                client_sentence,
                 drawn.names(),
+                parties,
                 feature.to_lowercase()
             );
         }
@@ -2658,13 +2675,15 @@ not_a_number  1 /bin/bash
     }
 
     /// A session that delivers no protocol this terminal draws takes a
-    /// refusal, and the message names every set it read.
+    /// refusal, and the message names every set that decided it.
     ///
     /// A pane of Zellij answers sixel, because Zellij draws sixel and reads no
     /// other protocol. A terminal of the user that draws the kitty protocol
     /// alone therefore shares no protocol with that pane, and a picture in
-    /// either protocol lands on the screen as text. The reader needs both sets
-    /// to see why, because the repair is a different terminal.
+    /// either protocol lands on the screen as text. This session names that
+    /// terminal of the user, so three sets decided the refusal and the message
+    /// names the three of them. The reader needs each one to see why, because
+    /// the repair is a different terminal.
     #[test]
     fn a_session_that_shares_no_protocol_with_this_terminal_names_both_sets() {
         let pane = Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true);
@@ -2704,11 +2723,14 @@ not_a_number  1 /bin/bash
     fn a_session_that_names_no_terminal_of_the_user_names_two_sets() {
         let kitty = Capabilities::new(TerminalType::Kitty, true, true);
         let session = MoshImages::from_env(Some("sixel"), None);
-        let error =
-            validate_terminal_for_graphics(&kitty, &RemoteTransport::Mosh, false, &session, "Image")
-                .expect_err(
-                    "a session that delivers no protocol this terminal draws must be refused",
-                );
+        let error = validate_terminal_for_graphics(
+            &kitty,
+            &RemoteTransport::Mosh,
+            false,
+            &session,
+            "Image",
+        )
+        .expect_err("a session that delivers no protocol this terminal draws must be refused");
         let message = error.to_string();
         assert!(
             message.contains("sixel"),
