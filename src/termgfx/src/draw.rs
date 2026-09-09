@@ -636,10 +636,15 @@ fn cursor_contract(
 /// One shape that a picture travels in, and the cheaper shape under it.
 ///
 /// A protocol states which shapes it carries, and the shapes of one protocol
-/// stand in an order: each one costs fewer characters of the same pixels than
+/// stand in an order: each one aims at fewer characters of the same pixels than
 /// the one above it, and it pays for them with something else.
 /// [`fit_to_payload_budget`] walks that order before it takes a pixel off the
 /// picture, because the pixel count is what the reader sees.
+///
+/// The order is where the walk starts and not what it believes. A rung that
+/// costs more of a given picture than the rung above it exists, and
+/// [`shape_that_costs_least`] measures every rung rather than trusting the
+/// order to hold for the picture in hand.
 ///
 /// The Kitty protocol and the Sixel protocol each carry one shape, so
 /// [`Payload::cheaper`] answers [`None`] for them and the fit reaches for the
@@ -961,9 +966,9 @@ impl Payload for Iterm2Payload {
 /// the encoder runs of one draw whatever a future encoder does with the size.
 ///
 /// The shapes of a protocol bound themselves, because
-/// [`Payload::cheaper`] walks a list that each protocol states and that list
-/// ends. So the encoder runs of one fit come to the length of that list plus
-/// this number plus one.
+/// [`shape_that_costs_least`] walks a list that each protocol states and that
+/// list ends. So the encoder runs of one fit come to the length of that list
+/// plus this number plus one.
 const MAXIMUM_FIT_ATTEMPTS: usize = 6;
 
 /// The share of the budget that one attempt of [`fit_to_payload_budget`] aims
@@ -981,9 +986,9 @@ const FIT_SAFETY: f64 = 0.95;
 /// The fit spends two things and it spends them in this order.
 ///
 /// **The shape first.** [`Payload::cheaper`] names the shape under the one the
-/// picture is in, and every rung of that ladder carries the same pixels for
-/// fewer characters. So a picture that reaches the budget on the ladder alone
-/// reaches it at the resolution that the screen shows.
+/// picture is in, and [`shape_that_costs_least`] walks that ladder. A picture
+/// that reaches the budget on the ladder alone reaches it at the resolution
+/// that the screen shows.
 ///
 /// **The pixel count second, and only when the ladder ends.** The payload of
 /// every shape this crate writes grows with the pixel count, so an attempt that
@@ -1024,18 +1029,10 @@ fn fit_to_payload_budget<'a, P: Payload>(
     shape: P,
 ) -> Result<(Cow<'a, DynamicImage>, P, String), DrawError> {
     let mut picture = image;
-    let mut shape = shape;
-    let mut payload = shape.encode(&picture)?;
-    let mut resizes = 0;
+    let (shape, mut payload) = shape_that_costs_least(&picture, budget, shape)?;
 
-    while !budget.holds(payload.len()) {
-        if let Some(cheaper) = shape.cheaper() {
-            shape = cheaper;
-            payload = shape.encode(&picture)?;
-            continue;
-        }
-
-        if resizes == MAXIMUM_FIT_ATTEMPTS {
+    for _ in 0..MAXIMUM_FIT_ATTEMPTS {
+        if budget.holds(payload.len()) {
             break;
         }
 
@@ -1044,11 +1041,60 @@ fn fit_to_payload_budget<'a, P: Payload>(
         };
 
         picture = Cow::Owned(smaller);
-        resizes += 1;
         payload = shape.encode(&picture)?;
     }
 
     Ok((picture, shape, payload))
+}
+
+/// Walk the ladder from `shape` down, and give the rung that carries `image`
+/// for the fewest characters.
+///
+/// The walk stops at the first rung that `budget` holds. The ladder falls in
+/// quality and the walk starts at the top of it, so that rung is the best
+/// picture that the budget allows.
+///
+/// **A rung under another one is not always cheaper than it, and that is what
+/// makes this a walk and not an arithmetic.** A JPEG spreads every sharp edge
+/// over the block it stands in, so a screenshot of text costs more as a JPEG
+/// than as a PNG at every quality of the ladder. The walk therefore reads what
+/// the encoder made of this picture rather than trusting the order, and a
+/// picture that no rung fits comes back in the rung that cost the fewest
+/// characters. [`fit_to_payload_budget`] then spends pixels in that rung.
+///
+/// # Arguments
+/// * `image` - The picture at the size the display bounds gave it.
+/// * `budget` - The characters of payload that the picture can spend.
+/// * `shape` - The top rung of the ladder that the protocol states.
+///
+/// # Returns
+/// The rung and the payload it made. A protocol that names one shape alone
+/// comes back with that shape after one encoder run.
+///
+/// # Errors
+/// Gives the error of the first encoder run that fails.
+fn shape_that_costs_least<P: Payload>(
+    image: &DynamicImage,
+    budget: PayloadBudget,
+    shape: P,
+) -> Result<(P, String), DrawError> {
+    let mut best = (shape, shape.encode(image)?);
+    let mut rung = shape;
+
+    while !budget.holds(best.1.len()) {
+        let Some(cheaper) = rung.cheaper() else {
+            break;
+        };
+
+        let payload = cheaper.encode(image)?;
+        rung = cheaper;
+
+        if payload.len() < best.1.len() {
+            best = (rung, payload);
+        }
+    }
+
+    Ok(best)
 }
 
 /// Give `image` at the size that aims at `budget`, or [`None`] when no smaller
