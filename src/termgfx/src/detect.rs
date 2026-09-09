@@ -727,6 +727,37 @@ mod tests {
         );
     }
 
+    /// A pane of a multiplexer owes the answer about the protocol it draws.
+    ///
+    /// The answer of a terminal outranks the name of a multiplexer, and a run
+    /// that asks nothing gets no answer for it to outrank. So the question
+    /// stands open for every name that
+    /// [`TerminalType::the_answer_outranks_this_name`] gives way to, and not
+    /// for [`TerminalType::Unknown`] alone.
+    ///
+    /// The pixel size settles nothing here. A pane that reports one closes the
+    /// question about a character cell, and the question about the protocol
+    /// stands open beside it.
+    #[test]
+    fn a_pane_of_a_multiplexer_owes_the_answer_about_the_protocol() {
+        assert!(
+            asks_the_terminal(
+                &TerminalType::Zellij,
+                test_window(Some(TEST_PIXELS)),
+                NeededAnswer::Protocol
+            ),
+            "a multiplexer answers for a pane it does not own, and a run that asks it nothing keeps an assumption where a fact was in reach"
+        );
+        assert!(
+            !asks_the_terminal(
+                &TerminalType::Muxiavelli(ImageProtocol::Sixel),
+                test_window(Some(TEST_PIXELS)),
+                NeededAnswer::Protocol
+            ),
+            "a panel states the protocol it draws, so no answer can outrank it and the round trip buys nothing"
+        );
+    }
+
     #[test]
     fn a_muxiavelli_sixel_panel_draws_with_sixel_and_a_kitty_window_draws_with_kitty() {
         let panel = Capabilities::from_env(
