@@ -213,6 +213,13 @@ A picture in a protocol that any one of the three does not read lands on the scr
 For image display, use a terminal that draws one of the protocols this Mosh carries.
 ```
 
+Both variables state what the transport carries and what the terminal of the
+user draws. Neither one states what a multiplexer in front of the picture
+draws, because the shell that starts that multiplexer hands the whole
+environment to it. So a session that carries images lifts the refusal that
+names mosh and lifts no other one: a tmux that answers no query still takes the
+refusal that names tmux, inside such a mosh as everywhere else.
+
 See [timmattison/mosh-rs#78](https://github.com/timmattison/mosh-rs/issues/78)
 for the two variables and where they come from.
 

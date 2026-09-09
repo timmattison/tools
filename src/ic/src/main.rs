@@ -538,17 +538,26 @@ fn validate_terminal_for_graphics(
     feature: &str,
 ) -> Result<()> {
     // A mosh that carries images states so in the environment, and the
-    // environment is the one channel that crosses a multiplexer. Every rule
-    // below reads a query or a process tree, and neither one can answer this:
-    // a multiplexer owns the pseudo terminal of its pane and answers every
-    // query itself, so a round trip inside one tells an upstream mosh, which
-    // strips every image sequence, from a mosh that draws them never. See
-    // `termgfx::MoshImages` and https://github.com/timmattison/mosh-rs/issues/78.
+    // environment is the one channel that crosses a multiplexer. The rule
+    // about mosh below reads a process tree, which names the transport and
+    // states nothing about the images that transport carries, and a query
+    // cannot answer the question either: a multiplexer owns the pseudo
+    // terminal of its pane and answers every query itself, so a round trip
+    // inside one tells an upstream mosh, which strips every image sequence,
+    // from a mosh that draws them never. See `termgfx::MoshImages` and
+    // https://github.com/timmattison/mosh-rs/issues/78.
     //
-    // This rule stands in front of the rule about mosh, which is what issue
-    // #471 reports: that rule refused every terminal the environment named,
-    // because it stood in front of the rule that reads what a terminal draws.
-    if session.carries_images() && terminal_caps.draws_images() {
+    // This rule lifts the refusal of mosh alone, which is what issue #471
+    // reports: that refusal took every terminal the environment named, because
+    // it stood in front of the rule that reads what a terminal draws. It lifts
+    // no other rule. The statement in the environment is about the transport,
+    // and every rule below states what stands between that transport and the
+    // screen. tmux shows it: the shell that starts the tmux server hands the
+    // environment to the server, and the server hands it to every pane, so
+    // `MOSH_IMAGES` says nothing at all about the tmux in front of the
+    // picture.
+    let mosh_carries_images = session.carries_images() && terminal_caps.draws_images();
+    if mosh_carries_images {
         let delivers = session.delivers();
         let drawn = terminal_caps.drawn_protocols();
         if drawn.intersect(&delivers).is_empty() {
@@ -566,7 +575,6 @@ fn validate_terminal_for_graphics(
                 feature.to_lowercase()
             );
         }
-        return Ok(());
     }
 
     // A terminal that answered a query is a fact, and every rule below it is a
@@ -586,8 +594,9 @@ fn validate_terminal_for_graphics(
 
     // Check for Mosh, since upstream Mosh strips the escape sequences that
     // every graphics protocol needs. A Mosh that draws them answers the query
-    // above, and this one answered nothing.
-    if *transport == RemoteTransport::Mosh {
+    // above, or it states what it carries in the environment, and this one did
+    // neither.
+    if *transport == RemoteTransport::Mosh && !mosh_carries_images {
         anyhow::bail!(
             "Mosh detected, and this session answered no query about images.\n\
             Upstream Mosh strips the escape sequences that carry an image (Sixel, Kitty, iTerm2).\n\
