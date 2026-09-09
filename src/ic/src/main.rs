@@ -1646,11 +1646,21 @@ fn draw_progress_bar(
 /// read it and wrote it out again would throw a second helping of the picture
 /// away for nothing. See `termgfx::Request::source`.
 ///
+/// A file of every other format goes through that encoder, so its bytes are a
+/// copy that nothing reads. They stand beside a decoded picture of the same
+/// size for the whole length of the draw, and a BMP of 4000 by 3000 pixels
+/// holds 36 megabytes. This function therefore asks
+/// [`termgfx::travels_as_it_stands`] which file it holds and drops the bytes of
+/// a file that the writer can never send. `termgfx` owns that rule, because a
+/// second copy of it here disagrees with the writer the day the writer takes a
+/// third format.
+///
 /// # Arguments
 /// * `file_path` - The path of the image file.
 ///
 /// # Returns
-/// The picture and the bytes it came out of.
+/// The picture, and the bytes it came out of for a file that the writer can
+/// send as it stands. [`None`] in place of the bytes for every other file.
 ///
 /// # Errors
 /// An error when the file does not open, or when it holds no image.
@@ -1673,7 +1683,11 @@ fn read_image_file(file_path: &Path) -> Result<(DynamicImage, Option<Vec<u8>>)> 
         .decode()
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
-    Ok((img, Some(source)))
+    // A file that the writer cannot send drops here, at the end of the read,
+    // and the caller holds the picture alone.
+    let source = termgfx::travels_as_it_stands(&source).then_some(source);
+
+    Ok((img, source))
 }
 
 /// Print a header and then display an image file.

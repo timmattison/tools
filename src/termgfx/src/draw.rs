@@ -1533,6 +1533,22 @@ const fn base64_characters_of(bytes: usize) -> usize {
 
 /// Whether the bytes of `source` travel to the terminal as they stand.
 ///
+/// A caller that holds the file a picture came out of states those bytes in
+/// [`Request::source`], and this crate then sends the file byte for byte in
+/// place of an encode of the picture. This function gives that rule to such a
+/// caller before it makes the request: a false answer says that no draw of
+/// these bytes can ever send them, so a caller that holds them drops them and
+/// keeps the picture alone. The bytes it drops are a copy that nothing reads,
+/// and the copy stands beside a decoded picture of the same size for the whole
+/// length of the draw.
+///
+/// A true answer is no promise that the bytes travel. The display bounds decide
+/// first, because a picture they took pixels off is no longer the picture that
+/// the file holds. The budget decides after them, because a file above the cap
+/// of the transport draws nothing at all. Each of the two sends the picture
+/// through the encoder and reads no byte of the file. So a caller keeps the
+/// bytes on a true answer, and it counts on nothing more than that.
+///
 /// The writer sends a file as it stands in the two formats it makes itself, and
 /// every terminal of this protocol draws both of them. The terminals do not all
 /// read the same list beyond those two, and a file that a terminal cannot read
@@ -1558,7 +1574,8 @@ const fn base64_characters_of(bytes: usize) -> usize {
 ///
 /// # Returns
 /// True for a JPEG and for a still PNG. False for every other file.
-fn travels_as_it_stands(source: &[u8]) -> bool {
+#[must_use]
+pub fn travels_as_it_stands(source: &[u8]) -> bool {
     match image::guess_format(source) {
         Ok(ImageFormat::Jpeg) => true,
         Ok(ImageFormat::Png) => PngDecoder::new(io::Cursor::new(source))

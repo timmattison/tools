@@ -63,6 +63,13 @@
 //! picture that only this crate knows how to put together. The list below is
 //! therefore short on purpose, and it grows only when a caller has a use for
 //! an answer that [`Capabilities::draw`] cannot give it.
+//!
+//! [`travels_as_it_stands`] is one such answer. A caller states the file a
+//! picture came out of in [`Request::source`], and the draw sends that file
+//! byte for byte in two formats alone. The draw reads the rule too late for
+//! the caller, which holds the whole file from the moment it reads it, so a
+//! caller that asks first drops the bytes of a file that no draw can send and
+//! holds the picture by itself.
 
 mod cursor;
 mod detect;
@@ -72,7 +79,7 @@ mod probe;
 mod session;
 
 pub use detect::{AnsweredProtocol, Capabilities, ImageProtocol, TerminalType};
-pub use draw::{Budget, Cursor, DrawError, PayloadBudget, Picture, Request};
+pub use draw::{travels_as_it_stands, Budget, Cursor, DrawError, PayloadBudget, Picture, Request};
 pub use geometry::{cell_pixels, terminal_cells};
 pub use probe::Refusal;
 pub use session::{MoshImages, ProtocolSet};
