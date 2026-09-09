@@ -1764,6 +1764,16 @@ mod tests {
     /// budget on pixels, which is what the test measures.
     const LADDER_FLOOR_BUDGET_SHARE: usize = 100;
 
+    /// The share of the payload of a source file that the refusal test allows.
+    ///
+    /// A measurement on 2026-09-09 states the photograph fixture as a JPEG of
+    /// the highest quality in 23280 characters of base64, and the lowest rung
+    /// of the quality ladder carries the same picture in 7092. A half of the
+    /// file is 11640 characters. That budget stands far under the file, so the
+    /// writer has to refuse the file, and far above the lowest rung, so one
+    /// rung of the ladder reaches the budget and the fit spends no pixels.
+    const REFUSED_SOURCE_BUDGET_SHARE: usize = 2;
+
     /// The characters that mosh holds for one transmission.
     ///
     /// `MAXIMUM_STORED_CHARACTERS` of `crates/mosh-terminal/src/imagestore.rs`,
@@ -2585,6 +2595,43 @@ mod tests {
             "a source file that the budget holds must reach the terminal byte for byte, but the command carried {} characters where the file is {}",
             payload.len(),
             untouched.len()
+        );
+    }
+
+    /// A source file that the budget refuses reaches the terminal through the
+    /// fit.
+    ///
+    /// The rule that sends a file as it stands holds for a file that the
+    /// budget holds, and for no other file. A payload above the cap of a mosh
+    /// session is a payload that mosh drops, so a larger file spends the fit
+    /// instead. The picture that reaches the terminal is then a picture that
+    /// no byte of the file carries, and it stands inside the budget.
+    #[test]
+    fn a_source_file_that_the_budget_refuses_travels_through_the_fit() {
+        let source = source_file_of(
+            Iterm2Payload::Jpeg(JpegQuality::HIGHEST),
+            &photograph_fixture(),
+        );
+        let picture =
+            image::load_from_memory(&source).expect("the encoder wrote a whole image file");
+        let untouched = BASE64_STANDARD.encode(&source);
+        let budget = PayloadBudget::of(untouched.len() / REFUSED_SOURCE_BUDGET_SHARE);
+
+        let payload = iterm2_payload_of_source(&picture, Some(&source), budget);
+
+        // The payloads run to tens of thousands of characters, so the messages
+        // state their sizes and not the characters themselves. A failure that
+        // prints two whole files says less than one that fits on the screen.
+        assert!(
+            payload != untouched,
+            "a source file that the budget refuses must not travel as it stands, but the command carried the whole file of {} characters",
+            untouched.len()
+        );
+        assert!(
+            budget.holds(payload.len()),
+            "the picture that reached the terminal must stand inside the budget of {} characters, but it spent {}",
+            budget.characters(),
+            payload.len()
         );
     }
 
