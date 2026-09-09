@@ -1488,6 +1488,53 @@ mod tests {
         }))
     }
 
+    /// The width in pixels of the screenshot fixture.
+    const SCREENSHOT_WIDTH: u32 = 480;
+
+    /// The height in pixels of the screenshot fixture.
+    const SCREENSHOT_HEIGHT: u32 = 320;
+
+    /// A picture of flat color and sharp edges, which is what a screenshot of
+    /// text is.
+    ///
+    /// This is the picture that PNG carries and JPEG cannot. A JPEG spreads
+    /// every sharp edge over the block it stands in, so it spends more
+    /// characters on this picture than the lossless file does, at any quality.
+    /// The fixture therefore holds a few flat colors and hard borders between
+    /// them: a title bar, a page, and rows of glyph blocks on it.
+    fn screenshot_fixture() -> DynamicImage {
+        screenshot_of(SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT)
+    }
+
+    /// A picture of `width` pixels by `height` of flat color and sharp edges.
+    ///
+    /// # Arguments
+    /// * `width` - The width in pixels.
+    /// * `height` - The height in pixels.
+    fn screenshot_of(width: u32, height: u32) -> DynamicImage {
+        /// The height in pixels of one row of text.
+        const ROW_HEIGHT: u32 = 16;
+        /// The height in pixels of the title bar.
+        const TITLE_BAR_HEIGHT: u32 = 24;
+
+        DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
+            if y < TITLE_BAR_HEIGHT {
+                return image::Rgb([214, 214, 218]);
+            }
+
+            let row = (y - TITLE_BAR_HEIGHT) / ROW_HEIGHT;
+            let inside_the_line = (y - TITLE_BAR_HEIGHT) % ROW_HEIGHT >= 3
+                && (y - TITLE_BAR_HEIGHT) % ROW_HEIGHT < 13;
+            let on_a_glyph = (x / 3 + row * 7) % 5 < 2 && x % 9 < 6;
+
+            if inside_the_line && on_a_glyph {
+                image::Rgb([28, 28, 36])
+            } else {
+                image::Rgb([250, 250, 246])
+            }
+        }))
+    }
+
     /// The characters that mosh holds for one transmission.
     ///
     /// `MAXIMUM_STORED_CHARACTERS` of `crates/mosh-terminal/src/imagestore.rs`,
@@ -2014,6 +2061,32 @@ mod tests {
             pixels_of(&file),
             (PHOTOGRAPH_WIDTH, PHOTOGRAPH_HEIGHT),
             "a picture that reached the budget on quality alone must keep every pixel"
+        );
+    }
+
+    /// A picture of flat color above the budget keeps its lossless file.
+    ///
+    /// A JPEG spreads every sharp edge over the block it stands in, so a
+    /// screenshot of text costs more as a JPEG than as a PNG at every quality
+    /// of the ladder. A fit that stepped down that ladder anyway would spend
+    /// the quality of the picture and reach no budget with it, and it would
+    /// then spend the pixels as well. So the fit reads what the encoder makes
+    /// of this picture and keeps the shape that costs the fewest characters.
+    #[test]
+    fn a_picture_of_flat_color_above_the_budget_keeps_its_png() {
+        let fixture = screenshot_fixture();
+        let whole = iterm2_whole_picture_payload_of(&fixture, PayloadBudget::UNLIMITED);
+        let budget = PayloadBudget::of(whole.len() / 2);
+        let file = iterm2_file_of(&fixture, budget);
+
+        assert!(
+            file.starts_with(PNG_SIGNATURE),
+            "a picture that costs more as a JPEG must keep its PNG, but the file starts with {:?}",
+            &file[..PNG_SIGNATURE.len().min(file.len())]
+        );
+        assert!(
+            pixels_of(&file).0 < SCREENSHOT_WIDTH,
+            "the budget must be one that the picture cannot reach at its own size, or this test measures nothing"
         );
     }
 
