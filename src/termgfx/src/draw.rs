@@ -1915,6 +1915,23 @@ mod tests {
             .expect("the encoder gave base64")
     }
 
+    /// The bytes of `image` as a BMP file.
+    ///
+    /// A BMP is a still picture that carries no compression at all, and it is
+    /// not one of the two formats that this writer makes. So it stands for
+    /// every format that the byte-for-byte rule has to refuse.
+    ///
+    /// # Arguments
+    /// * `image` - The picture that the file holds.
+    fn bmp_file_of(image: &DynamicImage) -> Vec<u8> {
+        let mut file = io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut file, image::ImageFormat::Bmp)
+            .expect("the BMP encoder takes a picture of this size");
+
+        file.into_inner()
+    }
+
     /// The first bytes of a PNG file, which name the format to a reader.
     ///
     /// The iTerm2 protocol carries a whole file, and the terminal reads the
@@ -2339,6 +2356,26 @@ mod tests {
             pixels_of(&file).0 < RESIZED_PHOTOGRAPH_WIDTH,
             "the picture that reached the terminal must be the one the screen shows, but it is {:?} where the file holds {RESIZED_PHOTOGRAPH_WIDTH} pixels across",
             pixels_of(&file)
+        );
+    }
+
+    /// A source file in a format this writer does not make gets an encode.
+    ///
+    /// The rule that sends a file as it stands rests on the terminal reading
+    /// the format out of the file. The terminals of this protocol do not all
+    /// read the same list of formats, so the writer sends a file as it stands
+    /// in the two formats it makes itself and encodes every other one.
+    #[test]
+    fn a_source_file_in_a_format_the_writer_does_not_make_gets_an_encode() {
+        let source = bmp_file_of(&photograph_fixture());
+        let picture =
+            image::load_from_memory(&source).expect("the encoder wrote a whole image file");
+
+        let payload = iterm2_payload_of_source(&picture, Some(&source), PayloadBudget::UNLIMITED);
+
+        assert!(
+            payload != BASE64_STANDARD.encode(&source),
+            "a file in a format this writer does not make must reach the terminal through the encoder"
         );
     }
 
