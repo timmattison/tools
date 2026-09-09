@@ -208,13 +208,20 @@ fn will_display_fails_and_names_the_terminal_when_graphics_are_unsupported() {
     );
 }
 
+/// The value that tmux writes into `TMUX` for a pane of its default socket.
+///
+/// The three fields name the socket, the process id of the server and the
+/// number of the session. `ic` reads that the variable stands in the
+/// environment, and it reads no field of it.
+const TMUX_PANE: &str = "/private/tmp/tmux-501/default,1,0";
+
 /// tmux strips the escape sequences that carry an image. `ic` must fail and
 /// name tmux.
 #[test]
 fn will_display_fails_and_names_tmux() {
     let (code, _stdout, stderr) = run(ic("xterm-256color")
         .arg("--will-display")
-        .env("TMUX", "/private/tmp/tmux-501/default,1,0"));
+        .env("TMUX", TMUX_PANE));
 
     assert_eq!(code, Some(1), "stderr: {stderr}");
     assert!(stderr.contains("tmux"), "stderr must name tmux: {stderr}");
@@ -369,4 +376,24 @@ fn will_display_fails_and_names_both_sets_when_the_session_shares_no_protocol() 
         !stderr.contains("ssh user@host"),
         "and it must not send the reader to ssh, which carries no more protocols than this Mosh does: {stderr}"
     );
+}
+
+/// A pane of tmux inside such a Mosh still takes the refusal that names tmux.
+///
+/// `MOSH_IMAGES` states what the transport carries, and tmux stands between
+/// that transport and the screen. A tmux that draws no image strips every
+/// sequence that carries one, and the variable says nothing about this tmux:
+/// the shell that starts the tmux server hands the whole environment to the
+/// server, and the server hands it to every pane. So a Mosh that carries
+/// images lifts the refusal of Mosh alone, and every rule under it still runs.
+#[test]
+fn will_display_fails_and_names_tmux_inside_a_mosh_that_carries_images() {
+    let table = MoshProcessTable::new(TARGET_NAME);
+    let (code, _stdout, stderr) = run(ic_under_mosh("tmux-256color", &table)
+        .arg("--will-display")
+        .env("TMUX", TMUX_PANE)
+        .env("MOSH_IMAGES", MOSH_CARRIES_EVERY_PROTOCOL));
+
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("tmux"), "stderr must name tmux: {stderr}");
 }

@@ -2588,6 +2588,29 @@ not_a_number  1 /bin/bash
         }
     }
 
+    /// A mosh that carries images still takes the refusal that names tmux.
+    ///
+    /// The statement in the environment is about the transport, and tmux
+    /// stands between that transport and the screen. A tmux that draws no
+    /// image strips every sequence that carries one, and no variable of the
+    /// session says whether this tmux draws one: the shell that starts the
+    /// tmux server hands the whole environment to the server, and the server
+    /// hands it to every pane. So the rule about tmux reads a query, the query
+    /// answered nothing here, and a mosh that carries images lifts the rule
+    /// about mosh alone.
+    #[test]
+    fn a_mosh_that_carries_images_still_takes_the_refusal_that_names_tmux() {
+        let named = Capabilities::new(TerminalType::Ghostty, true, true);
+        let session = MoshImages::from_env(Some("kitty"), None);
+        let error =
+            validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, true, &session, "Image")
+                .expect_err("a tmux that answered no query must be refused");
+        assert!(
+            error.to_string().contains("tmux"),
+            "and the message must name tmux, which is what strips the picture: {error}"
+        );
+    }
+
     /// A mosh that states nothing about images is an upstream mosh, and an
     /// upstream mosh still takes the refusal.
     ///
