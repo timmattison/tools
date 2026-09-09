@@ -381,9 +381,14 @@ impl Capabilities {
     /// State the mosh session that this terminal stands in.
     ///
     /// [`Capabilities::detect`] reads the session from the environment, and
-    /// this is the entrance for a test that names the session it covers.
-    #[cfg(test)]
-    pub(crate) fn in_session(mut self, session: crate::session::MoshImages) -> Self {
+    /// this is the entrance for a caller that states the session. It stands
+    /// beside [`Capabilities::new`], which states the terminal. Both entrances
+    /// exist because the honest way to fill these fields is to read the
+    /// environment, and a test cannot: a test that read the environment would
+    /// answer with the session and the terminal of whoever started the test
+    /// run.
+    #[must_use]
+    pub fn in_session(mut self, session: crate::session::MoshImages) -> Self {
         self.session = session;
         self
     }
@@ -427,6 +432,19 @@ impl Capabilities {
     #[must_use]
     pub fn raw_mode(&self) -> bool {
         self.raw_mode
+    }
+
+    /// What the environment of a mosh session states about the images it
+    /// carries.
+    ///
+    /// The gate of a caller reads this beside
+    /// [`Capabilities::drawn_protocols`]: one set states what the session
+    /// delivers and the other states what this terminal draws, and a picture
+    /// needs a protocol that stands in both. The two sets come from one value
+    /// of this type, so the gate and the writer never read two sessions.
+    #[must_use]
+    pub fn session(&self) -> crate::session::MoshImages {
+        self.session
     }
 
     /// The character cell that this terminal named in its answer.
