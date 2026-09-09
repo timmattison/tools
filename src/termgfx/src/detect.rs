@@ -195,6 +195,15 @@ pub struct Capabilities {
     /// asked the terminal for itself would read it a second time for every
     /// picture, and a still picture already holds one round trip.
     cell: Option<crate::geometry::CellPixels>,
+    /// What the environment of a mosh session says about the images it
+    /// carries, or an empty statement for every session that is no such
+    /// session.
+    ///
+    /// **A query cannot answer this.** Inside a multiplexer the multiplexer
+    /// owns the pseudo terminal of the pane and answers every query itself, so
+    /// the answer states nothing about the transport that carries the bytes on
+    /// to the terminal of the user. See [`crate::session`].
+    session: crate::session::MoshImages,
 }
 
 /// What a caller needs the answer of the terminal for.
@@ -360,7 +369,20 @@ impl Capabilities {
             // measure of a cell falls back to the ioctl and then to the
             // estimate. See [`crate::geometry::cell_pixels_or_estimate_of`].
             cell: None,
+            // A caller that states the terminal states no session either, and
+            // an empty statement narrows nothing.
+            session: crate::session::MoshImages::default(),
         }
+    }
+
+    /// State the mosh session that this terminal stands in.
+    ///
+    /// [`Capabilities::detect`] reads the session from the environment, and
+    /// this is the entrance for a test that names the session it covers.
+    #[cfg(test)]
+    pub(crate) fn in_session(mut self, session: crate::session::MoshImages) -> Self {
+        self.session = session;
+        self
     }
 
     /// Name the terminal that this run draws into.
@@ -443,6 +465,7 @@ impl Capabilities {
                     draws_images: true,
                     raw_mode,
                     cell,
+                    session: named.session,
                 }
             }
             (terminal_type, _) => Self {
@@ -450,6 +473,7 @@ impl Capabilities {
                 draws_images: named.draws_images,
                 raw_mode,
                 cell,
+                session: named.session,
             },
         }
     }
@@ -469,7 +493,41 @@ impl Capabilities {
             // The environment carries no size of a cell. Only the ioctl and the
             // answer of a terminal do.
             cell: None,
+            session: env.mosh,
         }
+    }
+
+    /// The routine that this run writes the picture with.
+    ///
+    /// [`display_routine_for`] states what the terminal reads, and that is the
+    /// whole answer wherever the environment states no mosh session. A session
+    /// that states what it delivers narrows it, and it narrows the one case
+    /// where the routine is a guess rather than a statement.
+    ///
+    /// * **A terminal of no name states no protocol at all**, so
+    ///   [`display_routine_for`] guesses one for it. A session that states what
+    ///   it delivers knows more than that guess, so the statement wins. The
+    ///   guess still stands where the session delivers it, because a session
+    ///   that delivers every protocol settles nothing between them.
+    /// * **Every other terminal stated its protocol**, by its own name or by
+    ///   its own answer. A session that does not deliver that protocol draws
+    ///   nothing at all, and the gate of the caller refuses such a session
+    ///   before one byte leaves. So the statement of the terminal stands, and
+    ///   this call never sends a terminal a sequence it does not read.
+    pub(crate) fn display_routine(&self) -> DisplayRoutine {
+        display_routine_for(&self.terminal_type)
+    }
+
+    /// The protocols that this terminal draws, as far as this crate knows.
+    ///
+    /// One routine writes one protocol, so the set holds one member. The gate
+    /// of a caller reads it beside [`crate::MoshImages::delivers`]: a session
+    /// that delivers no protocol this terminal draws draws no picture, and the
+    /// caller says so instead of writing a sequence that lands on the screen
+    /// as text.
+    #[must_use]
+    pub fn drawn_protocols(&self) -> crate::session::ProtocolSet {
+        crate::session::ProtocolSet::of_routine(self.display_routine())
     }
 }
 
@@ -498,6 +556,9 @@ struct TerminalEnv {
     ghostty_resources_dir: bool,
     iterm_session_id: bool,
     alacritty_socket: bool,
+    /// What the environment of a mosh session says about the images it
+    /// carries. See [`crate::session`].
+    mosh: crate::session::MoshImages,
 }
 
 impl TerminalEnv {
@@ -516,6 +577,7 @@ impl TerminalEnv {
             ghostty_resources_dir: is_set("GHOSTTY_RESOURCES_DIR"),
             iterm_session_id: is_set("ITERM_SESSION_ID"),
             alacritty_socket: is_set("ALACRITTY_SOCKET"),
+            mosh: crate::session::MoshImages::detect(),
         }
     }
 }
@@ -972,6 +1034,7 @@ mod tests {
             ghostty_resources_dir: true,
             iterm_session_id: false,
             alacritty_socket: false,
+            mosh: crate::session::MoshImages::default(),
         }
     }
 
@@ -1236,6 +1299,74 @@ mod tests {
         ] {
             assert_eq!(display_routine_for(&terminal_type), DisplayRoutine::Iterm2);
         }
+    }
+
+    // =========================================================================
+    // Tests for the routine that a mosh session narrows
+    // =========================================================================
+
+    /// A terminal of no name draws the protocol that the session states, and
+    /// not the protocol that this crate guesses for it.
+    ///
+    /// A terminal that set no signal and answered no query states no protocol
+    /// at all, so [`display_routine_for`] guesses iTerm2 for it. A mosh session
+    /// that states what it delivers knows more than that guess, and a picture
+    /// in the guessed protocol lands on the screen as text.
+    ///
+    /// The guess still stands where the session delivers it. A session that
+    /// delivers every protocol settles nothing between the three of them, so a
+    /// run under one draws what a run outside every session draws.
+    #[test]
+    fn a_terminal_of_no_name_draws_what_the_session_states_it_delivers() {
+        assert_eq!(
+            Capabilities::new(TerminalType::Unknown, true, true).display_routine(),
+            DisplayRoutine::Iterm2,
+            "a run that stands in no such session keeps the guess it always made"
+        );
+        assert_eq!(
+            Capabilities::new(TerminalType::Unknown, true, true)
+                .in_session(crate::session::MoshImages::from_env(Some("sixel"), None))
+                .display_routine(),
+            DisplayRoutine::Sixel,
+            "and a session that delivers sixel alone states more than the guess does"
+        );
+        assert_eq!(
+            Capabilities::new(TerminalType::Unknown, true, true)
+                .in_session(crate::session::MoshImages::from_env(
+                    Some("kitty,sixel,iterm2"),
+                    None
+                ))
+                .display_routine(),
+            DisplayRoutine::Iterm2,
+            "a session that delivers every protocol settles nothing, so the guess stands"
+        );
+    }
+
+    /// A terminal that stated its protocol keeps it, whatever a session
+    /// delivers.
+    ///
+    /// A name and an answer are both statements of the terminal itself. A
+    /// session that delivers no protocol such a terminal draws draws no
+    /// picture at all, and the gate of the caller refuses it before one byte
+    /// leaves. So this call never sends a terminal a sequence that terminal
+    /// does not read.
+    #[test]
+    fn a_terminal_that_stated_its_protocol_keeps_it_whatever_the_session_delivers() {
+        let session = crate::session::MoshImages::from_env(Some("sixel"), None);
+        assert_eq!(
+            Capabilities::new(TerminalType::Ghostty, true, true)
+                .in_session(session)
+                .display_routine(),
+            DisplayRoutine::Kitty,
+            "a Ghostty window reads the kitty protocol and reads no other one"
+        );
+        assert_eq!(
+            Capabilities::new(TerminalType::Answered(AnsweredProtocol::Kitty), true, true)
+                .in_session(session)
+                .display_routine(),
+            DisplayRoutine::Kitty,
+            "and a terminal that answered kitty stated it as plainly as a name does"
+        );
     }
 
     // =========================================================================
