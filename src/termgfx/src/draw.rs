@@ -1669,6 +1669,14 @@ mod tests {
         }))
     }
 
+    /// The share of the payload of a whole picture that the floor test allows.
+    ///
+    /// The lowest rung of the quality ladder carries the photograph fixture in
+    /// about a fortieth of the characters that its PNG costs, so a budget of a
+    /// hundredth stands under every rung of the ladder. The fit reaches that
+    /// budget on pixels, which is what the test measures.
+    const LADDER_FLOOR_BUDGET_SHARE: usize = 100;
+
     /// The characters that mosh holds for one transmission.
     ///
     /// `MAXIMUM_STORED_CHARACTERS` of `crates/mosh-terminal/src/imagestore.rs`,
@@ -2393,6 +2401,68 @@ mod tests {
         assert!(
             payload != BASE64_STANDARD.encode(&source),
             "a file in a format this writer does not make must reach the terminal through the encoder"
+        );
+    }
+
+    /// A photograph that no rung of the ladder fits spends pixels as well.
+    ///
+    /// The quality of a JPEG buys characters down to the rung where the blocks
+    /// of the encoder start to show, and a budget under that rung has to come
+    /// out of the pixel count. The picture keeps the cells it spans, so it
+    /// holds the size that the reader sees and loses resolution alone.
+    #[test]
+    fn a_photograph_that_no_quality_fits_spends_pixels_as_well() {
+        let fixture = photograph_fixture();
+        let whole = iterm2_whole_picture_payload_of(&fixture, PayloadBudget::UNLIMITED);
+        let budget = PayloadBudget::of(whole.len() / LADDER_FLOOR_BUDGET_SHARE);
+        let payload = iterm2_payload_of_source(&fixture, None, budget);
+        let file = BASE64_STANDARD
+            .decode(&payload)
+            .expect("the writer wrote base64");
+
+        assert!(
+            file.starts_with(JPEG_SIGNATURE),
+            "a photograph under every rung of the ladder must travel in the rung that costs least, but the file starts with {:?}",
+            &file[..JPEG_SIGNATURE.len().min(file.len())]
+        );
+        assert!(
+            pixels_of(&file).0 < PHOTOGRAPH_WIDTH,
+            "a budget that no quality reaches must come out of the pixel count, but the picture is {:?}",
+            pixels_of(&file)
+        );
+        assert!(
+            budget.holds(payload.len()),
+            "the fit must reach the budget of {} characters, but it spent {}",
+            budget.characters(),
+            payload.len()
+        );
+    }
+
+    /// The quality ladder walks from the highest rung to the lowest and stops.
+    ///
+    /// The step is a number, and a step that does not divide the ladder evenly
+    /// would walk past the lowest rung and hand the encoder a quality that
+    /// nobody chose. So the walk is measured here rung by rung.
+    #[test]
+    fn the_quality_ladder_ends_on_the_lowest_rung() {
+        let mut rungs = vec![JpegQuality::HIGHEST.get()];
+        let mut rung = JpegQuality::HIGHEST;
+
+        while let Some(cheaper) = rung.cheaper() {
+            rung = cheaper;
+            rungs.push(rung.get());
+
+            assert!(
+                rungs.len() <= 32,
+                "the ladder must end, but it reached {} rungs: {rungs:?}",
+                rungs.len()
+            );
+        }
+
+        assert_eq!(
+            rungs,
+            vec![90, 79, 68, 57, 46, 35],
+            "the ladder must walk from the highest rung to the lowest one"
         );
     }
 
