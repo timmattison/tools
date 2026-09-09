@@ -1792,36 +1792,31 @@ mod tests {
     /// The fixture therefore holds a few flat colors and hard borders between
     /// them: a title bar, a page, and rows of glyph blocks on it.
     fn screenshot_fixture() -> DynamicImage {
-        screenshot_of(SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT)
-    }
-
-    /// A picture of `width` pixels by `height` of flat color and sharp edges.
-    ///
-    /// # Arguments
-    /// * `width` - The width in pixels.
-    /// * `height` - The height in pixels.
-    fn screenshot_of(width: u32, height: u32) -> DynamicImage {
         /// The height in pixels of one row of text.
         const ROW_HEIGHT: u32 = 16;
         /// The height in pixels of the title bar.
         const TITLE_BAR_HEIGHT: u32 = 24;
 
-        DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
-            if y < TITLE_BAR_HEIGHT {
-                return image::Rgb([214, 214, 218]);
-            }
+        DynamicImage::ImageRgb8(image::RgbImage::from_fn(
+            SCREENSHOT_WIDTH,
+            SCREENSHOT_HEIGHT,
+            |x, y| {
+                if y < TITLE_BAR_HEIGHT {
+                    return image::Rgb([214, 214, 218]);
+                }
 
-            let row = (y - TITLE_BAR_HEIGHT) / ROW_HEIGHT;
-            let inside_the_line = (y - TITLE_BAR_HEIGHT) % ROW_HEIGHT >= 3
-                && (y - TITLE_BAR_HEIGHT) % ROW_HEIGHT < 13;
-            let on_a_glyph = (x / 3 + row * 7) % 5 < 2 && x % 9 < 6;
+                let row = (y - TITLE_BAR_HEIGHT) / ROW_HEIGHT;
+                let inside_the_line = (y - TITLE_BAR_HEIGHT) % ROW_HEIGHT >= 3
+                    && (y - TITLE_BAR_HEIGHT) % ROW_HEIGHT < 13;
+                let on_a_glyph = (x / 3 + row * 7) % 5 < 2 && x % 9 < 6;
 
-            if inside_the_line && on_a_glyph {
-                image::Rgb([28, 28, 36])
-            } else {
-                image::Rgb([250, 250, 246])
-            }
-        }))
+                if inside_the_line && on_a_glyph {
+                    image::Rgb([28, 28, 36])
+                } else {
+                    image::Rgb([250, 250, 246])
+                }
+            },
+        ))
     }
 
     /// The width in pixels of the transparent fixture.
@@ -2158,7 +2153,7 @@ mod tests {
             .decode(
                 shape
                     .encode(image)
-                    .expect("the encoder takes an RGB8 picture"),
+                    .expect("the encoder takes a picture of any channel count"),
             )
             .expect("the encoder gave base64")
     }
@@ -2386,16 +2381,6 @@ mod tests {
         }
     }
 
-    /// Draw `image` on an iTerm2 terminal at its own pixel size, inside
-    /// `budget`, and give back the base64 payload of the command.
-    ///
-    /// # Arguments
-    /// * `image` - The picture to draw.
-    /// * `budget` - The characters of payload that the picture can spend.
-    fn iterm2_whole_picture_payload_of(image: &DynamicImage, budget: PayloadBudget) -> String {
-        iterm2_payload_of_source(image, None, budget)
-    }
-
     /// Draw `image` on an iTerm2 terminal as one frame of many, at its own
     /// pixel size, inside `budget`, and give back the base64 payload of the
     /// command.
@@ -2441,9 +2426,14 @@ mod tests {
     /// `budget`, with `source` as the file that the picture came out of, and
     /// give back the base64 payload of the command.
     ///
+    /// A `source` of `None` states that the picture came out of no file. The
+    /// writer then encodes the picture itself, and the byte-for-byte path
+    /// stays shut.
+    ///
     /// # Arguments
     /// * `image` - The picture to draw.
-    /// * `source` - The bytes of the file that the picture came out of.
+    /// * `source` - The bytes of the file that the picture came out of, or
+    ///   `None` for a picture that came out of no file.
     /// * `budget` - The characters of payload that the picture can spend.
     fn iterm2_payload_of_source(
         image: &DynamicImage,
@@ -2471,7 +2461,7 @@ mod tests {
     /// * `budget` - The characters of payload that the picture can spend.
     fn iterm2_file_of(image: &DynamicImage, budget: PayloadBudget) -> Vec<u8> {
         BASE64_STANDARD
-            .decode(iterm2_whole_picture_payload_of(image, budget))
+            .decode(iterm2_payload_of_source(image, None, budget))
             .expect("the writer wrote base64")
     }
 
@@ -2778,7 +2768,7 @@ mod tests {
     #[test]
     fn a_photograph_above_the_budget_spends_quality_before_pixels() {
         let fixture = photograph_fixture();
-        let whole = iterm2_whole_picture_payload_of(&fixture, PayloadBudget::UNLIMITED);
+        let whole = iterm2_payload_of_source(&fixture, None, PayloadBudget::UNLIMITED);
         let budget = PayloadBudget::of(whole.len() / 2);
         let file = iterm2_file_of(&fixture, budget);
 
@@ -2805,7 +2795,7 @@ mod tests {
     #[test]
     fn a_picture_of_flat_color_above_the_budget_keeps_its_png() {
         let fixture = screenshot_fixture();
-        let whole = iterm2_whole_picture_payload_of(&fixture, PayloadBudget::UNLIMITED);
+        let whole = iterm2_payload_of_source(&fixture, None, PayloadBudget::UNLIMITED);
         let budget = PayloadBudget::of(whole.len() / 2);
         let file = iterm2_file_of(&fixture, budget);
 
@@ -3077,7 +3067,7 @@ mod tests {
     #[test]
     fn a_photograph_that_no_quality_fits_spends_pixels_as_well() {
         let fixture = photograph_fixture();
-        let whole = iterm2_whole_picture_payload_of(&fixture, PayloadBudget::UNLIMITED);
+        let whole = iterm2_payload_of_source(&fixture, None, PayloadBudget::UNLIMITED);
         let budget = PayloadBudget::of(whole.len() / LADDER_FLOOR_BUDGET_SHARE);
         let payload = iterm2_payload_of_source(&fixture, None, budget);
         let file = BASE64_STANDARD
