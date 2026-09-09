@@ -2491,7 +2491,7 @@ not_a_number  1 /bin/bash
             &MoshImages::default(),
             "Image",
         )
-            .expect_err("Mosh must be refused");
+        .expect_err("Mosh must be refused");
         error.to_string()
     }
 
@@ -2626,7 +2626,9 @@ not_a_number  1 /bin/bash
         let session = MoshImages::from_env(Some("kitty,sixel,iterm2"), Some("kitty"));
         let error =
             validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, &session, "Image")
-                .expect_err("a session that delivers no protocol this terminal draws must be refused");
+                .expect_err(
+                    "a session that delivers no protocol this terminal draws must be refused",
+                );
         let message = error.to_string();
         assert!(
             message.contains("kitty"),
@@ -2653,14 +2655,8 @@ not_a_number  1 /bin/bash
         let pane = Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true);
         let session = MoshImages::from_env(Some("kitty,sixel,iterm2"), Some("kitty,sixel"));
         assert!(
-            validate_terminal_for_graphics(
-                &pane,
-                &RemoteTransport::Mosh,
-                false,
-                &session,
-                "Image"
-            )
-            .is_ok(),
+            validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, &session, "Image")
+                .is_ok(),
             "every party of this session reads sixel"
         );
     }

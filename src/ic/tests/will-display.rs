@@ -25,7 +25,7 @@ use std::time::Duration;
 mod common;
 
 use common::pty::{Pty, Window};
-use common::unreachable_path_dir;
+use common::{unreachable_path_dir, MoshProcessTable};
 
 /// The name that this target puts in the unreachable `PATH` of its children.
 const TARGET_NAME: &str = "will-display";
@@ -199,5 +199,122 @@ fn will_display_asks_nothing_of_a_named_terminal_that_reports_no_pixel_size() {
     assert!(
         status.success(),
         "and it must still report that a Kitty terminal displays an image: {status}"
+    );
+}
+
+/// The value of `MOSH_IMAGES` for a Mosh that carries every image protocol.
+///
+/// Only a Mosh that draws images writes this variable. Upstream Mosh strips
+/// every image sequence and writes nothing, which is why an absent variable is
+/// a refusal and not a question.
+const MOSH_CARRIES_EVERY_PROTOCOL: &str = "kitty,sixel,iterm2";
+
+/// Invoke `ic` inside a session that the process tree reports as Mosh.
+///
+/// The `PATH` reaches the stated `ps` of `table` and reaches nothing else, so
+/// the transport comes from the table and not from the machine of whoever runs
+/// the suite. Every other test of this file points the `PATH` at a directory
+/// that does not exist, which is the same rule read the other way: a test
+/// states the process tree it covers, and it reads none.
+fn ic_under_mosh(term: &str, table: &MoshProcessTable) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
+    command.env_clear();
+    command.env("PATH", table.path());
+    command.env("TERM", term);
+    command
+}
+
+/// A Mosh that carries images draws a picture for a terminal that named
+/// itself.
+///
+/// This is the refusal of issue #471, as the user meets it. The rule about
+/// Mosh stood in front of the rule that reads what the terminal draws, so
+/// every terminal the environment named took the refusal of upstream Mosh. A
+/// query cannot answer that rule inside a multiplexer, so the session states
+/// it in the environment instead.
+#[test]
+fn will_display_succeeds_for_a_named_terminal_of_a_mosh_that_carries_images() {
+    let table = MoshProcessTable::new(TARGET_NAME);
+    let (code, stdout, stderr) = run(ic_under_mosh("xterm-ghostty", &table)
+        .arg("--will-display")
+        .env("MOSH_IMAGES", MOSH_CARRIES_EVERY_PROTOCOL)
+        .output()
+        .expect("ic must run"));
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "", "success must print nothing to stdout");
+    assert_eq!(stderr, "", "success must print nothing to stderr");
+}
+
+/// A pane of Zellij inside such a Mosh draws a picture as well.
+///
+/// This is the session the reporter of issue #471 ran. Zellij draws sixel, the
+/// Mosh carries sixel, so the picture draws. The variable of Zellij is what
+/// named the terminal and took the refusal.
+#[test]
+fn will_display_succeeds_in_a_zellij_pane_of_a_mosh_that_carries_images() {
+    let table = MoshProcessTable::new(TARGET_NAME);
+    let (code, _stdout, stderr) = run(ic_under_mosh("xterm-256color", &table)
+        .arg("--will-display")
+        .env("ZELLIJ", "0")
+        .env("MOSH_IMAGES", MOSH_CARRIES_EVERY_PROTOCOL)
+        .output()
+        .expect("ic must run"));
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+}
+
+/// An upstream Mosh states no such variable, and it still takes the refusal
+/// that names ssh.
+///
+/// Upstream Mosh strips every escape sequence that carries an image, so a
+/// picture there leaves the user with an empty screen and no reason for it.
+/// This is the one session that the whole rule protects, and the terminal here
+/// names Ghostty, which is exactly the terminal that used to be refused for
+/// the wrong reason.
+#[test]
+fn will_display_fails_and_names_ssh_for_an_upstream_mosh() {
+    let table = MoshProcessTable::new(TARGET_NAME);
+    let (code, _stdout, stderr) = run(ic_under_mosh("xterm-ghostty", &table)
+        .arg("--will-display")
+        .output()
+        .expect("ic must run"));
+
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("ssh user@host"),
+        "stderr must name the repair that works: {stderr}"
+    );
+}
+
+/// A session that shares no protocol with this terminal is refused, and the
+/// message names every set it read.
+///
+/// A Mosh that carries sixel alone delivers nothing to a Kitty window, which
+/// reads the kitty protocol and reads no other one. The repair is a different
+/// terminal, so the reader needs to see which protocols each party of the
+/// session draws.
+#[test]
+fn will_display_fails_and_names_both_sets_when_the_session_shares_no_protocol() {
+    let table = MoshProcessTable::new(TARGET_NAME);
+    let (code, _stdout, stderr) = run(ic_under_mosh(TERM_XTERM_KITTY, &table)
+        .arg("--will-display")
+        .env("MOSH_IMAGES", "sixel")
+        .env("MOSH_CLIENT_IMAGES", "sixel")
+        .output()
+        .expect("ic must run"));
+
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("sixel"),
+        "stderr must name what the session carries: {stderr}"
+    );
+    assert!(
+        stderr.contains("kitty"),
+        "stderr must name what this terminal draws: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ssh user@host"),
+        "and it must not send the reader to ssh, which carries no more protocols than this Mosh does: {stderr}"
     );
 }
