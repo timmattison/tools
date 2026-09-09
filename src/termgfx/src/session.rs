@@ -173,8 +173,12 @@ impl ProtocolSet {
 
 /// What the environment of a mosh session says about the images it carries.
 ///
-/// A tool reads this once with [`MoshImages::detect`] and hands it to the gate
-/// that decides whether a picture can draw at all.
+/// [`crate::Capabilities`] holds one of these for the run, and the gate of a
+/// tool reads it from there with [`crate::Capabilities::session`] to decide
+/// whether a picture can draw at all. A run fills it with
+/// [`MoshImages::detect`], through [`crate::Capabilities::detect`]. A test
+/// states it with [`MoshImages::from_env`], through
+/// [`crate::Capabilities::in_session`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MoshImages {
     transport: ProtocolSet,

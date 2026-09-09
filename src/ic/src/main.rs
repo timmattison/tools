@@ -13,8 +13,7 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use termgfx::{
-    terminal_cells, Budget, Capabilities, Cursor, MoshImages, PayloadBudget, Picture, Request,
-    TerminalType,
+    terminal_cells, Budget, Capabilities, Cursor, PayloadBudget, Picture, Request, TerminalType,
 };
 use termion::event::Key;
 use termion::input::TermRead;
@@ -520,23 +519,28 @@ fn in_tmux() -> bool {
 ///
 /// The gate reads four things: what the environment of a mosh session states
 /// about the images it carries, the answer the terminal gave to a query, the
-/// remote transport, and the multiplexer. It gives `Ok` when the session can
-/// show graphics. It gives an error when the session cannot, and that error
-/// carries the reason and the repair for the user to read. `feature` names
-/// what the user asked for, "Image" or "Video", and the messages say that
-/// word.
+/// remote transport, and the multiplexer. `terminal_caps` carries the first
+/// two of them, because one value states the whole terminal of the run. It
+/// gives `Ok` when the session can show graphics. It gives an error when the
+/// session cannot, and that error carries the reason and the repair for the
+/// user to read. `feature` names what the user asked for, "Image" or "Video",
+/// and the messages say that word.
 ///
-/// `in_tmux` and `session` both arrive as arguments, and the gate reads no
-/// environment variable that decides a verdict. It reads `TERM` for one
-/// message alone. A test that set `TMUX` would change the environment of every
-/// other test in the process.
+/// `in_tmux` arrives as an argument, the session arrives on `terminal_caps`,
+/// and the gate reads no environment variable that decides a verdict. It reads
+/// `TERM` for one message alone. A test that set `TMUX` would change the
+/// environment of every other test in the process.
 fn validate_terminal_for_graphics(
     terminal_caps: &Capabilities,
     transport: &RemoteTransport,
     in_tmux: bool,
-    session: &MoshImages,
     feature: &str,
 ) -> Result<()> {
+    // The session stands on the capabilities, so the gate and the writer that
+    // draws the picture read one session. `Capabilities::detect` reads it from
+    // the environment for a run, and `Capabilities::in_session` states it for
+    // a test.
+    let session = terminal_caps.session();
     // A mosh that carries images states so in the environment, and the
     // environment is the one channel that crosses a multiplexer. The rule
     // about mosh below reads a process tree, which names the transport and
@@ -709,26 +713,14 @@ fn report_display_readiness() -> Result<()> {
     let terminal_caps = Capabilities::detect_by_asking_the_protocol();
     let transport = detect_remote_transport();
 
-    validate_terminal_for_graphics(
-        &terminal_caps,
-        &transport,
-        in_tmux(),
-        &MoshImages::detect(),
-        "Image",
-    )
+    validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")
 }
 
 fn display_video_from_file(file_path: &Path, args: &Args) -> Result<()> {
     let terminal_caps = Capabilities::detect_by_asking();
     let transport = detect_remote_transport();
 
-    validate_terminal_for_graphics(
-        &terminal_caps,
-        &transport,
-        in_tmux(),
-        &MoshImages::detect(),
-        "Video",
-    )?;
+    validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Video")?;
     ensure_ffmpeg_available()?;
 
     // Clear screen initially with function
@@ -1760,13 +1752,7 @@ fn display_image(
     let terminal_caps = Capabilities::detect_by_asking();
     let transport = detect_remote_transport();
 
-    validate_terminal_for_graphics(
-        &terminal_caps,
-        &transport,
-        in_tmux(),
-        &MoshImages::detect(),
-        "Image",
-    )?;
+    validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")?;
 
     // Always use character-based sizing (fit mode), but respect user-specified dimensions if provided
     let (target_width, target_height) = if args.width.is_some() || args.height.is_some() {
@@ -2331,7 +2317,7 @@ fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use termgfx::AnsweredProtocol;
+    use termgfx::{AnsweredProtocol, MoshImages};
 
     /// A mosh session states the budget that mosh keeps, and no other
     /// transport states one.
@@ -2523,14 +2509,8 @@ not_a_number  1 /bin/bash
         // stands in favor of the image, so the refusal below comes from the
         // transport alone.
         let caps = Capabilities::new(TerminalType::ITerm2, true, true);
-        let error = validate_terminal_for_graphics(
-            &caps,
-            &RemoteTransport::Mosh,
-            false,
-            &MoshImages::default(),
-            "Image",
-        )
-        .expect_err("Mosh must be refused");
+        let error = validate_terminal_for_graphics(&caps, &RemoteTransport::Mosh, false, "Image")
+            .expect_err("Mosh must be refused");
         error.to_string()
     }
 
@@ -2559,14 +2539,8 @@ not_a_number  1 /bin/bash
         let answered =
             Capabilities::new(TerminalType::Answered(AnsweredProtocol::Kitty), true, true);
         assert!(
-            validate_terminal_for_graphics(
-                &answered,
-                &RemoteTransport::Mosh,
-                false,
-                &MoshImages::default(),
-                "Image"
-            )
-            .is_ok(),
+            validate_terminal_for_graphics(&answered, &RemoteTransport::Mosh, false, "Image")
+                .is_ok(),
             "a terminal that answered the query draws the picture"
         );
     }
@@ -2578,14 +2552,8 @@ not_a_number  1 /bin/bash
         let answered =
             Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true);
         assert!(
-            validate_terminal_for_graphics(
-                &answered,
-                &RemoteTransport::None,
-                true,
-                &MoshImages::default(),
-                "Image"
-            )
-            .is_ok(),
+            validate_terminal_for_graphics(&answered, &RemoteTransport::None, true, "Image")
+                .is_ok(),
             "a terminal that answered the query draws the picture"
         );
     }
@@ -2611,16 +2579,11 @@ not_a_number  1 /bin/bash
     #[test]
     fn a_mosh_that_carries_images_draws_a_picture_for_a_named_terminal() {
         for terminal_type in [TerminalType::Ghostty, TerminalType::Kitty] {
-            let named = Capabilities::new(terminal_type.clone(), true, true);
+            let named = Capabilities::new(terminal_type.clone(), true, true)
+                .in_session(a_mosh_that_carries_images());
             assert!(
-                validate_terminal_for_graphics(
-                    &named,
-                    &RemoteTransport::Mosh,
-                    false,
-                    &a_mosh_that_carries_images(),
-                    "Image"
-                )
-                .is_ok(),
+                validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, false, "Image")
+                    .is_ok(),
                 "a mosh that states it carries every protocol carries the one that {terminal_type:?} draws"
             );
         }
@@ -2639,14 +2602,7 @@ not_a_number  1 /bin/bash
         let named = Capabilities::new(TerminalType::Ghostty, true, true)
             .in_session(MoshImages::from_env(Some("kitty"), None));
         assert!(
-            validate_terminal_for_graphics(
-                &named,
-                &RemoteTransport::Mosh,
-                false,
-                &MoshImages::default(),
-                "Image"
-            )
-            .is_ok(),
+            validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, false, "Image").is_ok(),
             "this mosh carries the kitty protocol, and Ghostty draws it"
         );
     }
@@ -2663,11 +2619,10 @@ not_a_number  1 /bin/bash
     /// about mosh alone.
     #[test]
     fn a_mosh_that_carries_images_still_takes_the_refusal_that_names_tmux() {
-        let named = Capabilities::new(TerminalType::Ghostty, true, true);
-        let session = MoshImages::from_env(Some("kitty"), None);
-        let error =
-            validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, true, &session, "Image")
-                .expect_err("a tmux that answered no query must be refused");
+        let named = Capabilities::new(TerminalType::Ghostty, true, true)
+            .in_session(MoshImages::from_env(Some("kitty"), None));
+        let error = validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, true, "Image")
+            .expect_err("a tmux that answered no query must be refused");
         assert!(
             error.to_string().contains("tmux"),
             "and the message must name tmux, which is what strips the picture: {error}"
@@ -2685,14 +2640,8 @@ not_a_number  1 /bin/bash
     #[test]
     fn an_upstream_mosh_still_takes_the_refusal_that_names_ssh() {
         let named = Capabilities::new(TerminalType::Ghostty, true, true);
-        let error = validate_terminal_for_graphics(
-            &named,
-            &RemoteTransport::Mosh,
-            false,
-            &MoshImages::default(),
-            "Image",
-        )
-        .expect_err("a mosh that states nothing about images must be refused");
+        let error = validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, false, "Image")
+            .expect_err("a mosh that states nothing about images must be refused");
         assert!(
             error.to_string().contains("ssh user@host"),
             "and the message must name the repair that works: {error}"
@@ -2711,13 +2660,13 @@ not_a_number  1 /bin/bash
     /// the repair is a different terminal.
     #[test]
     fn a_session_that_shares_no_protocol_with_this_terminal_names_both_sets() {
-        let pane = Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true);
-        let session = MoshImages::from_env(Some("kitty,sixel,iterm2"), Some("kitty"));
-        let error =
-            validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, &session, "Image")
-                .expect_err(
-                    "a session that delivers no protocol this terminal draws must be refused",
-                );
+        let pane = Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true)
+            .in_session(MoshImages::from_env(
+                Some("kitty,sixel,iterm2"),
+                Some("kitty"),
+            ));
+        let error = validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, "Image")
+            .expect_err("a session that delivers no protocol this terminal draws must be refused");
         let message = error.to_string();
         assert!(
             message.contains("kitty"),
@@ -2746,16 +2695,10 @@ not_a_number  1 /bin/bash
     /// terminal that draws no picture at all.
     #[test]
     fn a_session_that_names_no_terminal_of_the_user_names_two_sets() {
-        let kitty = Capabilities::new(TerminalType::Kitty, true, true);
-        let session = MoshImages::from_env(Some("sixel"), None);
-        let error = validate_terminal_for_graphics(
-            &kitty,
-            &RemoteTransport::Mosh,
-            false,
-            &session,
-            "Image",
-        )
-        .expect_err("a session that delivers no protocol this terminal draws must be refused");
+        let kitty = Capabilities::new(TerminalType::Kitty, true, true)
+            .in_session(MoshImages::from_env(Some("sixel"), None));
+        let error = validate_terminal_for_graphics(&kitty, &RemoteTransport::Mosh, false, "Image")
+            .expect_err("a session that delivers no protocol this terminal draws must be refused");
         let message = error.to_string();
         assert!(
             message.contains("sixel"),
@@ -2783,12 +2726,39 @@ not_a_number  1 /bin/bash
     /// one protocol, so the picture draws.
     #[test]
     fn a_pane_of_zellij_inside_a_mosh_that_carries_images_draws_a_picture() {
-        let pane = Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true);
-        let session = MoshImages::from_env(Some("kitty,sixel,iterm2"), Some("kitty,sixel"));
+        let pane = Capabilities::new(TerminalType::Answered(AnsweredProtocol::Sixel), true, true)
+            .in_session(MoshImages::from_env(
+                Some("kitty,sixel,iterm2"),
+                Some("kitty,sixel"),
+            ));
         assert!(
-            validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, &session, "Image")
-                .is_ok(),
+            validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, "Image").is_ok(),
             "every party of this session reads sixel"
+        );
+    }
+
+    /// A session narrows the routine of a terminal of no name, and the gate
+    /// reads the routine that follows.
+    ///
+    /// A terminal that set none of the signals `termgfx` reads states no
+    /// protocol at all, so `termgfx` guesses iTerm2 for it. A mosh that
+    /// carries sixel alone knows more than that guess, and
+    /// `Capabilities::display_routine` takes the statement over the guess. So
+    /// this terminal draws sixel, this transport carries sixel, and the
+    /// picture draws.
+    ///
+    /// A gate that read a session of its own could not reach this path from
+    /// `ic` at all. The capabilities held an empty session there whatever
+    /// session the gate took, the guess of iTerm2 stood, and the gate refused
+    /// a session that carries the one protocol this terminal draws.
+    #[test]
+    fn a_session_narrows_the_routine_of_a_terminal_of_no_name() {
+        let unnamed = Capabilities::new(TerminalType::Unknown, true, true)
+            .in_session(MoshImages::from_env(Some("sixel"), None));
+        assert!(
+            validate_terminal_for_graphics(&unnamed, &RemoteTransport::Mosh, false, "Image")
+                .is_ok(),
+            "the session states sixel, and a statement outranks the guess of iterm2 that a terminal of no name takes"
         );
     }
 
@@ -2808,17 +2778,10 @@ not_a_number  1 /bin/bash
     /// screen, so the picture still draws.
     #[test]
     fn a_stale_mosh_variable_outside_a_mosh_draws_a_picture() {
-        let named = Capabilities::new(TerminalType::Ghostty, true, true);
-        let session = MoshImages::from_env(Some("sixel"), None);
+        let named = Capabilities::new(TerminalType::Ghostty, true, true)
+            .in_session(MoshImages::from_env(Some("sixel"), None));
         assert!(
-            validate_terminal_for_graphics(
-                &named,
-                &RemoteTransport::None,
-                false,
-                &session,
-                "Image"
-            )
-            .is_ok(),
+            validate_terminal_for_graphics(&named, &RemoteTransport::None, false, "Image").is_ok(),
             "a variable that names no transport of this session says nothing about it"
         );
     }
