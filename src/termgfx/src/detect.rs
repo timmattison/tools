@@ -616,9 +616,11 @@ pub(crate) fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutin
 /// * **Which protocol does this terminal draw.** Every caller needs that
 ///   answer, because a caller that draws the wrong sequence puts base64 on the
 ///   screen and a caller that reports the wrong verdict names the wrong
-///   terminal. A terminal that named itself in the environment answered it
-///   already, and a name costs no round trip. So this question stands open for
-///   [`TerminalType::Unknown`] alone.
+///   terminal. A panel and a named terminal each answered it already with a
+///   signal their own author wrote, and such a signal costs no round trip. So
+///   this question stands open for every name that
+///   [`TerminalType::the_answer_outranks_this_name`] gives way to, which is a
+///   terminal of no name and a pane of a multiplexer.
 /// * **How big is one character cell.** Only a caller that draws a picture
 ///   converts cells to pixels, so this question stands open for
 ///   [`NeededAnswer::ProtocolAndCell`] alone, and a caller that reports what
@@ -643,7 +645,7 @@ fn asks_the_terminal(
     window: Option<Window>,
     needed: NeededAnswer,
 ) -> bool {
-    let protocol_stands_open = *terminal_type == TerminalType::Unknown;
+    let protocol_stands_open = terminal_type.the_answer_outranks_this_name();
     let cell_stands_open = needed == NeededAnswer::ProtocolAndCell
         && crate::geometry::cell_pixels_of(window).is_none();
     protocol_stands_open || cell_stands_open
