@@ -1789,10 +1789,16 @@ mod tests {
     ///
     /// # Arguments
     /// * `image` - The picture to draw.
+    /// * `source` - The bytes of the file that the picture came out of.
     /// * `budget` - The characters of payload that the picture can spend.
-    fn iterm2_command_of(image: &DynamicImage, budget: PayloadBudget) -> String {
+    fn iterm2_command_of(
+        image: &DynamicImage,
+        source: Option<&[u8]>,
+        budget: PayloadBudget,
+    ) -> String {
         let request = Request {
             payload: budget,
+            source,
             cursor: Cursor::Held,
             ..test_request()
         };
@@ -1817,7 +1823,7 @@ mod tests {
     /// * `image` - The picture to draw.
     /// * `budget` - The characters of payload that the picture can spend.
     fn iterm2_payload_of(image: &DynamicImage, budget: PayloadBudget) -> usize {
-        let command = iterm2_command_of(image, budget);
+        let command = iterm2_command_of(image, None, budget);
         let (_arguments, payload) = command
             .rsplit_once(':')
             .expect("an iTerm2 command holds a colon between the arguments and the payload");
@@ -1833,7 +1839,7 @@ mod tests {
     /// * `image` - The picture to draw.
     /// * `budget` - The characters of payload that the picture can spend.
     fn iterm2_arguments_of(image: &DynamicImage, budget: PayloadBudget) -> String {
-        let command = iterm2_command_of(image, budget);
+        let command = iterm2_command_of(image, None, budget);
         let (_introducer, arguments_and_payload) = command
             .split_once("File=")
             .expect("an iTerm2 command holds `File=` before its arguments");
@@ -1842,6 +1848,40 @@ mod tests {
             .expect("an iTerm2 command holds a colon between the arguments and the payload");
 
         String::from(arguments)
+    }
+
+    /// The width in pixels of the photograph that the resize test draws.
+    ///
+    /// The test draws it inside the ten columns by five rows of
+    /// [`test_request`], and the writer turns those cells into pixels with the
+    /// cell that the window of the runner reports. A picture this wide needs a
+    /// cell of 66 pixels by 176 to escape the downscale, and no terminal lays
+    /// text out in a cell of that size, so the resize happens on every machine
+    /// that runs this suite.
+    const RESIZED_PHOTOGRAPH_WIDTH: u32 = 2 * PHOTOGRAPH_WIDTH;
+
+    /// The height in pixels of the photograph that the resize test draws.
+    const RESIZED_PHOTOGRAPH_HEIGHT: u32 = 2 * PHOTOGRAPH_HEIGHT;
+
+    /// Draw `image` on an iTerm2 terminal inside the cells of [`test_request`],
+    /// with `source` as the file that the picture came out of, and give back
+    /// the base64 payload of the command.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `source` - The bytes of the file that the picture came out of.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn iterm2_payload_in_cells_of(
+        image: &DynamicImage,
+        source: Option<&[u8]>,
+        budget: PayloadBudget,
+    ) -> String {
+        let command = iterm2_command_of(image, source, budget);
+        let (_arguments, payload) = command
+            .rsplit_once(':')
+            .expect("an iTerm2 command holds a colon between the arguments and the payload");
+
+        String::from(payload.trim_end_matches('\x07'))
     }
 
     /// The bytes of `image` as a file of `shape`.
@@ -2249,6 +2289,39 @@ mod tests {
             "a source file that the budget holds must reach the terminal byte for byte, but the command carried {} characters where the file is {}",
             payload.len(),
             untouched.len()
+        );
+    }
+
+    /// A source file whose picture does not fit the screen gets an encode.
+    ///
+    /// The bytes of a file hold the picture at the size the file was written
+    /// at. A screen that shows fewer pixels than that needs the smaller
+    /// picture, and the smaller picture is one that no byte of the file
+    /// carries. So the rule that sends a file as it stands reaches a picture
+    /// that the display bounds left alone, and nothing else.
+    #[test]
+    fn a_source_file_whose_picture_needs_a_resize_gets_an_encode() {
+        let source = source_file_of(
+            Iterm2Payload::Jpeg(JpegQuality::HIGHEST),
+            &photograph_of(RESIZED_PHOTOGRAPH_WIDTH, RESIZED_PHOTOGRAPH_HEIGHT),
+        );
+        let picture =
+            image::load_from_memory(&source).expect("the encoder wrote a whole image file");
+
+        let payload =
+            iterm2_payload_in_cells_of(&picture, Some(&source), PayloadBudget::UNLIMITED);
+        let file = BASE64_STANDARD
+            .decode(&payload)
+            .expect("the writer wrote base64");
+
+        assert!(
+            payload != BASE64_STANDARD.encode(&source),
+            "a picture that the screen shows smaller must not travel as the file it came out of"
+        );
+        assert!(
+            pixels_of(&file).0 < RESIZED_PHOTOGRAPH_WIDTH,
+            "the picture that reached the terminal must be the one the screen shows, but it is {:?} where the file holds {RESIZED_PHOTOGRAPH_WIDTH} pixels across",
+            pixels_of(&file)
         );
     }
 
