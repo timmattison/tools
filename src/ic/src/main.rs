@@ -1654,7 +1654,7 @@ fn draw_progress_bar(
 ///
 /// # Errors
 /// An error when the file does not open, or when it holds no image.
-fn read_image_file(file_path: &Path) -> Result<(DynamicImage, Vec<u8>)> {
+fn read_image_file(file_path: &Path) -> Result<(DynamicImage, Option<Vec<u8>>)> {
     let source = fs::read(file_path)
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
@@ -1673,7 +1673,7 @@ fn read_image_file(file_path: &Path) -> Result<(DynamicImage, Vec<u8>)> {
         .decode()
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
-    Ok((img, source))
+    Ok((img, Some(source)))
 }
 
 /// Print a header and then display an image file.
@@ -1701,7 +1701,7 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
     let (term_width, _) = terminal_cells();
     display_image(
         img,
-        Some(&source),
+        source.as_deref(),
         args,
         Picture::Still,
         header_rows(header, term_width),
@@ -3383,6 +3383,7 @@ not_a_number zellij a work
         let path = temporary_file_of(&written, "png");
         let (picture, source) = read_image_file(&path).expect("the file holds a picture");
         fs::remove_file(&path).expect("the test wrote the file it removes");
+        let source = source.expect("the writer sends a PNG as it stands, so the reader keeps it");
 
         assert_eq!(
             (picture.width(), picture.height()),
@@ -3394,6 +3395,61 @@ not_a_number zellij a work
             "the reader must give back the bytes of the file, but it gave {} bytes where the file holds {}",
             source.len(),
             written.len()
+        );
+    }
+
+    /// Encode a small picture in `format` and give back the bytes.
+    ///
+    /// The picture is the same one in every format, so a test that reads it
+    /// back tells one format from another by the rule of the reader alone.
+    ///
+    /// # Arguments
+    /// * `format` - The format to write.
+    ///
+    /// # Returns
+    /// The bytes of a file of that format.
+    fn picture_bytes_in(format: image::ImageFormat) -> Vec<u8> {
+        let mut file = io::Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(image::RgbImage::new(4, 3))
+            .write_to(&mut file, format)
+            .expect("the encoder takes a picture of this size");
+
+        file.into_inner()
+    }
+
+    /// The reader drops a file that the writer cannot send as it stands.
+    ///
+    /// `termgfx` sends a file byte for byte in two formats alone, a JPEG and a
+    /// still PNG. A file of any other format is a copy that nothing reads, and
+    /// it stands beside a decoded picture of the same size for the whole length
+    /// of the draw. A BMP of 4000 by 3000 pixels holds 36 megabytes, and the
+    /// picture that comes out of it holds 36 more.
+    ///
+    /// The PNG at the end of this test holds the rule to one format. A reader
+    /// that drops the bytes of every file passes the first half of this test
+    /// and fails the second.
+    #[test]
+    fn the_reader_drops_a_file_that_the_writer_cannot_send() {
+        let bitmap = picture_bytes_in(image::ImageFormat::Bmp);
+        let path = temporary_file_of(&bitmap, "bmp");
+        let (_, source) = read_image_file(&path).expect("the file holds a picture");
+        fs::remove_file(&path).expect("the test wrote the file it removes");
+
+        assert!(
+            source.is_none(),
+            "the reader must drop the bytes of a BMP, but it kept {} of them",
+            source.map_or(0, |bytes| bytes.len())
+        );
+
+        let png = picture_bytes_in(image::ImageFormat::Png);
+        let path = temporary_file_of(&png, "png");
+        let (_, source) = read_image_file(&path).expect("the file holds a picture");
+        fs::remove_file(&path).expect("the test wrote the file it removes");
+
+        assert_eq!(
+            source.as_deref(),
+            Some(png.as_slice()),
+            "the reader must keep the bytes of a PNG, because the writer sends them as they stand"
         );
     }
 
