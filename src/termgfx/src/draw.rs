@@ -1399,15 +1399,27 @@ fn write_sixel<W: Write>(
 /// it out again would spend the time of a decode and an encode, and it would
 /// throw a second helping of the picture away to do it.
 ///
+/// The bytes of a file hold the picture at the size it was written at, so a
+/// screen that shows fewer pixels than that needs a picture that no byte of the
+/// file carries. `resized` states whether the display bounds already took
+/// pixels off this picture, and a picture they touched reaches the terminal
+/// through the encoder.
+///
 /// # Arguments
 /// * `request` - The request that the caller made, which states the file and
 ///   the characters that the picture can spend.
+/// * `resized` - True when the display bounds took pixels off the picture.
 ///
 /// # Returns
-/// The base64 of the file, for a request that states one and a budget that
-/// holds it. [`None`] for a caller that states no file, and for a file that
-/// stands above the budget, which has to reach that budget through the fit.
-fn source_payload_of(request: &Request<'_>) -> Option<String> {
+/// The base64 of the file, for a picture that the display bounds left alone,
+/// out of a request that states a file, inside a budget that holds it. [`None`]
+/// in every other case, and the picture then reaches the budget through the
+/// fit.
+fn source_payload_of(request: &Request<'_>, resized: bool) -> Option<String> {
+    if resized {
+        return None;
+    }
+
     let payload = BASE64_STANDARD.encode(request.source?);
 
     request.payload.holds(payload.len()).then_some(payload)
@@ -1475,7 +1487,12 @@ fn write_iterm2<W: Write>(
     // lossless shape and steps down the qualities of [`Iterm2Payload`] before
     // it takes a pixel off the picture, and the terminal reads the format out
     // of the file, so no argument of the command names the shape it ended in.
-    let (image, base64_data) = match source_payload_of(request) {
+    // `downscale_to_display_pixels` borrows the picture it left alone and owns
+    // the one it resized, so the shape of what it gave back states whether the
+    // file the caller holds still carries the pixels of the screen.
+    let resized = matches!(image, Cow::Owned(_));
+
+    let (image, base64_data) = match source_payload_of(request, resized) {
         Some(payload) => (image, payload),
         None => {
             let (fitted, _shape, payload) =
