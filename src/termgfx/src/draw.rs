@@ -1671,6 +1671,44 @@ mod tests {
         }))
     }
 
+    /// The width in pixels of the transparent fixture.
+    const TRANSPARENT_WIDTH: u32 = 64;
+
+    /// The height in pixels of the transparent fixture.
+    const TRANSPARENT_HEIGHT: u32 = 64;
+
+    /// The side in pixels of one square of the transparent fixture.
+    const TRANSPARENT_SQUARE_SIDE: u32 = 8;
+
+    /// A picture of 64 pixels by 64 that carries a real alpha channel.
+    fn transparent_fixture() -> DynamicImage {
+        transparent_of(TRANSPARENT_WIDTH, TRANSPARENT_HEIGHT)
+    }
+
+    /// A picture of `width` pixels by `height` whose alpha channel holds two
+    /// values.
+    ///
+    /// The squares alternate between opaque red and fully transparent green. A
+    /// picture of one alpha value says nothing about that channel, because a
+    /// path that drops the channel gives the same picture back. Two squares
+    /// that differ in the alpha channel make the drop visible pixel by pixel.
+    ///
+    /// # Arguments
+    /// * `width` - The width in pixels.
+    /// * `height` - The height in pixels.
+    fn transparent_of(width: u32, height: u32) -> DynamicImage {
+        DynamicImage::ImageRgba8(image::RgbaImage::from_fn(width, height, |x, y| {
+            let opaque =
+                (x / TRANSPARENT_SQUARE_SIDE + y / TRANSPARENT_SQUARE_SIDE).is_multiple_of(2);
+
+            if opaque {
+                image::Rgba([220, 30, 30, 255])
+            } else {
+                image::Rgba([30, 220, 30, 0])
+            }
+        }))
+    }
+
     /// The share of the payload of a whole picture that the floor test allows.
     ///
     /// The lowest rung of the quality ladder carries the photograph fixture in
@@ -1961,6 +1999,38 @@ mod tests {
             .expect("the BMP encoder takes a picture of this size");
 
         file.into_inner()
+    }
+
+    /// The bytes of `image` as a PNG file that keeps every channel.
+    ///
+    /// [`source_file_of`] writes its file through [`Iterm2Payload`], which
+    /// starts from RGB8, so a file out of that helper carries no alpha channel
+    /// to measure. This helper writes the picture as it stands, which is what a
+    /// caller reads off a disk.
+    ///
+    /// # Arguments
+    /// * `image` - The picture that the file holds.
+    fn png_file_of(image: &DynamicImage) -> Vec<u8> {
+        let mut file = io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut file, image::ImageFormat::Png)
+            .expect("the PNG encoder takes a picture of this size");
+
+        file.into_inner()
+    }
+
+    /// The pixels of the picture that a payload carries, with every channel.
+    ///
+    /// # Arguments
+    /// * `payload` - The base64 payload of an iTerm2 command.
+    fn rgba_pixels_of_payload(payload: &str) -> image::RgbaImage {
+        let file = BASE64_STANDARD
+            .decode(payload)
+            .expect("the writer wrote base64");
+
+        image::load_from_memory(&file)
+            .expect("the writer wrote a whole image file")
+            .to_rgba8()
     }
 
     /// The first bytes of a PNG file, which name the format to a reader.
@@ -2406,6 +2476,76 @@ mod tests {
         assert!(
             payload != BASE64_STANDARD.encode(&source),
             "a file in a format this writer does not make must reach the terminal through the encoder"
+        );
+    }
+
+    /// The two paths of the iTerm2 writer draw one picture.
+    ///
+    /// The writer has two ways to a payload. [`source_payload_of`] sends the
+    /// bytes of the file that the caller holds, and [`fit_to_payload_budget`]
+    /// encodes the picture instead. The display bounds and the payload budget
+    /// pick between them, and the caller states neither one pixel by pixel. So
+    /// a caller cannot tell which path runs, and a picture that changes with
+    /// the path is a picture that changes for no reason the caller can see.
+    ///
+    /// The paths part on the alpha channel today. [`Iterm2Payload::encode`]
+    /// starts from RGB8 and drops that channel, and the byte-for-byte path
+    /// keeps whatever the file holds. A transparent PNG therefore draws two
+    /// pictures.
+    #[test]
+    fn the_two_iterm2_paths_draw_the_same_picture() {
+        let source = png_file_of(&transparent_fixture());
+        let picture =
+            image::load_from_memory(&source).expect("the encoder wrote a whole image file");
+
+        let payload_of_the_source_path =
+            iterm2_payload_of_source(&picture, Some(&source), PayloadBudget::UNLIMITED);
+        let payload_of_the_encoder_path =
+            iterm2_payload_of_source(&picture, None, PayloadBudget::UNLIMITED);
+
+        // The byte-for-byte path runs only for a file in a format the writer
+        // makes, at the size of the screen, inside the budget. A run that
+        // missed one of those three would send both pictures through the
+        // encoder, and the comparison below would then measure one path twice
+        // and pass on every picture.
+        assert!(
+            payload_of_the_source_path == BASE64_STANDARD.encode(&source),
+            "the byte-for-byte path must carry the file as it stands, or this test measures one path twice, but the command carried {} characters where the file is {} bytes",
+            payload_of_the_source_path.len(),
+            source.len()
+        );
+
+        let of_the_source_path = rgba_pixels_of_payload(&payload_of_the_source_path);
+        let of_the_encoder_path = rgba_pixels_of_payload(&payload_of_the_encoder_path);
+
+        assert_eq!(
+            of_the_source_path.dimensions(),
+            of_the_encoder_path.dimensions(),
+            "both paths must draw a picture of one size"
+        );
+
+        let mut differences = 0_usize;
+        let mut first_difference = None;
+
+        for (x, y, of_the_source) in of_the_source_path.enumerate_pixels() {
+            let of_the_encoder = of_the_encoder_path.get_pixel(x, y);
+
+            if of_the_source != of_the_encoder {
+                differences += 1;
+                first_difference.get_or_insert_with(|| {
+                    format!("{x},{y}, where the byte-for-byte path holds {of_the_source:?} and the encoder path holds {of_the_encoder:?}")
+                });
+            }
+        }
+
+        // The two buffers run to thousands of pixels, so the message names the
+        // count and the first pixel that differs. A failure that prints two
+        // whole buffers says less than one that fits on the screen.
+        assert!(
+            differences == 0,
+            "both paths must draw one picture, but {differences} pixels of {} differ, the first at {}",
+            of_the_source_path.pixels().count(),
+            first_difference.unwrap_or_default()
         );
     }
 
