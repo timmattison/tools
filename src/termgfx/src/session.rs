@@ -35,6 +35,18 @@ const TRANSPORT_VARIABLE: &str = "MOSH_IMAGES";
 /// The environment variable that names what the terminal of the user draws.
 const CLIENT_VARIABLE: &str = "MOSH_CLIENT_IMAGES";
 
+/// The name that both variables give the kitty graphics protocol.
+const KITTY_NAME: &str = "kitty";
+
+/// The name that both variables give the Sixel protocol.
+const SIXEL_NAME: &str = "sixel";
+
+/// The name that both variables give the inline image protocol of iTerm2.
+const ITERM2_NAME: &str = "iterm2";
+
+/// What a message calls a set that names no protocol at all.
+const EMPTY_SET_NAME: &str = "none";
+
 /// A set of the inline-image protocols that one party carries or draws.
 ///
 /// The three protocols stand as three flags rather than as a list, because the
@@ -61,8 +73,18 @@ impl ProtocolSet {
     /// * `raw` - The value of the variable.
     #[must_use]
     pub fn parse(raw: &str) -> Self {
-        let _ = raw;
-        Self::default()
+        let mut set = Self::default();
+        for token in raw.split(',') {
+            let token = token.trim();
+            if token.eq_ignore_ascii_case(KITTY_NAME) {
+                set.kitty = true;
+            } else if token.eq_ignore_ascii_case(SIXEL_NAME) {
+                set.sixel = true;
+            } else if token.eq_ignore_ascii_case(ITERM2_NAME) {
+                set.iterm2 = true;
+            }
+        }
+        set
     }
 
     /// Whether this set names no protocol at all.
@@ -74,8 +96,11 @@ impl ProtocolSet {
     /// The protocols that stand in this set and in `other` as well.
     #[must_use]
     pub fn intersect(&self, other: &Self) -> Self {
-        let _ = other;
-        *self
+        Self {
+            kitty: self.kitty && other.kitty,
+            sixel: self.sixel && other.sixel,
+            iterm2: self.iterm2 && other.iterm2,
+        }
     }
 
     /// The protocols of this set, as a reader of an error message reads them.
@@ -86,8 +111,12 @@ impl ProtocolSet {
     /// message that lost its list.
     #[must_use]
     pub fn names(&self) -> String {
-        let _ = self;
-        String::new()
+        let names: Vec<&str> = self.in_order().map(|(name, _)| name).collect();
+        if names.is_empty() {
+            EMPTY_SET_NAME.to_string()
+        } else {
+            names.join(", ")
+        }
     }
 
     /// The one routine that this set prefers, or `None` for an empty set.
@@ -97,14 +126,40 @@ impl ProtocolSet {
     /// because a terminal answers a query about it. iTerm2 stands last because
     /// it carries no query and answers nothing at all.
     pub(crate) fn preferred_routine(&self) -> Option<DisplayRoutine> {
-        let _ = self;
-        None
+        self.in_order().map(|(_, routine)| routine).next()
     }
 
     /// The set that holds one routine alone.
     pub(crate) fn of_routine(routine: DisplayRoutine) -> Self {
-        let _ = routine;
-        Self::default()
+        Self {
+            kitty: routine == DisplayRoutine::Kitty,
+            sixel: routine == DisplayRoutine::Sixel,
+            iterm2: routine == DisplayRoutine::Iterm2,
+        }
+    }
+
+    /// Whether this set holds the protocol that `routine` writes.
+    pub(crate) fn holds(&self, routine: DisplayRoutine) -> bool {
+        match routine {
+            DisplayRoutine::Kitty => self.kitty,
+            DisplayRoutine::Sixel => self.sixel,
+            DisplayRoutine::Iterm2 => self.iterm2,
+        }
+    }
+
+    /// The protocols of this set, in the one order that this module states.
+    ///
+    /// [`ProtocolSet::names`] and [`ProtocolSet::preferred_routine`] both read
+    /// this order, so a message and a choice never disagree about which
+    /// protocol stands first.
+    fn in_order(&self) -> impl Iterator<Item = (&'static str, DisplayRoutine)> + '_ {
+        [
+            (self.kitty, KITTY_NAME, DisplayRoutine::Kitty),
+            (self.sixel, SIXEL_NAME, DisplayRoutine::Sixel),
+            (self.iterm2, ITERM2_NAME, DisplayRoutine::Iterm2),
+        ]
+        .into_iter()
+        .filter_map(|(held, name, routine)| held.then_some((name, routine)))
     }
 }
 
