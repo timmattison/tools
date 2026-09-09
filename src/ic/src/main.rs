@@ -937,6 +937,9 @@ fn process_frame_display(
     // less the row of the prompt.
     display_image(
         img,
+        // A frame of a video comes out of the decoder of the video and out of
+        // no file at all, so there are no bytes for the writer to pass on.
+        None,
         args,
         Picture::Frame {
             id: HELD_PLACEMENT_ID,
@@ -1652,10 +1655,25 @@ fn draw_progress_bar(
 /// # Errors
 /// An error when the file does not open, or when it holds no image.
 fn read_image_file(file_path: &Path) -> Result<(DynamicImage, Vec<u8>)> {
-    let img = image::open(file_path)
+    let source = fs::read(file_path)
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
-    Ok((img, Vec::new()))
+    // The decoder reads the format out of the first bytes of the file, and it
+    // takes the extension of the name where those bytes name nothing. That is
+    // what `image::open` does with a path, and this reads the same file the
+    // same way out of the memory it already holds.
+    let mut reader = image::ImageReader::new(io::Cursor::new(&source));
+    if let Ok(format) = image::ImageFormat::from_path(file_path) {
+        reader.set_format(format);
+    }
+
+    let img = reader
+        .with_guessed_format()
+        .with_context(|| format!("Failed to open image file: {}", file_path.display()))?
+        .decode()
+        .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
+
+    Ok((img, source))
 }
 
 /// Print a header and then display an image file.
@@ -1678,10 +1696,16 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
         println!("{line}");
     }
 
-    let (img, _source) = read_image_file(file_path)?;
+    let (img, source) = read_image_file(file_path)?;
 
     let (term_width, _) = terminal_cells();
-    display_image(img, args, Picture::Still, header_rows(header, term_width))
+    display_image(
+        img,
+        Some(&source),
+        args,
+        Picture::Still,
+        header_rows(header, term_width),
+    )
 }
 
 fn display_text_file(file_path: &Path) -> Result<()> {
@@ -1705,8 +1729,9 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
     let img = image::load_from_memory(&buffer).context("Failed to decode image from stdin")?;
 
     // This path prints no header, so the image can use the whole terminal less
-    // the row of the prompt.
-    display_image(img, args, Picture::Still, HeaderRows(0))
+    // the row of the prompt. The bytes that arrived travel beside the picture,
+    // because a file that the terminal draws as it stands needs no encode.
+    display_image(img, Some(&buffer), args, Picture::Still, HeaderRows(0))
 }
 
 /// The code that a Kitty terminal names for an image store with no room left.
@@ -1754,6 +1779,10 @@ fn size_advice_for(code: &str) -> &'static str {
 ///
 /// # Arguments
 /// * `img` - The image to display.
+/// * `source` - The bytes of the file that the image came out of, when this
+///   call has them. A file that the terminal draws, that the screen fits and
+///   that the transport carries reaches the terminal as it stands, so no
+///   encoder runs and no pixel changes. See `termgfx::Request::source`.
 /// * `args` - The command line arguments.
 /// * `picture` - Whether this call draws one still picture or one frame of a
 ///   video. It names the shape that the image travels in, the answer that the
@@ -1766,6 +1795,7 @@ fn size_advice_for(code: &str) -> &'static str {
 /// An error when the terminal cannot show graphics, or when the display fails.
 fn display_image(
     img: DynamicImage,
+    source: Option<&[u8]>,
     args: &Args,
     picture: Picture,
     header: HeaderRows,
@@ -1835,7 +1865,7 @@ fn display_image(
             columns: scaled_width,
             rows: scaled_height,
         },
-        source: None,
+        source,
         payload: payload_budget_for(transport),
         picture,
         // A frame of a video always holds the cursor, because the caller puts
