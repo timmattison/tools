@@ -674,12 +674,16 @@ fn cursor_contract(
 /// [`shape_that_costs_least`] measures every rung rather than trusting the
 /// order to hold for the picture in hand.
 ///
-/// The Kitty protocol and the Sixel protocol each carry one shape, so
-/// [`Payload::cheaper`] answers [`None`] for them and the fit reaches for the
-/// pixels at once. The iTerm2 protocol carries a whole file of any format the
-/// terminal reads, so [`Iterm2Payload`] states a real order there. That order
-/// has two top rungs, and [`write_iterm2`] picks between them by what the
-/// caller draws rather than by what the budget holds.
+/// The Kitty protocol and the iTerm2 protocol each take their top rung off
+/// `request.picture` rather than off the budget. Kitty carries two shapes, and
+/// [`write_kitty`] picks between them, so neither one stands over the other and
+/// [`KittyPayload::cheaper`] answers [`None`]. The Sixel protocol carries one
+/// shape alone, and [`SixelPayload::cheaper`] answers [`None`] for that reason
+/// instead. So the fit reaches for the pixels at once in each of those two
+/// protocols. The iTerm2 protocol carries a whole file of any format the
+/// terminal reads, so [`Iterm2Payload`] states a real order there:
+/// [`write_iterm2`] picks between two top rungs, and the JPEG rungs stand under
+/// both of them.
 trait Payload: Copy {
     /// Encode `image` into the base64 payload of this shape.
     ///
