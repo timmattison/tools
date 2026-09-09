@@ -920,9 +920,10 @@ impl JpegQuality {
 /// shrank the picture to about 655 pixels by 395 and the terminal stretched
 /// that over the whole rectangle.
 ///
-/// Both shapes drop the alpha channel. A JPEG carries none at all, and the PNM
-/// file that went before carried none either, so the drawn result is the one
-/// that the writer drew before.
+/// A PNG keeps the alpha channel that the picture carries, so the encoder path
+/// and the byte-for-byte path of [`write_iterm2`] draw one picture. A JPEG
+/// carries no alpha channel at all, so a picture that the budget pushes onto a
+/// JPEG rung loses the transparency along with the quality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Iterm2Payload {
     /// A whole PNG file, which loses no pixel of the picture.
@@ -944,25 +945,42 @@ impl Payload for Iterm2Payload {
     /// # Errors
     /// Gives [`DrawError::Encode`] when the encoder refuses the image.
     fn encode(self, image: &DynamicImage) -> Result<String, DrawError> {
-        // Both shapes start from RGB8. A JPEG carries no alpha channel at all,
-        // and the alpha of a PNG changes no pixel that this writer draws.
-        let rgb = image.to_rgb8();
         let mut file = Vec::new();
 
         match self {
-            Iterm2Payload::Png => PngEncoder::new(&mut file).write_image(
-                rgb.as_raw(),
-                rgb.width(),
-                rgb.height(),
-                ExtendedColorType::Rgb8,
-            ),
-            Iterm2Payload::Jpeg(quality) => JpegEncoder::new_with_quality(&mut file, quality.get())
-                .write_image(
+            // A picture with an alpha channel goes out with that channel, so
+            // this path draws what the byte-for-byte path draws.
+            Iterm2Payload::Png if image.color().has_alpha() => {
+                let rgba = image.to_rgba8();
+                PngEncoder::new(&mut file).write_image(
+                    rgba.as_raw(),
+                    rgba.width(),
+                    rgba.height(),
+                    ExtendedColorType::Rgba8,
+                )
+            }
+            // An opaque picture costs three bytes for one pixel, which is what
+            // it cost before.
+            Iterm2Payload::Png => {
+                let rgb = image.to_rgb8();
+                PngEncoder::new(&mut file).write_image(
                     rgb.as_raw(),
                     rgb.width(),
                     rgb.height(),
                     ExtendedColorType::Rgb8,
-                ),
+                )
+            }
+            // A JPEG carries no alpha channel at all, so this shape starts
+            // from RGB8 whatever the picture holds.
+            Iterm2Payload::Jpeg(quality) => {
+                let rgb = image.to_rgb8();
+                JpegEncoder::new_with_quality(&mut file, quality.get()).write_image(
+                    rgb.as_raw(),
+                    rgb.width(),
+                    rgb.height(),
+                    ExtendedColorType::Rgb8,
+                )
+            }
         }
         .map_err(|error| DrawError::Encode(error.to_string()))?;
 
