@@ -273,16 +273,15 @@ const MOSH_CARRIES_EVERY_PROTOCOL: &str = "kitty,sixel,iterm2";
 
 /// Invoke `ic` inside a session that the process tree reports as Mosh.
 ///
-/// The `PATH` reaches the stated `ps` of `table` and reaches nothing else, so
-/// the transport comes from the table and not from the machine of whoever runs
-/// the suite. Every other test of this file points the `PATH` at a directory
-/// that does not exist, which is the same rule read the other way: a test
-/// states the process tree it covers, and it reads none.
+/// This is the command of [`ic`], with the `PATH` of `table` in place of the
+/// unreachable one. That `PATH` reaches the stated `ps` of `table` and reaches
+/// nothing else, so the transport comes from the table and not from the machine
+/// of whoever runs the suite. Every other test of this file points the `PATH` at
+/// a directory that does not exist, which is the same rule read the other way: a
+/// test states the process tree it covers, and it reads none.
 fn ic_under_mosh(term: &str, table: &MoshProcessTable) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
-    command.env_clear();
+    let mut command = ic(term);
     command.env("PATH", table.path());
-    command.env("TERM", term);
     command
 }
 
