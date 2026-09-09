@@ -1449,9 +1449,30 @@ fn source_payload_of(request: &Request<'_>, resized: bool) -> Option<String> {
         return None;
     }
 
-    let payload = BASE64_STANDARD.encode(source);
+    // The length of base64 comes off the length of the input alone, so the
+    // arithmetic stands in for the encode. The budget refuses the file before
+    // the allocation of four thirds of that file happens.
+    if !request.payload.holds(base64_characters_of(source.len())) {
+        return None;
+    }
 
-    request.payload.holds(payload.len()).then_some(payload)
+    Some(BASE64_STANDARD.encode(source))
+}
+
+/// The characters of base64 that an input of `bytes` bytes costs.
+///
+/// Base64 with padding turns three bytes into four characters, and it pads a
+/// last group of one byte or two bytes out to four characters as well. So the
+/// count of the groups is the length in bytes rounded up to the next three,
+/// and the length in characters is four of those for every group.
+///
+/// # Arguments
+/// * `bytes` - The length of the input in bytes.
+///
+/// # Returns
+/// The characters that the base64 of an input of that length holds.
+const fn base64_characters_of(bytes: usize) -> usize {
+    bytes.div_ceil(3) * 4
 }
 
 /// Whether the bytes of `source` travel to the terminal as they stand.
