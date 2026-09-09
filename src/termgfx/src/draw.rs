@@ -1464,6 +1464,71 @@ mod tests {
         String::from(arguments)
     }
 
+    /// The first bytes of a PNG file, which name the format to a reader.
+    ///
+    /// The iTerm2 protocol carries a whole file, and the terminal reads the
+    /// format out of the first bytes of it. So a test that asks which format a
+    /// picture travelled in reads those same bytes.
+    const PNG_SIGNATURE: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+    /// The first bytes of a JPEG file, which are the start-of-image marker.
+    const JPEG_SIGNATURE: &[u8] = &[0xff, 0xd8];
+
+    /// The request that the encoder tests draw with.
+    ///
+    /// It states no bound in character cells, so the picture reaches the
+    /// encoder at its own pixel size. A bound in cells makes the writer
+    /// downscale the picture to the window of whoever runs the suite, and a
+    /// test that reads the file would then read a file of a size that the
+    /// window decided.
+    ///
+    /// # Arguments
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn whole_picture_request(budget: PayloadBudget) -> Request {
+        Request {
+            budget: Budget {
+                columns: None,
+                rows: None,
+            },
+            payload: budget,
+            picture: Picture::Still,
+            cursor: Cursor::Held,
+            preserve_aspect: true,
+        }
+    }
+
+    /// Draw `image` on an iTerm2 terminal at its own pixel size, inside
+    /// `budget`, and give back the base64 payload of the command.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn iterm2_whole_picture_payload_of(image: &DynamicImage, budget: PayloadBudget) -> String {
+        let mut out = Vec::new();
+        Capabilities::new(TerminalType::ITerm2, true, true)
+            .draw(&mut out, image, &whole_picture_request(budget))
+            .expect("a write to a vector never fails");
+
+        let command = String::from_utf8(out).expect("an iTerm2 command is ASCII");
+        let (_arguments, payload) = command
+            .rsplit_once(':')
+            .expect("an iTerm2 command holds a colon between the arguments and the payload");
+
+        String::from(payload.trim_end_matches('\x07'))
+    }
+
+    /// Draw `image` on an iTerm2 terminal at its own pixel size, inside
+    /// `budget`, and give back the file that the command carried.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `budget` - The characters of payload that the picture can spend.
+    fn iterm2_file_of(image: &DynamicImage, budget: PayloadBudget) -> Vec<u8> {
+        BASE64_STANDARD
+            .decode(iterm2_whole_picture_payload_of(image, budget))
+            .expect("the writer wrote base64")
+    }
+
     /// The Kitty graphics command that takes every image off the screen. The
     /// test spells the bytes out, so a change of the command fails the test
     /// instead of moving with it.
@@ -1661,6 +1726,24 @@ mod tests {
         assert!(
             spent > 0,
             "a Sixel picture that spends nothing drew nothing, which is the failure this repairs"
+        );
+    }
+
+    /// A picture that the budget holds travels as a PNG file.
+    ///
+    /// The iTerm2 protocol carries a whole file, and a raw PNM file spends
+    /// three bytes on every pixel and compresses none of them. A photograph of
+    /// 3074 pixels by 1856 costs 17116032 bytes that way, which is 22821376
+    /// base64 characters, and a mosh session holds 1048576 of them. The same
+    /// photograph as a PNG costs a fraction of it and loses no pixel at all.
+    #[test]
+    fn a_picture_that_the_budget_holds_travels_as_a_png() {
+        let file = iterm2_file_of(&photograph_fixture(), PayloadBudget::UNLIMITED);
+
+        assert!(
+            file.starts_with(PNG_SIGNATURE),
+            "an iTerm2 picture that the budget holds must travel as a PNG, but the file starts with {:?}",
+            &file[..PNG_SIGNATURE.len().min(file.len())]
         );
     }
 
