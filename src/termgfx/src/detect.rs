@@ -515,7 +515,12 @@ impl Capabilities {
     ///   before one byte leaves. So the statement of the terminal stands, and
     ///   this call never sends a terminal a sequence it does not read.
     pub(crate) fn display_routine(&self) -> DisplayRoutine {
-        display_routine_for(&self.terminal_type)
+        let own = display_routine_for(&self.terminal_type);
+        let delivers = self.session.delivers();
+        if self.terminal_type != TerminalType::Unknown || delivers.holds(own) {
+            return own;
+        }
+        delivers.preferred_routine().unwrap_or(own)
     }
 
     /// The protocols that this terminal draws, as far as this crate knows.
