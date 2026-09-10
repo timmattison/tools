@@ -372,7 +372,10 @@ impl<'a> Report<'a> {
     /// [`without_stops`]: Report::without_stops
     #[must_use]
     pub fn render_diffs(&self, diffs: &HaltDiffs) -> Option<String> {
-        let _ = diffs;
+        if diffs.is_empty() {
+            return None;
+        }
+
         Some(String::new())
     }
 }
