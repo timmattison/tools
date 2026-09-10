@@ -1911,6 +1911,93 @@ fn clicolor_zero_refuses_the_color_of_a_wrapper() {
     );
 }
 
+/// `NO_COLOR` turns color off, also on the pipe of a wrapper.
+///
+/// The run states `COLUMNS` and writes to a pipe, which is the shape that the
+/// override paints when no variable refuses it. `NO_COLOR` is a choice that
+/// the user made, so the run holds no ESC byte.
+#[test]
+fn no_color_refuses_the_color_of_a_wrapper() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let output = diff_through_a_pipe(&repo, &[(NO_COLOR, Some("1"))]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("stop 2 of 2"),
+        "the control: the run printed the diff of both stops:\n{stdout}"
+    );
+    assert!(
+        !output.stdout.contains(&ESC),
+        "NO_COLOR turns color off, also on the pipe of a wrapper:\n{stdout}"
+    );
+}
+
+/// A pipe with no `COLUMNS` goes to a file or to another program, and `grind`
+/// does not paint into it.
+///
+/// The rule of a wrapper needs the width that a wrapper states. With no width
+/// stated and no color variable set, `colored` sees a pipe and writes no code,
+/// and nothing overrides it.
+#[test]
+fn diff_through_a_pipe_with_no_stated_width_is_plain() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let output = diff_through_a_pipe(&repo, &[(WIDTH_VARIABLE, None)]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("stop 2 of 2"),
+        "the control: the run printed the diff of both stops:\n{stdout}"
+    );
+    assert!(
+        !output.stdout.contains(&ESC),
+        "a pipe with no stated width is no wrapper, so the diff is plain:\n{stdout}"
+    );
+}
+
+/// `CLICOLOR_FORCE=1` paints the diff into any pipe. That is the rule of
+/// `colored` itself, and the pager recipe of the README rests on it:
+/// `CLICOLOR_FORCE=1 grind --diff main | less -R`.
+///
+/// The run states no width, so the rule of a wrapper does not fire, and the
+/// color comes from `colored` alone. A `grind` that gives the answer of
+/// `should_force_colors` to `set_override` directly fails here. That answer is
+/// false for this run, and `set_override(false)` wins over the variable.
+#[test]
+fn clicolor_force_paints_a_pipe_with_no_stated_width() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let output = diff_through_a_pipe(
+        &repo,
+        &[(WIDTH_VARIABLE, None), (CLICOLOR_FORCE, Some("1"))],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.contains(&ESC),
+        "CLICOLOR_FORCE=1 turns color on, also into a pipe:\n{stdout}"
+    );
+}
+
 /// Which of `grind`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {
