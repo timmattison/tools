@@ -1901,6 +1901,102 @@ fn a_note_or_a_failure_nobody_is_reading_costs_the_words_and_not_the_answer() {
     );
 }
 
+/// `--diff` puts a second write on stdout, after the verdict, and that write
+/// meets the same closed pipe. It must cost the words and never the answer.
+///
+/// Two stops, so the diff spans two sections, and the run has more to lose to
+/// a broken pipe than the verdict alone gives it.
+#[test]
+fn a_diff_nobody_is_reading_costs_the_words_and_not_the_answer() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.checkout("two");
+
+    let (code, stderr) =
+        grind_into_an_unread_pipe(repo.path(), &[DIFF_FLAG, "one"], Unread::Stdout);
+
+    assert_ne!(
+        code,
+        Some(PANICKED),
+        "a broken pipe must not turn the answer into a panic\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the replay conflicted, so the answer is {CONFLICTS} whether or not \
+         anyone read the diff\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "a broken pipe is not a bug in grind and must not be reported as \
+         one:\n{stderr}"
+    );
+}
+
+/// The closed stderr of the test above that, run again with `--diff`, on all
+/// three paths. The tree is dirty, so each path has a note to lose.
+///
+/// The conflict path is the one with the most on it. The note fails, and the
+/// run must carry on to print the verdict and the diff on stdout, byte for byte
+/// as the same run prints them when stderr is open.
+#[test]
+fn with_diff_a_note_or_a_failure_nobody_is_reading_costs_the_words_and_not_the_answer() {
+    let clean_repo = independent_branches_repo();
+    clean_repo.checkout("alpha");
+    clean_repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (clean_code, clean_stdout) =
+        grind_into_an_unread_pipe(clean_repo.path(), &[DIFF_FLAG, "beta"], Unread::Stderr);
+
+    assert_eq!(
+        clean_code,
+        Some(CLEAN),
+        "a note nobody read must not move the verdict off {CLEAN}\nstdout:\n{clean_stdout}"
+    );
+    assert_eq!(
+        clean_stdout, "grind: clean - replaying HEAD onto beta hit no conflicts",
+        "the run has to carry on past the note it could not print"
+    );
+
+    let (error_code, error_stdout) = grind_into_an_unread_pipe(
+        clean_repo.path(),
+        &[DIFF_FLAG, "nonexistent-branch"],
+        Unread::Stderr,
+    );
+
+    assert_eq!(
+        error_code,
+        Some(ERROR),
+        "a failure it could not print is still a failure, and still \
+         {ERROR}\nstdout:\n{error_stdout}"
+    );
+
+    let conflict_repo = equal_hunks_unequal_stops_repo();
+    conflict_repo.checkout("two");
+    conflict_repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (conflict_code, conflict_stdout) =
+        grind_into_an_unread_pipe(conflict_repo.path(), &[DIFF_FLAG, "one"], Unread::Stderr);
+    let (_, heard_stdout, heard_stderr) =
+        streams(&grind(conflict_repo.path(), &[DIFF_FLAG, "one"]));
+
+    assert_eq!(
+        conflict_code,
+        Some(CONFLICTS),
+        "a note nobody read must not move the verdict off {CONFLICTS}\n\
+         stdout:\n{conflict_stdout}"
+    );
+    assert!(
+        heard_stderr.contains("note:") && heard_stdout.contains("stop 2 of 2"),
+        "the control: with stderr open, the same run prints a note and a diff \
+         of two stops\nstdout:\n{heard_stdout}\nstderr:\n{heard_stderr}"
+    );
+    assert_eq!(
+        conflict_stdout, heard_stdout,
+        "the run has to carry on past the note it could not print, to the \
+         verdict and the diff"
+    );
+}
+
 /// Read a file that must come back byte-identical after `grind` has run.
 ///
 /// # Panics
