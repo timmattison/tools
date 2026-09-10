@@ -555,3 +555,79 @@ fn a_halt_diff_holds_no_color_code_whatever_the_color_settings_say() {
         );
     }
 }
+
+/// [`conflicting_repo`] with a diff driver whose textconv program fails, and a
+/// committed `.gitattributes` on [`OURS`] that selects that driver for each
+/// `.txt` file.
+///
+/// `diff.hostile.textconv=false` names the program `false`, which exits 1.
+/// Git runs the textconv program of a driver on each side of a diff of a file
+/// that selects the driver. The attributes file is on the branch the merge
+/// replay stands on, so it is in the working tree of the scratch worktree.
+/// [`THEIRS`] does not touch it, so it merges clean, and the halt names
+/// `shared.txt` alone.
+fn textconv_repo() -> TestRepo {
+    /// The name of the diff driver that the attributes file selects.
+    const DRIVER: &str = "hostile";
+
+    let repo = conflicting_repo_with(&format!("diff.{DRIVER}.textconv"), "false");
+    repo.checkout(OURS);
+    repo.commit_file(
+        ".gitattributes",
+        &format!("*.txt diff={DRIVER}\n"),
+        "select a diff driver whose textconv program fails",
+    );
+    repo.checkout(FIXTURE_BRANCH);
+    repo
+}
+
+/// A halt diff is not lost to a textconv program that fails.
+///
+/// A `.gitattributes` entry can select a diff driver, and
+/// `diff.<driver>.textconv` names a program that git runs on each side of the
+/// diff before it compares them. When the program fails, `git diff` stops
+/// with `fatal: unable to read files to diff`. The capture then holds that
+/// error in place of a diff, and the reader gets no diff for a halt that git
+/// can show. The capture must also never run a program from the configuration
+/// of the developer.
+///
+/// The count must not depend on the diff. So the `Conflicts` of the merge that
+/// captures must equal the `Conflicts` that the plain entrance gives on a
+/// fresh copy of the fixture.
+#[test]
+fn a_halt_diff_is_not_lost_to_a_textconv_program_that_fails() {
+    /// What git says when a textconv program fails, under `LC_ALL=C`.
+    const UNREADABLE: &str = "unable to read files to diff";
+
+    let repo = textconv_repo();
+
+    let plain = plain_diff_at_a_real_halt(&repo, &["--diff-filter=U"]);
+    let refusal = String::from_utf8_lossy(&plain.stderr);
+    assert!(
+        !plain.status.success() && refusal.contains(UNREADABLE),
+        "a textconv program that fails does not stop plain `git diff` with `{UNREADABLE}`, so \
+         this test could only pass vacuously: exit {:?}, {refusal}",
+        plain.status.code()
+    );
+
+    let (conflicts, halt) = merge_with_halt_diff(&repo);
+    let diff = halt.diff().unwrap_or_else(|message| {
+        panic!("a textconv program that fails left the halt diff with no diff: {message}")
+    });
+    assert!(
+        diff_lines(&halt).iter().any(|line| line == OPENING_MARKER),
+        "the halt diff has to show the region the merge conflicted in, from its \
+         `{OPENING_MARKER}` line: {}",
+        String::from_utf8_lossy(diff)
+    );
+
+    let plain_count = textconv_repo()
+        .scratch(OURS)
+        .replay_merge(THEIRS)
+        .expect("replay the same merge through the plain entrance");
+    assert_eq!(
+        conflicts, plain_count,
+        "the capture changed a count: the merge that captures and the plain merge have to \
+         measure one fixture the same way"
+    );
+}
