@@ -1721,6 +1721,7 @@ fn write_iterm2<W: Write>(
 mod tests {
     use super::*;
     use crate::detect::TerminalType;
+    use image::codecs::jpeg::JpegDecoder;
     use image::metadata::Orientation;
     use image::ImageDecoder;
 
@@ -2338,6 +2339,110 @@ mod tests {
         image::load_from_memory(&file)
             .expect("the writer wrote a whole image file")
             .to_rgba8()
+    }
+
+    /// The bytes of `image` as a JPEG file that states an EXIF orientation.
+    ///
+    /// No encoder in this tree writes an EXIF segment, so no encoder here
+    /// makes this fixture. This helper writes a plain JPEG and puts an APP1
+    /// segment straight after the start-of-image marker. The segments of a
+    /// JPEG file stand behind that marker in any order, and a reader that
+    /// walks them finds this one.
+    ///
+    /// The segment is the marker `FF E1`, a two-byte length that counts itself
+    /// and every byte behind it, the six bytes `Exif` and two zeros, and then
+    /// a TIFF block. The block is a header of the byte order `MM`, the number
+    /// 42 and the offset of the first directory, and then that directory: a
+    /// count of one entry, and one entry of twelve bytes. The entry names the
+    /// tag, the type SHORT, a count of one value, and the value itself in the
+    /// first two bytes of a field of four. A four-byte zero behind the
+    /// directory says that no second directory follows. The byte order `MM`
+    /// makes every number of the block big-endian.
+    ///
+    /// The value is the EXIF orientation 6, which a reader draws as a turn of
+    /// 90 degrees clockwise. The helper reads the tag back out of the file it
+    /// built, because a fixture that carries no readable tag measures nothing.
+    ///
+    /// # Arguments
+    /// * `image` - The picture that the file holds.
+    ///
+    /// # Returns
+    /// The bytes of a JPEG file that states a turn of 90 degrees.
+    fn jpeg_file_with_an_orientation_of(image: &DynamicImage) -> Vec<u8> {
+        /// The marker of an APP1 segment, which is the segment that carries
+        /// EXIF.
+        const APP1_MARKER: &[u8] = &[0xff, 0xe1];
+        /// The bytes that name the content of the segment to a reader.
+        const EXIF_HEADER: &[u8] = b"Exif\0\0";
+        /// The bytes of the length field, which counts itself.
+        const LENGTH_FIELD: usize = 2;
+        /// The byte order of the TIFF block. `MM` is big-endian.
+        const BIG_ENDIAN: &[u8] = b"MM";
+        /// The number that stands behind the byte order of a TIFF block.
+        const TIFF_MAGIC: u16 = 42;
+        /// The offset of the first directory, counted from the first byte of
+        /// the block. The header holds eight bytes, so the directory starts
+        /// directly behind it.
+        const FIRST_DIRECTORY: u32 = 8;
+        /// The entries that the directory holds.
+        const ENTRIES: u16 = 1;
+        /// The tag that names the orientation of the picture.
+        const ORIENTATION_TAG: u16 = 0x0112;
+        /// The type SHORT, which is one unsigned number of two bytes.
+        const SHORT_TYPE: u16 = 3;
+        /// The values that the entry holds.
+        const ONE_VALUE: u32 = 1;
+        /// The EXIF orientation of a picture that a reader turns 90 degrees
+        /// clockwise.
+        const ROTATE_90: u16 = 6;
+        /// The bytes that fill the value field behind a SHORT. The field holds
+        /// four bytes, and a value of two bytes stands in the first two.
+        const VALUE_PADDING: &[u8] = &[0, 0];
+        /// The offset of the next directory. Zero says that no directory
+        /// follows.
+        const NO_SECOND_DIRECTORY: u32 = 0;
+
+        let plain = source_file_of(Iterm2Payload::Jpeg(JpegQuality::HIGHEST), image);
+
+        assert!(
+            plain.starts_with(JPEG_SIGNATURE),
+            "the JPEG encoder must write the start-of-image marker, but the file starts with {:?}",
+            &plain[..JPEG_SIGNATURE.len().min(plain.len())]
+        );
+
+        let mut block = Vec::new();
+        block.extend_from_slice(BIG_ENDIAN);
+        block.extend_from_slice(&TIFF_MAGIC.to_be_bytes());
+        block.extend_from_slice(&FIRST_DIRECTORY.to_be_bytes());
+        block.extend_from_slice(&ENTRIES.to_be_bytes());
+        block.extend_from_slice(&ORIENTATION_TAG.to_be_bytes());
+        block.extend_from_slice(&SHORT_TYPE.to_be_bytes());
+        block.extend_from_slice(&ONE_VALUE.to_be_bytes());
+        block.extend_from_slice(&ROTATE_90.to_be_bytes());
+        block.extend_from_slice(VALUE_PADDING);
+        block.extend_from_slice(&NO_SECOND_DIRECTORY.to_be_bytes());
+
+        let length = u16::try_from(LENGTH_FIELD + EXIF_HEADER.len() + block.len())
+            .expect("the segment of this fixture holds few bytes");
+
+        let mut file = plain[..JPEG_SIGNATURE.len()].to_vec();
+        file.extend_from_slice(APP1_MARKER);
+        file.extend_from_slice(&length.to_be_bytes());
+        file.extend_from_slice(EXIF_HEADER);
+        file.extend_from_slice(&block);
+        file.extend_from_slice(&plain[JPEG_SIGNATURE.len()..]);
+
+        let orientation = JpegDecoder::new(io::Cursor::new(&file))
+            .expect("the fixture holds a whole JPEG file")
+            .orientation()
+            .expect("the fixture holds a whole JPEG file");
+
+        assert!(
+            orientation == Orientation::Rotate90,
+            "the fixture must state a turn of 90 degrees, or it measures nothing, but the decoder reports {orientation:?}"
+        );
+
+        file
     }
 
     /// The orientation that the file of a payload states.
@@ -3091,6 +3196,17 @@ mod tests {
             SamePictureCase {
                 name: "a BMP, which is a format this writer does not make",
                 source: bmp_file_of(&photograph_fixture()),
+                travel: TravelOfTheFile::ThroughTheEncoder,
+            },
+            // A JPEG whose EXIF segment states a turn of 90 degrees. The
+            // terminal reads that tag and turns the picture, and the decoder
+            // of this crate reads the pixels and leaves the tag where it
+            // stands. So the file as it stands and an encode of the decode
+            // draw two pictures, and this file reaches the terminal through
+            // the encoder.
+            SamePictureCase {
+                name: "a JPEG that states an EXIF orientation",
+                source: jpeg_file_with_an_orientation_of(&photograph_fixture()),
                 travel: TravelOfTheFile::ThroughTheEncoder,
             },
         ]
