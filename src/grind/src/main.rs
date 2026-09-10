@@ -151,10 +151,11 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let scratch = repo.scratch("HEAD")?;
     // `--diff` asks for the capture. Without it, the replay captures nothing
     // and costs what it cost before the flag existed.
-    let conflicts = if args.diff {
-        scratch.replay_rebase_with_diffs(&branch)?.0
+    let (conflicts, diffs) = if args.diff {
+        let (conflicts, diffs) = scratch.replay_rebase_with_diffs(&branch)?;
+        (conflicts, Some(diffs))
     } else {
-        scratch.replay_rebase(&branch)?
+        (scratch.replay_rebase(&branch)?, None)
     };
 
     // There is a verdict now, so the caveat has something to qualify.
@@ -184,6 +185,18 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // against a pseudo-terminal of a size it chose.
     console
         .verdict(&report.render_within(&conflicts, usize::from(TerminalWidth::get_or_default())));
+
+    // The diff comes after the verdict that it explains, on the same stream.
+    // `render_diffs` gives nothing for a replay that did not halt, so a clean
+    // run prints the same bytes with the flag and without it. A run that fails
+    // never gets here, because the replay returned its error above. A diff with
+    // no answer is no part of an answer.
+    //
+    // Through `Console::verdict` like the verdict, so `-q` reaches it and a
+    // failed write costs the words and never the exit code.
+    if let Some(text) = diffs.and_then(|diffs| report.render_diffs(&diffs)) {
+        console.verdict(&text);
+    }
 
     Ok(conflicts)
 }
