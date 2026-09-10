@@ -11,9 +11,9 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use gitscratch::testing::{
-    default_branch_choice_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
-    multi_byte_names_repo, nested_conflict_repo, not_a_repository, unrelated_histories_repo,
-    TestRepo, CHOICE_HEAD_BRANCH,
+    conflicting_repo, default_branch_choice_repo, equal_hunks_unequal_stops_repo,
+    independent_branches_repo, multi_byte_names_repo, nested_conflict_repo, not_a_repository,
+    unrelated_histories_repo, TestRepo, CHOICE_HEAD_BRANCH,
 };
 use gitscratch::{NoInheritedGitEnvironment, DEFAULT_BRANCHES};
 use unicode_width::UnicodeWidthStr;
@@ -106,6 +106,12 @@ fn grime_command(repo: &Path, args: &[&str]) -> Command {
     // what spares the next reader who adds one that does.
     command.envs(PINNED_LOCALE);
     command.env(WIDTH_VARIABLE, STATED_WIDTH);
+    // The color of the diff is the choice of the test that reads it, and never
+    // the choice of the developer's shell. A test that needs one of these
+    // variables sets it on the command this function gives back.
+    for name in COLOR_VARIABLES {
+        command.env_remove(name);
+    }
 
     command
 }
@@ -175,6 +181,62 @@ fn every_run_states_the_width_of_its_terminal_so_no_golden_reads_the_window() {
          a width the test never chose, and every golden here then holds in a \
          wide window and breaks in a narrow one"
     );
+}
+
+/// The variables through which the environment decides whether `grime` paints
+/// its diff, and which every run in this file takes away.
+///
+/// `colored` reads all three. `NO_COLOR` turns color off, `CLICOLOR=0` turns it
+/// off, and `CLICOLOR_FORCE` turns it on and wins over `NO_COLOR`. A developer
+/// who exports one of them gives it to every child of `cargo test`, and a test
+/// of the paint then fails on that machine only. So the builder takes all three
+/// away, and a test that needs one sets it on its own run.
+///
+/// A constant, because the test below reads each name back off the built
+/// command.
+const COLOR_VARIABLES: [&str; 3] = [NO_COLOR, CLICOLOR, CLICOLOR_FORCE];
+
+/// The variable that turns color off, whatever value it holds.
+const NO_COLOR: &str = "NO_COLOR";
+
+/// The variable that turns color off when it holds `0`.
+const CLICOLOR: &str = "CLICOLOR";
+
+/// The variable that turns color on when it holds a value other than `0`, also
+/// into a pipe, and whatever `NO_COLOR` says.
+const CLICOLOR_FORCE: &str = "CLICOLOR_FORCE";
+
+/// Whether `command` takes `name` away from the environment that the child
+/// inherits.
+///
+/// [`Command::get_envs`] reports a removed variable as a `None` value against
+/// its name, and it reports nothing for a variable the caller never mentioned.
+/// [`environment_value`] gives `None` for both, so it cannot see a removal.
+fn removes_environment(command: &Command, name: &str) -> bool {
+    command
+        .get_envs()
+        .any(|(key, value)| key == OsStr::new(name) && value.is_none())
+}
+
+/// Every run in this file takes the color variables away, and the removal is
+/// asserted here rather than left to the tests of the paint.
+///
+/// Read off the built command for the reason the locale pin is: the machine
+/// this suite is written on cannot show the failure. It exports none of the
+/// three variables. The failure is live on the machine of a developer who
+/// exports `NO_COLOR`, which is exactly the shape a test has to pin rather than
+/// reproduce.
+#[test]
+fn every_run_takes_the_color_variables_away_so_no_test_reads_the_developers_choice() {
+    let command = grime_command(Path::new("."), &["main"]);
+
+    for name in COLOR_VARIABLES {
+        assert!(
+            removes_environment(&command, name),
+            "a run that takes {name} from the developer's shell paints its diff, \
+             or does not, by a choice that the test never made"
+        );
+    }
 }
 
 /// Everything a test wants to look at, gathered once so an assertion failure
@@ -1336,6 +1398,616 @@ fn a_run_from_a_subdirectory_names_conflicts_from_the_repository_root() {
     );
 }
 
+/// The flag that asks for the diff of the halt after the breakdown.
+///
+/// A constant, because every test of the diff names it.
+const DIFF_FLAG: &str = "--diff";
+
+/// `--diff` adds the diff of the halt, and a clean merge has no halt. So a
+/// clean run prints the same bytes with the flag and without it, and it answers
+/// with the same code.
+///
+/// The raw bytes are compared, not the trimmed text, because an empty line
+/// after the verdict is the one thing a wrong implementation adds here. The run
+/// without the flag is also held to the clean verdict. Without that control,
+/// two runs that both print nothing agree and prove nothing.
+#[test]
+fn diff_on_a_clean_merge_prints_the_same_bytes_as_a_run_without_it() {
+    let repo = independent_branches_repo();
+
+    let plain = run_raw(&repo, "alpha", &["beta"]);
+    let with_diff = run_raw(&repo, "alpha", &[DIFF_FLAG, "beta"]);
+    let (code, stdout, stderr) = streams(&with_diff);
+
+    assert_eq!(
+        code,
+        Some(CLEAN),
+        "--diff adds words and changes no answer, and this merge is clean\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&plain.stdout),
+        "grime: clean - merging beta into HEAD hit no conflicts\n",
+        "the control: the run without --diff gives the clean verdict"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&with_diff.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "a clean merge has no halt, so --diff has no diff to add\nstderr:\n{stderr}"
+    );
+}
+
+/// The short id of `revision` in `repo`, at the length that a replay writes.
+///
+/// The runner of `gitscratch` pins `core.abbrev=auto`, so every id that a
+/// replay prints has git's default length. The fixture's own git does not
+/// carry that pin, and a developer whose global config sets `core.abbrev` gets
+/// ids of another length from it. So this call states the pin too, and the
+/// expected text agrees with the run on every machine.
+fn short_id(repo: &TestRepo, revision: &str) -> String {
+    repo.git(&["-c", "core.abbrev=auto", "rev-parse", "--short", revision])
+}
+
+/// Stand on `left` in [`conflicting_repo`] and merge `right`. Both branches
+/// rewrite line 15 of `shared.txt`, so the merge halts once, on one region of
+/// one file.
+///
+/// `--diff` prints the verdict exactly as a run without the flag prints it,
+/// then an empty line, then the diff that `git diff` shows at the halt of a
+/// real merge. A merge halts once, so the report shows no stop heading, and
+/// the diff follows the empty line directly. The closing marker names the
+/// other side by the branch name that the caller gave.
+///
+/// The golden is the whole of stdout, byte for byte, with `NO_COLOR` set so
+/// the text is plain. Each blob id in it comes from the fixture's own git
+/// through [`short_id`], so the golden follows the fixture if its content
+/// changes. The all-zero id is the result, which is not in the object store
+/// yet. The text after the second `@@@` of the hunk header is the function
+/// context that git finds for the hunk.
+///
+/// The exit code is [`CONFLICTS`], the code of the same run without `--diff`.
+/// The diff adds words and changes no answer.
+#[test]
+fn diff_on_a_conflict_prints_the_verdict_then_the_diff_of_the_halt() {
+    let repo = conflicting_repo();
+    repo.checkout("left");
+
+    let ours = short_id(&repo, "left:shared.txt");
+    let theirs = short_id(&repo, "right:shared.txt");
+
+    let output = grime_command(repo.path(), &[DIFF_FLAG, "right"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grime");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the merge conflicts, so the answer is {CONFLICTS} with the diff as \
+         without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "grime: conflicts - merging right into HEAD
+       1 hunk across 1 file
+
+  shared.txt    1 hunk
+
+diff --cc shared.txt
+index {ours},{theirs}..0000000
+--- a/shared.txt
++++ b/shared.txt
+@@@ -12,7 -12,7 +12,11 @@@ line1
+  line12
+  line13
+  line14
+++<<<<<<< HEAD
+ +left-edit
+++=======
++ right-edit
+++>>>>>>> right
+  line16
+  line17
+  line18
+"
+        ),
+        "stderr:\n{stderr}"
+    );
+}
+
+/// A run that cannot answer prints no diff. The diff is part of the answer,
+/// and a run that fails has no answer.
+///
+/// The fixture conflicts, so a merge of a real branch has a diff to print.
+/// This run names a branch that does not resolve, and the pre-flight refuses
+/// it before any merge. The refusal must be `grime`'s own and not clap's,
+/// because clap refuses an unknown flag with the same exit code and the same
+/// empty stdout.
+///
+/// Stdout is compared raw, so an empty line fails the test too.
+#[test]
+fn diff_on_a_branch_that_does_not_resolve_prints_no_diff() {
+    let repo = conflicting_repo();
+
+    let output = run_raw(&repo, "left", &[DIFF_FLAG, "nonexistent-branch"]);
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a branch that does not resolve is a run that cannot answer, with the \
+         diff as without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not resolve 'nonexistent-branch'"),
+        "the control: the refusal is grime's own, so --diff got past the \
+         parser:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a run with no answer has no diff to print:\n{stdout}"
+    );
+}
+
+/// A merge that git refuses prints no diff. Git refuses to merge two
+/// histories with no commit in common and leaves nothing to resolve, so the
+/// run exits [`ERROR`] with no verdict, and the diff goes with the verdict.
+///
+/// The error carries git's own refusal, which is the control: it shows that
+/// the run got past the pre-flight to the merge itself. Without it, a run that
+/// failed earlier passes this test for the reason the test above already
+/// covers.
+///
+/// Stdout is compared raw, so an empty line fails the test too.
+#[test]
+fn diff_on_a_merge_that_fails_with_nothing_to_measure_prints_no_diff() {
+    let repo = unrelated_histories_repo();
+
+    let output = run_raw(&repo, "main", &[DIFF_FLAG, "unrelated"]);
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a merge that git refuses is a run that cannot answer, with the diff as \
+         without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("refusing to merge unrelated histories"),
+        "the control: git refused the merge itself, so the run got past the \
+         pre-flight:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a run with no answer has no diff to print:\n{stdout}"
+    );
+}
+
+/// A conflict in a file named `日本語.txt`, merged from `right-右` into
+/// `left-左`, comes through the diff intact, in its header and in its body.
+///
+/// Git C-quotes a name outside ASCII unless `core.quotePath` is off. The
+/// runner turns it off, so the header of the file reads
+/// `diff --cc 日本語.txt` and not an octal escape that names no file. The
+/// body holds multi-byte text on each side of each region, and the closing
+/// marker names the multi-byte branch. A renderer that cut a line by byte
+/// index panics on each of them.
+///
+/// The body is read from the header of `日本語.txt` to the end of stdout, and
+/// that file comes last, so no line of the `readme.md` diff counts. The file
+/// conflicts in two regions, so each line of a region appears twice.
+#[test]
+fn diff_carries_a_multi_byte_file_name_and_multi_byte_content_intact() {
+    let repo = multi_byte_names_repo();
+    repo.checkout("left-左");
+
+    let output = grime_command(repo.path(), &[DIFF_FLAG, "right-右"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grime");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert!(
+        !stderr.contains("panicked"),
+        "a multi-byte name must not crash the binary:\n{stderr}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let (_, body) = stdout
+        .split_once("\ndiff --cc 日本語.txt\n")
+        .unwrap_or_else(|| panic!("no diff of 日本語.txt, with its name intact, in:\n{stdout}"));
+    for header in ["--- a/日本語.txt", "+++ b/日本語.txt"] {
+        assert!(
+            body.lines().any(|line| line == header),
+            "the diff of 日本語.txt names the file intact on {header:?}:\n{body}"
+        );
+    }
+    for content in [" +左-edit", "+ 右-edit", "++>>>>>>> right-右"] {
+        assert_eq!(
+            body.lines().filter(|line| *line == content).count(),
+            2,
+            "each of the two regions of 日本語.txt holds {content:?} intact:\n{body}"
+        );
+    }
+}
+
+/// A run from a subdirectory names each file of the diff from the repository
+/// root, and it shows the file that conflicted outside that subdirectory too.
+///
+/// [`nested_conflict_repo`] conflicts in `shared.txt` at the root and in
+/// `sub/nested/shared.txt`, and the run starts in `sub/nested`. A diff scoped
+/// to the directory of the run leaves the root file out. A diff relative to
+/// that directory names the nested file `shared.txt`, which is the name of the
+/// other file. Either one points the reader at the wrong file.
+///
+/// The whole stdout is also held byte-identical to the run from the root, for
+/// the reason the test of the breakdown gives: the same question about the
+/// same repository has one answer, whichever of its directories asks it.
+#[test]
+fn diff_from_a_subdirectory_names_each_file_from_the_repository_root() {
+    let repo = nested_conflict_repo();
+    repo.checkout("left");
+    let nested = repo.path().join("sub").join("nested");
+
+    let from_nested = grime_command(&nested, &[DIFF_FLAG, "right"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grime");
+    let (code, stdout, stderr) = streams(&from_nested);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("diff --cc "))
+            .collect::<Vec<_>>(),
+        vec!["diff --cc shared.txt", "diff --cc sub/nested/shared.txt"],
+        "the diff names both files by their whole path from the repository \
+         root, the one outside the directory of the run included\nstderr:\n{stderr}"
+    );
+
+    let from_root = grime_command(repo.path(), &[DIFF_FLAG, "right"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grime");
+
+    assert_eq!(
+        (from_nested.status.code(), stdout),
+        (
+            from_root.status.code(),
+            String::from_utf8_lossy(&from_root.stdout)
+                .trim_end()
+                .to_string()
+        ),
+        "the same question about the same repository has one answer, whichever \
+         of its directories asks it"
+    );
+}
+
+/// `--diff` asks for more words and `-q` asks for none. The two contradict
+/// each other, so clap refuses the pair before `grime` starts, in both
+/// spellings of `-q`.
+///
+/// A tool that obeys one of the two in silence surprises the caller who gave
+/// the other. The run is on a fixture that conflicts, so a `grime` that takes
+/// the pair and lets `-q` win answers [`CONFLICTS`] with no word, and one that
+/// lets `--diff` win prints a diff. Each fails here.
+///
+/// The refusal is clap's usage error, on stderr, and it names both flags, so
+/// the caller learns which part of the command line was wrong. The code is
+/// [`ERROR`], the code of every command line that `grime` cannot read.
+#[test]
+fn quiet_with_diff_is_a_usage_error_in_both_spellings_of_quiet() {
+    let repo = conflicting_repo();
+
+    for quiet in ["-q", "--quiet"] {
+        let output = run_raw(&repo, "left", &[quiet, DIFF_FLAG, "right"]);
+        let (code, stdout, stderr) = streams(&output);
+
+        assert_eq!(
+            code,
+            Some(ERROR),
+            "{quiet} with {DIFF_FLAG} is a command line that contradicts itself, \
+             so {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("--quiet") && stderr.contains(DIFF_FLAG),
+            "the usage error names both flags of the pair:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "the refusal belongs on stderr, and there is no verdict and no \
+             diff:\n{stdout}"
+        );
+    }
+}
+
+/// The byte that opens each ANSI escape sequence, and so each color code.
+///
+/// The renderer escapes each control character of the diff before it paints,
+/// so each raw ESC byte in stdout is a code that the painter wrote.
+const ESC: u8 = 0x1b;
+
+/// A `--diff` run of the one halt of [`conflicting_repo`], standing on `left`
+/// and merging `right`, with stdout on a pipe. Each variable in `environment`
+/// is set to its value, or taken away for `None`.
+///
+/// The builder states `COLUMNS` and takes the color variables away. So a run
+/// with nothing in `environment` is the run of a wrapper such as `viddy(1)`: a
+/// pipe, and a stated width.
+fn diff_through_a_pipe(repo: &TestRepo, environment: &[(&str, Option<&str>)]) -> Output {
+    repo.checkout("left");
+
+    let mut command = grime_command(repo.path(), &[DIFF_FLAG, "right"]);
+    for (name, value) in environment {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+
+    command.output().expect("failed to run grime")
+}
+
+/// A wrapper such as `viddy(1)` gives `grime` a pipe and states `COLUMNS`, and
+/// it shows the bytes that it reads on a terminal. So the diff keeps its color
+/// through that pipe.
+///
+/// The paint changes no character: the painted stdout, less its color codes,
+/// is byte-identical to the stdout of the same run with `NO_COLOR`. And only
+/// the diff is painted. The verdict and the breakdown come out with no code in
+/// them, as a run without `--diff` prints them, so no golden of such a run
+/// changes.
+#[test]
+fn diff_through_a_pipe_with_a_stated_width_is_painted() {
+    let repo = conflicting_repo();
+
+    let painted = diff_through_a_pipe(&repo, &[]);
+    let plain = diff_through_a_pipe(&repo, &[(NO_COLOR, Some("1"))]);
+    let painted_text = String::from_utf8_lossy(&painted.stdout);
+    let plain_text = String::from_utf8_lossy(&plain.stdout);
+
+    assert_eq!(
+        painted.status.code(),
+        Some(CONFLICTS),
+        "the paint changes no answer\nstdout:\n{painted_text}\nstderr:\n{}",
+        String::from_utf8_lossy(&painted.stderr)
+    );
+    assert!(
+        painted.stdout.contains(&ESC),
+        "a wrapper shows the bytes on a terminal, so the diff keeps its color \
+         through the pipe that the wrapper gives:\n{painted_text}"
+    );
+    assert_eq!(
+        testcolor::strip_ansi(&painted_text),
+        plain_text,
+        "the paint is codes around the text of each line, and nothing more"
+    );
+
+    let (verdict, _) = plain_text
+        .split_once("\n\ndiff --cc ")
+        .unwrap_or_else(|| panic!("the plain run holds a verdict, then the diff:\n{plain_text}"));
+    assert!(
+        painted_text.starts_with(&format!("{verdict}\n")),
+        "only the diff is painted, and the verdict and the breakdown carry no \
+         code:\n{painted_text}"
+    );
+}
+
+/// `CLICOLOR=0` turns color off, and it turns off the color of a wrapper too.
+///
+/// The rule of a wrapper extends the case in which the user set no variable.
+/// `CLICOLOR=0` is a choice that the user made, so the run holds no ESC byte,
+/// with `COLUMNS` stated and stdout on a pipe. That is the shape that the
+/// override paints when no variable refuses it. `colored` reads `CLICOLOR` as
+/// off exactly when its value is the string `0`.
+#[test]
+fn clicolor_zero_refuses_the_color_of_a_wrapper() {
+    let repo = conflicting_repo();
+
+    let output = diff_through_a_pipe(&repo, &[(CLICOLOR, Some("0"))]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("diff --cc shared.txt"),
+        "the control: the run printed the diff of the halt:\n{stdout}"
+    );
+    assert!(
+        !output.stdout.contains(&ESC),
+        "CLICOLOR=0 turns color off, also on the pipe of a wrapper:\n{stdout}"
+    );
+}
+
+/// `NO_COLOR` turns color off, also on the pipe of a wrapper.
+///
+/// The run states `COLUMNS` and writes to a pipe, which is the shape that the
+/// override paints when no variable refuses it. `NO_COLOR` is a choice that
+/// the user made, so the run holds no ESC byte.
+#[test]
+fn no_color_refuses_the_color_of_a_wrapper() {
+    let repo = conflicting_repo();
+
+    let output = diff_through_a_pipe(&repo, &[(NO_COLOR, Some("1"))]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("diff --cc shared.txt"),
+        "the control: the run printed the diff of the halt:\n{stdout}"
+    );
+    assert!(
+        !output.stdout.contains(&ESC),
+        "NO_COLOR turns color off, also on the pipe of a wrapper:\n{stdout}"
+    );
+}
+
+/// A pipe with no `COLUMNS` goes to a file or to another program, and `grime`
+/// does not paint into it.
+///
+/// The rule of a wrapper needs the width that a wrapper states. With no width
+/// stated and no color variable set, `colored` sees a pipe and writes no code,
+/// and nothing overrides it.
+#[test]
+fn diff_through_a_pipe_with_no_stated_width_is_plain() {
+    let repo = conflicting_repo();
+
+    let output = diff_through_a_pipe(&repo, &[(WIDTH_VARIABLE, None)]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("diff --cc shared.txt"),
+        "the control: the run printed the diff of the halt:\n{stdout}"
+    );
+    assert!(
+        !output.stdout.contains(&ESC),
+        "a pipe with no stated width is no wrapper, so the diff is plain:\n{stdout}"
+    );
+}
+
+/// A `COLUMNS` that holds no width states none. So a pipe with such a value is
+/// no wrapper, and the diff through it is plain.
+///
+/// `COLUMNS` states a width when it holds a number above zero that fits in a
+/// `u16`. `termbar::TerminalWidth` lays the breakdown out by that rule, and
+/// the color obeys the same rule. With an empty value, or with a value that is
+/// no number, the breakdown takes the width of the terminal, as with no
+/// `COLUMNS` at all. A run that paints for such a value reads a width in the
+/// variable for the color and no width in it for the layout. That is two
+/// answers to one question.
+#[test]
+fn diff_through_a_pipe_with_a_columns_that_states_no_width_is_plain() {
+    let repo = conflicting_repo();
+
+    for value in ["", "wide"] {
+        let output = diff_through_a_pipe(&repo, &[(WIDTH_VARIABLE, Some(value))]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert_eq!(
+            output.status.code(),
+            Some(CONFLICTS),
+            "{WIDTH_VARIABLE}={value:?}\nstdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("diff --cc shared.txt"),
+            "the control: with {WIDTH_VARIABLE}={value:?}, the run printed the diff \
+             of the halt:\n{stdout}"
+        );
+        assert!(
+            !output.stdout.contains(&ESC),
+            "{WIDTH_VARIABLE}={value:?} states no width, so the pipe is no wrapper \
+             and the diff is plain:\n{stdout}"
+        );
+    }
+}
+
+/// `CLICOLOR_FORCE=1` paints the diff into any pipe. That is the rule of
+/// `colored` itself, and the pager recipe of the README rests on it:
+/// `CLICOLOR_FORCE=1 grime --diff main | less -R`.
+///
+/// The run states no width, so the rule of a wrapper does not fire, and the
+/// color comes from `colored` alone. A `grime` that gives the answer of
+/// `should_force_colors_here` to `set_override` directly fails here. That
+/// answer is false for this run, and `set_override(false)` wins over the
+/// variable.
+#[test]
+fn clicolor_force_paints_a_pipe_with_no_stated_width() {
+    let repo = conflicting_repo();
+
+    let output = diff_through_a_pipe(
+        &repo,
+        &[(WIDTH_VARIABLE, None), (CLICOLOR_FORCE, Some("1"))],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.contains(&ESC),
+        "CLICOLOR_FORCE=1 turns color on, also into a pipe:\n{stdout}"
+    );
+}
+
+/// Stdout on a terminal, with no color variable set, gets the diff in color.
+///
+/// That is the color that `colored` gives a terminal by itself. The rule of a
+/// wrapper does not fire, because stdout is a terminal, so
+/// `should_force_colors_here` answers false. A `grime` that gives that answer
+/// to `set_override` directly turns the color of a terminal off, and it fails
+/// here. No pipe is a terminal, so no other test of the color can show that
+/// failure.
+///
+/// The terminal is a pseudo-terminal from [`Pty`], which is also the
+/// controlling terminal of the run. It gives back each byte as the run wrote
+/// it, so the painted stdout, less its codes, is byte-identical to the stdout
+/// of the same fixture through a pipe with `NO_COLOR`. The builder still
+/// states `COLUMNS`, and that width wins over the width of the terminal, so
+/// both runs lay the breakdown out alike.
+#[cfg(unix)]
+#[test]
+fn diff_on_a_terminal_is_painted_with_no_color_variable_set() {
+    use gitscratch::testing::pty::Pty;
+
+    /// The width of the terminal. Any width serves, because the width that
+    /// the builder states wins.
+    const TERMINAL_COLUMNS: u16 = 80;
+
+    let repo = conflicting_repo();
+    let plain = diff_through_a_pipe(&repo, &[(NO_COLOR, Some("1"))]);
+
+    let output = Pty::open(TERMINAL_COLUMNS)
+        .run_with_stdout_on_terminal(grime_command(repo.path(), &[DIFF_FLAG, "right"]));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.contains(&ESC),
+        "a terminal gets the color that colored gives it by itself:\n{stdout}"
+    );
+    assert_eq!(
+        testcolor::strip_ansi(&stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "on a terminal as through a pipe, the paint is codes around the text of \
+         each line, and nothing more"
+    );
+}
+
 /// Which of `grime`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {
@@ -1463,6 +2135,102 @@ fn a_note_or_a_failure_nobody_is_reading_costs_the_words_and_not_the_answer() {
         Some(ERROR),
         "a failure it could not print is still a failure, and still \
          {ERROR}\nstdout:\n{error_stdout}"
+    );
+}
+
+/// `--diff` puts a second write on stdout, after the verdict, and that write
+/// meets the same closed pipe. It must cost the words and never the answer.
+///
+/// The merge conflicts, so the run has a diff after the verdict to lose to the
+/// broken pipe.
+#[test]
+fn a_diff_nobody_is_reading_costs_the_words_and_not_the_answer() {
+    let repo = conflicting_repo();
+    repo.checkout("left");
+
+    let (code, stderr) =
+        grime_into_an_unread_pipe(repo.path(), &[DIFF_FLAG, "right"], Unread::Stdout);
+
+    assert_ne!(
+        code,
+        Some(PANICKED),
+        "a broken pipe must not turn the answer into a panic\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the merge conflicted, so the answer is {CONFLICTS} whether or not \
+         anyone read the diff\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "a broken pipe is not a bug in grime and must not be reported as \
+         one:\n{stderr}"
+    );
+}
+
+/// The closed stderr of the test above that, run again with `--diff`, on all
+/// three paths. The tree is dirty, so each path has a note to lose.
+///
+/// The conflict path is the one with the most on it. The note fails, and the
+/// run must carry on to print the verdict and the diff on stdout, byte for byte
+/// as the same run prints them when stderr is open.
+#[test]
+fn with_diff_a_note_or_a_failure_nobody_is_reading_costs_the_words_and_not_the_answer() {
+    let clean_repo = independent_branches_repo();
+    clean_repo.checkout("alpha");
+    clean_repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (clean_code, clean_stdout) =
+        grime_into_an_unread_pipe(clean_repo.path(), &[DIFF_FLAG, "beta"], Unread::Stderr);
+
+    assert_eq!(
+        clean_code,
+        Some(CLEAN),
+        "a note nobody read must not move the verdict off {CLEAN}\nstdout:\n{clean_stdout}"
+    );
+    assert_eq!(
+        clean_stdout, "grime: clean - merging beta into HEAD hit no conflicts",
+        "the run has to carry on past the note it could not print"
+    );
+
+    let (error_code, error_stdout) = grime_into_an_unread_pipe(
+        clean_repo.path(),
+        &[DIFF_FLAG, "nonexistent-branch"],
+        Unread::Stderr,
+    );
+
+    assert_eq!(
+        error_code,
+        Some(ERROR),
+        "a failure it could not print is still a failure, and still \
+         {ERROR}\nstdout:\n{error_stdout}"
+    );
+
+    let conflict_repo = conflicting_repo();
+    conflict_repo.checkout("left");
+    conflict_repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (conflict_code, conflict_stdout) =
+        grime_into_an_unread_pipe(conflict_repo.path(), &[DIFF_FLAG, "right"], Unread::Stderr);
+    let (_, heard_stdout, heard_stderr) =
+        streams(&grime(conflict_repo.path(), &[DIFF_FLAG, "right"]));
+
+    assert_eq!(
+        conflict_code,
+        Some(CONFLICTS),
+        "a note nobody read must not move the verdict off {CONFLICTS}\n\
+         stdout:\n{conflict_stdout}"
+    );
+    assert!(
+        heard_stderr.contains("note:") && heard_stdout.contains("diff --cc shared.txt"),
+        "the control: with stderr open, the same run prints a note and the diff \
+         of the halt\nstdout:\n{heard_stdout}\nstderr:\n{heard_stderr}"
+    );
+    assert_eq!(
+        conflict_stdout, heard_stdout,
+        "the run has to carry on past the note it could not print, to the \
+         verdict and the diff"
     );
 }
 

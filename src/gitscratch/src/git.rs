@@ -274,8 +274,9 @@ impl Git {
     /// Private because raw output is a footgun in the one way this crate cares
     /// about: everything public either trims it deliberately ([`Git::try_run`],
     /// [`Git::run`]) or deliberately does not ([`Git::nul_separated`],
-    /// [`Git::nul_separated_paths`], [`Git::path`]), and which of those a caller
-    /// wants is not a choice worth re-making per call site.
+    /// [`Git::nul_separated_paths`], [`Git::path`], [`Git::verbatim`]), and
+    /// which of those a caller wants is not a choice worth re-making per call
+    /// site.
     fn output(&self, subcommand: &str, args: &[&str]) -> Result<Output> {
         self.command(subcommand, args)
             .output()
@@ -517,6 +518,38 @@ impl Git {
         Ok(path_from_git(printed))
     }
 
+    /// Run git and return its stdout as the bytes git wrote: not trimmed and
+    /// not decoded.
+    ///
+    /// **The reader for text that goes to a person verbatim.** A halt diff is
+    /// such text, and each other reader changes it. [`Git::run`] and
+    /// [`Git::try_run`] trim, so a diff loses the newline at its end and the
+    /// spaces at the end of its last line. They also decode lossily, so a byte
+    /// of file content outside UTF-8 becomes U+FFFD before the caller decides
+    /// how to show it. [`Git::nul_separated`] and the two path-list readers ask
+    /// git for `-z` and split its answer into fields, and [`Git::path`] removes
+    /// one newline. A diff has none of those shapes. Its bytes are the answer,
+    /// and the caller that prints them decodes them at print time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned or exited non-zero. The
+    /// error carries git's stderr, because git says there why it gave no
+    /// answer.
+    pub fn verbatim(&self, subcommand: &str, args: &[&str]) -> Result<Vec<u8>> {
+        let output = self.output(subcommand, args)?;
+
+        anyhow::ensure!(
+            output.status.success(),
+            "git {} failed:\n{}\n{}",
+            invocation(subcommand, args),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        Ok(output.stdout)
+    }
+
     /// Resolve a revision to a full commit id.
     ///
     /// **Both flags are the question, not decoration.** A bare
@@ -704,6 +737,33 @@ impl Git {
             // merge replay. Read out of a real merge rather than from git's
             // documentation.
             "merge.verifySignatures=false",
+            // A halt diff carries abbreviated object ids on its `index` line,
+            // and `core.abbrev` sets how many hex digits git prints for one.
+            // Under `core.abbrev=12`, git 2.55 printed that line of a conflict
+            // diff with ids of 12 digits in place of 7. The flag `--abbrev=7`
+            // on the diff call does not reach that line of a combined diff,
+            // and only `-c core.abbrev=auto` gives it back. A `-c` pair cannot
+            // follow the subcommand, so this pin is here and not with the
+            // other pins of the halt diff in `DIFF_AT_HALT`. `auto` is what
+            // git uses when nothing sets the key, so the name of a stopped
+            // commit also gets git's default length. The counter reads the
+            // shape of a marker and not its label, so no count changes. Pinned
+            // by
+            // `a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says`
+            // in `tests/diffs.rs`.
+            "core.abbrev=auto",
+            // `log.showSignature=true` makes `git log` check the signature of
+            // a signed commit and write the result on stdout, above the line
+            // of the format. For an SSH-signed stopped commit, git 2.55 wrote
+            // `Good "git" signature for ...` above the name that
+            // `name_stopped_commit` returns, so the stop heading had two lines.
+            // The pin is here and not on that one call, so it covers each
+            // `log` call. A check of a signature also runs the program that
+            // `gpg.ssh.program` or `gpg.program` names, and a replay runs no
+            // program from the configuration of the developer. Pinned by
+            // `a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says`
+            // in `tests/diffs.rs`.
+            "log.showSignature=false",
         ]
         .iter()
         .map(|setting| (*setting).to_string())

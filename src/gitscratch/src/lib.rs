@@ -43,6 +43,13 @@
 //! the operation at all - "refusing to merge unrelated histories" is neither a
 //! clean verdict nor a conflicted one.
 //!
+//! Each operation also has an entrance that captures the halt diff of each
+//! halt: the text `git diff` shows there in a real rebase or merge.
+//! [`Scratch::replay_rebase_with_diffs`] and
+//! [`Scratch::replay_merge_with_diffs`] return the halt diffs in a
+//! [`HaltDiffs`] beside the [`Conflicts`], and the [`diffs`] module says why
+//! they stay out of that type.
+//!
 //! The git runner is no part of that door. It is crate-private, and both halves
 //! of that are needed: nothing outside this crate can *build* a runner, because
 //! `Git::new` is crate-private, and nothing outside is *handed* one,
@@ -96,6 +103,7 @@
 //! shares one copy instead of each compiling its own.
 
 pub mod console;
+pub mod diffs;
 
 /// The git runner, and the two environment guards that are safe to share.
 ///
@@ -127,6 +135,7 @@ pub use git::{shed_inherited_git_environment, NoInheritedGitEnvironment};
 pub use git::Git;
 
 pub use console::Console;
+pub use diffs::{HaltDiff, HaltDiffs};
 pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
 pub use repo::{Repo, DEFAULT_BRANCHES};
 pub use report::{Report, UnwordedReport};

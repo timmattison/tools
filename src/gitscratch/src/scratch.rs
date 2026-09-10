@@ -51,6 +51,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
+use crate::diffs::{HaltDiff, HaltDiffs};
 use crate::git::Git;
 use crate::metrics::{Files, Hunks, Stops};
 
@@ -80,6 +81,23 @@ use crate::metrics::{Files, Hunks, Stops};
 /// arm alone leaves the next arm uncounted. `MUTATIONS.md` records this as an
 /// unfalsifiable guard rather than claiming one nobody has watched fail.
 const MAX_RESOLUTION_ROUNDS: usize = 1_000;
+
+/// Whether a replay captures a halt diff at each halt.
+///
+/// A parameter of the one rebase loop and of the one merge, not a second copy
+/// of either. A second copy is a second place for the count to go wrong, and
+/// the replay that captures must count what the plain replay counts.
+///
+/// [`Capture::Nothing`] adds no git call. `grist` replays each step of each
+/// ordering through the plain entrance and prints no diff, so the capture must
+/// cost it nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Capture {
+    /// Capture no halt diff. The plain entrances pass this.
+    Nothing,
+    /// Capture the halt diff at each halt.
+    Diffs,
+}
 
 /// A detached scratch worktree that removes itself.
 ///
@@ -340,7 +358,45 @@ impl Scratch {
     /// or if the rebase is still unfinished once `MAX_RESOLUTION_ROUNDS` rounds
     /// have been spent trying to advance it.
     pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
-        self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS)
+        self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS, Capture::Nothing)
+            .map(|(conflicts, _)| conflicts)
+    }
+
+    /// [`Scratch::replay_rebase`], and the halt diff of each stop beside the
+    /// counts.
+    ///
+    /// The halt diff of a stop is the text `git diff` shows at that stop in a
+    /// real rebase, and it carries the name of the commit the rebase stopped
+    /// on. The [`diffs`](crate::diffs) module says why the halt diffs come back
+    /// beside the [`Conflicts`] and not inside it.
+    ///
+    /// The replay is the one loop [`Scratch::replay_rebase`] runs, with the
+    /// capture turned on, so the two entrances count the same stops the same
+    /// way. A diff that git cannot give does not stop the replay: the halt
+    /// diff holds the error in its place, and the counts stay the same.
+    ///
+    /// ```no_run
+    /// let scratch = gitscratch::Repo::open(std::path::Path::new("."))
+    ///     .expect("a repository")
+    ///     .scratch("HEAD")
+    ///     .expect("a scratch worktree");
+    /// scratch.check_out_detached("feature").expect("a checkout");
+    /// let (conflicts, diffs) = scratch.replay_rebase_with_diffs("main").expect("a replay");
+    /// let report = gitscratch::Report::for_tool("grind").describing("replaying HEAD onto main");
+    /// println!("{}", report.render(&conflicts));
+    /// // A commit subject and file content can hold an ESC. The renderer
+    /// // escapes it, so no escape sequence gets to the terminal.
+    /// if let Some(text) = report.render_diffs(&diffs) {
+    ///     println!("{text}");
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in each case [`Scratch::replay_rebase`] does, and in no
+    /// other.
+    pub fn replay_rebase_with_diffs(&self, onto: &str) -> Result<(Conflicts, HaltDiffs)> {
+        self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS, Capture::Diffs)
     }
 
     /// [`Scratch::replay_rebase`] with the round budget named rather than baked
@@ -352,11 +408,22 @@ impl Scratch {
     /// charged, so a replay whose last round completed the rebase leaves with
     /// its answer rather than with a claim it was abandoned - and the refusal
     /// below is unreachable for a rebase that actually finished.
-    fn replay_rebase_within(&self, onto: &str, max_rounds: usize) -> Result<Conflicts> {
+    ///
+    /// `capture` says whether the loop captures a halt diff at each stop. The
+    /// plain entrance and the entrance that captures share this one loop, so
+    /// they count the same stops the same way. The plain entrance gets back an
+    /// empty [`HaltDiffs`] and drops it.
+    fn replay_rebase_within(
+        &self,
+        onto: &str,
+        max_rounds: usize,
+        capture: Capture,
+    ) -> Result<(Conflicts, HaltDiffs)> {
         let git = self.git();
         let worktree = self.path();
 
         let mut cost = Conflicts::nothing_replayed();
+        let mut halt_diffs = HaltDiffs::nothing_captured();
         // `--end-of-options` ahead of `onto`, because `onto` arrives from a
         // caller and git knows `--root` as an option of `rebase`. Without it a
         // replay onto `--root` rebases the whole history onto nothing, finishes
@@ -376,7 +443,7 @@ impl Scratch {
                     outcome.stdout,
                     outcome.stderr
                 );
-                return Ok(cost);
+                return Ok((cost, halt_diffs));
             }
 
             anyhow::ensure!(
@@ -395,6 +462,19 @@ impl Scratch {
                     for file in conflicted {
                         let hunks = count_conflict_hunks(&worktree.join(&file))?;
                         cost.add_file(file, hunks);
+                    }
+
+                    // Above `git add -A`, because that line stages the
+                    // markers, and after it `git diff` shows nothing for this
+                    // stop. Pinned by
+                    // `each_halt_diff_holds_the_markers_of_its_own_region` in
+                    // `tests/diffs.rs`. A capture never fails the replay, so a
+                    // stopped commit git will not name gets the phrase
+                    // `classify_halt` uses for one.
+                    if capture == Capture::Diffs {
+                        let stopped = name_stopped_commit(&git)
+                            .unwrap_or_else(|_| UNNAMED_STOPPED_COMMIT.to_owned());
+                        halt_diffs.push(HaltDiff::capture(&git, Some(stopped)));
                     }
 
                     git.run("add", &["-A"])?;
@@ -465,6 +545,42 @@ impl Scratch {
     /// reporting one as clean would say a merge is free when git will not do
     /// it at all.
     pub fn replay_merge(&self, branch: &str) -> Result<Conflicts> {
+        self.replay_merge_capturing(branch, Capture::Nothing)
+            .map(|(conflicts, _)| conflicts)
+    }
+
+    /// [`Scratch::replay_merge`], and the halt diff of its one halt beside the
+    /// counts.
+    ///
+    /// The halt diff is the text `git diff` shows at the halt of a real merge.
+    /// A merge has no stopped commit, so the halt diff names none. A merge that
+    /// git completed has no halt, and gives an empty [`HaltDiffs`].
+    ///
+    /// The merge is the one [`Scratch::replay_merge`] makes, with the capture
+    /// turned on, so the two entrances count the same halt the same way. A
+    /// diff that git cannot give does not stop the replay: the halt diff holds
+    /// the error in its place, and the counts stay the same.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in each case [`Scratch::replay_merge`] does, and in no
+    /// other.
+    pub fn replay_merge_with_diffs(&self, branch: &str) -> Result<(Conflicts, HaltDiffs)> {
+        self.replay_merge_capturing(branch, Capture::Diffs)
+    }
+
+    /// The one merge behind [`Scratch::replay_merge`] and
+    /// [`Scratch::replay_merge_with_diffs`].
+    ///
+    /// `capture` says whether the merge captures the halt diff of its halt.
+    /// Both entrances share this one function, so they count the same halt the
+    /// same way. The plain entrance gets back an empty [`HaltDiffs`] and drops
+    /// it.
+    fn replay_merge_capturing(
+        &self,
+        branch: &str,
+        capture: Capture,
+    ) -> Result<(Conflicts, HaltDiffs)> {
         let git = self.git();
         let worktree = self.path();
 
@@ -506,8 +622,9 @@ impl Scratch {
         )?;
 
         let mut cost = Conflicts::nothing_replayed();
+        let mut halt_diffs = HaltDiffs::nothing_captured();
         if outcome.success {
-            return Ok(cost);
+            return Ok((cost, halt_diffs));
         }
 
         // The same two readers the rebase replay takes, because a conflicted
@@ -546,7 +663,16 @@ impl Scratch {
             cost.add_file(file, hunks);
         }
 
-        Ok(cost)
+        // Below the refusal above and the early return for a merge git
+        // completed, because neither of those two merges has a halt, and a
+        // halt diff is the text of a halt. Pinned by
+        // `a_replay_that_does_not_halt_captures_no_halt_diff` in
+        // `tests/diffs.rs`. A merge has no stopped commit to name.
+        if capture == Capture::Diffs {
+            halt_diffs.push(HaltDiff::capture(&git, None));
+        }
+
+        Ok((cost, halt_diffs))
     }
 
     fn worktree_arg(&self) -> Result<&str> {
@@ -828,9 +954,15 @@ impl Conflicts {
     ///
     /// Each name comes out as a [`Path`] rather than as a `&str`, because that
     /// is what it is: git reported it as bytes and it was never decoded, so on
-    /// unix it may be a name no `str` can hold. A caller printing one converts
-    /// it lossily at that point and no earlier - a U+FFFD on the screen is a
-    /// legible answer, while a U+FFFD in the map is a name that opens no file.
+    /// unix it may be a name no `str` can hold.
+    ///
+    /// Print a name through [`Report::render`](crate::Report::render) or
+    /// [`Report::render_within`](crate::Report::render_within), and never print
+    /// it raw. The renderer converts the name lossily when it prints it, and
+    /// not earlier. A U+FFFD on the screen is a name a person can read, but a
+    /// U+FFFD in the map is a name that opens no file. A name can also hold an
+    /// ESC, and the renderer escapes each control character in the name. So no
+    /// escape sequence out of the repository gets to the terminal.
     pub fn file_hunks(&self) -> impl Iterator<Item = (&Path, Hunks)> {
         self.files
             .iter()
@@ -848,6 +980,26 @@ enum Halt {
     /// Git could not write the commit it was replaying. Skipping would throw
     /// that work away; `evidence` says which state proved it.
     UnwritableCommit { stopped: String, evidence: String },
+}
+
+/// What a message calls the stopped commit when `REBASE_HEAD` does not
+/// resolve.
+const UNNAMED_STOPPED_COMMIT: &str = "a commit git would not name";
+
+/// Name the commit the rebase stopped on: its short id, a space, and its
+/// subject.
+///
+/// The one way this crate names a stopped commit. [`classify_halt`] puts the
+/// name in a refusal, and the capture puts it on a halt diff. With two
+/// spellings, one commit could come out under two names, and a reader could
+/// not match the refusal to the halt diff.
+///
+/// # Errors
+///
+/// Returns an error if git could not be spawned, or if `REBASE_HEAD` does not
+/// resolve.
+fn name_stopped_commit(git: &Git) -> Result<String> {
+    git.run("log", &["-1", "--format=%h %s", "REBASE_HEAD"])
 }
 
 /// Work out, from repository state alone, why the rebase is halted.
@@ -868,9 +1020,9 @@ fn classify_halt(git: &Git) -> Result<Halt> {
 
     // Without REBASE_HEAD the loop cannot even name the commit it is about to
     // drop, so it has no business dropping it.
-    let Ok(stopped) = git.run("log", &["-1", "--format=%h %s", "REBASE_HEAD"]) else {
+    let Ok(stopped) = name_stopped_commit(git) else {
         return Ok(Halt::UnwritableCommit {
-            stopped: "a commit git would not name".to_owned(),
+            stopped: UNNAMED_STOPPED_COMMIT.to_owned(),
             evidence: "REBASE_HEAD does not resolve, so the replay cannot say which commit the \
                        rebase halted on"
                 .to_owned(),
@@ -1197,8 +1349,8 @@ mod tests {
     use anyhow::Result;
 
     use super::{
-        count_conflict_hunks, stopped_commit_is_already_in_head, Conflicts, NonZeroUsize, Path,
-        PathBuf,
+        count_conflict_hunks, stopped_commit_is_already_in_head, Capture, Conflicts, NonZeroUsize,
+        Path, PathBuf,
     };
     use crate::git::Git;
     use crate::metrics::{Hunks, Stops};
@@ -1227,7 +1379,9 @@ mod tests {
             .git()
             .run("checkout", &["-q", "--detach", "iterated"])
             .expect("check out the branch detached in the scratch worktree");
-        scratch.replay_rebase_within("single", max_rounds)
+        scratch
+            .replay_rebase_within("single", max_rounds, Capture::Nothing)
+            .map(|(conflicts, _)| conflicts)
     }
 
     /// Noticing that a rebase has finished must not cost a round.

@@ -2731,9 +2731,12 @@ name = "gitscratch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "colored",
  "gitscratch",
+ "libc",
  "pulldown-cmark",
  "tempfile",
+ "testcolor",
  "unicode-width",
 ]
 
@@ -3719,8 +3722,11 @@ dependencies = [
  "anyhow",
  "buildinfo",
  "clap",
+ "colored",
  "gitscratch",
  "termbar",
+ "termwindow",
+ "testcolor",
  "unicode-width",
 ]
 
@@ -3731,9 +3737,11 @@ dependencies = [
  "anyhow",
  "buildinfo",
  "clap",
+ "colored",
  "gitscratch",
- "libc",
  "termbar",
+ "termwindow",
+ "testcolor",
  "unicode-width",
 ]
 

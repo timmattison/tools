@@ -12,7 +12,7 @@ guarantees instead of each reimplementing a weaker version.
 ## The interface
 
 ```rust
-use gitscratch::Repo;
+use gitscratch::{Repo, Report};
 
 // The pre-flight first — it is also the only route to a worktree. See below.
 // A detached worktree at `main`, in a temp directory, torn down on drop.
@@ -26,14 +26,23 @@ if conflicts.is_clean() {
     // Nothing conflicted.
 } else {
     for (file, hunks) in conflicts.file_hunks() {
-        // `file` is a `&Path` — git's own bytes, never decoded, so it is
-        // converted lossily here at the moment of printing and nowhere
-        // earlier. `hunks` is a `Hunks` — the same type the headline total
-        // comes back as, so it already knows its own noun.
-        println!("{}: {}", file.display(), hunks.phrase());
+        // `file` is a `&Path` — git's own bytes, never decoded. `hunks` is a
+        // `Hunks` — the same type the headline total comes back as, so it
+        // already knows its own noun.
+        println!("name: {} bytes, {}", file.as_os_str().len(), hunks.phrase());
     }
 }
+
+// A file name is text out of the repository. The renderer converts each name
+// only when it prints it, and it escapes each control character in the name.
+// So no escape sequence in a name gets to the terminal.
+let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+println!("{}", report.render(&conflicts));
 ```
+
+The loop prints only values that hold no text out of the repository, because a
+file name can hold an ESC. [The report](#the-report) gives the rules of
+`Report::render` and the text that it gives.
 
 A rebase is one of the two questions this crate answers. The other is the
 merge, and it is a straight line where the rebase is a loop:
@@ -74,6 +83,68 @@ streams — "refusing to merge unrelated histories" is the plain case, and a
 branch name that resolves to nothing is the other — because that sentence is the
 only part of the answer that says which refusal this was. `replay_rebase`
 refuses the same shape of state for the same reason.
+
+A replay can also capture the **halt diff** of each halt: the text `git diff`
+shows at that halt in a real rebase or merge. Two entrances capture it, one
+beside each plain entrance:
+
+```rust
+let (conflicts, diffs) = scratch.replay_rebase_with_diffs("main")?;
+for halt in diffs.iter() {
+    // `Some` at a rebase stop: the short id and the subject of the stopped
+    // commit. A merge halt has none.
+    let named = halt.stopped().is_some();
+    match halt.diff() {
+        // The bytes git wrote, not trimmed and not decoded.
+        Ok(bytes) => println!("named: {named}, diff: {} bytes", bytes.len()),
+        // Git gave no diff, and the message from git is here. The halt still
+        // counts.
+        Err(_message) => println!("named: {named}, no diff"),
+    }
+}
+
+// The name, the diff and the message are text out of the repository. The
+// renderer escapes them, so no escape sequence in them gets to the terminal.
+let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+if let Some(text) = report.render_diffs(&diffs) {
+    println!("{text}");
+}
+
+let (conflicts, diffs) = Repo::open(repo_path)?
+    .scratch("HEAD")?
+    .replay_merge_with_diffs("feature")?;
+```
+
+The loop prints only values that hold no text out of the repository, because a
+commit subject can hold an ESC, and so can file content and the message from
+git. [The halt diffs](#the-halt-diffs) gives the rules of
+`Report::render_diffs` and the text that it gives.
+
+The capture is opt-in. `replay_rebase` and `replay_merge` keep their
+signatures and their cost, and capture nothing. `grist` calls `replay_rebase`
+once for each step of each ordering and prints no diff, so it pays nothing for
+the capture. The halt diffs come back in a `HaltDiffs` beside the `Conflicts`,
+not inside it. `grist` folds `Conflicts` values with `absorb` and ranks the
+orderings on them, and a diff inside that type puts a copy of each diff into
+each ordering that `grist` keeps. The replay that captures is the same rebase
+loop, or the same merge, as the plain replay. Only the capture is on, so the
+two count the same halts the same way.
+
+At a rebase stop, the capture sits above the `git add -A` that stages the
+markers, because after that line `git diff` shows nothing for the stop. A
+capture below it gives an empty halt diff at every stop. The diff call carries
+`--diff-filter=U`, the filter the counter reads the conflicted files with, so a
+halt diff names the files the breakdown counts at that halt and no other file.
+Its other flags pin the settings of the developer that change the text of a
+diff, so one halt gives the same bytes on each machine.
+[What it guarantees](#what-it-guarantees) lists each pin. A diff that git
+cannot give does not stop the replay. The halt diff holds git's error in its
+place, and the counts and the exit code stay the same.
+
+`HaltDiff::from_parts` and `HaltDiffs::from_halts` build halt diffs by hand for
+the tests of a renderer. The `testing` feature gates them the way it gates
+`Conflicts::from_files`, so a released binary gets a halt diff from a replay
+and from nothing else.
 
 A `Conflicts` records how many times the replay halted and, for every file that
 conflicted, how many hunks it contributed. The headline totals — `hunks()`,
@@ -120,9 +191,9 @@ A `compile_fail` doc-test holds the derive out — see **Testing** below.
 
 `Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
 to get a `Scratch`. A `Scratch` answers the operations it names —
-`check_out_detached`, `replay_rebase`, `replay_merge`, `head_tree`,
-`commit_tree` — and each of them builds its own git call under the whole safety
-configuration. So there is no way to get a worktree from here without also
+`check_out_detached`, `replay_rebase`, `replay_rebase_with_diffs`,
+`replay_merge`, `replay_merge_with_diffs`, `head_tree`, `commit_tree` — and
+each of them builds its own git call under the whole safety configuration. So there is no way to get a worktree from here without also
 getting the hardening — nor without first having established that the directory
 is a repository at all, which is the pre-flight's job below.
 
@@ -226,6 +297,14 @@ character sits in the middle and no trim reaches it there — while
 `rev-parse --show-toplevel` ends on that character, and a trimming reader takes
 it off. A call site that reasoned about which loss its own question is open to
 would have to be right twice, every time. Taking the reader is right once.
+
+A **halt diff** is a fourth question, and it has a fourth reader, `verbatim`.
+It returns git's stdout as the bytes git wrote, not trimmed and not decoded.
+When git exits non-zero, it returns an error that carries git's stderr. The
+halt diff is text that goes to a person verbatim, and each other reader changes
+it: `run` trims and decodes, the list readers split on NUL, and `path` removes
+a newline. `Report::render_diffs` decodes the diff at print time, and it
+escapes the diff, so no escape sequence in it gets to the terminal.
 
 ## The pre-flight
 
@@ -453,6 +532,150 @@ buys. `diff3` and `zdiff3` put the base version inside the region, so a base
 carrying a line that reads as a marker is measured on a developer who set the
 key and not on one who did not.
 
+### The halt diffs
+
+`Report::render_diffs` turns the halt diffs of a replay into the text that
+follows the verdict. A tool that shows them prints that text through
+`Console::verdict`, after the verdict:
+
+```rust
+let (conflicts, diffs) = scratch.replay_rebase_with_diffs("main")?;
+
+console.verdict(&report.render_within(&conflicts, columns));
+if let Some(text) = report.render_diffs(&diffs) {
+    console.verdict(&text);
+}
+```
+
+It returns `None` when the replay did not halt, so a clean run prints the same
+bytes with `--diff` and without it. Otherwise the text starts with an empty
+line, which separates it from the breakdown. It has one section for each halt,
+in halt order, with one empty line between two sections. It ends with no
+newline, because `Console::verdict` writes one. Here, for the two stops of a
+rebase:
+
+```console
+grind: conflicts - replaying HEAD onto main
+       3 hunks across 2 files, 2 stops
+
+  f.txt    2 hunks
+  g.txt    1 hunk
+
+stop 1 of 2 - 6ee2c41 feat one
+diff --cc f.txt
+index a5f1be7,60b32f6..0000000
+--- a/f.txt
++++ b/f.txt
+@@@ -1,5 -1,5 +1,9 @@@
+  a
+++<<<<<<< HEAD
+ +MAIN
+++=======
++ FEAT1
+++>>>>>>> 6ee2c41 (feat one)
+  c
+  d
+  e
+* Unmerged path g.txt
+
+stop 2 of 2 - 9910691 feat two
+diff --cc f.txt
+index 1edf9f2,a1ec13b..0000000
+--- a/f.txt
++++ b/f.txt
+@@@ -1,9 -1,5 +1,13 @@@
+  a
+ +<<<<<<< HEAD
+++<<<<<<< HEAD
+ +MAIN
+ +=======
+ +FEAT1
+ +>>>>>>> 6ee2c41 (feat one)
+++=======
++ FEAT2
+++>>>>>>> 9910691 (feat two)
+  c
+  d
+  e
+```
+
+A section starts with a stop heading, `stop {i} of {n} - {stopped}`, which
+names the stop and the stopped commit. A halt with no stopped commit gets
+`stop {i} of {n}`. `Report::without_stops()` removes the stop headings and no
+other line. A merge halts once and has no stopped commit, so `grime` prints the
+halt diff of its one halt alone, under the empty line.
+
+Under the heading is the text `git diff` showed at that halt, less its last
+newline. Only that newline goes. A trim removes more: a line of a diff can end
+in spaces, and an empty context line of a combined diff is two spaces. A halt
+where git gave no diff gets `diff not available: ` and the message from git in
+place of the diff. The message can span lines, and each newline stays. The
+heading stays too, and the counts and the exit code do not change.
+
+The renderer writes each control character as `\u{...}`, the form the
+breakdown writes for a name. A name cannot write an escape sequence to the
+terminal, and neither can file content or a commit subject. So the rule applies
+to the diff, to the stop heading, and to the message. Three characters stay,
+because a diff is lines of text: a newline, a tab, and a carriage return
+immediately before a newline, which is a CRLF line ending. Each other carriage
+return comes out as `\u{d}`. A lone one moves the cursor back to the start of
+the line, and the text after it writes over the text before it. The escape runs
+before the last newline goes, so the last line of a CRLF file keeps its
+carriage return. Bytes that are not UTF-8 come out as U+FFFD, as they do in a
+name, so file content never causes a panic. The breakdown and the halt diffs
+escape through one loop, so a name and a diff cannot spell one character two
+ways.
+
+The renderer paints each line with the palette of git, so the halt diffs look
+like `git diff` on a terminal:
+
+| Line | Color | The git setting whose default it copies |
+| --- | --- | --- |
+| A header line of a file: `diff --cc`, `index`, `---`, `+++`, and each other line between the `diff ` line of a file and its first hunk header or its binary line, except the mode line of a combined diff | bold | `color.diff.meta` |
+| `mode <parent modes>..<result mode>`, the mode line that git writes in the header of a combined diff when the mode of a parent is not the mode of the result | plain | none |
+| `Binary files differ`, the binary line that git writes in place of the hunks of a binary file | plain | none |
+| A hunk header, `@@@ ... @@@` or `@@ ... @@` | cyan | `color.diff.frag` |
+| A content line with a `+` in a prefix column, the marker lines included | green | `color.diff.new` |
+| A context line | plain | `color.diff.context` |
+| `\ No newline at end of file`, in a hunk of a diff of two files | plain | `color.diff.context` |
+| A content line with a `-` in a prefix column | red | `color.diff.old` |
+| `* Unmerged path <name>`, and each other line outside a file | plain | none |
+| The stop heading | yellow | `color.diff.commit`, the color of a commit line in `git log` |
+| `diff not available: ` and the message from git | plain | none |
+
+The `color.diff.<slot>` settings of the user do not apply, because the capture
+is plain: `--no-color` is one of the pins of the diff call.
+
+Each line opens and closes its own color codes, so no code spans a newline.
+The renderer does not ask whether color is on. The `colored` crate decides that
+when it formats each line, from the environment and from whether stdout is a
+terminal. So a run whose stdout is a pipe gets the text above with no code,
+unless the environment or the tool forces color on.
+
+Two rules keep the paint correct:
+
+- **Escape first, paint second.** The capture is plain, and the renderer
+  escapes the control characters before it paints. So each ESC byte in the
+  output is a code that the renderer wrote. A color code from git and an ESC
+  out of a file look the same, and nothing can tell them apart after the
+  escape.
+- **Classify a line by its position, not by its text alone.** A content line
+  starts with its prefix columns, and its text follows them. In a combined
+  diff, a line that both parents hold and the result does not starts with
+  `--`, so a removed line whose text is `- a/f.txt` reads `--- a/f.txt`. The
+  header lines of a file stand between its `diff ` line and its first hunk
+  header. Git writes no hunk for a binary file, so its binary line ends its
+  header. Git writes each `* Unmerged path` line after the last file, so such
+  a line can end a header that has no hunk, and the renderer reads it from
+  outside each file. The mode line of a combined diff stands in the header
+  too, and it does not end the header, because the `---` line and the `+++`
+  line come after it. Inside a hunk, the prefix columns decide, and the count
+  of leading `@` in the hunk header, less one, is the count of prefix
+  columns. The first line whose prefix columns hold another character ends
+  the hunk, and the renderer reads that line again from outside each file. A
+  painter that matches the text of one line paints the removed line bold, and
+  a test of the usual lines does not see it.
+
 ## The shell
 
 `Report` says what a replay cost, and `Console` is the program around it.
@@ -613,6 +836,19 @@ because it quietly discarded the work.
 | `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job or `Git::paths`'s, and reading one path is `Git::path`'s (all three above), and this narrows what a call site that reaches around them can get wrong. |
 | `merge.conflictStyle=merge` | The count has to mean the same thing on every machine. All three styles open and close a conflict region with the same markers, so a region whose two sides carry no bracket line of their own costs one hunk under any of them. What `diff3` and `zdiff3` add is the **base** version of the region, between a `|||||||` line and the `=======` one — so a base carrying a line that reads as a marker lands inside the region under those two and outside it under `merge`. The replay then measures a different file on a developer who set the key, and `grist` ranks candidates on that count: two developers comparing the same branches read two orders and neither is told why. Read out of a real merge rather than from git's documentation. |
 | `merge.verifySignatures=false` | The two rows about signing above cover a replay asked to *make* a signature; this one covers a replay asked to **read** one. `merge.verifySignatures` is consulted by `git merge` alone, so a developer who turns it on leaves the rebase replay untouched and breaks the merge replay outright: git 2.55 exits 128 with `fatal: Commit <sha> does not have a GPG signature.` for any branch that carries no signature, which is nearly every branch, and it leaves no unmerged path behind it. The merge replay reads that empty path list as its own "the merge failed and left nothing to resolve" — neither a cost nor a clean replay — so `grime` answers exit 2, "I cannot tell you", for every unsigned branch on that machine. Read out of a real merge rather than from git's documentation. |
+| `--no-color` on the diff call of a halt diff | `color.ui=always` or `color.diff=always` makes git write color codes into `git diff`, although git writes to a pipe. Watched on git 2.55: each setting alone puts a code on each line of the halt diff. A renderer cannot tell such a code from an ESC byte in the file. So it escapes both, and the reader sees `\u{1b}[1m` in place of a color. The renderer paints the diff itself, so the capture stays plain. |
+| `--no-textconv` on the diff call of a halt diff | A `.gitattributes` entry can select a diff driver, and `diff.<driver>.textconv` names a program that git runs on each side of the file before it compares them. Watched on git 2.55 at a conflict: a program that fails stops `git diff` with `fatal: unable to read files to diff`, so the halt diff holds that error and no diff. A program that works changes the text: `sed s/line/LINE/` put `LINE12` in the halt diff in place of `line12`. The pin keeps the halt diff to the bytes in the file, and it keeps the capture from running a program from the configuration of the developer. The counts never depend on the diff, so they are the same with and without the pin. |
+| `-U3` on the diff call of a halt diff | `diff.context` sets how many unchanged lines git shows around a change, and three is git's own default. Watched on git 2.55: at `diff.context=0` the halt diff of one conflicted line shrank from 16 lines to 10, because the three lines above the region and the three below it went away. Those lines show where the region is in the file. The pin gives each machine the same three lines. |
+| `--default-prefix` on the diff call of a halt diff | Four settings change the prefixes of the two file header lines of a diff, and each one reaches the conflict diff. Watched on git 2.55 at a conflict: `diff.noprefix=true` gives `--- shared.txt` in place of `--- a/shared.txt`. `diff.mnemonicPrefix=true` gives `--- i/shared.txt` and `+++ w/shared.txt`. `diff.srcPrefix=x/` gives `--- x/shared.txt`, and `diff.dstPrefix=y/` gives `+++ y/shared.txt`. The flag restores `--- a/<name>` and `+++ b/<name>` under each of the four, and a test holds each setting in a fixture of its own. |
+| `--no-ext-diff` on the diff call of a halt diff | `diff.external` names a program that git runs in place of its own diff. `diff.<driver>.command` does the same for a file whose `.gitattributes` entry selects that driver. The capture must never run a program from the configuration of the developer. Watched on git 2.55: git runs each program for an ordinary diff of two commits, and neither one for the conflict diff at a halt. So no test can make this pin fail, and `MUTATIONS.md` records it as such. It stays for the day git runs such a program for a combined diff. |
+| `core.abbrev=auto` | `core.abbrev` sets how many hex digits git prints for an abbreviated object id, and the halt diff carries three such ids on its `index` line. Watched on git 2.55 at a conflict: `core.abbrev=12` gives `index ca88aa969c5a,9e4d34aa23b2..000000000000` in place of `index ca88aa9,9e4d34a..0000000`. The flag `--abbrev=7` on the diff call does not reach that line of a combined diff, and only `-c core.abbrev=auto` gives it back. A `-c` pair must come before the subcommand, so this pin is in the safety configuration and not on the diff call. `auto` is what git uses when nothing sets the key, so the pin also gives the name of a stopped commit git's default length on each machine. |
+| `log.showSignature=false` | `log.showSignature=true` makes `git log` check the signature of each signed commit it shows, and write the result on stdout, above the line of the format. The name of a stopped commit is what `git log -1 --format="%h %s"` prints for `REBASE_HEAD`. Watched on git 2.55 with an SSH-signed commit: that call wrote `Good "git" signature for <principal> with ED25519 key SHA256:...` above `<id> <subject>`. So the stop heading of each signed stop had two lines, its first line named a signature and not the commit, and its yellow color code spanned the newline. The pin gives back the one line. It is in the safety configuration and not on the one call, so it covers each `log` call, the refusals that name a stopped commit included. With no check of a signature, a replay also runs no program that `gpg.ssh.program` or `gpg.program` names. |
+
+The halt diff takes no pin for the names of files. `core.quotePath=false` above
+already prints `日本語.txt` raw in the `diff --cc` header, watched on git 2.55.
+Git still C-quotes a name that holds `"`, `\` or a control character, whatever
+that setting says: `quo"te.txt` comes out as `diff --cc "quo\"te.txt"`. That is
+the text `git diff` shows at a real halt, so the halt diff keeps it.
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the
@@ -1194,6 +1430,40 @@ rather than through the map. Both were watched to fail — replacing the decode
 with a `to_str` that gives up reddens the first, and trimming the converted name
 reddens the second.
 
+The tests of `Report::render_diffs` sit in `src/report.rs` too. They build their
+halt diffs with `HaltDiff::from_parts` and `HaltDiffs::from_halts`, so they
+need no repository.
+`each_halt_gets_a_section_with_its_heading_and_its_diff_in_halt_order` holds
+the whole block against a golden made of the real halt diffs of the
+`grind --diff` example in GitHub issue #475.
+`a_merge_halt_without_stops_renders_its_diff_alone` holds the `grime --diff`
+example to the byte.
+`dropping_the_stop_count_removes_the_stop_headings_and_nothing_else` compares
+the block with the headings, less exactly its heading lines, against the block
+without them. `a_replay_that_did_not_halt_renders_no_halt_diffs`,
+`a_halt_with_no_stopped_commit_gets_a_heading_that_names_the_stop_alone` and
+`a_halt_where_git_gave_no_diff_says_so_under_its_heading` hold the other
+shapes.
+`a_control_character_in_a_halt_diff_is_escaped_and_each_line_ending_stays`
+and `a_control_character_in_a_commit_subject_is_escaped_in_the_heading` hold
+the escape. The first was watched to fail under two mutations: the rule of the
+breakdown in place of the rule of the diff, and an end of text that counts as a
+line ending. `a_halt_diff_loses_its_last_newline_and_nothing_else` fails under a
+trim. `multi_byte_text_survives_in_a_halt_diff_and_in_its_heading` was watched
+to fail with the escape walking bytes in place of characters. These goldens read
+the text through `glyphs`, which forces color on with
+`testcolor::with_forced_ansi` and takes the codes back out, so each one gives
+the same answer on a terminal and in a pipe. The painter tests read the paint
+of each line off its typed `ColoredString`, as `gsw` and `seescc` do. Four of
+them were watched to fail under a mutation:
+`inside_a_hunk_a_line_that_reads_like_a_header_gets_the_color_of_content` under
+a painter that reads the text of one line,
+`each_painted_line_opens_and_closes_its_own_color_codes` under one reset at the
+end of the block, `painting_a_halt_diff_changes_no_character_of_it` under a
+painter that trims an added line, and
+`an_esc_in_file_content_stays_escaped_on_a_painted_line` under a painter that
+paints before it escapes.
+
 Every column assertion in that file reads through one helper, `count_column`,
 and the helper has a test of its own —
 `the_count_column_is_read_from_the_last_place_the_count_appears`. The count is
@@ -1230,8 +1500,9 @@ the only thing that makes it worth anything in a failing assertion's message.
 **The replay's round budget** is pinned by unit tests in `src/scratch.rs`, which
 the integration suite could not serve: the constant is 1000, and the case that
 matters is a replay needing exactly that many rounds. So the tests name the
-budget instead — `replay_rebase_within` is `replay_rebase` with the bound as a
-parameter — and spend it on `contested_region_repo()`, whose three colliding
+budget instead — `replay_rebase_within` is `replay_rebase` with the bound, and
+the capture switch, as parameters — and spend it on `contested_region_repo()`,
+whose three colliding
 commits take exactly three rounds. Both sides of the boundary are asserted:
 three rounds must produce the answer, two must still refuse. Noticing that the
 rebase has *finished* costs no round, so a fully-measured replay is never
@@ -1261,6 +1532,33 @@ unspellable. The other two require the constructor to refuse a breakdown and a
 stop count that disagree about whether anything conflicted, in both directions:
 stops with no files would otherwise render the clean line and swallow them, and
 files with no stops would report a replay that never halted.
+
+`tests/diffs.rs` covers the halt diffs that the two capturing entrances give
+beside the counts. A rebase replay of `contested_region_repo()` gives three
+halt diffs in stop order. Each one names its own stopped commit and holds the
+markers of its own region, and the counts equal those of the plain entrance.
+The test on the markers is the one that fails when the capture moves below
+`git add -A`, because after that line `git diff` shows nothing. Each halt diff
+of `equal_hunks_unequal_stops_repo()` names the files the breakdown counted at
+its stop, and no other file. A modify/delete halt diff names its file as
+`* Unmerged path x.txt`. A merge gives one halt diff with no stopped commit,
+and a replay that does not halt gives none through either entrance. Two unit
+tests sit in `src/diffs.rs`.
+`a_diff_call_that_fails_leaves_git_s_own_words_in_the_halt_diff` runs the
+capture outside a repository and requires git's own words in the halt diff. A
+control reads those words from plain git first, so the test holds in each
+language git speaks. `a_hand_built_halt_diff_reads_back_what_it_was_given` pins
+the two fixture constructors. [`MUTATIONS.md`](./MUTATIONS.md) records the
+capture moved below `git add -A` and the merge capture moved above its early
+return, each watched to fail. It also records `--diff-filter=U` removed, which
+no test can make fail. Seven more tests put one hostile setting in the
+fixture's configuration, and an armed control shows plain git acting on it. Six
+of them require a halt diff that does not change. It holds no color code,
+survives a textconv program that fails, carries three context lines, names its
+file as `a/` and `b/`, carries ids of seven digits, and names a signed stopped
+commit on one line under `log.showSignature=true`. The seventh, on
+`diff.external`, passes with `--no-ext-diff` and without it, and
+[`MUTATIONS.md`](./MUTATIONS.md) records why.
 
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
@@ -1342,6 +1640,22 @@ of reach of every `Drop` — a signal that terminates without unwinding, which i
 what `Ctrl-C` during `cargo test` sends — and the doc comment says so and names
 the same repair. Each fixture owns a temporary directory of its own, so what
 that end leaves is litter on the disk rather than a hazard to a later run.
+
+It also holds `gitscratch::testing::pty`, a pseudo-terminal of a size that a
+test chose, for a test of a tool that measures its terminal or decides color by
+it. `Pty::give_as_controlling_terminal` makes the terminal the controlling
+terminal of a child. A tool that measures `/dev/tty` then measures a known
+window, and not the window of whoever typed `cargo test`.
+`Pty::run_with_stdout_on_terminal` also puts standard output of the child on
+the terminal, and gives back a `std::process::Output`. So a test of `grind` or
+`grime` sees the color that a person at a terminal sees. Output processing is
+off, so the bytes come back as the child wrote them. The master end is read on
+a thread of its own, so output of any size comes back whole. The helper lives
+here because both tools need it, and two copies of the same `unsafe` code part
+company. `tests/pty.rs` holds the helper to those claims.
+`tests/pty-descriptors.rs` holds that the terminal reaches the child on its
+standard streams alone. It is a target of its own, because a second test in its
+process can open a terminal before the close-on-exec flag is set.
 
 | Fixture | Shape |
 | --- | --- |

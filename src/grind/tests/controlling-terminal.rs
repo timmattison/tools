@@ -20,19 +20,19 @@
 //! holds a terminal that `grind` can measure and a standard output that
 //! measures nothing, which is the shape of every captured run.
 //!
-//! A pseudo-terminal that nobody sized reports zero columns, and the
-//! `TIOCGWINSZ` ioctl succeeds on it. Every terminal here therefore arrives
-//! sized, and the size arrives with the `openpty` call so that no window of the
-//! wrong size ever exists.
+//! The pseudo-terminal comes from [`Pty`] in `gitscratch::testing::pty`, which
+//! the tests of `grime` share. A pseudo-terminal that nobody sized reports zero
+//! columns, and the `TIOCGWINSZ` ioctl succeeds on it. [`Pty::open`] therefore
+//! takes the size, and the size arrives with the `openpty` call so that no
+//! window of the wrong size ever exists.
 
 #![cfg(unix)]
 
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::ptr;
 
 use gitscratch::testing::nested_conflict_repo;
+use gitscratch::testing::pty::Pty;
 use gitscratch::NoInheritedGitEnvironment;
 
 /// The branch that [`nested_conflict_repo`] stands on for every run here.
@@ -46,13 +46,6 @@ const WIDTH_VARIABLE: &str = "COLUMNS";
 
 /// The locale every run here is pinned to, for the reason `cli.rs` states.
 const PINNED_LOCALE: [(&str, &str); 2] = [("LC_ALL", "C"), ("LANG", "C")];
-
-/// The number of rows of every pseudo-terminal here.
-///
-/// The layout reads the columns and no row, so this number reaches nothing that
-/// the tests assert. It is above zero because a terminal of zero rows carries
-/// no window, and `grind` refuses such a terminal and falls back.
-const TERMINAL_ROWS: u16 = 24;
 
 /// A width too narrow to hold the longer name of [`nested_conflict_repo`]
 /// beside its count.
@@ -92,86 +85,13 @@ const UNCLAMPED: [&str; 2] = [
     "  sub/nested/shared.txt    1 hunk",
 ];
 
-/// A pseudo-terminal of a size that a test chose.
-///
-/// Both ends stay open for the life of the child. The master end holds the
-/// pseudo-terminal alive, and the slave end is the terminal that the child
-/// takes as its own.
-struct Pty {
-    /// The master end. The parent holds it open and reads nothing from it,
-    /// because the child writes its verdict to a pipe and not to the terminal.
-    master: libc::c_int,
-    /// The slave end. It becomes the controlling terminal of the child.
-    slave: libc::c_int,
-}
-
-impl Pty {
-    /// Open a pseudo-terminal `columns` columns wide.
-    ///
-    /// # Returns
-    /// The two ends of a pseudo-terminal that reports `columns` columns by
-    /// [`TERMINAL_ROWS`] rows.
-    ///
-    /// # Panics
-    /// Panics when the system opens no pseudo-terminal.
-    fn open(columns: u16) -> Self {
-        let mut master: libc::c_int = -1;
-        let mut slave: libc::c_int = -1;
-        let mut size = libc::winsize {
-            ws_row: TERMINAL_ROWS,
-            ws_col: columns,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-
-        // SAFETY: `openpty` writes one file descriptor to each of the first two
-        // pointers, and both point at a live local variable. The two null
-        // pointers are the documented way to ask for the default terminal modes
-        // and to ask for no name of the slave device. The last pointer is the
-        // size of the window, and it points at a live local variable that
-        // outlives the call.
-        let result = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                &mut size,
-            )
-        };
-        assert_eq!(
-            result,
-            0,
-            "openpty must give a pseudo-terminal: {}",
-            std::io::Error::last_os_error()
-        );
-
-        Pty { master, slave }
-    }
-}
-
-impl Drop for Pty {
-    /// Close both ends of the pseudo-terminal.
-    ///
-    /// A test that leaks a file descriptor for each run empties the table of
-    /// the process, and the runs of this file share one process.
-    fn drop(&mut self) {
-        // SAFETY: each descriptor came from the one `openpty` call of
-        // [`Pty::open`], nothing else closes them, and `Drop` runs one time.
-        unsafe {
-            libc::close(self.slave);
-            libc::close(self.master);
-        }
-    }
-}
-
 /// Run `grind` in `repo` under a terminal `terminal_columns` wide, stating
 /// `stated_columns` when the caller names one.
 ///
-/// The child starts a session of its own and then claims the slave end of the
-/// pseudo-terminal as its controlling terminal. `/dev/tty` in the child
-/// therefore resolves to that pseudo-terminal, while standard output stays a
-/// pipe.
+/// The child starts a session of its own and then claims the pseudo-terminal
+/// as its controlling terminal, through [`Pty::give_as_controlling_terminal`].
+/// `/dev/tty` in the child therefore resolves to that pseudo-terminal, while
+/// standard output stays a pipe.
 ///
 /// `None` for `stated_columns` takes the variable away rather than leaving it
 /// alone, because the shell of whoever runs the suite can export one. A test of
@@ -196,32 +116,7 @@ fn grind_within(repo: &Path, terminal_columns: u16, stated_columns: Option<u16>)
         None => command.env_remove(WIDTH_VARIABLE),
     };
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let slave = pty.slave;
-    // SAFETY: the closure runs in the child between the fork and the exec, and
-    // it calls two functions. `setsid` and `ioctl` are both async-signal-safe,
-    // and neither one touches memory of this process: the ioctl takes the
-    // request `TIOCSCTTY`, which reads no pointer. The child is never a process
-    // group leader in that window, because the fork gave it a new process id
-    // and the process group is still the one of the parent, so the one
-    // documented failure of `setsid` cannot happen.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "the ban covers the read of a window, and `TIOCSCTTY` reads none. It claims the pseudo-terminal as the controlling terminal of the child, and termsize offers no call for that"
-            )]
-            if libc::ioctl(slave, libc::c_ulong::from(libc::TIOCSCTTY), 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            Ok(())
-        });
-    }
+    pty.give_as_controlling_terminal(&mut command);
 
     // The pseudo-terminal lives until this function returns, so it is still the
     // terminal of the child for the whole run.

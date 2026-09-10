@@ -44,8 +44,8 @@ not have to re-derive which guard belongs to which test.
 | `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back` | The pair `--verify --end-of-options`, which is how the pre-flight asks a question git can refuse | `src/git.rs`, `Git::rev_parse` — drop both arguments | remove |
 | `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` (`tests/repo.rs`) | `--end-of-options` ahead of the two positionals of `worktree add` | `src/scratch.rs`, `Scratch::create` — drop the argument | remove |
 | `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | `--end-of-options` ahead of the upstream of `rebase` | `src/scratch.rs`, `Scratch::replay_rebase_within` — drop the argument | remove |
-| `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree` (`tests/merges.rs`) | `--end-of-options` ahead of the branch of `merge` | `src/scratch.rs`, `Scratch::replay_merge` — drop the argument | remove |
-| `a_merge_of_a_branch_already_in_head_is_clean` (`tests/merges.rs`) | The **absence** of a `MERGE_HEAD` check on the merge replay's success path, which is what lets a branch already contained in HEAD come back clean | `src/scratch.rs`, `Scratch::replay_merge` — require `rev-parse -q --verify MERGE_HEAD` to succeed before the early return | **add** |
+| `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree` (`tests/merges.rs`) | `--end-of-options` ahead of the branch of `merge` | `src/scratch.rs`, `Scratch::replay_merge_capturing`, the one merge behind both merge entrances — drop the argument | remove |
+| `a_merge_of_a_branch_already_in_head_is_clean` (`tests/merges.rs`) | The **absence** of a `MERGE_HEAD` check on the merge replay's success path, which is what lets a branch already contained in HEAD come back clean | `src/scratch.rs`, `Scratch::replay_merge_capturing` — require `rev-parse -q --verify MERGE_HEAD` to succeed before the early return | **add** |
 | `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | `maintenance.auto=false`, the switch on automatic maintenance that `gc.auto=0` does not reach | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | `core.fsmonitor=false`, the one program git runs that the redirected `core.hooksPath` cannot take away | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | `rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo list | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
@@ -70,6 +70,21 @@ not have to re-derive which guard belongs to which test.
 | `every_identity_variable_is_settled_on_the_command_the_runner_builds` | The two `env_remove` calls that take `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` off every command, which is the half of the restated identity a commit cannot show | `src/git.rs`, `Git::command` — drop both calls | remove |
 | `refuses_an_empty_hooks_path_rather_than_resolving_a_hook_outside_the_repository` | The refusal of an empty `hooks_path`, which git resolves at the root of the file system rather than at nothing | `src/git.rs`, `Git::new` — drop the `assert!` | remove |
 | `sheds_every_inherited_git_variable_and_nothing_else` (`tests/inherited-environment.rs`) | The `GIT_` prefix, which is the whole of what the scrub covers beyond a list of names | `src/git.rs`, `NoInheritedGitEnvironment for Command` — narrow the prefix test over `std::env::vars_os` back to a fifteen-name list | narrow |
+| `each_halt_diff_holds_the_markers_of_its_own_region` (`tests/diffs.rs`) | The capture above `git add -A` in the rebase loop, which reads a stop before the replay stages its markers | `src/scratch.rs`, `Scratch::replay_rebase_within` — move the capture block below `git.run("add", &["-A"])` | move |
+| Nothing — see the record below | `--diff-filter=U` in `DIFF_AT_HALT`, which keeps a halt diff to the files the counter reads | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
+| `a_replay_that_does_not_halt_captures_no_halt_diff` (`tests/diffs.rs`) | The merge capture below the early return for a merge git completed, which keeps a clean merge free of halt diffs | `src/scratch.rs`, `Scratch::replay_merge_capturing` — move the capture block above `if outcome.success` | move |
+| `a_halt_diff_holds_no_color_code_whatever_the_color_settings_say` (`tests/diffs.rs`) | `--no-color` in `DIFF_AT_HALT`, which keeps the color codes of `color.ui=always` and `color.diff=always` out of the capture | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
+| `a_halt_diff_is_not_lost_to_a_textconv_program_that_fails` (`tests/diffs.rs`) | `--no-textconv` in `DIFF_AT_HALT`, which keeps the capture from running the textconv program of a diff driver | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
+| `a_halt_diff_carries_three_lines_of_context_whatever_diff_context_says` (`tests/diffs.rs`) | `-U3` in `DIFF_AT_HALT`, which gives each machine git's default of three context lines | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
+| `a_halt_diff_names_its_file_with_the_default_prefixes_whatever_the_prefix_settings_say` (`tests/diffs.rs`) | `--default-prefix` in `DIFF_AT_HALT`, which gives back `a/` and `b/` under each of the four prefix settings | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
+| `a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says` (`tests/diffs.rs`) | `core.abbrev=auto`, which gives the ids on the `index` line of a halt diff git's default length | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| `a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says` (`tests/diffs.rs`) | `log.showSignature=false`, which keeps the signature line of a signed stopped commit out of its name | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| Nothing — see the record below | `--no-ext-diff` in `DIFF_AT_HALT`, which keeps the capture from running the program that `diff.external` names | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
+| `a_child_whose_stdout_is_on_the_terminal_sees_a_terminal` (`tests/pty.rs`) | The copy of the slave end that `Pty::run_with_stdout_on_terminal` gives the child as standard output, which is what a tool reads as a terminal | `src/testing/pty.rs`, `Pty::run_with_stdout_on_terminal` — give the child `Stdio::piped()` in place of the copy | redirect |
+| `the_newlines_of_the_child_come_back_unchanged` (`tests/pty.rs`) | Output processing off, which keeps the terminal from turning a newline into a carriage return and a newline | `src/testing/pty.rs`, `Pty::open` — drop `modes.c_oflag &= !libc::OPOST` | remove |
+| `output_far_bigger_than_any_buffer_comes_back_whole_on_both_streams` (`tests/pty.rs`), which hangs and does not fail — see the record below | The reader thread of the master end, which reads the terminal while the calling thread reads standard error | `src/testing/pty.rs`, `Pty::run_with_stdout_on_terminal` — join the reader before `wait_with_output` reads standard error | move |
+| `the_controlling_terminal_of_the_child_is_the_terminal_at_its_opened_size` (`tests/pty.rs`) | The claim of the controlling terminal in the run, which aims `/dev/tty` of the child at the pseudo-terminal | `src/testing/pty.rs`, `Pty::run_with_stdout_on_terminal` — drop the `give_as_controlling_terminal` call | remove |
+| `the_terminal_reaches_the_child_on_its_standard_streams_alone` (`tests/pty-descriptors.rs`) | The close-on-exec flag on both ends, which keeps a copy of the terminal out of every child that a test does not give it to | `src/testing/pty.rs`, `Pty::open` — drop the `fcntl` loop | remove |
 
 ## What keeps each test honest
 
@@ -144,6 +159,13 @@ registry that reports everything as fine is worth less than no registry at all.
 | `uncommitted_files_counts_a_staged_copy_as_the_one_file_it_is` | The fixture commits `big.txt`, so a copy has a source, and it stages the modification of that source that copy detection needs. Two untracked files sit beside the copy, so the count fails from both directions: pair nothing and the answer is 5, pair every record and it is 3, and only a count that pairs exactly the copy gives 4. | **Full.** Plain git, through the fixture, must report `C  copy.txt`, NUL, `big.txt` — "copy detection is not armed, so this test could only pass vacuously". That control is not a formality: git reports an undetected copy as `A  copy.txt`, one field for one file, so the closing count comes out right while the pairing never runs. The fixture arms `status.renames = copies` in its own repository rather than reading it out of `~/.gitconfig`, so the control holds on a machine whose developer has never set the key. |
 | `uncommitted_files_counts_a_working_tree_rename_and_copy_as_the_files_they_are` | The two files the fixture commits hold content of their own, because git pairs a copy with whichever source matches it best and two files spelled alike let it report the rename and the copy against one name — which is what the first draft of this fixture did. Two untracked files sit beside the pair, so the count fails from both directions: 7 with no pairing, 4 with every record paired, 5 only for a count that pairs exactly the two working-tree records. | **Full.** Plain git, through the fixture, must report ` R moved.txt`, NUL, `big.txt` and ` C other-copy.txt`, NUL, `other.txt` — "git no longer reports that in the working-tree column, so this test could only pass vacuously". Without the detection an undetected move is a delete beside an untracked file, which is two fields for two files and never pairs, so the control is what proves the second status byte is under test at all. The `git add -N` that arms it is the everyday route: `git add -p` records the same intent-to-add entry for a new file. |
 | `uncommitted_files_refuses_a_repository_with_no_working_tree` | `Repo::open` on the bare clone must succeed, so what the count refuses below is a repository with no working tree rather than a directory that is no repository at all. `TestRepo::bare_clone` proves its own premise as well: it points HEAD at the branch it was asked for and resolves it, so a `head` that names nothing fails while the fixture is being built. | **Structural.** Git refuses `status` in a repository with no working tree by construction, so a fixture has nothing to arm. What a control adds is that same refusal read back through plain git, and `BareRepo` hands back no runner to ask with — it is a path and a `TempDir`. The mutation record below is the out-of-band substitute. |
+| `a_halt_diff_holds_no_color_code_whatever_the_color_settings_say` (`tests/diffs.rs`) | `conflicting_repo_with` reads each setting back through plain git before the test uses the fixture — "the fixture does not hold `{key}={value}`, so there is nothing here for a pin to override and the assertions below are measured against nothing". The armed control also reads the branch, `HEAD` and `status` of the fixture before it starts, and asserts all three again after it puts the fixture back, so the replay does not read what the control left. | **Full, once for each setting.** `plain_diff_at_a_real_halt` makes the halt that the merge replay makes, with plain git in the fixture: `merge --no-commit --no-ff right` on `left`. The merge must fail and leave an unmerged path, so the control reads a real halt and not a refusal. Plain `git diff --diff-filter=U` there must hold an ESC byte — "`{key}={value}` puts no color code into plain `git diff` through a pipe, so this test could only pass vacuously". This control passes no `--no-color`, because the codes are what it reads. |
+| `a_halt_diff_is_not_lost_to_a_textconv_program_that_fails` (`tests/diffs.rs`) | The same read-back of `diff.hostile.textconv=false`. The `.gitattributes` commit on `left` goes through `TestRepo::commit_file`, which panics when git refuses it. | **Full.** Plain `git diff --diff-filter=U` at the real halt, under `LC_ALL=C`, must fail and say `unable to read files to diff` — "a textconv program that fails does not stop plain `git diff` with `unable to read files to diff`, so this test could only pass vacuously". The words are part of the assertion, so a diff that failed for another reason does not arm it. A second control holds the other side: the plain entrance on a fresh copy of the fixture must count what the capturing entrance counts. |
+| `a_halt_diff_carries_three_lines_of_context_whatever_diff_context_says` (`tests/diffs.rs`) | The same read-back of `diff.context=0`. | **Full.** Plain `git diff --no-color --diff-filter=U` at the real halt must show fewer than three lines on each side of the region — "`diff.context=0` takes no context line out of plain `git diff`, so this test could only pass vacuously". The assertion then asks for exactly three on each side, and for a context line in each place, so a capture with more context fails it too. |
+| `a_halt_diff_names_its_file_with_the_default_prefixes_whatever_the_prefix_settings_say` (`tests/diffs.rs`) | The same read-back, once for each of the four settings. | **Full, once for each setting.** Plain `git diff --no-color --diff-filter=U` at the real halt must print two file header lines that are not `--- a/shared.txt` and `+++ b/shared.txt` — "`{key}={value}` leaves plain `git diff` with git's default prefixes, so this test could only pass vacuously". Both sides read the header lines above the first hunk header, so a content line that reads like a header cannot stand in for one. The loop stops at the first setting that fails, so the record below narrows it to each setting in turn. |
+| `a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says` (`tests/diffs.rs`) | The same read-back of `core.abbrev=12`. | **Full.** Plain `git diff --no-color --diff-filter=U` at the real halt must print three ids of 12 digits on its `index` line — "`core.abbrev=12` does not lengthen the ids on the `index` line of plain `git diff`, so this test could only pass vacuously". The assertion asks for three ids of seven hex digits. Seven is what `auto` gives a repository with as few objects as this fixture, so the number is a fact about the fixture as well as about git. |
+| `a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says` (`tests/diffs.rs`) | The same read-back of `log.showSignature=true`. `ssh-keygen` must make the key and exit 0, and `commit --amend -S` must exit 0, so a machine that cannot sign fails the test with a message and does not skip it. The expected name must be one line that is not empty — "`--no-show-signature` gave no one-line name for the signed commit, so there is no name here to compare the halt diff against". | **Full.** Plain `git log -1 --format=%h %s left` in the fixture must write more than one line, and one line must name the principal of the allowed-signers file — "`log.showSignature=true` puts no signature line above the name of a signed commit in plain `git log`, so this test could only pass vacuously". The principal comes from the fixture, so the extra line is the check of this signature and no other line. The expected name comes from the runner with `--no-show-signature`, so both names take one `core.abbrev`. |
+| `a_halt_diff_runs_no_external_diff_program_whatever_diff_external_names` (`tests/diffs.rs`) | The program goes into the git directory of the fixture as an executable file, and `diff.external` names it in the fixture's own configuration. The control removes its sentinel through `remove_file`, which panics when there is none to remove, so the closing assertion starts from no sentinel. | **Full for the setting. The hazard at a halt cannot be armed.** Plain git, through the fixture, runs an ordinary diff of two commits, and the program must leave its sentinel — "`diff.external` did not run its program for an ordinary diff of two commits, so the setting is not live and this test could only pass vacuously". That proves the setting is live and the script works. Git 2.55 runs no external diff program for a combined diff, so the capture leaves no sentinel with the flag or without it. The record below is that measurement. |
 
 ### The rule for the next test
 
@@ -592,7 +614,10 @@ has: "Conflicts { stops: 0, files: {} }"
 test result: FAILED. 35 passed; 1 failed
 ```
 
-**`--end-of-options`, removed from `Scratch::replay_merge`.** Git knows
+**`--end-of-options`, removed from `Scratch::replay_merge_capturing`.** That
+function is the one merge behind `Scratch::replay_merge`, and the test reaches
+it through that entrance. The merge call moved there from `replay_merge` when
+the halt diff arrived. Git knows
 `--allow-unrelated-histories` as an option of `merge`, so it reads the branch as
 one, is left with nothing to merge, and falls back to the upstream of the
 current branch. A scratch worktree stands on a detached HEAD, so there is no
@@ -647,7 +672,7 @@ Mutation (**opposite direction — added, not removed**): made the merge replay'
 success path demand a `MERGE_HEAD` before it hands the clean verdict back —
 `anyhow::ensure!` on `git.try_run("rev-parse", &["-q", "--verify",
 "MERGE_HEAD"])?.success`, immediately ahead of the early return in
-`Scratch::replay_merge`.
+`Scratch::replay_merge_capturing`, the one merge behind `Scratch::replay_merge`.
 
 That is the plausible over-correction rather than an arbitrary break. The
 comment on `--no-ff` three lines above says what this replay is afraid of — a
@@ -1924,15 +1949,414 @@ false-green shape this file exists to remove, and it is worse in a comment than
 in code: the comment is what the next person reads before deciding the rule is
 covered.
 
+### `each_halt_diff_holds_the_markers_of_its_own_region`, and the position of the capture
+
+Mutation: moved the capture block in `Scratch::replay_rebase_within` from above
+`git.run("add", &["-A"])` to below it, so the rebase loop reads each stop after
+it stages the markers. The run was `cargo test --no-fail-fast -p gitscratch
+--test diffs` on git 2.55.0. Nothing outside `gitscratch` captures a halt diff
+yet, so no other crate can see this line.
+
+```text
+---- each_halt_diff_holds_the_markers_of_its_own_region stdout ----
+thread 'each_halt_diff_holds_the_markers_of_its_own_region'
+panicked at src/gitscratch/tests/diffs.rs:191:9:
+the halt diff of stop 1 has no `++<<<<<<< HEAD` line, so it does not show the
+region that stop conflicted in: []
+
+---- each_halt_diff_names_the_files_the_breakdown_counted_at_its_stop stdout ----
+thread 'each_halt_diff_names_the_files_the_breakdown_counted_at_its_stop'
+panicked at src/gitscratch/tests/diffs.rs:222:5:
+assertion `left == right` failed: the first stop conflicts in x.txt alone and
+the second in y.txt alone, so each halt diff has to name that one file
+  left: [{}, {}]
+ right: [{"x.txt"}, {"y.txt"}]
+
+---- a_modify_delete_halt_diff_names_the_file_as_an_unmerged_path stdout ----
+thread 'a_modify_delete_halt_diff_names_the_file_as_an_unmerged_path'
+panicked at src/gitscratch/tests/diffs.rs:273:5:
+a file that one side deleted has no combined diff, so the halt diff has to name
+it with `* Unmerged path x.txt`: []
+
+test result: FAILED. 3 passed; 3 failed
+```
+
+Each halt diff came back empty. After `git add -A`, the index holds each file
+with its markers at stage 0, the worktree holds the same bytes, and `git diff`
+has nothing to show. The three tests that read the text of a rebase stop went
+red, each for that reason. The three that stayed green are the right three. The
+test on the names and the counts reads no diff text, and the merge test and the
+clean-replay test never reach the capture in the rebase loop.
+
+### `--diff-filter=U` in `DIFF_AT_HALT`, which nothing can redden
+
+Mutation: emptied `DIFF_AT_HALT`, so the capture runs a bare `git diff`. The
+run was `cargo test --no-fail-fast -p gitscratch` on git 2.55.0, and every test
+in the crate stayed green:
+
+```text
+unittests src/lib.rs            test result: ok. 56 passed; 0 failed
+tests/conflicts.rs              test result: ok. 7 passed; 0 failed
+tests/diffs.rs                  test result: ok. 6 passed; 0 failed
+tests/halts.rs                  test result: ok. 8 passed; 0 failed
+tests/hook_environment.rs       test result: ok. 1 passed; 0 failed
+tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
+tests/isolation.rs              test result: ok. 3 passed; 0 failed
+tests/merges.rs                 test result: ok. 7 passed; 0 failed
+tests/repo.rs                   test result: ok. 20 passed; 0 failed
+tests/safety.rs                 test result: ok. 8 passed; 0 failed
+Doc-tests gitscratch            test result: ok. 10 passed; 0 failed
+```
+
+That is the finding, not a failure to find one. A scratch worktree starts from
+a clean checkout, and at a halt git stages each change of the picked commit
+that merged cleanly. So the index and the worktree agree on each path that is
+not unmerged, and a bare `git diff` has only the unmerged paths to show. The
+filter then removes nothing. The same was watched on git 2.55 before the
+capture was written: inside a scratch worktree, no path that merged cleanly
+reached `git diff` at a halt.
+
+The filter stays all the same, and issue #475 shows the state it is for. In a
+working tree with an edit beside the conflict, a bare `git diff` names the
+edited file too, and `--diff-filter=U` keeps only the conflicted file. A replay
+does not reach that state today. The next change that leaves a path unstaged
+in the scratch worktree reaches it with no warning, and the halt diff then
+names a file the breakdown does not count. The filter costs one argument, and
+it makes the diff call read the files the counter reads. It is recorded here
+as a guard no test can make fail, as `--literal-pathspecs` is, and not as one
+somebody watched fail.
+
+### `a_replay_that_does_not_halt_captures_no_halt_diff`, and the position of the merge capture
+
+This test passed the moment it was written, against a stub that captured
+nothing, because a replay that does not halt has nothing to capture on either
+side. A test that was never red is not evidence, so this mutation is what shows
+that it pins something.
+
+Mutation: moved the capture block in `Scratch::replay_merge_capturing` from
+below the hunk count to above `if outcome.success`, the early return for a
+merge git completed. The run was `cargo test --no-fail-fast -p gitscratch
+--test diffs` on git 2.55.0.
+
+```text
+---- a_replay_that_does_not_halt_captures_no_halt_diff stdout ----
+thread 'a_replay_that_does_not_halt_captures_no_halt_diff'
+panicked at src/gitscratch/tests/diffs.rs:379:5:
+a merge that git completed has no halt, so it has no halt diff: HaltDiffs {
+halts: [HaltDiff { stopped: None, diff: Ok([]) }] }
+
+test result: FAILED. 5 passed; 1 failed
+```
+
+A clean merge got a halt diff of nothing, and a renderer prints that as a
+section for a halt that did not happen. Only the merge half of the test can see
+this, and only this test went red. The merge test with a conflict stayed green,
+and that is the right answer. Above the early return, the capture of a
+conflicted merge reads the same `git diff` that it reads below the count,
+because the count changes nothing in the worktree. So this one test holds the
+position, from the side of the merge that git completed.
+
+### The five pins of the diff text that a test can redden
+
+Five pins keep a setting of the developer out of the diff text of a halt diff,
+and each one was removed on its own. Four are flags in `DIFF_AT_HALT`, and one
+is an entry of `Git::safety_config()`. Each flag run was `cargo test
+--no-fail-fast -p gitscratch` on git 2.55.0. Nothing outside `gitscratch`
+captures a halt diff yet, so no other crate can see those four flags. The run
+for the `safety_config` entry took in `grind`, `grime` and `grist` too, because
+each replay reads that list.
+
+Mutation: removed `"--no-color"` from `DIFF_AT_HALT`. The fixture's own
+`color.ui=always` then stands, and git writes a color code on each line of the
+halt diff.
+
+```text
+---- a_halt_diff_holds_no_color_code_whatever_the_color_settings_say stdout ----
+thread 'a_halt_diff_holds_no_color_code_whatever_the_color_settings_say'
+panicked at src/gitscratch/tests/diffs.rs:549:9:
+under `color.ui=always` the halt diff holds color codes, and a renderer prints
+them as escaped text: \u{1b}[1mdiff --cc shared.txt\u{1b}[m\n\u{1b}[1mindex
+ca88aa9,9e4d34a..0000000\u{1b}[m\n\u{1b}[1m--- a/shared.txt\u{1b}[m\n...
+
+test result: FAILED. 11 passed; 1 failed
+```
+
+The loop of that test stops at the first setting that fails, so `color.ui` hid
+`color.diff` in that run. A second run narrowed the loop to `color.diff`
+alone, with the flag still removed:
+
+```text
+under `color.diff=always` the halt diff holds color codes, and a renderer
+prints them as escaped text: \u{1b}[1mdiff --cc shared.txt\u{1b}[m\n...
+
+test result: FAILED. 0 passed; 1 failed; 11 filtered out
+```
+
+Mutation: removed `"--no-textconv"`. The fixture's own textconv program,
+`false`, then runs on each side of `shared.txt`, and git gives no diff.
+
+```text
+---- a_halt_diff_is_not_lost_to_a_textconv_program_that_fails stdout ----
+thread 'a_halt_diff_is_not_lost_to_a_textconv_program_that_fails'
+panicked at src/gitscratch/tests/diffs.rs:620:9:
+a textconv program that fails left the halt diff with no diff: git diff
+--no-color -U3 --default-prefix --no-ext-diff --diff-filter=U failed:
+
+fatal: unable to read files to diff
+
+test result: FAILED. 11 passed; 1 failed
+```
+
+The replay itself went on and returned its counts. The panic comes from the
+halt diff, which held git's error in place of a diff, as the capture is built
+to do.
+
+Mutation: removed `"-U3"`. The fixture's own `diff.context=0` then stands.
+
+```text
+---- a_halt_diff_carries_three_lines_of_context_whatever_diff_context_says stdout ----
+thread 'a_halt_diff_carries_three_lines_of_context_whatever_diff_context_says'
+panicked at src/gitscratch/tests/diffs.rs:704:5:
+assertion `left == right` failed: under `diff.context=0` the halt diff has to
+carry 3 lines of context on each side of the region: diff --cc shared.txt
+index ca88aa9,9e4d34a..0000000
+--- a/shared.txt
++++ b/shared.txt
+@@@ -15,1 -15,1 +15,5 @@@ line1
+++<<<<<<< HEAD
+ +left-edit
+++=======
++ right-edit
+++>>>>>>> right
+
+  left: (0, 0)
+ right: (3, 3)
+
+test result: FAILED. 11 passed; 1 failed
+```
+
+Mutation: removed `"--default-prefix"`. The fixture's own `diff.noprefix=true`
+then stands.
+
+```text
+---- a_halt_diff_names_its_file_with_the_default_prefixes_whatever_the_prefix_settings_say stdout ----
+thread 'a_halt_diff_names_its_file_with_the_default_prefixes_whatever_the_prefix_settings_say'
+panicked at src/gitscratch/tests/diffs.rs:774:9:
+assertion `left == right` failed: under `diff.noprefix=true` the halt diff has
+to name its file with git's default prefixes: diff --cc shared.txt
+...
+  left: ["--- shared.txt", "+++ shared.txt"]
+ right: ["--- a/shared.txt", "+++ b/shared.txt"]
+
+test result: FAILED. 11 passed; 1 failed
+```
+
+The loop stops at `diff.noprefix` here too. Three more runs, with the flag
+still removed, narrowed the loop to each of the other three settings alone.
+The narrowing takes three lines out of the test, so the panic moves to line
+771. Each run ended `test result: FAILED. 0 passed; 1 failed; 11 filtered
+out`:
+
+```text
+under `diff.mnemonicPrefix=true` the halt diff has to name its file with git's
+default prefixes: ...
+  left: ["--- i/shared.txt", "+++ w/shared.txt"]
+
+under `diff.srcPrefix=x/` the halt diff has to name its file with git's default
+prefixes: ...
+  left: ["--- x/shared.txt", "+++ b/shared.txt"]
+
+under `diff.dstPrefix=y/` the halt diff has to name its file with git's default
+prefixes: ...
+  left: ["--- a/shared.txt", "+++ y/shared.txt"]
+```
+
+So each of the four settings reaches the halt diff alone, and the one flag
+holds each of them.
+
+Mutation: removed `"core.abbrev=auto"` from `Git::safety_config()`. The
+fixture's own `core.abbrev=12` then stands. The run was `cargo test
+--no-fail-fast -p gitscratch -p grind -p grime -p grist`.
+
+```text
+---- a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says stdout ----
+thread 'a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says'
+panicked at src/gitscratch/tests/diffs.rs:842:5:
+assertion `left == right` failed: under `core.abbrev=12` the `index` line of
+the halt diff has to carry three ids of 7 digits: ["ca88aa969c5a",
+"9e4d34aa23b2", "000000000000"]
+  left: [12, 12, 12]
+ right: [7, 7, 7]
+
+test result: FAILED. 11 passed; 1 failed
+```
+
+Each other suite of the four crates stayed green. The README inventory guard
+stays green with the entry gone, for the reason the `merge.conflictStyle`
+record gives: it asks that each pinned setting has a row, and not that each
+row is a pinned setting.
+
+No collateral in any of the five. Each mutation reddens its own test and no
+other. Each file went back after its run, `git diff` on it came back empty, and
+the crate is green again with each pin in place.
+
+### `log.showSignature=false`, the pin of the name of a stopped commit
+
+A sixth pin keeps a setting of the developer out of the halt diff: out of the
+name of the stopped commit that a halt diff carries, and not out of its diff
+text. The pin came from a review finding, and its test,
+`a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says`,
+went in first. It failed against a `Git::safety_config()` with no such entry,
+which is the mutation, and it went green when the entry went in. The mutation
+was then run again against the final code. Mutation: removed
+`"log.showSignature=false"` from `Git::safety_config()`. The fixture's own
+`log.showSignature=true` then stands. The run was `cargo test --no-fail-fast -p
+gitscratch -p grind -p grime -p grist -- --test-threads=4` on git 2.55.0, with
+the `ssh-keygen` of OpenSSH 10.3. Each run makes a new key, so the fingerprint
+and the id change from run to run.
+
+```text
+---- a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says stdout ----
+thread 'a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says'
+panicked at src/gitscratch/tests/diffs.rs:1026:5:
+assertion `left == right` failed: under `log.showSignature=true` the name of a
+signed stopped commit has to be the one line `<id> <subject>`. A signature line
+above it puts a second line into the stop heading, and that line names a
+signature and not the commit
+  left: Some("Good \"git\" signature for signer@example.invalid with ED25519 key SHA256:oWJgHHGaj2tp/qPDx79OoisHUtHRbLp1wn0aIBietJ4\nb1d64d3 left work")
+ right: Some("b1d64d3 left work")
+
+test result: FAILED. 12 passed; 1 failed
+```
+
+Each other suite of the four crates stayed green. The README inventory guard
+stays green with the entry gone, because it asks that each pinned setting has a
+row, and not that each row is a pinned setting. The entry went back after the
+run, and the crate is green again with the pin in place.
+
+### `--no-ext-diff` in `DIFF_AT_HALT`, which nothing can redden
+
+The flag and its test,
+`a_halt_diff_runs_no_external_diff_program_whatever_diff_external_names`,
+arrived in one commit. The test went in first and ran against a `DIFF_AT_HALT`
+without `"--no-ext-diff"`, which is the mutation. The run was `cargo test
+--no-fail-fast -p gitscratch` on git 2.55.0, and every test in the crate stayed
+green:
+
+```text
+unittests src/lib.rs            test result: ok. 56 passed; 0 failed
+tests/conflicts.rs              test result: ok. 7 passed; 0 failed
+tests/diffs.rs                  test result: ok. 12 passed; 0 failed
+tests/halts.rs                  test result: ok. 8 passed; 0 failed
+tests/hook_environment.rs       test result: ok. 1 passed; 0 failed
+tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
+tests/isolation.rs              test result: ok. 3 passed; 0 failed
+tests/merges.rs                 test result: ok. 7 passed; 0 failed
+tests/repo.rs                   test result: ok. 20 passed; 0 failed
+tests/safety.rs                 test result: ok. 8 passed; 0 failed
+Doc-tests gitscratch            test result: ok. 10 passed; 0 failed
+```
+
+That is the finding, not a failure to find one. `diff.external` names a program
+that git runs in place of its own diff, and git 2.55 does not run it for a
+combined diff. The armed control of the test shows the other half: the same
+program, in the same fixture, runs for an ordinary diff of two commits and
+leaves its sentinel. `diff.<driver>.command`, which a `.gitattributes` entry
+selects for a file, did the same when it was watched by hand. It ran for an
+ordinary diff of two commits, and not for the conflict diff at a halt.
+
+The flag went in after that run, and the crate stayed green with it. It stays
+because the capture must never run a program from the configuration of the
+developer. A git that starts to run an external diff for a combined diff
+reaches the capture with no warning of its own, and on that day this test is
+the one that goes red without the flag. It is recorded here as a guard that no
+test can make fail, as `--diff-filter=U` and `--literal-pathspecs` are, and not
+as one that somebody watched fail.
+
+### The pseudo-terminal of the tests, `gitscratch::testing::pty`
+
+`Pty` is scaffolding, and it guards no real repository. The tests of `grind`
+and `grime` rest on it all the same, because each color test reads its answer
+off the master end. So each of its five guards was mutated against the final
+code, one at a time. The runs were the test binaries of `tests/pty.rs` and
+`tests/pty-descriptors.rs` under `timeout 60`, with
+`cargo test -p grind --test controlling-terminal` beside them. Each file went
+back after its run, and `git diff` on it came back empty. `grind` stayed green
+under all five, because its tests give the child a pipe for standard output
+and reach no guard but the claim.
+
+The slave end as standard output, replaced with `Stdio::piped()`, turns all
+four tests of `tests/pty.rs` red. Each one reads an empty standard output:
+
+```text
+stdout: ""
+  left: []
+ right: [116, 101, 114, 109, 105, 110, 97, 108]
+test result: FAILED. 0 passed; 4 failed
+```
+
+That mutation also found a hole. `tests/pty-descriptors.rs` stayed green under
+it, because its listing reached no terminal and came back empty, and an empty
+answer equals the empty answer of a clean control. The listing now prints a
+fixed heading first, and under the same mutation the test goes red:
+
+```text
+  left: ""
+ right: "terminals above 2:"
+```
+
+Output processing left on, which is the line that clears `OPOST` taken out,
+turns `the_newlines_of_the_child_come_back_unchanged` red with `"a\r\nb\r\n"`.
+It turns
+`the_controlling_terminal_of_the_child_is_the_terminal_at_its_opened_size` red
+as well, with `"24 97\r\n"`, because `stty` ends its answer with a newline. The
+other two tests write no newline, and they stay green.
+
+The claim of the controlling terminal, taken out of the run, turns the
+controlling-terminal test red and no other. The child holds no controlling
+terminal, and the shell says so: `sh: /dev/tty: Device not configured`.
+
+The close-on-exec flag, taken off both ends, turns
+`the_terminal_reaches_the_child_on_its_standard_streams_alone` red and no
+other. The child holds both ends of the terminal as descriptors 3 and 4, where
+the plain child holds none:
+
+```text
+  left: "terminals above 2: 3 4"
+ right: "terminals above 2:"
+```
+
+The reader thread, changed so that the reader is joined before
+`wait_with_output` reads standard error, does not turn the output test red. It
+hangs it. The child stops on a full standard error, and the helper waits for an
+end of the master end that does not come. The other three tests of
+`tests/pty.rs` pass first, and `timeout` then kills the binary:
+
+```text
+test the_newlines_of_the_child_come_back_unchanged ... ok
+test a_child_whose_stdout_is_on_the_terminal_sees_a_terminal ... ok
+test the_controlling_terminal_of_the_child_is_the_terminal_at_its_opened_size ... ok
+exit 124
+```
+
+The red commit of that test was the same hang, against the helper that read the
+master end on the calling thread. A hang is not a failure that `cargo test`
+reports, so a run without a timeout of its own waits forever on this mutation.
+The test holds no clock on purpose. A deadline around a child measures the load
+of the machine as well as the code, and it fails a loaded run of a correct
+helper.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
 code moves. Every place below is load-bearing for the whole table:
 
 - **`Git::safety_config()`** — five of the nine guards `tests/safety.rs` pins
-  are entries in that list, and the unit tests in `src/git.rs` pin five more of
-  its entries directly. Adding, reordering, or removing one changes what the
-  suite covers.
+  are entries in that list, and the unit tests in `src/git.rs` pin six more of
+  its entries directly. `tests/diffs.rs` pins two more: `core.abbrev=auto`,
+  through the `index` line of a halt diff, and `log.showSignature=false`,
+  through the name of a signed stopped commit. Adding, reordering, or removing
+  one changes what the suite covers.
 - **`Scratch::create`** — the scratch worktree and its detached `worktree add`.
 - **The `Drop` teardown** — both the removal that must happen and the prune that
   must not.
@@ -1992,6 +2416,20 @@ code moves. Every place below is load-bearing for the whole table:
   replay, so only a resolution comes round again, and the charge for a `--skip`
   is unfalsifiable today. An arm that starts coming round again after a skip
   makes it falsifiable, and needs its own mutation and its own row.
+- **The two positions of the capture, and `DIFF_AT_HALT`** — the rebase loop
+  captures a halt diff above the `git add -A` that stages the markers, and the
+  merge captures below its early return and its refusal. A capture below
+  `git add -A` gives an empty halt diff, and a capture above the early return
+  gives a clean merge a halt diff. `DIFF_AT_HALT` decides which bytes the
+  capture hands a person, so a flag added to it or taken from it needs its own
+  test, its own mutation and its own row. `core.abbrev=auto` in
+  `Git::safety_config()` belongs to the same line. It is the one pin of the
+  halt diff that a flag cannot carry, because a `-c` pair cannot follow the
+  subcommand. `log.showSignature=false` belongs to the same line as well. It
+  keeps the name of a stopped commit to one line, and it is in
+  `Git::safety_config()` so that it covers each `log` call and not only the one
+  that names the commit. Six of the seven pins have a test that goes red
+  without them, and `--no-ext-diff` has a test that cannot.
 - **`Scratch::check_out_detached`** — the detached checkout every consumer now
   makes. `tests/safety.rs` spells its own checkout out by hand rather than
   calling this, on purpose: that detach is a guard under test, and a guard read
@@ -2052,6 +2490,12 @@ code moves. Every place below is load-bearing for the whole table:
   I/O error, so the guard has to exist before the walk starts. Building it out
   of what the walk returns leaves a stripped tree behind on the one path the
   guard exists for.
+- **`Pty::open` and `Pty::run_with_stdout_on_terminal`** — the modes, the
+  close-on-exec flag, the reader thread, and the copies of the slave end that
+  the run closes when the child starts. One more copy of the slave end, held
+  anywhere in the test process, holds the read of the master end open. A test
+  that waits on that read then hangs and does not fail, so a change here needs
+  its mutation run under a timeout, as the record above says.
 
 Anyone touching those should re-run the relevant mutation and update this file
 with what they saw. A guard added without ever being watched to fail is back to

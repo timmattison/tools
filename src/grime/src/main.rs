@@ -44,6 +44,15 @@ struct Args {
     /// Print nothing about the merge - the exit code is the answer
     #[clap(short, long)]
     quiet: bool,
+
+    /// Print the diff of the one halt of the merge after the breakdown
+    ///
+    // A request for the diff and a request for no output contradict each
+    // other, so clap refuses the pair with its usage error and exit 2. A tool
+    // that obeys one of the two in silence surprises the caller who gave the
+    // other.
+    #[clap(long, conflicts_with = "quiet")]
+    diff: bool,
 }
 
 /// Hands the whole shell to [`Console::answer`] - what this tool says, the one
@@ -61,7 +70,37 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
+    decide_color();
+
     Console::answer(TOOL, args.quiet, |console| run(&args, console))
+}
+
+/// Decide once, before the first word, whether the halt diff of `--diff` is in
+/// color.
+///
+/// Only the halt diff is painted. `gitscratch` paints it with `colored`, and
+/// `colored` decides at format time whether to write the codes of its paint.
+/// Its own rules cover a terminal and the usual variables.
+///
+/// [`termwindow::should_force_colors_here`] adds the rule of a wrapper, which
+/// `colored` cannot see: a pipe, and a width stated in `COLUMNS`, as
+/// `viddy(1)` gives. It also holds the two variables that refuse that rule,
+/// `NO_COLOR` and `CLICOLOR=0`, and the parse of `COLUMNS` that `termbar`
+/// uses for the width. `grind` asks the same function, so the two tools paint
+/// by one rule, and a fix to it reaches both.
+///
+/// The override is `set_override(true)` or nothing. The answer never goes to
+/// `set_override` directly. On a terminal that answer is false, and
+/// `set_override(false)` turns off the color that `colored` gives a terminal by
+/// itself.
+fn decide_color() {
+    if termwindow::should_force_colors_here() {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
+        )]
+        colored::control::set_override(true);
+    }
 }
 
 /// Answer the question, returning what the merge would cost.
@@ -157,7 +196,14 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let dirty_note = unworded.dirty_note(repo.uncommitted_files().unwrap_or_default());
 
     let scratch = repo.scratch("HEAD")?;
-    let conflicts = scratch.replay_merge(&branch)?;
+    // `--diff` asks for the capture. Without it, the merge captures nothing
+    // and costs what it cost before the flag existed.
+    let (conflicts, diffs) = if args.diff {
+        let (conflicts, diffs) = scratch.replay_merge_with_diffs(&branch)?;
+        (conflicts, Some(diffs))
+    } else {
+        (scratch.replay_merge(&branch)?, None)
+    };
 
     // There is a verdict now, so the caveat has something to qualify.
     if let Some(note) = dirty_note {
@@ -185,6 +231,23 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // state a width of its own.
     console
         .verdict(&report.render_within(&conflicts, usize::from(TerminalWidth::get_or_default())));
+
+    // The diff comes after the verdict that it explains, on the same stream.
+    // `render_diffs` gives nothing for a merge that did not halt, so a clean
+    // run prints the same bytes with the flag and without it. A run that fails
+    // never gets here, because the merge returned its error above. A diff with
+    // no answer is no part of an answer.
+    //
+    // The report is `without_stops`, so the diff of the one halt comes with no
+    // stop heading. A merge halts once, and a heading of `stop 1 of 1` names a
+    // constant, as the stop count does.
+    //
+    // Through `Console::verdict` like the verdict, so `-q` reaches it and a
+    // failed write costs the words and never the exit code. clap refuses `-q`
+    // with `--diff`, so the reach of `-q` here is a second guard.
+    if let Some(text) = diffs.and_then(|diffs| report.render_diffs(&diffs)) {
+        console.verdict(&text);
+    }
 
     Ok(conflicts)
 }
