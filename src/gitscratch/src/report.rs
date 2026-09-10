@@ -400,7 +400,7 @@ impl<'a> Report<'a> {
                 lines.push(DiffLine::Heading(&heading).render());
             }
 
-            let body = String::from_utf8_lossy(halt.diff().unwrap_or_default());
+            let body = printable_diff(&String::from_utf8_lossy(halt.diff().unwrap_or_default()));
             lines.extend(
                 body.trim_end()
                     .split('\n')
@@ -471,21 +471,47 @@ impl DiffLine<'_> {
 /// by an `n`, and this escape leaves that backslash alone, so `\n` on screen
 /// would name two different files. `\u{a}` names one.
 fn printable(name: &Path) -> String {
-    let text = name.to_string_lossy();
-    if !text.contains(char::is_control) {
-        return text.into_owned();
-    }
+    spell_out_controls(&name.to_string_lossy(), |_, _| false)
+}
 
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        if character.is_control() {
-            escaped.push_str(&format!("\\u{{{:x}}}", character as u32));
+/// Text from a halt diff, as text a terminal can be handed.
+///
+/// The rule of `printable`, with three characters kept, because a diff is
+/// lines of text and a name is not. A newline ends a line of a diff, and a tab
+/// is the indent of a line of code. A carriage return immediately before a
+/// newline is a CRLF line ending, which a file written on Windows carries on
+/// each line. Each other carriage return comes out as `\u{d}`. A lone one moves
+/// the cursor back to the start of the line, and the text after it then writes
+/// over the text before it. That includes a carriage return at the very end of
+/// the text, which no newline follows.
+fn printable_diff(text: &str) -> String {
+    spell_out_controls(text, |control, next| match control {
+        '\n' | '\t' => true,
+        '\r' => next == Some('\n'),
+        _ => false,
+    })
+}
+
+/// `text` with each control character spelled out as `\u{...}`, except each
+/// one that `keeps` names.
+///
+/// One loop and one form for the two callers, `printable` for a name and
+/// `printable_diff` for the text of a halt diff, so the two cannot spell one
+/// character two ways. `keeps` gets the control character and the character
+/// after it, or `None` at the end of the text, because a carriage return is a
+/// line ending or not by what follows it.
+fn spell_out_controls(text: &str, keeps: impl Fn(char, Option<char>) -> bool) -> String {
+    let mut spelled = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character.is_control() && !keeps(character, characters.peek().copied()) {
+            spelled.push_str(&format!("\\u{{{:x}}}", character as u32));
         } else {
-            escaped.push(character);
+            spelled.push(character);
         }
     }
 
-    escaped
+    spelled
 }
 
 #[cfg(test)]
