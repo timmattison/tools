@@ -33,10 +33,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::prelude::{Engine, BASE64_STANDARD};
 use icy_sixel::{sixel_encode, EncodeOptions};
-use image::codecs::jpeg::JpegEncoder;
+use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
 use image::codecs::png::{PngDecoder, PngEncoder};
 use image::imageops::FilterType;
-use image::{DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat};
+use image::metadata::Orientation;
+use image::{DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat};
 
 use crate::cursor::{write_image_with_cursor_contract, CursorContract};
 use crate::detect::{Capabilities, DisplayRoutine};
@@ -441,13 +442,16 @@ pub struct Request<'a> {
     /// The bytes of the file that the image came out of, when the caller holds
     /// them.
     ///
-    /// A picture that needs no resize, that arrives as a still PNG or a JPEG,
-    /// and that the budget holds travels byte for byte. No encoder runs and no
-    /// pixel changes, so a JPEG on disk reaches the terminal as the
-    /// photographer left it. A file of any other format reaches it through the
-    /// encoder, because the terminals of the protocol do not all read the same
-    /// list of formats, and because a file that animates carries more than the
-    /// one frame the caller holds.
+    /// A picture that needs no resize, that arrives as a still PNG or a JPEG
+    /// that states no turn of the picture, and that the budget holds travels
+    /// byte for byte. No encoder runs and no pixel changes, so a JPEG on disk
+    /// reaches the terminal as the photographer left it. Every other file
+    /// reaches it through the encoder: the terminals of the protocol do not
+    /// all read the same list of formats, a file that animates carries more
+    /// than the one frame the caller holds, and a file that states a turn of
+    /// the picture draws one picture as it stands and another one through the
+    /// encoder. [`travels_as_it_stands`] holds the whole rule and gives it to
+    /// a caller.
     ///
     /// A caller that decoded the picture out of a file it still holds states
     /// those bytes here. A caller that made the picture itself states [`None`],
@@ -1491,9 +1495,9 @@ fn write_sixel<W: Write>(
 ///
 /// # Returns
 /// The base64 of the file, for a picture that the display bounds left alone,
-/// out of a request that states a file of a format this writer makes, inside a
-/// budget that holds it. [`None`] in every other case, and the picture then
-/// reaches the budget through the fit.
+/// out of a request that states a file that [`travels_as_it_stands`] answers
+/// for, inside a budget that holds it. [`None`] in every other case, and the
+/// picture then reaches the budget through the fit.
 fn source_payload_of(request: &Request<'_>, resized: bool) -> Option<String> {
     if resized {
         return None;
@@ -1565,22 +1569,53 @@ const fn base64_characters_of(bytes: usize) -> usize {
 /// The specification puts the chunk in front of the first `IDAT` chunk, so the
 /// reader takes a header and no pixel.
 ///
-/// The answer is false for a PNG that the reader cannot open, and for one whose
-/// `acTL` chunk it cannot read. A file that this writer cannot read is a file
-/// it must not pass on.
+/// A file that states a turn of the picture stays out for a third reason. The
+/// EXIF standard lets a file state that a reader turns the picture before it
+/// draws it, and a terminal that draws the file itself reads that statement.
+/// The decoder of this crate reads the pixels and leaves the statement where it
+/// stands, so the picture that the caller holds is the picture before the turn.
+/// A file that travels as it stands therefore draws upright, and an encode of
+/// the same picture draws on its side. The cell span disagrees as well, because
+/// the writer measures the picture that it holds and a turn of 90 degrees swaps
+/// the two sides of the box that the terminal puts the picture in. A JPEG
+/// states the turn in an APP1 segment and a PNG states it in an `eXIf` chunk,
+/// and one reader takes both: the read stops at the metadata and takes no
+/// pixel.
+///
+/// This writer refuses such a file, and it turns no picture itself. A turn here
+/// changes what a Kitty terminal and a Sixel terminal draw as well, because
+/// those two protocols carry the picture and not the file, and no reader asked
+/// for that change. A turn in the caller reaches the same pictures, and it also
+/// moves the rule out of this crate: a caller that turned its picture cannot
+/// state that, so this writer cannot know which of the two pictures it holds. A
+/// rule that rests on the caller is a rule that this crate cannot keep, so the
+/// rule stays inside the crate and every terminal draws the picture that it
+/// drew before.
+///
+/// The answer is false for a file that the reader cannot open, for one whose
+/// `acTL` chunk it cannot read, and for one whose orientation it cannot read. A
+/// file that this writer cannot read is a file it must not pass on.
 ///
 /// # Arguments
 /// * `source` - The bytes of the file that the picture came out of.
 ///
 /// # Returns
-/// True for a JPEG and for a still PNG. False for every other file.
+/// True for a JPEG that states no turn of the picture, and for a still PNG that
+/// states none. False for every other file.
 #[must_use]
 pub fn travels_as_it_stands(source: &[u8]) -> bool {
     match image::guess_format(source) {
-        Ok(ImageFormat::Jpeg) => true,
+        Ok(ImageFormat::Jpeg) => JpegDecoder::new(io::Cursor::new(source))
+            .and_then(|mut decoder| decoder.orientation())
+            .is_ok_and(|orientation| orientation == Orientation::NoTransforms),
         Ok(ImageFormat::Png) => PngDecoder::new(io::Cursor::new(source))
-            .and_then(|decoder| decoder.is_apng())
-            .is_ok_and(|animated| !animated),
+            .and_then(|mut decoder| {
+                let animated = decoder.is_apng()?;
+                let orientation = decoder.orientation()?;
+
+                Ok(!animated && orientation == Orientation::NoTransforms)
+            })
+            .unwrap_or(false),
         _ => false,
     }
 }
@@ -1674,8 +1709,9 @@ fn write_iterm2<W: Write>(
         Picture::Still => Iterm2Payload::Png,
     };
 
-    // A file that the caller holds, that the screen fits and that the budget
-    // carries travels as it stands, so no encoder runs and no pixel changes.
+    // A file that the caller holds, that `travels_as_it_stands` answers for,
+    // that the screen fits and that the budget carries travels as it stands, so
+    // no encoder runs and no pixel changes.
     // Every other picture reaches the budget through the fit, which starts at
     // the shape above and steps down the qualities of `Iterm2Payload` before it
     // takes a pixel off the picture. `width=` and `height=` below state the
@@ -1721,9 +1757,6 @@ fn write_iterm2<W: Write>(
 mod tests {
     use super::*;
     use crate::detect::TerminalType;
-    use image::codecs::jpeg::JpegDecoder;
-    use image::metadata::Orientation;
-    use image::ImageDecoder;
 
     /// The image that the tests draw. One pixel is enough, because no test here
     /// reads the pixels of the payload.

@@ -66,10 +66,11 @@
 //!
 //! [`travels_as_it_stands`] is one such answer. A caller states the file a
 //! picture came out of in [`Request::source`], and the draw sends that file
-//! byte for byte in two formats alone. The draw reads the rule too late for
-//! the caller, which holds the whole file from the moment it reads it, so a
-//! caller that asks first drops the bytes of a file that no draw can send and
-//! holds the picture by itself.
+//! byte for byte in two formats alone, and out of those two only for a file
+//! that holds one picture and states no turn of it. The draw reads the rule
+//! too late for the caller, which holds the whole file from the moment it
+//! reads it, so a caller that asks first drops the bytes of a file that no
+//! draw can send and holds the picture by itself.
 
 mod cursor;
 mod detect;
