@@ -392,11 +392,11 @@ impl<'a> Report<'a> {
             lines.push(DiffLine::Gap.render());
 
             if self.show_stops {
-                let heading = format!(
-                    "stop {} of {stops} - {}",
-                    index + 1,
-                    halt.stopped().unwrap_or_default()
-                );
+                let stop = index + 1;
+                let heading = match halt.stopped() {
+                    Some(stopped) => format!("stop {stop} of {stops} - {stopped}"),
+                    None => format!("stop {stop} of {stops}"),
+                };
                 lines.push(DiffLine::Heading(&heading).render());
             }
 
