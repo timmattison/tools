@@ -539,6 +539,23 @@ impl Capabilities {
         Ok(())
     }
 
+    /// Whether the bytes of `source` travel to this terminal as they stand.
+    ///
+    /// A caller that holds the file a picture came out of states those bytes
+    /// in [`Request::source`], and a false answer says that no draw of them
+    /// reaches this terminal. Such a caller drops the bytes and keeps the
+    /// picture alone.
+    ///
+    /// # Arguments
+    /// * `source` - The bytes of the file that the picture came out of.
+    ///
+    /// # Returns
+    /// True for a file that this terminal takes as it stands.
+    #[must_use]
+    pub fn travels_as_it_stands(&self, source: &[u8]) -> bool {
+        travels_as_it_stands(source)
+    }
+
     /// Read the refusal that this terminal wrote for the picture that went
     /// before.
     ///
@@ -1756,7 +1773,7 @@ fn write_iterm2<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detect::TerminalType;
+    use crate::detect::{AnsweredProtocol, TerminalType};
 
     /// The image that the tests draw. One pixel is enough, because no test here
     /// reads the pixels of the payload.
@@ -3170,6 +3187,54 @@ mod tests {
         assert!(
             payload != BASE64_STANDARD.encode(&source),
             "an animated PNG must reach the terminal through the encoder, but the command carried the file as it stands"
+        );
+    }
+
+    /// A terminal that sends no file refuses a file of every format.
+    ///
+    /// The iTerm2 protocol carries a whole file, and [`write_iterm2`] is the
+    /// one writer that reads [`Request::source`]. The Kitty writer and the
+    /// Sixel writer read no byte of it, and a terminal that draws no picture
+    /// at all reads nothing at all. A caller that holds the file of a picture
+    /// for one of those terminals therefore holds a copy that nothing reads,
+    /// beside a decoded picture of the same size, for the whole length of the
+    /// draw.
+    ///
+    /// So the answer names the terminal before it names the format. The
+    /// iTerm2 case at the end holds the rule to the terminals that read no
+    /// file: an answer of false for every terminal passes the first three
+    /// cases and fails the fourth.
+    #[test]
+    fn a_terminal_that_sends_no_file_refuses_a_file_of_every_format() {
+        let source = png_file_of(&photograph_fixture());
+
+        for terminal_type in [
+            TerminalType::Kitty,
+            TerminalType::Answered(AnsweredProtocol::Sixel),
+        ] {
+            let capabilities = Capabilities::new(terminal_type.clone(), true, true);
+
+            assert!(
+                !capabilities.travels_as_it_stands(&source),
+                "a {terminal_type:?} terminal reads no byte of the source file, so no file of it travels as it stands"
+            );
+        }
+
+        // A terminal of the iTerm2 protocol that draws no inline image at all.
+        // The protocol carries a file and the terminal draws none, so `draw`
+        // refuses the picture before it reads one byte of the source.
+        let draws_nothing = Capabilities::new(TerminalType::Alacritty, false, true);
+
+        assert!(
+            !draws_nothing.travels_as_it_stands(&source),
+            "a terminal that draws no inline image sends no file either"
+        );
+
+        let iterm2 = Capabilities::new(TerminalType::ITerm2, true, true);
+
+        assert!(
+            iterm2.travels_as_it_stands(&source),
+            "an iTerm2 terminal carries a whole file, and a still PNG that states no turn is a file that it sends"
         );
     }
 

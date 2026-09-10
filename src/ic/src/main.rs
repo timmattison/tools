@@ -1657,6 +1657,9 @@ fn draw_progress_bar(
 ///
 /// # Arguments
 /// * `file_path` - The path of the image file.
+/// * `capabilities` - What the terminal of this run does. The caller reads the
+///   terminal one time and states it here, so this read never depends on the
+///   terminal of whoever runs it.
 ///
 /// # Returns
 /// The picture, and the bytes it came out of for a file that the writer can
@@ -1664,7 +1667,10 @@ fn draw_progress_bar(
 ///
 /// # Errors
 /// An error when the file does not open, or when it holds no image.
-fn read_image_file(file_path: &Path) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+fn read_image_file(
+    file_path: &Path,
+    capabilities: &Capabilities,
+) -> Result<(DynamicImage, Option<Vec<u8>>)> {
     let source = fs::read(file_path)
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
@@ -1685,7 +1691,7 @@ fn read_image_file(file_path: &Path) -> Result<(DynamicImage, Option<Vec<u8>>)> 
 
     // A file that the writer cannot send drops here, at the end of the read,
     // and the caller holds the picture alone.
-    let source = termgfx::travels_as_it_stands(&source).then_some(source);
+    let source = capabilities.travels_as_it_stands(&source).then_some(source);
 
     Ok((img, source))
 }
@@ -1710,7 +1716,11 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
         println!("{line}");
     }
 
-    let (img, source) = read_image_file(file_path)?;
+    // The read of the terminal happens one time for the whole run, and
+    // `display_image` below takes that same answer out of the memory of
+    // `termgfx`. So this call costs no round trip of its own.
+    let capabilities = Capabilities::detect_by_asking();
+    let (img, source) = read_image_file(file_path, &capabilities)?;
 
     let (term_width, _) = terminal_cells();
     display_image(
@@ -1732,9 +1742,29 @@ fn display_text_file(file_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn display_image_from_stdin(args: &Args) -> Result<()> {
-    let stdin = io::stdin();
-    let mut reader = BufReader::new(stdin.lock());
+/// Read one image out of `reader`, and give back the picture and the bytes.
+///
+/// This is the read of the standard input path, and it stands apart from the
+/// display of the picture for the reason [`read_image_file`] stands apart from
+/// [`display_image_from_file`]: a test reads a picture out of bytes it built
+/// itself, where a test of the display would draw into the terminal of whoever
+/// runs it.
+///
+/// # Arguments
+/// * `reader` - The stream that carries the bytes of one image file.
+/// * `capabilities` - What the terminal of this run does. The caller reads the
+///   terminal one time and states it here, so this read never depends on the
+///   terminal of whoever runs it.
+///
+/// # Returns
+/// The picture, and the bytes it came out of.
+///
+/// # Errors
+/// An error when the stream does not read, or when it holds no image.
+fn picture_from_stdin(
+    mut reader: impl Read,
+    _capabilities: &Capabilities,
+) -> Result<(DynamicImage, Option<Vec<u8>>)> {
     let mut buffer = Vec::new();
     reader
         .read_to_end(&mut buffer)
@@ -1742,10 +1772,21 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 
     let img = image::load_from_memory(&buffer).context("Failed to decode image from stdin")?;
 
+    Ok((img, Some(buffer)))
+}
+
+fn display_image_from_stdin(args: &Args) -> Result<()> {
+    // The read of the terminal happens one time for the whole run, and
+    // `display_image` below takes that same answer out of the memory of
+    // `termgfx`. So this call costs no round trip of its own.
+    let capabilities = Capabilities::detect_by_asking();
+    let stdin = io::stdin();
+    let (img, source) = picture_from_stdin(BufReader::new(stdin.lock()), &capabilities)?;
+
     // This path prints no header, so the image can use the whole terminal less
     // the row of the prompt. The bytes that arrived travel beside the picture,
     // because a file that the terminal draws as it stands needs no encode.
-    display_image(img, Some(&buffer), args, Picture::Still, HeaderRows(0))
+    display_image(img, source.as_deref(), args, Picture::Still, HeaderRows(0))
 }
 
 /// The code that a Kitty terminal names for an image store with no room left.
@@ -3412,6 +3453,16 @@ not_a_number zellij a work
         TemporaryFile(path)
     }
 
+    /// A terminal that carries a whole image file.
+    ///
+    /// The rule that keeps the bytes of a file names the terminal as well as
+    /// the format, and the iTerm2 protocol is the one that carries a file. A
+    /// test that read the terminal of whoever runs the suite would answer with
+    /// that terminal instead, so every test here states the terminal it covers.
+    fn a_terminal_that_sends_a_file() -> Capabilities {
+        Capabilities::new(TerminalType::ITerm2, true, true)
+    }
+
     /// The reader gives back the bytes of the file it read.
     ///
     /// `termgfx` sends a file it can carry as it stands, so it needs the bytes
@@ -3428,7 +3479,8 @@ not_a_number zellij a work
         let written = file.into_inner();
 
         let png_file = temporary_file_of(&written, "png");
-        let (picture, source) = read_image_file(png_file.path()).expect("the file holds a picture");
+        let (picture, source) = read_image_file(png_file.path(), &a_terminal_that_sends_a_file())
+            .expect("the file holds a picture");
         let source = source.expect("the writer sends a PNG as it stands, so the reader keeps it");
 
         assert_eq!(
@@ -3478,7 +3530,8 @@ not_a_number zellij a work
     fn the_reader_drops_a_file_that_the_writer_cannot_send() {
         let bitmap = picture_bytes_in(image::ImageFormat::Bmp);
         let bitmap_file = temporary_file_of(&bitmap, "bmp");
-        let (_, source) = read_image_file(bitmap_file.path()).expect("the file holds a picture");
+        let (_, source) = read_image_file(bitmap_file.path(), &a_terminal_that_sends_a_file())
+            .expect("the file holds a picture");
 
         assert!(
             source.is_none(),
@@ -3488,8 +3541,89 @@ not_a_number zellij a work
 
         let png = picture_bytes_in(image::ImageFormat::Png);
         let png_file = temporary_file_of(&png, "png");
-        let (_, source) = read_image_file(png_file.path()).expect("the file holds a picture");
+        let (_, source) = read_image_file(png_file.path(), &a_terminal_that_sends_a_file())
+            .expect("the file holds a picture");
 
+        assert_eq!(
+            source.as_deref(),
+            Some(png.as_slice()),
+            "the reader must keep the bytes of a PNG, because the writer sends them as they stand"
+        );
+    }
+
+    /// The reader drops a file that this terminal never sends.
+    ///
+    /// The iTerm2 writer is the one reader of the bytes of a file. A Kitty
+    /// terminal and a Sixel terminal read no byte of them, so the bytes that a
+    /// reader keeps for one of those terminals are a copy that nothing reads,
+    /// beside a decoded picture of the same size, for the whole length of the
+    /// draw. Ghostty, WezTerm and kitty are the common case, so the rule that
+    /// names the format alone holds the memory of every common run.
+    ///
+    /// The iTerm2 half at the end holds the rule to the terminals that send no
+    /// file. A reader that drops the bytes for every terminal passes the first
+    /// half of this test and fails the second.
+    #[test]
+    fn the_reader_drops_a_file_that_this_terminal_never_sends() {
+        let png = picture_bytes_in(image::ImageFormat::Png);
+        let png_file = temporary_file_of(&png, "png");
+
+        let kitty = Capabilities::new(TerminalType::Kitty, true, true);
+        let (_, source) =
+            read_image_file(png_file.path(), &kitty).expect("the file holds a picture");
+
+        assert!(
+            source.is_none(),
+            "the reader must drop the bytes of a PNG that a Kitty terminal never reads, but it kept {} of them",
+            source.map_or(0, |bytes| bytes.len())
+        );
+
+        let (_, source) = read_image_file(png_file.path(), &a_terminal_that_sends_a_file())
+            .expect("the file holds a picture");
+
+        assert_eq!(
+            source.as_deref(),
+            Some(png.as_slice()),
+            "the reader must keep the bytes of a PNG for the one terminal that sends them as they stand"
+        );
+    }
+
+    /// The reader of standard input drops a file that the writer cannot send.
+    ///
+    /// The two readers of `ic` read one file each, and one rule serves both. A
+    /// rule that reached the reader of a path alone would hold 36 megabytes of
+    /// dead bytes for `ic < photograph.bmp`, which is the case that the rule
+    /// exists for.
+    ///
+    /// The bytes come out of the memory of this test, so the read reaches no
+    /// standard input of the run and no file of the disk.
+    ///
+    /// The PNG at the end holds the rule to one format. A reader that drops
+    /// the bytes of every file passes the first half of this test and fails
+    /// the second.
+    #[test]
+    fn the_reader_of_standard_input_drops_a_file_that_the_writer_cannot_send() {
+        let terminal = a_terminal_that_sends_a_file();
+
+        let bitmap = picture_bytes_in(image::ImageFormat::Bmp);
+        let (_, source) = picture_from_stdin(io::Cursor::new(bitmap.as_slice()), &terminal)
+            .expect("the bytes hold a picture");
+
+        assert!(
+            source.is_none(),
+            "the reader must drop the bytes of a BMP, but it kept {} of them",
+            source.map_or(0, |bytes| bytes.len())
+        );
+
+        let png = picture_bytes_in(image::ImageFormat::Png);
+        let (picture, source) = picture_from_stdin(io::Cursor::new(png.as_slice()), &terminal)
+            .expect("the bytes hold a picture");
+
+        assert_eq!(
+            (picture.width(), picture.height()),
+            (4, 3),
+            "the reader must give back the picture that the bytes hold"
+        );
         assert_eq!(
             source.as_deref(),
             Some(png.as_slice()),
