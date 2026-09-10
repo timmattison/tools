@@ -2106,4 +2106,70 @@ mod tests {
         );
         assert_eq!(testcolor::strip_ansi(&rendered), plain);
     }
+
+    /// An ESC in file content stays spelled out on a painted line, and the
+    /// only ESC bytes on that line are the codes of its paint.
+    ///
+    /// The escape runs first and the painter second. So an ESC out of the file
+    /// is the text `\u{1b}` when the painter puts the color codes around the
+    /// line. A painter that ran first puts its codes into a line that the
+    /// escape then spells out, and the terminal prints them as text. The line
+    /// here is added against one parent, so it is green, and its typed paint
+    /// is the control. With color forced on, the printed line holds two ESC
+    /// bytes: the code that opens the green and the reset. With the codes
+    /// taken out, the literal `\u{1b}` is still there, and no ESC byte is
+    /// left.
+    #[test]
+    fn an_esc_in_file_content_stays_escaped_on_a_painted_line() {
+        /// The line of the halt diff that holds the ESC, as the escape spells
+        /// it.
+        const SPELLED: &str = r" +esc \u{1b}[31mred\u{1b}[m";
+
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            None,
+            concat!(
+                "diff --cc f.txt\n",
+                "index 989b198,a4e431d..0000000\n",
+                "--- a/f.txt\n",
+                "+++ b/f.txt\n",
+                "@@@ -1,1 -1,1 +1,5 @@@\n",
+                "++<<<<<<< HEAD\n",
+                " +esc \x1b[31mred\x1b[m\n",
+                "++=======\n",
+                "+ FEAT\n",
+                "++>>>>>>> 9d6c330 (feat one)",
+            ),
+        )]);
+
+        assert!(
+            painted(report, &diffs).contains(&SPELLED.green()),
+            "the line that holds the ESC is content with a `+`, so it is green"
+        );
+
+        let rendered = testcolor::with_forced_ansi(|| report.render_diffs(&diffs))
+            .expect("a replay that halted renders its halt diff");
+        let printed = rendered
+            .split('\n')
+            .find(|line| testcolor::strip_ansi(line) == SPELLED)
+            .unwrap_or_else(|| panic!("no printed line reads {SPELLED:?}:\n{rendered:?}"));
+        assert_eq!(
+            printed.matches(ESC).count(),
+            2,
+            "the ESC bytes on the line are the code that opens the green and the reset, \
+             and no ESC out of the file: {printed:?}"
+        );
+
+        let visible = testcolor::strip_ansi(&rendered);
+        assert!(
+            visible.contains(SPELLED),
+            "the literal \\u{{1b}} is still there once the codes go: {visible:?}"
+        );
+        assert!(
+            !visible.contains(ESC),
+            "no ESC byte is left once the codes go: {visible:?}"
+        );
+    }
 }
