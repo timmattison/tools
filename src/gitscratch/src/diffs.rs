@@ -31,6 +31,11 @@ const DIFF_AT_HALT: &[&str] = &[
     // although git writes to a pipe. A renderer cannot tell such a code from
     // an ESC byte in the file, and the renderer paints the diff itself.
     "--no-color",
+    // A `.gitattributes` entry can select a driver whose `textconv` program
+    // git runs on each side. A program that fails stops `git diff`, and one
+    // that works changes the text. The capture must run no program from the
+    // configuration of the developer.
+    "--no-textconv",
     "--diff-filter=U",
 ];
 
