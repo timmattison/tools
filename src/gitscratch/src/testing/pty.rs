@@ -22,7 +22,7 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::ptr;
 
 /// A pseudo-terminal of a size that a test chose.
@@ -159,5 +159,34 @@ impl Pty {
                 Ok(())
             });
         }
+    }
+
+    /// Run `command` with its standard output on this terminal, and give back
+    /// what the child left behind.
+    ///
+    /// A tool that decides color by whether standard output is a terminal
+    /// needs this shape of run. A pipe is not a terminal, so a test that reads
+    /// standard output through a pipe never sees the color that a person at a
+    /// terminal sees.
+    ///
+    /// # Arguments
+    /// * `command` - The command to start the child from. This method sets its
+    ///   three standard streams, and the caller sets every other part of it.
+    ///
+    /// # Returns
+    /// The exit status of the child, every byte it wrote to the terminal, and
+    /// every byte it wrote to standard error, in the shape that
+    /// [`Command::output`] gives.
+    ///
+    /// # Panics
+    /// Panics when the child does not start.
+    pub fn run_with_stdout_on_terminal(self, mut command: Command) -> Output {
+        // A stub: the child writes to a pipe, not to the terminal.
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("the child must start")
     }
 }
