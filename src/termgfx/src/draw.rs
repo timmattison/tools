@@ -789,8 +789,15 @@ fn cursor_contract(
 ///
 /// The order is where the walk starts and not what it believes. A rung that
 /// costs more of a given picture than the rung above it exists, and
-/// [`shape_that_costs_least`] measures every rung rather than trusting the
+/// [`shape_that_costs_least`] measures each rung rather than trusting the
 /// order to hold for the picture in hand.
+///
+/// A shape that compresses gives its size to the encoder alone, and the walk
+/// measures such a rung with an encoder run. A raw shape takes the same three
+/// bytes for every pixel whatever the picture holds, so
+/// [`Payload::characters_of`] states the size of that rung as arithmetic. The
+/// walk reads the statement, and it steps past a raw rung that the budget
+/// refuses without one encoder run.
 ///
 /// The Kitty protocol and the iTerm2 protocol each take their top rung off
 /// `request.picture` rather than off the budget. Kitty carries two shapes, and
@@ -934,9 +941,24 @@ impl Payload for KittyPayload {
         None
     }
 
-    /// Neither shape states a count yet.
-    fn characters_of(self, _image: &DynamicImage) -> Option<usize> {
-        None
+    /// The raw pixels cost four characters for every pixel, and the header
+    /// states the size of the picture beside them rather than inside the
+    /// payload. So [`raw_pixel_characters_of`] counts them off the pixel count
+    /// alone, and it counts no header with them.
+    ///
+    /// A PNG compresses, so its size comes off the content of the picture as
+    /// well and only the encoder gives it.
+    ///
+    /// # Arguments
+    /// * `image` - The image at the size that it draws at.
+    ///
+    /// # Returns
+    /// The characters of the raw pixels, and [`None`] for a PNG.
+    fn characters_of(self, image: &DynamicImage) -> Option<usize> {
+        match self {
+            KittyPayload::RawRgb => raw_pixel_characters_of(image, 0),
+            KittyPayload::Png => None,
+        }
     }
 }
 
@@ -980,7 +1002,9 @@ impl Payload for SixelPayload {
         None
     }
 
-    /// This shape states no count yet.
+    /// A Sixel encoding builds a palette and then compresses the bands of
+    /// pixels against it, so the size of it comes off the content of the
+    /// picture and only the encoder gives that size.
     fn characters_of(self, _image: &DynamicImage) -> Option<usize> {
         None
     }
@@ -1065,8 +1089,8 @@ impl JpegQuality {
 ///   copies the pixels behind a header of three lines, so it costs a memcpy
 ///   where a PNG costs a deflate. A measurement of a photograph of 1920 pixels
 ///   by 1080 states the PNG encoder at 8.37 milliseconds and the PNM builder at
-///   1.73, for 19 percent fewer characters, and a frame pays that time one time
-///   for every frame that it draws.
+///   1.73, for 19 percent fewer characters, and a frame that travels in one of
+///   these two shapes pays that time one time for every frame that it draws.
 /// * [`Iterm2Payload::Jpeg`] stands under both of them, one quality at a time.
 ///   A photograph compresses poorly in a lossless format, and a JPEG of it
 ///   carries about twelve times the pixels of a PNG for the same characters.
@@ -1101,6 +1125,28 @@ enum Iterm2Payload {
     Pnm,
     /// A whole JPEG file at this quality.
     Jpeg(JpegQuality),
+}
+
+impl Iterm2Payload {
+    /// Give the header of the raw PNM file that carries a picture of this size.
+    ///
+    /// The format states `P6`, then the size, then the highest value that a
+    /// channel takes, each on a line of its own, and the pixels follow it.
+    ///
+    /// [`Iterm2Payload::encode`] writes this header and
+    /// [`Iterm2Payload::characters_of`] measures it, so one place states the
+    /// header and the two cannot state different ones. A count that stands
+    /// under the file it counts sends a payload that the terminal drops.
+    ///
+    /// # Arguments
+    /// * `width` - The width of the picture in pixels.
+    /// * `height` - The height of the picture in pixels.
+    ///
+    /// # Returns
+    /// The three lines, with the newline that closes the last one.
+    fn pnm_header(width: u32, height: u32) -> String {
+        format!("P6\n{width} {height}\n255\n")
+    }
 }
 
 impl Payload for Iterm2Payload {
@@ -1150,7 +1196,7 @@ impl Payload for Iterm2Payload {
             Iterm2Payload::Pnm => {
                 let rgb = image.to_rgb8();
                 let pixels = rgb.as_raw();
-                let header = format!("P6\n{} {}\n255\n", rgb.width(), rgb.height());
+                let header = Iterm2Payload::pnm_header(rgb.width(), rgb.height());
 
                 file.reserve(header.len() + pixels.len());
                 file.extend_from_slice(header.as_bytes());
@@ -1180,8 +1226,10 @@ impl Payload for Iterm2Payload {
     /// A PNM steps onto the same rung that a PNG steps onto, and it skips the
     /// PNG. The deflate of a PNG is the exact cost that a frame starts at a PNM
     /// to avoid, and a JPEG encoder runs far under that cost. So a frame under
-    /// the budget of a mosh session builds one cheap PNM and lands on a JPEG
-    /// rung.
+    /// the budget of a mosh session lands on a JPEG rung, and it builds no PNM
+    /// at all to get there: [`Iterm2Payload::characters_of`] states what the
+    /// PNM costs, and [`shape_that_costs_least`] steps past that rung on the
+    /// statement alone.
     ///
     /// # Returns
     /// The highest JPEG quality under a PNG and under a PNM, the next rung down
@@ -1196,9 +1244,28 @@ impl Payload for Iterm2Payload {
         }
     }
 
-    /// No shape states a count yet.
-    fn characters_of(self, _image: &DynamicImage) -> Option<usize> {
-        None
+    /// A raw PNM carries three bytes for one pixel behind a header that states
+    /// the size, and it compresses none of them. So
+    /// [`raw_pixel_characters_of`] counts the whole file off the pixel count
+    /// and the header, and no encoder has to run.
+    ///
+    /// A PNG and a JPEG each compress, so the size of one comes off the content
+    /// of the picture as well and only the encoder gives it.
+    ///
+    /// # Arguments
+    /// * `image` - The image at the size that it draws at.
+    ///
+    /// # Returns
+    /// The characters of the raw PNM, and [`None`] for the two shapes that
+    /// compress.
+    fn characters_of(self, image: &DynamicImage) -> Option<usize> {
+        match self {
+            Iterm2Payload::Pnm => raw_pixel_characters_of(
+                image,
+                Iterm2Payload::pnm_header(image.width(), image.height()).len(),
+            ),
+            Iterm2Payload::Png | Iterm2Payload::Jpeg(_) => None,
+        }
     }
 }
 
@@ -1211,8 +1278,13 @@ impl Payload for Iterm2Payload {
 ///
 /// The shapes of a protocol bound themselves, because
 /// [`shape_that_costs_least`] walks a list that each protocol states and that
-/// list ends. So the encoder runs of one fit come to the length of that list
-/// plus this number plus one.
+/// list ends. So the encoder runs of one fit come to at most the length of that
+/// list plus this number plus one.
+///
+/// That count is a bound and no longer a number. [`Payload::characters_of`]
+/// states the size of a raw rung as arithmetic, and the walk steps past such a
+/// rung with no encoder run when the budget refuses it. A frame under the
+/// budget of a mosh session therefore comes in one run under the bound.
 const MAXIMUM_FIT_ATTEMPTS: usize = 6;
 
 /// The share of the budget that one attempt of [`fit_to_payload_budget`] aims
@@ -1306,6 +1378,14 @@ fn fit_to_payload_budget<'a, P: Payload>(
 /// picture that no rung fits comes back in the rung that cost the fewest
 /// characters. [`fit_to_payload_budget`] then spends pixels in that rung.
 ///
+/// **A raw rung is the one exception, because arithmetic gives its size.**
+/// [`Payload::characters_of`] states what such a rung costs, and the walk steps
+/// past a rung that the budget refuses before an encoder builds a payload that
+/// the budget then throws away. A rung that the walk steps past holds the same
+/// pixels for more characters than the budget allows, so the fit spends pixels
+/// whichever rung it lands in. The step stops at the last rung of the ladder,
+/// because the caller has to come back with a payload.
+///
 /// # Arguments
 /// * `image` - The picture at the size the display bounds gave it.
 /// * `budget` - The characters of payload that the picture can spend.
@@ -1322,6 +1402,29 @@ fn shape_that_costs_least<P: Payload>(
     budget: PayloadBudget,
     shape: P,
 ) -> Result<(P, String), DrawError> {
+    // A rung that states its count states it off the pixel count alone, so the
+    // budget refuses such a rung before an encoder builds the payload that the
+    // budget then throws away. A frame of 1920 pixels by 1080 costs 8294424
+    // characters as a raw PNM, and a mosh session holds 1044480 of them, so
+    // this step saves that payload one time for every frame of the video.
+    //
+    // The step stops at the last rung of the ladder on purpose. The caller has
+    // to come back with a payload: `fit_to_payload_budget` spends the pixels of
+    // the picture in the rung that this function names, and a picture that no
+    // rung holds reaches the budget there.
+    let mut shape = shape;
+
+    while shape
+        .characters_of(image)
+        .is_some_and(|characters| !budget.holds(characters))
+    {
+        let Some(cheaper) = shape.cheaper() else {
+            break;
+        };
+
+        shape = cheaper;
+    }
+
     let mut best = (shape, shape.encode(image)?);
     let mut rung = shape;
 
@@ -1680,6 +1783,47 @@ const fn base64_characters_of(bytes: usize) -> usize {
     bytes.div_ceil(3) * 4
 }
 
+/// The largest input that [`base64_characters_of`] counts inside a `usize`.
+///
+/// The count takes four characters for every three bytes, so an input above
+/// three quarters of a `usize` has a count that a `usize` cannot hold. No
+/// picture that a memory holds stands anywhere near this size, and
+/// [`raw_pixel_characters_of`] states the bound all the same, because a wrapped
+/// count is a small count and a small count sends a payload that the terminal
+/// drops.
+const BASE64_COUNTABLE_BYTES: usize = usize::MAX / 4 * 3;
+
+/// The base64 characters that the raw pixels of `image` cost, behind a header
+/// of `header` bytes.
+///
+/// Three bytes carry one pixel in every raw shape that this module writes, and
+/// a header of such a shape states the size of the picture rather than the
+/// pixels of it. So the count comes off the pixel count alone, and
+/// [`Payload::characters_of`] answers with it instead of running an encoder.
+///
+/// # Arguments
+/// * `image` - The image at the size that it draws at.
+/// * `header` - The bytes in front of the pixels. The Kitty protocol states the
+///   size in the keys of the command and puts no header in the payload, so it
+///   passes no bytes here.
+///
+/// # Returns
+/// [`None`] when the count runs past a `usize`. The walk then reads the size
+/// off an encoder run, which is the answer that it gave before this
+/// arithmetic, so an overflow costs one encoder run and no correctness.
+fn raw_pixel_characters_of(image: &DynamicImage, header: usize) -> Option<usize> {
+    /// The bytes that carry one pixel: one red, one green and one blue.
+    const BYTES_FOR_ONE_PIXEL: usize = 3;
+
+    let bytes = usize::try_from(image.width())
+        .ok()?
+        .checked_mul(usize::try_from(image.height()).ok()?)?
+        .checked_mul(BYTES_FOR_ONE_PIXEL)?
+        .checked_add(header)?;
+
+    (bytes <= BASE64_COUNTABLE_BYTES).then(|| base64_characters_of(bytes))
+}
+
 /// Whether the format of `source` lets the iTerm2 writer send it as it stands.
 ///
 /// This is the half of the rule that reads the file, and
@@ -1749,7 +1893,9 @@ fn file_travels_as_it_stands(source: &[u8]) -> bool {
 /// costs the least time. [`write_kitty`] states this same trade.
 ///
 /// A budget that neither top rung reaches steps onto the JPEG rungs, which both
-/// shapes share.
+/// shapes share. The step off a raw PNM builds no PNM at all, because
+/// [`Iterm2Payload::characters_of`] states what one costs and
+/// [`shape_that_costs_least`] reads that statement.
 ///
 /// # Arguments
 /// * `out` - The stream that takes the bytes.
@@ -3675,7 +3821,11 @@ mod tests {
                 &picture,
                 "the raw pixels of Kitty",
             );
-            the_count_agrees_with_the_encoder(Iterm2Payload::Pnm, &picture, "the raw PNM of iTerm2");
+            the_count_agrees_with_the_encoder(
+                Iterm2Payload::Pnm,
+                &picture,
+                "the raw PNM of iTerm2",
+            );
         }
     }
 
