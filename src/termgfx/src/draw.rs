@@ -450,8 +450,8 @@ pub struct Request<'a> {
     /// all read the same list of formats, a file that animates carries more
     /// than the one frame the caller holds, and a file that states a turn of
     /// the picture draws one picture as it stands and another one through the
-    /// encoder. [`travels_as_it_stands`] holds the whole rule and gives it to
-    /// a caller.
+    /// encoder. [`Capabilities::travels_as_it_stands`] holds the whole rule,
+    /// the terminal as well as the format, and gives it to a caller.
     ///
     /// A caller that decoded the picture out of a file it still holds states
     /// those bytes here. A caller that made the picture itself states [`None`],
@@ -542,18 +542,115 @@ impl Capabilities {
     /// Whether the bytes of `source` travel to this terminal as they stand.
     ///
     /// A caller that holds the file a picture came out of states those bytes
-    /// in [`Request::source`], and a false answer says that no draw of them
-    /// reaches this terminal. Such a caller drops the bytes and keeps the
-    /// picture alone.
+    /// in [`Request::source`], and this crate then sends that file byte for
+    /// byte in place of an encode of the picture. This method gives the rule
+    /// to such a caller before it makes the request: a false answer says that
+    /// no draw of these bytes on this terminal can send them, so a caller that
+    /// holds them drops them and keeps the picture alone. The bytes it drops
+    /// are a copy that nothing reads, and the copy stands beside a decoded
+    /// picture of the same size for the whole length of the draw.
+    ///
+    /// The answer reads this terminal first and the file second.
+    ///
+    /// # The terminal
+    ///
+    /// The iTerm2 protocol carries a whole file, and the writer of that
+    /// protocol is the one writer of this crate that reads a source file. The
+    /// Kitty protocol carries the picture in a wrapper of its own, and the
+    /// Sixel protocol carries an encoding of its own, so a terminal of either
+    /// one reads no byte of the file. The common case there is a terminal of
+    /// the Kitty protocol: kitty, Ghostty and WezTerm all draw it. A terminal
+    /// that draws no inline image at all draws none of the three protocols,
+    /// and [`Capabilities::draw`] refuses such a terminal before one byte
+    /// leaves.
+    ///
+    /// The answer is false for every one of those terminals, whatever the file
+    /// holds. A caller that reads the format alone therefore holds a whole PNG
+    /// or JPEG for the length of a draw that reads no byte of it.
+    ///
+    /// # The file
+    ///
+    /// The writer sends a file as it stands in the two formats it makes
+    /// itself, and every terminal of this protocol draws both of them. The
+    /// terminals do not all read the same list beyond those two, and a file
+    /// that a terminal cannot read draws nothing at all, so every other format
+    /// goes through the encoder.
+    ///
+    /// A file that animates stays out for a second reason: the picture that
+    /// the caller holds beside it is one frame of that animation, so a file
+    /// that travels as it stands draws a picture that the caller never asked
+    /// for. It also disagrees with itself, because the same file animates when
+    /// the display bounds leave it alone and freezes when a resize sends it
+    /// through the encoder. A GIF states the animation in its format, and an
+    /// animated PNG states it in the `acTL` chunk of a file that carries the
+    /// signature of a still PNG. So the writer reads that chunk to tell one
+    /// PNG from the other. The specification puts the chunk in front of the
+    /// first `IDAT` chunk, so the reader takes a header and no pixel.
+    ///
+    /// A file that states a turn of the picture stays out for a third reason.
+    /// The EXIF standard lets a file state that a reader turns the picture
+    /// before it draws it, and a terminal that draws the file itself reads
+    /// that statement. The decoder of this crate reads the pixels and leaves
+    /// the statement where it stands, so the picture that the caller holds is
+    /// the picture before the turn. A file that travels as it stands therefore
+    /// draws upright, and an encode of the same picture draws on its side. The
+    /// cell span disagrees as well, because the writer measures the picture
+    /// that it holds and a turn of 90 degrees swaps the two sides of the box
+    /// that the terminal puts the picture in. A JPEG states the turn in an
+    /// APP1 segment and a PNG states it in an `eXIf` chunk, and one reader
+    /// takes both: the read stops at the metadata and takes no pixel.
+    ///
+    /// This writer refuses such a file, and it turns no picture itself. A turn
+    /// here changes what a Kitty terminal and a Sixel terminal draw as well,
+    /// because those two protocols carry the picture and not the file, and no
+    /// reader asked for that change. A turn in the caller reaches the same
+    /// pictures, and it also moves the rule out of this crate: a caller that
+    /// turned its picture cannot state that, so this writer cannot know which
+    /// of the two pictures it holds. A rule that rests on the caller is a rule
+    /// that this crate cannot keep, so the rule stays inside the crate and
+    /// every terminal draws the picture that it drew before.
+    ///
+    /// The answer is false for a file that the reader cannot open, for one
+    /// whose `acTL` chunk it cannot read, and for one whose orientation it
+    /// cannot read. A file that this writer cannot read is a file it must not
+    /// pass on.
+    ///
+    /// # What a true answer leaves open
+    ///
+    /// A true answer is no promise that the bytes travel. Two facts of the
+    /// draw decide after it, and this call reads neither one. The display
+    /// bounds decide first, because a picture they took pixels off is no
+    /// longer the picture that the file holds. The budget decides after them,
+    /// because a file above the cap of the transport draws nothing at all.
+    /// Each of the two sends the picture through the encoder and reads no byte
+    /// of the file. So a caller keeps the bytes on a true answer, and it
+    /// counts on nothing more than that.
     ///
     /// # Arguments
     /// * `source` - The bytes of the file that the picture came out of.
     ///
     /// # Returns
-    /// True for a file that this terminal takes as it stands.
+    /// True for a JPEG that states no turn of the picture, and for a still PNG
+    /// that states none, on a terminal that this crate draws the iTerm2
+    /// protocol into. False for every other file, and for every other
+    /// terminal.
     #[must_use]
     pub fn travels_as_it_stands(&self, source: &[u8]) -> bool {
-        travels_as_it_stands(source)
+        // A terminal that draws no inline image draws no file either, and
+        // `draw` gives such a terminal `DrawError::NoGraphics` before it reads
+        // one byte of the request.
+        if !self.draws_images() {
+            return false;
+        }
+
+        // The iTerm2 writer is the one reader of the source file. The other
+        // two writers carry the picture and not the file, so the bytes of a
+        // file reach neither one.
+        if self.display_routine() != DisplayRoutine::Iterm2 {
+            return false;
+        }
+
+        file_travels_as_it_stands(source)
     }
 
     /// Read the refusal that this terminal wrote for the picture that went
@@ -1512,9 +1609,14 @@ fn write_sixel<W: Write>(
 ///
 /// # Returns
 /// The base64 of the file, for a picture that the display bounds left alone,
-/// out of a request that states a file that [`travels_as_it_stands`] answers
-/// for, inside a budget that holds it. [`None`] in every other case, and the
-/// picture then reaches the budget through the fit.
+/// out of a request that states a file that [`file_travels_as_it_stands`]
+/// answers for, inside a budget that holds it. [`None`] in every other case,
+/// and the picture then reaches the budget through the fit.
+///
+/// This function reads the format of the file alone, because it runs for the
+/// iTerm2 protocol alone. [`Capabilities::travels_as_it_stands`] is the
+/// entrance that reads the protocol as well, and a caller asks that one before
+/// it holds a file at all.
 fn source_payload_of(request: &Request<'_>, resized: bool) -> Option<String> {
     if resized {
         return None;
@@ -1522,7 +1624,7 @@ fn source_payload_of(request: &Request<'_>, resized: bool) -> Option<String> {
 
     let source = request.source?;
 
-    if !travels_as_it_stands(source) {
+    if !file_travels_as_it_stands(source) {
         return None;
     }
 
@@ -1552,66 +1654,17 @@ const fn base64_characters_of(bytes: usize) -> usize {
     bytes.div_ceil(3) * 4
 }
 
-/// Whether the bytes of `source` travel to the terminal as they stand.
+/// Whether the format of `source` lets the iTerm2 writer send it as it stands.
 ///
-/// A caller that holds the file a picture came out of states those bytes in
-/// [`Request::source`], and this crate then sends the file byte for byte in
-/// place of an encode of the picture. This function gives that rule to such a
-/// caller before it makes the request: a false answer says that no draw of
-/// these bytes can ever send them, so a caller that holds them drops them and
-/// keeps the picture alone. The bytes it drops are a copy that nothing reads,
-/// and the copy stands beside a decoded picture of the same size for the whole
-/// length of the draw.
+/// This is the half of the rule that reads the file, and
+/// [`Capabilities::travels_as_it_stands`] is the entrance that holds both
+/// halves. The other half reads the terminal, and every caller of this function
+/// already stands inside the iTerm2 path: [`source_payload_of`] runs for that
+/// protocol alone, and the method above reads the protocol before it reads one
+/// byte of the file. So this function names the protocol nowhere.
 ///
-/// A true answer is no promise that the bytes travel. The display bounds decide
-/// first, because a picture they took pixels off is no longer the picture that
-/// the file holds. The budget decides after them, because a file above the cap
-/// of the transport draws nothing at all. Each of the two sends the picture
-/// through the encoder and reads no byte of the file. So a caller keeps the
-/// bytes on a true answer, and it counts on nothing more than that.
-///
-/// The writer sends a file as it stands in the two formats it makes itself, and
-/// every terminal of this protocol draws both of them. The terminals do not all
-/// read the same list beyond those two, and a file that a terminal cannot read
-/// draws nothing at all, so every other format goes through the encoder.
-///
-/// A file that animates stays out for a second reason: the picture that the
-/// caller holds beside it is one frame of that animation, so a file that
-/// travels as it stands draws a picture that the caller never asked for. It
-/// also disagrees with itself, because the same file animates when the display
-/// bounds leave it alone and freezes when a resize sends it through the
-/// encoder. A GIF states the animation in its format, and an animated PNG
-/// states it in the `acTL` chunk of a file that carries the signature of a
-/// still PNG. So the writer reads that chunk to tell one PNG from the other.
-/// The specification puts the chunk in front of the first `IDAT` chunk, so the
-/// reader takes a header and no pixel.
-///
-/// A file that states a turn of the picture stays out for a third reason. The
-/// EXIF standard lets a file state that a reader turns the picture before it
-/// draws it, and a terminal that draws the file itself reads that statement.
-/// The decoder of this crate reads the pixels and leaves the statement where it
-/// stands, so the picture that the caller holds is the picture before the turn.
-/// A file that travels as it stands therefore draws upright, and an encode of
-/// the same picture draws on its side. The cell span disagrees as well, because
-/// the writer measures the picture that it holds and a turn of 90 degrees swaps
-/// the two sides of the box that the terminal puts the picture in. A JPEG
-/// states the turn in an APP1 segment and a PNG states it in an `eXIf` chunk,
-/// and one reader takes both: the read stops at the metadata and takes no
-/// pixel.
-///
-/// This writer refuses such a file, and it turns no picture itself. A turn here
-/// changes what a Kitty terminal and a Sixel terminal draw as well, because
-/// those two protocols carry the picture and not the file, and no reader asked
-/// for that change. A turn in the caller reaches the same pictures, and it also
-/// moves the rule out of this crate: a caller that turned its picture cannot
-/// state that, so this writer cannot know which of the two pictures it holds. A
-/// rule that rests on the caller is a rule that this crate cannot keep, so the
-/// rule stays inside the crate and every terminal draws the picture that it
-/// drew before.
-///
-/// The answer is false for a file that the reader cannot open, for one whose
-/// `acTL` chunk it cannot read, and for one whose orientation it cannot read. A
-/// file that this writer cannot read is a file it must not pass on.
+/// The method also holds the reasons for the two formats, for the animation and
+/// for the turn of a picture. Read them there.
 ///
 /// # Arguments
 /// * `source` - The bytes of the file that the picture came out of.
@@ -1620,7 +1673,7 @@ const fn base64_characters_of(bytes: usize) -> usize {
 /// True for a JPEG that states no turn of the picture, and for a still PNG that
 /// states none. False for every other file.
 #[must_use]
-pub fn travels_as_it_stands(source: &[u8]) -> bool {
+fn file_travels_as_it_stands(source: &[u8]) -> bool {
     match image::guess_format(source) {
         Ok(ImageFormat::Jpeg) => JpegDecoder::new(io::Cursor::new(source))
             .and_then(|mut decoder| decoder.orientation())
@@ -1726,9 +1779,9 @@ fn write_iterm2<W: Write>(
         Picture::Still => Iterm2Payload::Png,
     };
 
-    // A file that the caller holds, that `travels_as_it_stands` answers for,
-    // that the screen fits and that the budget carries travels as it stands, so
-    // no encoder runs and no pixel changes.
+    // A file that the caller holds, that `file_travels_as_it_stands` answers
+    // for, that the screen fits and that the budget carries travels as it
+    // stands, so no encoder runs and no pixel changes.
     // Every other picture reaches the budget through the fit, which starts at
     // the shape above and steps down the qualities of `Iterm2Payload` before it
     // takes a pixel off the picture. `width=` and `height=` below state the

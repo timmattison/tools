@@ -1646,14 +1646,23 @@ fn draw_progress_bar(
 /// read it and wrote it out again would throw a second helping of the picture
 /// away for nothing. See `termgfx::Request::source`.
 ///
-/// A file of every other format goes through that encoder, so its bytes are a
-/// copy that nothing reads. They stand beside a decoded picture of the same
-/// size for the whole length of the draw, and a BMP of 4000 by 3000 pixels
-/// holds 36 megabytes. This function therefore asks
-/// [`termgfx::travels_as_it_stands`] which file it holds and drops the bytes of
-/// a file that the writer can never send. `termgfx` owns that rule, because a
-/// second copy of it here disagrees with the writer the day the writer takes a
-/// third format.
+/// Two facts decide whether the writer can send this file, and the terminal is
+/// the larger of the two. One of the three protocols carries a whole file, and
+/// the writers of the other two read no byte of a source file at all. The
+/// common case is a terminal of the Kitty protocol, which kitty, Ghostty and
+/// WezTerm all draw, so a rule that read the format alone would keep the bytes
+/// of every PNG and every JPEG on the terminals that never read them. The
+/// format decides after the terminal, because the writer sends two formats as
+/// they stand and encodes every other one.
+///
+/// Bytes that no writer reads are a copy that nothing reads. They stand beside
+/// a decoded picture of the same size for the whole length of the draw, and a
+/// BMP of 4000 by 3000 pixels holds 36 megabytes. This function therefore asks
+/// `termgfx::Capabilities::travels_as_it_stands` what this terminal does with
+/// the file it holds, and it drops the bytes of a file that this terminal
+/// never sends. `termgfx` owns that rule, because a second copy of it here
+/// disagrees with the writer the day the writer takes a third format or a
+/// second protocol carries a file.
 ///
 /// # Arguments
 /// * `file_path` - The path of the image file.
@@ -1662,8 +1671,9 @@ fn draw_progress_bar(
 ///   terminal of whoever runs it.
 ///
 /// # Returns
-/// The picture, and the bytes it came out of for a file that the writer can
-/// send as it stands. [`None`] in place of the bytes for every other file.
+/// The picture, and the bytes it came out of for a file that this terminal
+/// takes as it stands. [`None`] in place of the bytes for every other file and
+/// every other terminal.
 ///
 /// # Errors
 /// An error when the file does not open, or when it holds no image.
@@ -1744,11 +1754,16 @@ fn display_text_file(file_path: &Path) -> Result<()> {
 
 /// Read one image out of `reader`, and give back the picture and the bytes.
 ///
-/// This is the read of the standard input path, and it stands apart from the
-/// display of the picture for the reason [`read_image_file`] stands apart from
-/// [`display_image_from_file`]: a test reads a picture out of bytes it built
-/// itself, where a test of the display would draw into the terminal of whoever
-/// runs it.
+/// This is the read of the standard input path, and it keeps the bytes of a
+/// file by the rule that [`read_image_file`] keeps them by. One rule serves
+/// both readers: a rule that reached the reader of a path alone would hold 36
+/// megabytes of dead bytes for `ic < photograph.bmp`, which is the case that
+/// the rule exists for.
+///
+/// The read stands apart from the display of the picture for the reason
+/// [`read_image_file`] stands apart from [`display_image_from_file`]: a test
+/// reads a picture out of bytes it built itself, where a test of the display
+/// would draw into the terminal of whoever runs it.
 ///
 /// # Arguments
 /// * `reader` - The stream that carries the bytes of one image file.
@@ -1757,13 +1772,15 @@ fn display_text_file(file_path: &Path) -> Result<()> {
 ///   terminal of whoever runs it.
 ///
 /// # Returns
-/// The picture, and the bytes it came out of.
+/// The picture, and the bytes it came out of for a file that this terminal
+/// takes as it stands. [`None`] in place of the bytes for every other file and
+/// every other terminal.
 ///
 /// # Errors
 /// An error when the stream does not read, or when it holds no image.
 fn picture_from_stdin(
     mut reader: impl Read,
-    _capabilities: &Capabilities,
+    capabilities: &Capabilities,
 ) -> Result<(DynamicImage, Option<Vec<u8>>)> {
     let mut buffer = Vec::new();
     reader
@@ -1772,7 +1789,11 @@ fn picture_from_stdin(
 
     let img = image::load_from_memory(&buffer).context("Failed to decode image from stdin")?;
 
-    Ok((img, Some(buffer)))
+    // A file that this terminal never sends drops here, at the end of the read,
+    // and the caller holds the picture alone.
+    let source = capabilities.travels_as_it_stands(&buffer).then_some(buffer);
+
+    Ok((img, source))
 }
 
 fn display_image_from_stdin(args: &Args) -> Result<()> {
@@ -1784,8 +1805,9 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
     let (img, source) = picture_from_stdin(BufReader::new(stdin.lock()), &capabilities)?;
 
     // This path prints no header, so the image can use the whole terminal less
-    // the row of the prompt. The bytes that arrived travel beside the picture,
-    // because a file that the terminal draws as it stands needs no encode.
+    // the row of the prompt. The bytes that arrived travel beside the picture
+    // for a terminal that draws the file as it stands, because such a file
+    // needs no encode.
     display_image(img, source.as_deref(), args, Picture::Still, HeaderRows(0))
 }
 
@@ -1837,7 +1859,10 @@ fn size_advice_for(code: &str) -> &'static str {
 /// * `source` - The bytes of the file that the image came out of, when this
 ///   call has them. A file that the terminal draws, that the screen fits and
 ///   that the transport carries reaches the terminal as it stands, so no
-///   encoder runs and no pixel changes. See `termgfx::Request::source`.
+///   encoder runs and no pixel changes. The two readers of `ic` state [`None`]
+///   here for a file that this terminal never sends, and
+///   `termgfx::Capabilities::travels_as_it_stands` holds that rule. See
+///   `termgfx::Request::source`.
 /// * `args` - The command line arguments.
 /// * `picture` - Whether this call draws one still picture or one frame of a
 ///   video. It names the shape that the image travels in, the answer that the
@@ -3465,11 +3490,11 @@ not_a_number zellij a work
 
     /// The reader gives back the bytes of the file it read.
     ///
-    /// `termgfx` sends a file it can carry as it stands, so it needs the bytes
-    /// that the file holds and not an encoding of the picture inside it. A
-    /// reader that gives back the picture alone leaves the writer nothing to
-    /// send, and every JPEG then reaches the terminal through a decode and an
-    /// encode that lose a second helping of it.
+    /// A terminal that carries a whole file takes the bytes that the file
+    /// holds, and not an encoding of the picture inside it. A reader that gives
+    /// back the picture alone leaves the writer nothing to send, and every JPEG
+    /// then reaches such a terminal through a decode and an encode that lose a
+    /// second helping of it.
     #[test]
     fn the_reader_gives_back_the_bytes_of_the_file() {
         let mut file = io::Cursor::new(Vec::new());
@@ -3517,11 +3542,16 @@ not_a_number zellij a work
 
     /// The reader drops a file that the writer cannot send as it stands.
     ///
-    /// `termgfx` sends a file byte for byte in two formats alone, a JPEG and a
-    /// still PNG. A file of any other format is a copy that nothing reads, and
-    /// it stands beside a decoded picture of the same size for the whole length
-    /// of the draw. A BMP of 4000 by 3000 pixels holds 36 megabytes, and the
-    /// picture that comes out of it holds 36 more.
+    /// This test states the format half of the rule, and it names the one
+    /// terminal that sends a file at all. The terminal half stands in
+    /// [`the_reader_drops_a_file_that_this_terminal_never_sends`], and
+    /// `termgfx::Capabilities::travels_as_it_stands` holds the two of them.
+    ///
+    /// On that terminal, `termgfx` sends a file byte for byte in two formats
+    /// alone, a JPEG and a still PNG. A file of any other format is a copy that
+    /// nothing reads, and it stands beside a decoded picture of the same size
+    /// for the whole length of the draw. A BMP of 4000 by 3000 pixels holds 36
+    /// megabytes, and the picture that comes out of it holds 36 more.
     ///
     /// The PNG at the end of this test holds the rule to one format. A reader
     /// that drops the bytes of every file passes the first half of this test

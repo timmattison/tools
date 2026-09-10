@@ -64,13 +64,19 @@
 //! therefore short on purpose, and it grows only when a caller has a use for
 //! an answer that [`Capabilities::draw`] cannot give it.
 //!
-//! [`travels_as_it_stands`] is one such answer. A caller states the file a
-//! picture came out of in [`Request::source`], and the draw sends that file
-//! byte for byte in two formats alone, and out of those two only for a file
-//! that holds one picture and states no turn of it. The draw reads the rule
-//! too late for the caller, which holds the whole file from the moment it
-//! reads it, so a caller that asks first drops the bytes of a file that no
-//! draw can send and holds the picture by itself.
+//! [`Capabilities::travels_as_it_stands`] is one such answer. A caller states
+//! the file a picture came out of in [`Request::source`], and one of the three
+//! protocols carries a whole file. So the draw sends that file byte for byte
+//! on a terminal of that one protocol, in two formats alone, and out of those
+//! two only for a file that holds one picture and states no turn of it. The
+//! draw reads the rule too late for the caller, which holds the whole file
+//! from the moment it reads it, so a caller that asks first drops the bytes of
+//! a file that this terminal never sends and holds the picture by itself.
+//!
+//! The answer stands on [`Capabilities`] because the terminal decides as much
+//! as the file does. A caller that asked about the format alone would keep a
+//! whole PNG or JPEG beside the picture on every terminal of the other two
+//! protocols, which read no byte of it.
 
 mod cursor;
 mod detect;
@@ -80,7 +86,7 @@ mod probe;
 mod session;
 
 pub use detect::{AnsweredProtocol, Capabilities, ImageProtocol, TerminalType};
-pub use draw::{travels_as_it_stands, Budget, Cursor, DrawError, PayloadBudget, Picture, Request};
+pub use draw::{Budget, Cursor, DrawError, PayloadBudget, Picture, Request};
 pub use geometry::{cell_pixels, terminal_cells};
 pub use probe::Refusal;
 pub use session::{MoshImages, ProtocolSet};
