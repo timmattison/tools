@@ -712,12 +712,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     error — it notes on stderr that uncommitted work is not included and leaves the verdict alone.
     Nothing in your repo moves; the safety guarantees are the shared `gitscratch` harness's, not a
     second copy of them.
-  - Usage: `grime [BRANCH]`, `grime -q feature && git merge feature`. `BRANCH` is optional: leave it
-    out to merge `main`, or `master` in a repository with no `main`, and a repository holding neither
-    name is refused with exit 2 rather than measured against HEAD. `-q` silences everything grime
+  - Usage: `grime [-q | --diff] [BRANCH]`, `grime -q feature && git merge feature`,
+    `grime --diff feature`. `BRANCH` is optional: leave it out to merge `main`, or `master` in a
+    repository with no `main`, and a repository holding neither name is refused with exit 2 rather
+    than measured against HEAD. `--diff` prints the diff of the one halt of the merge after the
+    breakdown, in color on a terminal, and changes no exit code. `-q` silences everything grime
     says, on both streams, since the exit code is the whole answer — but it stops at the argument
-    parser, so `grime -q --onto main` still prints a usage error and `grime -q --version` still
-    prints the version.
+    parser, so `grime -q --onto main` and `grime -q --diff` still print a usage error and
+    `grime -q --version` still prints the version.
   - To install: `cargo install --git https://github.com/timmattison/tools grime`
 
 - krt (Knights of the Round Trip)
