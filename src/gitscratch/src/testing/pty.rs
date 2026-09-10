@@ -61,14 +61,27 @@ impl Pty {
     /// tool then falls back to its default width.
     pub const ROWS: u16 = 24;
 
-    /// Open a pseudo-terminal `columns` columns wide.
+    /// Open a pseudo-terminal `columns` columns wide, which gives back each
+    /// byte as the child wrote it.
+    ///
+    /// The terminal has the default modes of the system, less one: output
+    /// processing is off. With output processing on, the terminal changes each
+    /// newline into a carriage return and a newline on its way to the master
+    /// end. A test that compares the bytes of a tool on a terminal with the
+    /// bytes of the same tool on a pipe then compares two different texts.
+    ///
+    /// The modes change before any child exists, so no child ever writes to a
+    /// terminal that changes its bytes. They change after the `openpty` call
+    /// and not in it. To give `openpty` a set of modes, the helper needs the
+    /// default modes of the system, and only a new terminal reports them.
     ///
     /// # Returns
     /// The two ends of a pseudo-terminal that reports `columns` columns by
     /// [`Pty::ROWS`] rows.
     ///
     /// # Panics
-    /// Panics when the system opens no pseudo-terminal.
+    /// Panics when the system opens no pseudo-terminal, or when the terminal
+    /// does not give or take its modes.
     pub fn open(columns: u16) -> Self {
         let mut master: libc::c_int = -1;
         let mut slave: libc::c_int = -1;
@@ -107,6 +120,32 @@ impl Pty {
         // descriptor one time, when it drops.
         let (master, slave) =
             unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+
+        let mut modes = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: `tcgetattr` writes one `termios` through the pointer, which
+        // points at storage of that type that outlives the call. The descriptor
+        // is the slave end, which is open.
+        let given = unsafe { libc::tcgetattr(slave.as_raw_fd(), modes.as_mut_ptr()) };
+        assert_eq!(
+            given,
+            0,
+            "the terminal must give its modes: {}",
+            io::Error::last_os_error()
+        );
+        // SAFETY: `tcgetattr` succeeded, so it wrote every field of the
+        // `termios`.
+        let mut modes = unsafe { modes.assume_init() };
+        modes.c_oflag &= !libc::OPOST;
+        // SAFETY: `tcsetattr` reads one `termios` through the pointer, which
+        // points at a live local value. The descriptor is the slave end, which
+        // is open.
+        let taken = unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &modes) };
+        assert_eq!(
+            taken,
+            0,
+            "the terminal must take its modes: {}",
+            io::Error::last_os_error()
+        );
 
         Pty { master, slave }
     }
