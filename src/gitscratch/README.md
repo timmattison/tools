@@ -508,6 +508,100 @@ buys. `diff3` and `zdiff3` put the base version inside the region, so a base
 carrying a line that reads as a marker is measured on a developer who set the
 key and not on one who did not.
 
+### The halt diffs
+
+`Report::render_diffs` turns the halt diffs of a replay into the text that
+follows the verdict. A tool that shows them prints that text through
+`Console::verdict`, after the verdict:
+
+```rust
+let (conflicts, diffs) = scratch.replay_rebase_with_diffs("main")?;
+
+console.verdict(&report.render_within(&conflicts, columns));
+if let Some(text) = report.render_diffs(&diffs) {
+    console.verdict(&text);
+}
+```
+
+It returns `None` when the replay did not halt, so a clean run prints the same
+bytes with `--diff` and without it. Otherwise the text starts with an empty
+line, which separates it from the breakdown. It has one section for each halt,
+in halt order, with one empty line between two sections. It ends with no
+newline, because `Console::verdict` writes one. Here, for the two stops of a
+rebase:
+
+```console
+grind: conflicts - replaying HEAD onto main
+       3 hunks across 2 files, 2 stops
+
+  f.txt    2 hunks
+  g.txt    1 hunk
+
+stop 1 of 2 - 6ee2c41 feat one
+diff --cc f.txt
+index a5f1be7,60b32f6..0000000
+--- a/f.txt
++++ b/f.txt
+@@@ -1,5 -1,5 +1,9 @@@
+  a
+++<<<<<<< HEAD
+ +MAIN
+++=======
++ FEAT1
+++>>>>>>> 6ee2c41 (feat one)
+  c
+  d
+  e
+* Unmerged path g.txt
+
+stop 2 of 2 - 9910691 feat two
+diff --cc f.txt
+index 1edf9f2,a1ec13b..0000000
+--- a/f.txt
++++ b/f.txt
+@@@ -1,9 -1,5 +1,13 @@@
+  a
+ +<<<<<<< HEAD
+++<<<<<<< HEAD
+ +MAIN
+ +=======
+ +FEAT1
+ +>>>>>>> 6ee2c41 (feat one)
+++=======
++ FEAT2
+++>>>>>>> 9910691 (feat two)
+  c
+  d
+  e
+```
+
+A section starts with a stop heading, `stop {i} of {n} - {stopped}`, which
+names the stop and the stopped commit. A halt with no stopped commit gets
+`stop {i} of {n}`. `Report::without_stops()` removes the stop headings and no
+other line. A merge halts once and has no stopped commit, so `grime` prints the
+halt diff of its one halt alone, under the empty line.
+
+Under the heading is the text `git diff` showed at that halt, less its last
+newline. Only that newline goes. A trim removes more: a line of a diff can end
+in spaces, and an empty context line of a combined diff is two spaces. A halt
+where git gave no diff gets `diff not available: ` and the message from git in
+place of the diff. The message can span lines, and each newline stays. The
+heading stays too, and the counts and the exit code do not change.
+
+The renderer writes each control character as `\u{...}`, the form the
+breakdown writes for a name. A name cannot write an escape sequence to the
+terminal, and neither can file content or a commit subject. So the rule applies
+to the diff, to the stop heading, and to the message. Three characters stay,
+because a diff is lines of text: a newline, a tab, and a carriage return
+immediately before a newline, which is a CRLF line ending. Each other carriage
+return comes out as `\u{d}`. A lone one moves the cursor back to the start of
+the line, and the text after it writes over the text before it. The escape runs
+before the last newline goes, so the last line of a CRLF file keeps its
+carriage return. Bytes that are not UTF-8 come out as U+FFFD, as they do in a
+name, so file content never causes a panic. The breakdown and the halt diffs
+escape through one loop, so a name and a diff cannot spell one character two
+ways.
+
 ## The shell
 
 `Report` says what a replay cost, and `Console` is the program around it.
@@ -1260,6 +1354,28 @@ space, a trailing space, U+3000 and an emoji, asserted through the rendered text
 rather than through the map. Both were watched to fail — replacing the decode
 with a `to_str` that gives up reddens the first, and trimming the converted name
 reddens the second.
+
+The tests of `Report::render_diffs` sit in `src/report.rs` too. They build their
+halt diffs with `HaltDiff::from_parts` and `HaltDiffs::from_halts`, so they
+need no repository.
+`each_halt_gets_a_section_with_its_heading_and_its_diff_in_halt_order` holds
+the whole block against a golden made of the real halt diffs of the
+`grind --diff` example in GitHub issue #475.
+`a_merge_halt_without_stops_renders_its_diff_alone` holds the `grime --diff`
+example to the byte.
+`dropping_the_stop_count_removes_the_stop_headings_and_nothing_else` compares
+the block with the headings, less exactly its heading lines, against the block
+without them. `a_replay_that_did_not_halt_renders_no_halt_diffs`,
+`a_halt_with_no_stopped_commit_gets_a_heading_that_names_the_stop_alone` and
+`a_halt_where_git_gave_no_diff_says_so_under_its_heading` hold the other
+shapes.
+`a_control_character_in_a_halt_diff_is_escaped_and_each_line_ending_stays`
+and `a_control_character_in_a_commit_subject_is_escaped_in_the_heading` hold
+the escape. The first was watched to fail under two mutations: the rule of the
+breakdown in place of the rule of the diff, and an end of text that counts as a
+line ending. `a_halt_diff_loses_its_last_newline_and_nothing_else` fails under a
+trim. `multi_byte_text_survives_in_a_halt_diff_and_in_its_heading` was watched
+to fail with the escape walking bytes in place of characters.
 
 Every column assertion in that file reads through one helper, `count_column`,
 and the helper has a test of its own —
