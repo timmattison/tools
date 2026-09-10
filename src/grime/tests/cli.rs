@@ -11,9 +11,9 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use gitscratch::testing::{
-    default_branch_choice_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
-    multi_byte_names_repo, nested_conflict_repo, not_a_repository, unrelated_histories_repo,
-    TestRepo, CHOICE_HEAD_BRANCH,
+    conflicting_repo, default_branch_choice_repo, equal_hunks_unequal_stops_repo,
+    independent_branches_repo, multi_byte_names_repo, nested_conflict_repo, not_a_repository,
+    unrelated_histories_repo, TestRepo, CHOICE_HEAD_BRANCH,
 };
 use gitscratch::{NoInheritedGitEnvironment, DEFAULT_BRANCHES};
 use unicode_width::UnicodeWidthStr;
@@ -1434,6 +1434,86 @@ fn diff_on_a_clean_merge_prints_the_same_bytes_as_a_run_without_it() {
         String::from_utf8_lossy(&with_diff.stdout),
         String::from_utf8_lossy(&plain.stdout),
         "a clean merge has no halt, so --diff has no diff to add\nstderr:\n{stderr}"
+    );
+}
+
+/// The short id of `revision` in `repo`, at the length that a replay writes.
+///
+/// The runner of `gitscratch` pins `core.abbrev=auto`, so every id that a
+/// replay prints has git's default length. The fixture's own git does not
+/// carry that pin, and a developer whose global config sets `core.abbrev` gets
+/// ids of another length from it. So this call states the pin too, and the
+/// expected text agrees with the run on every machine.
+fn short_id(repo: &TestRepo, revision: &str) -> String {
+    repo.git(&["-c", "core.abbrev=auto", "rev-parse", "--short", revision])
+}
+
+/// Stand on `left` in [`conflicting_repo`] and merge `right`. Both branches
+/// rewrite line 15 of `shared.txt`, so the merge halts once, on one region of
+/// one file.
+///
+/// `--diff` prints the verdict exactly as a run without the flag prints it,
+/// then an empty line, then the diff that `git diff` shows at the halt of a
+/// real merge. A merge halts once, so the report shows no stop heading, and
+/// the diff follows the empty line directly. The closing marker names the
+/// other side by the branch name that the caller gave.
+///
+/// The golden is the whole of stdout, byte for byte, with `NO_COLOR` set so
+/// the text is plain. Each blob id in it comes from the fixture's own git
+/// through [`short_id`], so the golden follows the fixture if its content
+/// changes. The all-zero id is the result, which is not in the object store
+/// yet. The text after the second `@@@` of the hunk header is the function
+/// context that git finds for the hunk.
+///
+/// The exit code is [`CONFLICTS`], the code of the same run without `--diff`.
+/// The diff adds words and changes no answer.
+#[test]
+fn diff_on_a_conflict_prints_the_verdict_then_the_diff_of_the_halt() {
+    let repo = conflicting_repo();
+    repo.checkout("left");
+
+    let ours = short_id(&repo, "left:shared.txt");
+    let theirs = short_id(&repo, "right:shared.txt");
+
+    let output = grime_command(repo.path(), &[DIFF_FLAG, "right"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grime");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the merge conflicts, so the answer is {CONFLICTS} with the diff as \
+         without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "grime: conflicts - merging right into HEAD
+       1 hunk across 1 file
+
+  shared.txt    1 hunk
+
+diff --cc shared.txt
+index {ours},{theirs}..0000000
+--- a/shared.txt
++++ b/shared.txt
+@@@ -12,7 -12,7 +12,11 @@@ line1
+  line12
+  line13
+  line14
+++<<<<<<< HEAD
+ +left-edit
+++=======
++ right-edit
+++>>>>>>> right
+  line16
+  line17
+  line18
+"
+        ),
+        "stderr:\n{stderr}"
     );
 }
 
