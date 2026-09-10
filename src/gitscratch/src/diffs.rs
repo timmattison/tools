@@ -20,7 +20,9 @@ use crate::git::Git;
 /// The global configuration of the developer reaches the runner, and some of
 /// its settings change the text of a diff. Each flag above the last one pins
 /// such a setting, so one halt gives the same halt diff on each machine. A
-/// test in `tests/diffs.rs` holds each pin against its setting.
+/// test in `tests/diffs.rs` holds each pin against its setting. One of them,
+/// `--no-ext-diff`, is a guard that no test can make fail, and `MUTATIONS.md`
+/// says why.
 ///
 /// `--diff-filter=U` makes the diff name the files that the counter reads, and
 /// no other file. The counter reads `git diff --name-only --diff-filter=U`, so
@@ -44,6 +46,12 @@ const DIFF_AT_HALT: &[&str] = &[
     // `diff.dstPrefix` each change the prefixes of the `---` and `+++` lines.
     // This flag gives back `a/` and `b/` under each of the four.
     "--default-prefix",
+    // `diff.external`, and `diff.<driver>.command` for a file whose attributes
+    // select that driver, name a program that git runs in place of its own
+    // diff. Git 2.55 runs neither one for a combined diff, so no test can make
+    // this flag fail. It stays because the capture must never run a program
+    // from the configuration of the developer.
+    "--no-ext-diff",
     "--diff-filter=U",
 ];
 

@@ -851,3 +851,63 @@ fn a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_
         "each id on the `index` line has to be hex digits and nothing else: {ids:?}"
     );
 }
+
+/// A halt diff runs no external diff program, whatever `diff.external` names.
+///
+/// `diff.external` names a program that git runs in place of its own diff.
+/// The capture must never run a program from the configuration of the
+/// developer, so the diff call carries `--no-ext-diff`. Git 2.55 was watched
+/// not to run the program for a combined diff at all, so this test passes
+/// with and without the flag. `MUTATIONS.md` records the flag as a guard that
+/// no test can make fail. The test holds the day git starts to run the program
+/// for a combined diff, and it holds now that the flag changes nothing else in
+/// the halt diff.
+///
+/// The program is a script in the git directory of the fixture, and it makes
+/// a sentinel file beside itself, so a run of the program leaves evidence. It
+/// finds that place from its own path, so no path is written into the script.
+/// The armed control runs an ordinary diff of two commits with plain git,
+/// which does run the program, and the sentinel must appear. That shows that
+/// the setting is live and that the script works. The control then removes the
+/// sentinel, and the capture must leave none behind.
+#[cfg(unix)]
+#[test]
+fn a_halt_diff_runs_no_external_diff_program_whatever_diff_external_names() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// A program that makes a sentinel file in its own directory.
+    const PROGRAM: &str = "#!/bin/sh\ntouch \"$(dirname \"$0\")/external-diff-ran\"\n";
+
+    let repo = conflicting_repo();
+    let git_dir = repo.path().join(".git");
+    let program = git_dir.join("external-diff");
+    let sentinel = git_dir.join("external-diff-ran");
+    std::fs::write(&program, PROGRAM).expect("write the external diff program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("make the external diff program executable");
+    let program_path = program
+        .to_str()
+        .expect("a temporary directory has a UTF-8 path");
+    repo.git(&["config", "diff.external", program_path]);
+
+    let ordinary = repo.try_git(&["diff", FIXTURE_BRANCH, OURS], &[]);
+    assert!(
+        ordinary.status.success() && sentinel.exists(),
+        "`diff.external` did not run its program for an ordinary diff of two commits, so the \
+         setting is not live and this test could only pass vacuously: {}",
+        String::from_utf8_lossy(&ordinary.stderr)
+    );
+    std::fs::remove_file(&sentinel).expect("remove the sentinel the control made");
+
+    let (_, halt) = merge_with_halt_diff(&repo);
+    assert!(
+        !sentinel.exists(),
+        "the capture ran the program that `diff.external` names"
+    );
+    let lines = diff_lines(&halt);
+    assert!(
+        lines.iter().any(|line| line == OPENING_MARKER),
+        "the halt diff has to show the region the merge conflicted in, from its \
+         `{OPENING_MARKER}` line: {lines:#?}"
+    );
+}

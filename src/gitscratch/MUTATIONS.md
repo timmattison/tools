@@ -73,6 +73,7 @@ not have to re-derive which guard belongs to which test.
 | `each_halt_diff_holds_the_markers_of_its_own_region` (`tests/diffs.rs`) | The capture above `git add -A` in the rebase loop, which reads a stop before the replay stages its markers | `src/scratch.rs`, `Scratch::replay_rebase_within` — move the capture block below `git.run("add", &["-A"])` | move |
 | Nothing — see the record below | `--diff-filter=U` in `DIFF_AT_HALT`, which keeps a halt diff to the files the counter reads | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
 | `a_replay_that_does_not_halt_captures_no_halt_diff` (`tests/diffs.rs`) | The merge capture below the early return for a merge git completed, which keeps a clean merge free of halt diffs | `src/scratch.rs`, `Scratch::replay_merge_capturing` — move the capture block above `if outcome.success` | move |
+| Nothing — see the record below | `--no-ext-diff` in `DIFF_AT_HALT`, which keeps the capture from running the program that `diff.external` names | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
 
 ## What keeps each test honest
 
@@ -147,6 +148,7 @@ registry that reports everything as fine is worth less than no registry at all.
 | `uncommitted_files_counts_a_staged_copy_as_the_one_file_it_is` | The fixture commits `big.txt`, so a copy has a source, and it stages the modification of that source that copy detection needs. Two untracked files sit beside the copy, so the count fails from both directions: pair nothing and the answer is 5, pair every record and it is 3, and only a count that pairs exactly the copy gives 4. | **Full.** Plain git, through the fixture, must report `C  copy.txt`, NUL, `big.txt` — "copy detection is not armed, so this test could only pass vacuously". That control is not a formality: git reports an undetected copy as `A  copy.txt`, one field for one file, so the closing count comes out right while the pairing never runs. The fixture arms `status.renames = copies` in its own repository rather than reading it out of `~/.gitconfig`, so the control holds on a machine whose developer has never set the key. |
 | `uncommitted_files_counts_a_working_tree_rename_and_copy_as_the_files_they_are` | The two files the fixture commits hold content of their own, because git pairs a copy with whichever source matches it best and two files spelled alike let it report the rename and the copy against one name — which is what the first draft of this fixture did. Two untracked files sit beside the pair, so the count fails from both directions: 7 with no pairing, 4 with every record paired, 5 only for a count that pairs exactly the two working-tree records. | **Full.** Plain git, through the fixture, must report ` R moved.txt`, NUL, `big.txt` and ` C other-copy.txt`, NUL, `other.txt` — "git no longer reports that in the working-tree column, so this test could only pass vacuously". Without the detection an undetected move is a delete beside an untracked file, which is two fields for two files and never pairs, so the control is what proves the second status byte is under test at all. The `git add -N` that arms it is the everyday route: `git add -p` records the same intent-to-add entry for a new file. |
 | `uncommitted_files_refuses_a_repository_with_no_working_tree` | `Repo::open` on the bare clone must succeed, so what the count refuses below is a repository with no working tree rather than a directory that is no repository at all. `TestRepo::bare_clone` proves its own premise as well: it points HEAD at the branch it was asked for and resolves it, so a `head` that names nothing fails while the fixture is being built. | **Structural.** Git refuses `status` in a repository with no working tree by construction, so a fixture has nothing to arm. What a control adds is that same refusal read back through plain git, and `BareRepo` hands back no runner to ask with — it is a path and a `TempDir`. The mutation record below is the out-of-band substitute. |
+| `a_halt_diff_runs_no_external_diff_program_whatever_diff_external_names` (`tests/diffs.rs`) | The program goes into the git directory of the fixture as an executable file, and `diff.external` names it in the fixture's own configuration. The control removes its sentinel through `remove_file`, which panics when there is none to remove, so the closing assertion starts from no sentinel. | **Full for the setting. The hazard at a halt cannot be armed.** Plain git, through the fixture, runs an ordinary diff of two commits, and the program must leave its sentinel — "`diff.external` did not run its program for an ordinary diff of two commits, so the setting is not live and this test could only pass vacuously". That proves the setting is live and the script works. Git 2.55 runs no external diff program for a combined diff, so the capture leaves no sentinel with the flag or without it. The record below is that measurement. |
 
 ### The rule for the next test
 
@@ -2036,6 +2038,45 @@ and that is the right answer. Above the early return, the capture of a
 conflicted merge reads the same `git diff` that it reads below the count,
 because the count changes nothing in the worktree. So this one test holds the
 position, from the side of the merge that git completed.
+
+### `--no-ext-diff` in `DIFF_AT_HALT`, which nothing can redden
+
+The flag and its test,
+`a_halt_diff_runs_no_external_diff_program_whatever_diff_external_names`,
+arrived in one commit. The test went in first and ran against a `DIFF_AT_HALT`
+without `"--no-ext-diff"`, which is the mutation. The run was `cargo test
+--no-fail-fast -p gitscratch` on git 2.55.0, and every test in the crate stayed
+green:
+
+```text
+unittests src/lib.rs            test result: ok. 56 passed; 0 failed
+tests/conflicts.rs              test result: ok. 7 passed; 0 failed
+tests/diffs.rs                  test result: ok. 12 passed; 0 failed
+tests/halts.rs                  test result: ok. 8 passed; 0 failed
+tests/hook_environment.rs       test result: ok. 1 passed; 0 failed
+tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
+tests/isolation.rs              test result: ok. 3 passed; 0 failed
+tests/merges.rs                 test result: ok. 7 passed; 0 failed
+tests/repo.rs                   test result: ok. 20 passed; 0 failed
+tests/safety.rs                 test result: ok. 8 passed; 0 failed
+Doc-tests gitscratch            test result: ok. 10 passed; 0 failed
+```
+
+That is the finding, not a failure to find one. `diff.external` names a program
+that git runs in place of its own diff, and git 2.55 does not run it for a
+combined diff. The armed control of the test shows the other half: the same
+program, in the same fixture, runs for an ordinary diff of two commits and
+leaves its sentinel. `diff.<driver>.command`, which a `.gitattributes` entry
+selects for a file, did the same when it was watched by hand. It ran for an
+ordinary diff of two commits, and not for the conflict diff at a halt.
+
+The flag went in after that run, and the crate stayed green with it. It stays
+because the capture must never run a program from the configuration of the
+developer. A git that starts to run an external diff for a combined diff
+reaches the capture with no warning of its own, and on that day this test is
+the one that goes red without the flag. It is recorded here as a guard that no
+test can make fail, as `--diff-filter=U` and `--literal-pathspecs` are, and not
+as one that somebody watched fail.
 
 ## This is not a one-time ritual
 
