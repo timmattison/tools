@@ -64,9 +64,11 @@ disallowed-methods = [
     # pixels at all and drew at a guess. GitHub issue #350 reports that defect.
     #
     # `termsize` holds the only read of a window this ban allows, and it says so
-    # at the call site with an `#[allow]` and a reason. The one other call is a
-    # different request: a test of `ic` sends `TIOCSCTTY`, which reads no window
-    # and claims a controlling terminal for a child.
+    # at the call site with an `#[allow]` and a reason. The other calls are a
+    # different request. The pseudo-terminal helpers of the tests, in
+    # `src/ic/tests/common/pty.rs` and in `gitscratch::testing::pty`, send
+    # `TIOCSCTTY`, which reads no window and claims a controlling terminal for a
+    # child.
     { path = "crossterm::terminal::size", reason = "call termsize::controlling_size or termsize::controlling_columns instead; a terminal that carries no window answers this call with Ok((0, 0)), and zero columns is not a width" },
     { path = "terminal_size::terminal_size", reason = "call termsize::stdout_size or termsize::stdout_columns instead; this call hands a zero back on Windows, and zero columns is not a width" },
     { path = "libc::ioctl", reason = "call termsize::drawing_window instead; a raw TIOCGWINSZ on one file descriptor is the bypass that termgfx held, and GitHub issue #350 reports what it cost. An ioctl of another request says so at its call site with an #[allow]" },

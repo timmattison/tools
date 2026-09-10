@@ -27,6 +27,13 @@ use crate::git::NoInheritedGitEnvironment;
 use crate::repo::Repo;
 use crate::scratch::Scratch;
 
+/// A pseudo-terminal of a size that a test chose, for a test of a tool that
+/// measures its terminal.
+///
+/// Unix only, because `openpty` and a controlling terminal are Unix calls.
+#[cfg(unix)]
+pub mod pty;
+
 /// The name every fixture commit is authored and committed under.
 const FIXTURE_USER_NAME: &str = "gitscratch test";
 

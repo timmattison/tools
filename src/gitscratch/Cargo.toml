@@ -7,6 +7,12 @@ description = "The hardened scratch-worktree harness for dry-running git operati
 [dependencies]
 anyhow.workspace = true
 colored.workspace = true
+# The pseudo-terminal of the tests, in `testing::pty`, and nothing else. A test
+# of a tool that lays text out for a terminal opens a terminal of a size it
+# chose, and the standard library has no call for `openpty` or for
+# `TIOCSCTTY`. Optional, so a build without the `testing` feature holds none of
+# it.
+libc = { workspace = true, optional = true }
 tempfile.workspace = true
 unicode-width.workspace = true
 
@@ -26,8 +32,9 @@ pulldown-cmark.workspace = true
 testcolor.workspace = true
 
 [features]
-# Shared git fixture builders for the test suites of crates built on gitscratch.
-testing = []
+# Shared git fixture builders for the test suites of crates built on gitscratch,
+# and the pseudo-terminal that the tests of `grind` and `grime` share.
+testing = ["dep:libc"]
 
 [lints]
 workspace = true

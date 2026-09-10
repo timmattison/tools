@@ -2733,6 +2733,7 @@ dependencies = [
  "anyhow",
  "colored",
  "gitscratch",
+ "libc",
  "pulldown-cmark",
  "tempfile",
  "testcolor",
@@ -3734,7 +3735,6 @@ dependencies = [
  "buildinfo",
  "clap",
  "gitscratch",
- "libc",
  "termbar",
  "unicode-width",
 ]
