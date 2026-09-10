@@ -3,12 +3,20 @@
 //! `tests/conflicts.rs` and `tests/merges.rs` pin the counts a replay gives.
 //! These pin the halt diffs beside the counts: one for each halt, in halt
 //! order, each one the text `git diff` shows at that halt.
+//!
+//! The last tests pin what a developer's configuration can change in that
+//! text. The developer's global configuration reaches the runner, so without a
+//! pin the halt diff of one fixture is different bytes on different machines.
+//! Each of those tests sets one hostile setting in its fixture's own
+//! configuration, shows with plain git that the setting changes the diff at a
+//! real halt, and then asserts that the halt diff does not change.
 
 use std::collections::BTreeSet;
+use std::process::Output;
 
 use gitscratch::testing::{
     conflicting_repo, contested_region_repo, equal_hunks_unequal_stops_repo,
-    independent_branches_repo, modify_delete_repo,
+    independent_branches_repo, modify_delete_repo, TestRepo,
 };
 use gitscratch::{Conflicts, HaltDiff, HaltDiffs, Scratch, Stops};
 
@@ -31,6 +39,19 @@ const OPENING_MARKER: &str = "++<<<<<<< HEAD";
 /// The start of the line that closes a conflict region in a combined diff.
 /// The label of the other side follows it.
 const CLOSING_MARKER: &str = "++>>>>>>> ";
+
+/// The branch a merge replay of [`conflicting_repo`] stands on.
+const OURS: &str = "left";
+
+/// The branch a merge replay of [`conflicting_repo`] merges. It rewrites the
+/// line that [`OURS`] rewrites, so the merge halts once.
+const THEIRS: &str = "right";
+
+/// The branch [`conflicting_repo`] leaves checked out in the fixture itself.
+const FIXTURE_BRANCH: &str = "main";
+
+/// The byte that starts each color code a terminal reads.
+const ESC: u8 = 0x1b;
 
 /// Check `branch` out detached in the scratch worktree, the way a consumer
 /// does before a rebase replay.
@@ -380,4 +401,157 @@ fn a_replay_that_does_not_halt_captures_no_halt_diff() {
         merge_diffs.is_empty(),
         "a merge that git completed has no halt, so it has no halt diff: {merge_diffs:?}"
     );
+}
+
+/// [`conflicting_repo`] with `key` set to `value` in the fixture's own
+/// configuration.
+///
+/// The fixture holds the hostile setting itself, as
+/// `branches_behind_main_with_a_submodule_pointer_bump_repo` does for
+/// `diff.ignoreSubmodules`. So the hazard is live on each machine, and on no
+/// machine by accident. A local value wins over a global one, so a developer
+/// who sets the key gets the same fixture as a developer who does not.
+///
+/// The value is read back before the fixture goes to a test. That is the
+/// start-state control: a key that the fixture did not take is a key that no
+/// pin can be shown to override.
+fn conflicting_repo_with(key: &str, value: &str) -> TestRepo {
+    let repo = conflicting_repo();
+    repo.git(&["config", key, value]);
+    assert_eq!(
+        repo.git(&["config", "--get", key]),
+        value,
+        "the fixture does not hold `{key}={value}`, so there is nothing here for a pin to \
+         override and the assertions below are measured against nothing"
+    );
+    repo
+}
+
+/// The branch the fixture has checked out, the commit it stands on, and what
+/// `git status` says about its working tree.
+///
+/// Read before and after the armed control, so that the control can show it
+/// puts the fixture back where it found it.
+fn fixture_state(repo: &TestRepo) -> (String, String, String) {
+    (
+        repo.git(&["symbolic-ref", "--short", "HEAD"]),
+        repo.git(&["rev-parse", "HEAD"]),
+        repo.git(&["status", "--porcelain"]),
+    )
+}
+
+/// What plain git shows at a real halt of the merge that the capture reads:
+/// the output of `git diff <args>`, run in the fixture itself.
+///
+/// The armed control of each pin test below. A pin test ends in an assertion
+/// that the halt diff did not change, and that assertion also passes when the
+/// setting under test changes nothing. So each test first reads plain git at a
+/// real halt and asserts that the hazard is live there. On the day git stops
+/// acting on a setting, the control fails and says so, and the test does not
+/// pass for a reason that has nothing to do with its pin.
+///
+/// The halt is the one the merge replay makes: the fixture checks out [`OURS`]
+/// and merges [`THEIRS`] with `--no-commit --no-ff`. `--no-ff` also answers a
+/// developer's `merge.ff=only`, which refuses a merge of two branches that
+/// diverge. Then the control aborts the merge, checks out [`FIXTURE_BRANCH`]
+/// again, and asserts that the fixture is back where it started. The replay
+/// that follows reads the fixture, and it must not read what the control left
+/// behind.
+///
+/// Each spawn goes through [`TestRepo::git`] or [`TestRepo::try_git`], and
+/// both remove the inherited git environment. The diff call runs under
+/// `LC_ALL=C`, so a control that reads git's own words reads them in one
+/// language.
+fn plain_diff_at_a_real_halt(repo: &TestRepo, args: &[&str]) -> Output {
+    let before = fixture_state(repo);
+
+    repo.checkout(OURS);
+    let merged = repo.try_git(&["merge", "--no-commit", "--no-ff", THEIRS], &[]);
+    let conflicted = repo.git(&["diff", "--name-only", "--diff-filter=U"]);
+    assert!(
+        !merged.status.success() && !conflicted.is_empty(),
+        "plain git did not halt on a conflict when it merged {THEIRS} into {OURS}, so there is \
+         no halt here to read and this control could only pass vacuously: {}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+
+    let diff_call: Vec<&str> = std::iter::once("diff")
+        .chain(args.iter().copied())
+        .collect();
+    let diff = repo.try_git(&diff_call, &[("LC_ALL", "C")]);
+
+    repo.git(&["merge", "--abort"]);
+    repo.checkout(FIXTURE_BRANCH);
+    assert_eq!(
+        fixture_state(repo),
+        before,
+        "the control did not put the fixture back where it started, so the replay below reads \
+         what the control left behind"
+    );
+
+    diff
+}
+
+/// Replay the merge of [`THEIRS`] into [`OURS`] in a scratch worktree of
+/// `repo`, through the entrance that captures, and give back the counts and
+/// the one halt diff.
+fn merge_with_halt_diff(repo: &TestRepo) -> (Conflicts, HaltDiff) {
+    let (conflicts, diffs) = repo
+        .scratch(OURS)
+        .replay_merge_with_diffs(THEIRS)
+        .expect("replay a merge of a branch that rewrites the same line and capture its halt diff");
+    assert_eq!(
+        diffs.len(),
+        1,
+        "a merge halts once or not at all, and this merge conflicts, so it has to give one halt \
+         diff: {diffs:?}"
+    );
+    let halt = diffs
+        .iter()
+        .next()
+        .cloned()
+        .expect("the one halt diff counted above");
+    (conflicts, halt)
+}
+
+/// A halt diff holds no color code, whatever the color settings of the
+/// developer say.
+///
+/// `color.ui=always` and `color.diff=always` make git write color codes into
+/// the output of `git diff`, although git writes to a pipe. A renderer that
+/// prints the halt diff cannot tell such a code from an ESC byte in the file.
+/// It escapes both, and the reader then sees `\u{1b}[1m` in place of a color.
+/// The renderer paints the diff itself, so the capture must stay plain. Each
+/// setting gets a fixture of its own, because each one turns the codes on
+/// alone.
+#[test]
+fn a_halt_diff_holds_no_color_code_whatever_the_color_settings_say() {
+    for (key, value) in [("color.ui", "always"), ("color.diff", "always")] {
+        let repo = conflicting_repo_with(key, value);
+
+        let plain = plain_diff_at_a_real_halt(&repo, &["--diff-filter=U"]);
+        assert!(
+            plain.stdout.contains(&ESC),
+            "`{key}={value}` puts no color code into plain `git diff` through a pipe, so this \
+             test could only pass vacuously: {}",
+            String::from_utf8_lossy(&plain.stdout)
+        );
+
+        let (_, halt) = merge_with_halt_diff(&repo);
+        let diff = halt
+            .diff()
+            .unwrap_or_else(|message| panic!("git gave no diff at the halt: {message}"));
+        assert!(
+            !diff.contains(&ESC),
+            "under `{key}={value}` the halt diff holds color codes, and a renderer prints them as \
+             escaped text: {}",
+            String::from_utf8_lossy(diff).escape_debug()
+        );
+        assert!(
+            diff_lines(&halt).iter().any(|line| line == OPENING_MARKER),
+            "under `{key}={value}` the halt diff has to show the region the merge conflicted \
+             in, from its `{OPENING_MARKER}` line: {}",
+            String::from_utf8_lossy(diff)
+        );
+    }
 }
