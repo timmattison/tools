@@ -489,9 +489,15 @@ enum DiffLine<'a> {
     /// commit line in `git log`.
     Heading(&'a str),
     /// A header line of a file: `diff --cc`, `index`, `---`, `+++`, and each
-    /// other line between the `diff ` line of a file and its first hunk
-    /// header. Bold, the default of `color.diff.meta`.
+    /// other line between the `diff ` line of a file and the line that ends
+    /// its header. Bold, the default of `color.diff.meta`.
     FileHeader(&'a str),
+    /// The line that git writes in place of the hunks of a binary file:
+    /// `Binary files differ` in a combined diff, and
+    /// `Binary files a/<name> and b/<name> differ` in a diff of two files.
+    /// Git writes no hunk for that file after it, so it ends the header of
+    /// the file. Plain, because git gives it no color.
+    Binary(&'a str),
     /// The header of a hunk: `@@@ ... @@@` in a combined diff, `@@ ... @@` in
     /// a diff of two files. Cyan, the default of `color.diff.frag`.
     HunkHeader(&'a str),
@@ -531,7 +537,8 @@ impl DiffLine<'_> {
             Self::HunkHeader(text) => text.cyan(),
             Self::Added(text) => text.green(),
             Self::Removed(text) => text.red(),
-            Self::Context(text)
+            Self::Binary(text)
+            | Self::Context(text)
             | Self::NoNewline(text)
             | Self::Outside(text)
             | Self::Unavailable(text) => text.normal(),
@@ -547,13 +554,15 @@ impl DiffLine<'_> {
 /// with `--`, so a removed line whose text is `- a/f.txt` reads `--- a/f.txt`.
 /// So the part that a line plays comes from where it stands, and not from its
 /// text alone. The header lines of a file stand between its `diff ` line and
-/// its first hunk header. Inside a hunk, the prefix columns decide.
+/// the line that ends its header. Inside a hunk, the prefix columns decide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Position {
-    /// Before the first file of the halt diff, or after a hunk that a line
-    /// which is not content ended.
+    /// Before the first file of the halt diff, or after the end of a file.
+    /// A binary line ends a file. A `* Unmerged path` line ends a header
+    /// that has no hunk. A line that is not content ends a hunk.
     Outside,
-    /// Between the `diff ` line of a file and its first hunk header.
+    /// Between the `diff ` line of a file and the line that ends its header:
+    /// its first hunk header, its binary line, or a `* Unmerged path` line.
     Header,
     /// In a hunk, whose content lines have the number of prefix columns that
     /// this holds.
@@ -565,13 +574,24 @@ impl Position {
     /// then moves to where the next line stands.
     ///
     /// Outside each file, a `diff ` line opens a file, and each other line
-    /// stays outside. In the header of a file, a line that starts with `@@`
-    /// opens a hunk, and each other line is a header line. In a hunk, a line
-    /// that starts with `@@` opens the next hunk, and the prefix columns of
-    /// each other line decide its part. The marker of a last line with no
-    /// newline stays in the hunk. A line that is neither content nor that
-    /// marker ends the hunk, and the painter reads it again as a line outside
-    /// each file. So a `diff ` line after a hunk opens the next file.
+    /// stays outside.
+    ///
+    /// In the header of a file, a line that starts with `@@` opens a hunk. A
+    /// line that starts with `Binary files ` is the binary line, and git
+    /// writes no hunk for that file after it. Git does not translate these
+    /// two words, so they identify the line in each language that git
+    /// speaks. A line that starts with `* ` stands outside each file. Git
+    /// writes such a line, `* Unmerged path <name>`, after the last file, so
+    /// it can come directly after a header that has no hunk. Each of these
+    /// two lines ends the header. Each other line in the header is a header
+    /// line.
+    ///
+    /// In a hunk, a line that starts with `@@` opens the next hunk, and the
+    /// prefix columns of each other line decide its part. The marker of a
+    /// last line with no newline stays in the hunk. A line that is neither
+    /// content nor that marker ends the hunk, and the painter reads it again
+    /// as a line outside each file. So a `diff ` line after a hunk opens the
+    /// next file.
     fn classify<'a>(&mut self, line: &'a str) -> DiffLine<'a> {
         match (*self, hunk_columns(line)) {
             (Self::Header | Self::Hunk(_), Some(columns)) => {
@@ -583,6 +603,14 @@ impl Position {
                 DiffLine::FileHeader(line)
             }
             (Self::Outside, _) => DiffLine::Outside(line),
+            (Self::Header, None) if line.starts_with("Binary files ") => {
+                *self = Self::Outside;
+                DiffLine::Binary(line)
+            }
+            (Self::Header, None) if line.starts_with("* ") => {
+                *self = Self::Outside;
+                DiffLine::Outside(line)
+            }
             (Self::Header, None) => DiffLine::FileHeader(line),
             (Self::Hunk(columns), None) => content(line, columns)
                 .or_else(|| no_newline_marker(line))
@@ -914,7 +942,7 @@ mod tests {
     );
 
     /// The stopped commit of a rebase stop whose halt diff holds each kind of
-    /// line that the painter tells apart.
+    /// line that the painter tells apart in a conflict of a text file.
     const EVERY_KIND_STOP: &str = "9d6c330 feat one";
 
     /// The halt diff of that stop, as git 2.55 wrote it, less its last

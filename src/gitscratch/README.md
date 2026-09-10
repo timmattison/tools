@@ -607,7 +607,8 @@ like `git diff` on a terminal:
 
 | Line | Color | The git setting whose default it copies |
 | --- | --- | --- |
-| A header line of a file: `diff --cc`, `index`, `---`, `+++`, and each other line between the `diff ` line of a file and its first hunk header | bold | `color.diff.meta` |
+| A header line of a file: `diff --cc`, `index`, `---`, `+++`, and each other line between the `diff ` line of a file and its first hunk header or its binary line | bold | `color.diff.meta` |
+| `Binary files differ`, the binary line that git writes in place of the hunks of a binary file | plain | none |
 | A hunk header, `@@@ ... @@@` or `@@ ... @@` | cyan | `color.diff.frag` |
 | A content line with a `+` in a prefix column, the marker lines included | green | `color.diff.new` |
 | A context line | plain | `color.diff.context` |
@@ -638,12 +639,15 @@ Two rules keep the paint correct:
   diff, a line that both parents hold and the result does not starts with
   `--`, so a removed line whose text is `- a/f.txt` reads `--- a/f.txt`. The
   header lines of a file stand between its `diff ` line and its first hunk
-  header. Inside a hunk, the prefix columns decide, and the count of leading
-  `@` in the hunk header, less one, is the count of prefix columns. The first
-  line whose prefix columns hold another character ends the hunk, and the
-  renderer reads that line again from outside each file. A painter that
-  matches the text of one line paints the removed line bold, and a test of the
-  usual lines does not see it.
+  header. Git writes no hunk for a binary file, so its binary line ends its
+  header. Git writes each `* Unmerged path` line after the last file, so such
+  a line can end a header that has no hunk, and the renderer reads it from
+  outside each file. Inside a hunk, the prefix columns decide, and the count
+  of leading `@` in the hunk header, less one, is the count of prefix
+  columns. The first line whose prefix columns hold another character ends
+  the hunk, and the renderer reads that line again from outside each file. A
+  painter that matches the text of one line paints the removed line bold, and
+  a test of the usual lines does not see it.
 
 ## The shell
 
