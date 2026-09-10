@@ -519,5 +519,6 @@ The `--diff` tests hold the rules of
   a `COLUMNS` that is no number. `CLICOLOR_FORCE=1` paints a pipe. A
   pseudo-terminal from `gitscratch::testing::pty` gets color with no variable
   set. That last test fails for a `grind` that gives the answer of
-  `should_force_colors` to `set_override` directly. On a terminal that answer
-  is false, and `set_override(false)` turns off the color of the terminal.
+  `should_force_colors_here` to `set_override` directly. On a terminal that
+  answer is false, and `set_override(false)` turns off the color of the
+  terminal.

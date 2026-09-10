@@ -2011,8 +2011,9 @@ fn diff_through_a_pipe_with_a_columns_that_states_no_width_is_plain() {
 ///
 /// The run states no width, so the rule of a wrapper does not fire, and the
 /// color comes from `colored` alone. A `grind` that gives the answer of
-/// `should_force_colors` to `set_override` directly fails here. That answer is
-/// false for this run, and `set_override(false)` wins over the variable.
+/// `should_force_colors_here` to `set_override` directly fails here. That
+/// answer is false for this run, and `set_override(false)` wins over the
+/// variable.
 #[test]
 fn clicolor_force_paints_a_pipe_with_no_stated_width() {
     let repo = equal_hunks_unequal_stops_repo();
@@ -2039,8 +2040,8 @@ fn clicolor_force_paints_a_pipe_with_no_stated_width() {
 ///
 /// That is the color that `colored` gives a terminal by itself. The rule of a
 /// wrapper does not fire, because stdout is a terminal, so
-/// `should_force_colors` answers false. A `grind` that gives that answer to
-/// `set_override` directly turns the color of a terminal off, and it fails
+/// `should_force_colors_here` answers false. A `grind` that gives that answer
+/// to `set_override` directly turns the color of a terminal off, and it fails
 /// here. No pipe is a terminal, so no other test of the color can show that
 /// failure.
 ///
