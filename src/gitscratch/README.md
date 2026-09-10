@@ -602,6 +602,48 @@ name, so file content never causes a panic. The breakdown and the halt diffs
 escape through one loop, so a name and a diff cannot spell one character two
 ways.
 
+The renderer paints each line with the palette of git, so the halt diffs look
+like `git diff` on a terminal:
+
+| Line | Color | The git setting whose default it copies |
+| --- | --- | --- |
+| A header line of a file: `diff --cc`, `index`, `---`, `+++`, and each other line between the `diff ` line of a file and its first hunk header | bold | `color.diff.meta` |
+| A hunk header, `@@@ ... @@@` or `@@ ... @@` | cyan | `color.diff.frag` |
+| A content line with a `+` in a prefix column, the marker lines included | green | `color.diff.new` |
+| A context line | plain | `color.diff.context` |
+| A content line with a `-` in a prefix column | red | `color.diff.old` |
+| `* Unmerged path <name>`, and each other line outside a file | plain | none |
+| The stop heading | yellow | `color.diff.commit`, the color of a commit line in `git log` |
+| `diff not available: ` and the message from git | plain | none |
+
+The `color.diff.<slot>` settings of the user do not apply, because the capture
+is plain: `--no-color` is one of the pins of the diff call.
+
+Each line opens and closes its own color codes, so no code spans a newline.
+The renderer does not ask whether color is on. The `colored` crate decides that
+when it formats each line, from the environment and from whether stdout is a
+terminal. So a run whose stdout is a pipe gets the text above with no code,
+unless the environment or the tool forces color on.
+
+Two rules keep the paint correct:
+
+- **Escape first, paint second.** The capture is plain, and the renderer
+  escapes the control characters before it paints. So each ESC byte in the
+  output is a code that the renderer wrote. A color code from git and an ESC
+  out of a file look the same, and nothing can tell them apart after the
+  escape.
+- **Classify a line by its position, not by its text alone.** A content line
+  starts with its prefix columns, and its text follows them. In a combined
+  diff, a line that both parents hold and the result does not starts with
+  `--`, so a removed line whose text is `- a/f.txt` reads `--- a/f.txt`. The
+  header lines of a file stand between its `diff ` line and its first hunk
+  header. Inside a hunk, the prefix columns decide, and the count of leading
+  `@` in the hunk header, less one, is the count of prefix columns. The first
+  line whose prefix columns hold another character ends the hunk, and the
+  renderer reads that line again from outside each file. A painter that
+  matches the text of one line paints the removed line bold, and a test of the
+  usual lines does not see it.
+
 ## The shell
 
 `Report` says what a replay cost, and `Console` is the program around it.
@@ -1375,7 +1417,19 @@ the escape. The first was watched to fail under two mutations: the rule of the
 breakdown in place of the rule of the diff, and an end of text that counts as a
 line ending. `a_halt_diff_loses_its_last_newline_and_nothing_else` fails under a
 trim. `multi_byte_text_survives_in_a_halt_diff_and_in_its_heading` was watched
-to fail with the escape walking bytes in place of characters.
+to fail with the escape walking bytes in place of characters. These goldens read
+the text through `glyphs`, which forces color on with
+`testcolor::with_forced_ansi` and takes the codes back out, so each one gives
+the same answer on a terminal and in a pipe. The painter tests read the paint
+of each line off its typed `ColoredString`, as `gsw` and `seescc` do. Four of
+them were watched to fail under a mutation:
+`inside_a_hunk_a_line_that_reads_like_a_header_gets_the_color_of_content` under
+a painter that reads the text of one line,
+`each_painted_line_opens_and_closes_its_own_color_codes` under one reset at the
+end of the block, `painting_a_halt_diff_changes_no_character_of_it` under a
+painter that trims an added line, and
+`an_esc_in_file_content_stays_escaped_on_a_painted_line` under a painter that
+paints before it escapes.
 
 Every column assertion in that file reads through one helper, `count_column`,
 and the helper has a test of its own —
