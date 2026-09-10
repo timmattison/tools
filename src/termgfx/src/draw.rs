@@ -2491,115 +2491,51 @@ mod tests {
         file.into_inner()
     }
 
-    /// The CRC32 of `bytes`, in the form that a PNG chunk carries.
-    ///
-    /// A PNG reader checks the CRC of every chunk and refuses a chunk whose
-    /// CRC does not match. A fixture that carries a chunk this file wrote by
-    /// hand must therefore carry the right CRC, and no crate that `termgfx`
-    /// reaches gives one. This loop is the bitwise form of the standard
-    /// algorithm. It needs no table and no dependency.
-    ///
-    /// # Arguments
-    /// * `bytes` - The chunk type and the chunk data, one after the other.
-    ///
-    /// # Returns
-    /// The CRC32 of `bytes`.
-    fn crc32_of(bytes: &[u8]) -> u32 {
-        /// The reversed polynomial of the CRC32 that the PNG specification
-        /// states.
-        const POLYNOMIAL: u32 = 0xedb8_8320;
-        /// The bits of one byte, which the loop takes one at a time.
-        const BITS_OF_A_BYTE: u8 = 8;
-
-        let mut crc = u32::MAX;
-
-        for byte in bytes {
-            crc ^= u32::from(*byte);
-
-            for _ in 0..BITS_OF_A_BYTE {
-                crc = if crc & 1 == 0 {
-                    crc >> 1
-                } else {
-                    (crc >> 1) ^ POLYNOMIAL
-                };
-            }
-        }
-
-        crc ^ u32::MAX
-    }
-
     /// The bytes of `image` as an animated PNG file.
     ///
-    /// The PNG encoder of the `image` crate writes no `acTL` chunk, so no
-    /// encoder in this tree makes this fixture. This helper writes a still PNG
-    /// and puts an `acTL` chunk in front of the first `IDAT` chunk. The APNG
-    /// specification gives the chunk that position, and a reader that finds it
-    /// there calls the file an animation.
+    /// A reader calls a PNG file an animation when the file carries an `acTL`
+    /// chunk. The PNG encoder of the `image` crate writes no such chunk, so
+    /// this helper writes the file with the `png` crate, which the `image`
+    /// crate already carries. [`png::Encoder::set_animated`] writes the chunk
+    /// in the position that the APNG specification gives it, in front of the
+    /// first `IDAT` chunk.
     ///
-    /// The chunk is a four-byte length, the four bytes `acTL`, a four-byte
-    /// frame count, a four-byte loop count, and the CRC32 of the type and the
-    /// data together. Every number is big-endian.
+    /// The file holds one frame, and that frame is the picture that the caller
+    /// gave. The encoder counts the frames it wrote against the count that the
+    /// chunk states, so a file that claims more frames than it holds does not
+    /// close.
     ///
     /// # Arguments
-    /// * `image` - The picture that the first frame of the file holds.
+    /// * `image` - The picture that the frame of the file holds.
     ///
     /// # Returns
     /// The bytes of an animated PNG file.
     fn apng_file_of(image: &DynamicImage) -> Vec<u8> {
-        /// The bytes of the frame count and the loop count together, which the
-        /// length field of the chunk states.
-        const ACTL_DATA_LENGTH: u32 = 8;
-        /// The frames that the file claims. A reader drops an `acTL` chunk
-        /// that states zero frames, so the count stands above zero.
-        const FRAME_COUNT: u32 = 2;
+        /// The frames that the file holds and claims. A reader drops an `acTL`
+        /// chunk that states zero frames, so the count stands above zero.
+        const FRAME_COUNT: u32 = 1;
         /// The times the animation repeats. Zero is the endless loop.
         const LOOP_COUNT: u32 = 0;
-        /// The bytes of the length field of a chunk, and of its type field.
-        /// The two fields hold the same number of bytes.
-        const CHUNK_FIELD: usize = 4;
-        /// The bytes of the length field and the type field together, which
-        /// stand in front of the data of a chunk.
-        const CHUNK_HEADER: usize = CHUNK_FIELD * 2;
-        /// The bytes of a chunk beside its data: the length, the type and the
-        /// CRC.
-        const CHUNK_OVERHEAD: usize = 12;
 
-        let still = png_file_of(image);
+        let frame = image.to_rgb8();
+        let mut file = Vec::new();
 
-        let mut chunk = Vec::new();
-        chunk.extend_from_slice(&ACTL_DATA_LENGTH.to_be_bytes());
-        chunk.extend_from_slice(b"acTL");
-        chunk.extend_from_slice(&FRAME_COUNT.to_be_bytes());
-        chunk.extend_from_slice(&LOOP_COUNT.to_be_bytes());
+        let mut encoder = png::Encoder::new(&mut file, frame.width(), frame.height());
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .set_animated(FRAME_COUNT, LOOP_COUNT)
+            .expect("the frame count stands above zero");
 
-        // The CRC covers the type and the data, and it leaves the length out.
-        let crc = crc32_of(&chunk[CHUNK_FIELD..]);
-        chunk.extend_from_slice(&crc.to_be_bytes());
-
-        // The walk starts after the signature and steps one whole chunk at a
-        // time, so it lands on the first `IDAT` and on no `IDAT` inside the
-        // data of another chunk.
-        let mut offset = PNG_SIGNATURE.len();
-
-        while &still[offset + CHUNK_FIELD..offset + CHUNK_HEADER] != b"IDAT" {
-            let length = u32::from_be_bytes(
-                still[offset..offset + CHUNK_FIELD]
-                    .try_into()
-                    .expect("the walk takes four bytes of a file that holds them"),
-            );
-
-            offset += CHUNK_OVERHEAD
-                + usize::try_from(length).expect("a chunk of this fixture holds few bytes");
-
-            assert!(
-                offset + CHUNK_HEADER <= still.len(),
-                "the PNG encoder must write an IDAT chunk, but the file holds none"
-            );
-        }
-
-        let mut file = still[..offset].to_vec();
-        file.extend_from_slice(&chunk);
-        file.extend_from_slice(&still[offset..]);
+        let mut writer = encoder
+            .write_header()
+            .expect("the PNG encoder takes a picture of this size");
+        writer
+            .write_image_data(frame.as_raw())
+            .expect("the frame holds the pixels that the header states");
+        writer
+            .finish()
+            .expect("the file holds every frame that it claims");
 
         file
     }
