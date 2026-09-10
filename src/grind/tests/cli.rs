@@ -106,6 +106,12 @@ fn grind_command(repo: &Path, args: &[&str]) -> Command {
     // what spares the next reader who adds one that does.
     command.envs(PINNED_LOCALE);
     command.env(WIDTH_VARIABLE, STATED_WIDTH);
+    // The color of the diff is the choice of the test that reads it, and never
+    // the choice of the developer's shell. A test that needs one of these
+    // variables sets it on the command this function gives back.
+    for name in COLOR_VARIABLES {
+        command.env_remove(name);
+    }
 
     command
 }
