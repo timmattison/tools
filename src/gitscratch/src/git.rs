@@ -274,8 +274,9 @@ impl Git {
     /// Private because raw output is a footgun in the one way this crate cares
     /// about: everything public either trims it deliberately ([`Git::try_run`],
     /// [`Git::run`]) or deliberately does not ([`Git::nul_separated`],
-    /// [`Git::nul_separated_paths`], [`Git::path`]), and which of those a caller
-    /// wants is not a choice worth re-making per call site.
+    /// [`Git::nul_separated_paths`], [`Git::path`], [`Git::verbatim`]), and
+    /// which of those a caller wants is not a choice worth re-making per call
+    /// site.
     fn output(&self, subcommand: &str, args: &[&str]) -> Result<Output> {
         self.command(subcommand, args)
             .output()
@@ -515,6 +516,38 @@ impl Git {
         }
 
         Ok(path_from_git(printed))
+    }
+
+    /// Run git and return its stdout as the bytes git wrote: not trimmed and
+    /// not decoded.
+    ///
+    /// **The reader for text that goes to a person verbatim.** A halt diff is
+    /// such text, and each other reader changes it. [`Git::run`] and
+    /// [`Git::try_run`] trim, so a diff loses the newline at its end and the
+    /// spaces at the end of its last line. They also decode lossily, so a byte
+    /// of file content outside UTF-8 becomes U+FFFD before the caller decides
+    /// how to show it. [`Git::nul_separated`] and the two path-list readers ask
+    /// git for `-z` and split its answer into fields, and [`Git::path`] removes
+    /// one newline. A diff has none of those shapes. Its bytes are the answer,
+    /// and the caller that prints them decodes them at print time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned or exited non-zero. The
+    /// error carries git's stderr, because git says there why it gave no
+    /// answer.
+    pub fn verbatim(&self, subcommand: &str, args: &[&str]) -> Result<Vec<u8>> {
+        let output = self.output(subcommand, args)?;
+
+        anyhow::ensure!(
+            output.status.success(),
+            "git {} failed:\n{}\n{}",
+            invocation(subcommand, args),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        Ok(output.stdout)
     }
 
     /// Resolve a revision to a full commit id.

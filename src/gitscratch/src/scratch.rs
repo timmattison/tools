@@ -462,8 +462,10 @@ impl Scratch {
 
                     // Above `git add -A`, because that line stages the
                     // markers, and after it `git diff` shows nothing for this
-                    // stop. A capture never fails the replay, so a stopped
-                    // commit git will not name gets the phrase
+                    // stop. Pinned by
+                    // `each_halt_diff_holds_the_markers_of_its_own_region` in
+                    // `tests/diffs.rs`. A capture never fails the replay, so a
+                    // stopped commit git will not name gets the phrase
                     // `classify_halt` uses for one.
                     if capture == Capture::Diffs {
                         let stopped = name_stopped_commit(&git)

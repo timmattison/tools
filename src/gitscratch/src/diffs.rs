@@ -15,6 +15,14 @@
 
 use crate::git::Git;
 
+/// The arguments of the diff call at a halt, after the subcommand `diff`.
+///
+/// `--diff-filter=U` makes the diff name the files that the counter reads, and
+/// no other file. The counter reads `git diff --name-only --diff-filter=U`, so
+/// with the same filter on the diff call, the halt diff and the breakdown
+/// cannot name different files.
+const DIFF_AT_HALT: &[&str] = &["--diff-filter=U"];
+
 /// The text `git diff` shows at one halt of a replay.
 ///
 /// A rebase halt carries the name of its stopped commit. A merge halt carries
@@ -35,14 +43,26 @@ pub struct HaltDiff {
 }
 
 impl HaltDiff {
-    /// Record the halt that `git` stands on, with the name of its stopped
-    /// commit.
+    /// Capture the halt that `git` stands on: the text `git diff` shows there,
+    /// and the name of the stopped commit.
     ///
-    /// The diff is not read yet, so it is empty.
-    pub(crate) fn capture(_git: &Git, stopped: Option<String>) -> Self {
+    /// A `HaltDiff` and never a `Result`, because the capture must never fail
+    /// the replay. A diff call that fails gives `Err(message)` inside the halt
+    /// diff, and the counts and the exit code stay the same. The message is
+    /// the error text in its alternate form, so it carries git's own stderr.
+    ///
+    /// The diff comes through [`Git::verbatim`], because the halt diff is text
+    /// that goes to a person verbatim, and each other reader trims or decodes.
+    ///
+    /// The caller decides where the capture happens. At a rebase stop, the
+    /// capture must come before the replay stages the markers, because after
+    /// that `git diff` shows nothing for the stop.
+    pub(crate) fn capture(git: &Git, stopped: Option<String>) -> Self {
         Self {
             stopped,
-            diff: Ok(Vec::new()),
+            diff: git
+                .verbatim("diff", DIFF_AT_HALT)
+                .map_err(|err| format!("{err:#}")),
         }
     }
 
