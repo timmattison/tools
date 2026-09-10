@@ -1031,6 +1031,62 @@ mod tests {
         "  e\r",
     );
 
+    /// The halt diff of a rebase stop that conflicts on a binary file and on a
+    /// file that one side deleted, as git 2.55 wrote it, less its last
+    /// newline.
+    ///
+    /// Real output. Git writes `Binary files differ` in place of the hunks of
+    /// the binary file `z.dat`, and it writes no `---` line and no `+++` line
+    /// for that file. Git writes the `* Unmerged path` line after the last
+    /// file, although `c.txt` sorts before `z.dat`. So that line comes
+    /// directly after the binary line.
+    const BINARY_LAST_DIFF: &str = concat!(
+        "diff --cc z.dat\n",
+        "index 25b3410,1323b0a..0000000\n",
+        "Binary files differ\n",
+        "* Unmerged path c.txt",
+    );
+
+    /// The halt diff of a merge that conflicts on a binary file and on a text
+    /// file whose name sorts after it, as git 2.55 wrote it, less its last
+    /// newline.
+    ///
+    /// Real output. The `diff --cc` line of the text file `b.txt` comes
+    /// directly after the binary line of `a.dat`.
+    const BINARY_FIRST_DIFF: &str = concat!(
+        "diff --cc a.dat\n",
+        "index 1323b0a,299f349..0000000\n",
+        "Binary files differ\n",
+        "diff --cc b.txt\n",
+        "index af70335,ac05874..0000000\n",
+        "--- a/b.txt\n",
+        "+++ b/b.txt\n",
+        "@@@ -1,3 -1,3 +1,7 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        "++=======\n",
+        "+ FEAT\n",
+        "++>>>>>>> feature\n",
+        "  c",
+    );
+
+    /// The halt diff of a merge where each side adds a symbolic link `l` with
+    /// a different target, and one side deletes a file that the other side
+    /// changes, as git 2.55 wrote it, less its last newline.
+    ///
+    /// Real output. The header of `l` has no hunk after it. The working tree
+    /// holds the link of HEAD, and a `--cc` diff shows no hunk where the
+    /// result is the same as one parent. So the `* Unmerged path` line comes
+    /// directly after the `+++` line.
+    const NO_HUNK_DIFF: &str = concat!(
+        "diff --cc l\n",
+        "index 64c5e58,43dd47e..0000000\n",
+        "--- a/l\n",
+        "+++ b/l\n",
+        "* Unmerged path g.txt",
+    );
+
     /// Each line of the halt diffs as `report` paints it: its text, its color,
     /// and its style.
     ///
@@ -2076,6 +2132,99 @@ mod tests {
                 "\\ No newline at end of file".normal(),
                 "+new".green(),
                 "\\ No newline at end of file".normal(),
+            ],
+        );
+    }
+
+    /// The binary line of a file is plain, and it ends the header of that
+    /// file.
+    ///
+    /// Git writes `Binary files differ` in place of the hunks of a binary
+    /// file, and it gives that line no color. No hunk of that file comes
+    /// after it. Here the binary file is the last file of the halt diff, and
+    /// a file that one side deleted conflicts too. So the `* Unmerged path`
+    /// line comes directly after the binary line. That line stands outside
+    /// each file, and git gives it no color. A painter that stays in the
+    /// header of the file until a hunk header comes paints both lines bold.
+    #[test]
+    fn the_binary_line_of_a_file_is_plain_and_ends_the_header_of_that_file() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto side")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(None, BINARY_LAST_DIFF)]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc z.dat".bold(),
+                "index 25b3410,1323b0a..0000000".bold(),
+                "Binary files differ".normal(),
+                "* Unmerged path c.txt".normal(),
+            ],
+        );
+    }
+
+    /// The file after a binary file gets the paint of each other file.
+    ///
+    /// The `diff --cc` line of the next file comes directly after the binary
+    /// line, and it opens that file. So each header line of that file is
+    /// bold, and its hunk header is cyan. The prefix columns of each content
+    /// line decide its color.
+    #[test]
+    fn the_file_after_a_binary_file_gets_the_paint_of_each_other_file() {
+        let report = Report::for_tool("grime")
+            .describing("merging feature into HEAD")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(None, BINARY_FIRST_DIFF)]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc a.dat".bold(),
+                "index 1323b0a,299f349..0000000".bold(),
+                "Binary files differ".normal(),
+                "diff --cc b.txt".bold(),
+                "index af70335,ac05874..0000000".bold(),
+                "--- a/b.txt".bold(),
+                "+++ b/b.txt".bold(),
+                "@@@ -1,3 -1,3 +1,7 @@@".cyan(),
+                "  a".normal(),
+                "++<<<<<<< HEAD".green(),
+                " +MAIN".green(),
+                "++=======".green(),
+                "+ FEAT".green(),
+                "++>>>>>>> feature".green(),
+                "  c".normal(),
+            ],
+        );
+    }
+
+    /// A `* Unmerged path` line ends a header that has no hunk.
+    ///
+    /// Git can write the header of a file and no hunk. For a conflict on a
+    /// symbolic link, the working tree holds the link of one side, and a
+    /// `--cc` diff shows no hunk for it. Then the `* Unmerged path` line of
+    /// another conflict comes directly after the header. That line stands
+    /// outside each file, and git gives it no color. A painter that stays in
+    /// the header of the file until a hunk header comes paints it bold.
+    #[test]
+    fn an_unmerged_path_line_ends_a_header_that_has_no_hunk() {
+        let report = Report::for_tool("grime")
+            .describing("merging side into HEAD")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(None, NO_HUNK_DIFF)]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc l".bold(),
+                "index 64c5e58,43dd47e..0000000".bold(),
+                "--- a/l".bold(),
+                "+++ b/l".bold(),
+                "* Unmerged path g.txt".normal(),
             ],
         );
     }
