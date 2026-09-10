@@ -84,9 +84,9 @@ const MAX_RESOLUTION_ROUNDS: usize = 1_000;
 
 /// Whether a replay captures a halt diff at each halt.
 ///
-/// A parameter of the one rebase loop, not a second copy of it. A second copy
-/// is a second place for the count to go wrong, and the replay that captures
-/// must count what the plain replay counts.
+/// A parameter of the one rebase loop and of the one merge, not a second copy
+/// of either. A second copy is a second place for the count to go wrong, and
+/// the replay that captures must count what the plain replay counts.
 ///
 /// [`Capture::Nothing`] adds no git call. `grist` replays each step of each
 /// ordering through the plain entrance and prints no diff, so the capture must
@@ -541,6 +541,42 @@ impl Scratch {
     /// reporting one as clean would say a merge is free when git will not do
     /// it at all.
     pub fn replay_merge(&self, branch: &str) -> Result<Conflicts> {
+        self.replay_merge_capturing(branch, Capture::Nothing)
+            .map(|(conflicts, _)| conflicts)
+    }
+
+    /// [`Scratch::replay_merge`], and the halt diff of its one halt beside the
+    /// counts.
+    ///
+    /// The halt diff is the text `git diff` shows at the halt of a real merge.
+    /// A merge has no stopped commit, so the halt diff names none. A merge that
+    /// git completed has no halt, and gives an empty [`HaltDiffs`].
+    ///
+    /// The merge is the one [`Scratch::replay_merge`] makes, with the capture
+    /// turned on, so the two entrances count the same halt the same way. A
+    /// diff that git cannot give does not stop the replay: the halt diff holds
+    /// the error in its place, and the counts stay the same.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in each case [`Scratch::replay_merge`] does, and in no
+    /// other.
+    pub fn replay_merge_with_diffs(&self, branch: &str) -> Result<(Conflicts, HaltDiffs)> {
+        self.replay_merge_capturing(branch, Capture::Diffs)
+    }
+
+    /// The one merge behind [`Scratch::replay_merge`] and
+    /// [`Scratch::replay_merge_with_diffs`].
+    ///
+    /// `capture` says whether the merge captures the halt diff of its halt.
+    /// Both entrances share this one function, so they count the same halt the
+    /// same way. The plain entrance gets back an empty [`HaltDiffs`] and drops
+    /// it.
+    fn replay_merge_capturing(
+        &self,
+        branch: &str,
+        capture: Capture,
+    ) -> Result<(Conflicts, HaltDiffs)> {
         let git = self.git();
         let worktree = self.path();
 
@@ -582,8 +618,9 @@ impl Scratch {
         )?;
 
         let mut cost = Conflicts::nothing_replayed();
+        let mut halt_diffs = HaltDiffs::nothing_captured();
         if outcome.success {
-            return Ok(cost);
+            return Ok((cost, halt_diffs));
         }
 
         // The same two readers the rebase replay takes, because a conflicted
@@ -622,17 +659,16 @@ impl Scratch {
             cost.add_file(file, hunks);
         }
 
-        Ok(cost)
-    }
+        // Below the refusal above and the early return for a merge git
+        // completed, because neither of those two merges has a halt, and a
+        // halt diff is the text of a halt. Pinned by
+        // `a_replay_that_does_not_halt_captures_no_halt_diff` in
+        // `tests/diffs.rs`. A merge has no stopped commit to name.
+        if capture == Capture::Diffs {
+            halt_diffs.push(HaltDiff::capture(&git, None));
+        }
 
-    /// [`Scratch::replay_merge`], and the halt diff of its one halt beside the
-    /// counts.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error in each case [`Scratch::replay_merge`] does.
-    pub fn replay_merge_with_diffs(&self, branch: &str) -> Result<(Conflicts, HaltDiffs)> {
-        Ok((self.replay_merge(branch)?, HaltDiffs::nothing_captured()))
+        Ok((cost, halt_diffs))
     }
 
     fn worktree_arg(&self) -> Result<&str> {
