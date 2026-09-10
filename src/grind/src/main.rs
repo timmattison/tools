@@ -44,6 +44,10 @@ struct Args {
     /// Print nothing about the rebase - the exit code is the answer
     #[clap(short, long)]
     quiet: bool,
+
+    /// Print the diff of each stop after the breakdown
+    #[clap(long)]
+    diff: bool,
 }
 
 /// Hands the whole shell to [`Console::answer`] - what this tool says, the one
@@ -145,7 +149,13 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let dirty_note = unworded.dirty_note(repo.uncommitted_files().unwrap_or_default());
 
     let scratch = repo.scratch("HEAD")?;
-    let conflicts = scratch.replay_rebase(&branch)?;
+    // `--diff` asks for the capture. Without it, the replay captures nothing
+    // and costs what it cost before the flag existed.
+    let conflicts = if args.diff {
+        scratch.replay_rebase_with_diffs(&branch)?.0
+    } else {
+        scratch.replay_rebase(&branch)?
+    };
 
     // There is a verdict now, so the caveat has something to qualify.
     if let Some(note) = dirty_note {
