@@ -1349,4 +1349,38 @@ mod tests {
             "an ESC in a commit subject must never reach a terminal: {rendered:?}"
         );
     }
+
+    /// A halt where git gave no diff says so under its heading, in the words
+    /// of git, and the section after it does not change.
+    ///
+    /// The capture never fails the replay, so a diff call that fails leaves
+    /// its message in the halt diff. The section then holds
+    /// `diff not available: ` and that message. The message spans lines: the
+    /// line that names the call, then the output of git. The newlines stay.
+    /// The output of git can hold what git read out of the repository, so the
+    /// message gets the escape too.
+    #[test]
+    fn a_halt_where_git_gave_no_diff_says_so_under_its_heading() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let message =
+            "git diff --no-color --diff-filter=U failed:\n\nfatal: unable to read \x1b[2J files";
+        let diffs = HaltDiffs::from_halts([
+            HaltDiff::from_parts(Some(STOP_ONE), Err(message)),
+            as_git_wrote_it(Some(STOP_TWO), STOP_TWO_DIFF),
+        ]);
+
+        let expected = [
+            String::new(),
+            format!("stop 1 of 2 - {STOP_ONE}"),
+            "diff not available: git diff --no-color --diff-filter=U failed:".to_owned(),
+            String::new(),
+            r"fatal: unable to read \u{1b}[2J files".to_owned(),
+            String::new(),
+            format!("stop 2 of 2 - {STOP_TWO}"),
+            STOP_TWO_DIFF.to_owned(),
+        ]
+        .join("\n");
+
+        assert_eq!(report.render_diffs(&diffs), Some(expected));
+    }
 }
