@@ -397,6 +397,7 @@ impl<'a> Report<'a> {
                     Some(stopped) => format!("stop {stop} of {stops} - {stopped}"),
                     None => format!("stop {stop} of {stops}"),
                 };
+                let heading = printable_diff(&heading);
                 lines.push(DiffLine::Heading(&heading).render());
             }
 
@@ -425,6 +426,7 @@ enum DiffLine<'a> {
     /// the breakdown, and each other section from the section before it.
     Gap,
     /// The heading of a section, which names the stop and the stopped commit.
+    /// It is one line, because git writes the subject of a commit on one line.
     Heading(&'a str),
     /// One line of the text `git diff` showed at a halt.
     Diff(&'a str),
