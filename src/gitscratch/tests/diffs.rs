@@ -780,3 +780,74 @@ fn a_halt_diff_names_its_file_with_the_default_prefixes_whatever_the_prefix_sett
         );
     }
 }
+
+/// The object ids on the `index` line of a halt diff of one file.
+///
+/// A combined diff names one blob for each parent and one for the result, as
+/// `index <ours>,<theirs>..<result>`. The result is the working tree, which
+/// has no blob yet, so its id is all zeros. The line is read from the header
+/// of the file alone, above the first hunk header.
+fn index_line_ids(diff: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(diff);
+    let ids = text
+        .lines()
+        .take_while(|line| !line.starts_with("@@"))
+        .find_map(|line| line.strip_prefix("index "))
+        .unwrap_or_else(|| panic!("the diff has no `index` line above its first hunk: {text}"));
+    let (parents, result) = ids
+        .split_once("..")
+        .unwrap_or_else(|| panic!("the `index` line has no `..` in it: {ids}"));
+    parents
+        .split(',')
+        .chain(result.split_whitespace().take(1))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A halt diff abbreviates each object id to git's own default length,
+/// whatever `core.abbrev` says.
+///
+/// `core.abbrev` sets how many hex digits git prints for an abbreviated id.
+/// At `core.abbrev=12`, git 2.55 printed the `index` line of this conflict as
+/// `index ca88aa969c5a,9e4d34aa23b2..000000000000` in place of
+/// `index ca88aa9,9e4d34a..0000000`. The flag `--abbrev=7` does not reach that
+/// line of a combined diff, so the pin is `-c core.abbrev=auto` in the safety
+/// configuration of the runner. For a repository with as few objects as this
+/// fixture, `auto` gives git's shortest default length, seven digits.
+#[test]
+fn a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says() {
+    /// The digits of an id under `auto`, in a repository with few objects.
+    const DEFAULT_ABBREV: usize = 7;
+    /// The digits the fixture asks for.
+    const HOSTILE_ABBREV: usize = 12;
+
+    let repo = conflicting_repo_with("core.abbrev", &HOSTILE_ABBREV.to_string());
+    let digits =
+        |ids: &[String]| -> Vec<usize> { ids.iter().map(|id| id.chars().count()).collect() };
+
+    let plain = plain_diff_at_a_real_halt(&repo, &["--no-color", "--diff-filter=U"]);
+    let plain_ids = index_line_ids(&plain.stdout);
+    assert_eq!(
+        digits(&plain_ids),
+        vec![HOSTILE_ABBREV; 3],
+        "`core.abbrev={HOSTILE_ABBREV}` does not lengthen the ids on the `index` line of plain \
+         `git diff`, so this test could only pass vacuously: {plain_ids:?}"
+    );
+
+    let (_, halt) = merge_with_halt_diff(&repo);
+    let diff = halt
+        .diff()
+        .unwrap_or_else(|message| panic!("git gave no diff at the halt: {message}"));
+    let ids = index_line_ids(diff);
+    assert_eq!(
+        digits(&ids),
+        vec![DEFAULT_ABBREV; 3],
+        "under `core.abbrev={HOSTILE_ABBREV}` the `index` line of the halt diff has to carry \
+         three ids of {DEFAULT_ABBREV} digits: {ids:?}"
+    );
+    assert!(
+        ids.iter()
+            .all(|id| id.chars().all(|digit| digit.is_ascii_hexdigit())),
+        "each id on the `index` line has to be hex digits and nothing else: {ids:?}"
+    );
+}
