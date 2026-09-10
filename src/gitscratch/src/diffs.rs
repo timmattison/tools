@@ -13,6 +13,8 @@
 //! the halt diffs in a value beside the `Conflicts`, and the plain entrance
 //! captures nothing.
 
+use crate::git::Git;
+
 /// The text `git diff` shows at one halt of a replay.
 ///
 /// A rebase halt carries the name of its stopped commit. A merge halt carries
@@ -33,6 +35,17 @@ pub struct HaltDiff {
 }
 
 impl HaltDiff {
+    /// Record the halt that `git` stands on, with the name of its stopped
+    /// commit.
+    ///
+    /// The diff is not read yet, so it is empty.
+    pub(crate) fn capture(_git: &Git, stopped: Option<String>) -> Self {
+        Self {
+            stopped,
+            diff: Ok(Vec::new()),
+        }
+    }
+
     /// The name of the commit the rebase stopped on, or `None` for a merge.
     ///
     /// The name is the text `git log -1 --format="%h %s"` prints for the
@@ -73,6 +86,11 @@ impl HaltDiffs {
     #[must_use]
     pub(crate) fn nothing_captured() -> Self {
         Self { halts: Vec::new() }
+    }
+
+    /// Add the halt diff of the next halt.
+    pub(crate) fn push(&mut self, halt: HaltDiff) {
+        self.halts.push(halt);
     }
 
     /// Every halt diff, in halt order.
