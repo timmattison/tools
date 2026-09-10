@@ -177,6 +177,62 @@ fn every_run_states_the_width_of_its_terminal_so_no_golden_reads_the_window() {
     );
 }
 
+/// The variables through which the environment decides whether `grime` paints
+/// its diff, and which every run in this file takes away.
+///
+/// `colored` reads all three. `NO_COLOR` turns color off, `CLICOLOR=0` turns it
+/// off, and `CLICOLOR_FORCE` turns it on and wins over `NO_COLOR`. A developer
+/// who exports one of them gives it to every child of `cargo test`, and a test
+/// of the paint then fails on that machine only. So the builder takes all three
+/// away, and a test that needs one sets it on its own run.
+///
+/// A constant, because the test below reads each name back off the built
+/// command.
+const COLOR_VARIABLES: [&str; 3] = [NO_COLOR, CLICOLOR, CLICOLOR_FORCE];
+
+/// The variable that turns color off, whatever value it holds.
+const NO_COLOR: &str = "NO_COLOR";
+
+/// The variable that turns color off when it holds `0`.
+const CLICOLOR: &str = "CLICOLOR";
+
+/// The variable that turns color on when it holds a value other than `0`, also
+/// into a pipe, and whatever `NO_COLOR` says.
+const CLICOLOR_FORCE: &str = "CLICOLOR_FORCE";
+
+/// Whether `command` takes `name` away from the environment that the child
+/// inherits.
+///
+/// [`Command::get_envs`] reports a removed variable as a `None` value against
+/// its name, and it reports nothing for a variable the caller never mentioned.
+/// [`environment_value`] gives `None` for both, so it cannot see a removal.
+fn removes_environment(command: &Command, name: &str) -> bool {
+    command
+        .get_envs()
+        .any(|(key, value)| key == OsStr::new(name) && value.is_none())
+}
+
+/// Every run in this file takes the color variables away, and the removal is
+/// asserted here rather than left to the tests of the paint.
+///
+/// Read off the built command for the reason the locale pin is: the machine
+/// this suite is written on cannot show the failure. It exports none of the
+/// three variables. The failure is live on the machine of a developer who
+/// exports `NO_COLOR`, which is exactly the shape a test has to pin rather than
+/// reproduce.
+#[test]
+fn every_run_takes_the_color_variables_away_so_no_test_reads_the_developers_choice() {
+    let command = grime_command(Path::new("."), &["main"]);
+
+    for name in COLOR_VARIABLES {
+        assert!(
+            removes_environment(&command, name),
+            "a run that takes {name} from the developer's shell paints its diff, \
+             or does not, by a choice that the test never made"
+        );
+    }
+}
+
 /// Everything a test wants to look at, gathered once so an assertion failure
 /// can print the whole picture rather than the one stream it happened to check.
 fn streams(output: &Output) -> (Option<i32>, String, String) {
