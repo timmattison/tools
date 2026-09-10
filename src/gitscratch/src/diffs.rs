@@ -66,6 +66,22 @@ impl HaltDiff {
         }
     }
 
+    /// Build a halt diff straight from its two parts.
+    ///
+    /// A fixture constructor for the tests of a renderer, gated the way
+    /// [`Conflicts::from_files`](crate::Conflicts::from_files) is. Each call
+    /// site is a fixture. A released binary cannot state a halt diff that
+    /// nothing captured: it gets a `HaltDiff` from a replay, and from nothing
+    /// else.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn from_parts(_stopped: Option<&str>, _diff: Result<&[u8], &str>) -> Self {
+        Self {
+            stopped: None,
+            diff: Ok(Vec::new()),
+        }
+    }
+
     /// The name of the commit the rebase stopped on, or `None` for a merge.
     ///
     /// The name is the text `git log -1 --format="%h %s"` prints for the
@@ -113,6 +129,16 @@ impl HaltDiffs {
         self.halts.push(halt);
     }
 
+    /// Build a set of halt diffs straight from `halts`, in the order given.
+    ///
+    /// A fixture constructor for the tests of a renderer, gated the way
+    /// [`HaltDiff::from_parts`] is, and for the same reason.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn from_halts(_halts: impl IntoIterator<Item = HaltDiff>) -> Self {
+        Self::nothing_captured()
+    }
+
     /// Every halt diff, in halt order.
     pub fn iter(&self) -> std::slice::Iter<'_, HaltDiff> {
         self.halts.iter()
@@ -135,13 +161,52 @@ impl HaltDiffs {
 mod tests {
     use std::process::Command;
 
-    use super::HaltDiff;
+    use super::{HaltDiff, HaltDiffs};
     use crate::git::{Git, NoInheritedGitEnvironment};
     use crate::repo::PREFLIGHT_HOOKS_PATH;
     use crate::testing::not_a_repository;
 
-    /// The name the test gives the capture, so that it can read the name back.
+    /// The name a test gives a halt diff, so that it can read the name back.
     const STOPPED: &str = "abc1234 a stopped commit";
+
+    /// A diff a test gives a hand-built halt diff.
+    const DIFF_TEXT: &[u8] = b"diff --cc f.txt\n";
+
+    /// An error a test gives a hand-built halt diff in the place of a diff.
+    const NO_DIFF: &str = "fatal: unable to read files to diff";
+
+    /// A hand-built halt diff reads back what it was given, and a hand-built
+    /// set keeps the order it was given.
+    ///
+    /// The tests of a renderer build their halt diffs with these two
+    /// constructors. A constructor that drops the name, puts the diff in the
+    /// place of the error, or changes the order of the halts makes a broken
+    /// renderer look correct. The test then compares the renderer against a
+    /// fixture that is already wrong.
+    #[test]
+    fn a_hand_built_halt_diff_reads_back_what_it_was_given() {
+        let rebase = HaltDiff::from_parts(Some(STOPPED), Ok(DIFF_TEXT));
+        let merge = HaltDiff::from_parts(None, Err(NO_DIFF));
+
+        assert_eq!(
+            (rebase.stopped(), rebase.diff()),
+            (Some(STOPPED), Ok(DIFF_TEXT)),
+            "a halt diff built from a name and a diff has to read back that name and that diff"
+        );
+        assert_eq!(
+            (merge.stopped(), merge.diff()),
+            (None, Err(NO_DIFF)),
+            "a halt diff built from no name and an error has to read back no name and that error"
+        );
+
+        let halts = HaltDiffs::from_halts([rebase.clone(), merge.clone()]);
+        assert_eq!(
+            halts.iter().collect::<Vec<_>>(),
+            vec![&rebase, &merge],
+            "a set built from two halt diffs has to hold both, in the order given"
+        );
+        assert_eq!(halts.len(), 2, "the length counts each halt diff given");
+    }
 
     /// A diff call that fails leaves git's own words in the halt diff, and the
     /// capture still gives a halt diff.
