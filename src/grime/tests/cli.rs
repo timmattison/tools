@@ -1585,6 +1585,115 @@ fn diff_on_a_merge_that_fails_with_nothing_to_measure_prints_no_diff() {
     );
 }
 
+/// A conflict in a file named `日本語.txt`, merged from `right-右` into
+/// `left-左`, comes through the diff intact, in its header and in its body.
+///
+/// Git C-quotes a name outside ASCII unless `core.quotePath` is off. The
+/// runner turns it off, so the header of the file reads
+/// `diff --cc 日本語.txt` and not an octal escape that names no file. The
+/// body holds multi-byte text on each side of each region, and the closing
+/// marker names the multi-byte branch. A renderer that cut a line by byte
+/// index panics on each of them.
+///
+/// The body is read from the header of `日本語.txt` to the end of stdout, and
+/// that file comes last, so no line of the `readme.md` diff counts. The file
+/// conflicts in two regions, so each line of a region appears twice.
+#[test]
+fn diff_carries_a_multi_byte_file_name_and_multi_byte_content_intact() {
+    let repo = multi_byte_names_repo();
+    repo.checkout("left-左");
+
+    let output = grime_command(repo.path(), &[DIFF_FLAG, "right-右"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grime");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert!(
+        !stderr.contains("panicked"),
+        "a multi-byte name must not crash the binary:\n{stderr}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let (_, body) = stdout
+        .split_once("\ndiff --cc 日本語.txt\n")
+        .unwrap_or_else(|| panic!("no diff of 日本語.txt, with its name intact, in:\n{stdout}"));
+    for header in ["--- a/日本語.txt", "+++ b/日本語.txt"] {
+        assert!(
+            body.lines().any(|line| line == header),
+            "the diff of 日本語.txt names the file intact on {header:?}:\n{body}"
+        );
+    }
+    for content in [" +左-edit", "+ 右-edit", "++>>>>>>> right-右"] {
+        assert_eq!(
+            body.lines().filter(|line| *line == content).count(),
+            2,
+            "each of the two regions of 日本語.txt holds {content:?} intact:\n{body}"
+        );
+    }
+}
+
+/// A run from a subdirectory names each file of the diff from the repository
+/// root, and it shows the file that conflicted outside that subdirectory too.
+///
+/// [`nested_conflict_repo`] conflicts in `shared.txt` at the root and in
+/// `sub/nested/shared.txt`, and the run starts in `sub/nested`. A diff scoped
+/// to the directory of the run leaves the root file out. A diff relative to
+/// that directory names the nested file `shared.txt`, which is the name of the
+/// other file. Either one points the reader at the wrong file.
+///
+/// The whole stdout is also held byte-identical to the run from the root, for
+/// the reason the test of the breakdown gives: the same question about the
+/// same repository has one answer, whichever of its directories asks it.
+#[test]
+fn diff_from_a_subdirectory_names_each_file_from_the_repository_root() {
+    let repo = nested_conflict_repo();
+    repo.checkout("left");
+    let nested = repo.path().join("sub").join("nested");
+
+    let from_nested = grime_command(&nested, &[DIFF_FLAG, "right"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grime");
+    let (code, stdout, stderr) = streams(&from_nested);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("diff --cc "))
+            .collect::<Vec<_>>(),
+        vec!["diff --cc shared.txt", "diff --cc sub/nested/shared.txt"],
+        "the diff names both files by their whole path from the repository \
+         root, the one outside the directory of the run included\nstderr:\n{stderr}"
+    );
+
+    let from_root = grime_command(repo.path(), &[DIFF_FLAG, "right"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grime");
+
+    assert_eq!(
+        (from_nested.status.code(), stdout),
+        (
+            from_root.status.code(),
+            String::from_utf8_lossy(&from_root.stdout)
+                .trim_end()
+                .to_string()
+        ),
+        "the same question about the same repository has one answer, whichever \
+         of its directories asks it"
+    );
+}
+
 /// Which of `grime`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {
