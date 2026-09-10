@@ -1732,6 +1732,78 @@ fn quiet_with_diff_is_a_usage_error_in_both_spellings_of_quiet() {
     }
 }
 
+/// The byte that opens each ANSI escape sequence, and so each color code.
+///
+/// The renderer escapes each control character of the diff before it paints,
+/// so each raw ESC byte in stdout is a code that the painter wrote.
+const ESC: u8 = 0x1b;
+
+/// A `--diff` run of the one halt of [`conflicting_repo`], standing on `left`
+/// and merging `right`, with stdout on a pipe. Each variable in `environment`
+/// is set to its value, or taken away for `None`.
+///
+/// The builder states `COLUMNS` and takes the color variables away. So a run
+/// with nothing in `environment` is the run of a wrapper such as `viddy(1)`: a
+/// pipe, and a stated width.
+fn diff_through_a_pipe(repo: &TestRepo, environment: &[(&str, Option<&str>)]) -> Output {
+    repo.checkout("left");
+
+    let mut command = grime_command(repo.path(), &[DIFF_FLAG, "right"]);
+    for (name, value) in environment {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+
+    command.output().expect("failed to run grime")
+}
+
+/// A wrapper such as `viddy(1)` gives `grime` a pipe and states `COLUMNS`, and
+/// it shows the bytes that it reads on a terminal. So the diff keeps its color
+/// through that pipe.
+///
+/// The paint changes no character: the painted stdout, less its color codes,
+/// is byte-identical to the stdout of the same run with `NO_COLOR`. And only
+/// the diff is painted. The verdict and the breakdown come out with no code in
+/// them, as a run without `--diff` prints them, so no golden of such a run
+/// changes.
+#[test]
+fn diff_through_a_pipe_with_a_stated_width_is_painted() {
+    let repo = conflicting_repo();
+
+    let painted = diff_through_a_pipe(&repo, &[]);
+    let plain = diff_through_a_pipe(&repo, &[(NO_COLOR, Some("1"))]);
+    let painted_text = String::from_utf8_lossy(&painted.stdout);
+    let plain_text = String::from_utf8_lossy(&plain.stdout);
+
+    assert_eq!(
+        painted.status.code(),
+        Some(CONFLICTS),
+        "the paint changes no answer\nstdout:\n{painted_text}\nstderr:\n{}",
+        String::from_utf8_lossy(&painted.stderr)
+    );
+    assert!(
+        painted.stdout.contains(&ESC),
+        "a wrapper shows the bytes on a terminal, so the diff keeps its color \
+         through the pipe that the wrapper gives:\n{painted_text}"
+    );
+    assert_eq!(
+        testcolor::strip_ansi(&painted_text),
+        plain_text,
+        "the paint is codes around the text of each line, and nothing more"
+    );
+
+    let (verdict, _) = plain_text
+        .split_once("\n\ndiff --cc ")
+        .unwrap_or_else(|| panic!("the plain run holds a verdict, then the diff:\n{plain_text}"));
+    assert!(
+        painted_text.starts_with(&format!("{verdict}\n")),
+        "only the diff is painted, and the verdict and the breakdown carry no \
+         code:\n{painted_text}"
+    );
+}
+
 /// Which of `grime`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {

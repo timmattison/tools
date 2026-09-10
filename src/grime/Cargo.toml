@@ -24,6 +24,11 @@ termbar.workspace = true
 
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }
+# Takes the color codes back out of a painted run, so a test compares the
+# glyphs of the diff with the text of the same run with `NO_COLOR`. One
+# stripper for the whole workspace, because two hand-written strippers agree
+# on the common sequences and part company on the rare ones.
+testcolor.workspace = true
 # So a test asserting that a column lines up measures the same thing the
 # renderer does. Byte length and character count both disagree with what a
 # terminal shows for a CJK name, and a test using either would call a ragged
