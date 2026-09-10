@@ -12,8 +12,8 @@ use std::process::{Command, Output, Stdio};
 
 use gitscratch::testing::{
     contested_region_repo, default_branch_choice_repo, equal_hunks_unequal_stops_repo,
-    independent_branches_repo, multi_byte_names_repo, nested_conflict_repo, not_a_repository,
-    TestRepo, CHOICE_HEAD_BRANCH,
+    independent_branches_repo, modify_delete_repo, multi_byte_names_repo, nested_conflict_repo,
+    not_a_repository, TestRepo, CHOICE_HEAD_BRANCH,
 };
 use gitscratch::{NoInheritedGitEnvironment, DEFAULT_BRANCHES};
 use unicode_width::UnicodeWidthStr;
@@ -1567,6 +1567,89 @@ index {y_ours},{y_theirs}..0000000
 "
         ),
         "stderr:\n{stderr}"
+    );
+}
+
+/// A run that cannot answer prints no diff. The diff is part of the answer,
+/// and a run that fails has no answer.
+///
+/// The fixture conflicts, so a replay onto a real branch has a diff to print.
+/// This run names a branch that does not resolve, and the pre-flight refuses
+/// it before any replay. The refusal must be `grind`'s own and not clap's,
+/// because clap refuses an unknown flag with the same exit code and the same
+/// empty stdout.
+///
+/// Stdout is compared raw, so an empty line fails the test too.
+#[test]
+fn diff_on_a_branch_that_does_not_resolve_prints_no_diff() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let output = run_raw(&repo, "two", &[DIFF_FLAG, "nonexistent-branch"]);
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a branch that does not resolve is a run that cannot answer, with the \
+         diff as without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not resolve 'nonexistent-branch'"),
+        "the control: the refusal is grind's own, so --diff got past the \
+         parser:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a run with no answer has no diff to print:\n{stdout}"
+    );
+}
+
+/// A replay that fails after a stop prints no diff, and not even the diff of
+/// the stop it already captured.
+///
+/// [`modify_delete_repo`] stops at a modify/delete conflict, and the capture
+/// reads that stop. The object store is sealed, so git then cannot write the
+/// commit of the stop. The replay refuses to answer, because a commit that git
+/// did not write is work that the count leaves out. So the run exits
+/// [`ERROR`], and the halt diff of its one stop goes with the answer.
+///
+/// The error names the commit of the stop, which is the control: it shows that
+/// the replay got as far as the stop, where the capture runs. Without it, a run
+/// that failed before the stop passes this test for the reason the test above
+/// already covers.
+///
+/// Unix only, because [`TestRepo::seal_object_store`] is.
+#[cfg(unix)]
+#[test]
+fn diff_on_a_replay_that_fails_after_a_stop_prints_no_diff() {
+    let repo = modify_delete_repo();
+    repo.checkout("branch");
+
+    // Sealed after the fixture exists, because each commit of the fixture
+    // writes objects. The run writes none until the replay commits its stop,
+    // and that write is the one that fails.
+    let sealed = repo.seal_object_store();
+    let output = grind(repo.path(), &[DIFF_FLAG, "main"]);
+    // Released before any assertion, so a failed assertion leaves no read-only
+    // directory for the removal of the temporary directory to trip over.
+    drop(sealed);
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "git could not write the commit of the stop, so the replay has no \
+         answer\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("branch modifies x"),
+        "the control: the error names the commit of the stop, so the replay \
+         got as far as the capture:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a run with no answer prints no diff, not even the diff of a stop it \
+         captured:\n{stdout}"
     );
 }
 
