@@ -737,6 +737,21 @@ impl Git {
             // merge replay. Read out of a real merge rather than from git's
             // documentation.
             "merge.verifySignatures=false",
+            // A halt diff carries abbreviated object ids on its `index` line,
+            // and `core.abbrev` sets how many hex digits git prints for one.
+            // Under `core.abbrev=12`, git 2.55 printed that line of a conflict
+            // diff with ids of 12 digits in place of 7. The flag `--abbrev=7`
+            // on the diff call does not reach that line of a combined diff,
+            // and only `-c core.abbrev=auto` gives it back. A `-c` pair cannot
+            // follow the subcommand, so this pin is here and not with the
+            // other pins of the halt diff in `DIFF_AT_HALT`. `auto` is what
+            // git uses when nothing sets the key, so the name of a stopped
+            // commit also gets git's default length. The counter reads the
+            // shape of a marker and not its label, so no count changes. Pinned
+            // by
+            // `a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says`
+            // in `tests/diffs.rs`.
+            "core.abbrev=auto",
         ]
         .iter()
         .map(|setting| (*setting).to_string())
