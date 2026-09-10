@@ -1771,6 +1771,44 @@ fn diff_from_a_subdirectory_names_each_file_from_the_repository_root() {
     );
 }
 
+/// `--diff` asks for more words and `-q` asks for none. The two contradict
+/// each other, so clap refuses the pair before `grind` starts, in both
+/// spellings of `-q`.
+///
+/// A tool that obeys one of the two in silence surprises the caller who gave
+/// the other. The run is on a fixture that conflicts, so a `grind` that takes
+/// the pair and lets `-q` win answers [`CONFLICTS`] with no word, and one that
+/// lets `--diff` win prints a diff. Each fails here.
+///
+/// The refusal is clap's usage error, on stderr, and it names both flags, so
+/// the caller learns which part of the command line was wrong. The code is
+/// [`ERROR`], the code of every command line that `grind` cannot read.
+#[test]
+fn quiet_with_diff_is_a_usage_error_in_both_spellings_of_quiet() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    for quiet in ["-q", "--quiet"] {
+        let output = run_raw(&repo, "two", &[quiet, DIFF_FLAG, "one"]);
+        let (code, stdout, stderr) = streams(&output);
+
+        assert_eq!(
+            code,
+            Some(ERROR),
+            "{quiet} with {DIFF_FLAG} is a command line that contradicts itself, \
+             so {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("--quiet") && stderr.contains(DIFF_FLAG),
+            "the usage error names both flags of the pair:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "the refusal belongs on stderr, and there is no verdict and no \
+             diff:\n{stdout}"
+        );
+    }
+}
+
 /// Which of `grind`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {
