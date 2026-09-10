@@ -78,3 +78,48 @@ fn the_newlines_of_the_child_come_back_unchanged() {
         described(&output)
     );
 }
+
+/// Far more bytes than the buffer of a terminal or of a pipe holds.
+///
+/// A pseudo-terminal holds a few KiB on macOS, and a pipe holds 64 KiB. A
+/// mebibyte is far past both on each system this suite runs on.
+const FAR_PAST_ANY_BUFFER: usize = 1 << 20;
+
+/// Output far bigger than any buffer comes back whole, on standard output and
+/// on standard error both.
+///
+/// A child that writes more than a buffer holds stops until somebody reads that
+/// buffer. So the helper reads the master end and standard error while the
+/// child runs. A helper that reads one stream to its end before it reads the
+/// other hangs here: the child waits for a read of the second stream, and the
+/// helper waits for the end of the first. The test then hangs and does not
+/// fail. That is still a guard, because no run of such a helper gets past it.
+#[test]
+fn output_far_bigger_than_any_buffer_comes_back_whole_on_both_streams() {
+    let script = format!(
+        "head -c {FAR_PAST_ANY_BUFFER} /dev/zero | tr '\\0' x; \
+         head -c {FAR_PAST_ANY_BUFFER} /dev/zero | tr '\\0' y >&2"
+    );
+
+    let output = on_a_terminal(&script);
+
+    assert!(
+        output.status.success(),
+        "the child must write both streams and succeed: {}",
+        output.status
+    );
+    for (stream, bytes, byte) in [
+        ("standard output", &output.stdout, b'x'),
+        ("standard error", &output.stderr, b'y'),
+    ] {
+        assert_eq!(
+            bytes.len(),
+            FAR_PAST_ANY_BUFFER,
+            "{stream} must come back whole"
+        );
+        assert!(
+            bytes.iter().all(|&each| each == byte),
+            "{stream} must hold only the byte the child wrote there"
+        );
+    }
+}
