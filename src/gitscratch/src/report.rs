@@ -1877,4 +1877,56 @@ mod tests {
             ],
         );
     }
+
+    /// The hunk header says how many prefix columns a content line has.
+    ///
+    /// A combined diff has one prefix column for each parent, and its hunk
+    /// header opens with one `@` more than that: `@@@` for two parents. A diff
+    /// of two files has one prefix column, and its hunk header opens with
+    /// `@@`. So the count of leading `@` less one is the count of prefix
+    /// columns. In a hunk of one column, `+x` is added, `-x` is removed, and
+    /// ` x` is context. ` -x` and ` +x` are context too, with text that starts
+    /// with a sign. A painter that reads two columns paints ` -x` red and
+    /// ` +x` green, and it reads `-x` and `+x` as lines that are not content.
+    ///
+    /// The halt diff is written by hand. It is a diff of two files, which has
+    /// the one-column hunk that the rule has to read.
+    #[test]
+    fn the_hunk_header_says_how_many_prefix_columns_a_content_line_has() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            None,
+            concat!(
+                "diff --git a/f.txt b/f.txt\n",
+                "index 1111111..2222222 100644\n",
+                "--- a/f.txt\n",
+                "+++ b/f.txt\n",
+                "@@ -1,4 +1,4 @@\n",
+                " x\n",
+                "-x\n",
+                "+x\n",
+                " -x\n",
+                " +x",
+            ),
+        )]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --git a/f.txt b/f.txt".bold(),
+                "index 1111111..2222222 100644".bold(),
+                "--- a/f.txt".bold(),
+                "+++ b/f.txt".bold(),
+                "@@ -1,4 +1,4 @@".cyan(),
+                " x".normal(),
+                "-x".red(),
+                "+x".green(),
+                " -x".normal(),
+                " +x".normal(),
+            ],
+        );
+    }
 }
