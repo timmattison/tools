@@ -815,6 +815,17 @@ trait Payload: Copy {
     /// The shape that carries the same pixels for fewer characters, or [`None`]
     /// when this shape is the last one that the protocol carries.
     fn cheaper(self) -> Option<Self>;
+
+    /// The characters that this shape costs, when the count comes off the size
+    /// of the picture alone and no encoder has to run.
+    ///
+    /// # Arguments
+    /// * `image` - The image at the size that it draws at.
+    ///
+    /// # Returns
+    /// [`None`] for a shape whose size comes off the content of the picture as
+    /// well, which is every shape that compresses.
+    fn characters_of(self, image: &DynamicImage) -> Option<usize>;
 }
 
 /// The shape that one Kitty image travels in.
@@ -922,6 +933,11 @@ impl Payload for KittyPayload {
     fn cheaper(self) -> Option<Self> {
         None
     }
+
+    /// Neither shape states a count yet.
+    fn characters_of(self, _image: &DynamicImage) -> Option<usize> {
+        None
+    }
 }
 
 /// The one shape that a Sixel image travels in.
@@ -961,6 +977,11 @@ impl Payload for SixelPayload {
     /// The protocol carries this shape and no other one, so a Sixel picture
     /// that stands above the budget reaches it on pixels alone.
     fn cheaper(self) -> Option<Self> {
+        None
+    }
+
+    /// This shape states no count yet.
+    fn characters_of(self, _image: &DynamicImage) -> Option<usize> {
         None
     }
 }
@@ -1173,6 +1194,11 @@ impl Payload for Iterm2Payload {
             }
             Iterm2Payload::Jpeg(quality) => quality.cheaper().map(Iterm2Payload::Jpeg),
         }
+    }
+
+    /// No shape states a count yet.
+    fn characters_of(self, _image: &DynamicImage) -> Option<usize> {
+        None
     }
 }
 
@@ -1825,6 +1851,8 @@ fn write_iterm2<W: Write>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
     use crate::detect::{AnsweredProtocol, TerminalType};
 
@@ -3525,6 +3553,150 @@ mod tests {
             rungs,
             vec![90, 79, 68, 57, 46, 35],
             "the ladder must walk from the highest rung to the lowest one"
+        );
+    }
+
+    /// The walk runs no encoder for a rung whose stated count the budget
+    /// refuses.
+    ///
+    /// A raw shape states what it costs off the pixel count alone. A frame of
+    /// 1920 pixels by 1080 costs 8294424 characters as a raw PNM, and a mosh
+    /// session holds 1044480 of them, so the budget refuses that rung for every
+    /// frame of the video. A walk that reads the statement steps past the rung.
+    /// A walk that reads the payload builds those 8294424 characters one time
+    /// for each frame and throws every one of them away.
+    ///
+    /// The ladder here counts the encoder runs of its top rung, so the test
+    /// measures the encoder run itself and not the payload it made.
+    #[test]
+    fn the_walk_runs_no_encoder_for_a_rung_that_the_budget_refuses() {
+        /// The characters that the top rung of this ladder states.
+        const TOP_CHARACTERS: usize = 4096;
+
+        /// The characters that the rung under it costs.
+        const CHEAPER_CHARACTERS: usize = 16;
+
+        /// The encoder runs that the top rung of this ladder made.
+        ///
+        /// The static stands inside this test, so it counts the runs of this
+        /// test and no other test reaches it.
+        static TOP_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+        /// A ladder of two rungs that counts the encoder runs of the top one.
+        ///
+        /// The top rung states its count, and the rung under it states none.
+        /// So the budget refuses the top rung on the statement alone, and the
+        /// walk has to reach the encoder for the rung under it.
+        #[derive(Clone, Copy)]
+        struct CountedShape {
+            /// True for the top rung, and false for the rung under it.
+            top: bool,
+            /// Where the top rung counts its encoder runs.
+            runs: &'static AtomicUsize,
+        }
+
+        impl Payload for CountedShape {
+            /// Count this run, and give a payload of the stated length.
+            fn encode(self, _image: &DynamicImage) -> Result<String, DrawError> {
+                if self.top {
+                    self.runs.fetch_add(1, Ordering::Relaxed);
+
+                    Ok("t".repeat(TOP_CHARACTERS))
+                } else {
+                    Ok("c".repeat(CHEAPER_CHARACTERS))
+                }
+            }
+
+            /// The ladder holds two rungs and it ends under the second one.
+            fn cheaper(self) -> Option<Self> {
+                self.top.then_some(Self {
+                    top: false,
+                    runs: self.runs,
+                })
+            }
+
+            /// The top rung states its count, and the rung under it states
+            /// none.
+            fn characters_of(self, _image: &DynamicImage) -> Option<usize> {
+                self.top.then_some(TOP_CHARACTERS)
+            }
+        }
+
+        let (shape, payload) = shape_that_costs_least(
+            &test_image(),
+            PayloadBudget::of(TOP_CHARACTERS - 1),
+            CountedShape {
+                top: true,
+                runs: &TOP_RUNS,
+            },
+        )
+        .expect("the shapes of this ladder carry every picture");
+
+        assert_eq!(
+            TOP_RUNS.load(Ordering::Relaxed),
+            0,
+            "the walk must reach no encoder for a rung that states a count of {TOP_CHARACTERS} characters under a budget of {} characters",
+            TOP_CHARACTERS - 1
+        );
+        assert!(
+            !shape.top,
+            "the walk must come back with the rung under the one that the budget refused"
+        );
+        assert_eq!(
+            payload.len(),
+            CHEAPER_CHARACTERS,
+            "the payload must come off the rung that the walk came back with"
+        );
+    }
+
+    /// The picture sizes that the count test measures.
+    ///
+    /// A raw PNM of the first size holds 116 bytes, which leaves a remainder of
+    /// two over three, so the base64 of it carries a pad. A raw PNM of the
+    /// second holds 444 bytes, which divides by three and carries none. A count
+    /// that reads the pad wrong therefore fails on the first size.
+    const COUNTED_SIZES: [(u32, u32); 2] = [(7, 5), (16, 9)];
+
+    /// The count that a raw shape states agrees with its encoder.
+    ///
+    /// [`shape_that_costs_least`] steps past a rung whose stated count the
+    /// budget refuses, and it steps past it with no encoder run. A count above
+    /// the real one therefore drops a rung that the budget holds, and the
+    /// picture loses quality for nothing. A count under the real one sends a
+    /// payload that the terminal drops. So the count is measured against the
+    /// encoder that it stands in for.
+    #[test]
+    fn the_stated_count_of_a_raw_shape_agrees_with_its_encoder() {
+        for (width, height) in COUNTED_SIZES {
+            let picture = photograph_of(width, height);
+
+            the_count_agrees_with_the_encoder(
+                KittyPayload::RawRgb,
+                &picture,
+                "the raw pixels of Kitty",
+            );
+            the_count_agrees_with_the_encoder(Iterm2Payload::Pnm, &picture, "the raw PNM of iTerm2");
+        }
+    }
+
+    /// Measure the count that `shape` states against the payload it encodes.
+    ///
+    /// # Arguments
+    /// * `shape` - The rung that states a count.
+    /// * `image` - The picture to measure the rung at.
+    /// * `name` - The name of the rung, for the message of the failure.
+    fn the_count_agrees_with_the_encoder<P: Payload>(shape: P, image: &DynamicImage, name: &str) {
+        let payload = shape
+            .encode(image)
+            .expect("the raw shapes carry every picture");
+
+        assert_eq!(
+            shape.characters_of(image),
+            Some(payload.len()),
+            "{name} must state the {} characters that its encoder made of a picture of {} pixels by {}",
+            payload.len(),
+            image.width(),
+            image.height()
         );
     }
 
