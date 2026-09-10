@@ -96,6 +96,7 @@
 //! shares one copy instead of each compiling its own.
 
 pub mod console;
+pub mod diffs;
 
 /// The git runner, and the two environment guards that are safe to share.
 ///
@@ -127,6 +128,7 @@ pub use git::{shed_inherited_git_environment, NoInheritedGitEnvironment};
 pub use git::Git;
 
 pub use console::Console;
+pub use diffs::{HaltDiff, HaltDiffs};
 pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
 pub use repo::{Repo, DEFAULT_BRANCHES};
 pub use report::{Report, UnwordedReport};

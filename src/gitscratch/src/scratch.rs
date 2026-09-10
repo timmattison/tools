@@ -51,6 +51,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
+use crate::diffs::HaltDiffs;
 use crate::git::Git;
 use crate::metrics::{Files, Hunks, Stops};
 
@@ -341,6 +342,16 @@ impl Scratch {
     /// have been spent trying to advance it.
     pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
         self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS)
+    }
+
+    /// [`Scratch::replay_rebase`], and the halt diff of each stop beside the
+    /// counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in each case [`Scratch::replay_rebase`] does.
+    pub fn replay_rebase_with_diffs(&self, onto: &str) -> Result<(Conflicts, HaltDiffs)> {
+        Ok((self.replay_rebase(onto)?, HaltDiffs::nothing_captured()))
     }
 
     /// [`Scratch::replay_rebase`] with the round budget named rather than baked
