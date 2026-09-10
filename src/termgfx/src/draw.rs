@@ -404,29 +404,38 @@ pub enum Cursor {
 /// two different things from the same protocol, and the difference is the cost
 /// that each of them pays.
 ///
-/// A still picture pays its characters one time, so it travels in the shape
+/// A still picture pays its characters one time, so it starts at the shape
 /// that costs the fewest of them, and it asks the terminal for the failures
 /// because the caller reads that answer before it gives the terminal back to
-/// the shell. A frame pays for every frame, so it takes the shape that costs
-/// the least time, and it asks for no answer at all because the caller holds
-/// the terminal in raw mode for the key presses of the user.
+/// the shell. A frame pays for every frame, so it starts at the shape that
+/// costs the least time, and it asks for no answer at all because the caller
+/// holds the terminal in raw mode for the key presses of the user. The budget
+/// decides after that, and [`PayloadBudget`] states what a picture that stands
+/// above it spends.
 ///
 /// This is a different question from [`Cursor`], and the two answers are free
 /// of each other. A user who types `ic -n photo.png` draws one still picture
 /// and holds the cursor as well.
 ///
-/// The choice means something to the Kitty graphics protocol alone. The Sixel
-/// protocol and the iTerm2 protocol each carry one shape of an image and answer
-/// no command at all, so the two writers of those protocols read this and then
-/// ignore it.
+/// The Kitty graphics protocol and the iTerm2 protocol each take the shape of
+/// the picture off this choice. The Sixel protocol carries one shape alone, so
+/// the writer of that protocol reads this and then sends the same shape either
+/// way.
+///
+/// The answer is a key of the Kitty protocol alone. A Sixel command and an
+/// iTerm2 command each ask the terminal for nothing, whichever choice the
+/// caller makes here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Picture {
-    /// One still picture. It travels as a whole PNG file, and it asks the
-    /// terminal for the failures.
+    /// One still picture. It starts at the shape that costs the fewest
+    /// characters, which is a whole PNG file in the Kitty protocol and in the
+    /// iTerm2 protocol, and it asks the terminal for the failures.
     Still,
-    /// One frame of many. It keeps the raw pixels, it asks the terminal for no
-    /// answer, and it carries the placement `id` that makes the next frame of
-    /// that same id replace it in place instead of stand beside it.
+    /// One frame of many. It starts at the shape that costs the least time,
+    /// which keeps the raw pixels: the Kitty protocol takes them as raw RGB and
+    /// the iTerm2 protocol takes them as a raw PNM file. It asks the terminal
+    /// for no answer, and it carries the placement `id` that makes the next
+    /// frame of that same id replace it in place instead of stand beside it.
     Frame {
         /// The placement id of the frame, which a Kitty terminal reads and the
         /// other two protocols ignore.
@@ -1087,10 +1096,14 @@ impl JpegQuality {
 ///   JPEG at any quality.
 /// * [`Iterm2Payload::Pnm`] is the top rung of one frame of many. The builder
 ///   copies the pixels behind a header of three lines, so it costs a memcpy
-///   where a PNG costs a deflate. A measurement of a photograph of 1920 pixels
-///   by 1080 states the PNG encoder at 8.37 milliseconds and the PNM builder at
-///   1.73, for 19 percent fewer characters, and a frame that travels in one of
-///   these two shapes pays that time one time for every frame that it draws.
+///   where a PNG costs a deflate, and a frame pays that cost one time for every
+///   frame that it draws. A measurement of a photograph of 1920 pixels by 1080
+///   states the PNG encoder at about three times the time of the PNM builder,
+///   and `ic` answers that time with a lower frame rate, which is the thing the
+///   reader sees. The PNG of that photograph takes 4166532 characters where the
+///   PNM takes 8294424, and the fewer characters of the PNG count only where
+///   the budget holds both shapes, which is a budget where the characters are
+///   not the scarce thing.
 /// * [`Iterm2Payload::Jpeg`] stands under both of them, one quality at a time.
 ///   A photograph compresses poorly in a lossless format, and a JPEG of it
 ///   carries about twelve times the pixels of a PNG for the same characters.
@@ -1517,8 +1530,10 @@ fn shrink_towards(
 ///
 /// [`Picture::Frame`] is one frame of many, and it keeps the raw pixels. The
 /// caller draws the next frame directly after this one, so a PNG encoder here
-/// runs one time for every frame, and that time costs more than the characters
-/// that it saves.
+/// runs one time for every frame. `ic` answers that time with a lower frame
+/// rate, which is the thing the reader sees, so the frame starts at the shape
+/// that costs the least time and pays more characters for it. [`write_iterm2`]
+/// states this same trade.
 ///
 /// Ghostty and WezTerm read this same protocol.
 ///
@@ -1887,10 +1902,18 @@ fn file_travels_as_it_stands(source: &[u8]) -> bool {
 /// [`Picture::Frame`] is one frame of many, and it starts at a raw PNM. The
 /// caller draws the next frame directly after this one, so an encoder here runs
 /// one time for every frame. A measurement of a photograph of 1920 pixels by
-/// 1080 states the PNG encoder at 8.37 milliseconds and the PNM builder at
-/// 1.73, and the PNG saves 19 percent of the characters for that time. `ic`
-/// answers the time with a lower frame rate, so the frame keeps the shape that
-/// costs the least time. [`write_kitty`] states this same trade.
+/// 1080 states the PNG encoder at about three times the time of the PNM
+/// builder, and `ic` answers that time with a lower frame rate, which is the
+/// thing the reader sees. So the frame starts at the shape that costs the least
+/// time. [`write_kitty`] states this same trade.
+///
+/// The PNG of that photograph takes 4166532 characters where the PNM takes
+/// 8294424, and the fewer characters of the PNG count only where the budget
+/// holds both shapes. A budget that holds both is a budget where the characters
+/// are not the scarce thing, such as a local terminal. A mosh session holds
+/// neither shape of a frame at the size of a screen, and the walk steps onto a
+/// JPEG rung there, so the two counts decide nothing where the characters are
+/// scarce.
 ///
 /// A budget that neither top rung reaches steps onto the JPEG rungs, which both
 /// shapes share. The step off a raw PNM builds no PNM at all, because
@@ -3058,11 +3081,18 @@ mod tests {
     ///
     /// A frame pays the encoder one time for every frame, so the time of the
     /// encoder is the cost that a video player feels. A measurement of the
-    /// photograph fixture states a PNG at 3.8 times the time of a PNM at 960
-    /// pixels by 540, and at 4.8 times it at 1920 by 1080, for 19 percent fewer
-    /// characters. `ic` answers that time with a lower frame rate. The Kitty
-    /// writer states the same trade and keeps the raw pixels of a frame, so the
-    /// iTerm2 writer starts a frame at the shape that costs the least time.
+    /// photograph fixture states the PNG encoder at three times to four times
+    /// the time of the PNM builder, and `ic` answers that time with a lower
+    /// frame rate. The Kitty writer states the same trade and keeps the
+    /// raw pixels of a frame, so the iTerm2 writer starts a frame at the shape
+    /// that costs the least time.
+    ///
+    /// The PNG of that fixture takes 296040 characters where the PNM takes
+    /// 580820, and the fewer characters of the PNG count only where the budget
+    /// holds both shapes. A mosh session holds both shapes of this small
+    /// fixture and neither shape of a frame at the size of a screen, and the
+    /// walk steps onto a JPEG rung there, which
+    /// [`an_iterm2_frame_above_the_budget_steps_onto_a_jpeg`] measures.
     ///
     /// A still picture pays for the encoder one time and the characters are the
     /// whole of what it pays, so it keeps its PNG. The second assertion holds
@@ -3181,8 +3211,12 @@ mod tests {
     /// A JPEG on a disk is already a JPEG. An encoder that read it and wrote it
     /// out again would spend the time of a decode and an encode, and it would
     /// throw a second helping of the picture away to do it. So a file that
-    /// arrives in a format the protocol carries, that the budget holds, and
-    /// that needs no resize reaches the terminal as it stands.
+    /// reaches an iTerm2 terminal, that arrives as a JPEG or as a PNG of one
+    /// picture and not of an animation, that states no turn of the picture,
+    /// that the budget holds and that needs no resize reaches the terminal as it
+    /// stands. [`Capabilities::travels_as_it_stands`] holds the rule of the
+    /// terminal and the file together, and the display bounds and the budget
+    /// decide the rest.
     #[test]
     fn a_source_file_that_needs_no_resize_travels_byte_for_byte() {
         let source = source_file_of(
