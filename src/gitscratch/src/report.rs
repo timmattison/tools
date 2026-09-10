@@ -1686,4 +1686,57 @@ mod tests {
             ],
         );
     }
+
+    /// Inside a hunk, a content line whose text reads like a header line gets
+    /// the color of content.
+    ///
+    /// A content line starts with its prefix columns, and its text follows
+    /// them. So a line removed from both parents whose text is `- a/f.txt`
+    /// prints as `--- a/f.txt`. A line added against both parents whose text
+    /// is `+ b/f.txt` prints as `+++ b/f.txt`. Each one reads like a header
+    /// line of a file. Only the position of a line tells them apart: the
+    /// header lines stand between a `diff ` line and the first hunk header,
+    /// and inside a hunk the prefix columns decide. A painter that reads the
+    /// text of one line paints both lines bold, and a test of the usual lines
+    /// does not see it.
+    ///
+    /// The halt diff has the shape of a real one, and the two lines in its
+    /// hunk are written by hand. Git writes such a line only for a file whose
+    /// text reads like a header, and no other fixture here holds one.
+    #[test]
+    fn inside_a_hunk_a_line_that_reads_like_a_header_gets_the_color_of_content() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            None,
+            concat!(
+                "diff --cc f.txt\n",
+                "index 989b198,a4e431d..0000000\n",
+                "--- a/f.txt\n",
+                "+++ b/f.txt\n",
+                "@@@ -1,3 -1,3 +1,3 @@@\n",
+                "  a\n",
+                "--- a/f.txt\n",
+                "+++ b/f.txt\n",
+                "  c",
+            ),
+        )]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc f.txt".bold(),
+                "index 989b198,a4e431d..0000000".bold(),
+                "--- a/f.txt".bold(),
+                "+++ b/f.txt".bold(),
+                "@@@ -1,3 -1,3 +1,3 @@@".cyan(),
+                "  a".normal(),
+                "--- a/f.txt".red(),
+                "+++ b/f.txt".green(),
+                "  c".normal(),
+            ],
+        );
+    }
 }
