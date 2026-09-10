@@ -38,6 +38,8 @@
 //! that. Each of those is one number, and a tool that takes the number of
 //! another tool clips the bottom of its own output.
 
+use std::io::IsTerminal;
+
 /// Decide the effective terminal width gsw should render for.
 ///
 /// Always leaves one cell of margin against the detected column count:
@@ -125,6 +127,96 @@ pub fn should_force_colors(
     no_color_env: bool,
 ) -> bool {
     !stdout_is_tty && columns_env_present && !no_color_env
+}
+
+/// The variable through which a wrapper states the width of its terminal.
+const WIDTH_VARIABLE: &str = "COLUMNS";
+
+/// The variable that refuses color with any value, as <https://no-color.org>
+/// asks.
+const NO_COLOR_VARIABLE: &str = "NO_COLOR";
+
+/// The variable that refuses color when it holds the string `0`.
+const CLICOLOR_VARIABLE: &str = "CLICOLOR";
+
+/// Whether this process must turn on the color of the `colored` crate itself.
+/// The function reads the standard output and the environment of this process.
+///
+/// `colored` already decides color for a terminal and for the usual variables.
+/// `CLICOLOR_FORCE` turns color on, also into a pipe. `NO_COLOR` turns it off.
+/// With neither variable, color is on only when standard output is a terminal.
+/// This function adds one rule to those, the rule of a wrapper, through
+/// [`should_force_colors`].
+///
+/// A wrapper such as `viddy(1)` gives the tool a pipe and states the width of
+/// its terminal in `COLUMNS`. The wrapper shows the bytes that it reads on that
+/// terminal. `colored` sees only the pipe and writes no code, so the tool must
+/// turn color on for that shape. This function answers `true` for it.
+///
+/// `COLUMNS` states a width only when it holds a number above zero that fits in
+/// a `u16`. That is the rule by which `termbar::TerminalWidth` takes a stated
+/// width, so the color and the layout of one run read one width. An empty
+/// value, a value that is no number, `0`, and a value above `65535` state no
+/// width. A tool that reads its width through `termbar` then measures its
+/// terminal, and this function leaves the pipe plain. This crate has no
+/// dependencies, so the parse is a second statement of the rule of `termbar`,
+/// and the unit tests of this crate hold it.
+///
+/// Two variables refuse the rule of a wrapper. Each one is a choice that the
+/// user made, and the rule of a wrapper extends only the case in which the user
+/// made none. `NO_COLOR` set to any value refuses it, as it refuses color
+/// everywhere else. `CLICOLOR` set to `0` refuses it too. `colored` reads
+/// `CLICOLOR` as off exactly when its value is the string `0`.
+///
+/// # The call that uses the answer
+///
+/// Call `colored::control::set_override(true)` when this function answers
+/// `true`, and call nothing when it answers `false`. Never give the answer to
+/// `set_override` directly. On a terminal the answer is `false`, and
+/// `set_override(false)` turns off the color that `colored` gives a terminal by
+/// itself. It also wins over `CLICOLOR_FORCE`.
+///
+/// The call stays in the tool, with
+/// `#[allow(clippy::disallowed_methods, reason = "...")]` at the call site. The
+/// workspace bans `set_override`, because a test that calls it changes the
+/// color of each test in its process. A tool that decides its own color at
+/// startup is the one legitimate caller, and the allow says so in the file of
+/// that tool. Only the decision stands here.
+///
+/// ```ignore
+/// if termwindow::should_force_colors_here() {
+///     #[allow(clippy::disallowed_methods, reason = "...")]
+///     colored::control::set_override(true);
+/// }
+/// ```
+#[must_use]
+pub fn should_force_colors_here() -> bool {
+    should_force_colors(
+        std::io::stdout().is_terminal(),
+        states_a_width(std::env::var(WIDTH_VARIABLE).ok().as_deref()),
+        refuses_color(
+            std::env::var_os(NO_COLOR_VARIABLE).is_some(),
+            std::env::var(CLICOLOR_VARIABLE).ok().as_deref(),
+        ),
+    )
+}
+
+/// Whether `value`, the value of `COLUMNS`, states a width.
+///
+/// A width is a number above zero that fits in a `u16`. The `TIOCGWINSZ`
+/// ioctl answers in that type, so a larger value is a width that no terminal
+/// reports. No character of a line prints into no column, so zero states no
+/// width either. A value that is not valid text arrives here as `None`,
+/// because the read takes the variable as text. That is the rule of
+/// `termbar::TerminalWidth`, whose `stated_of` and `columns_of` hold it.
+fn states_a_width(value: Option<&str>) -> bool {
+    value.is_some()
+}
+
+/// Whether the user refused color, from whether `NO_COLOR` is set and from the
+/// value of `CLICOLOR`.
+fn refuses_color(no_color_set: bool, clicolor: Option<&str>) -> bool {
+    no_color_set || clicolor == Some("0")
 }
 
 #[cfg(test)]
@@ -241,5 +333,68 @@ mod tests {
     fn no_force_colors_when_no_color_env_set() {
         // Honor https://no-color.org even when under viddy.
         assert!(!should_force_colors(false, true, true));
+    }
+
+    #[test]
+    fn a_number_above_zero_in_columns_states_a_width() {
+        assert!(states_a_width(Some("80")));
+    }
+
+    #[test]
+    fn the_widest_width_a_terminal_reports_states_a_width() {
+        // The TIOCGWINSZ ioctl answers in a u16, and this is its largest value.
+        assert!(states_a_width(Some("65535")));
+    }
+
+    #[test]
+    fn no_columns_states_no_width() {
+        assert!(!states_a_width(None));
+    }
+
+    #[test]
+    fn an_empty_columns_states_no_width() {
+        // `COLUMNS=` is set, and it holds no number. A tool that reads its
+        // width through termbar measures the terminal for it.
+        assert!(!states_a_width(Some("")));
+    }
+
+    #[test]
+    fn a_columns_that_is_no_number_states_no_width() {
+        assert!(!states_a_width(Some("abc")));
+    }
+
+    #[test]
+    fn a_columns_of_zero_states_no_width() {
+        // No character of a line prints into no column.
+        assert!(!states_a_width(Some("0")));
+    }
+
+    #[test]
+    fn a_columns_wider_than_a_u16_states_no_width() {
+        // No terminal reports a width that the TIOCGWINSZ ioctl cannot hold.
+        assert!(!states_a_width(Some("70000")));
+    }
+
+    #[test]
+    fn no_color_with_any_value_refuses_color() {
+        assert!(refuses_color(true, None));
+        assert!(refuses_color(true, Some("1")));
+    }
+
+    #[test]
+    fn clicolor_zero_refuses_color() {
+        assert!(refuses_color(false, Some("0")));
+    }
+
+    #[test]
+    fn clicolor_other_than_zero_refuses_nothing() {
+        // colored reads CLICOLOR as off exactly when it holds the string 0.
+        assert!(!refuses_color(false, Some("1")));
+        assert!(!refuses_color(false, Some("")));
+    }
+
+    #[test]
+    fn no_variable_refuses_nothing() {
+        assert!(!refuses_color(false, None));
     }
 }
