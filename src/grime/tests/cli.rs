@@ -1517,6 +1517,74 @@ index {ours},{theirs}..0000000
     );
 }
 
+/// A run that cannot answer prints no diff. The diff is part of the answer,
+/// and a run that fails has no answer.
+///
+/// The fixture conflicts, so a merge of a real branch has a diff to print.
+/// This run names a branch that does not resolve, and the pre-flight refuses
+/// it before any merge. The refusal must be `grime`'s own and not clap's,
+/// because clap refuses an unknown flag with the same exit code and the same
+/// empty stdout.
+///
+/// Stdout is compared raw, so an empty line fails the test too.
+#[test]
+fn diff_on_a_branch_that_does_not_resolve_prints_no_diff() {
+    let repo = conflicting_repo();
+
+    let output = run_raw(&repo, "left", &[DIFF_FLAG, "nonexistent-branch"]);
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a branch that does not resolve is a run that cannot answer, with the \
+         diff as without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not resolve 'nonexistent-branch'"),
+        "the control: the refusal is grime's own, so --diff got past the \
+         parser:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a run with no answer has no diff to print:\n{stdout}"
+    );
+}
+
+/// A merge that git refuses prints no diff. Git refuses to merge two
+/// histories with no commit in common and leaves nothing to resolve, so the
+/// run exits [`ERROR`] with no verdict, and the diff goes with the verdict.
+///
+/// The error carries git's own refusal, which is the control: it shows that
+/// the run got past the pre-flight to the merge itself. Without it, a run that
+/// failed earlier passes this test for the reason the test above already
+/// covers.
+///
+/// Stdout is compared raw, so an empty line fails the test too.
+#[test]
+fn diff_on_a_merge_that_fails_with_nothing_to_measure_prints_no_diff() {
+    let repo = unrelated_histories_repo();
+
+    let output = run_raw(&repo, "main", &[DIFF_FLAG, "unrelated"]);
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a merge that git refuses is a run that cannot answer, with the diff as \
+         without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("refusing to merge unrelated histories"),
+        "the control: git refused the merge itself, so the run got past the \
+         pre-flight:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a run with no answer has no diff to print:\n{stdout}"
+    );
+}
+
 /// Which of `grime`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {
