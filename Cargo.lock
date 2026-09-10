@@ -3722,8 +3722,10 @@ dependencies = [
  "anyhow",
  "buildinfo",
  "clap",
+ "colored",
  "gitscratch",
  "termbar",
+ "termwindow",
  "testcolor",
  "unicode-width",
 ]

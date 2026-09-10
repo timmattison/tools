@@ -70,7 +70,37 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
+    decide_color();
+
     Console::answer(TOOL, args.quiet, |console| run(&args, console))
+}
+
+/// Decide once, before the first word, whether the halt diff of `--diff` is in
+/// color.
+///
+/// Only the halt diff is painted. `gitscratch` paints it with `colored`, and
+/// `colored` decides at format time whether to write the codes of its paint.
+/// Its own rules cover a terminal and the usual variables.
+///
+/// [`termwindow::should_force_colors_here`] adds the rule of a wrapper, which
+/// `colored` cannot see: a pipe, and a width stated in `COLUMNS`, as
+/// `viddy(1)` gives. It also holds the two variables that refuse that rule,
+/// `NO_COLOR` and `CLICOLOR=0`, and the parse of `COLUMNS` that `termbar`
+/// uses for the width. `grind` asks the same function, so the two tools paint
+/// by one rule, and a fix to it reaches both.
+///
+/// The override is `set_override(true)` or nothing. The answer never goes to
+/// `set_override` directly. On a terminal that answer is false, and
+/// `set_override(false)` turns off the color that `colored` gives a terminal by
+/// itself.
+fn decide_color() {
+    if termwindow::should_force_colors_here() {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
+        )]
+        colored::control::set_override(true);
+    }
 }
 
 /// Answer the question, returning what the merge would cost.
