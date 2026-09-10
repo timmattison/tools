@@ -752,6 +752,18 @@ impl Git {
             // `a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says`
             // in `tests/diffs.rs`.
             "core.abbrev=auto",
+            // `log.showSignature=true` makes `git log` check the signature of
+            // a signed commit and write the result on stdout, above the line
+            // of the format. For an SSH-signed stopped commit, git 2.55 wrote
+            // `Good "git" signature for ...` above the name that
+            // `name_stopped_commit` returns, so the stop heading had two lines.
+            // The pin is here and not on that one call, so it covers each
+            // `log` call. A check of a signature also runs the program that
+            // `gpg.ssh.program` or `gpg.program` names, and a replay runs no
+            // program from the configuration of the developer. Pinned by
+            // `a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says`
+            // in `tests/diffs.rs`.
+            "log.showSignature=false",
         ]
         .iter()
         .map(|setting| (*setting).to_string())

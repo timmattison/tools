@@ -5,11 +5,12 @@
 //! order, each one the text `git diff` shows at that halt.
 //!
 //! The last tests pin what a developer's configuration can change in that
-//! text. The developer's global configuration reaches the runner, so without a
-//! pin the halt diff of one fixture is different bytes on different machines.
-//! Each of those tests sets one hostile setting in its fixture's own
-//! configuration, shows with plain git that the setting changes the diff at a
-//! real halt, and then asserts that the halt diff does not change.
+//! text, and in the name of the stopped commit above it. The developer's global
+//! configuration reaches the runner, so without a pin the halt diff of one
+//! fixture is different bytes on different machines. Each of those tests sets
+//! one hostile setting in its fixture's own configuration, shows with plain git
+//! that the setting changes what git prints, and then asserts that the halt
+//! diff does not change.
 
 use std::collections::BTreeSet;
 use std::process::{Command, Output};

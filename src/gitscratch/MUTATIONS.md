@@ -78,6 +78,7 @@ not have to re-derive which guard belongs to which test.
 | `a_halt_diff_carries_three_lines_of_context_whatever_diff_context_says` (`tests/diffs.rs`) | `-U3` in `DIFF_AT_HALT`, which gives each machine git's default of three context lines | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
 | `a_halt_diff_names_its_file_with_the_default_prefixes_whatever_the_prefix_settings_say` (`tests/diffs.rs`) | `--default-prefix` in `DIFF_AT_HALT`, which gives back `a/` and `b/` under each of the four prefix settings | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
 | `a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says` (`tests/diffs.rs`) | `core.abbrev=auto`, which gives the ids on the `index` line of a halt diff git's default length | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
+| `a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says` (`tests/diffs.rs`) | `log.showSignature=false`, which keeps the signature line of a signed stopped commit out of its name | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | Nothing — see the record below | `--no-ext-diff` in `DIFF_AT_HALT`, which keeps the capture from running the program that `diff.external` names | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
 | `a_child_whose_stdout_is_on_the_terminal_sees_a_terminal` (`tests/pty.rs`) | The copy of the slave end that `Pty::run_with_stdout_on_terminal` gives the child as standard output, which is what a tool reads as a terminal | `src/testing/pty.rs`, `Pty::run_with_stdout_on_terminal` — give the child `Stdio::piped()` in place of the copy | redirect |
 | `the_newlines_of_the_child_come_back_unchanged` (`tests/pty.rs`) | Output processing off, which keeps the terminal from turning a newline into a carriage return and a newline | `src/testing/pty.rs`, `Pty::open` — drop `modes.c_oflag &= !libc::OPOST` | remove |
@@ -163,6 +164,7 @@ registry that reports everything as fine is worth less than no registry at all.
 | `a_halt_diff_carries_three_lines_of_context_whatever_diff_context_says` (`tests/diffs.rs`) | The same read-back of `diff.context=0`. | **Full.** Plain `git diff --no-color --diff-filter=U` at the real halt must show fewer than three lines on each side of the region — "`diff.context=0` takes no context line out of plain `git diff`, so this test could only pass vacuously". The assertion then asks for exactly three on each side, and for a context line in each place, so a capture with more context fails it too. |
 | `a_halt_diff_names_its_file_with_the_default_prefixes_whatever_the_prefix_settings_say` (`tests/diffs.rs`) | The same read-back, once for each of the four settings. | **Full, once for each setting.** Plain `git diff --no-color --diff-filter=U` at the real halt must print two file header lines that are not `--- a/shared.txt` and `+++ b/shared.txt` — "`{key}={value}` leaves plain `git diff` with git's default prefixes, so this test could only pass vacuously". Both sides read the header lines above the first hunk header, so a content line that reads like a header cannot stand in for one. The loop stops at the first setting that fails, so the record below narrows it to each setting in turn. |
 | `a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says` (`tests/diffs.rs`) | The same read-back of `core.abbrev=12`. | **Full.** Plain `git diff --no-color --diff-filter=U` at the real halt must print three ids of 12 digits on its `index` line — "`core.abbrev=12` does not lengthen the ids on the `index` line of plain `git diff`, so this test could only pass vacuously". The assertion asks for three ids of seven hex digits. Seven is what `auto` gives a repository with as few objects as this fixture, so the number is a fact about the fixture as well as about git. |
+| `a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says` (`tests/diffs.rs`) | The same read-back of `log.showSignature=true`. `ssh-keygen` must make the key and exit 0, and `commit --amend -S` must exit 0, so a machine that cannot sign fails the test with a message and does not skip it. The expected name must be one line that is not empty — "`--no-show-signature` gave no one-line name for the signed commit, so there is no name here to compare the halt diff against". | **Full.** Plain `git log -1 --format=%h %s left` in the fixture must write more than one line, and one line must name the principal of the allowed-signers file — "`log.showSignature=true` puts no signature line above the name of a signed commit in plain `git log`, so this test could only pass vacuously". The principal comes from the fixture, so the extra line is the check of this signature and no other line. The expected name comes from the runner with `--no-show-signature`, so both names take one `core.abbrev`. |
 | `a_halt_diff_runs_no_external_diff_program_whatever_diff_external_names` (`tests/diffs.rs`) | The program goes into the git directory of the fixture as an executable file, and `diff.external` names it in the fixture's own configuration. The control removes its sentinel through `remove_file`, which panics when there is none to remove, so the closing assertion starts from no sentinel. | **Full for the setting. The hazard at a halt cannot be armed.** Plain git, through the fixture, runs an ordinary diff of two commits, and the program must leave its sentinel — "`diff.external` did not run its program for an ordinary diff of two commits, so the setting is not live and this test could only pass vacuously". That proves the setting is live and the script works. Git 2.55 runs no external diff program for a combined diff, so the capture leaves no sentinel with the flag or without it. The record below is that measurement. |
 
 ### The rule for the next test
@@ -2054,15 +2056,15 @@ conflicted merge reads the same `git diff` that it reads below the count,
 because the count changes nothing in the worktree. So this one test holds the
 position, from the side of the merge that git completed.
 
-### The five pins of the halt diff that a test can redden
+### The five pins of the diff text that a test can redden
 
-Five pins keep a setting of the developer out of the halt diff, and each one
-was removed on its own. Four are flags in `DIFF_AT_HALT`, and one is an entry
-of `Git::safety_config()`. Each flag run was `cargo test --no-fail-fast -p
-gitscratch` on git 2.55.0. Nothing outside `gitscratch` captures a halt diff
-yet, so no other crate can see those four flags. The run for the
-`safety_config` entry took in `grind`, `grime` and `grist` too, because each
-replay reads that list.
+Five pins keep a setting of the developer out of the diff text of a halt diff,
+and each one was removed on its own. Four are flags in `DIFF_AT_HALT`, and one
+is an entry of `Git::safety_config()`. Each flag run was `cargo test
+--no-fail-fast -p gitscratch` on git 2.55.0. Nothing outside `gitscratch`
+captures a halt diff yet, so no other crate can see those four flags. The run
+for the `safety_config` entry took in `grind`, `grime` and `grist` too, because
+each replay reads that list.
 
 Mutation: removed `"--no-color"` from `DIFF_AT_HALT`. The fixture's own
 `color.ui=always` then stands, and git writes a color code on each line of the
@@ -2198,6 +2200,40 @@ No collateral in any of the five. Each mutation reddens its own test and no
 other. Each file went back after its run, `git diff` on it came back empty, and
 the crate is green again with each pin in place.
 
+### `log.showSignature=false`, the pin of the name of a stopped commit
+
+A sixth pin keeps a setting of the developer out of the halt diff: out of the
+name of the stopped commit that a halt diff carries, and not out of its diff
+text. The pin came from a review finding, and its test,
+`a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says`,
+went in first. It failed against a `Git::safety_config()` with no such entry,
+which is the mutation, and it went green when the entry went in. The mutation
+was then run again against the final code. Mutation: removed
+`"log.showSignature=false"` from `Git::safety_config()`. The fixture's own
+`log.showSignature=true` then stands. The run was `cargo test --no-fail-fast -p
+gitscratch -p grind -p grime -p grist -- --test-threads=4` on git 2.55.0, with
+the `ssh-keygen` of OpenSSH 10.3. Each run makes a new key, so the fingerprint
+and the id change from run to run.
+
+```text
+---- a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says stdout ----
+thread 'a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says'
+panicked at src/gitscratch/tests/diffs.rs:1026:5:
+assertion `left == right` failed: under `log.showSignature=true` the name of a
+signed stopped commit has to be the one line `<id> <subject>`. A signature line
+above it puts a second line into the stop heading, and that line names a
+signature and not the commit
+  left: Some("Good \"git\" signature for signer@example.invalid with ED25519 key SHA256:oWJgHHGaj2tp/qPDx79OoisHUtHRbLp1wn0aIBietJ4\nb1d64d3 left work")
+ right: Some("b1d64d3 left work")
+
+test result: FAILED. 12 passed; 1 failed
+```
+
+Each other suite of the four crates stayed green. The README inventory guard
+stays green with the entry gone, because it asks that each pinned setting has a
+row, and not that each row is a pinned setting. The entry went back after the
+run, and the crate is green again with the pin in place.
+
 ### `--no-ext-diff` in `DIFF_AT_HALT`, which nothing can redden
 
 The flag and its test,
@@ -2317,9 +2353,10 @@ code moves. Every place below is load-bearing for the whole table:
 
 - **`Git::safety_config()`** — five of the nine guards `tests/safety.rs` pins
   are entries in that list, and the unit tests in `src/git.rs` pin five more of
-  its entries directly. `tests/diffs.rs` pins one more, `core.abbrev=auto`,
-  through the `index` line of a halt diff. Adding, reordering, or removing one
-  changes what the suite covers.
+  its entries directly. `tests/diffs.rs` pins two more: `core.abbrev=auto`,
+  through the `index` line of a halt diff, and `log.showSignature=false`,
+  through the name of a signed stopped commit. Adding, reordering, or removing
+  one changes what the suite covers.
 - **`Scratch::create`** — the scratch worktree and its detached `worktree add`.
 - **The `Drop` teardown** — both the removal that must happen and the prune that
   must not.
@@ -2388,8 +2425,11 @@ code moves. Every place below is load-bearing for the whole table:
   test, its own mutation and its own row. `core.abbrev=auto` in
   `Git::safety_config()` belongs to the same line. It is the one pin of the
   halt diff that a flag cannot carry, because a `-c` pair cannot follow the
-  subcommand. Five of the six pins have a test that goes red without them, and
-  `--no-ext-diff` has a test that cannot.
+  subcommand. `log.showSignature=false` belongs to the same line as well. It
+  keeps the name of a stopped commit to one line, and it is in
+  `Git::safety_config()` so that it covers each `log` call and not only the one
+  that names the commit. Six of the seven pins have a test that goes red
+  without them, and `--no-ext-diff` has a test that cannot.
 - **`Scratch::check_out_detached`** — the detached checkout every consumer now
   makes. `tests/safety.rs` spells its own checkout out by hand rather than
   calling this, on purpose: that detach is a guard under test, and a guard read

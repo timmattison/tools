@@ -811,6 +811,7 @@ because it quietly discarded the work.
 | `--default-prefix` on the diff call of a halt diff | Four settings change the prefixes of the two file header lines of a diff, and each one reaches the conflict diff. Watched on git 2.55 at a conflict: `diff.noprefix=true` gives `--- shared.txt` in place of `--- a/shared.txt`. `diff.mnemonicPrefix=true` gives `--- i/shared.txt` and `+++ w/shared.txt`. `diff.srcPrefix=x/` gives `--- x/shared.txt`, and `diff.dstPrefix=y/` gives `+++ y/shared.txt`. The flag restores `--- a/<name>` and `+++ b/<name>` under each of the four, and a test holds each setting in a fixture of its own. |
 | `--no-ext-diff` on the diff call of a halt diff | `diff.external` names a program that git runs in place of its own diff. `diff.<driver>.command` does the same for a file whose `.gitattributes` entry selects that driver. The capture must never run a program from the configuration of the developer. Watched on git 2.55: git runs each program for an ordinary diff of two commits, and neither one for the conflict diff at a halt. So no test can make this pin fail, and `MUTATIONS.md` records it as such. It stays for the day git runs such a program for a combined diff. |
 | `core.abbrev=auto` | `core.abbrev` sets how many hex digits git prints for an abbreviated object id, and the halt diff carries three such ids on its `index` line. Watched on git 2.55 at a conflict: `core.abbrev=12` gives `index ca88aa969c5a,9e4d34aa23b2..000000000000` in place of `index ca88aa9,9e4d34a..0000000`. The flag `--abbrev=7` on the diff call does not reach that line of a combined diff, and only `-c core.abbrev=auto` gives it back. A `-c` pair must come before the subcommand, so this pin is in the safety configuration and not on the diff call. `auto` is what git uses when nothing sets the key, so the pin also gives the name of a stopped commit git's default length on each machine. |
+| `log.showSignature=false` | `log.showSignature=true` makes `git log` check the signature of each signed commit it shows, and write the result on stdout, above the line of the format. The name of a stopped commit is what `git log -1 --format="%h %s"` prints for `REBASE_HEAD`. Watched on git 2.55 with an SSH-signed commit: that call wrote `Good "git" signature for <principal> with ED25519 key SHA256:...` above `<id> <subject>`. So the stop heading of each signed stop had two lines, its first line named a signature and not the commit, and its yellow color code spanned the newline. The pin gives back the one line. It is in the safety configuration and not on the one call, so it covers each `log` call, the refusals that name a stopped commit included. With no check of a signature, a replay also runs no program that `gpg.ssh.program` or `gpg.program` names. |
 
 The halt diff takes no pin for the names of files. `core.quotePath=false` above
 already prints `日本語.txt` raw in the `diff --cc` header, watched on git 2.55.
@@ -1519,12 +1520,13 @@ language git speaks. `a_hand_built_halt_diff_reads_back_what_it_was_given` pins
 the two fixture constructors. [`MUTATIONS.md`](./MUTATIONS.md) records the
 capture moved below `git add -A` and the merge capture moved above its early
 return, each watched to fail. It also records `--diff-filter=U` removed, which
-no test can make fail. Six more tests put one hostile setting in the fixture's
-configuration, and an armed control shows plain git acting on it at a real
-halt. Five of them require a halt diff that does not change. It holds no color
-code, survives a textconv program that fails, carries three context lines,
-names its file as `a/` and `b/`, and carries ids of seven digits. The sixth,
-on `diff.external`, passes with `--no-ext-diff` and without it, and
+no test can make fail. Seven more tests put one hostile setting in the
+fixture's configuration, and an armed control shows plain git acting on it. Six
+of them require a halt diff that does not change. It holds no color code,
+survives a textconv program that fails, carries three context lines, names its
+file as `a/` and `b/`, carries ids of seven digits, and names a signed stopped
+commit on one line under `log.showSignature=true`. The seventh, on
+`diff.external`, passes with `--no-ext-diff` and without it, and
 [`MUTATIONS.md`](./MUTATIONS.md) records why.
 
 Consumers pin what they compose on top of the harness. `grist`'s own
