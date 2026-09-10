@@ -717,3 +717,66 @@ fn a_halt_diff_carries_three_lines_of_context_whatever_diff_context_says() {
          {before:?} {after:?}"
     );
 }
+
+/// The two file header lines of a halt diff of one file: the `---` line and
+/// the `+++` line.
+///
+/// Read from the header of the file alone, the lines above the first hunk
+/// header. A content line of a combined diff can also start with `---`: a line
+/// that both parents hold and the result does not starts with `--`, so a
+/// removed line whose text is `- a/f.txt` reads `--- a/f.txt`. A line below
+/// the first hunk header is therefore never a file header line.
+fn file_header_lines(diff: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(diff)
+        .lines()
+        .take_while(|line| !line.starts_with("@@"))
+        .filter(|line| line.starts_with("--- ") || line.starts_with("+++ "))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A halt diff names its file as `a/<name>` and `b/<name>`, whatever the
+/// prefix settings of the developer say.
+///
+/// Four settings change the prefixes of the two file header lines, and git
+/// 2.55 was watched to apply each one to the conflict diff at a halt.
+/// `diff.noprefix=true` removes the prefixes, `diff.mnemonicPrefix=true` gives
+/// `i/` and `w/`, and `diff.srcPrefix` and `diff.dstPrefix` give their own
+/// values. A reader, or a tool that reads the halt diff, then gets a different
+/// header for one halt on each machine. Each setting gets a fixture of its
+/// own, because each one changes the prefixes alone.
+#[test]
+fn a_halt_diff_names_its_file_with_the_default_prefixes_whatever_the_prefix_settings_say() {
+    /// The file that both branches of [`conflicting_repo`] rewrite.
+    const CONFLICTED: &str = "shared.txt";
+
+    let expected = vec![format!("--- a/{CONFLICTED}"), format!("+++ b/{CONFLICTED}")];
+    for (key, value) in [
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.srcPrefix", "x/"),
+        ("diff.dstPrefix", "y/"),
+    ] {
+        let repo = conflicting_repo_with(key, value);
+
+        let plain = plain_diff_at_a_real_halt(&repo, &["--no-color", "--diff-filter=U"]);
+        let plain_header = file_header_lines(&plain.stdout);
+        assert!(
+            plain.status.success() && plain_header.len() == 2 && plain_header != expected,
+            "`{key}={value}` leaves plain `git diff` with git's default prefixes, so this test \
+             could only pass vacuously: {plain_header:?}"
+        );
+
+        let (_, halt) = merge_with_halt_diff(&repo);
+        let diff = halt
+            .diff()
+            .unwrap_or_else(|message| panic!("git gave no diff at the halt: {message}"));
+        assert_eq!(
+            file_header_lines(diff),
+            expected,
+            "under `{key}={value}` the halt diff has to name its file with git's default \
+             prefixes: {}",
+            String::from_utf8_lossy(diff)
+        );
+    }
+}
