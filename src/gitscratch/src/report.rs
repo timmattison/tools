@@ -1115,6 +1115,31 @@ mod tests {
         "* Unmerged path g.txt",
     );
 
+    /// The halt diff of a rebase stop on a file whose mode one side changed,
+    /// as git 2.55 wrote it, less its last newline.
+    ///
+    /// Real output and not a sketch of it. The branch `side` makes `f.sh`
+    /// executable and changes its second line. The replayed commit changes
+    /// the same line and keeps the mode. So the mode of one parent is not the
+    /// mode of the result, and git writes the mode line,
+    /// `mode <parent modes>..<result mode>`, between the `index` line and the
+    /// `---` line.
+    const MODE_LINE_DIFF: &str = concat!(
+        "diff --cc f.sh\n",
+        "index f794161,af70335..0000000\n",
+        "mode 100755,100644..100755\n",
+        "--- a/f.sh\n",
+        "+++ b/f.sh\n",
+        "@@@ -1,3 -1,3 +1,7 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +SIDE\n",
+        "++=======\n",
+        "+ MAIN\n",
+        "++>>>>>>> 7d81fd2 (main edit)\n",
+        "  c",
+    );
+
     /// Each line of the halt diffs as `report` paints it: its text, its color,
     /// and its style.
     ///
@@ -2253,6 +2278,48 @@ mod tests {
                 "--- a/l".bold(),
                 "+++ b/l".bold(),
                 "* Unmerged path g.txt".normal(),
+            ],
+        );
+    }
+
+    /// The mode line of a combined diff is plain, and the header of the file
+    /// continues after it.
+    ///
+    /// When the mode of a parent is not the mode of the result, git writes
+    /// `mode <parent modes>..<result mode>` in the header of a combined diff.
+    /// Git paints each other line of that header bold, which is
+    /// `color.diff.meta`, but it gives the mode line no color. The `---` line
+    /// and the `+++` line come after the mode line, and git paints them bold.
+    /// So the mode line does not end the header. A painter that paints each
+    /// line of the header bold paints the mode line bold. A painter that ends
+    /// the header at the mode line paints each line after it plain.
+    ///
+    /// Git 2.55 painted each line of this halt diff as the expected paint
+    /// says, under `color.diff=always`.
+    #[test]
+    fn the_mode_line_of_a_combined_diff_is_plain_and_the_header_goes_on_after_it() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto side")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(None, MODE_LINE_DIFF)]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc f.sh".bold(),
+                "index f794161,af70335..0000000".bold(),
+                "mode 100755,100644..100755".normal(),
+                "--- a/f.sh".bold(),
+                "+++ b/f.sh".bold(),
+                "@@@ -1,3 -1,3 +1,7 @@@".cyan(),
+                "  a".normal(),
+                "++<<<<<<< HEAD".green(),
+                " +SIDE".green(),
+                "++=======".green(),
+                "+ MAIN".green(),
+                "++>>>>>>> 7d81fd2 (main edit)".green(),
+                "  c".normal(),
             ],
         );
     }
