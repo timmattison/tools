@@ -97,6 +97,7 @@ parking_lot = "0.12"
 
 # Image processing
 image = "0.25"
+png = "0.18"
 qrcode = "0.14"
 base64 = "0.22"
 icy_sixel = "0.5"

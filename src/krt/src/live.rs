@@ -480,6 +480,9 @@ fn write_images(
                 columns: Some(columns),
                 rows: Some(1),
             },
+            // The graph is drawn here, hop by hop, and it comes out of no file
+            // at all, so there are no source bytes for the writer to pass on.
+            source: None,
             // A hop graph is `ui::RECENT_WIDTH` cells by one row, which is
             // nine by one. A cell of 20 pixels by 40 makes that 7200 pixels,
             // or 28800 characters of raw payload, so it stands far under the
