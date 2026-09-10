@@ -1,6 +1,7 @@
 //! `grind` - Git Rebase In aNother Dimension: would rebasing HEAD onto a
 //! branch conflict, and by how much?
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -70,7 +71,42 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
+    decide_color();
+
     Console::answer(TOOL, args.quiet, |console| run(&args, console))
+}
+
+/// Decide once, before the first word, whether the halt diffs of `--diff` are
+/// in color.
+///
+/// Only the halt diffs are painted. `gitscratch` paints them with `colored`,
+/// and `colored` decides at format time whether to write the codes of its
+/// paint. Its own rules cover a terminal and the usual variables.
+/// `CLICOLOR_FORCE` turns color on, also into a pipe. `NO_COLOR` turns it off.
+/// With neither variable, color is on only when stdout is a terminal.
+///
+/// This function adds one rule, the rule of a wrapper. A wrapper such as
+/// `viddy(1)` gives this tool a pipe and states `COLUMNS`, and it shows the
+/// bytes that it reads on a terminal. `colored` sees only the pipe and writes
+/// no code, so the override turns color on for that shape. `NO_COLOR` refuses
+/// the override, as it refuses color everywhere else.
+///
+/// The override is `set_override(true)` or nothing. The answer of
+/// `should_force_colors` never goes to `set_override` directly. On a terminal
+/// that answer is false, and `set_override(false)` turns off the color that
+/// `colored` gives a terminal by itself.
+fn decide_color() {
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let columns_stated = std::env::var_os("COLUMNS").is_some();
+    let color_refused = std::env::var_os("NO_COLOR").is_some();
+
+    if termwindow::should_force_colors(stdout_is_tty, columns_stated, color_refused) {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
+        )]
+        colored::control::set_override(true);
+    }
 }
 
 /// Answer the question, returning what the rebase would cost.
