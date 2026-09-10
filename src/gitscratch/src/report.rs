@@ -1313,4 +1313,38 @@ mod tests {
             "an ESC out of a repository must never reach a terminal: {rendered:?}"
         );
     }
+
+    /// A control character in the subject of a stopped commit comes out as
+    /// `\u{...}` in the heading.
+    ///
+    /// A commit subject can hold an ESC, and the heading prints that subject
+    /// to the terminal of the person who ran the tool. This subject holds the
+    /// sequence that sets the title of a terminal window. So the heading gets
+    /// the escape that the body gets, and no raw ESC reaches the output.
+    #[test]
+    fn a_control_character_in_a_commit_subject_is_escaped_in_the_heading() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            Some("abc1234 \x1b]0;owned\x07 subject"),
+            "+x",
+        )]);
+
+        let rendered = report
+            .render_diffs(&diffs)
+            .expect("a replay that halted once renders its halt diff");
+
+        assert_eq!(
+            rendered,
+            [
+                "",
+                r"stop 1 of 1 - abc1234 \u{1b}]0;owned\u{7} subject",
+                "+x",
+            ]
+            .join("\n")
+        );
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "an ESC in a commit subject must never reach a terminal: {rendered:?}"
+        );
+    }
 }
