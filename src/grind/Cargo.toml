@@ -22,10 +22,10 @@ gitscratch.workspace = true
 # breakdown out at no columns at all. `TerminalWidth::get_or_default` is where
 # that answer is refused and the fallback of 80 columns stands instead.
 termbar.workspace = true
-# Says when a wrapper such as `viddy(1)` gives this tool a pipe and states
-# `COLUMNS`, so that the halt diffs keep their color on the terminal of the
-# wrapper. `gsw` and `wn` ask it the same question, and one answer keeps the
-# tools of this workspace alike.
+# Decides when a wrapper such as `viddy(1)` gives this tool a pipe and states a
+# width in `COLUMNS`, so that the halt diffs keep their color on the terminal of
+# the wrapper. The rule, and the two variables that refuse it, stand in one
+# function there, so a fix to them reaches each tool that asks.
 termwindow.workspace = true
 
 [dev-dependencies]

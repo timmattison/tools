@@ -1,7 +1,6 @@
 //! `grind` - Git Rebase In aNother Dimension: would rebasing HEAD onto a
 //! branch conflict, and by how much?
 
-use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -82,33 +81,20 @@ fn main() -> ExitCode {
 /// Only the halt diffs are painted. `gitscratch` paints them with `colored`,
 /// and `colored` decides at format time whether to write the codes of its
 /// paint. Its own rules cover a terminal and the usual variables.
-/// `CLICOLOR_FORCE` turns color on, also into a pipe. `NO_COLOR` turns it off.
-/// With neither variable, color is on only when stdout is a terminal.
 ///
-/// This function adds one rule, the rule of a wrapper. A wrapper such as
-/// `viddy(1)` gives this tool a pipe and states `COLUMNS`, and it shows the
-/// bytes that it reads on a terminal. `colored` sees only the pipe and writes
-/// no code, so the override turns color on for that shape.
+/// [`termwindow::should_force_colors_here`] adds the rule of a wrapper, which
+/// `colored` cannot see: a pipe, and a width stated in `COLUMNS`, as
+/// `viddy(1)` gives. It also holds the two variables that refuse that rule,
+/// `NO_COLOR` and `CLICOLOR=0`, and the parse of `COLUMNS` that `termbar`
+/// uses for the width. The rule has one copy there, so a fix to it reaches
+/// each tool that asks.
 ///
-/// Two variables refuse the override, because each one is a choice that the
-/// user made, and the rule of a wrapper extends only the case in which the
-/// user made none. `NO_COLOR`, with any value, refuses it as it refuses color
-/// everywhere else. `CLICOLOR=0` refuses it too, and `colored` reads that
-/// variable as off exactly when its value is the string `0`. Without the
-/// second check, the override paints over the choice of a user who set
-/// `CLICOLOR=0` and runs this tool in a wrapper.
-///
-/// The override is `set_override(true)` or nothing. The answer of
-/// `should_force_colors` never goes to `set_override` directly. On a terminal
-/// that answer is false, and `set_override(false)` turns off the color that
-/// `colored` gives a terminal by itself.
+/// The override is `set_override(true)` or nothing. The answer never goes to
+/// `set_override` directly. On a terminal that answer is false, and
+/// `set_override(false)` turns off the color that `colored` gives a terminal by
+/// itself.
 fn decide_color() {
-    let stdout_is_tty = std::io::stdout().is_terminal();
-    let columns_stated = std::env::var_os("COLUMNS").is_some();
-    let color_refused = std::env::var_os("NO_COLOR").is_some()
-        || std::env::var("CLICOLOR").is_ok_and(|value| value == "0");
-
-    if termwindow::should_force_colors(stdout_is_tty, columns_stated, color_refused) {
+    if termwindow::should_force_colors_here() {
         #[allow(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"

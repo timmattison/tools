@@ -335,8 +335,10 @@ palette. These rules decide the color:
 - Into a pipe, the diff is plain. `grind --diff main > conflicts.txt` writes
   plain text.
 - A wrapper such as `viddy(1)` gives `grind` a pipe and exports `COLUMNS`, and
-  it shows the bytes on a terminal. So a pipe with `COLUMNS` in the environment
-  gets color too. `gsw` and `wn` use the same rule.
+  it shows the bytes on a terminal. So a pipe gets color too when `COLUMNS`
+  states a width: a number above zero. An empty `COLUMNS`, or one that is no
+  number, states no width, and the diff stays plain. `grind` reads the width of
+  the breakdown by the same rule. `gsw` and `wn` paint for a wrapper too.
 - `NO_COLOR`, with any value, turns color off, also for a wrapper.
 - `CLICOLOR=0` turns color off, also for a wrapper.
 - `CLICOLOR_FORCE=1` turns color on, also into a pipe, and it wins over
@@ -511,9 +513,10 @@ The `--diff` tests hold the rules of
   file from the repository root.
 - A closed pipe costs the diff its words and never the exit code.
 - clap refuses `-q --diff` and `--quiet --diff`.
-- Six tests hold the color. The pipe of a wrapper gets color, and the paint
+- Seven tests hold the color. The pipe of a wrapper gets color, and the paint
   changes no character. `NO_COLOR` and `CLICOLOR=0` refuse that color. A pipe
-  with no `COLUMNS` stays plain. `CLICOLOR_FORCE=1` paints a pipe. A
+  with no `COLUMNS` stays plain, and so does a pipe with an empty `COLUMNS` or
+  a `COLUMNS` that is no number. `CLICOLOR_FORCE=1` paints a pipe. A
   pseudo-terminal from `gitscratch::testing::pty` gets color with no variable
   set. That last test fails for a `grind` that gives the answer of
   `should_force_colors` to `set_override` directly. On a terminal that answer
