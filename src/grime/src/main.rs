@@ -163,11 +163,11 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let scratch = repo.scratch("HEAD")?;
     // `--diff` asks for the capture. Without it, the merge captures nothing
     // and costs what it cost before the flag existed.
-    let conflicts = if args.diff {
-        let (conflicts, _diffs) = scratch.replay_merge_with_diffs(&branch)?;
-        conflicts
+    let (conflicts, diffs) = if args.diff {
+        let (conflicts, diffs) = scratch.replay_merge_with_diffs(&branch)?;
+        (conflicts, Some(diffs))
     } else {
-        scratch.replay_merge(&branch)?
+        (scratch.replay_merge(&branch)?, None)
     };
 
     // There is a verdict now, so the caveat has something to qualify.
@@ -196,6 +196,22 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // state a width of its own.
     console
         .verdict(&report.render_within(&conflicts, usize::from(TerminalWidth::get_or_default())));
+
+    // The diff comes after the verdict that it explains, on the same stream.
+    // `render_diffs` gives nothing for a merge that did not halt, so a clean
+    // run prints the same bytes with the flag and without it. A run that fails
+    // never gets here, because the merge returned its error above. A diff with
+    // no answer is no part of an answer.
+    //
+    // The report is `without_stops`, so the diff of the one halt comes with no
+    // stop heading. A merge halts once, and a heading of `stop 1 of 1` names a
+    // constant, as the stop count does.
+    //
+    // Through `Console::verdict` like the verdict, so `-q` reaches it and a
+    // failed write costs the words and never the exit code.
+    if let Some(text) = diffs.and_then(|diffs| report.render_diffs(&diffs)) {
+        console.verdict(&text);
+    }
 
     Ok(conflicts)
 }
