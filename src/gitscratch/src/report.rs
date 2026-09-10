@@ -376,7 +376,57 @@ impl<'a> Report<'a> {
             return None;
         }
 
-        Some(String::new())
+        let stops = diffs.len();
+        let mut lines = Vec::new();
+        for (index, halt) in diffs.iter().enumerate() {
+            lines.push(DiffLine::Gap.render());
+
+            let heading = format!(
+                "stop {} of {stops} - {}",
+                index + 1,
+                halt.stopped().unwrap_or_default()
+            );
+            lines.push(DiffLine::Heading(&heading).render());
+
+            let body = String::from_utf8_lossy(halt.diff().unwrap_or_default());
+            lines.extend(
+                body.trim_end()
+                    .split('\n')
+                    .map(DiffLine::Diff)
+                    .map(DiffLine::render),
+            );
+        }
+
+        Some(lines.join("\n"))
+    }
+}
+
+/// One line of the halt diff block, named by the part it plays there.
+///
+/// [`Report::render_diffs`] builds the block one line at a time, and each line
+/// becomes text in one place, [`DiffLine::render`]. So one change there gives
+/// each part of the block its own look. A line holds no newline, so what
+/// `render` writes around one line cannot reach into the next line.
+#[derive(Debug, Clone, Copy)]
+enum DiffLine<'a> {
+    /// The empty line above a section. It separates the first section from
+    /// the breakdown, and each other section from the section before it.
+    Gap,
+    /// The heading of a section, which names the stop and the stopped commit.
+    Heading(&'a str),
+    /// One line of the text `git diff` showed at a halt.
+    Diff(&'a str),
+}
+
+impl DiffLine<'_> {
+    /// This line as it prints.
+    ///
+    /// The block is plain text, so each part prints as the text it holds.
+    fn render(self) -> String {
+        match self {
+            Self::Gap => String::new(),
+            Self::Heading(text) | Self::Diff(text) => text.to_owned(),
+        }
     }
 }
 
