@@ -12,10 +12,10 @@
 //!   controlling terminal of the child. `/dev/tty` in the child then resolves
 //!   to it, whatever standard output points at. A test of a layout needs this
 //!   shape, with standard output on a pipe that the test reads.
-//! - [`Pty::run_with_stdout_on_terminal`] puts standard output of the child on
-//!   the pseudo-terminal, and reads back what the child wrote there. A test of
-//!   a tool that decides color by whether standard output is a terminal needs
-//!   this shape.
+//! - [`Pty::run_with_stdout_on_terminal`] does the same, and also puts
+//!   standard output of the child on the pseudo-terminal and reads back what
+//!   the child wrote there. A test of a tool that decides color by whether
+//!   standard output is a terminal needs this shape.
 //!
 //! A pseudo-terminal that nobody sized reports zero columns, and the
 //! `TIOCGWINSZ` ioctl succeeds on it. Every terminal here therefore arrives
@@ -232,6 +232,11 @@ impl Pty {
     /// on output bigger than a buffer, and a wait before either read deadlocks
     /// on less.
     ///
+    /// The terminal is also the controlling terminal of the child, as
+    /// [`Pty::give_as_controlling_terminal`] makes it. A tool that measures its
+    /// width through `/dev/tty` then measures this terminal, and not the
+    /// terminal of whoever started the run.
+    ///
     /// # Arguments
     /// * `command` - The command to start the child from. This method sets its
     ///   three standard streams, and the caller sets every other part of it.
@@ -242,10 +247,11 @@ impl Pty {
     /// [`Command::output`] gives.
     ///
     /// # Panics
-    /// Panics when the child does not start, when a read of the master end
-    /// fails for a reason other than the end of the output, or when the wait
-    /// for the child fails.
+    /// Panics when the system gives no copy of the slave end, when the child
+    /// does not start, when a read of the master end fails for a reason other
+    /// than the end of the output, or when the wait for the child fails.
     pub fn run_with_stdout_on_terminal(self, mut command: Command) -> Output {
+        self.give_as_controlling_terminal(&mut command);
         let stdout = self
             .slave
             .try_clone()
