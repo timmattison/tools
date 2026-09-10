@@ -2352,7 +2352,7 @@ The record above describes the code as it stands, and it decays the moment the
 code moves. Every place below is load-bearing for the whole table:
 
 - **`Git::safety_config()`** — five of the nine guards `tests/safety.rs` pins
-  are entries in that list, and the unit tests in `src/git.rs` pin five more of
+  are entries in that list, and the unit tests in `src/git.rs` pin six more of
   its entries directly. `tests/diffs.rs` pins two more: `core.abbrev=auto`,
   through the `index` line of a halt diff, and `log.showSignature=false`,
   through the name of a signed stopped commit. Adding, reordering, or removing
