@@ -649,6 +649,26 @@ mod tests {
         ])
     }
 
+    /// The halt diff of the one halt of the merge in the example of GitHub
+    /// issue #475, as git 2.55 wrote it, less its last newline.
+    const MERGE_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index a5f1be7,a1ec13b..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,5 -1,5 +1,9 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        "++=======\n",
+        "+ FEAT2\n",
+        "++>>>>>>> feature\n",
+        "  c\n",
+        "  d\n",
+        "  e\n",
+        "* Unmerged path g.txt",
+    );
+
     #[test]
     fn a_clean_replay_gets_one_line_naming_the_tool_and_what_it_tried() {
         let report = Report::for_tool("grind").describing("replaying HEAD onto origin/main");
@@ -1128,5 +1148,63 @@ mod tests {
         .join("\n");
 
         assert_eq!(report.render_diffs(&two_stops()), Some(expected));
+    }
+
+    /// `without_stops` takes the stop headings out of the block, and each
+    /// other line stays where it was.
+    ///
+    /// Measured against the block with the headings, not against a second
+    /// golden. The block with the headings, less exactly its heading lines,
+    /// has to be the block without them. So a `without_stops` that also takes
+    /// an empty line, or a line of a diff, fails here. The count of heading
+    /// lines is the control: a block with no heading to take out proves
+    /// nothing.
+    #[test]
+    fn dropping_the_stop_count_removes_the_stop_headings_and_nothing_else() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let headings = [
+            format!("stop 1 of 2 - {STOP_ONE}"),
+            format!("stop 2 of 2 - {STOP_TWO}"),
+        ];
+        let is_heading = |line: &&str| headings.iter().any(|heading| heading == line);
+
+        let with_headings = report
+            .render_diffs(&two_stops())
+            .expect("a replay that halted twice renders its halt diffs");
+        let without_headings = report
+            .without_stops()
+            .render_diffs(&two_stops())
+            .expect("a replay that halted twice renders its halt diffs");
+
+        assert_eq!(
+            with_headings.split('\n').filter(is_heading).count(),
+            headings.len(),
+            "the block with stops has to hold each heading, or there is nothing to take \
+             out:\n{with_headings}"
+        );
+        let rest: Vec<&str> = with_headings
+            .split('\n')
+            .filter(|line| !is_heading(line))
+            .collect();
+        assert_eq!(
+            without_headings,
+            rest.join("\n"),
+            "without stops, the block has to be the block with stops less its headings"
+        );
+    }
+
+    /// A merge halts once and has no stopped commit, so `grime` prints its
+    /// halt diff alone, under the empty line that separates it from the
+    /// breakdown.
+    ///
+    /// This is the `grime --diff` example of GitHub issue #475, to the byte.
+    #[test]
+    fn a_merge_halt_without_stops_renders_its_diff_alone() {
+        let report = Report::for_tool("grime")
+            .describing("merging feature into HEAD")
+            .without_stops();
+        let merge = HaltDiffs::from_halts([as_git_wrote_it(None, MERGE_DIFF)]);
+
+        assert_eq!(report.render_diffs(&merge), Some(format!("\n{MERGE_DIFF}")));
     }
 }
