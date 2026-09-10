@@ -28,7 +28,7 @@ use crate::repo::Repo;
 use crate::scratch::Scratch;
 
 /// A pseudo-terminal of a size that a test chose, for a test of a tool that
-/// measures its terminal.
+/// measures its terminal or that decides color by it.
 ///
 /// Unix only, because `openpty` and a controlling terminal are Unix calls.
 #[cfg(unix)]

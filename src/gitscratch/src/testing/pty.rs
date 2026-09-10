@@ -6,9 +6,16 @@
 //! in a wide window and another answer in a narrow one. A test therefore opens
 //! a pseudo-terminal of a size it chose, and gives it to the child.
 //!
-//! [`Pty::give_as_controlling_terminal`] makes the pseudo-terminal the
-//! controlling terminal of the child. `/dev/tty` in the child then resolves to
-//! it, whatever standard output points at.
+//! A test gives the terminal to the child in one of two shapes.
+//!
+//! - [`Pty::give_as_controlling_terminal`] makes the pseudo-terminal the
+//!   controlling terminal of the child. `/dev/tty` in the child then resolves
+//!   to it, whatever standard output points at. A test of a layout needs this
+//!   shape, with standard output on a pipe that the test reads.
+//! - [`Pty::run_with_stdout_on_terminal`] puts standard output of the child on
+//!   the pseudo-terminal, and reads back what the child wrote there. A test of
+//!   a tool that decides color by whether standard output is a terminal needs
+//!   this shape.
 //!
 //! A pseudo-terminal that nobody sized reports zero columns, and the
 //! `TIOCGWINSZ` ioctl succeeds on it. Every terminal here therefore arrives
@@ -19,7 +26,8 @@
 //! copy in each tool puts the same `unsafe` code in two places, and the two
 //! copies part company on the day one of them changes.
 
-use std::io;
+use std::fs::File;
+use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Output, Stdio};
@@ -37,9 +45,9 @@ use std::ptr;
 /// process. A pseudo-terminal is scarce as well. Every process of the machine
 /// shares one supply of them, and `openpty` fails when that supply is empty.
 pub struct Pty {
-    /// The master end. Nothing reads it. It keeps the pseudo-terminal alive
-    /// until the value drops.
-    _master: OwnedFd,
+    /// The master end. It carries every byte that reaches the terminal, and it
+    /// keeps the pseudo-terminal alive until the value drops.
+    master: OwnedFd,
     /// The slave end. It becomes the controlling terminal of the child.
     slave: OwnedFd,
 }
@@ -100,10 +108,7 @@ impl Pty {
         let (master, slave) =
             unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
 
-        Pty {
-            _master: master,
-            slave,
-        }
+        Pty { master, slave }
     }
 
     /// Give the child of `command` a session of its own, and this terminal as
@@ -169,6 +174,18 @@ impl Pty {
     /// standard output through a pipe never sees the color that a person at a
     /// terminal sees.
     ///
+    /// Standard input of the child is null, as [`Command::output`] gives it.
+    /// Standard error is a pipe, so a test can print what the child said about
+    /// a failure. The bytes of standard output come back from the master end,
+    /// which carries every byte that reaches the terminal.
+    ///
+    /// The method takes the value, because the read of the master end ends
+    /// only when no copy of the slave end is left open, and the value holds
+    /// one. So when the child starts, the method closes every copy that this
+    /// process holds. The read then ends when the child and its own children
+    /// close theirs. A child that leaves a process behind with the terminal
+    /// still open holds the read open for as long as that process lives.
+    ///
     /// # Arguments
     /// * `command` - The command to start the child from. This method sets its
     ///   three standard streams, and the caller sets every other part of it.
@@ -179,14 +196,55 @@ impl Pty {
     /// [`Command::output`] gives.
     ///
     /// # Panics
-    /// Panics when the child does not start.
+    /// Panics when the child does not start, when a read of the master end
+    /// fails for a reason other than the end of the output, or when the wait
+    /// for the child fails.
     pub fn run_with_stdout_on_terminal(self, mut command: Command) -> Output {
-        // A stub: the child writes to a pipe, not to the terminal.
+        let stdout = self
+            .slave
+            .try_clone()
+            .expect("the system must give a copy of the slave end for standard output");
         command
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .expect("the child must start")
+            .stdout(stdout)
+            .stderr(Stdio::piped());
+
+        let Pty { master, slave } = self;
+        let child = command.spawn();
+
+        // Every copy of the slave end that this process holds closes here: the
+        // copy that the command holds for standard output, and the copy that
+        // the terminal opened with. The child holds the rest.
+        drop(command);
+        drop(slave);
+
+        let child = child.unwrap_or_else(|error| panic!("the child must start: {error}"));
+        let stdout = read_until_hangup(master).unwrap_or_else(|error| {
+            panic!("the master end must give back what the child wrote: {error}")
+        });
+        let finished = child
+            .wait_with_output()
+            .unwrap_or_else(|error| panic!("the wait for the child must succeed: {error}"));
+
+        Output { stdout, ..finished }
+    }
+}
+
+/// Read `master` until no copy of the slave end is left open.
+///
+/// When the last copy of the slave end closes, the read of the master end
+/// gives 0 bytes or fails with `EIO`, and which of the two depends on the
+/// system. Both are the end of the output, not an error.
+///
+/// # Errors
+/// Returns the error of a read that fails for any other reason.
+fn read_until_hangup(master: OwnedFd) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    match File::from(master).read_to_end(&mut bytes) {
+        Ok(_) => Ok(bytes),
+        // `read_to_end` keeps every byte it read before the error, so the
+        // output is whole.
+        Err(error) if error.raw_os_error() == Some(libc::EIO) => Ok(bytes),
+        Err(error) => Err(error),
     }
 }
