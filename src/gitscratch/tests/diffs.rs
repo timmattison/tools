@@ -12,13 +12,14 @@
 //! real halt, and then asserts that the halt diff does not change.
 
 use std::collections::BTreeSet;
-use std::process::Output;
+use std::process::{Command, Output};
 
 use gitscratch::testing::{
     conflicting_repo, contested_region_repo, equal_hunks_unequal_stops_repo,
     independent_branches_repo, modify_delete_repo, TestRepo,
 };
 use gitscratch::{Conflicts, HaltDiff, HaltDiffs, Scratch, Stops};
+use tempfile::TempDir;
 
 /// The commits of `iterated` in [`contested_region_repo`], in the order a
 /// rebase replays them.
@@ -849,6 +850,184 @@ fn a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_
         ids.iter()
             .all(|id| id.chars().all(|digit| digit.is_ascii_hexdigit())),
         "each id on the `index` line has to be hex digits and nothing else: {ids:?}"
+    );
+}
+
+/// The program that makes the key of [`ssh_signing_key`], and that git runs
+/// to make and to check an SSH signature.
+const SSH_KEYGEN: &str = "ssh-keygen";
+
+/// The principal that [`ssh_signing_key`] trusts its key for. `ssh-keygen`
+/// names the principal in each good signature it reports.
+const SIGNER: &str = "signer@example.invalid";
+
+/// The name of the private key in the directory of [`ssh_signing_key`].
+const KEY_FILE: &str = "key";
+
+/// The name of the allowed-signers file in the directory of
+/// [`ssh_signing_key`].
+const ALLOWED_SIGNERS_FILE: &str = "allowed-signers";
+
+/// A new ed25519 key with no passphrase, and an allowed-signers file that
+/// trusts that key for [`SIGNER`], in a temporary directory of their own.
+///
+/// The directory is not in the fixture, so no key goes into a repository. The
+/// value holds the directory, so the two files stay on disk while it lives.
+///
+/// A machine that cannot run [`SSH_KEYGEN`] fails the test here, with a
+/// message that says why. The test does not skip. A test that skips where the
+/// program is missing passes there and pins nothing.
+fn ssh_signing_key() -> TempDir {
+    let dir = TempDir::new().expect("create a temporary directory for the signing key");
+    let key = dir.path().join(KEY_FILE);
+
+    let generated = Command::new(SSH_KEYGEN)
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", SIGNER, "-f"])
+        .arg(&key)
+        .output()
+        .unwrap_or_else(|err| {
+            panic!(
+                "could not run `{SSH_KEYGEN}`, so this test cannot sign a commit and cannot show \
+                 the hazard it pins: {err}"
+            )
+        });
+    assert!(
+        generated.status.success(),
+        "`{SSH_KEYGEN}` made no key, so this test cannot sign a commit and cannot show the \
+         hazard it pins: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let public = std::fs::read_to_string(dir.path().join(format!("{KEY_FILE}.pub")))
+        .expect("read the public key that ssh-keygen wrote");
+    std::fs::write(
+        dir.path().join(ALLOWED_SIGNERS_FILE),
+        format!("{SIGNER} {public}"),
+    )
+    .expect("write the allowed-signers file");
+
+    dir
+}
+
+/// The path of `name` in the directory of [`ssh_signing_key`], as a setting of
+/// git spells it.
+fn key_path(key: &TempDir, name: &str) -> String {
+    key.path()
+        .join(name)
+        .to_str()
+        .expect("a temporary directory has a UTF-8 path")
+        .to_owned()
+}
+
+/// [`conflicting_repo`] with the one commit of [`OURS`] signed by the key in
+/// `key`, and `log.showSignature=true` in the fixture's own configuration.
+///
+/// A rebase of [`OURS`] onto [`THEIRS`] stops once, on that signed commit. The
+/// fixture trusts the key in `gpg.ssh.allowedSignersFile`, so git reports a
+/// good signature. It names [`SSH_KEYGEN`] in `gpg.ssh.program`. A local value
+/// wins over a global one, so a signing program of the developer does not make
+/// or check this signature.
+///
+/// `commit --amend -S` signs the commit again, so the fixture keeps the shape
+/// of [`conflicting_repo`]. `SSH_AUTH_SOCK` is empty on that call, so the key
+/// file signs and no agent of the developer takes part.
+fn signed_stop_repo(key: &TempDir) -> TestRepo {
+    let repo = conflicting_repo_with("log.showSignature", "true");
+    repo.git(&["config", "gpg.ssh.program", SSH_KEYGEN]);
+    repo.git(&[
+        "config",
+        "gpg.ssh.allowedSignersFile",
+        &key_path(key, ALLOWED_SIGNERS_FILE),
+    ]);
+
+    repo.checkout(OURS);
+    let signing_key = format!("user.signingkey={}", key_path(key, KEY_FILE));
+    let signed = repo.try_git(
+        &[
+            "-c",
+            "gpg.format=ssh",
+            "-c",
+            &signing_key,
+            "commit",
+            "--amend",
+            "-q",
+            "-S",
+            "--no-edit",
+        ],
+        &[("SSH_AUTH_SOCK", "")],
+    );
+    assert!(
+        signed.status.success(),
+        "git could not sign the commit of {OURS} with `{SSH_KEYGEN}`, so the rebase has no \
+         signed commit to stop on: {}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    repo.checkout(FIXTURE_BRANCH);
+
+    repo
+}
+
+/// A halt diff names a signed stopped commit on one line, whatever
+/// `log.showSignature` says.
+///
+/// The name of a stopped commit is what `git log -1 --format="%h %s"` prints
+/// for `REBASE_HEAD`. `log.showSignature=true` makes that call check the
+/// signature of a signed commit. For an SSH-signed commit, git 2.55 wrote
+/// `Good "git" signature for <principal> with ED25519 key SHA256:...` on
+/// stdout, above `<id> <subject>`. The runner kept both lines, so the stop
+/// heading of `grind --diff` had two lines, and its first line named a
+/// signature and not the commit. The pin is `-c log.showSignature=false` in
+/// the safety configuration of the runner.
+///
+/// The armed control asks plain git in the fixture for the name of the signed
+/// commit, and the signature line must be there. The expected name comes from
+/// the runner of the scratch worktree with `--no-show-signature`. The two names
+/// then take one configuration, so the short id has one length whatever
+/// `core.abbrev` says.
+#[test]
+fn a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says() {
+    /// The format of the name of a stopped commit: its short id, a space, and
+    /// its subject.
+    const NAME_FORMAT: &str = "--format=%h %s";
+
+    let key = ssh_signing_key();
+    let repo = signed_stop_repo(&key);
+
+    let plain = repo.try_git(&["log", "-1", NAME_FORMAT, OURS], &[]);
+    let plain_name = String::from_utf8_lossy(&plain.stdout);
+    assert!(
+        plain.status.success()
+            && plain_name.lines().count() > 1
+            && plain_name.lines().any(|line| line.contains(SIGNER)),
+        "`log.showSignature=true` puts no signature line above the name of a signed commit in \
+         plain `git log`, so this test could only pass vacuously: {plain_name:?} {}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+
+    let scratch = repo.scratch(FIXTURE_BRANCH);
+    let expected = scratch
+        .testing_git()
+        .run("log", &["--no-show-signature", "-1", NAME_FORMAT, OURS])
+        .expect("name the signed commit with no signature line");
+    assert!(
+        !expected.is_empty() && !expected.contains('\n'),
+        "`--no-show-signature` gave no one-line name for the signed commit, so there is no name \
+         here to compare the halt diff against: {expected:?}"
+    );
+
+    let (_, diffs) = replay_with_diffs(&scratch, OURS, THEIRS);
+    assert_eq!(
+        diffs.len(),
+        1,
+        "a rebase of {OURS} onto {THEIRS} stops once, on the signed commit, so it has to give one \
+         halt diff: {diffs:?}"
+    );
+    assert_eq!(
+        diffs.iter().next().and_then(HaltDiff::stopped),
+        Some(expected.as_str()),
+        "under `log.showSignature=true` the name of a signed stopped commit has to be the one \
+         line `<id> <subject>`. A signature line above it puts a second line into the stop \
+         heading, and that line names a signature and not the commit"
     );
 }
 
