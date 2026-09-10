@@ -36,6 +36,10 @@ const DIFF_AT_HALT: &[&str] = &[
     // that works changes the text. The capture must run no program from the
     // configuration of the developer.
     "--no-textconv",
+    // `diff.context` sets how many unchanged lines git shows around a change.
+    // Three is git's own default, and it shows where the region is in the
+    // file.
+    "-U3",
     "--diff-filter=U",
 ];
 
