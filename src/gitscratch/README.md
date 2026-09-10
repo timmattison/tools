@@ -12,7 +12,7 @@ guarantees instead of each reimplementing a weaker version.
 ## The interface
 
 ```rust
-use gitscratch::Repo;
+use gitscratch::{Repo, Report};
 
 // The pre-flight first — it is also the only route to a worktree. See below.
 // A detached worktree at `main`, in a temp directory, torn down on drop.
@@ -26,14 +26,23 @@ if conflicts.is_clean() {
     // Nothing conflicted.
 } else {
     for (file, hunks) in conflicts.file_hunks() {
-        // `file` is a `&Path` — git's own bytes, never decoded, so it is
-        // converted lossily here at the moment of printing and nowhere
-        // earlier. `hunks` is a `Hunks` — the same type the headline total
-        // comes back as, so it already knows its own noun.
-        println!("{}: {}", file.display(), hunks.phrase());
+        // `file` is a `&Path` — git's own bytes, never decoded. `hunks` is a
+        // `Hunks` — the same type the headline total comes back as, so it
+        // already knows its own noun.
+        println!("name: {} bytes, {}", file.as_os_str().len(), hunks.phrase());
     }
 }
+
+// A file name is text out of the repository. The renderer converts each name
+// only when it prints it, and it escapes each control character in the name.
+// So no escape sequence in a name gets to the terminal.
+let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+println!("{}", report.render(&conflicts));
 ```
+
+The loop prints only values that hold no text out of the repository, because a
+file name can hold an ESC. [The report](#the-report) gives the rules of
+`Report::render` and the text that it gives.
 
 A rebase is one of the two questions this crate answers. The other is the
 merge, and it is a straight line where the rebase is a loop:

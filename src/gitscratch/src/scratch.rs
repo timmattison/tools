@@ -954,9 +954,15 @@ impl Conflicts {
     ///
     /// Each name comes out as a [`Path`] rather than as a `&str`, because that
     /// is what it is: git reported it as bytes and it was never decoded, so on
-    /// unix it may be a name no `str` can hold. A caller printing one converts
-    /// it lossily at that point and no earlier - a U+FFFD on the screen is a
-    /// legible answer, while a U+FFFD in the map is a name that opens no file.
+    /// unix it may be a name no `str` can hold.
+    ///
+    /// Print a name through [`Report::render`](crate::Report::render) or
+    /// [`Report::render_within`](crate::Report::render_within), and never print
+    /// it raw. The renderer converts the name lossily when it prints it, and
+    /// not earlier. A U+FFFD on the screen is a name a person can read, but a
+    /// U+FFFD in the map is a name that opens no file. A name can also hold an
+    /// ESC, and the renderer escapes each control character in the name. So no
+    /// escape sequence out of the repository gets to the terminal.
     pub fn file_hunks(&self) -> impl Iterator<Item = (&Path, Hunks)> {
         self.files
             .iter()
