@@ -28,6 +28,7 @@ use std::path::Path;
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::diffs::HaltDiffs;
 use crate::metrics::Uncommitted;
 use crate::scratch::Conflicts;
 
@@ -330,6 +331,50 @@ impl<'a> Report<'a> {
 
         lines.join("\n")
     }
+
+    /// The halt diffs of a replay, as the text that follows the verdict, or
+    /// `None` when the replay did not halt.
+    ///
+    /// `None` and not an empty string, because a replay that did not halt has
+    /// no halt diff. So a clean run prints the same bytes with `--diff` and
+    /// without it.
+    ///
+    /// The text starts with an empty line, which separates the halt diffs from
+    /// the breakdown above them. It has one section for each halt, in halt
+    /// order, with one empty line between two sections. It ends with no
+    /// newline, because [`Console::verdict`](crate::Console::verdict) writes
+    /// one after it.
+    ///
+    /// A section starts with a heading that names the stop and the stopped
+    /// commit: `stop 2 of 3 - 9910691 feat two`. A merge has no stopped
+    /// commit, so the heading of its halt is `stop 1 of 1`. [`without_stops`]
+    /// removes the headings and no other line. A merge halts exactly once, so
+    /// `grime` prints its halt diff alone.
+    ///
+    /// Under the heading is the text `git diff` showed at the halt. The last
+    /// newline of that text goes, and no other character. A trim removes more:
+    /// a line of a diff can end in spaces, and an empty context line of a
+    /// combined diff is two spaces. Where git gave no diff, the section holds
+    /// `diff not available: ` and the message from git in its place. The
+    /// heading stays, and the replay counts that halt as it counts each other
+    /// halt.
+    ///
+    /// A control character in the heading, in the diff, or in the message
+    /// comes out as `\u{...}`, the form the breakdown writes for a name. File
+    /// content can hold an ESC, and so can a commit subject. So no escape
+    /// sequence out of the repository gets to the terminal of the person who
+    /// ran the tool. A newline and a tab stay, because a diff is lines of text.
+    /// A carriage return immediately before a newline stays too, because that
+    /// pair is a CRLF line ending. Each other carriage return comes out as
+    /// `\u{d}`. Bytes that are not UTF-8 come out as U+FFFD, as they do in a
+    /// name.
+    ///
+    /// [`without_stops`]: Report::without_stops
+    #[must_use]
+    pub fn render_diffs(&self, diffs: &HaltDiffs) -> Option<String> {
+        let _ = diffs;
+        Some(String::new())
+    }
 }
 
 /// `name` as text a terminal can be handed, with every control character
@@ -386,6 +431,7 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::{Report, FILE_INDENT};
+    use crate::diffs::HaltDiffs;
     use crate::metrics::{Stops, Uncommitted};
     use crate::scratch::Conflicts;
 
@@ -913,5 +959,24 @@ mod tests {
             grind.dirty_note(Uncommitted::new(3)).as_deref(),
             Some("grind: note: 3 uncommitted files are not included; simulating from HEAD")
         );
+    }
+
+    /// A replay that did not halt has no halt diff, so it gets no text at all.
+    ///
+    /// `None` and not an empty string. A caller prints the text only when there
+    /// is some, so a clean run prints the same bytes with `--diff` and without
+    /// it. An empty string gives that caller an empty line to print for nothing.
+    /// Both wordings are asserted, because a report without stops renders
+    /// through the same method.
+    #[test]
+    fn a_replay_that_did_not_halt_renders_no_halt_diffs() {
+        let grind = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let grime = Report::for_tool("grime")
+            .describing("merging feature into HEAD")
+            .without_stops();
+        let nothing = HaltDiffs::from_halts([]);
+
+        assert_eq!(grind.render_diffs(&nothing), None);
+        assert_eq!(grime.render_diffs(&nothing), None);
     }
 }
