@@ -30,6 +30,7 @@
 
 use std::path::Path;
 
+use colored::{ColoredString, Colorize};
 use unicode_width::UnicodeWidthStr;
 
 use crate::diffs::HaltDiffs;
@@ -386,6 +387,21 @@ impl<'a> Report<'a> {
     /// [`without_stops`]: Report::without_stops
     #[must_use]
     pub fn render_diffs(&self, diffs: &HaltDiffs) -> Option<String> {
+        let painted = self.paint_diffs(diffs)?;
+        let lines: Vec<&str> = painted.iter().map(|line| line.input.as_str()).collect();
+
+        Some(lines.join("\n"))
+    }
+
+    /// The lines of [`Report::render_diffs`], each one painted on its own, or
+    /// `None` when the replay did not halt.
+    ///
+    /// The paint of a line is a value here: a [`ColoredString`] holds the text
+    /// of the line, its color, and its style. So a test reads the paint of
+    /// each line off that value, as the tests of `gsw` and `seescc` do, and it
+    /// forces no color code on to read it. [`Report::render_diffs`] joins the
+    /// lines into the text that a tool prints.
+    fn paint_diffs(&self, diffs: &HaltDiffs) -> Option<Vec<ColoredString>> {
         if diffs.is_empty() {
             return None;
         }
@@ -393,7 +409,7 @@ impl<'a> Report<'a> {
         let stops = diffs.len();
         let mut lines = Vec::new();
         for (index, halt) in diffs.iter().enumerate() {
-            lines.push(DiffLine::Gap.render());
+            lines.push(DiffLine::Gap.paint());
 
             if self.show_stops {
                 let stop = index + 1;
@@ -402,7 +418,7 @@ impl<'a> Report<'a> {
                     None => format!("stop {stop} of {stops}"),
                 };
                 let heading = printable_diff(&heading);
-                lines.push(DiffLine::Heading(&heading).render());
+                lines.push(DiffLine::Heading(&heading).paint());
             }
 
             match halt.diff() {
@@ -413,7 +429,7 @@ impl<'a> Report<'a> {
                     // escape runs first, so the last line of a CRLF file keeps
                     // its carriage return.
                     let body = escaped.strip_suffix('\n').unwrap_or(&escaped);
-                    lines.extend(body.split('\n').map(DiffLine::Diff).map(DiffLine::render));
+                    lines.extend(body.split('\n').map(DiffLine::Diff).map(DiffLine::paint));
                 }
                 Err(message) => {
                     let unavailable = printable_diff(&format!("{DIFF_NOT_AVAILABLE}{message}"));
@@ -421,22 +437,22 @@ impl<'a> Report<'a> {
                         unavailable
                             .split('\n')
                             .map(DiffLine::Unavailable)
-                            .map(DiffLine::render),
+                            .map(DiffLine::paint),
                     );
                 }
             }
         }
 
-        Some(lines.join("\n"))
+        Some(lines)
     }
 }
 
 /// One line of the halt diff block, named by the part it plays there.
 ///
-/// [`Report::render_diffs`] builds the block one line at a time, and each line
-/// becomes text in one place, [`DiffLine::render`]. So one change there gives
+/// [`Report::paint_diffs`] builds the block one line at a time, and each line
+/// gets its paint in one place, [`DiffLine::paint`]. So one change there gives
 /// each part of the block its own look. A line holds no newline, so what
-/// `render` writes around one line cannot reach into the next line.
+/// `paint` writes around one line cannot reach into the next line.
 #[derive(Debug, Clone, Copy)]
 enum DiffLine<'a> {
     /// The empty line above a section. It separates the first section from
@@ -453,13 +469,13 @@ enum DiffLine<'a> {
 }
 
 impl DiffLine<'_> {
-    /// This line as it prints.
+    /// This line, painted.
     ///
-    /// The block is plain text, so each part prints as the text it holds.
-    fn render(self) -> String {
+    /// The block is plain text, so each part holds its text and no color.
+    fn paint(self) -> ColoredString {
         match self {
-            Self::Gap => String::new(),
-            Self::Heading(text) | Self::Diff(text) | Self::Unavailable(text) => text.to_owned(),
+            Self::Gap => ColoredString::default(),
+            Self::Heading(text) | Self::Diff(text) | Self::Unavailable(text) => text.normal(),
         }
     }
 }
@@ -541,6 +557,7 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::path::PathBuf;
 
+    use colored::{ColoredString, Colorize};
     use unicode_width::UnicodeWidthStr;
 
     use super::{Report, FILE_INDENT};
@@ -728,6 +745,90 @@ mod tests {
         "  e\n",
         "* Unmerged path g.txt",
     );
+
+    /// The stopped commit of a rebase stop whose halt diff holds each kind of
+    /// line that the painter tells apart.
+    const EVERY_KIND_STOP: &str = "9d6c330 feat one";
+
+    /// The halt diff of that stop, as git 2.55 wrote it, less its last
+    /// newline.
+    ///
+    /// Real output and not a sketch of it. It has two hunks, so a hunk header
+    /// follows a hunk. The first hunk is an ordinary conflict region, with a
+    /// line added against one parent in each of the two prefix columns. The
+    /// second hunk is a conflict on a last line that has no newline. Git
+    /// removes the line of each parent, one in each column, and adds each line
+    /// of the region against both parents. A `* Unmerged path` line follows,
+    /// for a file that one side deleted.
+    const EVERY_KIND_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index 989b198,a4e431d..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,5 -1,5 +1,9 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        "++=======\n",
+        "+ FEAT\n",
+        "++>>>>>>> 9d6c330 (feat one)\n",
+        "  c\n",
+        "  d\n",
+        "  e\n",
+        "@@@ -8,4 -8,4 +12,8 @@@\n",
+        "  h\n",
+        "  i\n",
+        "  j\n",
+        "- main end\n",
+        " -feat end\n",
+        "++<<<<<<< HEAD\n",
+        "++main end\n",
+        "++=======\n",
+        "++feat end\n",
+        "++>>>>>>> 9d6c330 (feat one)\n",
+        "* Unmerged path g.txt",
+    );
+
+    /// The message of a halt where git gave no diff: the line that names the
+    /// call, then the output of git.
+    const NO_DIFF_MESSAGE: &str =
+        "git diff --no-color --diff-filter=U failed:\nfatal: unable to read files to diff";
+
+    /// Two stops of a rebase: the stop whose halt diff holds each kind of
+    /// line, then a stop where git gave no diff.
+    fn every_kind() -> HaltDiffs {
+        HaltDiffs::from_halts([
+            as_git_wrote_it(Some(EVERY_KIND_STOP), EVERY_KIND_DIFF),
+            HaltDiff::from_parts(Some(STOP_TWO), Err(NO_DIFF_MESSAGE)),
+        ])
+    }
+
+    /// Each line of the halt diffs as `report` paints it: its text, its color,
+    /// and its style.
+    ///
+    /// Read off the typed [`ColoredString`] of each line, as the tests of
+    /// `gsw` and `seescc` do. So a test that reads the paint forces no color
+    /// code on, waits for no lock, and gets the same answer on each terminal.
+    fn painted(report: Report, diffs: &HaltDiffs) -> Vec<ColoredString> {
+        report
+            .paint_diffs(diffs)
+            .expect("a replay that halted paints its halt diffs")
+    }
+
+    /// Assert that `actual` is the paint `expected` names, one line at a time,
+    /// so that a failure names the first line whose paint is wrong.
+    fn assert_paint(actual: &[ColoredString], expected: &[ColoredString]) {
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(actual, expected, "line {index} of the halt diffs");
+        }
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "the halt diffs have {} lines, and the expected paint names {}",
+            actual.len(),
+            expected.len()
+        );
+    }
 
     #[test]
     fn a_clean_replay_gets_one_line_naming_the_tool_and_what_it_tried() {
@@ -1467,6 +1568,66 @@ mod tests {
                 ]
                 .join("\n")
             )
+        );
+    }
+
+    /// Each kind of line in the halt diffs gets the color that git gives it.
+    ///
+    /// The palette is a copy of the defaults of git, so the halt diffs look
+    /// like `git diff` on a terminal. A header line of a file is bold, which
+    /// is `color.diff.meta`. A hunk header is cyan, which is
+    /// `color.diff.frag`. A content line with a `+` in a prefix column is
+    /// green, which is `color.diff.new`, and the marker lines of a region are
+    /// such lines. A content line with a `-` in a prefix column is red, which
+    /// is `color.diff.old`. A context line is plain, which is
+    /// `color.diff.context`. The stop heading is yellow, which is
+    /// `color.diff.commit`, the color of a commit line in `git log`. The
+    /// `* Unmerged path` line, the empty line above a section, and the text
+    /// that stands in place of a halt diff that git did not give are plain.
+    ///
+    /// Asserted on the typed paint of each line and not on color codes, as
+    /// the tests of `gsw` and `seescc` do. So the test forces no color code
+    /// on, and the terminal of the run changes nothing.
+    #[test]
+    fn each_kind_of_line_gets_the_color_that_git_gives_it() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+
+        assert_paint(
+            &painted(report, &every_kind()),
+            &[
+                "".normal(),
+                format!("stop 1 of 2 - {EVERY_KIND_STOP}").as_str().yellow(),
+                "diff --cc f.txt".bold(),
+                "index 989b198,a4e431d..0000000".bold(),
+                "--- a/f.txt".bold(),
+                "+++ b/f.txt".bold(),
+                "@@@ -1,5 -1,5 +1,9 @@@".cyan(),
+                "  a".normal(),
+                "++<<<<<<< HEAD".green(),
+                " +MAIN".green(),
+                "++=======".green(),
+                "+ FEAT".green(),
+                "++>>>>>>> 9d6c330 (feat one)".green(),
+                "  c".normal(),
+                "  d".normal(),
+                "  e".normal(),
+                "@@@ -8,4 -8,4 +12,8 @@@".cyan(),
+                "  h".normal(),
+                "  i".normal(),
+                "  j".normal(),
+                "- main end".red(),
+                " -feat end".red(),
+                "++<<<<<<< HEAD".green(),
+                "++main end".green(),
+                "++=======".green(),
+                "++feat end".green(),
+                "++>>>>>>> 9d6c330 (feat one)".green(),
+                "* Unmerged path g.txt".normal(),
+                "".normal(),
+                format!("stop 2 of 2 - {STOP_TWO}").as_str().yellow(),
+                "diff not available: git diff --no-color --diff-filter=U failed:".normal(),
+                "fatal: unable to read files to diff".normal(),
+            ],
         );
     }
 }

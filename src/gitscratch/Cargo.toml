@@ -6,6 +6,7 @@ description = "The hardened scratch-worktree harness for dry-running git operati
 
 [dependencies]
 anyhow.workspace = true
+colored.workspace = true
 tempfile.workspace = true
 unicode-width.workspace = true
 
