@@ -44,6 +44,8 @@ use std::ptr;
 /// empties the table of the process, and the tests of one target share one
 /// process. A pseudo-terminal is scarce as well. Every process of the machine
 /// shares one supply of them, and `openpty` fails when that supply is empty.
+/// Each end also closes on the exec of a child, so a child holds the terminal
+/// only where a test gives the terminal to it.
 pub struct Pty {
     /// The master end. It carries every byte that reaches the terminal, and it
     /// keeps the pseudo-terminal alive until the value drops.
@@ -80,8 +82,9 @@ impl Pty {
     /// [`Pty::ROWS`] rows.
     ///
     /// # Panics
-    /// Panics when the system opens no pseudo-terminal, or when the terminal
-    /// does not give or take its modes.
+    /// Panics when the system opens no pseudo-terminal, when an end does not
+    /// take the close-on-exec flag, or when the terminal does not give or take
+    /// its modes.
     pub fn open(columns: u16) -> Self {
         let mut master: libc::c_int = -1;
         let mut slave: libc::c_int = -1;
@@ -120,6 +123,26 @@ impl Pty {
         // descriptor one time, when it drops.
         let (master, slave) =
             unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+
+        // Both ends close on the exec of a child. `openpty` takes no such flag,
+        // so each end otherwise reaches every child that this process starts,
+        // and each such child holds the terminal open for as long as it runs.
+        // A child of this terminal still gets it. Its standard output is a copy
+        // that the spawn puts in place, and the claim of the controlling
+        // terminal runs between the fork and the exec, where the flag changes
+        // nothing. A fork in the few instructions between `openpty` and these
+        // calls still takes a copy.
+        for end in [&master, &slave] {
+            // SAFETY: `fcntl` with `F_SETFD` reads no pointer, and the
+            // descriptor is open, because an `OwnedFd` owns it.
+            let flagged = unsafe { libc::fcntl(end.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+            assert_ne!(
+                flagged,
+                -1,
+                "each end of the terminal must close on an exec: {}",
+                io::Error::last_os_error()
+            );
+        }
 
         let mut modes = std::mem::MaybeUninit::<libc::termios>::uninit();
         // SAFETY: `tcgetattr` writes one `termios` through the pointer, which
