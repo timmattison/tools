@@ -75,10 +75,10 @@ impl HaltDiff {
     /// else.
     #[cfg(any(test, feature = "testing"))]
     #[must_use]
-    pub fn from_parts(_stopped: Option<&str>, _diff: Result<&[u8], &str>) -> Self {
+    pub fn from_parts(stopped: Option<&str>, diff: Result<&[u8], &str>) -> Self {
         Self {
-            stopped: None,
-            diff: Ok(Vec::new()),
+            stopped: stopped.map(str::to_owned),
+            diff: diff.map(<[u8]>::to_vec).map_err(str::to_owned),
         }
     }
 
@@ -135,8 +135,10 @@ impl HaltDiffs {
     /// [`HaltDiff::from_parts`] is, and for the same reason.
     #[cfg(any(test, feature = "testing"))]
     #[must_use]
-    pub fn from_halts(_halts: impl IntoIterator<Item = HaltDiff>) -> Self {
-        Self::nothing_captured()
+    pub fn from_halts(halts: impl IntoIterator<Item = HaltDiff>) -> Self {
+        Self {
+            halts: halts.into_iter().collect(),
+        }
     }
 
     /// Every halt diff, in halt order.
