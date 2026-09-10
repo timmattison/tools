@@ -1881,6 +1881,36 @@ fn diff_through_a_pipe_with_a_stated_width_is_painted() {
     );
 }
 
+/// `CLICOLOR=0` turns color off, and it turns off the color of a wrapper too.
+///
+/// The rule of a wrapper extends the case in which the user set no variable.
+/// `CLICOLOR=0` is a choice that the user made, so the run holds no ESC byte,
+/// with `COLUMNS` stated and stdout on a pipe. That is the shape that the
+/// override paints when no variable refuses it. `colored` reads `CLICOLOR` as
+/// off exactly when its value is the string `0`.
+#[test]
+fn clicolor_zero_refuses_the_color_of_a_wrapper() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let output = diff_through_a_pipe(&repo, &[(CLICOLOR, Some("0"))]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("stop 2 of 2"),
+        "the control: the run printed the diff of both stops:\n{stdout}"
+    );
+    assert!(
+        !output.stdout.contains(&ESC),
+        "CLICOLOR=0 turns color off, also on the pipe of a wrapper:\n{stdout}"
+    );
+}
+
 /// Which of `grind`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {
