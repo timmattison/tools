@@ -1959,6 +1959,55 @@ fn clicolor_force_paints_a_pipe_with_no_stated_width() {
     );
 }
 
+/// Stdout on a terminal, with no color variable set, gets the diff in color.
+///
+/// That is the color that `colored` gives a terminal by itself. The rule of a
+/// wrapper does not fire, because stdout is a terminal, so
+/// `should_force_colors_here` answers false. A `grime` that gives that answer
+/// to `set_override` directly turns the color of a terminal off, and it fails
+/// here. No pipe is a terminal, so no other test of the color can show that
+/// failure.
+///
+/// The terminal is a pseudo-terminal from [`Pty`], which is also the
+/// controlling terminal of the run. It gives back each byte as the run wrote
+/// it, so the painted stdout, less its codes, is byte-identical to the stdout
+/// of the same fixture through a pipe with `NO_COLOR`. The builder still
+/// states `COLUMNS`, and that width wins over the width of the terminal, so
+/// both runs lay the breakdown out alike.
+#[cfg(unix)]
+#[test]
+fn diff_on_a_terminal_is_painted_with_no_color_variable_set() {
+    use gitscratch::testing::pty::Pty;
+
+    /// The width of the terminal. Any width serves, because the width that
+    /// the builder states wins.
+    const TERMINAL_COLUMNS: u16 = 80;
+
+    let repo = conflicting_repo();
+    let plain = diff_through_a_pipe(&repo, &[(NO_COLOR, Some("1"))]);
+
+    let output = Pty::open(TERMINAL_COLUMNS)
+        .run_with_stdout_on_terminal(grime_command(repo.path(), &[DIFF_FLAG, "right"]));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.contains(&ESC),
+        "a terminal gets the color that colored gives it by itself:\n{stdout}"
+    );
+    assert_eq!(
+        testcolor::strip_ansi(&stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "on a terminal as through a pipe, the paint is codes around the text of \
+         each line, and nothing more"
+    );
+}
+
 /// Which of `grime`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {
