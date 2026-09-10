@@ -429,7 +429,7 @@ impl<'a> Report<'a> {
                     // escape runs first, so the last line of a CRLF file keeps
                     // its carriage return.
                     let body = escaped.strip_suffix('\n').unwrap_or(&escaped);
-                    lines.extend(body.split('\n').map(DiffLine::Diff).map(DiffLine::paint));
+                    lines.extend(body.split('\n').map(classify).map(DiffLine::paint));
                 }
                 Err(message) => {
                     let unavailable = printable_diff(&format!("{DIFF_NOT_AVAILABLE}{message}"));
@@ -460,23 +460,79 @@ enum DiffLine<'a> {
     Gap,
     /// The heading of a section, which names the stop and the stopped commit.
     /// It is one line, because git writes the subject of a commit on one line.
+    /// Yellow, the default of `color.diff.commit`, which is the color of a
+    /// commit line in `git log`.
     Heading(&'a str),
-    /// One line of the text `git diff` showed at a halt.
-    Diff(&'a str),
+    /// A header line of a file: `diff --cc`, `index`, `---`, or `+++`. Bold,
+    /// the default of `color.diff.meta`.
+    FileHeader(&'a str),
+    /// The header of a hunk: `@@@ ... @@@` in a combined diff, `@@ ... @@` in
+    /// a diff of two files. Cyan, the default of `color.diff.frag`.
+    HunkHeader(&'a str),
+    /// A content line with a `+` in a prefix column. The marker lines of a
+    /// conflict region are such lines. Green, the default of `color.diff.new`.
+    Added(&'a str),
+    /// A content line with a `-` in a prefix column. Red, the default of
+    /// `color.diff.old`.
+    Removed(&'a str),
+    /// A content line with no `+` and no `-` in its prefix columns. Plain, the
+    /// default of `color.diff.context`.
+    Context(&'a str),
+    /// A line of the halt diff that stands outside each file, such as
+    /// `* Unmerged path <name>`. Plain, because no setting of git colors it.
+    Outside(&'a str),
     /// One line of the text that stands in place of a halt diff that git did
-    /// not give: `diff not available: `, then the message from git.
+    /// not give: `diff not available: `, then the message from git. Plain.
     Unavailable(&'a str),
 }
 
 impl DiffLine<'_> {
-    /// This line, painted.
+    /// This line, painted with the palette of git.
     ///
-    /// The block is plain text, so each part holds its text and no color.
+    /// The palette copies the defaults of git, so the halt diffs look like
+    /// `git diff` on a terminal. The paint is a value that holds the text of
+    /// the line, its color, and its style.
     fn paint(self) -> ColoredString {
         match self {
             Self::Gap => ColoredString::default(),
-            Self::Heading(text) | Self::Diff(text) | Self::Unavailable(text) => text.normal(),
+            Self::Heading(text) => text.yellow(),
+            Self::FileHeader(text) => text.bold(),
+            Self::HunkHeader(text) => text.cyan(),
+            Self::Added(text) => text.green(),
+            Self::Removed(text) => text.red(),
+            Self::Context(text) | Self::Outside(text) | Self::Unavailable(text) => text.normal(),
         }
+    }
+}
+
+/// The part that `line` of a halt diff plays, read from the text of the line.
+///
+/// A line that starts like a header line of a file is a header line. A line
+/// that starts with `@@` is a hunk header. A line whose first two characters
+/// are each a space, a `+`, or a `-` is content. Each other line stands
+/// outside each file.
+fn classify(line: &str) -> DiffLine<'_> {
+    const FILE_HEADERS: [&str; 4] = ["diff ", "index ", "--- ", "+++ "];
+
+    if FILE_HEADERS.iter().any(|header| line.starts_with(header)) {
+        return DiffLine::FileHeader(line);
+    }
+    if line.starts_with("@@") {
+        return DiffLine::HunkHeader(line);
+    }
+
+    let prefix: Vec<char> = line.chars().take(2).collect();
+    if !prefix
+        .iter()
+        .all(|column| matches!(column, ' ' | '+' | '-'))
+    {
+        DiffLine::Outside(line)
+    } else if prefix.contains(&'+') {
+        DiffLine::Added(line)
+    } else if prefix.contains(&'-') {
+        DiffLine::Removed(line)
+    } else {
+        DiffLine::Context(line)
     }
 }
 
