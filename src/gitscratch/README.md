@@ -675,6 +675,12 @@ because it quietly discarded the work.
 | `--no-ext-diff` on the diff call of a halt diff | `diff.external` names a program that git runs in place of its own diff. `diff.<driver>.command` does the same for a file whose `.gitattributes` entry selects that driver. The capture must never run a program from the configuration of the developer. Watched on git 2.55: git runs each program for an ordinary diff of two commits, and neither one for the conflict diff at a halt. So no test can make this pin fail, and `MUTATIONS.md` records it as such. It stays for the day git runs such a program for a combined diff. |
 | `core.abbrev=auto` | `core.abbrev` sets how many hex digits git prints for an abbreviated object id, and the halt diff carries three such ids on its `index` line. Watched on git 2.55 at a conflict: `core.abbrev=12` gives `index ca88aa969c5a,9e4d34aa23b2..000000000000` in place of `index ca88aa9,9e4d34a..0000000`. The flag `--abbrev=7` on the diff call does not reach that line of a combined diff, and only `-c core.abbrev=auto` gives it back. A `-c` pair must come before the subcommand, so this pin is in the safety configuration and not on the diff call. `auto` is what git uses when nothing sets the key, so the pin also gives the name of a stopped commit git's default length on each machine. |
 
+The halt diff takes no pin for the names of files. `core.quotePath=false` above
+already prints `日本語.txt` raw in the `diff --cc` header, watched on git 2.55.
+Git still C-quotes a name that holds `"`, `\` or a control character, whatever
+that setting says: `quo"te.txt` comes out as `diff --cc "quo\"te.txt"`. That is
+the text `git diff` shows at a real halt, so the halt diff keeps it.
+
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the
 administrative state — including any halted rebase — of every worktree whose
@@ -1342,7 +1348,13 @@ language git speaks. `a_hand_built_halt_diff_reads_back_what_it_was_given` pins
 the two fixture constructors. [`MUTATIONS.md`](./MUTATIONS.md) records the
 capture moved below `git add -A` and the merge capture moved above its early
 return, each watched to fail. It also records `--diff-filter=U` removed, which
-no test can make fail.
+no test can make fail. Six more tests put one hostile setting in the fixture's
+configuration, and an armed control shows plain git acting on it at a real
+halt. Five of them require a halt diff that does not change. It holds no color
+code, survives a textconv program that fails, carries three context lines,
+names its file as `a/` and `b/`, and carries ids of seven digits. The sixth,
+on `diff.external`, passes with `--no-ext-diff` and without it, and
+[`MUTATIONS.md`](./MUTATIONS.md) records why.
 
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
