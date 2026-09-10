@@ -981,6 +981,32 @@ mod tests {
         "* Unmerged path h.txt",
     );
 
+    /// The stopped commit of a rebase stop on a file with CRLF line endings.
+    const CRLF_STOP: &str = "e36de0b feat crlf";
+
+    /// The halt diff of that stop, as git 2.55 wrote it, less its last
+    /// newline.
+    ///
+    /// Real output. Git ends each line of its own with a newline alone, and
+    /// each line out of the file keeps the carriage return that the file
+    /// holds. So each content line ends with `\r`, and no header line does.
+    const CRLF_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index ee2d4be,f832060..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,5 -1,5 +1,9 @@@\n",
+        "  a\r\n",
+        "++<<<<<<< HEAD\r\n",
+        " +MAIN\r\n",
+        "++=======\r\n",
+        "+ FEAT\r\n",
+        "++>>>>>>> e36de0b (feat crlf)\r\n",
+        "  c\r\n",
+        "  d\r\n",
+        "  e\r",
+    );
+
     /// Each line of the halt diffs as `report` paints it: its text, its color,
     /// and its style.
     ///
@@ -2038,5 +2064,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Painting a halt diff changes no character of it.
+    ///
+    /// The paint of a line is codes around its text, and nothing more. So the
+    /// text with color forced on, less each color code, is the text with no
+    /// color, to the byte. The halt diffs are the two stops of the
+    /// `grind --diff` example in GitHub issue #475, then a stop on a file with
+    /// CRLF line endings, where each content line holds its carriage return
+    /// inside its paint. The control is that the painted text is not the plain
+    /// text: a painter that writes no code has nothing to take out, and it
+    /// passes the comparison for no reason.
+    #[test]
+    fn painting_a_halt_diff_changes_no_character_of_it() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let diffs = HaltDiffs::from_halts([
+            as_git_wrote_it(Some(STOP_ONE), STOP_ONE_DIFF),
+            as_git_wrote_it(Some(STOP_TWO), STOP_TWO_DIFF),
+            as_git_wrote_it(Some(CRLF_STOP), CRLF_DIFF),
+        ]);
+        let plain = [
+            String::new(),
+            format!("stop 1 of 3 - {STOP_ONE}"),
+            STOP_ONE_DIFF.to_owned(),
+            String::new(),
+            format!("stop 2 of 3 - {STOP_TWO}"),
+            STOP_TWO_DIFF.to_owned(),
+            String::new(),
+            format!("stop 3 of 3 - {CRLF_STOP}"),
+            CRLF_DIFF.to_owned(),
+        ]
+        .join("\n");
+
+        let rendered = testcolor::with_forced_ansi(|| report.render_diffs(&diffs))
+            .expect("a replay that halted three times renders its halt diffs");
+
+        assert_ne!(
+            rendered, plain,
+            "the painter has to write codes, or there is nothing to take out"
+        );
+        assert_eq!(testcolor::strip_ansi(&rendered), plain);
     }
 }
