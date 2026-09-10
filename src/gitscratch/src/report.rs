@@ -407,13 +407,13 @@ impl<'a> Report<'a> {
 
             match halt.diff() {
                 Ok(bytes) => {
-                    let body = printable_diff(&String::from_utf8_lossy(bytes));
-                    lines.extend(
-                        body.trim_end()
-                            .split('\n')
-                            .map(DiffLine::Diff)
-                            .map(DiffLine::render),
-                    );
+                    let escaped = printable_diff(&String::from_utf8_lossy(bytes));
+                    // One newline goes, the one git ends the diff with, and
+                    // never a trim: a line of a diff can end in spaces. The
+                    // escape runs first, so the last line of a CRLF file keeps
+                    // its carriage return.
+                    let body = escaped.strip_suffix('\n').unwrap_or(&escaped);
+                    lines.extend(body.split('\n').map(DiffLine::Diff).map(DiffLine::render));
                 }
                 Err(message) => {
                     let unavailable = printable_diff(&format!("{DIFF_NOT_AVAILABLE}{message}"));
