@@ -40,6 +40,10 @@ const DIFF_AT_HALT: &[&str] = &[
     // Three is git's own default, and it shows where the region is in the
     // file.
     "-U3",
+    // `diff.noprefix`, `diff.mnemonicPrefix`, `diff.srcPrefix` and
+    // `diff.dstPrefix` each change the prefixes of the `---` and `+++` lines.
+    // This flag gives back `a/` and `b/` under each of the four.
+    "--default-prefix",
     "--diff-filter=U",
 ];
 
