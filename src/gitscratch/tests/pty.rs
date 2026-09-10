@@ -123,3 +123,23 @@ fn output_far_bigger_than_any_buffer_comes_back_whole_on_both_streams() {
         );
     }
 }
+
+/// The terminal is the controlling terminal of the child, at the size it was
+/// opened with.
+///
+/// A tool measures its width through `/dev/tty`, which names the controlling
+/// terminal. A child that kept the terminal of whoever started the run measures
+/// that window, and a child with no controlling terminal measures nothing. So
+/// the child reads the size of `/dev/tty`, and the answer must be the rows and
+/// the columns that this test chose.
+#[test]
+fn the_controlling_terminal_of_the_child_is_the_terminal_at_its_opened_size() {
+    let output = on_a_terminal("stty size < /dev/tty");
+
+    assert_eq!(
+        output.stdout,
+        format!("{} {COLUMNS}\n", Pty::ROWS).as_bytes(),
+        "the child must measure this terminal through /dev/tty\n{}",
+        described(&output)
+    );
+}
