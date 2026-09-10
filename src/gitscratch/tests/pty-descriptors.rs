@@ -24,14 +24,20 @@ use gitscratch::testing::pty::Pty;
 /// above zero serves.
 const COLUMNS: u16 = 80;
 
-/// A script that prints each descriptor of the shell above its three standard
-/// streams that is a terminal, as numbers followed by a space.
+/// A script that prints a fixed heading, then each descriptor of the shell
+/// above its three standard streams that is a terminal, each number after a
+/// space.
+///
+/// The heading keeps the answer from being empty. A child whose standard output
+/// does not reach the terminal gives back no bytes at all. Without the heading,
+/// that empty answer equals the empty answer of a clean control, and the test
+/// passes for the wrong reason.
 ///
 /// `ls` lists the descriptors of its own process. That process holds every
 /// descriptor that the shell holds, and the shell then asks of each number
 /// whether it names a terminal in the shell itself. The one descriptor that
 /// `ls` holds alone, the directory it reads, names nothing in the shell.
-const TERMINALS_ABOVE_THE_STANDARD_STREAMS: &str = r#"for fd in $(ls /dev/fd); do if [ "$fd" -gt 2 ] && [ -t "$fd" ]; then printf '%s ' "$fd"; fi; done"#;
+const TERMINALS_ABOVE_THE_STANDARD_STREAMS: &str = r#"printf 'terminals above 2:'; for fd in $(ls /dev/fd); do if [ "$fd" -gt 2 ] && [ -t "$fd" ]; then printf ' %s' "$fd"; fi; done"#;
 
 /// A `sh -c` command that runs [`TERMINALS_ABOVE_THE_STANDARD_STREAMS`].
 fn listing() -> Command {
