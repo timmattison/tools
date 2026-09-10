@@ -79,6 +79,11 @@ not have to re-derive which guard belongs to which test.
 | `a_halt_diff_names_its_file_with_the_default_prefixes_whatever_the_prefix_settings_say` (`tests/diffs.rs`) | `--default-prefix` in `DIFF_AT_HALT`, which gives back `a/` and `b/` under each of the four prefix settings | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
 | `a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says` (`tests/diffs.rs`) | `core.abbrev=auto`, which gives the ids on the `index` line of a halt diff git's default length | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | Nothing — see the record below | `--no-ext-diff` in `DIFF_AT_HALT`, which keeps the capture from running the program that `diff.external` names | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
+| `a_child_whose_stdout_is_on_the_terminal_sees_a_terminal` (`tests/pty.rs`) | The copy of the slave end that `Pty::run_with_stdout_on_terminal` gives the child as standard output, which is what a tool reads as a terminal | `src/testing/pty.rs`, `Pty::run_with_stdout_on_terminal` — give the child `Stdio::piped()` in place of the copy | redirect |
+| `the_newlines_of_the_child_come_back_unchanged` (`tests/pty.rs`) | Output processing off, which keeps the terminal from turning a newline into a carriage return and a newline | `src/testing/pty.rs`, `Pty::open` — drop `modes.c_oflag &= !libc::OPOST` | remove |
+| `output_far_bigger_than_any_buffer_comes_back_whole_on_both_streams` (`tests/pty.rs`), which hangs and does not fail — see the record below | The reader thread of the master end, which reads the terminal while the calling thread reads standard error | `src/testing/pty.rs`, `Pty::run_with_stdout_on_terminal` — join the reader before `wait_with_output` reads standard error | move |
+| `the_controlling_terminal_of_the_child_is_the_terminal_at_its_opened_size` (`tests/pty.rs`) | The claim of the controlling terminal in the run, which aims `/dev/tty` of the child at the pseudo-terminal | `src/testing/pty.rs`, `Pty::run_with_stdout_on_terminal` — drop the `give_as_controlling_terminal` call | remove |
+| `the_terminal_reaches_the_child_on_its_standard_streams_alone` (`tests/pty-descriptors.rs`) | The close-on-exec flag on both ends, which keeps a copy of the terminal out of every child that a test does not give it to | `src/testing/pty.rs`, `Pty::open` — drop the `fcntl` loop | remove |
 
 ## What keeps each test honest
 
@@ -2232,6 +2237,79 @@ the one that goes red without the flag. It is recorded here as a guard that no
 test can make fail, as `--diff-filter=U` and `--literal-pathspecs` are, and not
 as one that somebody watched fail.
 
+### The pseudo-terminal of the tests, `gitscratch::testing::pty`
+
+`Pty` is scaffolding, and it guards no real repository. The tests of `grind`
+and `grime` rest on it all the same, because each color test reads its answer
+off the master end. So each of its five guards was mutated against the final
+code, one at a time. The runs were the test binaries of `tests/pty.rs` and
+`tests/pty-descriptors.rs` under `timeout 60`, with
+`cargo test -p grind --test controlling-terminal` beside them. Each file went
+back after its run, and `git diff` on it came back empty. `grind` stayed green
+under all five, because its tests give the child a pipe for standard output
+and reach no guard but the claim.
+
+The slave end as standard output, replaced with `Stdio::piped()`, turns all
+four tests of `tests/pty.rs` red. Each one reads an empty standard output:
+
+```text
+stdout: ""
+  left: []
+ right: [116, 101, 114, 109, 105, 110, 97, 108]
+test result: FAILED. 0 passed; 4 failed
+```
+
+That mutation also found a hole. `tests/pty-descriptors.rs` stayed green under
+it, because its listing reached no terminal and came back empty, and an empty
+answer equals the empty answer of a clean control. The listing now prints a
+fixed heading first, and under the same mutation the test goes red:
+
+```text
+  left: ""
+ right: "terminals above 2:"
+```
+
+Output processing left on, which is the line that clears `OPOST` taken out,
+turns `the_newlines_of_the_child_come_back_unchanged` red with `"a\r\nb\r\n"`.
+It turns
+`the_controlling_terminal_of_the_child_is_the_terminal_at_its_opened_size` red
+as well, with `"24 97\r\n"`, because `stty` ends its answer with a newline. The
+other two tests write no newline, and they stay green.
+
+The claim of the controlling terminal, taken out of the run, turns the
+controlling-terminal test red and no other. The child holds no controlling
+terminal, and the shell says so: `sh: /dev/tty: Device not configured`.
+
+The close-on-exec flag, taken off both ends, turns
+`the_terminal_reaches_the_child_on_its_standard_streams_alone` red and no
+other. The child holds both ends of the terminal as descriptors 3 and 4, where
+the plain child holds none:
+
+```text
+  left: "terminals above 2: 3 4"
+ right: "terminals above 2:"
+```
+
+The reader thread, changed so that the reader is joined before
+`wait_with_output` reads standard error, does not turn the output test red. It
+hangs it. The child stops on a full standard error, and the helper waits for an
+end of the master end that does not come. The other three tests of
+`tests/pty.rs` pass first, and `timeout` then kills the binary:
+
+```text
+test the_newlines_of_the_child_come_back_unchanged ... ok
+test a_child_whose_stdout_is_on_the_terminal_sees_a_terminal ... ok
+test the_controlling_terminal_of_the_child_is_the_terminal_at_its_opened_size ... ok
+exit 124
+```
+
+The red commit of that test was the same hang, against the helper that read the
+master end on the calling thread. A hang is not a failure that `cargo test`
+reports, so a run without a timeout of its own waits forever on this mutation.
+The test holds no clock on purpose. A deadline around a child measures the load
+of the machine as well as the code, and it fails a loaded run of a correct
+helper.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
@@ -2372,6 +2450,12 @@ code moves. Every place below is load-bearing for the whole table:
   I/O error, so the guard has to exist before the walk starts. Building it out
   of what the walk returns leaves a stripped tree behind on the one path the
   guard exists for.
+- **`Pty::open` and `Pty::run_with_stdout_on_terminal`** — the modes, the
+  close-on-exec flag, the reader thread, and the copies of the slave end that
+  the run closes when the child starts. One more copy of the slave end, held
+  anywhere in the test process, holds the read of the master end open. A test
+  that waits on that read then hangs and does not fail, so a change here needs
+  its mutation run under a timeout, as the record above says.
 
 Anyone touching those should re-run the relevant mutation and update this file
 with what they saw. A guard added without ever being watched to fail is back to

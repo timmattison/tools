@@ -1608,6 +1608,22 @@ what `Ctrl-C` during `cargo test` sends — and the doc comment says so and name
 the same repair. Each fixture owns a temporary directory of its own, so what
 that end leaves is litter on the disk rather than a hazard to a later run.
 
+It also holds `gitscratch::testing::pty`, a pseudo-terminal of a size that a
+test chose, for a test of a tool that measures its terminal or decides color by
+it. `Pty::give_as_controlling_terminal` makes the terminal the controlling
+terminal of a child. A tool that measures `/dev/tty` then measures a known
+window, and not the window of whoever typed `cargo test`.
+`Pty::run_with_stdout_on_terminal` also puts standard output of the child on
+the terminal, and gives back a `std::process::Output`. So a test of `grind` or
+`grime` sees the color that a person at a terminal sees. Output processing is
+off, so the bytes come back as the child wrote them. The master end is read on
+a thread of its own, so output of any size comes back whole. The helper lives
+here because both tools need it, and two copies of the same `unsafe` code part
+company. `tests/pty.rs` holds the helper to those claims.
+`tests/pty-descriptors.rs` holds that the terminal reaches the child on its
+standard streams alone. It is a target of its own, because a second test in its
+process can open a terminal before the close-on-exec flag is set.
+
 | Fixture | Shape |
 | --- | --- |
 | `contested_region_repo()` | `iterated` rewrites one region across three commits, `single` touches it once — the asymmetry that makes a stop count worth printing. |
