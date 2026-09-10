@@ -54,6 +54,10 @@ const FILE_INDENT: &str = "  ";
 /// that takes a row of its own - see [`Report::render_within`].
 const COUNT_GAP: usize = 4;
 
+/// The words that open the section of a halt where git gave no diff. The
+/// message from git follows them.
+const DIFF_NOT_AVAILABLE: &str = "diff not available: ";
+
 /// A tool that has named itself and has not yet said what it did.
 ///
 /// This is what [`Report::for_tool`] hands back, and the only thing it can
@@ -401,13 +405,26 @@ impl<'a> Report<'a> {
                 lines.push(DiffLine::Heading(&heading).render());
             }
 
-            let body = printable_diff(&String::from_utf8_lossy(halt.diff().unwrap_or_default()));
-            lines.extend(
-                body.trim_end()
-                    .split('\n')
-                    .map(DiffLine::Diff)
-                    .map(DiffLine::render),
-            );
+            match halt.diff() {
+                Ok(bytes) => {
+                    let body = printable_diff(&String::from_utf8_lossy(bytes));
+                    lines.extend(
+                        body.trim_end()
+                            .split('\n')
+                            .map(DiffLine::Diff)
+                            .map(DiffLine::render),
+                    );
+                }
+                Err(message) => {
+                    let unavailable = printable_diff(&format!("{DIFF_NOT_AVAILABLE}{message}"));
+                    lines.extend(
+                        unavailable
+                            .split('\n')
+                            .map(DiffLine::Unavailable)
+                            .map(DiffLine::render),
+                    );
+                }
+            }
         }
 
         Some(lines.join("\n"))
@@ -430,6 +447,9 @@ enum DiffLine<'a> {
     Heading(&'a str),
     /// One line of the text `git diff` showed at a halt.
     Diff(&'a str),
+    /// One line of the text that stands in place of a halt diff that git did
+    /// not give: `diff not available: `, then the message from git.
+    Unavailable(&'a str),
 }
 
 impl DiffLine<'_> {
@@ -439,7 +459,7 @@ impl DiffLine<'_> {
     fn render(self) -> String {
         match self {
             Self::Gap => String::new(),
-            Self::Heading(text) | Self::Diff(text) => text.to_owned(),
+            Self::Heading(text) | Self::Diff(text) | Self::Unavailable(text) => text.to_owned(),
         }
     }
 }
