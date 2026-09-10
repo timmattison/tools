@@ -384,11 +384,29 @@ impl<'a> Report<'a> {
     /// `\u{d}`. Bytes that are not UTF-8 come out as U+FFFD, as they do in a
     /// name.
     ///
+    /// Each line gets the color that git gives it on a terminal. A header line
+    /// of a file is bold, a hunk header is cyan, a content line with a `+` in
+    /// a prefix column is green, a content line with a `-` is red, and a stop
+    /// heading is yellow. Each other line is plain. The painter reads the part
+    /// that a line plays from where the line stands, and not from its text
+    /// alone, because a content line can start with the same characters as a
+    /// header line.
+    ///
+    /// Each line opens and closes its own color codes, so no code spans a
+    /// newline. This method does not ask whether color is on. The `colored`
+    /// crate decides that as it formats each line, from the environment and
+    /// from whether stdout is a terminal. So a run whose stdout is a pipe gets
+    /// the same text and no code, unless the environment or the tool forces
+    /// color on. The escape runs before the paint, so each ESC byte in the
+    /// text is a code that the painter wrote.
+    ///
     /// [`without_stops`]: Report::without_stops
     #[must_use]
     pub fn render_diffs(&self, diffs: &HaltDiffs) -> Option<String> {
         let painted = self.paint_diffs(diffs)?;
-        let lines: Vec<&str> = painted.iter().map(|line| line.input.as_str()).collect();
+        // `colored` decides here, as it formats each line, whether to write
+        // the codes of its paint. A plain line gets no code either way.
+        let lines: Vec<String> = painted.iter().map(ToString::to_string).collect();
 
         Some(lines.join("\n"))
     }
@@ -990,6 +1008,20 @@ mod tests {
         );
     }
 
+    /// The halt diffs as `report` renders them with color forced on, less
+    /// each color code: the glyphs that a reader sees.
+    ///
+    /// `colored` decides at format time whether to write the codes, and one
+    /// input to that decision is whether stdout is a terminal. So a test that
+    /// compares the rendered text with plain text passes when the run writes
+    /// to a file and fails when it writes to a terminal. This forces the codes
+    /// on and takes them back out, so the answer is the same on each terminal,
+    /// and the comparison covers the painted text that a reader sees.
+    fn glyphs(report: Report, diffs: &HaltDiffs) -> Option<String> {
+        testcolor::with_forced_ansi(|| report.render_diffs(diffs))
+            .map(|painted| testcolor::strip_ansi(&painted))
+    }
+
     #[test]
     fn a_clean_replay_gets_one_line_naming_the_tool_and_what_it_tried() {
         let report = Report::for_tool("grind").describing("replaying HEAD onto origin/main");
@@ -1468,7 +1500,7 @@ mod tests {
         ]
         .join("\n");
 
-        assert_eq!(report.render_diffs(&two_stops()), Some(expected));
+        assert_eq!(glyphs(report, &two_stops()), Some(expected));
     }
 
     /// `without_stops` takes the stop headings out of the block, and each
@@ -1489,12 +1521,9 @@ mod tests {
         ];
         let is_heading = |line: &&str| headings.iter().any(|heading| heading == line);
 
-        let with_headings = report
-            .render_diffs(&two_stops())
+        let with_headings = glyphs(report, &two_stops())
             .expect("a replay that halted twice renders its halt diffs");
-        let without_headings = report
-            .without_stops()
-            .render_diffs(&two_stops())
+        let without_headings = glyphs(report.without_stops(), &two_stops())
             .expect("a replay that halted twice renders its halt diffs");
 
         assert_eq!(
@@ -1526,7 +1555,7 @@ mod tests {
             .without_stops();
         let merge = HaltDiffs::from_halts([as_git_wrote_it(None, MERGE_DIFF)]);
 
-        assert_eq!(report.render_diffs(&merge), Some(format!("\n{MERGE_DIFF}")));
+        assert_eq!(glyphs(report, &merge), Some(format!("\n{MERGE_DIFF}")));
     }
 
     /// A halt with no stopped commit, on a report that shows stops, gets a
@@ -1542,7 +1571,7 @@ mod tests {
         let merge = HaltDiffs::from_halts([as_git_wrote_it(None, MERGE_DIFF)]);
 
         assert_eq!(
-            report.render_diffs(&merge),
+            glyphs(report, &merge),
             Some(format!("\nstop 1 of 1\n{MERGE_DIFF}"))
         );
     }
@@ -1573,9 +1602,8 @@ mod tests {
             HaltDiff::from_parts(None, Ok(b"+end\r")),
         ]);
 
-        let rendered = report
-            .render_diffs(&diffs)
-            .expect("a replay that halted twice renders its halt diffs");
+        let rendered =
+            glyphs(report, &diffs).expect("a replay that halted twice renders its halt diffs");
 
         assert_eq!(
             rendered,
@@ -1593,7 +1621,8 @@ mod tests {
         );
         assert!(
             !rendered.contains('\u{1b}'),
-            "an ESC out of a repository must never reach a terminal: {rendered:?}"
+            "an ESC out of a repository is spelled out, so no ESC byte is left once the \
+             color codes go: {rendered:?}"
         );
     }
 
@@ -1603,7 +1632,9 @@ mod tests {
     /// A commit subject can hold an ESC, and the heading prints that subject
     /// to the terminal of the person who ran the tool. This subject holds the
     /// sequence that sets the title of a terminal window. So the heading gets
-    /// the escape that the body gets, and no raw ESC reaches the output.
+    /// the escape that the body gets, and no ESC out of the subject reaches
+    /// the output. Each ESC byte in the output is a color code that the
+    /// painter wrote, so the test reads the text less those codes.
     #[test]
     fn a_control_character_in_a_commit_subject_is_escaped_in_the_heading() {
         let report = Report::for_tool("grind").describing("replaying HEAD onto main");
@@ -1612,9 +1643,8 @@ mod tests {
             "+x",
         )]);
 
-        let rendered = report
-            .render_diffs(&diffs)
-            .expect("a replay that halted once renders its halt diff");
+        let rendered =
+            glyphs(report, &diffs).expect("a replay that halted once renders its halt diff");
 
         assert_eq!(
             rendered,
@@ -1627,7 +1657,8 @@ mod tests {
         );
         assert!(
             !rendered.contains('\u{1b}'),
-            "an ESC in a commit subject must never reach a terminal: {rendered:?}"
+            "an ESC in a commit subject is spelled out, so no ESC byte is left once the \
+             color codes go: {rendered:?}"
         );
     }
 
@@ -1662,7 +1693,7 @@ mod tests {
         ]
         .join("\n");
 
-        assert_eq!(report.render_diffs(&diffs), Some(expected));
+        assert_eq!(glyphs(report, &diffs), Some(expected));
     }
 
     /// The last newline of a halt diff goes, and no other character.
@@ -1690,7 +1721,7 @@ mod tests {
             let diffs = HaltDiffs::from_halts([HaltDiff::from_parts(None, Ok(captured))]);
 
             assert_eq!(
-                report.render_diffs(&diffs).as_deref(),
+                glyphs(report, &diffs).as_deref(),
                 Some(expected),
                 "the halt diff {:?} has to lose its last newline and nothing else",
                 String::from_utf8_lossy(captured)
@@ -1716,7 +1747,7 @@ mod tests {
         )]);
 
         assert_eq!(
-            report.render_diffs(&diffs),
+            glyphs(report, &diffs),
             Some(
                 [
                     "",
