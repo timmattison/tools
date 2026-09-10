@@ -387,10 +387,11 @@ impl<'a> Report<'a> {
     /// Each line gets the color that git gives it on a terminal. A header line
     /// of a file is bold, a hunk header is cyan, a content line with a `+` in
     /// a prefix column is green, a content line with a `-` is red, and a stop
-    /// heading is yellow. Each other line is plain. The painter reads the part
-    /// that a line plays from where the line stands, and not from its text
-    /// alone, because a content line can start with the same characters as a
-    /// header line.
+    /// heading is yellow. Each other line is plain. The mode line of a
+    /// combined diff stands in the header of a file, but it is plain too,
+    /// because git gives it no color. The painter reads the part that a line
+    /// plays from where the line stands, and not from its text alone, because
+    /// a content line can start with the same characters as a header line.
     ///
     /// Each line opens and closes its own color codes, so no code spans a
     /// newline. This method does not ask whether color is on. The `colored`
@@ -490,8 +491,17 @@ enum DiffLine<'a> {
     Heading(&'a str),
     /// A header line of a file: `diff --cc`, `index`, `---`, `+++`, and each
     /// other line between the `diff ` line of a file and the line that ends
-    /// its header. Bold, the default of `color.diff.meta`.
+    /// its header, except the mode line of a combined diff. Bold, the default
+    /// of `color.diff.meta`.
     FileHeader(&'a str),
+    /// The mode line of a combined diff, `mode <parent modes>..<result mode>`,
+    /// for example `mode 100755,100644..100755`. Git writes it in the header
+    /// of a file when the mode of a parent is not the mode of the result. The
+    /// `---` line and the `+++` line come after it, so it does not end the
+    /// header. Plain, because git gives it no color. A `new file mode` line
+    /// and a `deleted file mode` line are header lines, and git paints them
+    /// bold.
+    Mode(&'a str),
     /// The line that git writes in place of the hunks of a binary file:
     /// `Binary files differ` in a combined diff, and
     /// `Binary files a/<name> and b/<name> differ` in a diff of two files.
@@ -537,7 +547,8 @@ impl DiffLine<'_> {
             Self::HunkHeader(text) => text.cyan(),
             Self::Added(text) => text.green(),
             Self::Removed(text) => text.red(),
-            Self::Binary(text)
+            Self::Mode(text)
+            | Self::Binary(text)
             | Self::Context(text)
             | Self::NoNewline(text)
             | Self::Outside(text)
@@ -583,7 +594,10 @@ impl Position {
     /// speaks. A line that starts with `* ` stands outside each file. Git
     /// writes such a line, `* Unmerged path <name>`, after the last file, so
     /// it can come directly after a header that has no hunk. Each of these
-    /// two lines ends the header. Each other line in the header is a header
+    /// two lines ends the header. A line that starts with `mode ` is the mode
+    /// line of a combined diff, and git does not translate that word either.
+    /// The mode line does not end the header, because the `---` line and the
+    /// `+++` line come after it. Each other line in the header is a header
     /// line.
     ///
     /// In a hunk, a line that starts with `@@` opens the next hunk, and the
@@ -611,6 +625,7 @@ impl Position {
                 *self = Self::Outside;
                 DiffLine::Outside(line)
             }
+            (Self::Header, None) if line.starts_with("mode ") => DiffLine::Mode(line),
             (Self::Header, None) => DiffLine::FileHeader(line),
             (Self::Hunk(columns), None) => content(line, columns)
                 .or_else(|| no_newline_marker(line))

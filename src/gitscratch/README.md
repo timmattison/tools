@@ -622,7 +622,8 @@ like `git diff` on a terminal:
 
 | Line | Color | The git setting whose default it copies |
 | --- | --- | --- |
-| A header line of a file: `diff --cc`, `index`, `---`, `+++`, and each other line between the `diff ` line of a file and its first hunk header or its binary line | bold | `color.diff.meta` |
+| A header line of a file: `diff --cc`, `index`, `---`, `+++`, and each other line between the `diff ` line of a file and its first hunk header or its binary line, except the mode line of a combined diff | bold | `color.diff.meta` |
+| `mode <parent modes>..<result mode>`, the mode line that git writes in the header of a combined diff when the mode of a parent is not the mode of the result | plain | none |
 | `Binary files differ`, the binary line that git writes in place of the hunks of a binary file | plain | none |
 | A hunk header, `@@@ ... @@@` or `@@ ... @@` | cyan | `color.diff.frag` |
 | A content line with a `+` in a prefix column, the marker lines included | green | `color.diff.new` |
@@ -657,7 +658,9 @@ Two rules keep the paint correct:
   header. Git writes no hunk for a binary file, so its binary line ends its
   header. Git writes each `* Unmerged path` line after the last file, so such
   a line can end a header that has no hunk, and the renderer reads it from
-  outside each file. Inside a hunk, the prefix columns decide, and the count
+  outside each file. The mode line of a combined diff stands in the header
+  too, and it does not end the header, because the `---` line and the `+++`
+  line come after it. Inside a hunk, the prefix columns decide, and the count
   of leading `@` in the hunk header, less one, is the count of prefix
   columns. The first line whose prefix columns hold another character ends
   the hunk, and the renderer reads that line again from outside each file. A
