@@ -504,6 +504,11 @@ enum DiffLine<'a> {
     /// A content line with no `+` and no `-` in its prefix columns. Plain, the
     /// default of `color.diff.context`.
     Context(&'a str),
+    /// The marker `\ No newline at end of file`, which git writes in a hunk
+    /// under a content line whose file ends without a newline. It belongs to
+    /// the hunk, so the lines after it are still content. Plain, because git
+    /// paints it with the color of context.
+    NoNewline(&'a str),
     /// A line of the halt diff that stands outside each file, such as
     /// `* Unmerged path <name>`. Plain, because no setting of git colors it.
     Outside(&'a str),
@@ -526,7 +531,10 @@ impl DiffLine<'_> {
             Self::HunkHeader(text) => text.cyan(),
             Self::Added(text) => text.green(),
             Self::Removed(text) => text.red(),
-            Self::Context(text) | Self::Outside(text) | Self::Unavailable(text) => text.normal(),
+            Self::Context(text)
+            | Self::NoNewline(text)
+            | Self::Outside(text)
+            | Self::Unavailable(text) => text.normal(),
         }
     }
 }
@@ -560,9 +568,10 @@ impl Position {
     /// stays outside. In the header of a file, a line that starts with `@@`
     /// opens a hunk, and each other line is a header line. In a hunk, a line
     /// that starts with `@@` opens the next hunk, and the prefix columns of
-    /// each other line decide its part. A line that is not content ends the
-    /// hunk, and the painter reads it again as a line outside each file. So a
-    /// `diff ` line after a hunk opens the next file.
+    /// each other line decide its part. The marker of a last line with no
+    /// newline stays in the hunk. A line that is neither content nor that
+    /// marker ends the hunk, and the painter reads it again as a line outside
+    /// each file. So a `diff ` line after a hunk opens the next file.
     fn classify<'a>(&mut self, line: &'a str) -> DiffLine<'a> {
         match (*self, hunk_columns(line)) {
             (Self::Header | Self::Hunk(_), Some(columns)) => {
@@ -575,12 +584,27 @@ impl Position {
             }
             (Self::Outside, _) => DiffLine::Outside(line),
             (Self::Header, None) => DiffLine::FileHeader(line),
-            (Self::Hunk(columns), None) => content(line, columns).unwrap_or_else(|| {
-                *self = Self::Outside;
-                self.classify(line)
-            }),
+            (Self::Hunk(columns), None) => content(line, columns)
+                .or_else(|| no_newline_marker(line))
+                .unwrap_or_else(|| {
+                    *self = Self::Outside;
+                    self.classify(line)
+                }),
         }
     }
+}
+
+/// `line` as the marker of a last line with no newline, or `None` when it is
+/// not that marker.
+///
+/// In a diff of two files, git writes `\ No newline at end of file` under a
+/// content line whose file ends without a newline, and the hunk continues after
+/// it. The backslash is what identifies the marker, and not the words after it,
+/// because git can translate the words. A content line starts with a space, a
+/// `+`, or a `-`, so a line in a hunk that starts with a backslash is never
+/// content.
+fn no_newline_marker(line: &str) -> Option<DiffLine<'_>> {
+    line.starts_with('\\').then_some(DiffLine::NoNewline(line))
 }
 
 /// The number of prefix columns of the hunk that `line` opens, or `None` when

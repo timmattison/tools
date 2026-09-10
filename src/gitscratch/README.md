@@ -611,6 +611,7 @@ like `git diff` on a terminal:
 | A hunk header, `@@@ ... @@@` or `@@ ... @@` | cyan | `color.diff.frag` |
 | A content line with a `+` in a prefix column, the marker lines included | green | `color.diff.new` |
 | A context line | plain | `color.diff.context` |
+| `\ No newline at end of file`, in a hunk of a diff of two files | plain | `color.diff.context` |
 | A content line with a `-` in a prefix column | red | `color.diff.old` |
 | `* Unmerged path <name>`, and each other line outside a file | plain | none |
 | The stop heading | yellow | `color.diff.commit`, the color of a commit line in `git log` |
