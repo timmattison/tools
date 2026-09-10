@@ -524,7 +524,8 @@ impl DiffLine<'_> {
 /// its first hunk header. Inside a hunk, the prefix columns decide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Position {
-    /// Before the first file of the halt diff.
+    /// Before the first file of the halt diff, or after a hunk that a line
+    /// which is not content ended.
     Outside,
     /// Between the `diff ` line of a file and its first hunk header.
     Header,
@@ -541,8 +542,9 @@ impl Position {
     /// stays outside. In the header of a file, a line that starts with `@@`
     /// opens a hunk, and each other line is a header line. In a hunk, a line
     /// that starts with `@@` opens the next hunk, and the prefix columns of
-    /// each other line decide its part. A line in a hunk that is not content
-    /// is plain.
+    /// each other line decide its part. A line that is not content ends the
+    /// hunk, and the painter reads it again as a line outside each file. So a
+    /// `diff ` line after a hunk opens the next file.
     fn classify<'a>(&mut self, line: &'a str) -> DiffLine<'a> {
         match *self {
             Self::Outside if line.starts_with("diff ") => {
@@ -555,7 +557,10 @@ impl Position {
                 DiffLine::HunkHeader(line)
             }
             Self::Header => DiffLine::FileHeader(line),
-            Self::Hunk => content(line).unwrap_or(DiffLine::Outside(line)),
+            Self::Hunk => content(line).unwrap_or_else(|| {
+                *self = Self::Outside;
+                self.classify(line)
+            }),
         }
     }
 }
