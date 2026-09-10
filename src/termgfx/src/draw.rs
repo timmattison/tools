@@ -1721,6 +1721,8 @@ fn write_iterm2<W: Write>(
 mod tests {
     use super::*;
     use crate::detect::TerminalType;
+    use image::metadata::Orientation;
+    use image::ImageDecoder;
 
     /// The image that the tests draw. One pixel is enough, because no test here
     /// reads the pixels of the payload.
@@ -2336,6 +2338,35 @@ mod tests {
         image::load_from_memory(&file)
             .expect("the writer wrote a whole image file")
             .to_rgba8()
+    }
+
+    /// The orientation that the file of a payload states.
+    ///
+    /// The iTerm2 protocol carries a whole file, and the terminal draws that
+    /// file itself. So the terminal reads the EXIF orientation out of it and
+    /// turns the picture by that amount. The decoder of this crate reads the
+    /// pixels alone and leaves the tag where it stands. A comparison of the
+    /// pixels of two files therefore says what a terminal draws only for two
+    /// files that carry one orientation, and this helper gives the orientation
+    /// that stands beside those pixels.
+    ///
+    /// The reader takes the format out of the file, because the two paths of
+    /// the writer send two formats and one comparison reads both of them.
+    ///
+    /// # Arguments
+    /// * `payload` - The base64 payload of an iTerm2 command.
+    fn orientation_of_payload(payload: &str) -> Orientation {
+        let file = BASE64_STANDARD
+            .decode(payload)
+            .expect("the writer wrote base64");
+
+        image::ImageReader::new(io::Cursor::new(file))
+            .with_guessed_format()
+            .expect("a read of a buffer in memory fails for no reason")
+            .into_decoder()
+            .expect("the writer wrote a whole image file")
+            .orientation()
+            .expect("the writer wrote a whole image file")
     }
 
     /// The first bytes of a PNG file, which name the format to a reader.
@@ -3004,6 +3035,67 @@ mod tests {
         );
     }
 
+    /// How the source file of a case reaches the terminal.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TravelOfTheFile {
+        /// The writer sends the file as it stands.
+        AsItStands,
+        /// The writer refuses the file and sends an encode of the picture.
+        ThroughTheEncoder,
+    }
+
+    /// One source file, and what the iTerm2 writer does with it.
+    struct SamePictureCase {
+        /// The name of the case, which every failure message of the loop
+        /// carries.
+        name: &'static str,
+        /// The bytes of the file that the picture came out of.
+        source: Vec<u8>,
+        /// How that file reaches the terminal.
+        travel: TravelOfTheFile,
+    }
+
+    /// The source files that the two paths of the iTerm2 writer must draw
+    /// alike.
+    ///
+    /// A row that travels as it stands measures the two paths against each
+    /// other. A row that reaches the terminal through the encoder has one path
+    /// and one picture, and it states which files the writer refuses. Both
+    /// arms of the rule stand here, so a new file needs one row and no new
+    /// test.
+    fn same_picture_cases() -> Vec<SamePictureCase> {
+        vec![
+            // The encoder path picks the channels of the file that it writes,
+            // and the byte-for-byte path keeps the channels of the file that
+            // the caller holds. So a transparent PNG makes a difference in the
+            // alpha channel visible pixel by pixel.
+            SamePictureCase {
+                name: "a transparent PNG",
+                source: png_file_of(&transparent_fixture()),
+                travel: TravelOfTheFile::AsItStands,
+            },
+            // A photograph in the format the caller reads off a disk, with no
+            // metadata beside the pixels. This row must pass, and it says that
+            // the loop passes a file that carries no difference at all.
+            SamePictureCase {
+                name: "an opaque JPEG that carries no EXIF segment",
+                source: source_file_of(
+                    Iterm2Payload::Jpeg(JpegQuality::HIGHEST),
+                    &photograph_fixture(),
+                ),
+                travel: TravelOfTheFile::AsItStands,
+            },
+            // A format that this writer does not make, which the byte-for-byte
+            // path refuses. It runs the other arm of the loop, so a row that
+            // states a refusal measures a refusal that happens.
+            SamePictureCase {
+                name: "a BMP, which is a format this writer does not make",
+                source: bmp_file_of(&photograph_fixture()),
+                travel: TravelOfTheFile::ThroughTheEncoder,
+            },
+        ]
+    }
+
     /// The two paths of the iTerm2 writer draw one picture.
     ///
     /// The writer has two ways to a payload. [`source_payload_of`] sends the
@@ -3013,66 +3105,98 @@ mod tests {
     /// a caller cannot tell which path runs, and a picture that changes with
     /// the path is a picture that changes for no reason the caller can see.
     ///
-    /// The alpha channel is the case that this test measures. The encoder path
-    /// picks the channels of the file that it writes, and the byte-for-byte
-    /// path keeps the channels of the file that the caller holds. So a
-    /// transparent PNG makes a difference between the two paths visible pixel
-    /// by pixel.
+    /// The alpha channel was the first channel of difference that a reader
+    /// found. A second one came after it, so the files stand in a table and
+    /// this loop runs the whole comparison over every one of them. A file that
+    /// the two paths draw differently is one row and no new test.
+    ///
+    /// The picture is the pixels together with the orientation that the file
+    /// states, because the terminal draws the file and the decoder of this
+    /// crate reads the pixels alone. [`orientation_of_payload`] gives that
+    /// second half.
+    ///
+    /// The comparison of the two pictures runs first, because a difference
+    /// between them is the defect that this test exists to name. The travel of
+    /// the file follows it, and it holds a row that carries the file apart
+    /// from a row that measures one path twice.
     #[test]
     fn the_two_iterm2_paths_draw_the_same_picture() {
-        let source = png_file_of(&transparent_fixture());
-        let picture =
-            image::load_from_memory(&source).expect("the encoder wrote a whole image file");
+        for case in same_picture_cases() {
+            let name = case.name;
+            let picture = image::load_from_memory(&case.source)
+                .unwrap_or_else(|error| panic!("the file of {name} is a whole image: {error}"));
 
-        let payload_of_the_source_path =
-            iterm2_payload_of_source(&picture, Some(&source), PayloadBudget::UNLIMITED);
-        let payload_of_the_encoder_path =
-            iterm2_payload_of_source(&picture, None, PayloadBudget::UNLIMITED);
+            let payload_of_the_source_path =
+                iterm2_payload_of_source(&picture, Some(&case.source), PayloadBudget::UNLIMITED);
+            let payload_of_the_encoder_path =
+                iterm2_payload_of_source(&picture, None, PayloadBudget::UNLIMITED);
 
-        // The byte-for-byte path runs only for a file in a format the writer
-        // makes, at the size of the screen, inside the budget. A run that
-        // missed one of those three would send both pictures through the
-        // encoder, and the comparison below would then measure one path twice
-        // and pass on every picture.
-        assert!(
-            payload_of_the_source_path == BASE64_STANDARD.encode(&source),
-            "the byte-for-byte path must carry the file as it stands, or this test measures one path twice, but the command carried {} characters where the file is {} bytes",
-            payload_of_the_source_path.len(),
-            source.len()
-        );
+            let orientation_of_the_source_path =
+                orientation_of_payload(&payload_of_the_source_path);
+            let orientation_of_the_encoder_path =
+                orientation_of_payload(&payload_of_the_encoder_path);
 
-        let of_the_source_path = rgba_pixels_of_payload(&payload_of_the_source_path);
-        let of_the_encoder_path = rgba_pixels_of_payload(&payload_of_the_encoder_path);
+            assert!(
+                orientation_of_the_source_path == orientation_of_the_encoder_path,
+                "both paths of {name} must draw one picture, but the file of the byte-for-byte path states the orientation {orientation_of_the_source_path:?} and the file of the encoder path states {orientation_of_the_encoder_path:?}"
+            );
 
-        assert_eq!(
-            of_the_source_path.dimensions(),
-            of_the_encoder_path.dimensions(),
-            "both paths must draw a picture of one size"
-        );
+            let of_the_source_path = rgba_pixels_of_payload(&payload_of_the_source_path);
+            let of_the_encoder_path = rgba_pixels_of_payload(&payload_of_the_encoder_path);
 
-        let mut differences = 0_usize;
-        let mut first_difference = None;
+            assert_eq!(
+                of_the_source_path.dimensions(),
+                of_the_encoder_path.dimensions(),
+                "both paths of {name} must draw a picture of one size"
+            );
 
-        for (x, y, of_the_source) in of_the_source_path.enumerate_pixels() {
-            let of_the_encoder = of_the_encoder_path.get_pixel(x, y);
+            let mut differences = 0_usize;
+            let mut first_difference = None;
 
-            if of_the_source != of_the_encoder {
-                differences += 1;
-                first_difference.get_or_insert_with(|| {
-                    format!("{x},{y}, where the byte-for-byte path holds {of_the_source:?} and the encoder path holds {of_the_encoder:?}")
-                });
+            for (x, y, of_the_source) in of_the_source_path.enumerate_pixels() {
+                let of_the_encoder = of_the_encoder_path.get_pixel(x, y);
+
+                if of_the_source != of_the_encoder {
+                    differences += 1;
+                    first_difference.get_or_insert_with(|| {
+                        format!("{x},{y}, where the byte-for-byte path holds {of_the_source:?} and the encoder path holds {of_the_encoder:?}")
+                    });
+                }
+            }
+
+            // The two buffers run to thousands of pixels, so the message names
+            // the count and the first pixel that differs. A failure that
+            // prints two whole buffers says less than one that fits on the
+            // screen.
+            assert!(
+                differences == 0,
+                "both paths of {name} must draw one picture, but {differences} pixels of {} differ, the first at {}",
+                of_the_source_path.pixels().count(),
+                first_difference.unwrap_or_default()
+            );
+
+            // The byte-for-byte path runs only for a file in a format the
+            // writer makes, that carries one frame and no transform, at the
+            // size of the screen, inside the budget. A row that states that
+            // path and misses one of those sends both pictures through the
+            // encoder, and the comparison above then measures one path twice
+            // and passes on every picture.
+            let carried_the_file =
+                payload_of_the_source_path == BASE64_STANDARD.encode(&case.source);
+
+            match case.travel {
+                TravelOfTheFile::AsItStands => assert!(
+                    carried_the_file,
+                    "the byte-for-byte path of {name} must carry the file as it stands, or this row measures one path twice, but the command carried {} characters where the file is {} bytes",
+                    payload_of_the_source_path.len(),
+                    case.source.len()
+                ),
+                TravelOfTheFile::ThroughTheEncoder => assert!(
+                    !carried_the_file,
+                    "the writer must send {name} through the encoder, but the command carried the file as it stands"
+                ),
             }
         }
-
-        // The two buffers run to thousands of pixels, so the message names the
-        // count and the first pixel that differs. A failure that prints two
-        // whole buffers says less than one that fits on the screen.
-        assert!(
-            differences == 0,
-            "both paths must draw one picture, but {differences} pixels of {} differ, the first at {}",
-            of_the_source_path.pixels().count(),
-            first_difference.unwrap_or_default()
-        );
     }
 
     /// A photograph that no rung of the ladder fits spends pixels as well.
