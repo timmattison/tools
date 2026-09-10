@@ -44,8 +44,8 @@ not have to re-derive which guard belongs to which test.
 | `refuses_a_revision_that_starts_with_a_dash_rather_than_echoing_it_back` | The pair `--verify --end-of-options`, which is how the pre-flight asks a question git can refuse | `src/git.rs`, `Git::rev_parse` — drop both arguments | remove |
 | `scratch_refuses_a_revision_that_starts_with_a_dash_rather_than_building_one_at_head` (`tests/repo.rs`) | `--end-of-options` ahead of the two positionals of `worktree add` | `src/scratch.rs`, `Scratch::create` — drop the argument | remove |
 | `refuses_an_upstream_that_starts_with_a_dash_rather_than_replaying_onto_the_root` | `--end-of-options` ahead of the upstream of `rebase` | `src/scratch.rs`, `Scratch::replay_rebase_within` — drop the argument | remove |
-| `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree` (`tests/merges.rs`) | `--end-of-options` ahead of the branch of `merge` | `src/scratch.rs`, `Scratch::replay_merge` — drop the argument | remove |
-| `a_merge_of_a_branch_already_in_head_is_clean` (`tests/merges.rs`) | The **absence** of a `MERGE_HEAD` check on the merge replay's success path, which is what lets a branch already contained in HEAD come back clean | `src/scratch.rs`, `Scratch::replay_merge` — require `rev-parse -q --verify MERGE_HEAD` to succeed before the early return | **add** |
+| `refuses_a_branch_that_starts_with_a_dash_by_name_rather_than_blaming_the_worktree` (`tests/merges.rs`) | `--end-of-options` ahead of the branch of `merge` | `src/scratch.rs`, `Scratch::replay_merge_capturing`, the one merge behind both merge entrances — drop the argument | remove |
+| `a_merge_of_a_branch_already_in_head_is_clean` (`tests/merges.rs`) | The **absence** of a `MERGE_HEAD` check on the merge replay's success path, which is what lets a branch already contained in HEAD come back clean | `src/scratch.rs`, `Scratch::replay_merge_capturing` — require `rev-parse -q --verify MERGE_HEAD` to succeed before the early return | **add** |
 | `pins_automatic_maintenance_off_even_when_the_repository_turns_it_on` | `maintenance.auto=false`, the switch on automatic maintenance that `gc.auto=0` does not reach | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_the_filesystem_monitor_off_even_when_the_repository_names_one` | `core.fsmonitor=false`, the one program git runs that the redirected `core.hooksPath` cannot take away | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 | `pins_merge_preserving_rebase_off_even_when_the_repository_turns_it_on` | `rebase.rebaseMerges=false`, which keeps a merge commit off the replay's todo list | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
@@ -70,6 +70,9 @@ not have to re-derive which guard belongs to which test.
 | `every_identity_variable_is_settled_on_the_command_the_runner_builds` | The two `env_remove` calls that take `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` off every command, which is the half of the restated identity a commit cannot show | `src/git.rs`, `Git::command` — drop both calls | remove |
 | `refuses_an_empty_hooks_path_rather_than_resolving_a_hook_outside_the_repository` | The refusal of an empty `hooks_path`, which git resolves at the root of the file system rather than at nothing | `src/git.rs`, `Git::new` — drop the `assert!` | remove |
 | `sheds_every_inherited_git_variable_and_nothing_else` (`tests/inherited-environment.rs`) | The `GIT_` prefix, which is the whole of what the scrub covers beyond a list of names | `src/git.rs`, `NoInheritedGitEnvironment for Command` — narrow the prefix test over `std::env::vars_os` back to a fifteen-name list | narrow |
+| `each_halt_diff_holds_the_markers_of_its_own_region` (`tests/diffs.rs`) | The capture above `git add -A` in the rebase loop, which reads a stop before the replay stages its markers | `src/scratch.rs`, `Scratch::replay_rebase_within` — move the capture block below `git.run("add", &["-A"])` | move |
+| Nothing — see the record below | `--diff-filter=U` in `DIFF_AT_HALT`, which keeps a halt diff to the files the counter reads | `src/diffs.rs`, `DIFF_AT_HALT` — drop the entry | remove |
+| `a_replay_that_does_not_halt_captures_no_halt_diff` (`tests/diffs.rs`) | The merge capture below the early return for a merge git completed, which keeps a clean merge free of halt diffs | `src/scratch.rs`, `Scratch::replay_merge_capturing` — move the capture block above `if outcome.success` | move |
 
 ## What keeps each test honest
 
@@ -592,7 +595,10 @@ has: "Conflicts { stops: 0, files: {} }"
 test result: FAILED. 35 passed; 1 failed
 ```
 
-**`--end-of-options`, removed from `Scratch::replay_merge`.** Git knows
+**`--end-of-options`, removed from `Scratch::replay_merge_capturing`.** That
+function is the one merge behind `Scratch::replay_merge`, and the test reaches
+it through that entrance. The merge call moved there from `replay_merge` when
+the halt diff arrived. Git knows
 `--allow-unrelated-histories` as an option of `merge`, so it reads the branch as
 one, is left with nothing to merge, and falls back to the upstream of the
 current branch. A scratch worktree stands on a detached HEAD, so there is no
@@ -647,7 +653,7 @@ Mutation (**opposite direction — added, not removed**): made the merge replay'
 success path demand a `MERGE_HEAD` before it hands the clean verdict back —
 `anyhow::ensure!` on `git.try_run("rev-parse", &["-q", "--verify",
 "MERGE_HEAD"])?.success`, immediately ahead of the early return in
-`Scratch::replay_merge`.
+`Scratch::replay_merge_capturing`, the one merge behind `Scratch::replay_merge`.
 
 That is the plausible over-correction rather than an arbitrary break. The
 comment on `--no-ff` three lines above says what this replay is afraid of — a
@@ -1924,6 +1930,113 @@ false-green shape this file exists to remove, and it is worse in a comment than
 in code: the comment is what the next person reads before deciding the rule is
 covered.
 
+### `each_halt_diff_holds_the_markers_of_its_own_region`, and the position of the capture
+
+Mutation: moved the capture block in `Scratch::replay_rebase_within` from above
+`git.run("add", &["-A"])` to below it, so the rebase loop reads each stop after
+it stages the markers. The run was `cargo test --no-fail-fast -p gitscratch
+--test diffs` on git 2.55.0. Nothing outside `gitscratch` captures a halt diff
+yet, so no other crate can see this line.
+
+```text
+---- each_halt_diff_holds_the_markers_of_its_own_region stdout ----
+thread 'each_halt_diff_holds_the_markers_of_its_own_region'
+panicked at src/gitscratch/tests/diffs.rs:191:9:
+the halt diff of stop 1 has no `++<<<<<<< HEAD` line, so it does not show the
+region that stop conflicted in: []
+
+---- each_halt_diff_names_the_files_the_breakdown_counted_at_its_stop stdout ----
+thread 'each_halt_diff_names_the_files_the_breakdown_counted_at_its_stop'
+panicked at src/gitscratch/tests/diffs.rs:222:5:
+assertion `left == right` failed: the first stop conflicts in x.txt alone and
+the second in y.txt alone, so each halt diff has to name that one file
+  left: [{}, {}]
+ right: [{"x.txt"}, {"y.txt"}]
+
+---- a_modify_delete_halt_diff_names_the_file_as_an_unmerged_path stdout ----
+thread 'a_modify_delete_halt_diff_names_the_file_as_an_unmerged_path'
+panicked at src/gitscratch/tests/diffs.rs:273:5:
+a file that one side deleted has no combined diff, so the halt diff has to name
+it with `* Unmerged path x.txt`: []
+
+test result: FAILED. 3 passed; 3 failed
+```
+
+Each halt diff came back empty. After `git add -A`, the index holds each file
+with its markers at stage 0, the worktree holds the same bytes, and `git diff`
+has nothing to show. The three tests that read the text of a rebase stop went
+red, each for that reason. The three that stayed green are the right three. The
+test on the names and the counts reads no diff text, and the merge test and the
+clean-replay test never reach the capture in the rebase loop.
+
+### `--diff-filter=U` in `DIFF_AT_HALT`, which nothing can redden
+
+Mutation: emptied `DIFF_AT_HALT`, so the capture runs a bare `git diff`. The
+run was `cargo test --no-fail-fast -p gitscratch` on git 2.55.0, and every test
+in the crate stayed green:
+
+```text
+unittests src/lib.rs            test result: ok. 56 passed; 0 failed
+tests/conflicts.rs              test result: ok. 7 passed; 0 failed
+tests/diffs.rs                  test result: ok. 6 passed; 0 failed
+tests/halts.rs                  test result: ok. 8 passed; 0 failed
+tests/hook_environment.rs       test result: ok. 1 passed; 0 failed
+tests/inherited-environment.rs  test result: ok. 1 passed; 0 failed
+tests/isolation.rs              test result: ok. 3 passed; 0 failed
+tests/merges.rs                 test result: ok. 7 passed; 0 failed
+tests/repo.rs                   test result: ok. 20 passed; 0 failed
+tests/safety.rs                 test result: ok. 8 passed; 0 failed
+Doc-tests gitscratch            test result: ok. 10 passed; 0 failed
+```
+
+That is the finding, not a failure to find one. A scratch worktree starts from
+a clean checkout, and at a halt git stages each change of the picked commit
+that merged cleanly. So the index and the worktree agree on each path that is
+not unmerged, and a bare `git diff` has only the unmerged paths to show. The
+filter then removes nothing. The same was watched on git 2.55 before the
+capture was written: inside a scratch worktree, no path that merged cleanly
+reached `git diff` at a halt.
+
+The filter stays all the same, and issue #475 shows the state it is for. In a
+working tree with an edit beside the conflict, a bare `git diff` names the
+edited file too, and `--diff-filter=U` keeps only the conflicted file. A replay
+does not reach that state today. The next change that leaves a path unstaged
+in the scratch worktree reaches it with no warning, and the halt diff then
+names a file the breakdown does not count. The filter costs one argument, and
+it makes the diff call read the files the counter reads. It is recorded here
+as a guard no test can make fail, as `--literal-pathspecs` is, and not as one
+somebody watched fail.
+
+### `a_replay_that_does_not_halt_captures_no_halt_diff`, and the position of the merge capture
+
+This test passed the moment it was written, against a stub that captured
+nothing, because a replay that does not halt has nothing to capture on either
+side. A test that was never red is not evidence, so this mutation is what shows
+that it pins something.
+
+Mutation: moved the capture block in `Scratch::replay_merge_capturing` from
+below the hunk count to above `if outcome.success`, the early return for a
+merge git completed. The run was `cargo test --no-fail-fast -p gitscratch
+--test diffs` on git 2.55.0.
+
+```text
+---- a_replay_that_does_not_halt_captures_no_halt_diff stdout ----
+thread 'a_replay_that_does_not_halt_captures_no_halt_diff'
+panicked at src/gitscratch/tests/diffs.rs:379:5:
+a merge that git completed has no halt, so it has no halt diff: HaltDiffs {
+halts: [HaltDiff { stopped: None, diff: Ok([]) }] }
+
+test result: FAILED. 5 passed; 1 failed
+```
+
+A clean merge got a halt diff of nothing, and a renderer prints that as a
+section for a halt that did not happen. Only the merge half of the test can see
+this, and only this test went red. The merge test with a conflict stayed green,
+and that is the right answer. Above the early return, the capture of a
+conflicted merge reads the same `git diff` that it reads below the count,
+because the count changes nothing in the worktree. So this one test holds the
+position, from the side of the merge that git completed.
+
 ## This is not a one-time ritual
 
 The record above describes the code as it stands, and it decays the moment the
@@ -1992,6 +2105,13 @@ code moves. Every place below is load-bearing for the whole table:
   replay, so only a resolution comes round again, and the charge for a `--skip`
   is unfalsifiable today. An arm that starts coming round again after a skip
   makes it falsifiable, and needs its own mutation and its own row.
+- **The two positions of the capture, and `DIFF_AT_HALT`** — the rebase loop
+  captures a halt diff above the `git add -A` that stages the markers, and the
+  merge captures below its early return and its refusal. A capture below
+  `git add -A` gives an empty halt diff, and a capture above the early return
+  gives a clean merge a halt diff. `DIFF_AT_HALT` decides which bytes the
+  capture hands a person, so a flag added to it or taken from it needs its own
+  test, its own mutation and its own row.
 - **`Scratch::check_out_detached`** — the detached checkout every consumer now
   makes. `tests/safety.rs` spells its own checkout out by hand rather than
   calling this, on purpose: that detach is a guard under test, and a guard read

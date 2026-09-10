@@ -75,6 +75,51 @@ branch name that resolves to nothing is the other — because that sentence is t
 only part of the answer that says which refusal this was. `replay_rebase`
 refuses the same shape of state for the same reason.
 
+A replay can also capture the **halt diff** of each halt: the text `git diff`
+shows at that halt in a real rebase or merge. Two entrances capture it, one
+beside each plain entrance:
+
+```rust
+let (conflicts, diffs) = scratch.replay_rebase_with_diffs("main")?;
+for halt in diffs.iter() {
+    // The stopped commit: its short id and its subject. A merge halt has none.
+    let heading = halt.stopped().unwrap_or("the merge");
+    match halt.diff() {
+        // The bytes git wrote, not trimmed and not decoded.
+        Ok(bytes) => println!("{heading}\n{}", String::from_utf8_lossy(bytes)),
+        // Git gave no diff. The halt still counts.
+        Err(message) => println!("{heading}\ndiff not available: {message}"),
+    }
+}
+
+let (conflicts, diffs) = Repo::open(repo_path)?
+    .scratch("HEAD")?
+    .replay_merge_with_diffs("feature")?;
+```
+
+The capture is opt-in. `replay_rebase` and `replay_merge` keep their
+signatures and their cost, and capture nothing. `grist` calls `replay_rebase`
+once for each step of each ordering and prints no diff, so it pays nothing for
+the capture. The halt diffs come back in a `HaltDiffs` beside the `Conflicts`,
+not inside it. `grist` folds `Conflicts` values with `absorb` and ranks the
+orderings on them, and a diff inside that type puts a copy of each diff into
+each ordering that `grist` keeps. The replay that captures is the same rebase
+loop, or the same merge, as the plain replay. Only the capture is on, so the
+two count the same halts the same way.
+
+At a rebase stop, the capture sits above the `git add -A` that stages the
+markers, because after that line `git diff` shows nothing for the stop. A
+capture below it gives an empty halt diff at every stop. The diff call is
+`git diff --diff-filter=U`, the filter the counter reads the conflicted files
+with, so a halt diff names the files the breakdown counts at that halt and no
+other file. A diff that git cannot give does not stop the replay. The halt diff
+holds git's error in its place, and the counts and the exit code stay the same.
+
+`HaltDiff::from_parts` and `HaltDiffs::from_halts` build halt diffs by hand for
+the tests of a renderer. The `testing` feature gates them the way it gates
+`Conflicts::from_files`, so a released binary gets a halt diff from a replay
+and from nothing else.
+
 A `Conflicts` records how many times the replay halted and, for every file that
 conflicted, how many hunks it contributed. The headline totals — `hunks()`,
 `files()`, `stops()` — are summaries of that breakdown rather than numbers
@@ -120,9 +165,9 @@ A `compile_fail` doc-test holds the derive out — see **Testing** below.
 
 `Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
 to get a `Scratch`. A `Scratch` answers the operations it names —
-`check_out_detached`, `replay_rebase`, `replay_merge`, `head_tree`,
-`commit_tree` — and each of them builds its own git call under the whole safety
-configuration. So there is no way to get a worktree from here without also
+`check_out_detached`, `replay_rebase`, `replay_rebase_with_diffs`,
+`replay_merge`, `replay_merge_with_diffs`, `head_tree`, `commit_tree` — and
+each of them builds its own git call under the whole safety configuration. So there is no way to get a worktree from here without also
 getting the hardening — nor without first having established that the directory
 is a repository at all, which is the pre-flight's job below.
 
@@ -226,6 +271,13 @@ character sits in the middle and no trim reaches it there — while
 `rev-parse --show-toplevel` ends on that character, and a trimming reader takes
 it off. A call site that reasoned about which loss its own question is open to
 would have to be right twice, every time. Taking the reader is right once.
+
+A **halt diff** is a fourth question, and it has a fourth reader, `verbatim`.
+It returns git's stdout as the bytes git wrote, not trimmed and not decoded.
+When git exits non-zero, it returns an error that carries git's stderr. The
+halt diff is text that goes to a person verbatim, and each other reader changes
+it: `run` trims and decodes, the list readers split on NUL, and `path` removes
+a newline. The caller that prints the diff decodes it at print time.
 
 ## The pre-flight
 
@@ -1230,8 +1282,9 @@ the only thing that makes it worth anything in a failing assertion's message.
 **The replay's round budget** is pinned by unit tests in `src/scratch.rs`, which
 the integration suite could not serve: the constant is 1000, and the case that
 matters is a replay needing exactly that many rounds. So the tests name the
-budget instead — `replay_rebase_within` is `replay_rebase` with the bound as a
-parameter — and spend it on `contested_region_repo()`, whose three colliding
+budget instead — `replay_rebase_within` is `replay_rebase` with the bound, and
+the capture switch, as parameters — and spend it on `contested_region_repo()`,
+whose three colliding
 commits take exactly three rounds. Both sides of the boundary are asserted:
 three rounds must produce the answer, two must still refuse. Noticing that the
 rebase has *finished* costs no round, so a fully-measured replay is never
@@ -1261,6 +1314,26 @@ unspellable. The other two require the constructor to refuse a breakdown and a
 stop count that disagree about whether anything conflicted, in both directions:
 stops with no files would otherwise render the clean line and swallow them, and
 files with no stops would report a replay that never halted.
+
+`tests/diffs.rs` covers the halt diffs that the two capturing entrances give
+beside the counts. A rebase replay of `contested_region_repo()` gives three
+halt diffs in stop order. Each one names its own stopped commit and holds the
+markers of its own region, and the counts equal those of the plain entrance.
+The test on the markers is the one that fails when the capture moves below
+`git add -A`, because after that line `git diff` shows nothing. Each halt diff
+of `equal_hunks_unequal_stops_repo()` names the files the breakdown counted at
+its stop, and no other file. A modify/delete halt diff names its file as
+`* Unmerged path x.txt`. A merge gives one halt diff with no stopped commit,
+and a replay that does not halt gives none through either entrance. Two unit
+tests sit in `src/diffs.rs`.
+`a_diff_call_that_fails_leaves_git_s_own_words_in_the_halt_diff` runs the
+capture outside a repository and requires git's own words in the halt diff. A
+control reads those words from plain git first, so the test holds in each
+language git speaks. `a_hand_built_halt_diff_reads_back_what_it_was_given` pins
+the two fixture constructors. [`MUTATIONS.md`](./MUTATIONS.md) records the
+capture moved below `git add -A` and the merge capture moved above its early
+return, each watched to fail. It also records `--diff-filter=U` removed, which
+no test can make fail.
 
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
