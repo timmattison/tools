@@ -429,7 +429,14 @@ impl<'a> Report<'a> {
                     // escape runs first, so the last line of a CRLF file keeps
                     // its carriage return.
                     let body = escaped.strip_suffix('\n').unwrap_or(&escaped);
-                    lines.extend(body.split('\n').map(classify).map(DiffLine::paint));
+                    // The position starts over for each halt diff, because
+                    // each one is the whole output of one `git diff` call.
+                    let mut position = Position::Outside;
+                    lines.extend(
+                        body.split('\n')
+                            .map(|line| position.classify(line))
+                            .map(DiffLine::paint),
+                    );
                 }
                 Err(message) => {
                     let unavailable = printable_diff(&format!("{DIFF_NOT_AVAILABLE}{message}"));
@@ -463,8 +470,9 @@ enum DiffLine<'a> {
     /// Yellow, the default of `color.diff.commit`, which is the color of a
     /// commit line in `git log`.
     Heading(&'a str),
-    /// A header line of a file: `diff --cc`, `index`, `---`, or `+++`. Bold,
-    /// the default of `color.diff.meta`.
+    /// A header line of a file: `diff --cc`, `index`, `---`, `+++`, and each
+    /// other line between the `diff ` line of a file and its first hunk
+    /// header. Bold, the default of `color.diff.meta`.
     FileHeader(&'a str),
     /// The header of a hunk: `@@@ ... @@@` in a combined diff, `@@ ... @@` in
     /// a diff of two files. Cyan, the default of `color.diff.frag`.
@@ -505,34 +513,72 @@ impl DiffLine<'_> {
     }
 }
 
-/// The part that `line` of a halt diff plays, read from the text of the line.
+/// Where a line of a halt diff stands: outside each file, in the header of a
+/// file, or in a hunk.
 ///
-/// A line that starts like a header line of a file is a header line. A line
-/// that starts with `@@` is a hunk header. A line whose first two characters
-/// are each a space, a `+`, or a `-` is content. Each other line stands
-/// outside each file.
-fn classify(line: &str) -> DiffLine<'_> {
-    const FILE_HEADERS: [&str; 4] = ["diff ", "index ", "--- ", "+++ "];
+/// A content line can start with the same characters as a header line. In a
+/// combined diff, a line that both parents hold and the result does not starts
+/// with `--`, so a removed line whose text is `- a/f.txt` reads `--- a/f.txt`.
+/// So the part that a line plays comes from where it stands, and not from its
+/// text alone. The header lines of a file stand between its `diff ` line and
+/// its first hunk header. Inside a hunk, the prefix columns decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Position {
+    /// Before the first file of the halt diff.
+    Outside,
+    /// Between the `diff ` line of a file and its first hunk header.
+    Header,
+    /// In a hunk of a combined diff, whose content lines have two prefix
+    /// columns.
+    Hunk,
+}
 
-    if FILE_HEADERS.iter().any(|header| line.starts_with(header)) {
-        return DiffLine::FileHeader(line);
+impl Position {
+    /// The part that `line` plays, read from where it stands. The position
+    /// then moves to where the next line stands.
+    ///
+    /// Outside each file, a `diff ` line opens a file, and each other line
+    /// stays outside. In the header of a file, a line that starts with `@@`
+    /// opens a hunk, and each other line is a header line. In a hunk, a line
+    /// that starts with `@@` opens the next hunk, and the prefix columns of
+    /// each other line decide its part. A line in a hunk that is not content
+    /// is plain.
+    fn classify<'a>(&mut self, line: &'a str) -> DiffLine<'a> {
+        match *self {
+            Self::Outside if line.starts_with("diff ") => {
+                *self = Self::Header;
+                DiffLine::FileHeader(line)
+            }
+            Self::Outside => DiffLine::Outside(line),
+            Self::Header | Self::Hunk if line.starts_with("@@") => {
+                *self = Self::Hunk;
+                DiffLine::HunkHeader(line)
+            }
+            Self::Header => DiffLine::FileHeader(line),
+            Self::Hunk => content(line).unwrap_or(DiffLine::Outside(line)),
+        }
     }
-    if line.starts_with("@@") {
-        return DiffLine::HunkHeader(line);
-    }
+}
 
+/// `line` as a content line of a combined diff, or `None` when it is not one.
+///
+/// A content line of a combined diff has two prefix columns, one for each
+/// parent, and each column holds a space, a `+`, or a `-`. A `+` in a column
+/// means that the result holds the line and that parent does not. A `-` means
+/// that the parent holds the line and the result does not.
+fn content(line: &str) -> Option<DiffLine<'_>> {
     let prefix: Vec<char> = line.chars().take(2).collect();
     if !prefix
         .iter()
         .all(|column| matches!(column, ' ' | '+' | '-'))
     {
-        DiffLine::Outside(line)
+        None
     } else if prefix.contains(&'+') {
-        DiffLine::Added(line)
+        Some(DiffLine::Added(line))
     } else if prefix.contains(&'-') {
-        DiffLine::Removed(line)
+        Some(DiffLine::Removed(line))
     } else {
-        DiffLine::Context(line)
+        Some(DiffLine::Context(line))
     }
 }
 
