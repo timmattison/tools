@@ -1436,4 +1436,37 @@ mod tests {
             );
         }
     }
+
+    /// Multi-byte text reaches the output intact, in a halt diff and in its
+    /// heading.
+    ///
+    /// A path holds `日本語.txt` as readily as `f.txt`, and a commit subject
+    /// holds an emoji. Each of those characters is three or four bytes. The
+    /// escape walks characters, not bytes, so it cuts no character and reads
+    /// no part of one as a control character. A control character between two
+    /// multi-byte characters is where a walk over bytes goes wrong, so the body
+    /// holds one.
+    #[test]
+    fn multi_byte_text_survives_in_a_halt_diff_and_in_its_heading() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            Some("abc1234 日本語 \u{1f389}"),
+            "diff --cc 日本語.txt\n+ café \u{1f389}\n+ 語\x1b語\r\n+ 日本",
+        )]);
+
+        assert_eq!(
+            report.render_diffs(&diffs),
+            Some(
+                [
+                    "",
+                    "stop 1 of 1 - abc1234 日本語 \u{1f389}",
+                    "diff --cc 日本語.txt",
+                    "+ café \u{1f389}",
+                    "+ 語\\u{1b}語\r",
+                    "+ 日本",
+                ]
+                .join("\n")
+            )
+        );
+    }
 }
