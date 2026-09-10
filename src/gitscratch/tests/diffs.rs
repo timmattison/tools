@@ -462,6 +462,11 @@ fn fixture_state(repo: &TestRepo) -> (String, String, String) {
 /// both remove the inherited git environment. The diff call runs under
 /// `LC_ALL=C`, so a control that reads git's own words reads them in one
 /// language.
+///
+/// A control that reads the text of the diff puts `--no-color` in `args`. A
+/// `color.ui=always` in the global configuration of the developer then cannot
+/// put codes between the control and the text it reads. The control of the
+/// color test puts no such flag in `args`, because the codes are what it reads.
 fn plain_diff_at_a_real_halt(repo: &TestRepo, args: &[&str]) -> Output {
     let before = fixture_state(repo);
 
@@ -629,5 +634,86 @@ fn a_halt_diff_is_not_lost_to_a_textconv_program_that_fails() {
         conflicts, plain_count,
         "the capture changed a count: the merge that captures and the plain merge have to \
          measure one fixture the same way"
+    );
+}
+
+/// The lines around the one region of a halt diff of [`conflicting_repo`]:
+/// the lines between the hunk header and the opening marker, and the lines
+/// after the closing marker.
+///
+/// The fixture rewrites one line of thirty, so its halt diff has one hunk, and
+/// that hunk holds one region with context on each side. The hunk header of a
+/// combined diff starts with `@@@`.
+fn lines_around_the_region(diff: &[u8]) -> (Vec<String>, Vec<String>) {
+    let text = String::from_utf8_lossy(diff);
+    let lines: Vec<&str> = text.lines().collect();
+
+    let header = lines
+        .iter()
+        .position(|line| line.starts_with("@@@"))
+        .unwrap_or_else(|| panic!("the diff has no hunk header: {text}"));
+    let opening = lines
+        .iter()
+        .position(|line| *line == OPENING_MARKER)
+        .unwrap_or_else(|| panic!("the diff has no `{OPENING_MARKER}` line: {text}"));
+    let closing = lines
+        .iter()
+        .position(|line| line.starts_with(CLOSING_MARKER))
+        .unwrap_or_else(|| panic!("the diff has no `{CLOSING_MARKER}` line: {text}"));
+
+    let owned = |span: &[&str]| span.iter().map(|line| (*line).to_owned()).collect();
+    (
+        owned(&lines[header + 1..opening]),
+        owned(&lines[closing + 1..]),
+    )
+}
+
+/// A halt diff carries three lines of context on each side of its region,
+/// whatever `diff.context` says.
+///
+/// `diff.context` sets how many unchanged lines git shows around a change.
+/// Three is git's own default. At `diff.context=0`, git 2.55 gave this
+/// fixture a halt diff of 10 lines in place of 16, and the reader lost the
+/// lines that show where the region is in the file. The setting belongs to
+/// the developer, so without a pin one halt gives a different text on each
+/// machine.
+#[test]
+fn a_halt_diff_carries_three_lines_of_context_whatever_diff_context_says() {
+    /// The context lines git gives on each side of a change when no setting
+    /// says otherwise.
+    const DEFAULT_CONTEXT: usize = 3;
+    /// The prefix columns of a context line in a combined diff of two
+    /// parents: one space for each parent.
+    const CONTEXT_PREFIX: &str = "  ";
+
+    let repo = conflicting_repo_with("diff.context", "0");
+
+    let plain = plain_diff_at_a_real_halt(&repo, &["--no-color", "--diff-filter=U"]);
+    let (before, after) = lines_around_the_region(&plain.stdout);
+    assert!(
+        before.len() < DEFAULT_CONTEXT && after.len() < DEFAULT_CONTEXT,
+        "`diff.context=0` takes no context line out of plain `git diff`, so this test could \
+         only pass vacuously: {before:?} {after:?}"
+    );
+
+    let (_, halt) = merge_with_halt_diff(&repo);
+    let diff = halt
+        .diff()
+        .unwrap_or_else(|message| panic!("git gave no diff at the halt: {message}"));
+    let (before, after) = lines_around_the_region(diff);
+    assert_eq!(
+        (before.len(), after.len()),
+        (DEFAULT_CONTEXT, DEFAULT_CONTEXT),
+        "under `diff.context=0` the halt diff has to carry {DEFAULT_CONTEXT} lines of context \
+         on each side of the region: {}",
+        String::from_utf8_lossy(diff)
+    );
+    assert!(
+        before
+            .iter()
+            .chain(&after)
+            .all(|line| line.starts_with(CONTEXT_PREFIX)),
+        "each line around the region has to be a context line, with a space for each parent: \
+         {before:?} {after:?}"
     );
 }
