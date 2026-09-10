@@ -21,6 +21,9 @@
 //! a pipe, because a pipe usually goes to a file. Here the pipe goes to the
 //! wrapper, and the wrapper draws the bytes it reads on a terminal. So the tool
 //! must turn the color on again, and [`should_force_colors`] tells it when.
+//! [`should_force_colors_here`] asks that question of this process. It reads
+//! standard output and the environment, and it holds the two variables that
+//! refuse color and the rule for a width that `COLUMNS` states.
 //!
 //! # Why the answers stand in one crate
 //!
@@ -29,6 +32,10 @@
 //! this workspace can read one line of it. `wn` draws in the same terminal,
 //! under the same wrappers, so `wn` needs the same answers. The only way to
 //! reach them was to write them a second time.
+//!
+//! `grind` and `grime` paint the diff of a conflict by one rule. A copy of that
+//! rule in each tool is a fix that reaches one binary and misses the other, so
+//! [`should_force_colors_here`] holds the one copy.
 //!
 //! A second copy is worse than the one it replaces. The two copies agree on the
 //! plain input, and they part company at the edges. The edges hold the whole of
@@ -120,6 +127,9 @@ pub fn effective_terminal_height(
 /// a TTY *and* `COLUMNS` is set in env), and the user has not asked to
 /// suppress colors via `NO_COLOR`. The wrapper renders the captured bytes
 /// inside its own TTY-backed UI, so colors should pass through.
+///
+/// [`should_force_colors_here`] reads the three inputs from this process, and
+/// it counts `CLICOLOR=0` as a refusal beside `NO_COLOR`.
 #[must_use]
 pub fn should_force_colors(
     stdout_is_tty: bool,
@@ -210,7 +220,9 @@ pub fn should_force_colors_here() -> bool {
 /// because the read takes the variable as text. That is the rule of
 /// `termbar::TerminalWidth`, whose `stated_of` and `columns_of` hold it.
 fn states_a_width(value: Option<&str>) -> bool {
-    value.is_some()
+    value
+        .and_then(|value| value.parse::<u16>().ok())
+        .is_some_and(|columns| columns > 0)
 }
 
 /// Whether the user refused color, from whether `NO_COLOR` is set and from the
