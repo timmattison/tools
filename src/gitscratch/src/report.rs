@@ -1947,4 +1947,65 @@ mod tests {
             ],
         );
     }
+
+    /// The first byte of each color code, and of each other escape sequence.
+    const ESC: char = '\u{1b}';
+
+    /// The code that `colored` writes after the text of each painted line. It
+    /// resets the color and the style.
+    const RESET: &str = "\u{1b}[0m";
+
+    /// Each painted line of the halt diffs opens and closes its own color
+    /// codes, so no code spans a newline.
+    ///
+    /// A color code stays in effect until the next code. A line that leaves
+    /// its code open paints the lines after it, and a tool that cuts the
+    /// output into lines, such as `grep` or `head`, gets a line with no reset.
+    /// So the painter paints each line on its own. A painted line starts with
+    /// the code that opens it and ends with the reset, and those are the only
+    /// two ESC bytes on it. A plain line holds no code.
+    ///
+    /// Color is forced on, so the codes are there whatever the run writes to.
+    /// Which lines have paint comes from the typed paint of each line. So the
+    /// test compares the text that `render_diffs` writes with the paint that
+    /// `paint_diffs` gives.
+    #[test]
+    fn each_painted_line_opens_and_closes_its_own_color_codes() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+        let diffs = every_kind();
+
+        let paint = painted(report, &diffs);
+        let rendered = testcolor::with_forced_ansi(|| report.render_diffs(&diffs))
+            .expect("a replay that halted renders its halt diffs");
+        let lines: Vec<&str> = rendered.split('\n').collect();
+
+        assert_eq!(
+            lines.len(),
+            paint.len(),
+            "one printed line for each painted line:\n{rendered:?}"
+        );
+        for (printed, painted_line) in lines.iter().zip(&paint) {
+            if painted_line.is_plain() {
+                assert!(
+                    !printed.contains(ESC),
+                    "a plain line holds no color code: {printed:?}"
+                );
+            } else {
+                assert!(
+                    printed.starts_with("\u{1b}["),
+                    "a painted line opens its own code: {printed:?}"
+                );
+                assert!(
+                    printed.ends_with(RESET),
+                    "a painted line closes its own code: {printed:?}"
+                );
+                assert_eq!(
+                    printed.matches(ESC).count(),
+                    2,
+                    "a painted line holds the code that opens it and the reset, and no \
+                     other ESC: {printed:?}"
+                );
+            }
+        }
+    }
 }

@@ -2735,6 +2735,7 @@ dependencies = [
  "gitscratch",
  "pulldown-cmark",
  "tempfile",
+ "testcolor",
  "unicode-width",
 ]
 
