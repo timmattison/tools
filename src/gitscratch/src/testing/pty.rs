@@ -225,6 +225,13 @@ impl Pty {
     /// close theirs. A child that leaves a process behind with the terminal
     /// still open holds the read open for as long as that process lives.
     ///
+    /// The master end is read on a thread of its own, while the calling thread
+    /// reads standard error and then waits for the child. A child that writes
+    /// more than a buffer holds stops until somebody reads that buffer. A read
+    /// of one stream to its end before a read of the other therefore deadlocks
+    /// on output bigger than a buffer, and a wait before either read deadlocks
+    /// on less.
+    ///
     /// # Arguments
     /// * `command` - The command to start the child from. This method sets its
     ///   three standard streams, and the caller sets every other part of it.
@@ -249,21 +256,27 @@ impl Pty {
             .stderr(Stdio::piped());
 
         let Pty { master, slave } = self;
+        let reader = std::thread::spawn(move || read_until_hangup(master));
         let child = command.spawn();
 
         // Every copy of the slave end that this process holds closes here: the
         // copy that the command holds for standard output, and the copy that
-        // the terminal opened with. The child holds the rest.
+        // the terminal opened with. The child holds the rest. They close before
+        // the result of the spawn is read, so a child that did not start still
+        // ends the read, and the reader ends with it.
         drop(command);
         drop(slave);
 
         let child = child.unwrap_or_else(|error| panic!("the child must start: {error}"));
-        let stdout = read_until_hangup(master).unwrap_or_else(|error| {
-            panic!("the master end must give back what the child wrote: {error}")
-        });
         let finished = child
             .wait_with_output()
             .unwrap_or_else(|error| panic!("the wait for the child must succeed: {error}"));
+        let stdout = reader
+            .join()
+            .expect("the reader of the master end must not panic")
+            .unwrap_or_else(|error| {
+                panic!("the master end must give back what the child wrote: {error}")
+            });
 
         Output { stdout, ..finished }
     }
