@@ -625,6 +625,16 @@ impl Scratch {
         Ok(cost)
     }
 
+    /// [`Scratch::replay_merge`], and the halt diff of its one halt beside the
+    /// counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error in each case [`Scratch::replay_merge`] does.
+    pub fn replay_merge_with_diffs(&self, branch: &str) -> Result<(Conflicts, HaltDiffs)> {
+        Ok((self.replay_merge(branch)?, HaltDiffs::nothing_captured()))
+    }
+
     fn worktree_arg(&self) -> Result<&str> {
         self.worktree
             .to_str()

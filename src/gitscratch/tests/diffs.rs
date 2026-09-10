@@ -7,7 +7,8 @@
 use std::collections::BTreeSet;
 
 use gitscratch::testing::{
-    contested_region_repo, equal_hunks_unequal_stops_repo, modify_delete_repo,
+    conflicting_repo, contested_region_repo, equal_hunks_unequal_stops_repo,
+    independent_branches_repo, modify_delete_repo,
 };
 use gitscratch::{Conflicts, HaltDiff, HaltDiffs, Scratch, Stops};
 
@@ -273,5 +274,110 @@ fn a_modify_delete_halt_diff_names_the_file_as_an_unmerged_path() {
         lines.contains(&unmerged),
         "a file that one side deleted has no combined diff, so the halt diff has to name it with \
          `{unmerged}`: {lines:#?}"
+    );
+}
+
+/// A merge replay that conflicts captures one halt diff, and that halt diff
+/// names no stopped commit.
+///
+/// A merge makes one three-way merge and stops at it, so it halts once or not
+/// at all. [`conflicting_repo`] gives `left` and `right` one edit each to the
+/// same line of `shared.txt`, so the merge halts once. The halt diff of that
+/// halt is the combined diff of `shared.txt`, with the markers in it. A merge
+/// has no stopped commit, so the name is `None`.
+///
+/// The capture must change no count here either. So the `Conflicts` of the
+/// merge that captures must equal the `Conflicts` that the plain entrance
+/// gives on a fresh copy of the fixture.
+#[test]
+fn a_merge_replay_captures_one_halt_diff_that_names_no_stopped_commit() {
+    let repo = conflicting_repo();
+    let scratch = repo.scratch("left");
+
+    let (conflicts, diffs) = scratch
+        .replay_merge_with_diffs("right")
+        .expect("replay a merge of a branch that rewrites the same line and capture its halt diff");
+
+    assert_eq!(
+        diffs.len(),
+        1,
+        "a merge halts once or not at all, so a merge that conflicted has to give one halt diff: \
+         {diffs:?}"
+    );
+    assert_eq!(
+        Stops::new(diffs.len()),
+        conflicts.stops(),
+        "a merge that captures has one halt diff for each stop it counted"
+    );
+
+    let halt = diffs
+        .iter()
+        .next()
+        .expect("the one halt diff counted above");
+    assert_eq!(
+        halt.stopped(),
+        None,
+        "a merge has no stopped commit, so its halt diff names none"
+    );
+    let lines = diff_lines(halt);
+    let header = format!("{COMBINED_DIFF}shared.txt");
+    assert!(
+        lines.contains(&header),
+        "the merge conflicted in shared.txt, so the halt diff has to open with `{header}`: \
+         {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line == OPENING_MARKER),
+        "the halt diff has to show the region the merge conflicted in, from its \
+         `{OPENING_MARKER}` line: {lines:#?}"
+    );
+
+    let plain = conflicting_repo()
+        .scratch("left")
+        .replay_merge("right")
+        .expect("replay the same merge through the plain entrance");
+    assert_eq!(
+        conflicts, plain,
+        "the capture changed a count: the merge that captures and the plain merge have to measure \
+         one fixture the same way"
+    );
+}
+
+/// A replay that does not halt captures no halt diff, through either entrance.
+///
+/// A halt diff is the text of a halt, and a clean replay has no halt. A
+/// capture that runs where every replay passes, and not at a halt, gives a
+/// clean replay a halt diff of nothing. A reader then gets a section for a
+/// stop that did not happen. `alpha` and `beta` in
+/// [`independent_branches_repo`] each add a file of their own, so neither the
+/// rebase nor the merge halts.
+///
+/// The merge half is the one that can go wrong. A merge that git completes
+/// returns early, and a capture above that return runs for a clean merge too.
+#[test]
+fn a_replay_that_does_not_halt_captures_no_halt_diff() {
+    let repo = independent_branches_repo();
+
+    let (rebased, rebase_diffs) = replay_with_diffs(&repo.scratch("main"), "alpha", "beta");
+    assert!(
+        rebased.is_clean(),
+        "the fixture has to replay clean, or there is a halt here to capture: {rebased:?}"
+    );
+    assert!(
+        rebase_diffs.is_empty(),
+        "a rebase that did not stop has no halt, so it has no halt diff: {rebase_diffs:?}"
+    );
+
+    let (merged, merge_diffs) = repo
+        .scratch("alpha")
+        .replay_merge_with_diffs("beta")
+        .expect("replay a merge of a branch that touches other files");
+    assert!(
+        merged.is_clean(),
+        "the fixture has to merge clean, or there is a halt here to capture: {merged:?}"
+    );
+    assert!(
+        merge_diffs.is_empty(),
+        "a merge that git completed has no halt, so it has no halt diff: {merge_diffs:?}"
     );
 }
