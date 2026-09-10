@@ -1968,6 +1968,43 @@ fn diff_through_a_pipe_with_no_stated_width_is_plain() {
     );
 }
 
+/// A `COLUMNS` that holds no width states none. So a pipe with such a value is
+/// no wrapper, and the diff through it is plain.
+///
+/// `COLUMNS` states a width when it holds a number above zero that fits in a
+/// `u16`. `termbar::TerminalWidth` lays the breakdown out by that rule, and
+/// the color obeys the same rule. With an empty value, or with a value that is
+/// no number, the breakdown takes the width of the terminal, as with no
+/// `COLUMNS` at all. A run that paints for such a value reads a width in the
+/// variable for the color and no width in it for the layout. That is two
+/// answers to one question.
+#[test]
+fn diff_through_a_pipe_with_a_columns_that_states_no_width_is_plain() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    for value in ["", "wide"] {
+        let output = diff_through_a_pipe(&repo, &[(WIDTH_VARIABLE, Some(value))]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert_eq!(
+            output.status.code(),
+            Some(CONFLICTS),
+            "{WIDTH_VARIABLE}={value:?}\nstdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("stop 2 of 2"),
+            "the control: with {WIDTH_VARIABLE}={value:?}, the run printed the diff \
+             of both stops:\n{stdout}"
+        );
+        assert!(
+            !output.stdout.contains(&ESC),
+            "{WIDTH_VARIABLE}={value:?} states no width, so the pipe is no wrapper \
+             and the diff is plain:\n{stdout}"
+        );
+    }
+}
+
 /// `CLICOLOR_FORCE=1` paints the diff into any pipe. That is the rule of
 /// `colored` itself, and the pager recipe of the README rests on it:
 /// `CLICOLOR_FORCE=1 grind --diff main | less -R`.
