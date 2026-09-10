@@ -905,6 +905,41 @@ mod tests {
         ])
     }
 
+    /// The halt diff of a merge that conflicts in two files and stops on a
+    /// third file that one side deleted, as git 2.55 wrote it, less its last
+    /// newline.
+    ///
+    /// Real output. The `diff --cc` line of the second file follows the last
+    /// context line of the first file with no line between them. The
+    /// `* Unmerged path` line follows the hunk of the second file.
+    const THREE_FILES_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index af70335,ac05874..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,3 -1,3 +1,7 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        "++=======\n",
+        "+ FEAT\n",
+        "++>>>>>>> feature\n",
+        "  c\n",
+        "diff --cc g.txt\n",
+        "index 3402964,a741a09..0000000\n",
+        "--- a/g.txt\n",
+        "+++ b/g.txt\n",
+        "@@@ -1,3 -1,3 +1,7 @@@\n",
+        "  x\n",
+        "++<<<<<<< HEAD\n",
+        " +MAING\n",
+        "++=======\n",
+        "+ FEATG\n",
+        "++>>>>>>> feature\n",
+        "  z\n",
+        "* Unmerged path h.txt",
+    );
+
     /// Each line of the halt diffs as `report` paints it: its text, its color,
     /// and its style.
     ///
@@ -1782,6 +1817,58 @@ mod tests {
                 "--- a/f.txt".red(),
                 "+++ b/f.txt".green(),
                 "  c".normal(),
+            ],
+        );
+    }
+
+    /// A hunk ends at the first line that is not content, and the painter
+    /// reads that line again as a line outside each file.
+    ///
+    /// A halt diff that names two conflicted files puts the `diff --cc` line
+    /// of the second file straight after the last line of the first file. Git
+    /// writes no empty line between them, so a hunk has no end line of its
+    /// own. It ends at the first line whose prefix columns hold a character
+    /// that is not a space, a `+`, or a `-`. The `diff --cc` line then opens
+    /// the next file, and each header line of that file is bold. A painter
+    /// that stays in the hunk paints the `---` line red and the `+++` line
+    /// green. A `* Unmerged path` line after a hunk stands outside each file,
+    /// and it is plain.
+    #[test]
+    fn a_hunk_ends_at_the_first_line_that_is_not_content() {
+        let report = Report::for_tool("grime")
+            .describing("merging feature into HEAD")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(None, THREE_FILES_DIFF)]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --cc f.txt".bold(),
+                "index af70335,ac05874..0000000".bold(),
+                "--- a/f.txt".bold(),
+                "+++ b/f.txt".bold(),
+                "@@@ -1,3 -1,3 +1,7 @@@".cyan(),
+                "  a".normal(),
+                "++<<<<<<< HEAD".green(),
+                " +MAIN".green(),
+                "++=======".green(),
+                "+ FEAT".green(),
+                "++>>>>>>> feature".green(),
+                "  c".normal(),
+                "diff --cc g.txt".bold(),
+                "index 3402964,a741a09..0000000".bold(),
+                "--- a/g.txt".bold(),
+                "+++ b/g.txt".bold(),
+                "@@@ -1,3 -1,3 +1,7 @@@".cyan(),
+                "  x".normal(),
+                "++<<<<<<< HEAD".green(),
+                " +MAING".green(),
+                "++=======".green(),
+                "+ FEATG".green(),
+                "++>>>>>>> feature".green(),
+                "  z".normal(),
+                "* Unmerged path h.txt".normal(),
             ],
         );
     }
