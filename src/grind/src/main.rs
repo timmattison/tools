@@ -88,8 +88,15 @@ fn main() -> ExitCode {
 /// This function adds one rule, the rule of a wrapper. A wrapper such as
 /// `viddy(1)` gives this tool a pipe and states `COLUMNS`, and it shows the
 /// bytes that it reads on a terminal. `colored` sees only the pipe and writes
-/// no code, so the override turns color on for that shape. `NO_COLOR` refuses
-/// the override, as it refuses color everywhere else.
+/// no code, so the override turns color on for that shape.
+///
+/// Two variables refuse the override, because each one is a choice that the
+/// user made, and the rule of a wrapper extends only the case in which the
+/// user made none. `NO_COLOR`, with any value, refuses it as it refuses color
+/// everywhere else. `CLICOLOR=0` refuses it too, and `colored` reads that
+/// variable as off exactly when its value is the string `0`. Without the
+/// second check, the override paints over the choice of a user who set
+/// `CLICOLOR=0` and runs this tool in a wrapper.
 ///
 /// The override is `set_override(true)` or nothing. The answer of
 /// `should_force_colors` never goes to `set_override` directly. On a terminal
@@ -98,7 +105,8 @@ fn main() -> ExitCode {
 fn decide_color() {
     let stdout_is_tty = std::io::stdout().is_terminal();
     let columns_stated = std::env::var_os("COLUMNS").is_some();
-    let color_refused = std::env::var_os("NO_COLOR").is_some();
+    let color_refused = std::env::var_os("NO_COLOR").is_some()
+        || std::env::var("CLICOLOR").is_ok_and(|value| value == "0");
 
     if termwindow::should_force_colors(stdout_is_tty, columns_stated, color_refused) {
         #[allow(
