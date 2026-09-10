@@ -529,9 +529,9 @@ enum Position {
     Outside,
     /// Between the `diff ` line of a file and its first hunk header.
     Header,
-    /// In a hunk of a combined diff, whose content lines have two prefix
-    /// columns.
-    Hunk,
+    /// In a hunk, whose content lines have the number of prefix columns that
+    /// this holds.
+    Hunk(usize),
 }
 
 impl Position {
@@ -546,18 +546,18 @@ impl Position {
     /// hunk, and the painter reads it again as a line outside each file. So a
     /// `diff ` line after a hunk opens the next file.
     fn classify<'a>(&mut self, line: &'a str) -> DiffLine<'a> {
-        match *self {
-            Self::Outside if line.starts_with("diff ") => {
+        match (*self, hunk_columns(line)) {
+            (Self::Header | Self::Hunk(_), Some(columns)) => {
+                *self = Self::Hunk(columns);
+                DiffLine::HunkHeader(line)
+            }
+            (Self::Outside, _) if line.starts_with("diff ") => {
                 *self = Self::Header;
                 DiffLine::FileHeader(line)
             }
-            Self::Outside => DiffLine::Outside(line),
-            Self::Header | Self::Hunk if line.starts_with("@@") => {
-                *self = Self::Hunk;
-                DiffLine::HunkHeader(line)
-            }
-            Self::Header => DiffLine::FileHeader(line),
-            Self::Hunk => content(line).unwrap_or_else(|| {
+            (Self::Outside, _) => DiffLine::Outside(line),
+            (Self::Header, None) => DiffLine::FileHeader(line),
+            (Self::Hunk(columns), None) => content(line, columns).unwrap_or_else(|| {
                 *self = Self::Outside;
                 self.classify(line)
             }),
@@ -565,14 +565,32 @@ impl Position {
     }
 }
 
-/// `line` as a content line of a combined diff, or `None` when it is not one.
+/// The number of prefix columns of the hunk that `line` opens, or `None` when
+/// `line` opens no hunk.
 ///
-/// A content line of a combined diff has two prefix columns, one for each
-/// parent, and each column holds a space, a `+`, or a `-`. A `+` in a column
-/// means that the result holds the line and that parent does not. A `-` means
-/// that the parent holds the line and the result does not.
-fn content(line: &str) -> Option<DiffLine<'_>> {
-    let prefix: Vec<char> = line.chars().take(2).collect();
+/// A hunk header opens with one `@` more than its hunk has prefix columns:
+/// `@@@` in a combined diff of two parents, which has two columns, and `@@` in
+/// a diff of two files, which has one. A line with one `@` or none opens no
+/// hunk.
+fn hunk_columns(line: &str) -> Option<usize> {
+    let ats = line
+        .chars()
+        .take_while(|character| *character == '@')
+        .count();
+    ats.checked_sub(1).filter(|columns| *columns > 0)
+}
+
+/// `line` as a content line of a hunk with `columns` prefix columns, or `None`
+/// when it is not one.
+///
+/// A content line has one prefix column for each parent: two in a combined
+/// diff, one in a diff of two files. Each column holds a space, a `+`, or a
+/// `-`. A `+` in a column means that the result holds the line and that parent
+/// does not. A `-` means that the parent holds the line and the result does
+/// not. An empty line holds no character that breaks this rule, so it is
+/// context.
+fn content(line: &str, columns: usize) -> Option<DiffLine<'_>> {
+    let prefix: Vec<char> = line.chars().take(columns).collect();
     if !prefix
         .iter()
         .all(|column| matches!(column, ' ' | '+' | '-'))
