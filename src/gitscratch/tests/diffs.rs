@@ -4,12 +4,32 @@
 //! These pin the halt diffs beside the counts: one for each halt, in halt
 //! order, each one the text `git diff` shows at that halt.
 
-use gitscratch::testing::contested_region_repo;
+use std::collections::BTreeSet;
+
+use gitscratch::testing::{
+    contested_region_repo, equal_hunks_unequal_stops_repo, modify_delete_repo,
+};
 use gitscratch::{Conflicts, HaltDiff, HaltDiffs, Scratch, Stops};
 
 /// The commits of `iterated` in [`contested_region_repo`], in the order a
 /// rebase replays them.
 const ITERATED_COMMITS: [&str; 3] = ["iterated~2", "iterated~1", "iterated"];
+
+/// The start of the line that opens the combined diff of one file. The name
+/// of the file follows it.
+const COMBINED_DIFF: &str = "diff --cc ";
+
+/// The start of the line git prints for an unmerged file that has no combined
+/// diff. The name of the file follows it.
+const UNMERGED_PATH: &str = "* Unmerged path ";
+
+/// The line that opens a conflict region in a combined diff. Git labels our
+/// side `HEAD` at a rebase stop and at a merge halt alike.
+const OPENING_MARKER: &str = "++<<<<<<< HEAD";
+
+/// The start of the line that closes a conflict region in a combined diff.
+/// The label of the other side follows it.
+const CLOSING_MARKER: &str = "++>>>>>>> ";
 
 /// Check `branch` out detached in the scratch worktree, the way a consumer
 /// does before a rebase replay.
@@ -36,6 +56,39 @@ fn replay_with_diffs(scratch: &Scratch, branch: &str, onto: &str) -> (Conflicts,
     scratch
         .replay_rebase_with_diffs(onto)
         .expect("replay the branch onto the simulated base and capture the halt diffs")
+}
+
+/// The lines of one halt diff, decoded for an assertion.
+///
+/// Lossy, because an assertion reads text and every fixture here writes ASCII.
+/// The halt diff itself keeps the bytes git wrote.
+fn diff_lines(halt: &HaltDiff) -> Vec<String> {
+    let diff = halt
+        .diff()
+        .unwrap_or_else(|message| panic!("git gave no diff at this halt: {message}"));
+    String::from_utf8_lossy(diff)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The files one halt diff names.
+///
+/// A file is named by a `diff --cc <name>` line, which opens the combined diff
+/// of a file that git merged in part, or by a `* Unmerged path <name>` line,
+/// which git prints for an unmerged file that has no combined diff. Both are
+/// read at the start of a line. A content line of a combined diff starts with
+/// its prefix columns, each a space, a `+` or a `-`, so no line of file content
+/// can read as either of them.
+fn named_files(halt: &HaltDiff) -> BTreeSet<String> {
+    diff_lines(halt)
+        .iter()
+        .filter_map(|line| {
+            line.strip_prefix(COMBINED_DIFF)
+                .or_else(|| line.strip_prefix(UNMERGED_PATH))
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 /// A rebase replay that stops three times captures three halt diffs, in stop
@@ -93,5 +146,132 @@ fn a_rebase_replay_captures_one_halt_diff_per_stop_each_naming_its_stopped_commi
         conflicts, plain,
         "the capture changed a count: the replay that captures and the plain replay have to \
          measure one fixture the same way"
+    );
+}
+
+/// Each halt diff holds the conflict markers of the region its own stop
+/// conflicted in.
+///
+/// The replay stages the markers with `git add -A` before it continues, and
+/// after that line `git diff` shows nothing for the stop. So a capture below
+/// that line gives an empty halt diff at every stop, and this is the test that
+/// fails when the capture moves there.
+///
+/// The closing marker says whose region it is. Git labels it with the short
+/// id and the subject of the stopped commit, so the halt diff of the second
+/// stop holds `++>>>>>>> <id> (iterate 2)`. The markers that an earlier stop
+/// staged come back at a later stop as content, with one `+`, so a marker line
+/// with two is always the region of the stop that the halt diff belongs to.
+#[test]
+fn each_halt_diff_holds_the_markers_of_its_own_region() {
+    let repo = contested_region_repo();
+    let scratch = repo.scratch("main");
+    let git = scratch.testing_git();
+    let closing: Vec<String> = ITERATED_COMMITS
+        .iter()
+        .map(|commit| {
+            let label = git
+                .run("log", &["-1", "--format=%h (%s)", commit])
+                .expect("label a commit of iterated the way git labels a closing marker");
+            format!("{CLOSING_MARKER}{label}")
+        })
+        .collect();
+
+    let (_, diffs) = replay_with_diffs(&scratch, "iterated", "single");
+
+    assert_eq!(
+        diffs.len(),
+        closing.len(),
+        "the replay stops once for each commit of iterated, so it has to give one halt diff for \
+         each, or the assertions below look at fewer stops than there are: {diffs:?}"
+    );
+    for (stop, (halt, closing)) in (1..).zip(diffs.iter().zip(&closing)) {
+        let lines = diff_lines(halt);
+        assert!(
+            lines.iter().any(|line| line == OPENING_MARKER),
+            "the halt diff of stop {stop} has no `{OPENING_MARKER}` line, so it does not show the \
+             region that stop conflicted in: {lines:#?}"
+        );
+        assert!(
+            lines.contains(closing),
+            "the halt diff of stop {stop} has no `{closing}` line, so the region it shows is not \
+             the one its own stopped commit conflicted in: {lines:#?}"
+        );
+    }
+}
+
+/// Each halt diff names the files the breakdown counted at its stop, and no
+/// other file.
+///
+/// A halt diff that names a file the counter did not read, or leaves out a
+/// file the counter read, tells the reader a different story from the
+/// breakdown above it. `two` edits `x.txt` and `y.txt` in two commits, and
+/// `one` edits both, so the first stop conflicts in `x.txt` alone and the
+/// second stop in `y.txt` alone. A capture that reads more than the conflicted
+/// files, or that keeps the files of an earlier stop, names both files at one
+/// stop.
+#[test]
+fn each_halt_diff_names_the_files_the_breakdown_counted_at_its_stop() {
+    let repo = equal_hunks_unequal_stops_repo();
+    let scratch = repo.scratch("main");
+
+    let (conflicts, diffs) = replay_with_diffs(&scratch, "two", "one");
+
+    let named: Vec<BTreeSet<String>> = diffs.iter().map(named_files).collect();
+    assert_eq!(
+        named,
+        vec![
+            BTreeSet::from(["x.txt".to_owned()]),
+            BTreeSet::from(["y.txt".to_owned()]),
+        ],
+        "the first stop conflicts in x.txt alone and the second in y.txt alone, so each halt \
+         diff has to name that one file"
+    );
+
+    let counted: BTreeSet<String> = conflicts
+        .file_hunks()
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        named.into_iter().flatten().collect::<BTreeSet<_>>(),
+        counted,
+        "the halt diffs together have to name the files the breakdown counted, and no other file"
+    );
+}
+
+/// A file that git has no combined diff for is named as an unmerged path.
+///
+/// [`modify_delete_repo`] gives `branch` a change to `x.txt`, and `main`
+/// deletes that file. Git has no combined diff for a file that one side
+/// deleted, so at that stop `git diff` prints `* Unmerged path x.txt` and no
+/// hunk. The halt diff has to hold that line. If not, the reader gets a stop
+/// that the breakdown counts and that the diff says nothing about.
+#[test]
+fn a_modify_delete_halt_diff_names_the_file_as_an_unmerged_path() {
+    let repo = modify_delete_repo();
+    let scratch = repo.scratch("main");
+
+    let (conflicts, diffs) = replay_with_diffs(&scratch, "branch", "main");
+
+    assert_eq!(
+        conflicts
+            .file_hunks()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        vec!["x.txt".to_owned()],
+        "the fixture has to stop on a conflict in x.txt, or there is nothing here to name"
+    );
+    assert_eq!(
+        diffs.len(),
+        1,
+        "one commit stops the rebase once, so the replay has to give one halt diff: {diffs:?}"
+    );
+
+    let unmerged = format!("{UNMERGED_PATH}x.txt");
+    let lines = diffs.iter().flat_map(diff_lines).collect::<Vec<_>>();
+    assert!(
+        lines.contains(&unmerged),
+        "a file that one side deleted has no combined diff, so the halt diff has to name it with \
+         `{unmerged}`: {lines:#?}"
     );
 }

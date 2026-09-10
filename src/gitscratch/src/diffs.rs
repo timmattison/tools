@@ -110,3 +110,71 @@ impl HaltDiffs {
         self.halts.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use super::HaltDiff;
+    use crate::git::{Git, NoInheritedGitEnvironment};
+    use crate::repo::PREFLIGHT_HOOKS_PATH;
+    use crate::testing::not_a_repository;
+
+    /// The name the test gives the capture, so that it can read the name back.
+    const STOPPED: &str = "abc1234 a stopped commit";
+
+    /// A diff call that fails leaves git's own words in the halt diff, and the
+    /// capture still gives a halt diff.
+    ///
+    /// The capture must never fail the replay, because the counts must not
+    /// depend on the diff. So a diff that git does not give is not an error of
+    /// the replay. It is the content of that one halt diff, and the reader
+    /// learns the cause from git. A directory that is not a repository is the
+    /// plain way to make `git diff` fail.
+    ///
+    /// The control makes plain git fail the same way first, and reads the
+    /// first line git writes about it. The assertion compares against that
+    /// line and not against a sentence written here, so it holds in each
+    /// language that git speaks.
+    #[test]
+    fn a_diff_call_that_fails_leaves_git_s_own_words_in_the_halt_diff() {
+        let outside = not_a_repository();
+
+        let refused = Command::new("git")
+            .arg("diff")
+            .current_dir(outside.path())
+            .without_inherited_git_environment()
+            .output()
+            .expect("spawn git diff outside a repository");
+        assert!(
+            !refused.status.success(),
+            "git gave a diff outside a repository, so nothing here makes the diff call fail and \
+             the assertion below is measured against nothing"
+        );
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        let first_words = stderr
+            .lines()
+            .next()
+            .expect("git says why it refused the diff");
+
+        let halt = HaltDiff::capture(
+            &Git::new(outside.path(), PREFLIGHT_HOOKS_PATH),
+            Some(STOPPED.to_owned()),
+        );
+
+        assert_eq!(
+            halt.stopped(),
+            Some(STOPPED),
+            "the capture keeps the name it was given, whatever git said about the diff"
+        );
+        let message = halt.diff().expect_err(
+            "git gave no diff outside a repository, so the halt diff has to hold the error in the \
+             place of a diff",
+        );
+        assert!(
+            message.contains(first_words),
+            "the halt diff has to carry git's own account of the failure, `{first_words}`, got: \
+             {message}"
+        );
+    }
+}
