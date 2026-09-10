@@ -1336,6 +1336,45 @@ fn a_run_from_a_subdirectory_names_conflicts_from_the_repository_root() {
     );
 }
 
+/// The flag that asks for the diff of the halt after the breakdown.
+///
+/// A constant, because every test of the diff names it.
+const DIFF_FLAG: &str = "--diff";
+
+/// `--diff` adds the diff of the halt, and a clean merge has no halt. So a
+/// clean run prints the same bytes with the flag and without it, and it answers
+/// with the same code.
+///
+/// The raw bytes are compared, not the trimmed text, because an empty line
+/// after the verdict is the one thing a wrong implementation adds here. The run
+/// without the flag is also held to the clean verdict. Without that control,
+/// two runs that both print nothing agree and prove nothing.
+#[test]
+fn diff_on_a_clean_merge_prints_the_same_bytes_as_a_run_without_it() {
+    let repo = independent_branches_repo();
+
+    let plain = run_raw(&repo, "alpha", &["beta"]);
+    let with_diff = run_raw(&repo, "alpha", &[DIFF_FLAG, "beta"]);
+    let (code, stdout, stderr) = streams(&with_diff);
+
+    assert_eq!(
+        code,
+        Some(CLEAN),
+        "--diff adds words and changes no answer, and this merge is clean\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&plain.stdout),
+        "grime: clean - merging beta into HEAD hit no conflicts\n",
+        "the control: the run without --diff gives the clean verdict"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&with_diff.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "a clean merge has no halt, so --diff has no diff to add\nstderr:\n{stderr}"
+    );
+}
+
 /// Which of `grime`'s streams is handed a pipe nobody is reading.
 #[derive(Debug, Clone, Copy)]
 enum Unread {
