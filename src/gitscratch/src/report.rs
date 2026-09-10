@@ -1237,4 +1237,54 @@ mod tests {
             Some(format!("\nstop 1 of 1\n{MERGE_DIFF}"))
         );
     }
+
+    /// A control character in a halt diff comes out as `\u{...}`, and each
+    /// character that makes a diff lines of text stays.
+    ///
+    /// File content can hold any byte. An ESC in a file is an escape sequence
+    /// that the file hands to the terminal of the person who ran the tool. So
+    /// the rule of the breakdown applies, and each control character comes out
+    /// as `\u{...}`. Three characters stay, because a diff is lines of text: a
+    /// newline, a tab, and a carriage return immediately before a newline,
+    /// which is a CRLF line ending. Each other carriage return comes out as
+    /// `\u{d}`, the one at the very end of a halt diff too. Bytes that are not
+    /// UTF-8 come out as U+FFFD, and nothing panics.
+    #[test]
+    fn a_control_character_in_a_halt_diff_is_escaped_and_each_line_ending_stays() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let captured: &[u8] = b"+esc \x1b[31mred\x1b[m\n\
+            +tab\there\n\
+            +crlf\r\n\
+            +lone\rreturn\n\
+            +bad \xff byte\n";
+        let diffs = HaltDiffs::from_halts([
+            HaltDiff::from_parts(None, Ok(captured)),
+            HaltDiff::from_parts(None, Ok(b"+end\r")),
+        ]);
+
+        let rendered = report
+            .render_diffs(&diffs)
+            .expect("a replay that halted twice renders its halt diffs");
+
+        assert_eq!(
+            rendered,
+            [
+                "",
+                r"+esc \u{1b}[31mred\u{1b}[m",
+                "+tab\there",
+                "+crlf\r",
+                r"+lone\u{d}return",
+                "+bad \u{fffd} byte",
+                "",
+                r"+end\u{d}",
+            ]
+            .join("\n")
+        );
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "an ESC out of a repository must never reach a terminal: {rendered:?}"
+        );
+    }
 }
