@@ -46,7 +46,12 @@ struct Args {
     quiet: bool,
 
     /// Print the diff of the one halt of the merge after the breakdown
-    #[clap(long)]
+    ///
+    // A request for the diff and a request for no output contradict each
+    // other, so clap refuses the pair with its usage error and exit 2. A tool
+    // that obeys one of the two in silence surprises the caller who gave the
+    // other.
+    #[clap(long, conflicts_with = "quiet")]
     diff: bool,
 }
 
@@ -208,7 +213,8 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // constant, as the stop count does.
     //
     // Through `Console::verdict` like the verdict, so `-q` reaches it and a
-    // failed write costs the words and never the exit code.
+    // failed write costs the words and never the exit code. clap refuses `-q`
+    // with `--diff`, so the reach of `-q` here is a second guard.
     if let Some(text) = diffs.and_then(|diffs| report.render_diffs(&diffs)) {
         console.verdict(&text);
     }
