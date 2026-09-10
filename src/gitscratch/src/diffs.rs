@@ -17,11 +17,22 @@ use crate::git::Git;
 
 /// The arguments of the diff call at a halt, after the subcommand `diff`.
 ///
+/// The global configuration of the developer reaches the runner, and some of
+/// its settings change the text of a diff. Each flag above the last one pins
+/// such a setting, so one halt gives the same halt diff on each machine. A
+/// test in `tests/diffs.rs` holds each pin against its setting.
+///
 /// `--diff-filter=U` makes the diff name the files that the counter reads, and
 /// no other file. The counter reads `git diff --name-only --diff-filter=U`, so
 /// with the same filter on the diff call, the halt diff and the breakdown
 /// cannot name different files.
-const DIFF_AT_HALT: &[&str] = &["--diff-filter=U"];
+const DIFF_AT_HALT: &[&str] = &[
+    // `color.ui=always` and `color.diff=always` put color codes into the text,
+    // although git writes to a pipe. A renderer cannot tell such a code from
+    // an ESC byte in the file, and the renderer paints the diff itself.
+    "--no-color",
+    "--diff-filter=U",
+];
 
 /// The text `git diff` shows at one halt of a replay.
 ///

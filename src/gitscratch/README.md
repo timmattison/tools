@@ -109,11 +109,14 @@ two count the same halts the same way.
 
 At a rebase stop, the capture sits above the `git add -A` that stages the
 markers, because after that line `git diff` shows nothing for the stop. A
-capture below it gives an empty halt diff at every stop. The diff call is
-`git diff --diff-filter=U`, the filter the counter reads the conflicted files
-with, so a halt diff names the files the breakdown counts at that halt and no
-other file. A diff that git cannot give does not stop the replay. The halt diff
-holds git's error in its place, and the counts and the exit code stay the same.
+capture below it gives an empty halt diff at every stop. The diff call carries
+`--diff-filter=U`, the filter the counter reads the conflicted files with, so a
+halt diff names the files the breakdown counts at that halt and no other file.
+Its other flags pin the settings of the developer that change the text of a
+diff, so one halt gives the same bytes on each machine.
+[What it guarantees](#what-it-guarantees) lists each pin. A diff that git
+cannot give does not stop the replay. The halt diff holds git's error in its
+place, and the counts and the exit code stay the same.
 
 `HaltDiff::from_parts` and `HaltDiffs::from_halts` build halt diffs by hand for
 the tests of a renderer. The `testing` feature gates them the way it gates
@@ -665,6 +668,7 @@ because it quietly discarded the work.
 | `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated_paths`'s job or `Git::paths`'s, and reading one path is `Git::path`'s (all three above), and this narrows what a call site that reaches around them can get wrong. |
 | `merge.conflictStyle=merge` | The count has to mean the same thing on every machine. All three styles open and close a conflict region with the same markers, so a region whose two sides carry no bracket line of their own costs one hunk under any of them. What `diff3` and `zdiff3` add is the **base** version of the region, between a `|||||||` line and the `=======` one — so a base carrying a line that reads as a marker lands inside the region under those two and outside it under `merge`. The replay then measures a different file on a developer who set the key, and `grist` ranks candidates on that count: two developers comparing the same branches read two orders and neither is told why. Read out of a real merge rather than from git's documentation. |
 | `merge.verifySignatures=false` | The two rows about signing above cover a replay asked to *make* a signature; this one covers a replay asked to **read** one. `merge.verifySignatures` is consulted by `git merge` alone, so a developer who turns it on leaves the rebase replay untouched and breaks the merge replay outright: git 2.55 exits 128 with `fatal: Commit <sha> does not have a GPG signature.` for any branch that carries no signature, which is nearly every branch, and it leaves no unmerged path behind it. The merge replay reads that empty path list as its own "the merge failed and left nothing to resolve" — neither a cost nor a clean replay — so `grime` answers exit 2, "I cannot tell you", for every unsigned branch on that machine. Read out of a real merge rather than from git's documentation. |
+| `--no-color` on the diff call of a halt diff | `color.ui=always` or `color.diff=always` makes git write color codes into `git diff`, although git writes to a pipe. Watched on git 2.55: each setting alone puts a code on each line of the halt diff. A renderer cannot tell such a code from an ESC byte in the file. So it escapes both, and the reader sees `\u{1b}[1m` in place of a color. The renderer paints the diff itself, so the capture stays plain. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the
