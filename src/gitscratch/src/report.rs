@@ -1219,4 +1219,22 @@ mod tests {
 
         assert_eq!(report.render_diffs(&merge), Some(format!("\n{MERGE_DIFF}")));
     }
+
+    /// A halt with no stopped commit, on a report that shows stops, gets a
+    /// heading that names the stop alone.
+    ///
+    /// A merge has no stopped commit. `grime` removes the headings, but a
+    /// report that shows stops still words the heading of such a halt. The
+    /// text `stop 1 of 1 - ` with nothing after the dash is a hole in the
+    /// line, the same defect that an unworded report cannot print.
+    #[test]
+    fn a_halt_with_no_stopped_commit_gets_a_heading_that_names_the_stop_alone() {
+        let report = Report::for_tool("grime").describing("merging feature into HEAD");
+        let merge = HaltDiffs::from_halts([as_git_wrote_it(None, MERGE_DIFF)]);
+
+        assert_eq!(
+            report.render_diffs(&merge),
+            Some(format!("\nstop 1 of 1\n{MERGE_DIFF}"))
+        );
+    }
 }
