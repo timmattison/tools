@@ -195,7 +195,17 @@ fn every_run_states_the_width_of_its_terminal_so_no_golden_reads_the_window() {
 ///
 /// A constant, because the test below reads each name back off the built
 /// command.
-const COLOR_VARIABLES: [&str; 3] = ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE"];
+const COLOR_VARIABLES: [&str; 3] = [NO_COLOR, CLICOLOR, CLICOLOR_FORCE];
+
+/// The variable that turns color off, whatever value it holds.
+const NO_COLOR: &str = "NO_COLOR";
+
+/// The variable that turns color off when it holds `0`.
+const CLICOLOR: &str = "CLICOLOR";
+
+/// The variable that turns color on when it holds a value other than `0`, also
+/// into a pipe, and whatever `NO_COLOR` says.
+const CLICOLOR_FORCE: &str = "CLICOLOR_FORCE";
 
 /// Whether `command` takes `name` away from the environment that the child
 /// inherits.
@@ -1453,6 +1463,110 @@ fn diff_on_a_clean_replay_prints_the_same_bytes_as_a_run_without_it() {
         String::from_utf8_lossy(&with_diff.stdout),
         String::from_utf8_lossy(&plain.stdout),
         "a clean replay has no stop, so --diff has no diff to add\nstderr:\n{stderr}"
+    );
+}
+
+/// The short id of `revision` in `repo`, at the length that a replay writes.
+///
+/// The runner of `gitscratch` pins `core.abbrev=auto`, so every id that a
+/// replay prints has git's default length. The fixture's own git does not
+/// carry that pin, and a developer whose global config sets `core.abbrev` gets
+/// ids of another length from it. So this call states the pin too, and the
+/// expected text agrees with the run on every machine.
+fn short_id(repo: &TestRepo, revision: &str) -> String {
+    repo.git(&["-c", "core.abbrev=auto", "rev-parse", "--short", revision])
+}
+
+/// Stand on `two` in [`equal_hunks_unequal_stops_repo`] and replay it onto
+/// `one`. The rebase stops twice, once for each commit of `two`, and each stop
+/// conflicts in one file: `x.txt`, then `y.txt`.
+///
+/// `--diff` prints the verdict exactly as a run without the flag prints it,
+/// then an empty line, then one section for each stop, in stop order. A
+/// section is the stop heading, which names the stopped commit, and the diff
+/// that `git diff` shows at that stop. Two sections have one empty line
+/// between them.
+///
+/// The golden is the whole of stdout, byte for byte, with `NO_COLOR` set so
+/// the text is plain. Each commit id and blob id in it comes from the
+/// fixture's own git through [`short_id`]. A commit records the time, so the
+/// ids change each time the fixture is built. The all-zero id is the result,
+/// which is not in the object store yet. The text after the second `@@@` of a
+/// hunk header is the function context that git finds for the hunk.
+///
+/// The exit code is [`CONFLICTS`], the code of the same run without `--diff`.
+/// The diff adds words and changes no answer.
+#[test]
+fn diff_on_a_conflict_prints_the_verdict_then_the_diff_of_each_stop() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.checkout("two");
+
+    let x_commit = short_id(&repo, "two~1");
+    let y_commit = short_id(&repo, "two");
+    let x_ours = short_id(&repo, "one:x.txt");
+    let x_theirs = short_id(&repo, "two~1:x.txt");
+    let y_ours = short_id(&repo, "one:y.txt");
+    let y_theirs = short_id(&repo, "two:y.txt");
+
+    let output = grind_command(repo.path(), &[DIFF_FLAG, "one"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the replay conflicts, so the answer is {CONFLICTS} with the diff as \
+         without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "grind: conflicts - replaying HEAD onto one
+       2 hunks across 2 files, 2 stops
+
+  x.txt    1 hunk
+  y.txt    1 hunk
+
+stop 1 of 2 - {x_commit} two edits x
+diff --cc x.txt
+index {x_ours},{x_theirs}..0000000
+--- a/x.txt
++++ b/x.txt
+@@@ -12,7 -12,7 +12,11 @@@ line1
+  line12
+  line13
+  line14
+++<<<<<<< HEAD
+ +one-x
+++=======
++ two-x
+++>>>>>>> {x_commit} (two edits x)
+  line16
+  line17
+  line18
+
+stop 2 of 2 - {y_commit} two edits y
+diff --cc y.txt
+index {y_ours},{y_theirs}..0000000
+--- a/y.txt
++++ b/y.txt
+@@@ -12,7 -12,7 +12,11 @@@ line1
+  line12
+  line13
+  line14
+++<<<<<<< HEAD
+ +one-y
+++=======
++ two-y
+++>>>>>>> {y_commit} (two edits y)
+  line16
+  line17
+  line18
+"
+        ),
+        "stderr:\n{stderr}"
     );
 }
 
