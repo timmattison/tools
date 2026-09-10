@@ -2005,6 +2005,57 @@ mod tests {
         );
     }
 
+    /// The marker of a last line with no newline belongs to its hunk.
+    ///
+    /// In a diff of two files, git writes `\ No newline at end of file` under a
+    /// content line whose file ends without a newline. The lines after the
+    /// marker are still content of the same hunk: here the added line comes
+    /// after the marker of the removed one. A painter that ends the hunk at the
+    /// marker paints that added line plain, as a line outside each file.
+    ///
+    /// A content line starts with a space, a `+`, or a `-`, so a line that
+    /// starts with a backslash is never content. Git paints the marker with the
+    /// color of context, which is plain.
+    ///
+    /// The halt diff is written by hand. Git 2.55 writes no such marker in a
+    /// combined diff, so a halt diff that git captured cannot hold one.
+    #[test]
+    fn the_marker_of_a_last_line_with_no_newline_does_not_end_the_hunk() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let diffs = HaltDiffs::from_halts([as_git_wrote_it(
+            None,
+            concat!(
+                "diff --git a/f.txt b/f.txt\n",
+                "index 1111111..2222222 100644\n",
+                "--- a/f.txt\n",
+                "+++ b/f.txt\n",
+                "@@ -1 +1 @@\n",
+                "-old\n",
+                "\\ No newline at end of file\n",
+                "+new\n",
+                "\\ No newline at end of file",
+            ),
+        )]);
+
+        assert_paint(
+            &painted(report, &diffs),
+            &[
+                "".normal(),
+                "diff --git a/f.txt b/f.txt".bold(),
+                "index 1111111..2222222 100644".bold(),
+                "--- a/f.txt".bold(),
+                "+++ b/f.txt".bold(),
+                "@@ -1 +1 @@".cyan(),
+                "-old".red(),
+                "\\ No newline at end of file".normal(),
+                "+new".green(),
+                "\\ No newline at end of file".normal(),
+            ],
+        );
+    }
+
     /// The first byte of each color code, and of each other escape sequence.
     const ESC: char = '\u{1b}';
 
