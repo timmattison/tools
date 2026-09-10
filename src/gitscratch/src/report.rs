@@ -13,9 +13,13 @@
 //! spec-sanctioned acceptance of a little presentation logic in a library: the
 //! alternative is two copies of it.
 //!
-//! The only difference the two tools are allowed is captured by
-//! [`Report::without_stops`] - a merge halts exactly once, so printing the
-//! number would be noise.
+//! The only difference the two tools are allowed is [`Report::without_stops`].
+//! A merge halts exactly once, so its stop count is noise, and so is the stop
+//! heading above its halt diff. `without_stops` removes both.
+//!
+//! [`Report::render_diffs`] writes the halt diffs of a replay, for a tool that
+//! runs with `--diff`. They are text for the same reader, from the same two
+//! tools, so their renderer is here for the same reason.
 //!
 //! Two types, because a verdict is worded in two steps and only the second step
 //! makes something to print. [`Report::for_tool`] names the tool and hands back
@@ -204,12 +208,18 @@ impl<'a> Report<'a> {
         UnwordedReport { tool }
     }
 
-    /// Drop the stop count from the summary.
+    /// Drop the stop count from the summary, and the stop headings from the
+    /// halt diffs.
     ///
     /// A merge halts exactly once, so the number carries no information for
     /// `grime` and printing it would invite a reader to compare a constant
     /// against `grind`'s real measurement. [`Conflicts`] still records it; this
     /// only decides whether it is worth saying out loud.
+    ///
+    /// The heading above each halt diff that [`Report::render_diffs`] writes
+    /// carries the same number. A merge has one halt and no stopped commit, so
+    /// its heading, `stop 1 of 1`, tells the reader nothing. This removes the
+    /// headings, and each other line of the halt diffs stays.
     ///
     /// Takes `self` and leaves the original usable, because [`Report`] is
     /// `Copy`: a caller wanting both wordings of the same verdict gets them
@@ -381,12 +391,14 @@ impl<'a> Report<'a> {
         for (index, halt) in diffs.iter().enumerate() {
             lines.push(DiffLine::Gap.render());
 
-            let heading = format!(
-                "stop {} of {stops} - {}",
-                index + 1,
-                halt.stopped().unwrap_or_default()
-            );
-            lines.push(DiffLine::Heading(&heading).render());
+            if self.show_stops {
+                let heading = format!(
+                    "stop {} of {stops} - {}",
+                    index + 1,
+                    halt.stopped().unwrap_or_default()
+                );
+                lines.push(DiffLine::Heading(&heading).render());
+            }
 
             let body = String::from_utf8_lossy(halt.diff().unwrap_or_default());
             lines.extend(
