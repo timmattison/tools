@@ -434,7 +434,7 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::{Report, FILE_INDENT};
-    use crate::diffs::HaltDiffs;
+    use crate::diffs::{HaltDiff, HaltDiffs};
     use crate::metrics::{Stops, Uncommitted};
     use crate::scratch::Conflicts;
 
@@ -526,6 +526,77 @@ mod tests {
             [file("src/lib.rs", 3), file("src/main.rs", 1)],
             Stops::new(3),
         )
+    }
+
+    /// The stopped commit of stop 1 in the example of GitHub issue #475.
+    const STOP_ONE: &str = "6ee2c41 feat one";
+
+    /// The stopped commit of stop 2 in the same example.
+    const STOP_TWO: &str = "9910691 feat two";
+
+    /// The halt diff of stop 1 in the example of GitHub issue #475, as git
+    /// 2.55 wrote it, less its last newline.
+    ///
+    /// Real output and not a sketch of it, so the tests hold the shapes that a
+    /// combined diff really has: two prefix columns, a context line that
+    /// starts with two spaces, and a `* Unmerged path` line after the last
+    /// hunk.
+    const STOP_ONE_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index a5f1be7,60b32f6..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,5 -1,5 +1,9 @@@\n",
+        "  a\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        "++=======\n",
+        "+ FEAT1\n",
+        "++>>>>>>> 6ee2c41 (feat one)\n",
+        "  c\n",
+        "  d\n",
+        "  e\n",
+        "* Unmerged path g.txt",
+    );
+
+    /// The halt diff of stop 2 in the same example, less its last newline.
+    ///
+    /// The markers that the replay staged at stop 1 are content here: the
+    /// lines with one `+`.
+    const STOP_TWO_DIFF: &str = concat!(
+        "diff --cc f.txt\n",
+        "index 1edf9f2,a1ec13b..0000000\n",
+        "--- a/f.txt\n",
+        "+++ b/f.txt\n",
+        "@@@ -1,9 -1,5 +1,13 @@@\n",
+        "  a\n",
+        " +<<<<<<< HEAD\n",
+        "++<<<<<<< HEAD\n",
+        " +MAIN\n",
+        " +=======\n",
+        " +FEAT1\n",
+        " +>>>>>>> 6ee2c41 (feat one)\n",
+        "++=======\n",
+        "+ FEAT2\n",
+        "++>>>>>>> 9910691 (feat two)\n",
+        "  c\n",
+        "  d\n",
+        "  e",
+    );
+
+    /// A halt diff as git writes it: `text`, then the newline that ends its
+    /// last line.
+    fn as_git_wrote_it(stopped: Option<&str>, text: &str) -> HaltDiff {
+        HaltDiff::from_parts(stopped, Ok(format!("{text}\n").as_bytes()))
+    }
+
+    /// The two stops of the rebase in the example of GitHub issue #475, in
+    /// stop order.
+    fn two_stops() -> HaltDiffs {
+        HaltDiffs::from_halts([
+            as_git_wrote_it(Some(STOP_ONE), STOP_ONE_DIFF),
+            as_git_wrote_it(Some(STOP_TWO), STOP_TWO_DIFF),
+        ])
     }
 
     #[test]
@@ -981,5 +1052,31 @@ mod tests {
 
         assert_eq!(grind.render_diffs(&nothing), None);
         assert_eq!(grime.render_diffs(&nothing), None);
+    }
+
+    /// Each halt gets one section, in halt order: its heading, then the text
+    /// `git diff` showed there.
+    ///
+    /// Asserted as one block, as the verdict is, because the empty lines are
+    /// the contract as much as the words. The block starts with an empty line,
+    /// which separates it from the breakdown. One empty line separates two
+    /// sections. The block ends with no newline, because `Console::verdict`
+    /// writes one. The last newline of each halt diff goes, so a section ends
+    /// on the last line that git wrote.
+    #[test]
+    fn each_halt_gets_a_section_with_its_heading_and_its_diff_in_halt_order() {
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+
+        let expected = [
+            String::new(),
+            format!("stop 1 of 2 - {STOP_ONE}"),
+            STOP_ONE_DIFF.to_owned(),
+            String::new(),
+            format!("stop 2 of 2 - {STOP_TWO}"),
+            STOP_TWO_DIFF.to_owned(),
+        ]
+        .join("\n");
+
+        assert_eq!(report.render_diffs(&two_stops()), Some(expected));
     }
 }
