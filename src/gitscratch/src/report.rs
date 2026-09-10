@@ -1403,4 +1403,37 @@ mod tests {
 
         assert_eq!(report.render_diffs(&diffs), Some(expected));
     }
+
+    /// The last newline of a halt diff goes, and no other character.
+    ///
+    /// Git ends the text of a diff with a newline, and `Console::verdict`
+    /// writes one after the block, so the last newline of the halt diff has to
+    /// go. A trim removes more. A halt diff whose last line is empty keeps that
+    /// line. The empty context line of a combined diff is two spaces, and both
+    /// stay. A halt diff that ends with no newline loses nothing. The last line
+    /// of a CRLF file keeps its carriage return, because the escape runs before
+    /// the newline goes. The newline after the block then makes the CRLF again.
+    #[test]
+    fn a_halt_diff_loses_its_last_newline_and_nothing_else() {
+        let report = Report::for_tool("grind")
+            .describing("replaying HEAD onto main")
+            .without_stops();
+        let cases: [(&[u8], &str); 4] = [
+            (b"x\n\n", "\nx\n"),
+            (b"x", "\nx"),
+            (b"  a\n  \n", "\n  a\n  "),
+            (b"+last\r\n", "\n+last\r"),
+        ];
+
+        for (captured, expected) in cases {
+            let diffs = HaltDiffs::from_halts([HaltDiff::from_parts(None, Ok(captured))]);
+
+            assert_eq!(
+                report.render_diffs(&diffs).as_deref(),
+                Some(expected),
+                "the halt diff {:?} has to lose its last newline and nothing else",
+                String::from_utf8_lossy(captured)
+            );
+        }
+    }
 }
