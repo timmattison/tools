@@ -82,20 +82,34 @@ beside each plain entrance:
 ```rust
 let (conflicts, diffs) = scratch.replay_rebase_with_diffs("main")?;
 for halt in diffs.iter() {
-    // The stopped commit: its short id and its subject. A merge halt has none.
-    let heading = halt.stopped().unwrap_or("the merge");
+    // `Some` at a rebase stop: the short id and the subject of the stopped
+    // commit. A merge halt has none.
+    let named = halt.stopped().is_some();
     match halt.diff() {
         // The bytes git wrote, not trimmed and not decoded.
-        Ok(bytes) => println!("{heading}\n{}", String::from_utf8_lossy(bytes)),
-        // Git gave no diff. The halt still counts.
-        Err(message) => println!("{heading}\ndiff not available: {message}"),
+        Ok(bytes) => println!("named: {named}, diff: {} bytes", bytes.len()),
+        // Git gave no diff, and the message from git is here. The halt still
+        // counts.
+        Err(_message) => println!("named: {named}, no diff"),
     }
+}
+
+// The name, the diff and the message are text out of the repository. The
+// renderer escapes them, so no escape sequence in them gets to the terminal.
+let report = Report::for_tool("grind").describing("replaying HEAD onto main");
+if let Some(text) = report.render_diffs(&diffs) {
+    println!("{text}");
 }
 
 let (conflicts, diffs) = Repo::open(repo_path)?
     .scratch("HEAD")?
     .replay_merge_with_diffs("feature")?;
 ```
+
+The loop prints only values that hold no text out of the repository, because a
+commit subject can hold an ESC, and so can file content and the message from
+git. [The halt diffs](#the-halt-diffs) gives the rules of
+`Report::render_diffs` and the text that it gives.
 
 The capture is opt-in. `replay_rebase` and `replay_merge` keep their
 signatures and their cost, and capture nothing. `grist` calls `replay_rebase`
@@ -280,7 +294,8 @@ It returns git's stdout as the bytes git wrote, not trimmed and not decoded.
 When git exits non-zero, it returns an error that carries git's stderr. The
 halt diff is text that goes to a person verbatim, and each other reader changes
 it: `run` trims and decodes, the list readers split on NUL, and `path` removes
-a newline. The caller that prints the diff decodes it at print time.
+a newline. `Report::render_diffs` decodes the diff at print time, and it
+escapes the diff, so no escape sequence in it gets to the terminal.
 
 ## The pre-flight
 

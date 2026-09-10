@@ -382,8 +382,12 @@ impl Scratch {
     ///     .expect("a scratch worktree");
     /// scratch.check_out_detached("feature").expect("a checkout");
     /// let (conflicts, diffs) = scratch.replay_rebase_with_diffs("main").expect("a replay");
-    /// for halt in diffs.iter() {
-    ///     println!("{}", halt.stopped().unwrap_or("a merge"));
+    /// let report = gitscratch::Report::for_tool("grind").describing("replaying HEAD onto main");
+    /// println!("{}", report.render(&conflicts));
+    /// // A commit subject and file content can hold an ESC. The renderer
+    /// // escapes it, so no escape sequence gets to the terminal.
+    /// if let Some(text) = report.render_diffs(&diffs) {
+    ///     println!("{text}");
     /// }
     /// ```
     ///

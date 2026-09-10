@@ -61,11 +61,18 @@ const DIFF_AT_HALT: &[&str] = &[
 /// no name, because a merge has no stopped commit.
 ///
 /// The diff is bytes, not text: the stdout of the diff call, byte for byte, not
-/// trimmed and not decoded. File content can hold bytes that are not UTF-8, so
-/// a caller that prints the diff converts it at print time, as a caller that
-/// prints a conflicted name does. When git gives no diff, the halt diff holds
-/// the error text in its place. The replay does not stop for that error,
-/// because the counts must not depend on the diff.
+/// trimmed and not decoded. When git gives no diff, the halt diff holds the
+/// error text in its place. The replay does not stop for that error, because
+/// the counts must not depend on the diff.
+///
+/// Print a halt diff through
+/// [`Report::render_diffs`](crate::Report::render_diffs), and never print its
+/// texts raw. File content can hold bytes that are not UTF-8, so the renderer
+/// converts the diff at print time, as
+/// [`Report::render_within`](crate::Report::render_within) does for a
+/// conflicted name. File content and a commit subject can also hold an ESC, so
+/// the renderer escapes the diff, the name of the stopped commit, and the error
+/// text. So no escape sequence out of the repository gets to the terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HaltDiff {
     /// The name of the stopped commit, or `None` for a merge.
