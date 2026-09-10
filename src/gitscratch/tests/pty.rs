@@ -60,3 +60,21 @@ fn a_child_whose_stdout_is_on_the_terminal_sees_a_terminal() {
         described(&output)
     );
 }
+
+/// The newlines of the child come back as the child wrote them.
+///
+/// A terminal changes each newline into a carriage return and a newline on its
+/// way out, unless its output processing is off. A test compares the bytes of
+/// a tool on a terminal with the bytes of the same tool on a pipe, so the
+/// terminal must give back what the tool wrote, byte for byte.
+#[test]
+fn the_newlines_of_the_child_come_back_unchanged() {
+    let output = on_a_terminal(r"printf 'a\nb\n'");
+
+    assert_eq!(
+        output.stdout,
+        b"a\nb\n",
+        "the terminal must give back each newline as the child wrote it\n{}",
+        described(&output)
+    );
+}
