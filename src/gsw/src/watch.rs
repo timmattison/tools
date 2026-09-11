@@ -8,6 +8,7 @@
 //! ([`resolve_dimensions`], [`should_react`], [`next_tick`]) so it can be
 //! unit-tested without a pty.
 
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -665,6 +666,14 @@ enum Event {
     /// Only [`classify_input`] makes one, and it makes one only where the
     /// command exists — so the loop never receives a request it cannot serve.
     IssueRequested,
+    /// The probe found the command, and this is its name.
+    ///
+    /// Sent only where the command exists. A shell that says no, a shell that
+    /// cannot be started, and a shell that never answers all send nothing, so
+    /// the key stays unbound and silent.
+    IssueCommandFound(crate::issue::IssueCommand),
+    /// A run of the issue command has finished, either way.
+    IssueFinished(crate::issue::IssueOutcome),
 }
 
 /// What keys mean right now.
@@ -696,6 +705,57 @@ pub(crate) enum IssueKey {
     /// The command does not exist, or the probe has not answered yet. `G`
     /// does nothing, the way an unbound key does.
     Unbound,
+}
+
+/// The `G` key's own state, for the life of one watch-mode run.
+///
+/// Two facts, and they are one value because one key reads both: the command
+/// the probe found, and whether a run of it is in flight. The second is a flag
+/// here rather than a fourth [`InputMode`], because it changes what one key
+/// does and changes no other key.
+struct IssueRun {
+    /// The command the probe found. `None` until the probe answers, and
+    /// forever where it found none or where the feature is off.
+    command: Option<crate::issue::IssueCommand>,
+    /// Whether a run is in flight. One run at a time: a browser opening twice
+    /// is two tabs nobody asked for.
+    running: bool,
+}
+
+impl IssueRun {
+    /// Nothing found yet, and nothing running.
+    fn new() -> Self {
+        Self {
+            command: None,
+            running: false,
+        }
+    }
+
+    /// Whether `G` has a command behind it.
+    fn key(&self) -> IssueKey {
+        if self.command.is_some() {
+            IssueKey::Bound
+        } else {
+            IssueKey::Unbound
+        }
+    }
+
+    /// Keep the command the probe found.
+    fn found(&mut self, command: crate::issue::IssueCommand) {
+        self.command = Some(command);
+    }
+
+    /// The command to run now, or `None` where there is nothing to run or a
+    /// run is already in flight.
+    fn start(&mut self) -> Option<crate::issue::IssueCommand> {
+        let _ = &self.command;
+        None
+    }
+
+    /// A run has ended, so `G` means something again.
+    fn finished(&mut self) {
+        self.running = false;
+    }
 }
 
 /// The git work one watch-mode refresh performs: re-open the repository so
@@ -824,6 +884,13 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let workdir = handle.repo().workdir().map(Path::to_path_buf);
     let push_tx = tx.clone();
 
+    // The shell the issue key uses, resolved once. The probe asks it whether
+    // the command exists and a run asks it to run the command, and both must
+    // ask the same shell.
+    let shell = crate::issue::user_shell();
+    let issue_tx = tx.clone();
+    spawn_issue_probe(shell.clone(), tx.clone());
+
     // The one ignore matcher both threads share: the watcher callback reads it
     // per event, and every `walk` below rebuilds it from disk so a `.gitignore`
     // edited in another pane takes effect without a restart.
@@ -853,6 +920,18 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
+            start_issue: |command: crate::issue::IssueCommand| {
+                // No work tree means no repository to ask about. The same
+                // `Option` the push honors, honored here.
+                if let Some(workdir) = workdir.clone() {
+                    let finish_tx = issue_tx.clone();
+                    let shell = shell.clone();
+                    thread::spawn(move || {
+                        let outcome = crate::issue::run(&shell, &command, &workdir);
+                        let _ = finish_tx.send(Event::IssueFinished(outcome));
+                    });
+                }
+            },
             start_push: |command: PushCommand| {
                 // No work tree means nothing to push from. `RepoHandle` rejects
                 // a bare repository at discovery, so watch mode never gets here
@@ -878,6 +957,30 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             },
         },
     )
+}
+
+/// Ask the shell, once, whether the issue command exists, and report the
+/// answer on the loop's own channel.
+///
+/// On a thread of its own, because an interactive shell reads an rc file and
+/// an rc file is somebody else's code: it can take a second, and it can take
+/// forever. The loop never waits for this. Until the answer arrives the key is
+/// unbound, and a shell that says no sends nothing at all — so the key stays
+/// unbound and silent for the life of the process.
+///
+/// The answer arrives once. A function added to the rc file after `gsw`
+/// started needs a restart.
+fn spawn_issue_probe(shell: OsString, tx: Sender<Event>) {
+    // Read here rather than on the thread, so the value and the process that
+    // holds it are read in one place. An absent variable gives the default
+    // name, and an empty one turns the feature off.
+    let named = std::env::var_os(crate::issue::ISSUE_COMMAND_ENV)
+        .map(|value| value.to_string_lossy().into_owned());
+    thread::spawn(move || {
+        if let Some(command) = crate::issue::resolve(named.as_deref(), &shell) {
+            let _ = tx.send(Event::IssueCommandFound(command));
+        }
+    });
 }
 
 /// Start the recursive filesystem watcher that feeds [`Event::FsChanged`] into
@@ -1038,7 +1141,7 @@ struct LoopStart {
 /// these to the real git collect, render, terminal-size query, painter, and
 /// clock; tests inject counters and a controllable clock to assert which hooks
 /// ran — and with what age offset — without a TTY or real time.
-struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush> {
+struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue> {
     /// Walk the repo into a fresh [`Snapshot`] (the expensive git work).
     collect: Collect,
     /// Render a snapshot at the given dimensions and timing.
@@ -1057,6 +1160,10 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush> {
     /// as [`Event::PushFinished`]; tests record the command and decide for
     /// themselves when — or whether — the outcome arrives.
     start_push: StartPush,
+    /// Start a run of the issue command. Production spawns a thread that runs
+    /// it and sends the outcome back as [`Event::IssueFinished`]; tests record
+    /// the command and decide for themselves when the outcome arrives.
+    start_issue: StartIssue,
 }
 
 /// The triggers one wake collected, before the render decides what to do with
@@ -1108,27 +1215,29 @@ enum Flow {
 /// behind that `p` is read as the ordinary key it is. `dims` is the pane the
 /// last render measured, which is the pane the user was looking at when they
 /// pressed the key — the loop re-measures after this drain, not during it.
-fn absorb<Clock, StartPush>(
+fn absorb<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue>(
     event: Event,
     pending: &mut Pending,
     ui: &mut PushUi,
+    issue: &mut IssueRun,
     snapshot: &Snapshot,
     dims: Dimensions,
-    clock: &Clock,
-    start_push: &mut StartPush,
+    hooks: &mut LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue>,
 ) -> Flow
 where
     Clock: Fn() -> Instant,
     StartPush: FnMut(PushCommand),
+    StartIssue: FnMut(crate::issue::IssueCommand),
 {
+    let clock = &hooks.clock;
     match event {
         Event::Quit => return Flow::Quit,
         Event::FsChanged => pending.fs = true,
         Event::Resize => pending.resize = true,
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
-            if let Some(action) = classify_input(key, ui.mode(), IssueKey::Unbound) {
-                return absorb(action, pending, ui, snapshot, dims, clock, start_push);
+            if let Some(action) = classify_input(key, ui.mode(), issue.key()) {
+                return absorb(action, pending, ui, issue, snapshot, dims, hooks);
             }
         }
         Event::PushRequested => ui.request(snapshot, dims, clock()),
@@ -1136,13 +1245,19 @@ where
         // the mode change starts nothing.
         Event::PushConfirmed => {
             if let Some(command) = ui.confirm(clock()) {
-                start_push(command);
+                (hooks.start_push)(command);
             }
         }
         Event::PushOutput(line) => ui.output_line(line),
         Event::PushCancelled => ui.cancel(),
         Event::Dismiss => ui.dismiss(),
-        Event::IssueRequested => {}
+        Event::IssueRequested => {
+            if let Some(command) = issue.start() {
+                (hooks.start_issue)(command);
+            }
+        }
+        Event::IssueCommandFound(command) => issue.found(command),
+        Event::IssueFinished(_outcome) => issue.finished(),
         Event::PushFinished(outcome) => {
             let succeeded = outcome.success;
             ui.finished(outcome, clock());
@@ -1215,12 +1330,12 @@ where
 /// to zero. The accepted cost: a repository deleted for good leaves a frozen
 /// (but visibly aging) frame until the user quits. That is the right failure for
 /// a monitor — a wrong-but-labeled-old screen beats no screen.
-fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush>(
+fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue>(
     rx: &Receiver<Event>,
     debounce: Duration,
     displayed: &mut String,
     start: LoopStart,
-    mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush>,
+    mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush, StartIssue>,
 ) -> Result<()>
 where
     Collect: FnMut() -> Result<Snapshot>,
@@ -1230,6 +1345,7 @@ where
     Clock: Fn() -> Instant,
     Tick: Fn(Option<Duration>) -> Option<Duration>,
     StartPush: FnMut(PushCommand),
+    StartIssue: FnMut(crate::issue::IssueCommand),
 {
     let LoopStart {
         mut cache,
@@ -1237,6 +1353,9 @@ where
         mut schedule,
         mut ui,
     } = start;
+    // The probe answers on the loop's own channel, so the key is unbound until
+    // it does and the loop never waits for it.
+    let mut issue = IssueRun::new();
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -1265,10 +1384,10 @@ where
                         event,
                         &mut pending,
                         &mut ui,
+                        &mut issue,
                         &cache.snapshot,
                         cache.dims,
-                        &hooks.clock,
-                        &mut hooks.start_push,
+                        &mut hooks,
                     ) == Flow::Quit
                     {
                         break;
@@ -1284,10 +1403,10 @@ where
                         event,
                         &mut pending,
                         &mut ui,
+                        &mut issue,
                         &cache.snapshot,
                         cache.dims,
-                        &hooks.clock,
-                        &mut hooks.start_push,
+                        &mut hooks,
                     ) == Flow::Quit
                     {
                         break;
@@ -1320,10 +1439,10 @@ where
                             event,
                             &mut pending,
                             &mut ui,
+                            &mut issue,
                             &cache.snapshot,
                             cache.dims,
-                            &hooks.clock,
-                            &mut hooks.start_push,
+                            &mut hooks,
                         ) == Flow::Quit
                         {
                             // Unlike the first wake, a quit that arrives inside
@@ -2992,6 +3111,7 @@ mod tests {
                 // the test must fail when no walk is scheduled, not block.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3038,6 +3158,7 @@ mod tests {
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3087,6 +3208,7 @@ mod tests {
                 clock: stepping_clock(base, Duration::from_secs(60)),
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3138,6 +3260,7 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3185,6 +3308,7 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3229,6 +3353,7 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3275,6 +3400,7 @@ mod tests {
                 // mapping is covered by the next_tick tests.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3321,6 +3447,7 @@ mod tests {
                 clock: || now,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3368,6 +3495,7 @@ mod tests {
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3421,6 +3549,7 @@ mod tests {
                 clock: || now,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3482,6 +3611,7 @@ mod tests {
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3565,6 +3695,7 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3652,6 +3783,7 @@ mod tests {
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3720,6 +3852,7 @@ mod tests {
                 clock: || base,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3795,6 +3928,7 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3869,6 +4003,7 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3923,6 +4058,7 @@ mod tests {
                 clock: || base,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -3990,6 +4126,7 @@ mod tests {
                 clock: || clock_at,
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         );
 
@@ -4081,6 +4218,7 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         );
 
@@ -4196,6 +4334,7 @@ mod tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         );
 
@@ -4358,6 +4497,8 @@ mod push_loop_tests {
         /// right thing once at the end and a loop that paints it as it happens
         /// leave the same final screen behind.
         paints: Vec<String>,
+        /// Every issue command the loop started a run of, in order.
+        issue_runs: Vec<crate::issue::IssueCommand>,
     }
 
     /// Run the loop over a pre-loaded event queue and report what it did.
@@ -4448,6 +4589,9 @@ mod push_loop_tests {
                 clock,
                 next_tick: timer_off,
                 start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
+                start_issue: |command: crate::issue::IssueCommand| {
+                    seen.borrow_mut().issue_runs.push(command);
+                },
             },
         )
         .expect("loop");
@@ -4472,6 +4616,125 @@ mod push_loop_tests {
     /// and short enough to keep the suite quick — it only elapses when the
     /// test is already failing.
     const RESCUE_AFTER: Duration = Duration::from_secs(3);
+
+    /// The command the probe found, which is what binds the `G` key.
+    fn found_command() -> crate::issue::IssueCommand {
+        crate::issue::IssueCommand::new(None).expect("the default names a command")
+    }
+
+    /// The probe's answer, as the loop receives it.
+    fn probe_answered() -> Event {
+        Event::IssueCommandFound(found_command())
+    }
+
+    /// One press of `G`.
+    fn press_g() -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn g_starts_nothing_until_the_probe_has_answered() {
+        // The loop never waits for the probe, so a key pressed in the first
+        // second of a session finds the command unresolved. An unbound key
+        // does nothing, and this is the one silent case the feature has.
+        let (_screen, seen) = run_loop(vec![press_g(), Event::Quit]);
+        assert!(
+            seen.issue_runs.is_empty(),
+            "an unresolved command must start no run, got {:?}",
+            seen.issue_runs,
+        );
+    }
+
+    #[test]
+    fn g_starts_the_command_once_the_probe_has_answered() {
+        let (_screen, seen) = run_loop(vec![probe_answered(), press_g(), Event::Quit]);
+        assert_eq!(
+            seen.issue_runs,
+            vec![found_command()],
+            "the key must run the command the probe found",
+        );
+    }
+
+    #[test]
+    fn a_second_g_while_a_run_is_in_flight_starts_nothing() {
+        // A browser opening twice is two tabs nobody asked for.
+        let (_screen, seen) = run_loop(vec![
+            probe_answered(),
+            press_g(),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.issue_runs.len(),
+            1,
+            "one run at a time, got {:?}",
+            seen.issue_runs,
+        );
+    }
+
+    #[test]
+    fn g_starts_another_run_once_the_first_has_ended() {
+        // The flag is a flag, not a latch.
+        let (_screen, seen) = run_loop(vec![
+            probe_answered(),
+            press_g(),
+            Event::IssueFinished(crate::issue::IssueOutcome::new(
+                "ggs",
+                true,
+                &[],
+                "exit status: 0",
+            )),
+            press_g(),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.issue_runs.len(),
+            2,
+            "a key after a run ended must start another, got {:?}",
+            seen.issue_runs,
+        );
+    }
+
+    #[test]
+    fn a_run_that_failed_puts_the_last_line_the_child_wrote_under_the_frame() {
+        // `ggs` refuses with exit status 2 on a branch that names no issue,
+        // and that refusal is the whole reason the browser did not open.
+        let (screen, _seen) = run_loop(vec![
+            probe_answered(),
+            press_g(),
+            Event::IssueFinished(crate::issue::IssueOutcome::new(
+                "ggs",
+                false,
+                &["branch main names no issue".to_string()],
+                "exit status: 2",
+            )),
+            Event::Quit,
+        ]);
+        assert!(
+            screen.contains("branch main names no issue"),
+            "the refusal must reach the screen, got {screen:?}",
+        );
+    }
+
+    #[test]
+    fn a_run_that_worked_puts_nothing_under_the_frame() {
+        // The browser is the answer.
+        let (screen, _seen) = run_loop(vec![
+            probe_answered(),
+            press_g(),
+            Event::IssueFinished(crate::issue::IssueOutcome::new(
+                "ggs",
+                true,
+                &[],
+                "exit status: 0",
+            )),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            screen, "FRAME",
+            "a run that worked must cost the frame no row, got {screen:?}",
+        );
+    }
 
     #[test]
     fn the_loop_wakes_itself_to_take_an_expired_message_off_the_screen() {
@@ -4534,6 +4797,7 @@ mod push_loop_tests {
                 },
                 next_tick: timer_off,
                 start_push: |_command: PushCommand| {},
+                start_issue: |_command: crate::issue::IssueCommand| {},
             },
         )
         .expect("loop");
@@ -4936,6 +5200,9 @@ mod push_loop_tests {
                     clock: move || base,
                     next_tick: timer_off,
                     start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
+                start_issue: |command: crate::issue::IssueCommand| {
+                    seen.borrow_mut().issue_runs.push(command);
+                },
                 },
             )
             .expect("loop");

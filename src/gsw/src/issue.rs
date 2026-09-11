@@ -5,7 +5,7 @@
 //! only a shell can run it. This module asks the shell both questions.
 
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -124,7 +124,7 @@ const PROBE_POLL: Duration = Duration::from_millis(25);
 /// `nwt` makes the same choice, for the same reason: `SHELL` is set by
 /// `login`, by `sshd`, and by every terminal program, so a session without it
 /// is a session that has no shell functions to find either.
-fn user_shell() -> OsString {
+pub(crate) fn user_shell() -> OsString {
     std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"))
 }
 
@@ -246,7 +246,7 @@ impl IssueOutcome {
     /// names no issue, and that refusal is the whole reason the key did
     /// nothing. A failure that wrote nothing has only the status left to
     /// report, and a blank row under the frame would read as success.
-    fn new(name: &str, success: bool, lines: &[String], status: &str) -> Self {
+    pub(crate) fn new(name: &str, success: bool, lines: &[String], status: &str) -> Self {
         if success {
             return Self { message: None };
         }
@@ -368,6 +368,7 @@ mod outcome_tests {
 mod run_tests {
     use super::stub_shell::StubShell;
     use super::*;
+    use std::path::PathBuf;
 
     /// `path` with every symbolic link in it resolved.
     ///
