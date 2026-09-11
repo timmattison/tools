@@ -587,18 +587,23 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - `G` opens the issue of the branch. A worktree branch usually names one — `issue-475` — and
     the command that turns that name into a page is yours, not gsw's: `G` runs one command in
     your own interactive shell, with the work tree as its current directory.
-    - `GSW_ISSUE_COMMAND` names the command, and it defaults to `ggs`. Set it to an empty string
+    - `GSW_ISSUE_COMMAND` holds the command, and it defaults to `ggs`. Set it to an empty string
       to turn the key off, which is also what to do if you have no such command: this repository
       ships none, and the default is simply the name these plans are written with.
+    - **The value is a whole command line, so it can carry arguments.**
+      `GSW_ISSUE_COMMAND='gh issue view --web'` works, the way `WN_START_COMMAND` takes
+      `gh issue develop`. gsw asks your shell about the first word and runs the whole line, so
+      the first word is the part that has to exist and everything after it is yours: the shell
+      reads those arguments the way it reads arguments at an interactive prompt.
     - The command is usually a shell function, and a function lives only inside a shell. So gsw
-      asks your shell once, at startup, with `$SHELL -ic 'command -v <name>'` — `command -v`
-      reports a function and an alias in both bash and zsh, and `-i` is what makes the rc file
-      load. The answer arrives on the watch loop's own channel, so nothing waits for it: until it
-      comes, `G` does nothing. An rc file that never returns is given five seconds, after which
-      the command is treated as absent and the whole process group of that shell is killed — the
-      shell itself and anything it started, because an rc file that hangs hangs inside some
-      command it ran, not inside a builtin. So a slow rc file cannot leave a process behind for
-      the life of the session.
+      asks your shell once, at startup, with `$SHELL -ic 'command -v <first word>'` —
+      `command -v` reports a function and an alias in both bash and zsh, and `-i` is what makes
+      the rc file load. The answer arrives on the watch loop's own channel, so nothing waits for
+      it: until it comes, `G` does nothing. An rc file that never returns is given five seconds,
+      after which the command is treated as absent and the whole process group of that shell is
+      killed — the shell itself and anything it started, because an rc file that hangs hangs
+      inside some command it ran, not inside a builtin. So a slow rc file cannot leave a process
+      behind for the life of the session.
     - **Where the command does not exist, `G` does nothing and says nothing** — the way an
       unbound key does. That is the one silent case the key has: every other outcome speaks.
       Because the question is asked once, a function you add to your rc file after gsw started

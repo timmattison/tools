@@ -1,8 +1,13 @@
 //! Opening the issue that the branch names, from watch mode.
 //!
 //! The `G` key of watch mode runs one command in the user's own interactive
-//! shell. That command is a shell function, so only a shell can find it and
-//! only a shell can run it. This module asks the shell both questions.
+//! shell. That command is usually a shell function, so only a shell can find
+//! it and only a shell can run it. This module asks the shell both questions.
+//!
+//! The command can carry arguments, which splits the two questions. The shell
+//! answers `command -v` about a name, so the question about existence carries
+//! the first word alone. The run carries the whole line, because the rest of
+//! it is the user's own arguments.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -15,7 +20,10 @@ use tempfile::NamedTempFile;
 use crate::child::detach_from_terminal;
 use crate::lines::LineSplitter;
 
-/// The variable that names the command `G` runs.
+/// The variable that holds the command `G` runs.
+///
+/// The value is a whole command line, so it can carry arguments. See
+/// [`IssueCommand`] for what gsw does with each part of it.
 pub(crate) const ISSUE_COMMAND_ENV: &str = "GSW_ISSUE_COMMAND";
 
 /// The command `G` runs when the environment names none.
@@ -30,7 +38,17 @@ const DEFAULT_ISSUE_COMMAND: &str = "ggs";
 ///
 /// A newtype rather than a `String`, because the value holds one rule that
 /// every reader of it depends on: it is never empty. An empty name asks the
-/// shell about nothing, and it runs nothing.
+/// shell about nothing, and it runs nothing. The rule gives the type its
+/// second guarantee for free — a value with no space at either end and some
+/// character in it always has a first word, which is what
+/// [`IssueCommand::probe_word`] returns.
+///
+/// The value is a whole command line and not one name. `wn` reads
+/// `WN_START_COMMAND` the same way, and it is the precedent this variable was
+/// added against, so `gh issue view --web` must work here as `gh issue
+/// develop` works there. The two halves of the value go to two different
+/// places: the shell answers `command -v` about the first word, and it runs
+/// the whole line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssueCommand(String);
 
@@ -45,6 +63,10 @@ impl IssueCommand {
     /// but space in it turns the feature off, which is the one way to say "do
     /// not do this at all" on a public repository whose default names one
     /// person's shell function.
+    ///
+    /// The space at each end goes and the words inside stay, so `gh issue view
+    /// --web` goes in whole. [`IssueCommand::probe_word`] takes the first word
+    /// off it for the question the shell can answer.
     pub(crate) fn new(value: Option<&str>) -> Option<Self> {
         match value {
             None => Some(Self(DEFAULT_ISSUE_COMMAND.to_string())),
@@ -55,14 +77,38 @@ impl IssueCommand {
         }
     }
 
-    /// The name of the command, which is never empty.
+    /// The whole value, which is never empty.
+    ///
+    /// This is the script the shell runs, arguments and all, and it is also
+    /// the text every message about the command names. A message that named
+    /// the first word alone would report `gh has not finished after 60s` for a
+    /// run of `gh issue view --web`, and the user set the whole line.
     pub(crate) fn name(&self) -> &str {
         &self.0
     }
 
-    /// The word the probe asks the shell about.
+    /// The first word of the value, which is the word the probe asks about.
+    ///
+    /// A shell answers `command -v` about a name. It answers about nothing
+    /// else, so the arguments must stay out of that question: `command -v 'gh
+    /// issue view --web'` reports no command in any shell, and the key then
+    /// goes quiet for a value that names a command every shell has. The whole
+    /// value still goes to [`run_command`], where the shell reads the
+    /// arguments the way it reads them at an interactive prompt.
+    ///
+    /// The word is never empty, because the value is never empty and the value
+    /// carries no space at either end. A value of nothing but space turns the
+    /// feature off in [`IssueCommand::new`], so every value that reaches here
+    /// holds at least one character that is not space, and
+    /// [`str::split_whitespace`] finds a word. The fallback states that rule
+    /// rather than panic, and it gives the whole value — which is the first
+    /// word of every value of one word.
+    ///
+    /// The cut goes by character and never by byte. A shell function takes any
+    /// name the user gives it, and a cut by bytes takes a multi-byte character
+    /// in half.
     pub(crate) fn probe_word(&self) -> &str {
-        &self.0
+        self.0.split_whitespace().next().unwrap_or(&self.0)
     }
 }
 
@@ -157,7 +203,10 @@ mod tests {
             Some("gh issue view".to_string()),
             "the space at each end goes and the space between the words stays",
         );
-        assert_eq!(probe_word(Some("  gh issue view  ")), Some("gh".to_string()));
+        assert_eq!(
+            probe_word(Some("  gh issue view  ")),
+            Some("gh".to_string())
+        );
     }
 
     #[test]
@@ -272,6 +321,16 @@ fn shell_child(shell: &OsStr, script: String) -> Command {
 /// `command -v` reports a function and an alias in both bash and zsh, which is
 /// what makes this the right question: the thing being looked for is usually
 /// neither a file nor a builtin.
+///
+/// **The question carries the first word of the value and nothing else.** A
+/// shell answers `command -v` about a name, so a question that held the
+/// arguments too would name a command no shell has, and every value with
+/// arguments in it would turn the key off in silence. The whole value still
+/// reaches [`run_command`].
+///
+/// The word goes through [`shell_quote`], which makes it one word whatever
+/// characters it holds. The run quotes nothing, for the reason
+/// [`run_command`] gives.
 fn probe_command(shell: &OsStr, command: &IssueCommand) -> Command {
     let mut child = shell_child(
         shell,
@@ -458,11 +517,21 @@ impl IssueOutcome {
 
 /// The child that runs `command` in `workdir`.
 ///
-/// The command is the whole script, unquoted. The probe already asked the
-/// shell about this exact name and the shell said yes, so the name is a
-/// command that this shell has — and quoting the word would stop the shell
-/// from expanding an alias, which is one of the two things `command -v`
-/// reports.
+/// The command is the whole script, unquoted, and both halves of that matter.
+///
+/// **The first word stays unquoted because the shell must expand it.** The
+/// probe already asked this shell about that exact word and the shell said
+/// yes, so the word names a command this shell has. Quotes around it would
+/// stop the shell from expanding an alias, which is one of the two things
+/// `command -v` reports.
+///
+/// **The rest stays unquoted because it belongs to the user.** Everything
+/// after the first word is the arguments the user wrote into
+/// [`ISSUE_COMMAND_ENV`], and the shell reads them here the way it reads them
+/// at an interactive prompt: it splits them at each space, it expands a
+/// variable, and it matches a pattern against file names. That is what the
+/// user asked for. A value of `gh issue view --web` is four words to the
+/// shell, and one quoted word to a shell would be a command no machine has.
 ///
 /// The caller attaches the two files the child writes to. Where the output
 /// goes is the one thing about this child that a deadline depends on, so

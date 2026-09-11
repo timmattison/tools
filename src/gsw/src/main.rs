@@ -54,12 +54,15 @@ mod watch;
                   checked out between the question and the answer is refused, not redirected. \
                   p never force-pushes.\n\n\
                   G runs one command in your own interactive shell, with the work tree as its \
-                  current directory. GSW_ISSUE_COMMAND names that command and it defaults to \
-                  `ggs`; set it to an empty string to turn the key off. The command is usually a \
-                  shell function, so gsw asks your shell once at startup whether it exists. \
-                  Where it does not, G does nothing and says nothing, the way an unbound key \
-                  does — and a function you add to your rc file after gsw started needs a \
-                  restart. A run that works opens a browser and costs the frame no row; a run \
+                  current directory. GSW_ISSUE_COMMAND holds that command and it defaults to \
+                  `ggs`; set it to an empty string to turn the key off. The value is a whole \
+                  command line, so it can carry arguments — `gh issue view --web` works. gsw \
+                  asks your shell about the first word and runs the whole line, so the first \
+                  word is what has to exist and the shell reads the rest the way it reads \
+                  arguments at a prompt. The command is usually a shell function, so gsw asks \
+                  your shell once at startup whether it exists. Where it does not, G does \
+                  nothing and says nothing, the way an unbound key does — and a function you \
+                  add to your rc file after gsw started needs a restart. A run that works opens a browser and costs the frame no row; a run \
                   that fails puts the last line it wrote under the frame, where it waits for a \
                   key. A run gets a minute: after that gsw stops waiting, says so under the \
                   frame, and gives the key back — the command itself keeps running, because it \
