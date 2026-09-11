@@ -412,6 +412,134 @@ impl PayloadBudget {
     }
 }
 
+/// The payload budget of each of the three inline-image protocols.
+///
+/// mosh once capped every protocol it carries at the same number, and
+/// [`PayloadBudget::MOSH`] is that one number. mosh states three caps now, one
+/// for each protocol, so one budget answers for the wrong protocol on two runs
+/// out of three. A budget above the cap of the protocol sends a picture that
+/// the terminal drops, and the user sees an empty screen. A budget below it
+/// takes resolution off a picture that the terminal would have drawn whole.
+/// See <https://github.com/timmattison/tools/issues/480>.
+///
+/// A caller states each protocol by name, with [`ProtocolBudgets::with_kitty`],
+/// [`ProtocolBudgets::with_sixel`] and [`ProtocolBudgets::with_iterm2`]. One
+/// constructor that took the three budgets as three arguments of one type
+/// would let a caller put two of them in the wrong order with nothing to say
+/// so, and that mistake shows itself as a picture that draws at the wrong size
+/// on one terminal out of three.
+///
+/// The builder also fits the caller that reads the caps of a transport. Such a
+/// caller starts at one careful budget with [`ProtocolBudgets::uniform`], and
+/// it then overrides each protocol whose cap the transport really states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtocolBudgets {
+    /// The budget of the Kitty graphics protocol.
+    kitty: PayloadBudget,
+    /// The budget of the Sixel protocol.
+    sixel: PayloadBudget,
+    /// The budget of the iTerm2 protocol.
+    iterm2: PayloadBudget,
+}
+
+impl ProtocolBudgets {
+    /// The budgets of a terminal that states no cap of its own.
+    pub const UNLIMITED: Self = Self::uniform(PayloadBudget::UNLIMITED);
+
+    /// The same budget for each of the three protocols.
+    ///
+    /// A caller that reads the caps of a transport starts here, at the most
+    /// careful budget it knows, and it then overrides each protocol whose cap
+    /// the transport really states. A protocol that the transport says nothing
+    /// about keeps the careful budget, which draws a picture the terminal
+    /// holds.
+    ///
+    /// # Arguments
+    /// * `budget` - The budget that each of the three protocols takes.
+    ///
+    /// # Returns
+    /// The budgets, with all three protocols at `budget`.
+    #[must_use]
+    pub const fn uniform(budget: PayloadBudget) -> Self {
+        Self {
+            kitty: budget,
+            sixel: budget,
+            iterm2: budget,
+        }
+    }
+
+    /// These budgets, with the Kitty graphics protocol at `budget`.
+    ///
+    /// # Arguments
+    /// * `budget` - The budget of the Kitty graphics protocol.
+    ///
+    /// # Returns
+    /// The same budgets, with that one protocol changed.
+    #[must_use]
+    pub const fn with_kitty(self, budget: PayloadBudget) -> Self {
+        Self {
+            kitty: budget,
+            sixel: self.sixel,
+            iterm2: self.iterm2,
+        }
+    }
+
+    /// These budgets, with the Sixel protocol at `budget`.
+    ///
+    /// # Arguments
+    /// * `budget` - The budget of the Sixel protocol.
+    ///
+    /// # Returns
+    /// The same budgets, with that one protocol changed.
+    #[must_use]
+    pub const fn with_sixel(self, budget: PayloadBudget) -> Self {
+        Self {
+            kitty: self.kitty,
+            sixel: budget,
+            iterm2: self.iterm2,
+        }
+    }
+
+    /// These budgets, with the iTerm2 protocol at `budget`.
+    ///
+    /// # Arguments
+    /// * `budget` - The budget of the iTerm2 protocol.
+    ///
+    /// # Returns
+    /// The same budgets, with that one protocol changed.
+    #[must_use]
+    pub const fn with_iterm2(self, budget: PayloadBudget) -> Self {
+        Self {
+            kitty: self.kitty,
+            sixel: self.sixel,
+            iterm2: budget,
+        }
+    }
+
+    /// The budget of the protocol that `routine` writes.
+    ///
+    /// The draw names the routine, and the routine names the protocol, so this
+    /// is the one step between the budgets that a caller states and the budget
+    /// that one picture spends.
+    ///
+    /// [`DisplayRoutine`] stays inside this crate, which is why this answer
+    /// does as well. A caller outside the crate names a protocol with
+    /// [`ProtocolBudgets::with_kitty`], [`ProtocolBudgets::with_sixel`] or
+    /// [`ProtocolBudgets::with_iterm2`], and it reads no routine at all.
+    ///
+    /// # Arguments
+    /// * `routine` - The routine that this terminal draws with.
+    ///
+    /// # Returns
+    /// The payload budget of the protocol that the routine writes.
+    #[must_use]
+    pub(crate) const fn of_routine(self, routine: DisplayRoutine) -> PayloadBudget {
+        match routine {
+            DisplayRoutine::Kitty | DisplayRoutine::Sixel | DisplayRoutine::Iterm2 => self.kitty,
+        }
+    }
+}
+
 /// Where the cursor stands when the image is written.
 ///
 /// No image protocol promises a position of the cursor, and each renderer
@@ -4288,5 +4416,78 @@ mod tests {
             0,
             "a cap below the room has to saturate at zero and never wrap around"
         );
+    }
+
+    /// The budget that the test states for the Kitty graphics protocol.
+    const KITTY_TEST_CAP: usize = 1024 * 1024;
+
+    /// The budget that the test states for the Sixel protocol.
+    const SIXEL_TEST_CAP: usize = 512 * 1024;
+
+    /// The budget that the test states for the iTerm2 protocol.
+    const ITERM2_TEST_CAP: usize = 256 * 1024;
+
+    /// The one careful budget that the test starts the builder at.
+    const UNIFORM_TEST_CAP: usize = 64 * 1024;
+
+    /// Each protocol reads the budget that the caller stated for it.
+    ///
+    /// mosh states a cap for each of the three protocols, and the three caps
+    /// differ. A holder that gave one number for all three would send a Sixel
+    /// picture under the cap of Kitty, and the terminal drops a picture above
+    /// the cap of its own protocol, so the user sees nothing at all. That one
+    /// number is the defect of
+    /// <https://github.com/timmattison/tools/issues/480>.
+    ///
+    /// The three budgets differ from each other on purpose. Three equal
+    /// numbers pass with two of the fields crossed over, and that crossing is
+    /// the mistake the builder exists to stop.
+    #[test]
+    fn each_protocol_reads_the_budget_that_the_caller_stated_for_it() {
+        let same = ProtocolBudgets::uniform(PayloadBudget::of(UNIFORM_TEST_CAP));
+        for routine in [
+            DisplayRoutine::Kitty,
+            DisplayRoutine::Sixel,
+            DisplayRoutine::Iterm2,
+        ] {
+            assert_eq!(
+                same.of_routine(routine).characters(),
+                UNIFORM_TEST_CAP,
+                "one budget for every protocol is what {routine:?} has to read here"
+            );
+        }
+
+        let each = same
+            .with_kitty(PayloadBudget::of(KITTY_TEST_CAP))
+            .with_sixel(PayloadBudget::of(SIXEL_TEST_CAP))
+            .with_iterm2(PayloadBudget::of(ITERM2_TEST_CAP));
+
+        assert_eq!(
+            each.of_routine(DisplayRoutine::Kitty).characters(),
+            KITTY_TEST_CAP,
+            "the Kitty graphics protocol has to read the budget stated for Kitty"
+        );
+        assert_eq!(
+            each.of_routine(DisplayRoutine::Sixel).characters(),
+            SIXEL_TEST_CAP,
+            "the Sixel protocol has to read the budget stated for Sixel"
+        );
+        assert_eq!(
+            each.of_routine(DisplayRoutine::Iterm2).characters(),
+            ITERM2_TEST_CAP,
+            "the iTerm2 protocol has to read the budget stated for iTerm2"
+        );
+
+        for routine in [
+            DisplayRoutine::Kitty,
+            DisplayRoutine::Sixel,
+            DisplayRoutine::Iterm2,
+        ] {
+            assert_eq!(
+                ProtocolBudgets::UNLIMITED.of_routine(routine),
+                PayloadBudget::UNLIMITED,
+                "a terminal that states no cap bounds no protocol, {routine:?} with the rest"
+            );
+        }
     }
 }
