@@ -47,11 +47,21 @@ mod watch;
                   separator under the header showing how stale the screen is and how long \
                   until the next refresh; with `--one-shot` (or when its output is piped) \
                   it renders once and exits.\n\n\
-                  Watch-mode keys: q or Ctrl-C quits, r refreshes now, and p pushes the current \
+                  Watch-mode keys: q or Ctrl-C quits, r refreshes now, p pushes the current \
                   branch after a confirmation that names what it will do — a branch not yet on \
-                  the remote is confirmed as creating one. A push whose branch stopped being \
+                  the remote is confirmed as creating one — and G opens the issue the branch \
+                  names. A push whose branch stopped being \
                   checked out between the question and the answer is refused, not redirected. \
                   p never force-pushes.\n\n\
+                  G runs one command in your own interactive shell, with the work tree as its \
+                  current directory. GSW_ISSUE_COMMAND names that command and it defaults to \
+                  `ggs`; set it to an empty string to turn the key off. The command is usually a \
+                  shell function, so gsw asks your shell once at startup whether it exists. \
+                  Where it does not, G does nothing and says nothing, the way an unbound key \
+                  does — and a function you add to your rc file after gsw started needs a \
+                  restart. A run that works opens a browser and costs the frame no row; a run \
+                  that fails puts the last line it wrote under the frame, where it waits for a \
+                  key.\n\n\
                   While a push runs, a notice reports how long it has taken, and up to six rows \
                   under it carry the newest output from git and from any pre-push hook. Each row \
                   arrives as the hook writes it, so a hook that builds and tests a workspace \

@@ -527,8 +527,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     gsw purely event-driven. On a repository where a status walk is expensive, the 1% duty-cycle
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
-  - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, and `p` pushes the
-    current branch. Ctrl-C quits from anywhere, including while a push is in flight.
+  - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, `p` pushes the
+    current branch, and `G` opens the issue the branch names. Ctrl-C quits from anywhere,
+    including while a push is in flight.
   - `p` always asks first, and the question names the branch, the remote, and how much is going —
     so what you confirm is what runs. If the checkout moves in another pane between the question
     and your answer, the push is refused rather than redirected at the branch that is there now:
@@ -583,6 +584,30 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       the way it always has. The fade is the 24-bit gradient the commit log uses, under the same
       `--truecolor`/`--no-truecolor` control; without truecolor the message simply dims halfway
       through its life instead.
+  - `G` opens the issue of the branch. A worktree branch usually names one — `issue-475` — and
+    the command that turns that name into a page is yours, not gsw's: `G` runs one command in
+    your own interactive shell, with the work tree as its current directory.
+    - `GSW_ISSUE_COMMAND` names the command, and it defaults to `ggs`. Set it to an empty string
+      to turn the key off, which is also what to do if you have no such command: this repository
+      ships none, and the default is simply the name these plans are written with.
+    - The command is usually a shell function, and a function lives only inside a shell. So gsw
+      asks your shell once, at startup, with `$SHELL -ic 'command -v <name>'` — `command -v`
+      reports a function and an alias in both bash and zsh, and `-i` is what makes the rc file
+      load. The answer arrives on the watch loop's own channel, so nothing waits for it: until it
+      comes, `G` does nothing. An rc file that never returns is given five seconds, after which
+      the child is killed and the command is treated as absent, so a slow rc file cannot leave a
+      process behind for the life of the session.
+    - **Where the command does not exist, `G` does nothing and says nothing** — the way an
+      unbound key does. That is the one silent case the key has: every other outcome speaks.
+      Because the question is asked once, a function you add to your rc file after gsw started
+      needs a restart.
+    - A run that works costs the frame no row: the browser is the answer. A run that fails puts
+      the last line the command wrote under the frame, where it waits for a key the way git's
+      error text does — `ggs` refuses on a branch that names no issue, and that refusal is the
+      whole reason no page opened. `G` works while a push runs, and a message that arrives then
+      waits for the row rather than taking it from the push. The child gets no terminal and no
+      inherited `GIT_DIR`, so it cannot read the keyboard gsw is reading and it cannot be aimed
+      at another repository.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —
