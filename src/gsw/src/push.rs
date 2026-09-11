@@ -48,6 +48,24 @@ const MAX_STATUS_ROWS: usize = 3;
 /// cannot spare six, and drops the oldest rather than the newest when it does.
 const MAX_PUSH_OUTPUT_ROWS: usize = 6;
 
+/// Most messages from another feature the row holds while a push or a question
+/// owns it.
+///
+/// `G` acts while a push runs, and a push with a pre-push hook takes minutes.
+/// Each `G` in those minutes can refuse, and each refusal costs the user one
+/// key to clear it. A queue with no bound thus turns one long push into a row
+/// the user must press through. Four covers the times a user reaches for the
+/// key during a single push, and four is small enough that the clearance is
+/// not a job of its own.
+///
+/// **A full queue drops the newest message and keeps the oldest.** That is the
+/// opposite of what [`failure_lines`] does, and the difference is deliberate.
+/// There the lines are the output of one command, and git's verdict comes
+/// last. Here the messages are separate runs of the same command: the first
+/// refusal tells the user what went wrong, and each refusal after it is
+/// usually that same refusal again.
+const MAX_HELD_MESSAGES: usize = 4;
+
 /// Git's prefix for advice lines. They follow the real error and explain
 /// general remedies, so they are the first thing to drop when the message has
 /// to fit in [`MAX_STATUS_ROWS`]. A lexical prefix is the right matcher here:
@@ -1819,6 +1837,121 @@ mod ui_tests {
         assert!(
             !text.contains("names no issue"),
             "the held message must wait its turn, got {text:?}",
+        );
+    }
+
+    /// Every message `ui` puts on the row from `now` on, in the order a user
+    /// reads them.
+    ///
+    /// Each pass paints one frame, records what the row carries, and presses a
+    /// key — which is what a user does with a message that waits for one. The
+    /// pass stops at the first blank frame. The count above it is a backstop:
+    /// a queue that never empties must fail a test rather than hold the run
+    /// open.
+    fn drained(ui: &mut PushUi, now: Instant) -> Vec<String> {
+        let mut seen = Vec::new();
+        for _ in 0..MAX_HELD_MESSAGES + 4 {
+            let text = painted(ui, tall_pane(80), now);
+            if text.is_empty() {
+                break;
+            }
+            seen.push(text);
+            ui.dismiss();
+        }
+        seen
+    }
+
+    #[test]
+    fn two_messages_held_during_a_push_both_reach_the_screen_in_order() {
+        // A run started by `G` can end while the push is still going, and the
+        // key is free again the moment it does. So a second `G` refuses with
+        // the first refusal still waiting. The user asked for both runs, and
+        // both owe an answer.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("the first refusal".to_string());
+        ui.post_error("the second refusal".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        // The push's own message ages off the screen first, and the oldest
+        // held message takes the row it leaves.
+        let later = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("the first refusal"),
+            "the first message must come first, got {text:?}",
+        );
+        assert!(
+            !text.contains("the second refusal"),
+            "the second message must wait its turn, got {text:?}",
+        );
+
+        // A key is the user's word that the first message was read. The second
+        // takes the row it leaves, and waits for a key of its own.
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("the second refusal"),
+            "the second message must follow the first, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_held_message_is_not_lost_to_a_second_one() {
+        // The narrow statement of the defect: one slot held one message, so a
+        // second refusal wrote over the first and the user never saw it.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("the first refusal".to_string());
+        ui.post_error("the second refusal".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        let seen = drained(&mut ui, now + STATUS_LIFETIME);
+        assert!(
+            seen.iter().any(|text| text.contains("the first refusal")),
+            "the first message must reach the screen, got {seen:?}",
+        );
+    }
+
+    #[test]
+    fn a_full_queue_of_held_messages_drops_the_newest() {
+        // The bound is what stops a push of several minutes from filling the
+        // row with keys to press. Which end it drops is the point: the first
+        // refusal says what went wrong, and the ones after it repeat it.
+        let now = t0();
+        let mut ui = pushing(now);
+        for index in 0..MAX_HELD_MESSAGES + 1 {
+            ui.post_error(format!("refusal number {index}"));
+        }
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        let seen = drained(&mut ui, now + STATUS_LIFETIME);
+        assert!(
+            seen.iter().any(|text| text.contains("refusal number 0")),
+            "the oldest message must survive a full queue, got {seen:?}",
+        );
+        let newest = format!("refusal number {MAX_HELD_MESSAGES}");
+        assert!(
+            !seen.iter().any(|text| text.contains(&newest)),
+            "the newest message is the one a full queue drops, got {seen:?}",
         );
     }
 
