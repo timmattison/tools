@@ -2273,7 +2273,7 @@ mod tests {
     /// `mosh-server new` starts by hand: the server states what it carries and
     /// no wrapper stated what the terminal of the user draws.
     fn a_mosh_that_carries_images() -> MoshImages {
-        MoshImages::from_env(Some("kitty,sixel,iterm2"), None)
+        MoshImages::from_env(Some("kitty,sixel,iterm2"), None, None)
     }
 
     /// A mosh that carries images draws a picture for a terminal that named
@@ -2309,7 +2309,7 @@ mod tests {
     #[test]
     fn the_gate_reads_the_session_that_the_capabilities_carry() {
         let named = Capabilities::new(TerminalType::Ghostty, true, true)
-            .in_session(MoshImages::from_env(Some("kitty"), None));
+            .in_session(MoshImages::from_env(Some("kitty"), None, None));
         assert!(
             validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, false, "Image").is_ok(),
             "this mosh carries the kitty protocol, and Ghostty draws it"
@@ -2329,7 +2329,7 @@ mod tests {
     #[test]
     fn a_mosh_that_carries_images_still_takes_the_refusal_that_names_tmux() {
         let named = Capabilities::new(TerminalType::Ghostty, true, true)
-            .in_session(MoshImages::from_env(Some("kitty"), None));
+            .in_session(MoshImages::from_env(Some("kitty"), None, None));
         let error = validate_terminal_for_graphics(&named, &RemoteTransport::Mosh, true, "Image")
             .expect_err("a tmux that answered no query must be refused");
         assert!(
@@ -2373,6 +2373,7 @@ mod tests {
             .in_session(MoshImages::from_env(
                 Some("kitty,sixel,iterm2"),
                 Some("kitty"),
+                None,
             ));
         let error = validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, "Image")
             .expect_err("a session that delivers no protocol this terminal draws must be refused");
@@ -2405,7 +2406,7 @@ mod tests {
     #[test]
     fn a_session_that_names_no_terminal_of_the_user_names_two_sets() {
         let kitty = Capabilities::new(TerminalType::Kitty, true, true)
-            .in_session(MoshImages::from_env(Some("sixel"), None));
+            .in_session(MoshImages::from_env(Some("sixel"), None, None));
         let error = validate_terminal_for_graphics(&kitty, &RemoteTransport::Mosh, false, "Image")
             .expect_err("a session that delivers no protocol this terminal draws must be refused");
         let message = error.to_string();
@@ -2439,6 +2440,7 @@ mod tests {
             .in_session(MoshImages::from_env(
                 Some("kitty,sixel,iterm2"),
                 Some("kitty,sixel"),
+                None,
             ));
         assert!(
             validate_terminal_for_graphics(&pane, &RemoteTransport::Mosh, false, "Image").is_ok(),
@@ -2463,7 +2465,7 @@ mod tests {
     #[test]
     fn a_session_narrows_the_routine_of_a_terminal_of_no_name() {
         let unnamed = Capabilities::new(TerminalType::Unknown, true, true)
-            .in_session(MoshImages::from_env(Some("sixel"), None));
+            .in_session(MoshImages::from_env(Some("sixel"), None, None));
         assert!(
             validate_terminal_for_graphics(&unnamed, &RemoteTransport::Mosh, false, "Image")
                 .is_ok(),
@@ -2488,7 +2490,7 @@ mod tests {
     #[test]
     fn a_stale_mosh_variable_outside_a_mosh_draws_a_picture() {
         let named = Capabilities::new(TerminalType::Ghostty, true, true)
-            .in_session(MoshImages::from_env(Some("sixel"), None));
+            .in_session(MoshImages::from_env(Some("sixel"), None, None));
         assert!(
             validate_terminal_for_graphics(&named, &RemoteTransport::None, false, "Image").is_ok(),
             "a variable that names no transport of this session says nothing about it"
