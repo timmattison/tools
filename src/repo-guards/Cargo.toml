@@ -13,6 +13,9 @@ serde_json.workspace = true
 syn.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+# Walks each workspace member for Rust source, so the git-environment guard
+# reads every file rather than only the target roots its siblings enumerate.
+walkdir.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
