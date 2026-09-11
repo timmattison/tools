@@ -877,6 +877,12 @@ impl PushUi {
         self.state = State::Status { lines, life };
     }
 
+    /// Put a message from a feature other than the push under the frame.
+    ///
+    /// The text is another program's words, so it waits for a key the way
+    /// git's error text does.
+    pub(crate) fn post_error(&mut self, _line: String) {}
+
     /// Handle a key with no other meaning: clear a status message if one is up.
     /// Leaves a question or a running push alone — neither is the user's to
     /// dismiss by pressing an unrelated key.
@@ -1671,6 +1677,96 @@ mod ui_tests {
         testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
             ui.overlay(dims, now).text()
         }))
+    }
+
+    #[test]
+    fn a_message_from_another_feature_goes_under_the_frame_and_waits_for_a_key() {
+        // The `G` key runs somebody else's command, and a command that refuses
+        // says why. That refusal is the whole reason the key did nothing.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_error("branch main names no issue".to_string());
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains("branch main names no issue"),
+            "the message must reach the screen, got {text:?}",
+        );
+        assert_eq!(
+            ui.next_tick(),
+            None,
+            "a message that waits for a key does not age",
+        );
+
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(text, "", "a key must take it off the screen");
+    }
+
+    #[test]
+    fn a_message_from_another_feature_leaves_a_running_push_on_the_screen() {
+        // `G` acts while a push runs, so the two features can reach the one
+        // row at once. The push owns it: taking its notice away would lose the
+        // outcome the push is about to report.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("branch main names no issue".to_string());
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the push must keep the rows it is using, got {text:?}",
+        );
+        assert!(
+            !text.contains("names no issue"),
+            "the held message must wait its turn, got {text:?}",
+        );
+        assert_eq!(ui.mode(), InputMode::Pushing, "the push is still running");
+    }
+
+    #[test]
+    fn a_message_from_another_feature_arrives_once_the_push_is_done_with_the_row() {
+        // Held is not dropped. Silence belongs to one case only, and this is
+        // not it.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("branch main names no issue".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        // The push's own message ages off the screen first, and the held one
+        // takes the row it leaves.
+        let later = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("branch main names no issue"),
+            "the held message must reach the screen, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_message_from_another_feature_leaves_the_question_on_the_screen() {
+        // A question and the keys that answer it go together. A message that
+        // took the question away would leave the mode answering nothing.
+        let now = t0();
+        let mut ui = asking();
+        ui.post_error("branch main names no issue".to_string());
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(
+            ui.mode(),
+            InputMode::Confirm,
+            "the question must still be on screen",
+        );
+        assert!(
+            !text.contains("names no issue"),
+            "the held message must wait its turn, got {text:?}",
+        );
     }
 
     #[test]
