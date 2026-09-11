@@ -596,16 +596,26 @@ pub(crate) struct PushOutcome {
 /// branch for each one.
 pub(crate) struct PushUi {
     state: State,
-    /// A message from another feature that arrived while the push owned the
-    /// row, waiting for the row to be free.
+    /// Messages from another feature that arrived while the push or a question
+    /// owned the row, oldest first, each one waiting for the row to be free.
     ///
     /// A push is the one thing here that takes minutes, and its own outcome is
     /// what the user is waiting to read. So a message that arrives mid-push is
-    /// held rather than posted, and [`PushUi::overlay`] posts it on the first
-    /// frame that finds nothing else on the row. Dropping it instead would
-    /// make a failure silent, and silence belongs to one case only: a command
-    /// that does not exist.
-    held: Option<String>,
+    /// held rather than posted, and [`PushUi::overlay`] posts the oldest one on
+    /// the first frame that finds nothing else on the row. Dropping it instead
+    /// would make a failure silent, and silence belongs to one case only: a
+    /// command that does not exist.
+    ///
+    /// **A queue rather than one slot, because minutes hold more than one
+    /// message.** `G` acts during a push, and the run it starts frees the key
+    /// again the moment it ends, so a second `G` refuses with the first
+    /// refusal still waiting. One slot made the second message overwrite the
+    /// first, which is the silence the rule above forbids. Each message here
+    /// reaches the user in turn, and each waits for a key of its own.
+    ///
+    /// The queue holds [`MAX_HELD_MESSAGES`] messages. A full one drops the
+    /// newest and keeps the oldest — see that constant for why that end.
+    held: VecDeque<String>,
     /// Whether the terminal takes 24-bit color, as [`crate::RenderConfig`]
     /// resolved it from the CLI flags and `COLORTERM`. Carried here because the
     /// status message fades, and a fade
@@ -709,7 +719,7 @@ impl PushUi {
     pub(crate) fn new(truecolor: bool) -> Self {
         Self {
             state: State::Idle,
-            held: None,
+            held: VecDeque::new(),
             truecolor,
         }
     }
@@ -874,17 +884,24 @@ impl PushUi {
         }
     }
 
-    /// Put a held message on the row, if there is one and the row is free.
+    /// Put the oldest held message on the row, if there is one and the row is
+    /// free.
     ///
     /// Called from [`PushUi::overlay`], beside [`PushUi::expire`], because a
     /// render is the one moment that happens often enough and reliably enough
     /// to act on: the row is freed by a key, by a clock, and by a push that
     /// ended, and a render follows each of them.
+    ///
+    /// **One message per frame, and no more.** The message it posts waits for
+    /// a key, so the next frame finds the row busy and leaves the rest of the
+    /// queue alone. A queue of two thus reaches the user as two messages in
+    /// order, and each one gets the key the first one gets. To post them all
+    /// at once would put the second message where the user reads the first.
     fn post_held(&mut self) {
         if !matches!(self.state, State::Idle) {
             return;
         }
-        if let Some(line) = self.held.take() {
+        if let Some(line) = self.held.pop_front() {
             self.state = State::Status {
                 lines: vec![line],
                 life: Life::UntilDismissed,
@@ -939,11 +956,25 @@ impl PushUi {
     /// A question and a push in flight both own the row, and neither may be
     /// painted over: the question goes with the keys that answer it, and the
     /// notice goes with the outcome the push is about to report. A message
-    /// that arrives then is held, and [`PushUi::overlay`] posts it on the
-    /// first frame that finds the row free.
+    /// that arrives then joins the back of [`PushUi::held`], and
+    /// [`PushUi::overlay`] posts the front of that queue on each frame that
+    /// finds the row free.
+    ///
+    /// **A queue, because a second message must not erase the first.** A push
+    /// takes minutes and `G` acts throughout them, so two refusals in one push
+    /// is an ordinary sequence rather than a corner. Both are failures the user
+    /// asked for, and both reach the screen in the order they arrived.
+    ///
+    /// A queue at [`MAX_HELD_MESSAGES`] drops the message that arrives, not
+    /// the ones already in it. That constant says why the oldest is the one
+    /// worth the row.
     pub(crate) fn post_error(&mut self, line: String) {
         match self.state {
-            State::Asking { .. } | State::Running { .. } => self.held = Some(line),
+            State::Asking { .. } | State::Running { .. } => {
+                if self.held.len() < MAX_HELD_MESSAGES {
+                    self.held.push_back(line);
+                }
+            }
             State::Idle | State::Status { .. } => {
                 self.state = State::Status {
                     lines: vec![line],

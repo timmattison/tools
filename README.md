@@ -612,7 +612,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       the last line the command wrote under the frame, where it waits for a key the way git's
       error text does — `ggs` refuses on a branch that names no issue, and that refusal is the
       whole reason no page opened. `G` works while a push runs, and a message that arrives then
-      waits for the row rather than taking it from the push. The child gets no terminal, so it
+      waits for the row rather than taking it from the push. A push takes minutes, so a second
+      `G` can refuse while the first refusal is still waiting: the messages queue up, and each
+      one takes the row in the order it arrived and waits for a key of its own. Four wait at
+      most. Past that the message that arrives is the one dropped, because the first refusal
+      says what went wrong and the ones after it repeat it. The child gets no terminal, so it
       cannot read the keyboard gsw reads, and it gets no `GIT_` variable out of gsw's own
       environment, so it cannot be aimed at another repository. The rule there is the `GIT_`
       prefix and never a list of names: `GIT_DIR` aims git elsewhere, and so do `GIT_COMMON_DIR`
