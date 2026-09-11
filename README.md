@@ -608,6 +608,21 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       waits for the row rather than taking it from the push. The child gets no terminal and no
       inherited `GIT_DIR`, so it cannot read the keyboard gsw is reading and it cannot be aimed
       at another repository.
+    - A run gets a minute. One run at a time is the rule, so a run that never ends would hold `G`
+      for the rest of the session — and a key that does nothing and says nothing is exactly what
+      an unbound key looks like. So after 60 seconds gsw stops waiting, says
+      `ggs has not finished after 60s` under the frame (with the last line the command wrote
+      after it, where there is one), and gives the key back.
+    - **gsw stops waiting; it does not stop the command.** Your rc file is gsw's own question and
+      gsw ends it, which is the five seconds above. The run is *your* command: a command that
+      hands the page to `xdg-open` holds a browser in the foreground, and to end that process
+      group is to close the page you asked for. So the command keeps running, and gsw only collects it
+      when it ends. Your rc file cannot be what hangs a run, because the question above loaded the
+      same rc file under its own five seconds.
+    - The two output streams go to files rather than pipes. A pipe is read to its end, and the end
+      arrives only when the last writer lets go — so a background child your command leaves behind
+      would hold the run open long after your shell exited, which is the same held key by another
+      road. A file has no such end to wait for.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —

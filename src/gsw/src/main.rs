@@ -61,7 +61,9 @@ mod watch;
                   does — and a function you add to your rc file after gsw started needs a \
                   restart. A run that works opens a browser and costs the frame no row; a run \
                   that fails puts the last line it wrote under the frame, where it waits for a \
-                  key.\n\n\
+                  key. A run gets a minute: after that gsw stops waiting, says so under the \
+                  frame, and gives the key back — the command itself keeps running, because it \
+                  is yours, and it can be the process that holds the browser open.\n\n\
                   While a push runs, a notice reports how long it has taken, and up to six rows \
                   under it carry the newest output from git and from any pre-push hook. Each row \
                   arrives as the hook writes it, so a hook that builds and tests a workspace \

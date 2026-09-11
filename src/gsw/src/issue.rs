@@ -6,10 +6,11 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use shellquote::shell_quote;
+use tempfile::NamedTempFile;
 
 use crate::child::detach_from_terminal;
 use crate::lines::LineSplitter;
@@ -220,6 +221,21 @@ pub(crate) fn resolve(value: Option<&str>, shell: &OsStr) -> Option<IssueCommand
     probe_with_deadline(shell, &command, PROBE_DEADLINE).then_some(command)
 }
 
+/// The last line of `lines` that has text in it, with the space after it
+/// dropped.
+///
+/// The last one, because a command says what it was doing and then says why it
+/// stopped. The one with text in it, because a command that ends its last line
+/// with a newline leaves an empty line after it, and an empty row under the
+/// frame reads as a run that said nothing.
+fn last_with_text(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim_end().to_string())
+}
+
 /// What a finished run of the issue command leaves under the frame.
 ///
 /// `None` is a run that worked. The browser is the answer, and a monitor that
@@ -243,13 +259,32 @@ impl IssueOutcome {
         if success {
             return Self { message: None };
         }
-        let last = lines
-            .iter()
-            .rev()
-            .find(|line| !line.trim().is_empty())
-            .map(|line| line.trim_end().to_string());
         Self {
-            message: Some(last.unwrap_or_else(|| format!("{name} failed ({status})"))),
+            message: Some(
+                last_with_text(lines).unwrap_or_else(|| format!("{name} failed ({status})")),
+            ),
+        }
+    }
+
+    /// The outcome of a run of `name` that `lines` came from and that was
+    /// still running at `deadline`.
+    ///
+    /// The message names the timeout every time, because the timeout is the
+    /// thing the user cannot see: the run goes on, the key is free again, and
+    /// no page opened. A row that said only what the command wrote would read
+    /// as a run that stopped.
+    ///
+    /// A command that said why before it stopped answering keeps its words,
+    /// after the timeout. `gh` reports a login it needs and then waits for an
+    /// answer nobody can give it, and that report is the whole reason the run
+    /// went nowhere.
+    pub(crate) fn unfinished(name: &str, lines: &[String], deadline: Duration) -> Self {
+        let waited = format!("{name} has not finished after {}s", deadline.as_secs());
+        Self {
+            message: Some(match last_with_text(lines) {
+                Some(said) => format!("{waited}: {said}"),
+                None => waited,
+            }),
         }
     }
 
@@ -267,21 +302,111 @@ impl IssueOutcome {
 /// command that this shell has — and quoting the word would stop the shell
 /// from expanding an alias, which is one of the two things `command -v`
 /// reports.
+///
+/// The caller attaches the two files the child writes to. Where the output
+/// goes is the one thing about this child that a deadline depends on, so
+/// [`start_run`] owns it.
 fn run_command(shell: &OsStr, command: &IssueCommand, workdir: &Path) -> Command {
     let mut child = shell_child(shell, command.name().to_string());
     // The command asks `gh` about the issue, and `gh` reads the origin remote
-    // of the directory it runs in. Both pipes are captured, because a line the
-    // child writes to the terminal would paint over the frame.
-    child
-        .current_dir(workdir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    // of the directory it runs in.
+    child.current_dir(workdir).stdin(Stdio::null());
     child
 }
 
 /// How long a run waits for the command to finish.
+///
+/// The probe asks a shell a question it answers out of memory, so
+/// [`PROBE_DEADLINE`] is small. A run is the user's own work: `gh` asks a
+/// server about the issue, and the browser that opens the page takes a moment
+/// of its own. So this number is much larger.
+///
+/// Sixty seconds is the trade. A shorter deadline reports a slow fetch over a
+/// slow network as a run that stopped, which is a lie about a run that goes on
+/// to open the page. A longer one holds the key: one run at a time is the
+/// rule, so the key means nothing while a run is open, and a user reads a key
+/// that does nothing as a key with nothing behind it. Sixty seconds is longer
+/// than a slow fetch and shorter than a session.
 const RUN_DEADLINE: Duration = Duration::from_secs(60);
+
+/// A run in flight: the child, and the two files it writes to.
+///
+/// The files are the load-bearing half, and they are files rather than pipes.
+/// A pipe makes the reader wait for end of file, and end of file arrives only
+/// when the last writer lets go — so a child the command leaves behind holds
+/// the run open long after the shell is gone. `xdg-open` leaves exactly such a
+/// child. A file has no such wait, and it also cannot fill up and stop the
+/// child the way a pipe that nobody reads does.
+///
+/// Each file is removed when this value is dropped. A child that still holds
+/// one keeps writing to it, because a file a process has open outlives its
+/// name, and the space comes back when that child ends.
+struct RunInFlight {
+    /// The shell, which is what the deadline waits for.
+    child: Child,
+    /// Where the child writes what it did.
+    stdout: NamedTempFile,
+    /// Where the child writes why it stopped.
+    stderr: NamedTempFile,
+}
+
+/// Start `command` in `workdir`, with a file for each of its two streams.
+fn start_run(
+    shell: &OsStr,
+    command: &IssueCommand,
+    workdir: &Path,
+) -> std::io::Result<RunInFlight> {
+    let stdout = NamedTempFile::new()?;
+    let stderr = NamedTempFile::new()?;
+    let mut builder = run_command(shell, command, workdir);
+    builder
+        .stdout(Stdio::from(stdout.as_file().try_clone()?))
+        .stderr(Stdio::from(stderr.as_file().try_clone()?));
+    let child = builder.spawn()?;
+    Ok(RunInFlight {
+        child,
+        stdout,
+        stderr,
+    })
+}
+
+/// `bytes` as lines gsw can paint.
+///
+/// [`LineSplitter`] is the one place a child's bytes become such text — a tab
+/// is up to eight columns and an escape sequence repaints the frame in another
+/// program's colors.
+///
+/// **One splitter for each stream, which is the rule [`LineSplitter`] states
+/// for itself.** A splitter holds the bytes of a line that has no terminator
+/// yet, and it holds them from one call to the next. So a single splitter
+/// across both streams gives the tail of standard output to the first line of
+/// standard error and reports the two as one line. A command that stops
+/// mid-word makes that line a word no program wrote, and a command that stops
+/// in the middle of a character puts a replacement character in front of the
+/// reason. The reason is the one thing this feature puts on the screen. This
+/// function takes one stream, so each caller of it gets a splitter of its own.
+fn painted_lines(bytes: &[u8]) -> Vec<String> {
+    let mut splitter = LineSplitter::new();
+    let mut lines = splitter.feed(bytes);
+    lines.extend(splitter.finish());
+    lines
+}
+
+/// Everything the run has written so far, standard output first.
+///
+/// That is the order a refusal reads in: a command says what it did on one
+/// stream and why it stopped on the other.
+///
+/// A file that cannot be read counts as a file with nothing in it. The run is
+/// over either way, and a read that failed is not something to put in front of
+/// the words the command wrote on the other stream.
+fn written_lines(run: &RunInFlight) -> Vec<String> {
+    let mut lines = painted_lines(&std::fs::read(run.stdout.path()).unwrap_or_default());
+    lines.extend(painted_lines(
+        &std::fs::read(run.stderr.path()).unwrap_or_default(),
+    ));
+    lines
+}
 
 /// Run `command` in `workdir` and report what to say about it.
 ///
@@ -290,18 +415,37 @@ pub(crate) fn run(shell: &OsStr, command: &IssueCommand, workdir: &Path) -> Issu
     run_with_deadline(shell, command, workdir, RUN_DEADLINE)
 }
 
-/// Run `command` in `workdir`, and give up after `deadline`.
+/// Run `command` in `workdir`, and stop waiting after `deadline`.
+///
+/// **At the deadline gsw stops waiting, and it kills nothing.** This is the one
+/// place where a run and the probe part company, and the reason is whose
+/// process it is. The probe's child is gsw's own question, so gsw ends it. This
+/// child is the user's own command, and a command that holds a browser in the
+/// foreground is the shape this deadline exists for — `xdg-open` does it. To
+/// kill that process group is to close the page the user asked gsw to open.
+///
+/// The user's rc file is bounded already, one layer up: the probe runs
+/// `$SHELL -ic 'command -v <name>'`, which loads that same rc file under
+/// [`PROBE_DEADLINE`]. So a run that hangs hangs in the command, and the
+/// command is the user's to end.
+///
+/// The child still has to be reaped. A dropped [`Child`] is neither killed nor
+/// waited for, and a child nobody waits for stays as a defunct entry for the
+/// life of the session — which is the cost this deadline exists to avoid. So
+/// the child goes to a thread that waits for it. That thread ends when the
+/// child ends, so the child is what bounds it.
 fn run_with_deadline(
     shell: &OsStr,
     command: &IssueCommand,
     workdir: &Path,
-    _deadline: Duration,
+    deadline: Duration,
 ) -> IssueOutcome {
     let name = command.name();
-    let output = match run_command(shell, command, workdir).output() {
-        Ok(output) => output,
-        // The shell is gone, or it cannot be started. Rare, and worth saying
-        // plainly: every other failure here is the child's own words.
+    let mut run = match start_run(shell, command, workdir) {
+        Ok(run) => run,
+        // The shell is gone, it cannot be started, or there is nowhere to put
+        // what it writes. Rare, and worth saying plainly: every other failure
+        // here is the child's own words.
         Err(error) => {
             return IssueOutcome {
                 message: Some(format!("cannot run {name}: {error}")),
@@ -309,36 +453,38 @@ fn run_with_deadline(
         }
     };
 
-    // Standard output first, then standard error, which is the order a
-    // refusal reads in: a command says what it did on one pipe and why it
-    // stopped on the other. Each pipe goes through [`LineSplitter`], the one
-    // place a child's bytes become text gsw can paint — a tab is up to eight
-    // columns and an escape sequence repaints the frame in another program's
-    // colors.
-    //
-    // **One splitter for each pipe, which is the rule [`LineSplitter`] states
-    // for itself.** A splitter holds the bytes of a line that has no
-    // terminator yet, and it holds them from one call to the next. So a single
-    // splitter across both pipes gives the tail of standard output to the
-    // first line of standard error and reports the two as one line. A command
-    // that stops mid-word makes that line a word no program wrote, and a
-    // command that stops in the middle of a character puts a replacement
-    // character in front of the reason. The reason is the one thing this
-    // feature puts on the screen, so each pipe is split on its own and
-    // finished on its own, and the two lists are joined after that.
-    let mut stdout_splitter = LineSplitter::new();
-    let mut lines = stdout_splitter.feed(&output.stdout);
-    lines.extend(stdout_splitter.finish());
-    let mut stderr_splitter = LineSplitter::new();
-    lines.extend(stderr_splitter.feed(&output.stderr));
-    lines.extend(stderr_splitter.finish());
-
-    IssueOutcome::new(
-        name,
-        output.status.success(),
-        &lines,
-        &output.status.to_string(),
-    )
+    let give_up_at = Instant::now() + deadline;
+    loop {
+        match run.child.try_wait() {
+            Ok(Some(status)) => {
+                let lines = written_lines(&run);
+                return IssueOutcome::new(name, status.success(), &lines, &status.to_string());
+            }
+            Ok(None) => {
+                if Instant::now() >= give_up_at {
+                    // Read the files where they stand. A command that said why
+                    // before it stopped answering is worth showing, and the
+                    // timeout is worth saying either way.
+                    let lines = written_lines(&run);
+                    let outcome = IssueOutcome::unfinished(name, &lines, deadline);
+                    let mut child = run.child;
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                    return outcome;
+                }
+                std::thread::sleep(PROBE_POLL);
+            }
+            // The child cannot be asked about, so nothing can be waited for
+            // either. Saying so plainly is the same answer a shell that cannot
+            // be started gets.
+            Err(error) => {
+                return IssueOutcome {
+                    message: Some(format!("cannot run {name}: {error}")),
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -447,12 +593,13 @@ mod run_tests {
 
     #[test]
     fn a_tail_on_standard_output_does_not_join_the_first_line_of_standard_error() {
-        // A command that stops mid-line on one pipe and gives its reason on
+        // A command that stops mid-line on one stream and gives its reason on
         // the other is the shape a refusal arrives in. One splitter across
-        // both pipes keeps the unterminated bytes of standard output, and the
-        // first line of standard error then completes them — the text under
-        // the frame reads `partialreason`, which is a word no program wrote.
-        // Each pipe gets a splitter of its own, so each tail keeps its own row.
+        // both streams keeps the unterminated bytes of standard output, and
+        // the first line of standard error then completes them — the text
+        // under the frame reads `partialreason`, which is a word no program
+        // wrote. Each stream gets a splitter of its own, so each tail keeps
+        // its own row.
         let stub = StubShell::new("printf 'partial'\nprintf 'reason\\n' >&2\nexit 2");
         let workdir = tempfile::tempdir().expect("tempdir");
         let outcome = run(stub.as_shell(), &default_command(), workdir.path());
@@ -466,7 +613,7 @@ mod run_tests {
     #[test]
     fn a_character_cut_in_half_on_standard_output_stays_out_of_the_message() {
         // `日` is three bytes and this stub writes the first two of them. One
-        // splitter across both pipes decodes that broken tail together with
+        // splitter across both streams decodes that broken tail together with
         // the first line of standard error, which puts a replacement character
         // in front of the reason. Two splitters keep the broken tail on a row
         // of its own, where it costs the reason nothing.
@@ -600,9 +747,9 @@ mod run_tests {
         // rather than for the shell, with the key held for all of it. A file
         // has no such wait.
         //
-        // The run happens on a thread of its own so this test reports the
-        // defect rather than joining it: a run that waits for the child never
-        // returns inside the bound, and the channel says so.
+        // The run happens on a thread of its own, so this test reports the
+        // defect rather than a wait of its own: a run that waits for the child
+        // never returns inside the bound, and the channel says so.
         let stub = StubShell::outlived_by_a_child();
         let workdir = tempfile::tempdir().expect("tempdir");
         let shell = stub.as_shell().to_os_string();
@@ -756,10 +903,10 @@ mod stub_shell {
 
         /// A stub that writes `said` and then never exits.
         ///
-        /// A command that says why it stopped and then hangs is the shape that
-        /// makes the words worth reading at a deadline. The shell writes them
-        /// before it replaces itself, so they are in the file the moment the
-        /// deadline arrives.
+        /// A command that says why it stopped, and then hangs, is the shape
+        /// that makes those words worth a row at a deadline. The shell writes
+        /// them before it replaces itself, so they are in the file the moment
+        /// the deadline arrives.
         pub(super) fn hanging_after_saying(said: &str) -> Self {
             Self::new(&format!(
                 "printf '%s\\n' {}\necho $$ > {PID_FILE}\nexec sleep 30",
