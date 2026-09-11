@@ -79,11 +79,23 @@ const DETACHED_PROCESS: u32 = 0x0000_0008;
 /// the caller has already set.
 ///
 /// **Not covered by any test in this repository.** The Unix half has a runtime
-/// test, `the_push_child_cannot_open_the_controlling_terminal`, which plants a
-/// fake ssh and asserts the child was refused the terminal. There is no Windows
-/// equivalent: no Windows host runs these tests and this repository has no CI,
-/// so such a test would be one nobody has ever seen pass or fail. This arm is
-/// verified by compiling for `x86_64-pc-windows-msvc` and by nothing else.
+/// test for each of the three children: the push has
+/// `the_push_child_cannot_open_the_controlling_terminal`, which plants a fake
+/// ssh, and the issue command has
+/// `the_probe_child_cannot_open_the_controlling_terminal` and
+/// `the_run_child_cannot_open_the_controlling_terminal`, which plant a stub
+/// shell. Each asserts that the child was refused the terminal. There is no
+/// Windows equivalent: no Windows host runs these tests and this repository has
+/// no CI, so such a test would be one nobody has ever seen pass or fail. This
+/// arm is verified by compiling for `x86_64-pc-windows-msvc` and by nothing
+/// else.
+///
+/// Each of those three tests skips where the test process itself cannot open
+/// `/dev/tty`, and for one reason: a `cargo test` that a script, a runner, or
+/// the pre-commit hook of this repository starts has no controlling terminal,
+/// so `/dev/tty` is unopenable for every process in the tree whether or not the
+/// child is detached. Run them under a pseudo-terminal to see them assert
+/// anything at all.
 #[cfg(windows)]
 pub(crate) fn detach_from_terminal(command: &mut Command) {
     use std::os::windows::process::CommandExt;

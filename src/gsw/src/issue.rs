@@ -312,6 +312,7 @@ fn shell_child(shell: &OsStr, script: String) -> Command {
     let mut command = Command::new(shell);
     command.arg("-ic").arg(script);
     gitscratch::shed_inherited_git_environment(&mut command);
+    detach_from_terminal(&mut command);
     command
 }
 
