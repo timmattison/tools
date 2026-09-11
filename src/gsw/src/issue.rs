@@ -280,10 +280,23 @@ fn run_command(shell: &OsStr, command: &IssueCommand, workdir: &Path) -> Command
     child
 }
 
+/// How long a run waits for the command to finish.
+const RUN_DEADLINE: Duration = Duration::from_secs(60);
+
 /// Run `command` in `workdir` and report what to say about it.
 ///
 /// Blocking: the caller runs it on a thread of its own.
 pub(crate) fn run(shell: &OsStr, command: &IssueCommand, workdir: &Path) -> IssueOutcome {
+    run_with_deadline(shell, command, workdir, RUN_DEADLINE)
+}
+
+/// Run `command` in `workdir`, and give up after `deadline`.
+fn run_with_deadline(
+    shell: &OsStr,
+    command: &IssueCommand,
+    workdir: &Path,
+    _deadline: Duration,
+) -> IssueOutcome {
     let name = command.name();
     let output = match run_command(shell, command, workdir).output() {
         Ok(output) => output,
@@ -373,9 +386,10 @@ mod outcome_tests {
 
 #[cfg(all(test, unix))]
 mod run_tests {
-    use super::stub_shell::StubShell;
+    use super::stub_shell::{alive, kill_now, StubShell, GAVE_UP_WITHIN, HANG_DEADLINE};
     use super::*;
     use std::path::PathBuf;
+    use std::sync::mpsc::channel;
 
     /// `path` with every symbolic link in it resolved.
     ///
@@ -492,6 +506,121 @@ mod run_tests {
                 "the run child must carry no {name}",
             );
         }
+    }
+
+    #[test]
+    fn a_run_that_never_finishes_reports_the_timeout() {
+        // One run at a time is the rule, so a run that never ends holds the
+        // key for the life of the session. Silence is the state the design
+        // keeps for a command that does not exist, so a user cannot tell a
+        // stuck run from an unbound key. [`StubShell::new`] warms the script,
+        // so the bound below measures this code and not the first start of a
+        // file this process just wrote.
+        let stub = StubShell::hanging();
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let started = Instant::now();
+        let outcome = run_with_deadline(
+            stub.as_shell(),
+            &default_command(),
+            workdir.path(),
+            HANG_DEADLINE,
+        );
+        assert!(
+            started.elapsed() < GAVE_UP_WITHIN,
+            "the run must give up at its deadline rather than wait for the command",
+        );
+        let message = outcome
+            .message()
+            .expect("a run that never finishes must say so");
+        assert!(
+            message.contains("ggs"),
+            "the message must name the command: {message:?}",
+        );
+        assert!(
+            message.contains("has not finished"),
+            "the message must name the timeout: {message:?}",
+        );
+        kill_now(stub.wait_for_pid());
+    }
+
+    #[test]
+    fn a_run_that_never_finishes_carries_what_the_command_said_first() {
+        // A command that says why and then hangs is worth reading. The two
+        // files hold those words, and the deadline reads them where they are.
+        let stub = StubShell::hanging_after_saying("waiting for the server");
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let outcome = run_with_deadline(
+            stub.as_shell(),
+            &default_command(),
+            workdir.path(),
+            HANG_DEADLINE,
+        );
+        let message = outcome
+            .message()
+            .expect("a run that never finishes must say so");
+        assert!(
+            message.contains("waiting for the server"),
+            "the words the command wrote before it hung must reach the screen: {message:?}",
+        );
+        assert!(
+            message.contains("has not finished"),
+            "the message must still name the timeout: {message:?}",
+        );
+        kill_now(stub.wait_for_pid());
+    }
+
+    #[test]
+    fn a_run_that_never_finishes_leaves_the_command_running() {
+        // gsw stops waiting. It does not stop the command. The probe's child
+        // is gsw's own question, so gsw kills that one, but this child is the
+        // user's own command — a command that holds a browser in the
+        // foreground is the usual shape, and killing it closes the page the
+        // user asked for.
+        let stub = StubShell::hanging();
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let _ = run_with_deadline(
+            stub.as_shell(),
+            &default_command(),
+            workdir.path(),
+            HANG_DEADLINE,
+        );
+        let pid = stub.wait_for_pid();
+        assert!(
+            alive(pid),
+            "the run must leave the user's own command running, and {pid} is gone",
+        );
+        kill_now(pid);
+    }
+
+    #[test]
+    fn a_run_returns_when_the_shell_exits_and_not_when_its_children_do() {
+        // A child the command leaves behind inherits where the output goes. A
+        // pipe makes the run wait for end of file, and that child holds the
+        // pipe open after the shell is gone — so the run waited for `sleep 30`
+        // rather than for the shell, with the key held for all of it. A file
+        // has no such wait.
+        //
+        // The run happens on a thread of its own so this test reports the
+        // defect rather than joining it: a run that waits for the child never
+        // returns inside the bound, and the channel says so.
+        let stub = StubShell::outlived_by_a_child();
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let shell = stub.as_shell().to_os_string();
+        let dir = workdir.path().to_path_buf();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let outcome = run_with_deadline(&shell, &default_command(), &dir, RUN_DEADLINE);
+            let _ = tx.send(outcome);
+        });
+        let outcome = rx
+            .recv_timeout(GAVE_UP_WITHIN)
+            .expect("the run must return when the shell exits, not when its children do");
+        assert_eq!(
+            outcome.message(),
+            None,
+            "the shell exited 0, so the browser is the answer",
+        );
+        kill_now(stub.wait_for_pid());
     }
 }
 
@@ -625,6 +754,29 @@ mod stub_shell {
             Self::new(&format!("echo $$ > {PID_FILE}\nexec sleep 30"))
         }
 
+        /// A stub that writes `said` and then never exits.
+        ///
+        /// A command that says why it stopped and then hangs is the shape that
+        /// makes the words worth reading at a deadline. The shell writes them
+        /// before it replaces itself, so they are in the file the moment the
+        /// deadline arrives.
+        pub(super) fn hanging_after_saying(said: &str) -> Self {
+            Self::new(&format!(
+                "printf '%s\\n' {}\necho $$ > {PID_FILE}\nexec sleep 30",
+                shell_quote(said),
+            ))
+        }
+
+        /// A stub that starts a child of its own, records that child, and
+        /// exits at once.
+        ///
+        /// The child inherits where the stub writes, and it holds that place
+        /// open long after the stub is gone. `$!` is the child, so the
+        /// recorded id is the id of the process that outlives the shell.
+        pub(super) fn outlived_by_a_child() -> Self {
+            Self::new(&format!("sleep 30 &\necho $! > {PID_FILE}\nexit 0"))
+        }
+
         /// Wait for the hanging stub to record its process id.
         ///
         /// The stub writes the file, and the probe kills the stub. Which of
@@ -673,20 +825,31 @@ mod stub_shell {
                 .expect("the recorded process id must be a number")
         }
     }
-}
-
-#[cfg(all(test, unix))]
-mod probe_tests {
-    use super::stub_shell::{StubShell, ANSWER_DEADLINE, GAVE_UP_WITHIN, HANG_DEADLINE};
-    use super::*;
 
     /// Whether a process of `pid` still exists.
-    fn alive(pid: i32) -> bool {
+    pub(super) fn alive(pid: i32) -> bool {
         // SAFETY: `kill` with signal 0 sends nothing. It reports whether the
         // process exists and whether this user may signal it, and it touches
         // no memory of this process.
         unsafe { libc::kill(pid, 0) == 0 }
     }
+
+    /// End the process of `pid` now.
+    ///
+    /// A test that proves `gsw` leaves a process running owns that process
+    /// afterwards. The suite cleans up what it started, so the test that
+    /// asked for the process is the one that ends it.
+    pub(super) fn kill_now(pid: i32) {
+        // SAFETY: `kill` sends a signal to a process this test started. It
+        // touches no memory of this process.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+}
+
+#[cfg(all(test, unix))]
+mod probe_tests {
+    use super::stub_shell::{alive, StubShell, ANSWER_DEADLINE, GAVE_UP_WITHIN, HANG_DEADLINE};
+    use super::*;
 
     /// The command the default name resolves to.
     fn default_command() -> IssueCommand {
