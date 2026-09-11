@@ -587,8 +587,9 @@ pub(crate) struct PushOutcome {
 /// state below describes: a question, a push in flight, and the outcome of
 /// one. It is **not** the push's alone. The `G` key runs a command of the
 /// user's own, and a command that refuses says why — so
-/// [`PushUi::post_error`] is the door another feature posts through, and
-/// [`PushUi::post_error`] is what keeps the two from painting over each other.
+/// [`PushUi::post_error`] and [`PushUi::post_notice`] are the two doors
+/// another feature posts through, and they are what keeps the two features
+/// from painting over each other.
 ///
 /// Watch mode holds one of these and asks it two questions — what mode are we
 /// in, and what does the pane show. It never learns whether a prompt or an
@@ -611,11 +612,12 @@ pub(crate) struct PushUi {
     /// again the moment it ends, so a second `G` refuses with the first
     /// refusal still waiting. One slot made the second message overwrite the
     /// first, which is the silence the rule above forbids. Each message here
-    /// reaches the user in turn, and each waits for a key of its own.
+    /// reaches the user in turn, and each gets the row to itself for a life of
+    /// its own — a key for an error, the clock for a notice.
     ///
     /// The queue holds [`MAX_HELD_MESSAGES`] messages. A full one drops the
     /// newest and keeps the oldest — see that constant for why that end.
-    held: VecDeque<String>,
+    held: VecDeque<HeldMessage>,
     /// Whether the terminal takes 24-bit color, as [`crate::RenderConfig`]
     /// resolved it from the CLI flags and `COLORTERM`. Carried here because the
     /// status message fades, and a fade
@@ -709,6 +711,55 @@ impl Life {
         match self {
             Self::UntilDismissed => None,
             Self::Fading { posted_at } => Some(now.saturating_duration_since(*posted_at)),
+        }
+    }
+
+    /// What is left of this life for a message that must wait for the row.
+    ///
+    /// The instant goes on purpose, and [`HeldLife`] says why: it is the
+    /// instant the message was posted, and a message that waits reaches the
+    /// row later than that.
+    fn kind(&self) -> HeldLife {
+        match self {
+            Self::UntilDismissed => HeldLife::UntilDismissed,
+            Self::Fading { .. } => HeldLife::Fading,
+        }
+    }
+}
+
+/// A message that is waiting for the row, and how long it stays once it has it.
+///
+/// The two travel together because the frame that frees the row knows nothing
+/// about which door the message came through. A queue of lines beside a queue
+/// of lives, or beside a flag, is two things that can get one step out of
+/// order — and the message would then take the wrong life.
+struct HeldMessage {
+    /// The line to put on the row.
+    line: String,
+    /// What takes it off the row again.
+    life: HeldLife,
+}
+
+/// How long a held message stays once the row frees up.
+///
+/// [`Life::Fading`] carries the instant a message was posted, and a held
+/// message is posted when the row frees up rather than when it arrived. So the
+/// queue holds the kind alone, and [`PushUi::post_held`] reads the clock that
+/// puts it on the row. A message that waited three minutes for a push then
+/// gets its whole life in front of the user, and not the end of one.
+enum HeldLife {
+    /// Becomes [`Life::Fading`], posted at the instant it reaches the row.
+    Fading,
+    /// Becomes [`Life::UntilDismissed`], which has no instant to carry.
+    UntilDismissed,
+}
+
+impl HeldLife {
+    /// The life a message of this kind takes when it reaches the row at `now`.
+    fn at(&self, now: Instant) -> Life {
+        match self {
+            Self::Fading => Life::Fading { posted_at: now },
+            Self::UntilDismissed => Life::UntilDismissed,
         }
     }
 }
@@ -892,19 +943,24 @@ impl PushUi {
     /// to act on: the row is freed by a key, by a clock, and by a push that
     /// ended, and a render follows each of them.
     ///
-    /// **One message per frame, and no more.** The message it posts waits for
-    /// a key, so the next frame finds the row busy and leaves the rest of the
-    /// queue alone. A queue of two thus reaches the user as two messages in
-    /// order, and each one gets the key the first one gets. To post them all
-    /// at once would put the second message where the user reads the first.
-    fn post_held(&mut self) {
+    /// **One message per frame, and no more.** The message it posts owns the
+    /// row until a key or the clock takes it away, so the next frame finds the
+    /// row busy and leaves the rest of the queue alone. A queue of two thus
+    /// reaches the user as two messages in order, and each one gets the whole
+    /// life the first one gets. To post them all at once would put the second
+    /// message where the user reads the first.
+    ///
+    /// `now` is the instant the message reaches the row, which is the instant
+    /// a fading one starts its life from — see [`HeldLife`]. The one caller is
+    /// [`PushUi::overlay`], which is already holding it.
+    fn post_held(&mut self, now: Instant) {
         if !matches!(self.state, State::Idle) {
             return;
         }
-        if let Some(line) = self.held.pop_front() {
+        if let Some(message) = self.held.pop_front() {
             self.state = State::Status {
-                lines: vec![line],
-                life: Life::UntilDismissed,
+                lines: vec![message.line],
+                life: message.life.at(now),
             };
         }
     }
@@ -969,19 +1025,7 @@ impl PushUi {
     /// the ones already in it. That constant says why the oldest is the one
     /// worth the row.
     pub(crate) fn post_error(&mut self, line: String) {
-        match self.state {
-            State::Asking { .. } | State::Running { .. } => {
-                if self.held.len() < MAX_HELD_MESSAGES {
-                    self.held.push_back(line);
-                }
-            }
-            State::Idle | State::Status { .. } => {
-                self.state = State::Status {
-                    lines: vec![line],
-                    life: Life::UntilDismissed,
-                };
-            }
-        }
+        self.post(line, Life::UntilDismissed);
     }
 
     /// Put gsw's own words under the frame, to be taken off again by the clock.
@@ -1009,8 +1053,39 @@ impl PushUi {
         reason = "the G key posts through this in the next slice of issue #478, and that slice removes this attribute"
     )]
     pub(crate) fn post_notice(&mut self, line: String, now: Instant) {
-        let _ = now;
-        self.post_error(line);
+        self.post(line, Life::Fading { posted_at: now });
+    }
+
+    /// Put `line` on the row with `life`, or hold it until the row is free.
+    ///
+    /// The body both doors share, so the rule about who owns the row is
+    /// written once. A question and a push in flight are never painted over,
+    /// and a message that arrives while one of them is up joins the back of
+    /// [`PushUi::held`] — at [`MAX_HELD_MESSAGES`] the message that arrives is
+    /// the one that goes.
+    ///
+    /// A held message keeps the kind of its life and loses the instant. The
+    /// instant in `life` is the instant the message arrived, and a held
+    /// message reaches the row on a later frame, so [`PushUi::post_held`]
+    /// reads the clock again there. [`HeldLife`] says why that is the right
+    /// end to measure from.
+    fn post(&mut self, line: String, life: Life) {
+        match self.state {
+            State::Asking { .. } | State::Running { .. } => {
+                if self.held.len() < MAX_HELD_MESSAGES {
+                    self.held.push_back(HeldMessage {
+                        line,
+                        life: life.kind(),
+                    });
+                }
+            }
+            State::Idle | State::Status { .. } => {
+                self.state = State::Status {
+                    lines: vec![line],
+                    life,
+                };
+            }
+        }
     }
 
     /// Handle a key with no other meaning: clear a status message if one is up.
@@ -1080,7 +1155,7 @@ impl PushUi {
     /// frame drawn.
     pub(crate) fn overlay(&mut self, dims: Dimensions, now: Instant) -> Overlay {
         self.expire(now);
-        self.post_held();
+        self.post_held(now);
         let width = dims.width;
         let lines: Vec<String> = match &self.state {
             State::Idle => Vec::new(),
