@@ -15,14 +15,15 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-/// Run a git command in `dir`, isolated from the host's global/system config,
-/// asserting success.
+/// Run a git command in `dir`, isolated from the host's global and system
+/// config, asserting success.
 ///
-/// Scrubs inherited `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` so the fixture
-/// repo under `dir` is the one git operates on. Without this, when the suite
-/// runs from inside this repo's own pre-commit hook (git exports those vars for
-/// the hook), the fixture's commits would land in the *real* repo despite
-/// `current_dir(dir)`.
+/// [`command`] sheds the whole inherited git environment, so the fixture repo
+/// under `dir` is the one git operates on. Without that, a suite that runs
+/// from inside this repo's own pre-commit hook lands its fixture commits in
+/// the *real* repo despite `current_dir(dir)` — git exports its own location
+/// into every hook, and git reads the environment ahead of the directory it
+/// was pointed at.
 ///
 /// # Panics
 ///
@@ -48,19 +49,40 @@ pub(crate) fn git_allowing_failure(dir: &Path, args: &[&str]) {
     let _ = command(dir, args).status().expect("invoke git");
 }
 
-/// A git invocation in `dir` with the host's config and any hook-exported git
-/// location scrubbed. The single place the isolation rules are applied; both
-/// [`git`] and [`git_allowing_failure`] differ only in how they treat the exit
-/// status.
+/// A git invocation in `dir` that takes its repository, and its configuration,
+/// from nothing it inherited.
+///
+/// The single place the isolation rules are applied. [`git`] and
+/// [`git_allowing_failure`] differ only in how they treat the exit status.
+///
+/// **The rule is the `GIT_` prefix, and never a list of names.** This helper
+/// named three variables once — `GIT_DIR`, `GIT_WORK_TREE` and
+/// `GIT_INDEX_FILE`. A list of names removes nothing new the day git adds a
+/// variable, and from then on it gives the same clean-looking answer as a list
+/// that works. Two variables walked straight through that list, and neither is
+/// a location variable, so no number of location names catches either one.
+/// `GIT_OBJECT_DIRECTORY` moves the objects git writes into another store, so
+/// the fixture keeps an empty store of its own and every later read of it
+/// answers about another repository. `GIT_CONFIG_PARAMETERS` sets any key at
+/// all, and git exports it to every `pre-commit` hook.
+/// [`gitscratch::shed_inherited_git_environment`] enumerates the environment
+/// of this process instead of a list, so it takes whatever git invents next
+/// with no edit here.
+///
+/// **The two pins come after the sweep, and that order is the whole of why
+/// they survive it.** The sweep removes every `GIT_` variable this process
+/// holds. A pin after it wins, and a pin ahead of it leaves with the rest.
+/// The two pins hold the host's own global and system configuration away from
+/// the fixture, so a `user.email` or a `commit.gpgsign` the developer set
+/// never decides what a test reads.
+///
+/// Pinned by `a_fixture_obeys_no_git_variable_out_of_a_hostile_environment`.
 fn command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
-    cmd.args(args)
-        .current_dir(dir)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE");
+    cmd.args(args).current_dir(dir);
+    gitscratch::shed_inherited_git_environment(&mut cmd);
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null");
     cmd
 }
 
