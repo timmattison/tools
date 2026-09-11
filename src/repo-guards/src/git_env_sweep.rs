@@ -7,8 +7,9 @@
 //! arrived one call site at a time, and each arrival was repaired the same way:
 //! a short list of the names somebody had thought of.
 //!
-//! [`gitscratch::shed_inherited_git_environment`] holds the rule that replaces
-//! the list. It enumerates the process environment and removes every key with
+//! `gitscratch::shed_inherited_git_environment` holds the rule that replaces
+//! the list. It is named rather than linked because this crate takes gitscratch
+//! as a dev-dependency, so rustdoc cannot resolve the path from here. It enumerates the process environment and removes every key with
 //! the `GIT_` prefix, so a variable git invents next year leaves without anyone
 //! editing a file. Its own documentation states the gap this module closes:
 //!

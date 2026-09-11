@@ -10,6 +10,11 @@ thiserror.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+# For `shed_inherited_git_environment`: the fixtures spawn git, and a run from
+# inside a git hook inherits an environment aimed at the repository being
+# committed to. Which variables those are is knowledge that lives in gitscratch
+# rather than being copied here to drift.
+gitscratch.workspace = true
 tempfile.workspace = true
 
 [lints]

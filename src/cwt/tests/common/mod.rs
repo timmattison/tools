@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
 
 /// Exit code that `cwt` returns when it finds no matching worktree.
@@ -26,20 +27,22 @@ pub const MULTIPLE_MATCHES: i32 = 6;
 /// Runs a git command in `dir` and returns whether it succeeded.
 ///
 /// Output is nulled so that concurrent test runs do not interleave noise. The
-/// git environment of the parent is scrubbed because a run started from a git
-/// hook inherits `GIT_DIR` and friends, which would point every command here at
-/// the wrong repository.
+/// whole inherited `GIT_` family is shed through
+/// [`gitscratch::shed_inherited_git_environment`], because a run started from a
+/// git hook inherits an environment that points every command here at the
+/// repository being committed to. The rule is the prefix, never a list of
+/// names: a list strips nothing new the day git adds a variable, and this
+/// fixture named four.
 pub fn run_git(dir: &Path, args: &[&str]) -> bool {
-    Command::new("git")
+    let mut command = Command::new("git");
+    shed_inherited_git_environment(&mut command);
+
+    command
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_PREFIX")
         .status()
         .is_ok_and(|s| s.success())
 }
@@ -99,17 +102,17 @@ pub fn add_worktree(temp: &TempDir, repo: &Path, branch: &str) -> PathBuf {
 
 /// Runs the `cwt` binary in `dir` with `args`.
 ///
-/// The inherited git environment is scrubbed for the same reason [`run_git`]
-/// scrubs it: these tests can run from inside a pre-commit hook.
+/// The inherited git environment is shed for the same reason [`run_git`] sheds
+/// it: these tests can run from inside a pre-commit hook, and `cwt` spawns git
+/// of its own.
 pub fn cwt(dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_cwt"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cwt"));
+    shed_inherited_git_environment(&mut command);
+
+    command
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_PREFIX")
         .output()
         .expect("failed to run cwt")
 }

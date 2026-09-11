@@ -3,27 +3,31 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
 
-/// Scrub the git-location env vars that git exports when it invokes a hook.
+/// Shed the inherited git environment, then pin what these fixtures need.
 ///
-/// In a *worktree*, git exports absolute `GIT_DIR`/`GIT_WORK_TREE`/
-/// `GIT_INDEX_FILE`/`GIT_PREFIX` to the pre-commit hook. Those leak into child
-/// `git` and `gitnuke` processes and pin them to the *real* repo regardless of
-/// `current_dir(tempdir)`, so fixture commits would land in the real repo and
-/// `gitnuke` would nuke real worktrees. Every git and gitnuke invocation here
-/// routes through this so the per-test tempdir is the only thing at risk.
+/// In a *worktree*, git exports an absolute `GIT_DIR`, `GIT_WORK_TREE`,
+/// `GIT_INDEX_FILE` and `GIT_PREFIX` to the pre-commit hook. Those leak into
+/// child `git` and `gitnuke` processes and pin them to the *real* repo whatever
+/// `current_dir(tempdir)` says, so fixture commits would land in the real repo
+/// and `gitnuke` would nuke real worktrees. Every git and gitnuke invocation
+/// here routes through this so the per-test tempdir is the only thing at risk.
 ///
-/// `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are pinned to `/dev/null` so the
-/// developer's own git config (aliases, `init.defaultBranch`, hooks) cannot
-/// change what these tests observe.
+/// [`gitscratch::shed_inherited_git_environment`] removes the whole `GIT_`
+/// family rather than the four names this fixture used to list, because a list
+/// strips nothing new the day git adds a variable.
+///
+/// The pins come after the sweep and so win. `GIT_CONFIG_GLOBAL` and
+/// `GIT_CONFIG_SYSTEM` point at `/dev/null` so the developer's own git config
+/// (aliases, `init.defaultBranch`, hooks) cannot change what these tests
+/// observe.
 fn scrub_git_env(cmd: &mut Command) -> &mut Command {
+    shed_inherited_git_environment(cmd);
+
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_PREFIX")
 }
 
 /// Run `git <args>` in `dir` and assert it succeeded.
