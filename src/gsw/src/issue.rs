@@ -298,13 +298,27 @@ pub(crate) fn run(shell: &OsStr, command: &IssueCommand, workdir: &Path) -> Issu
 
     // Standard output first, then standard error, which is the order a
     // refusal reads in: a command says what it did on one pipe and why it
-    // stopped on the other. Both go through [`LineSplitter`], the one place a
-    // child's bytes become text gsw can paint — a tab is up to eight columns
-    // and an escape sequence repaints the frame in another program's colors.
-    let mut splitter = LineSplitter::new();
-    let mut lines = splitter.feed(&output.stdout);
-    lines.extend(splitter.feed(&output.stderr));
-    lines.extend(splitter.finish());
+    // stopped on the other. Each pipe goes through [`LineSplitter`], the one
+    // place a child's bytes become text gsw can paint — a tab is up to eight
+    // columns and an escape sequence repaints the frame in another program's
+    // colors.
+    //
+    // **One splitter for each pipe, which is the rule [`LineSplitter`] states
+    // for itself.** A splitter holds the bytes of a line that has no
+    // terminator yet, and it holds them from one call to the next. So a single
+    // splitter across both pipes gives the tail of standard output to the
+    // first line of standard error and reports the two as one line. A command
+    // that stops mid-word makes that line a word no program wrote, and a
+    // command that stops in the middle of a character puts a replacement
+    // character in front of the reason. The reason is the one thing this
+    // feature puts on the screen, so each pipe is split on its own and
+    // finished on its own, and the two lists are joined after that.
+    let mut stdout_splitter = LineSplitter::new();
+    let mut lines = stdout_splitter.feed(&output.stdout);
+    lines.extend(stdout_splitter.finish());
+    let mut stderr_splitter = LineSplitter::new();
+    lines.extend(stderr_splitter.feed(&output.stderr));
+    lines.extend(stderr_splitter.finish());
 
     IssueOutcome::new(
         name,
