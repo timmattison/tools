@@ -491,6 +491,22 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
+fn this_workspace_removes_no_git_variable_by_name() {
+    let report = git_env_sweep::audit(&repo_root()).expect("the audit reaches a verdict");
+
+    assert!(
+        report.files_examined() > 300,
+        "this workspace holds hundreds of Rust source files, so a smaller count means the walk          reached the wrong tree and would report clean for the wrong reason: {report}"
+    );
+    assert!(report.is_compliant(), "{report}");
+    assert!(
+        report.unused_exemptions().is_empty(),
+        "an exemption that matches nothing has outlived the code it excused, and left in place          it widens the guard the day somebody writes that removal again: {:?}",
+        report.unused_exemptions()
+    );
+}
+
+#[test]
 fn the_read_set_holds_every_target_root_cargo_builds() {
     let root = repo_root();
 
