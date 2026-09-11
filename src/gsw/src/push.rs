@@ -984,6 +984,35 @@ impl PushUi {
         }
     }
 
+    /// Put gsw's own words under the frame, to be taken off again by the clock.
+    ///
+    /// The second door into the row, beside [`PushUi::post_error`]. The two
+    /// agree about who owns the row: a question and a push in flight are never
+    /// painted over, so a message that arrives while one of them is up joins
+    /// the back of [`PushUi::held`] and waits for the frame that finds the row
+    /// free. A full queue drops the message that arrives, here exactly as
+    /// there — see [`MAX_HELD_MESSAGES`].
+    ///
+    /// They differ in one thing, and [`Life`] already says why.
+    /// [`PushUi::post_error`] carries another program's words, which are a
+    /// remedy: the user has to read them and act on them, so only a key takes
+    /// them away. This carries gsw's own words about a key the user pressed,
+    /// which are a report: it goes stale the way a push that worked goes
+    /// stale, so the clock takes it away.
+    ///
+    /// `now` is the watch loop's injected clock, and it starts the countdown
+    /// only for a message that goes straight onto the row. A message that
+    /// waits for a push takes the instant of the frame that posts it
+    /// instead — see [`HeldLife`].
+    #[allow(
+        dead_code,
+        reason = "the G key posts through this in the next slice of issue #478, and that slice removes this attribute"
+    )]
+    pub(crate) fn post_notice(&mut self, line: String, now: Instant) {
+        let _ = now;
+        self.post_error(line);
+    }
+
     /// Handle a key with no other meaning: clear a status message if one is up.
     /// Leaves a question or a running push alone — neither is the user's to
     /// dismiss by pressing an unrelated key.
@@ -1984,6 +2013,169 @@ mod ui_tests {
             !seen.iter().any(|text| text.contains(&newest)),
             "the newest message is the one a full queue drops, got {seen:?}",
         );
+    }
+
+    /// What a notice says. The wording belongs to the key that posts one, and
+    /// the tests below are about how long it stays.
+    const NOTICE: &str = "remote shell — press G again";
+
+    #[test]
+    fn a_notice_takes_itself_off_the_screen() {
+        // gsw's own words about a key the user pressed. They are a report, and
+        // a report that stays until somebody types at the monitor is a row
+        // spent for the rest of the session.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_notice(NOTICE.to_string(), now);
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(NOTICE),
+            "the notice must reach the screen, got {text:?}",
+        );
+        assert!(
+            text.contains("(0s ago)"),
+            "a message the clock removes says how old it is, got {text:?}",
+        );
+        assert_eq!(
+            ui.next_tick(),
+            Some(STATUS_CADENCE),
+            "a message that ages must wake the loop to age",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), now + STATUS_LIFETIME);
+        assert_eq!(text, "", "the clock must take the notice away");
+    }
+
+    #[test]
+    fn a_message_from_another_feature_still_waits_for_a_key_a_lifetime_later() {
+        // The other door is unchanged by the one above it. Another program's
+        // words are a remedy, and a remedy that leaves on its own while the
+        // user reads another pane is worse than a row spent.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_error("branch main names no issue".to_string());
+
+        let later = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("branch main names no issue"),
+            "an error must outlive the lifetime a notice has, got {text:?}",
+        );
+        assert!(
+            !text.contains("ago"),
+            "a message that never expires has no countdown to report, got {text:?}",
+        );
+
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert_eq!(text, "", "a key is still what clears it");
+    }
+
+    #[test]
+    fn a_notice_that_arrives_during_a_push_waits_for_the_row() {
+        // `G` acts while a push runs, and the push owns the row: its notice
+        // goes with the outcome it is about to report.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_notice(NOTICE.to_string(), now);
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the push must keep the rows it is using, got {text:?}",
+        );
+        assert!(
+            !text.contains(NOTICE),
+            "the held notice must wait its turn, got {text:?}",
+        );
+        assert_eq!(ui.mode(), InputMode::Pushing, "the push is still running");
+    }
+
+    #[test]
+    fn a_notice_that_waited_for_the_row_gets_its_whole_life_on_it() {
+        // A push with a pre-push hook takes minutes, and a notice posted at
+        // the start of one reaches the screen at the end. Its life starts
+        // where the user can read it: a notice that carried the instant it
+        // arrived would appear already expired and go on the next frame.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_notice(NOTICE.to_string(), now);
+
+        // The push runs for longer than a notice lives, and its own message
+        // then takes the row for a lifetime of its own.
+        let push_ended = now + STATUS_LIFETIME * 2;
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            push_ended,
+        );
+        let text = painted(&mut ui, tall_pane(80), push_ended);
+        assert!(
+            !text.contains(NOTICE),
+            "the push's own outcome comes first, got {text:?}",
+        );
+
+        // The push's message ages off, and the notice takes the row it leaves.
+        let arrived = push_ended + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), arrived);
+        assert!(
+            text.contains(NOTICE),
+            "the held notice must reach the screen, got {text:?}",
+        );
+        assert!(
+            text.contains("(0s ago)"),
+            "the life of a held notice starts on the row, got {text:?}",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), arrived + STATUS_CADENCE);
+        assert!(
+            text.contains(NOTICE),
+            "the notice must still be there a moment later, got {text:?}",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), arrived + STATUS_LIFETIME);
+        assert_eq!(
+            text, "",
+            "the clock must take the notice away a lifetime after it arrived",
+        );
+    }
+
+    #[test]
+    fn an_error_that_waited_for_the_row_still_waits_for_a_key() {
+        // The queue carries which life a message takes, and it must carry the
+        // other one unchanged. An error that waited for a push is still a
+        // remedy when it reaches the row.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("branch main names no issue".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        // The push's own message ages off, and the held error takes the row.
+        let arrived = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), arrived);
+        assert!(
+            text.contains("branch main names no issue"),
+            "the held error must reach the screen, got {text:?}",
+        );
+
+        let text = painted(&mut ui, tall_pane(80), arrived + STATUS_LIFETIME * 3);
+        assert!(
+            text.contains("branch main names no issue"),
+            "a held error must not expire once it is on the row, got {text:?}",
+        );
+
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), arrived);
+        assert_eq!(text, "", "a key is what clears it");
     }
 
     #[test]
