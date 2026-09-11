@@ -562,8 +562,15 @@ pub(crate) struct PushOutcome {
     pub output: String,
 }
 
-/// Everything the push feature puts on screen, and the input mode that goes
+/// Everything watch mode puts under the frame, and the input mode that goes
 /// with it.
+///
+/// The name says `Push` because the push is what owns the row and what every
+/// state below describes: a question, a push in flight, and the outcome of
+/// one. It is **not** the push's alone. The `G` key runs a command of the
+/// user's own, and a command that refuses says why — so
+/// [`PushUi::post_error`] is the door another feature posts through, and
+/// [`PushUi::post_error`] is what keeps the two from painting over each other.
 ///
 /// Watch mode holds one of these and asks it two questions — what mode are we
 /// in, and what does the pane show. It never learns whether a prompt or an
@@ -571,6 +578,16 @@ pub(crate) struct PushOutcome {
 /// branch for each one.
 pub(crate) struct PushUi {
     state: State,
+    /// A message from another feature that arrived while the push owned the
+    /// row, waiting for the row to be free.
+    ///
+    /// A push is the one thing here that takes minutes, and its own outcome is
+    /// what the user is waiting to read. So a message that arrives mid-push is
+    /// held rather than posted, and [`PushUi::overlay`] posts it on the first
+    /// frame that finds nothing else on the row. Dropping it instead would
+    /// make a failure silent, and silence belongs to one case only: a command
+    /// that does not exist.
+    held: Option<String>,
     /// Whether the terminal takes 24-bit color, as [`crate::RenderConfig`]
     /// resolved it from the CLI flags and `COLORTERM`. Carried here because the
     /// status message fades, and a fade
@@ -674,6 +691,7 @@ impl PushUi {
     pub(crate) fn new(truecolor: bool) -> Self {
         Self {
             state: State::Idle,
+            held: None,
             truecolor,
         }
     }
@@ -838,6 +856,24 @@ impl PushUi {
         }
     }
 
+    /// Put a held message on the row, if there is one and the row is free.
+    ///
+    /// Called from [`PushUi::overlay`], beside [`PushUi::expire`], because a
+    /// render is the one moment that happens often enough and reliably enough
+    /// to act on: the row is freed by a key, by a clock, and by a push that
+    /// ended, and a render follows each of them.
+    fn post_held(&mut self) {
+        if !matches!(self.state, State::Idle) {
+            return;
+        }
+        if let Some(line) = self.held.take() {
+            self.state = State::Status {
+                lines: vec![line],
+                life: Life::UntilDismissed,
+            };
+        }
+    }
+
     /// Handle `n`: drop the confirmation. The prompt disappearing is the whole
     /// feedback — a "cancelled" notice would itself need dismissing.
     pub(crate) fn cancel(&mut self) {
@@ -881,7 +917,23 @@ impl PushUi {
     ///
     /// The text is another program's words, so it waits for a key the way
     /// git's error text does.
-    pub(crate) fn post_error(&mut self, _line: String) {}
+    ///
+    /// A question and a push in flight both own the row, and neither may be
+    /// painted over: the question goes with the keys that answer it, and the
+    /// notice goes with the outcome the push is about to report. A message
+    /// that arrives then is held, and [`PushUi::overlay`] posts it on the
+    /// first frame that finds the row free.
+    pub(crate) fn post_error(&mut self, line: String) {
+        match self.state {
+            State::Asking { .. } | State::Running { .. } => self.held = Some(line),
+            State::Idle | State::Status { .. } => {
+                self.state = State::Status {
+                    lines: vec![line],
+                    life: Life::UntilDismissed,
+                };
+            }
+        }
+    }
 
     /// Handle a key with no other meaning: clear a status message if one is up.
     /// Leaves a question or a running push alone — neither is the user's to
@@ -950,6 +1002,7 @@ impl PushUi {
     /// frame drawn.
     pub(crate) fn overlay(&mut self, dims: Dimensions, now: Instant) -> Overlay {
         self.expire(now);
+        self.post_held();
         let width = dims.width;
         let lines: Vec<String> = match &self.state {
             State::Idle => Vec::new(),
