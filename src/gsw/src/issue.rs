@@ -59,6 +59,11 @@ impl IssueCommand {
     pub(crate) fn name(&self) -> &str {
         &self.0
     }
+
+    /// The word the probe asks the shell about.
+    pub(crate) fn probe_word(&self) -> &str {
+        &self.0
+    }
 }
 
 #[cfg(test)]
@@ -68,6 +73,11 @@ mod tests {
     /// The name that `value` resolves to, as a plain string, or `None`.
     fn resolved(value: Option<&str>) -> Option<String> {
         IssueCommand::new(value).map(|command| command.name().to_string())
+    }
+
+    /// The word that the probe asks about, for `value`, or `None`.
+    fn probe_word(value: Option<&str>) -> Option<String> {
+        IssueCommand::new(value).map(|command| command.probe_word().to_string())
     }
 
     #[test]
@@ -105,6 +115,86 @@ mod tests {
         // A variable written in an rc file collects space. The name inside it
         // is still the name.
         assert_eq!(resolved(Some("  ggs  ")), Some("ggs".to_string()));
+    }
+
+    #[test]
+    fn a_command_of_more_than_one_word_keeps_every_word() {
+        // `wn` is the precedent for this variable and it takes this shape, so
+        // a reader who copies `gh issue develop` into `GSW_ISSUE_COMMAND`
+        // gets the command and not silence.
+        assert_eq!(
+            resolved(Some("gh issue view --web")),
+            Some("gh issue view --web".to_string()),
+            "a command with arguments must keep every word",
+        );
+    }
+
+    #[test]
+    fn the_probe_word_of_a_command_with_arguments_is_its_first_word() {
+        // `command -v` takes a name. No shell answers about a name that holds
+        // the arguments too.
+        assert_eq!(
+            probe_word(Some("gh issue view --web")),
+            Some("gh".to_string()),
+            "the probe word must be the first word",
+        );
+    }
+
+    #[test]
+    fn the_probe_word_of_a_command_of_one_word_is_that_command() {
+        assert_eq!(probe_word(Some("myfunc")), Some("myfunc".to_string()));
+        assert_eq!(
+            probe_word(None),
+            Some(DEFAULT_ISSUE_COMMAND.to_string()),
+            "the default is one word, and it is its own probe word",
+        );
+    }
+
+    #[test]
+    fn the_space_around_a_command_with_arguments_is_dropped() {
+        assert_eq!(
+            resolved(Some("  gh issue view  ")),
+            Some("gh issue view".to_string()),
+            "the space at each end goes and the space between the words stays",
+        );
+        assert_eq!(probe_word(Some("  gh issue view  ")), Some("gh".to_string()));
+    }
+
+    #[test]
+    fn a_tab_between_two_words_separates_them() {
+        // A variable written in an rc file carries whatever space the writer
+        // typed. A tab is space, so it ends the first word.
+        assert_eq!(
+            probe_word(Some("gh\tissue view")),
+            Some("gh".to_string()),
+            "a tab must end the first word",
+        );
+        assert_eq!(
+            resolved(Some("\t gh issue \t")),
+            Some("gh issue".to_string()),
+            "a tab at each end goes the way a space goes",
+        );
+        assert_eq!(
+            resolved(Some("\t\t")),
+            None,
+            "a value of nothing but tabs must turn G off",
+        );
+    }
+
+    #[test]
+    fn a_command_named_outside_the_latin_alphabet_keeps_its_whole_first_word() {
+        // A shell function takes any name the user gives it, and `問題` is
+        // three characters of three bytes each. A cut by bytes takes a
+        // character in half and asks the shell about text no program wrote.
+        assert_eq!(
+            probe_word(Some("問題 view --web")),
+            Some("問題".to_string()),
+            "the first word must arrive whole",
+        );
+        assert_eq!(
+            resolved(Some("問題 view --web")),
+            Some("問題 view --web".to_string()),
+        );
     }
 }
 
@@ -183,7 +273,10 @@ fn shell_child(shell: &OsStr, script: String) -> Command {
 /// what makes this the right question: the thing being looked for is usually
 /// neither a file nor a builtin.
 fn probe_command(shell: &OsStr, command: &IssueCommand) -> Command {
-    let mut child = shell_child(shell, format!("command -v {}", shell_quote(command.name())));
+    let mut child = shell_child(
+        shell,
+        format!("command -v {}", shell_quote(command.probe_word())),
+    );
     // Nothing the probe says belongs on the screen. An rc file that prints a
     // banner would otherwise paint over the frame.
     child
@@ -704,6 +797,22 @@ mod run_tests {
         assert!(
             runs.lines().any(|line| line == "myfunc"),
             "the script must be the bare name: {runs:?}",
+        );
+    }
+
+    #[test]
+    fn the_run_is_the_whole_value_with_the_arguments_in_it() {
+        // The probe asks about the first word, because that is the word a
+        // shell can answer about. The run is the whole line, because the rest
+        // of it is the user's own arguments.
+        let stub = StubShell::answering(0);
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let command = IssueCommand::new(Some("gh issue view --web")).expect("a name");
+        let _ = run(stub.as_shell(), &command, workdir.path());
+        let runs = stub.runs();
+        assert!(
+            runs.lines().any(|line| line == "gh issue view --web"),
+            "the script must be the whole value: {runs:?}",
         );
     }
 
@@ -1407,6 +1516,31 @@ mod probe_tests {
         assert!(
             runs.contains("command -v 'myfunc'"),
             "the probe must ask about the name the variable holds: {runs:?}",
+        );
+    }
+
+    #[test]
+    fn the_probe_asks_about_the_first_word_of_a_command_with_arguments() {
+        // A value that carries arguments is the shape `wn` takes for the same
+        // job. `command -v 'gh issue view --web'` names no command in any
+        // shell, so the probe reports the command absent and `G` goes quiet -
+        // the one silent state the key has, and the user sees no reason for
+        // it.
+        let stub = StubShell::answering(0);
+        let command = IssueCommand::new(Some("gh issue view --web")).expect("a name");
+        assert!(probe_with_deadline(
+            stub.as_shell(),
+            &command,
+            ANSWER_DEADLINE
+        ));
+        let runs = stub.runs();
+        assert!(
+            runs.contains("command -v 'gh'"),
+            "the probe must ask about the first word: {runs:?}",
+        );
+        assert!(
+            !runs.contains("command -v 'gh issue view --web'"),
+            "the probe must not put the arguments inside the quotes: {runs:?}",
         );
     }
 }
