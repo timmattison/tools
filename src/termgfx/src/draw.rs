@@ -393,7 +393,7 @@ impl PayloadBudget {
     /// The characters of payload that one image can spend under that cap.
     #[must_use]
     pub const fn under_command_cap(characters: usize) -> Self {
-        Self(characters)
+        Self(characters.saturating_sub(Self::CONTROL_BLOCK_ROOM))
     }
 
     /// Whether a payload of `characters` fits inside this budget.
