@@ -595,8 +595,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       reports a function and an alias in both bash and zsh, and `-i` is what makes the rc file
       load. The answer arrives on the watch loop's own channel, so nothing waits for it: until it
       comes, `G` does nothing. An rc file that never returns is given five seconds, after which
-      the child is killed and the command is treated as absent, so a slow rc file cannot leave a
-      process behind for the life of the session.
+      the command is treated as absent and the whole process group of that shell is killed — the
+      shell itself and anything it started, because an rc file that hangs hangs inside some
+      command it ran, not inside a builtin. So a slow rc file cannot leave a process behind for
+      the life of the session.
     - **Where the command does not exist, `G` does nothing and says nothing** — the way an
       unbound key does. That is the one silent case the key has: every other outcome speaks.
       Because the question is asked once, a function you add to your rc file after gsw started
@@ -614,7 +616,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       `ggs has not finished after 60s` under the frame (with the last line the command wrote
       after it, where there is one), and gives the key back.
     - **gsw stops waiting; it does not stop the command.** Your rc file is gsw's own question and
-      gsw ends it, which is the five seconds above. The run is *your* command: a command that
+      gsw ends it — that shell and its whole process group — which is the five seconds above.
+      The run is *your* command: a command that
       hands the page to `xdg-open` holds a browser in the foreground, and to end that process
       group is to close the page you asked for. So the command keeps running, and gsw only collects it
       when it ends. Your rc file cannot be what hangs a run, because the question above loaded the

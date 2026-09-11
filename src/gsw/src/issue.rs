@@ -112,8 +112,9 @@ mod tests {
 ///
 /// An rc file is somebody else's code, and one that hangs must not leave a
 /// process behind for the life of the session. At the deadline the probe kills
-/// the child and reports the command absent, which is the same answer as a
-/// shell that said no.
+/// the shell and every process that shell started — see [`end_probe_child`],
+/// which signals the whole process group — and reports the command absent,
+/// which is the same answer as a shell that said no.
 const PROBE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// How often the probe looks to see whether the shell has answered.
@@ -175,6 +176,54 @@ fn probe_command(shell: &OsStr, command: &IssueCommand) -> Command {
     child
 }
 
+/// End the probe's child, and every process that child started.
+///
+/// **The signal goes to the process group, not to the process.** A shell that
+/// hangs hangs inside some command it started, and not inside a builtin. So a
+/// signal to the child alone kills the shell and leaves the command it was
+/// waiting for — a grandchild of `gsw`, now with no parent — running for the
+/// life of the session. The group holds both.
+///
+/// [`detach_from_terminal`] made the group. It calls `setsid` between the fork
+/// and the exec, so the child leads a session and a group, and the id of that
+/// group is the child's own process id.
+///
+/// **Signaling a group by that id is safe, and it can never reach `gsw`.** A
+/// process group id is a process id, and the id of this child is fresh: the
+/// system gave it to this child alone, and it gives it to nobody else while
+/// the child lives. A group keeps its id reserved for as long as it has
+/// members, so no other live group can hold it either. The call therefore
+/// reaches the group `setsid` made, or it reaches nothing at all. `gsw` runs in
+/// a group of its own id, which is a different number.
+///
+/// Nothing at all is the case the fallback covers. `setsid` fails with `EPERM`
+/// where the caller already leads a process group, and
+/// [`detach_from_terminal`] drops that error on purpose. The child then keeps
+/// the group it was forked into, no group carries the child's id, and
+/// `killpg` answers `ESRCH`. The direct child still has to die, so the
+/// fallback kills it the old way.
+#[cfg(unix)]
+fn end_probe_child(child: &mut Child) {
+    let group = libc::pid_t::try_from(child.id()).ok();
+    let signaled = group.is_some_and(|group| {
+        // SAFETY: `killpg` sends a signal to a process group. It takes one
+        // integer and touches no memory of this process. The id is the id of a
+        // child this function owns, so it names the group `setsid` made for
+        // that child or no group at all.
+        unsafe { libc::killpg(group, libc::SIGKILL) == 0 }
+    });
+    if !signaled {
+        let _ = child.kill();
+    }
+}
+
+/// Neither Unix nor Windows has a process group this code knows how to signal,
+/// so the direct child is all this arm ends. See the Unix half above.
+#[cfg(not(unix))]
+fn end_probe_child(child: &mut Child) {
+    let _ = child.kill();
+}
+
 /// Whether `shell` has `command`, giving up after `deadline`.
 ///
 /// Exit status 0 means the command exists. Every other status, a shell that
@@ -192,10 +241,12 @@ fn probe_with_deadline(shell: &OsStr, command: &IssueCommand, deadline: Duration
             Ok(Some(status)) => return status.success(),
             Ok(None) => {
                 if Instant::now() >= give_up_at {
-                    // The child is killed and then reaped, in that order. A
-                    // kill alone leaves a zombie for the life of the session,
-                    // which is the process this deadline exists to prevent.
-                    let _ = child.kill();
+                    // The group is killed and the child is then reaped, in
+                    // that order. A kill alone leaves a zombie for the life of
+                    // the session, which is the process this deadline exists
+                    // to prevent. The grandchildren need no such reaping: the
+                    // system gives an orphan a new parent that reaps it.
+                    end_probe_child(&mut child);
                     let _ = child.wait();
                     return false;
                 }
@@ -419,7 +470,8 @@ pub(crate) fn run(shell: &OsStr, command: &IssueCommand, workdir: &Path) -> Issu
 ///
 /// **At the deadline gsw stops waiting, and it kills nothing.** This is the one
 /// place where a run and the probe part company, and the reason is whose
-/// process it is. The probe's child is gsw's own question, so gsw ends it. This
+/// process it is. The probe's child is gsw's own question, so gsw ends that
+/// child and the whole process group under it. This
 /// child is the user's own command, and a command that holds a browser in the
 /// foreground is the shape this deadline exists for — `xdg-open` does it. To
 /// kill that process group is to close the page the user asked gsw to open.
