@@ -34,8 +34,14 @@ impl IssueCommand {
     /// but space in it turns the feature off, which is the one way to say "do
     /// not do this at all" on a public repository whose default names one
     /// person's shell function.
-    pub(crate) fn new(_value: Option<&str>) -> Option<Self> {
-        None
+    pub(crate) fn new(value: Option<&str>) -> Option<Self> {
+        match value {
+            None => Some(Self(DEFAULT_ISSUE_COMMAND.to_string())),
+            Some(named) => {
+                let named = named.trim();
+                (!named.is_empty()).then(|| Self(named.to_string()))
+            }
+        }
     }
 
     /// The name of the command, which is never empty.
