@@ -1,0 +1,9 @@
+[package]
+name = "shellquote"
+version = "0.1.0"
+edition.workspace = true
+description = "One single-quote shell quoter for every tool in this workspace"
+license = "MIT"
+
+[lints]
+workspace = true
