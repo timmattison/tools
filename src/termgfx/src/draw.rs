@@ -533,9 +533,22 @@ impl ProtocolBudgets {
     /// # Returns
     /// The payload budget of the protocol that the routine writes.
     #[must_use]
+    // The tests below read this answer, and no other caller does yet. A later
+    // step gives the budgets to `Request`, and the expectation then fails and
+    // takes this line out with it.
+    // <https://github.com/timmattison/tools/issues/480>
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the callers of the three protocol budgets arrive in a later step of issue 480"
+        )
+    )]
     pub(crate) const fn of_routine(self, routine: DisplayRoutine) -> PayloadBudget {
         match routine {
-            DisplayRoutine::Kitty | DisplayRoutine::Sixel | DisplayRoutine::Iterm2 => self.kitty,
+            DisplayRoutine::Kitty => self.kitty,
+            DisplayRoutine::Sixel => self.sixel,
+            DisplayRoutine::Iterm2 => self.iterm2,
         }
     }
 }
