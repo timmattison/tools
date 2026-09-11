@@ -17,6 +17,8 @@ use termwindow::should_force_colors;
 
 mod age;
 mod bar;
+/// Starting a child process that cannot reach the terminal gsw is drawing on.
+mod child;
 mod git;
 /// Opening the issue that the branch names, through a command the user supplies.
 mod issue;
