@@ -1569,16 +1569,20 @@ fn forward_input(event: CtEvent) -> Option<Event> {
 /// - **Ctrl-C quits from every mode**, including mid-push. A monitor that
 ///   cannot be quit while it waits on the network is a monitor that has to be
 ///   killed from another pane.
-/// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push.
+/// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push,
+///   and `G` asks for the issue of the branch.
 /// - [`InputMode::Confirm`]: `y` and Enter push, `n`, Esc, and `q` cancel.
 ///   Nothing else acts — with a question on screen, `q` is the answer "no",
 ///   not "quit", and `r` is not a refresh. That is why the mode exists.
-/// - [`InputMode::Pushing`]: `q` quits and `r` refreshes, but `p` is inert, so
+/// - [`InputMode::Pushing`]: `q` quits, `r` refreshes, and `G` still asks for
+///   the issue — a browser conflicts with nothing a push does. `p` is inert, so
 ///   an impatient second press cannot start an overlapping push.
+/// - `G` acts only where `issue` says a command exists. Where it does not, the
+///   key gives [`Event::Dismiss`] like any other unbound key, which is the one
+///   silent case this feature has.
 /// - Every other press is [`Event::Dismiss`], which clears a status message and
 ///   otherwise does nothing.
 fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Event> {
-    let _ = issue;
     let KeyEvent {
         code,
         modifiers,
@@ -1603,6 +1607,10 @@ fn classify_input(key: KeyEvent, mode: InputMode, issue: IssueKey) -> Option<Eve
             // The one key the two modes disagree on: a push already running
             // makes a second request meaningless rather than harmless.
             KeyCode::Char('p') if mode == InputMode::Normal => Event::PushRequested,
+            // A browser opens beside the monitor, so a push in flight is no
+            // reason to refuse. With no command behind it the key falls
+            // through to `Dismiss`, which is what every unbound key gives.
+            KeyCode::Char('G') if issue == IssueKey::Bound => Event::IssueRequested,
             _ => Event::Dismiss,
         },
         InputMode::Confirm => match code {
