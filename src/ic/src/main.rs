@@ -3,7 +3,8 @@ use buildinfo::version_string;
 use clap::Parser;
 use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::{HashMap, HashSet};
+use proctree::{Pid, ProcessTree, ZellijScan};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -2000,80 +2001,6 @@ fn display_image(
     Ok(())
 }
 
-/// Process ID newtype for type safety in process tree walking.
-///
-/// Prevents accidentally mixing up pid/ppid values or confusing
-/// process IDs with other u32 values (e.g., loop counters).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Pid(u32);
-
-/// Maximum depth to walk up the process tree when searching for ancestors.
-/// 64 levels is generous; real-world process trees rarely exceed 20 levels.
-const MAX_ANCESTOR_DEPTH: usize = 64;
-
-/// The basename of the Zellij client program. The match must be exact, so
-/// that `zellij-server` and a wrapper script such as `my-zellij-wrapper` do
-/// not count as clients.
-const ZELLIJ_PROGRAM_NAME: &str = "zellij";
-
-/// Extracts the basename (filename) from a process comm string.
-///
-/// On macOS, `ps -eo comm=` returns the full executable path (e.g.,
-/// `/usr/local/bin/mosh-server`). This function extracts just the
-/// filename component for exact matching.
-fn comm_basename(comm: &str) -> &str {
-    Path::new(comm)
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or(comm)
-}
-
-/// Finds the Zellij client processes that are attached to one Zellij session.
-///
-/// Zellij daemonizes its server, so the server reparents to PID 1 and the
-/// chain from the current process to the terminal is broken. The client
-/// process keeps that chain, so the client stands in for the current process
-/// when the transport is detected.
-///
-/// A client must belong to *this* session. A machine can run many Zellij
-/// sessions at the same time, and a client of some other session says nothing
-/// about how this session is viewed.
-///
-/// `ps_args_output` is the output of `ps -eo pid=,args=`. A client is a
-/// process whose `argv[0]` basename is exactly `zellij` and that has the session
-/// name as a complete argument. The forms `zellij a NAME`, `zellij attach
-/// NAME`, `zellij -s NAME`, and `zellij --session NAME` all match. The server
-/// process (`zellij --server /path/.../NAME`) does not match, because the
-/// session name is only a part of its socket path.
-fn zellij_client_pids(ps_args_output: &str, session: &str) -> Vec<Pid> {
-    if session.is_empty() {
-        return Vec::new();
-    }
-
-    let mut clients = Vec::new();
-
-    for line in ps_args_output.lines() {
-        let mut parts = line.split_whitespace();
-        let pid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
-            Some(p) => Pid(p),
-            None => continue,
-        };
-        let Some(program) = parts.next() else {
-            continue;
-        };
-        if comm_basename(program) != ZELLIJ_PROGRAM_NAME {
-            continue;
-        }
-        // The remaining tokens are the arguments of the client. The session
-        // name must be one complete argument.
-        if parts.any(|arg| arg == session) {
-            clients.push(pid);
-        }
-    }
-
-    clients
-}
-
 /// The type of remote transport detected in the process tree.
 ///
 /// Used to adapt image display behavior for proxies that don't understand
@@ -2144,7 +2071,7 @@ fn detect_remote_transport() -> RemoteTransport {
 /// 3. **Mosh via Zellij heuristic only** (no ET) → Mosh
 /// 4. **Neither** → None
 fn detect_remote_transport_inner() -> RemoteTransport {
-    let comm_output = match run_ps(&["-eo", "pid=,ppid=,comm="]) {
+    let comm_output = match proctree::ps_snapshot() {
         Some(o) => o,
         None => {
             // Can't check process tree; fall back to env var for ET
@@ -2155,9 +2082,7 @@ fn detect_remote_transport_inner() -> RemoteTransport {
         }
     };
 
-    let zellij_session = std::env::var("ZELLIJ")
-        .ok()
-        .map(|_| std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default());
+    let zellij_session = proctree::zellij_session();
 
     // The argument snapshot is a second `ps` call, because the comm snapshot
     // deliberately treats every token after the PPID as one executable path,
@@ -2166,7 +2091,7 @@ fn detect_remote_transport_inner() -> RemoteTransport {
     // session needs the arguments, so a session outside Zellij does not pay
     // for the second call.
     let args_output = if zellij_session.is_some() {
-        run_ps(&["-eo", "pid=,args="]).unwrap_or_default()
+        proctree::ps_arguments().unwrap_or_default()
     } else {
         String::new()
     };
@@ -2174,23 +2099,10 @@ fn detect_remote_transport_inner() -> RemoteTransport {
     classify_transport(
         &comm_output,
         &args_output,
-        Pid(std::process::id()),
+        Pid::current(),
         zellij_session,
         std::env::var("ET_VERSION").is_ok(),
     )
-}
-
-/// Run `ps` with the given arguments and return its standard output.
-///
-/// Returns `None` when `ps` cannot be run at all.
-fn run_ps(args: &[&str]) -> Option<String> {
-    std::process::Command::new("ps")
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
 /// Decide the remote transport from two process snapshots and the environment.
@@ -2208,30 +2120,20 @@ fn classify_transport(
     zellij_session: Option<String>,
     et_version_set: bool,
 ) -> RemoteTransport {
+    let tree = ProcessTree::parse(ps_comm_output);
+    let scan = ZellijScan::for_session(ps_args_output, zellij_session.as_deref());
+
     // Direct Mosh ancestry (Case 1 only, no Zellij heuristic) — the current
     // shell is definitely under Mosh, so images cannot work.
-    if find_ancestor_process(ps_comm_output, current_pid, &ZellijScan::Off, "mosh-server") {
+    if tree.has_ancestor(current_pid, &ZellijScan::Off, "mosh-server") {
         return RemoteTransport::Mosh;
     }
-
-    let scan = match &zellij_session {
-        None => ZellijScan::Off,
-        Some(session) => match ClientPids::new(zellij_client_pids(ps_args_output, session)) {
-            Some(clients) => ZellijScan::Clients(clients),
-            // The session named no client, so the careful answer is the one
-            // that treats every Zellij client on the machine as a candidate.
-            // It can over-report Mosh, which hides an image that would have
-            // worked. The opposite mistake writes escape sequences that Mosh
-            // strips.
-            None => ZellijScan::EveryClient,
-        },
-    };
 
     // ET detected via env var or process tree (including Zellij heuristic).
     // This takes priority over Mosh-via-Zellij because in a multiplexed Zellij
     // session, Mosh and ET may both be attached — ET viewers can display images
     // while Mosh viewers silently strip the escape sequences.
-    if et_version_set || find_ancestor_process(ps_comm_output, current_pid, &scan, "etterminal") {
+    if et_version_set || tree.has_ancestor(current_pid, &scan, "etterminal") {
         return RemoteTransport::EternalTerminal;
     }
 
@@ -2242,208 +2144,17 @@ fn classify_transport(
         // Zellij sends the output of a pane to every attached client. One
         // client that can show images is enough, so Mosh only blocks when
         // every client of this session is a Mosh client.
-        ZellijScan::Clients(clients) => clients.as_slice().iter().all(|&client| {
-            find_ancestor_process(ps_comm_output, client, &ZellijScan::Off, "mosh-server")
-        }),
-        ZellijScan::EveryClient => {
-            find_ancestor_process(ps_comm_output, current_pid, &scan, "mosh-server")
-        }
+        ZellijScan::Clients(clients) => clients
+            .as_slice()
+            .iter()
+            .all(|&client| tree.has_ancestor(client, &ZellijScan::Off, "mosh-server")),
+        ZellijScan::EveryClient => tree.has_ancestor(current_pid, &scan, "mosh-server"),
     };
     if mosh {
         return RemoteTransport::Mosh;
     }
 
     RemoteTransport::None
-}
-
-/// Holds [`ClientPids`] so that its field stays private to this module. In a
-/// single-module program a private tuple field is still reachable from every
-/// other line of the file, and an invariant that the rest of the file can
-/// bypass is a comment, not a guarantee.
-mod client_pids {
-    use super::Pid;
-
-    /// A list of Zellij clients that holds at least one client.
-    ///
-    /// [`ClientPids::new`] is the only way to build one, so the empty case is
-    /// answered once instead of at every call site. The emptiness matters
-    /// because `classify_transport` asks whether *every* client of the session
-    /// is a Mosh client: `all` over an empty list answers yes, so a session
-    /// with no named client would be reported as Mosh for no reason. That
-    /// session belongs to [`super::ZellijScan::EveryClient`] instead.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) struct ClientPids(Vec<Pid>);
-
-    impl ClientPids {
-        /// Wraps `pids`, or answers `None` when there is no client to wrap.
-        pub(crate) fn new(pids: Vec<Pid>) -> Option<Self> {
-            if pids.is_empty() {
-                return None;
-            }
-            Some(Self(pids))
-        }
-
-        /// The clients, in the order `ps` reported them. Never empty.
-        pub(crate) fn as_slice(&self) -> &[Pid] {
-            &self.0
-        }
-    }
-}
-
-use client_pids::ClientPids;
-
-/// Which Zellij clients stand in for the current process during the search.
-///
-/// Zellij daemonizes its server, so the chain from the current process stops
-/// at PID 1 and never reaches a terminal. The client keeps that chain, which
-/// is why the client is searched instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ZellijScan {
-    /// Do not stand in for the current process. Used outside Zellij, and for
-    /// the direct-ancestry question, which must not use the workaround.
-    Off,
-    /// Every process on the machine whose basename is exactly `zellij`.
-    ///
-    /// This is the careful answer for a session whose clients cannot be
-    /// named. It can report a transport that belongs to another session.
-    EveryClient,
-    /// The clients that are attached to this session, found by
-    /// [`zellij_client_pids`].
-    ///
-    /// [`ClientPids`] holds at least one client, so `classify_transport` can
-    /// ask whether *every* client is a Mosh client and get an answer that a
-    /// client stands behind. A session with no named client cannot arrive
-    /// here at all: it uses [`ZellijScan::EveryClient`].
-    Clients(ClientPids),
-}
-
-/// Determines whether a target process (identified by basename) is an ancestor
-/// of the current process by analyzing parsed `ps` output.
-///
-/// This handles two cases:
-/// 1. **Direct ancestry**: The target process is a direct ancestor of `current_pid`.
-/// 2. **Zellij workaround**: Zellij daemonizes (reparents to PID 1), breaking the
-///    direct ancestry. In this case, `scan` names the client processes that stand
-///    in for the current process, and the target is searched above each of them.
-fn find_ancestor_process(
-    ps_output: &str,
-    current_pid: Pid,
-    scan: &ZellijScan,
-    target_name: &str,
-) -> bool {
-    let mut parent_of: HashMap<Pid, Pid> = HashMap::new();
-    let mut comm_of: HashMap<Pid, String> = HashMap::new();
-
-    for line in ps_output.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let pid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
-            Some(p) => Pid(p),
-            None => continue,
-        };
-        let ppid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
-            Some(p) => Pid(p),
-            None => continue,
-        };
-        // Rejoin remaining tokens to reconstruct paths that contain spaces
-        // (e.g., "/Users/user/my apps/mosh-server"). On macOS, `ps -eo comm=`
-        // returns the full executable path. The kernel's p_comm field is limited
-        // to MAXCOMLEN (16 chars), but `ps` resolves the full path via libproc,
-        // so truncation is not expected. Edge cases (zombie processes, kernel
-        // threads) may show truncated names; "mosh-server" (11 chars) fits.
-        let comm: String = parts.collect::<Vec<&str>>().join(" ");
-        parent_of.insert(pid, ppid);
-        comm_of.insert(pid, comm);
-    }
-
-    // Case 1: Walk up from current PID looking for target (direct ancestry)
-    let mut ancestor = current_pid;
-    for _ in 0..MAX_ANCESTOR_DEPTH {
-        if let Some(comm) = comm_of.get(&ancestor) {
-            if comm_basename(comm) == target_name {
-                return true;
-            }
-        }
-        match parent_of.get(&ancestor) {
-            Some(&ppid) if ppid != Pid(0) && ppid != ancestor => ancestor = ppid,
-            _ => break,
-        }
-    }
-
-    // Case 2: Inside Zellij, which daemonized and broke the ancestry chain.
-    // Search above each client that stands in for the current process.
-    let every_client: Vec<Pid>;
-    let clients: &[Pid] = match scan {
-        ZellijScan::Off => return false,
-        ZellijScan::Clients(clients) => clients.as_slice(),
-        // Any process whose basename is exactly "zellij" (the CLI binary, not
-        // "zellij-server" or other variants).
-        ZellijScan::EveryClient => {
-            every_client = comm_of
-                .iter()
-                .filter(|(_, comm)| comm_basename(comm) == ZELLIJ_PROGRAM_NAME)
-                .map(|(&pid, _)| pid)
-                .collect();
-            &every_client
-        }
-    };
-
-    for &client in clients {
-        let mut ancestor = client;
-        for _ in 0..MAX_ANCESTOR_DEPTH {
-            match parent_of.get(&ancestor) {
-                Some(&ppid) if ppid != Pid(0) && ppid != ancestor => {
-                    if let Some(pcomm) = comm_of.get(&ppid) {
-                        if comm_basename(pcomm) == target_name {
-                            return true;
-                        }
-                    }
-                    ancestor = ppid;
-                }
-                _ => break,
-            }
-        }
-    }
-
-    false
-}
-
-/// Turn the older `in_zellij` flag into a scan. A session whose clients are
-/// not named uses [`ZellijScan::EveryClient`], which is what `in_zellij` meant.
-#[cfg(test)]
-fn scan_for_flag(in_zellij: bool) -> ZellijScan {
-    if in_zellij {
-        ZellijScan::EveryClient
-    } else {
-        ZellijScan::Off
-    }
-}
-
-/// Check if Mosh is in the process tree. Delegates to [`find_ancestor_process`].
-#[cfg(test)]
-fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
-    find_ancestor_process(
-        ps_output,
-        current_pid,
-        &scan_for_flag(in_zellij),
-        "mosh-server",
-    )
-}
-
-/// Check if Eternal Terminal is in the process tree. Delegates to [`find_ancestor_process`].
-/// Looks for `etterminal` (the per-session worker), not `etserver` (the daemon),
-/// because `etterminal` is the direct ancestor of the user's shell.
-#[cfg(test)]
-fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
-    find_ancestor_process(
-        ps_output,
-        current_pid,
-        &scan_for_flag(in_zellij),
-        "etterminal",
-    )
 }
 
 #[cfg(test)]
@@ -2479,156 +2190,6 @@ mod tests {
             PayloadBudget::UNLIMITED,
             "Eternal Terminal carries the bytes through and states no cap of its own"
         );
-    }
-
-    // =========================================================================
-    // Tests for comm_basename
-    // =========================================================================
-
-    #[test]
-    fn comm_basename_full_path() {
-        assert_eq!(comm_basename("/usr/local/bin/mosh-server"), "mosh-server");
-    }
-
-    #[test]
-    fn comm_basename_bare_name() {
-        assert_eq!(comm_basename("mosh-server"), "mosh-server");
-    }
-
-    #[test]
-    fn comm_basename_path_with_spaces() {
-        // Paths with spaces are reconstructed by the join(" ") in parsing
-        assert_eq!(
-            comm_basename("/Users/user/my apps/mosh-server"),
-            "mosh-server"
-        );
-    }
-
-    #[test]
-    fn comm_basename_empty_string() {
-        assert_eq!(comm_basename(""), "");
-    }
-
-    // =========================================================================
-    // Tests for has_mosh_in_process_tree
-    // =========================================================================
-
-    #[test]
-    fn mosh_detected_bare_session() {
-        // Process tree: mosh-server(100) -> bash(200) -> ic(300)
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /bin/bash
-  300   200 /usr/local/bin/ic";
-        assert!(has_mosh_in_process_tree(ps_output, Pid(300), false));
-    }
-
-    #[test]
-    fn mosh_detected_bare_name() {
-        // comm is just the bare name, no path
-        let ps_output = "\
-  100     1 mosh-server
-  200   100 bash
-  300   200 ic";
-        assert!(has_mosh_in_process_tree(ps_output, Pid(300), false));
-    }
-
-    #[test]
-    fn mosh_detected_in_zellij() {
-        // mosh-server(100) -> zellij CLI(200), but current process(400)
-        // is child of zellij-server(300) which reparented to PID 1
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /usr/bin/zellij
-  300     1 /usr/bin/zellij-server
-  400   300 /bin/bash";
-        assert!(has_mosh_in_process_tree(ps_output, Pid(400), true));
-    }
-
-    #[test]
-    fn no_mosh_in_normal_session() {
-        let ps_output = "\
-    1     0 /sbin/launchd
-  500     1 /usr/sbin/sshd
-  600   500 /bin/bash
-  700   600 /usr/local/bin/ic";
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(700), false));
-    }
-
-    #[test]
-    fn mosh_empty_ps_output() {
-        assert!(!has_mosh_in_process_tree("", Pid(1), false));
-    }
-
-    #[test]
-    fn mosh_malformed_lines_skipped() {
-        let ps_output = "\
-not_a_number  1 /bin/bash
-  100     1 /usr/bin/mosh-server
-  abc   def /foo/bar
-  200   100 /bin/bash";
-        assert!(has_mosh_in_process_tree(ps_output, Pid(200), false));
-    }
-
-    #[test]
-    fn mosh_zellij_exact_match_no_false_positive() {
-        // "my-zellij-wrapper" and "zellij-server" must NOT match as zellij CLI
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /usr/local/bin/my-zellij-wrapper
-  300     1 /usr/local/bin/zellij-server
-  400   300 /bin/bash";
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(400), true));
-    }
-
-    #[test]
-    fn mosh_server_exact_match_no_false_positive() {
-        // "mosh-server-wrapper" must NOT match as mosh-server
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server-wrapper
-  200   100 /bin/bash";
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(200), false));
-    }
-
-    #[test]
-    fn mosh_comm_path_with_spaces() {
-        // Paths with spaces are reconstructed by join(" "),
-        // and comm_basename extracts the correct filename
-        let ps_output = "\
-  100     1 /Users/user/my apps/mosh-server
-  200   100 /bin/bash";
-        assert!(has_mosh_in_process_tree(ps_output, Pid(200), false));
-    }
-
-    #[test]
-    fn mosh_current_pid_not_in_table() {
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /bin/bash";
-        // PID 999 is not in the table
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(999), false));
-    }
-
-    #[test]
-    fn mosh_cycle_does_not_loop_forever() {
-        // A process whose parent is itself should not cause infinite loop
-        let ps_output = "\
-  100   100 /bin/bash";
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(100), false));
-    }
-
-    #[test]
-    fn mosh_not_detected_when_zellij_env_unset() {
-        // Even though a zellij process exists under mosh-server,
-        // Case 2 should not trigger when in_zellij is false
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /usr/bin/zellij
-  300     1 /usr/bin/zellij-server
-  400   300 /bin/bash";
-        // current PID 400 is not an ancestor of mosh-server via Case 1,
-        // and in_zellij=false disables Case 2
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(400), false));
     }
 
     // =========================================================================
@@ -2929,7 +2490,7 @@ not_a_number  1 /bin/bash
 
     /// The PID of the process that asks for the transport. It sits under the
     /// Zellij server of the session named `ic-test`.
-    const CURRENT: Pid = Pid(63481);
+    const CURRENT: Pid = Pid::new(63481);
 
     /// A process table that holds two Zellij sessions.
     ///
@@ -3124,185 +2685,6 @@ not_a_number  1 /bin/bash
             ),
             RemoteTransport::EternalTerminal
         );
-    }
-
-    // =========================================================================
-    // Tests for zellij_client_pids (session-scoped client discovery)
-    // =========================================================================
-
-    /// A `ps -eo pid=,args=` table with two Zellij sessions and one server.
-    const PS_ARGS_TWO_SESSIONS: &str = "\
-  51648 /Users/t/.local/bin/zellij --server /tmp/zellij-501/contract_version_1/ic-test
-  57053 zellij a ic-test
-  32269 zellij a meshtastic
-  56666 -zsh";
-
-    #[test]
-    fn zellij_client_pids_finds_the_client_of_this_session() {
-        assert_eq!(
-            zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test"),
-            vec![Pid(57053)]
-        );
-    }
-
-    #[test]
-    fn zellij_client_pids_ignores_another_sessions_client() {
-        let found = zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test");
-        assert!(!found.contains(&Pid(32269)));
-    }
-
-    #[test]
-    fn zellij_client_pids_ignores_the_server_of_this_session() {
-        // The server has the session name in its socket path, not as an
-        // argument of its own. It is not a client.
-        let found = zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test");
-        assert!(!found.contains(&Pid(51648)));
-    }
-
-    #[test]
-    fn zellij_client_pids_accepts_every_attach_form() {
-        let ps_args = "\
-  100 zellij a work
-  200 zellij attach work
-  300 zellij -s work
-  400 zellij --session work";
-        assert_eq!(
-            zellij_client_pids(ps_args, "work"),
-            vec![Pid(100), Pid(200), Pid(300), Pid(400)]
-        );
-    }
-
-    #[test]
-    fn zellij_client_pids_requires_a_whole_argument_match() {
-        // "work" must not match the session named "work-tree".
-        let ps_args = "  100 zellij a work-tree";
-        assert!(zellij_client_pids(ps_args, "work").is_empty());
-    }
-
-    #[test]
-    fn zellij_client_pids_requires_an_exact_program_name() {
-        // A wrapper script named "my-zellij-wrapper" is not the Zellij CLI.
-        let ps_args = "\
-  100 /usr/local/bin/my-zellij-wrapper a work
-  200 /usr/local/bin/zellij-server a work";
-        assert!(zellij_client_pids(ps_args, "work").is_empty());
-    }
-
-    #[test]
-    fn zellij_client_pids_is_empty_for_an_unknown_session() {
-        assert!(zellij_client_pids(PS_ARGS_TWO_SESSIONS, "no-such-session").is_empty());
-    }
-
-    #[test]
-    fn zellij_client_pids_handles_empty_input() {
-        assert!(zellij_client_pids("", "ic-test").is_empty());
-    }
-
-    #[test]
-    fn zellij_client_pids_skips_malformed_lines() {
-        let ps_args = "\
-not_a_number zellij a work
-  100 zellij a work";
-        assert_eq!(zellij_client_pids(ps_args, "work"), vec![Pid(100)]);
-    }
-
-    #[test]
-    fn zellij_client_pids_ignores_an_empty_session_name() {
-        // ZELLIJ_SESSION_NAME is unset or empty. No client can be identified.
-        assert!(zellij_client_pids(PS_ARGS_TWO_SESSIONS, "").is_empty());
-    }
-
-    // =========================================================================
-    // Tests for ClientPids (the client list that cannot be empty)
-    // =========================================================================
-
-    #[test]
-    fn client_pids_refuses_an_empty_list() {
-        // An empty list would answer "every client is a Mosh client" for no
-        // reason, so it must not be possible to build one.
-        assert!(ClientPids::new(Vec::new()).is_none());
-    }
-
-    #[test]
-    fn client_pids_keeps_a_non_empty_list_in_order() {
-        let clients =
-            ClientPids::new(vec![Pid(57053), Pid(32269)]).expect("a list with clients is accepted");
-        assert_eq!(clients.as_slice(), [Pid(57053), Pid(32269)]);
-    }
-
-    // =========================================================================
-    // Tests for has_et_in_process_tree (Eternal Terminal detection)
-    // =========================================================================
-
-    #[test]
-    fn et_detected_bare_session() {
-        // Process tree: etterminal(100) -> bash(200) -> ic(300)
-        let ps_output = "\
-  100     1 /usr/bin/etterminal
-  200   100 /bin/bash
-  300   200 /usr/local/bin/ic";
-        assert!(has_et_in_process_tree(ps_output, Pid(300), false));
-    }
-
-    #[test]
-    fn et_detected_bare_name() {
-        // comm is just the bare name, no path
-        let ps_output = "\
-  100     1 etterminal
-  200   100 bash
-  300   200 ic";
-        assert!(has_et_in_process_tree(ps_output, Pid(300), false));
-    }
-
-    #[test]
-    fn et_detected_in_zellij() {
-        // etterminal(100) -> zellij CLI(200), but current process(400)
-        // is child of zellij-server(300) which reparented to PID 1
-        let ps_output = "\
-  100     1 /usr/bin/etterminal
-  200   100 /usr/bin/zellij
-  300     1 /usr/bin/zellij-server
-  400   300 /bin/bash";
-        assert!(has_et_in_process_tree(ps_output, Pid(400), true));
-    }
-
-    #[test]
-    fn no_et_in_normal_session() {
-        let ps_output = "\
-    1     0 /sbin/launchd
-  500     1 /usr/sbin/sshd
-  600   500 /bin/bash
-  700   600 /usr/local/bin/ic";
-        assert!(!has_et_in_process_tree(ps_output, Pid(700), false));
-    }
-
-    #[test]
-    fn et_not_confused_with_mosh() {
-        // mosh-server present but no etterminal
-        let ps_output = "\
-  100     1 /usr/bin/mosh-server
-  200   100 /bin/bash
-  300   200 /usr/local/bin/ic";
-        assert!(!has_et_in_process_tree(ps_output, Pid(300), false));
-    }
-
-    #[test]
-    fn mosh_not_confused_with_et() {
-        // etterminal present but no mosh-server
-        let ps_output = "\
-  100     1 /usr/bin/etterminal
-  200   100 /bin/bash
-  300   200 /usr/local/bin/ic";
-        assert!(!has_mosh_in_process_tree(ps_output, Pid(300), false));
-    }
-
-    #[test]
-    fn et_exact_match_no_false_positive() {
-        // "etterminal-wrapper" must NOT match as etterminal
-        let ps_output = "\
-  100     1 /usr/bin/etterminal-wrapper
-  200   100 /bin/bash";
-        assert!(!has_et_in_process_tree(ps_output, Pid(200), false));
     }
 
     // =========================================================================

@@ -4179,6 +4179,7 @@ dependencies = [
  "image",
  "libc",
  "notify",
+ "proctree",
  "termgfx",
  "termion",
  "unicode-width",
