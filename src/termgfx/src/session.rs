@@ -61,13 +61,17 @@ const CLIENT_VARIABLE: &str = "MOSH_CLIENT_IMAGES";
 /// protocol that the transport carries.
 const BUDGETS_VARIABLE: &str = "MOSH_IMAGE_BUDGETS";
 
-/// The name that both variables give the kitty graphics protocol.
+/// The character that stands between the name of a protocol and its cap in
+/// [`BUDGETS_VARIABLE`].
+const ASSIGNMENT: char = '=';
+
+/// The name that all three variables give the kitty graphics protocol.
 const KITTY_NAME: &str = "kitty";
 
-/// The name that both variables give the Sixel protocol.
+/// The name that all three variables give the Sixel protocol.
 const SIXEL_NAME: &str = "sixel";
 
-/// The name that both variables give the inline image protocol of iTerm2.
+/// The name that all three variables give the inline image protocol of iTerm2.
 const ITERM2_NAME: &str = "iterm2";
 
 /// What a message calls a set that names no protocol at all.
@@ -189,6 +193,68 @@ impl ProtocolSet {
     }
 }
 
+/// Read the caps that [`BUDGETS_VARIABLE`] states, as budgets of a payload.
+///
+/// The value is a list of pairs. A comma stands between two pairs, and an `=`
+/// stands between the name of a protocol and the cap of it. The names are the
+/// names of `MOSH_IMAGES`, and they stand in the same order, so a reader joins
+/// the two lists by name. A name is read whatever its case, and the space
+/// around a pair is dropped, as [`ProtocolSet::parse`] reads a name.
+///
+/// Each cap counts the command of the protocol together with the payload, so
+/// [`PayloadBudget::under_command_cap`] takes the room of the command off it.
+/// The three caps do not count one stretch of one sequence, and a reader that
+/// takes the three for one number repeats the defect that
+/// <https://github.com/timmattison/tools/issues/480> reports.
+///
+/// This starts at [`PayloadBudget::MOSH`], which is the careful number that
+/// this crate held before mosh stated its caps, and it overrides each protocol
+/// that the value names. **A protocol that the value does not name keeps the
+/// careful number.** An upstream mosh writes no such variable, and so does
+/// every mosh built before
+/// <https://github.com/timmattison/mosh-rs/issues/94>, and the careful number
+/// is what keeps a picture drawing there.
+///
+/// A pair drops where this crate cannot read it: a name of a protocol that
+/// this crate does not draw, a pair that carries no `=`, and a cap that is no
+/// number. A later mosh that carries a fourth protocol states a cap for it,
+/// and a promise of a picture this crate cannot draw is worth nothing. A pair
+/// that drops leaves that one protocol at the careful number, and it leaves
+/// every other pair of the list alone.
+///
+/// **A cap is honored however small it is.** A cap at or under the room of the
+/// command gives a budget of zero, and this keeps that answer rather than fall
+/// back to the careful number. A mosh that lowers a cap is the failure that
+/// this whole design guards against: a number above the real cap sends a
+/// picture that the transport drops, and the user reads an empty screen.
+///
+/// # Arguments
+/// * `raw` - The value of `MOSH_IMAGE_BUDGETS`.
+///
+/// # Returns
+/// The budget of each of the three protocols that this crate draws.
+fn parse_budgets(raw: &str) -> ProtocolBudgets {
+    let mut budgets = ProtocolBudgets::uniform(PayloadBudget::MOSH);
+    for pair in raw.split(',') {
+        let Some((name, cap)) = pair.split_once(ASSIGNMENT) else {
+            continue;
+        };
+        let Ok(cap) = cap.trim().parse::<usize>() else {
+            continue;
+        };
+        let name = name.trim();
+        let budget = PayloadBudget::under_command_cap(cap);
+        if name.eq_ignore_ascii_case(KITTY_NAME) {
+            budgets = budgets.with_kitty(budget);
+        } else if name.eq_ignore_ascii_case(SIXEL_NAME) {
+            budgets = budgets.with_sixel(budget);
+        } else if name.eq_ignore_ascii_case(ITERM2_NAME) {
+            budgets = budgets.with_iterm2(budget);
+        }
+    }
+    budgets
+}
+
 /// What the environment of a mosh session says about the images it carries.
 ///
 /// [`crate::Capabilities`] holds one of these for the run, and the gate of a
@@ -251,9 +317,7 @@ impl MoshImages {
         Self {
             transport: transport.map(ProtocolSet::parse).unwrap_or_default(),
             client: client.map(ProtocolSet::parse).unwrap_or_default(),
-            budgets: budgets.map_or(ProtocolBudgets::uniform(PayloadBudget::MOSH), |_raw| {
-                ProtocolBudgets::uniform(PayloadBudget::MOSH)
-            }),
+            budgets: budgets.map_or(ProtocolBudgets::uniform(PayloadBudget::MOSH), parse_budgets),
         }
     }
 
