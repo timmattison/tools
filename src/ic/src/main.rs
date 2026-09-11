@@ -14,7 +14,8 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use termgfx::{
-    terminal_cells, Budget, Capabilities, Cursor, PayloadBudget, Picture, Request, TerminalType,
+    terminal_cells, Budget, Capabilities, Cursor, PayloadBudget, Picture, ProtocolBudgets, Request,
+    TerminalType,
 };
 use termion::event::Key;
 use termion::input::TermRead;
@@ -2028,25 +2029,33 @@ enum RemoteTransport {
     EternalTerminal,
 }
 
-/// The characters of payload that a picture can spend on `transport`.
+/// The characters of payload that a picture can spend on `transport`, stated
+/// one time for each of the three inline-image protocols.
 ///
 /// A transport that keeps every image it carries caps what it keeps, and a
 /// picture above that cap draws nothing at all. The tool cannot read the cap
 /// off the session, because no protocol asks the question, so it names the one
 /// transport whose cap is known.
 ///
+/// The answer names all three protocols, because `termgfx` reads the terminal
+/// and picks the protocol after this call. mosh states a cap for each of the
+/// three, and a later step of
+/// <https://github.com/timmattison/tools/issues/480> reads those three caps off
+/// the session. This step states the one cap that mosh once kept for all three,
+/// so a picture travels under the same number it travelled under before.
+///
 /// # Arguments
 /// * `transport` - The remote transport that this session runs over.
 ///
 /// # Returns
-/// The budget that the transport allows.
-fn payload_budget_for(transport: RemoteTransport) -> PayloadBudget {
+/// The budget of each of the three protocols under that transport.
+fn payload_budget_for(transport: RemoteTransport) -> ProtocolBudgets {
     match transport {
-        RemoteTransport::Mosh => PayloadBudget::MOSH,
+        RemoteTransport::Mosh => ProtocolBudgets::uniform(PayloadBudget::MOSH),
         // A local terminal keeps the resolution it was given, and Eternal
         // Terminal carries the bytes through. A budget on either one would
         // cost a picture resolution and buy nothing.
-        RemoteTransport::None | RemoteTransport::EternalTerminal => PayloadBudget::UNLIMITED,
+        RemoteTransport::None | RemoteTransport::EternalTerminal => ProtocolBudgets::UNLIMITED,
     }
 }
 
@@ -2174,21 +2183,27 @@ mod tests {
     /// Nothing else here names a cap. A local terminal keeps the resolution it
     /// was given, and Eternal Terminal carries the bytes through, so a budget
     /// on either one would cost a picture resolution for no reason.
+    ///
+    /// The answer names all three protocols, and every one of them reads the
+    /// same number here. mosh states a cap for each protocol, and a later step
+    /// of <https://github.com/timmattison/tools/issues/480> reads the three
+    /// apart. This test holds what a user sees today, so it states that the
+    /// three still agree.
     #[test]
     fn a_mosh_session_states_the_budget_that_mosh_keeps() {
         assert_eq!(
             payload_budget_for(RemoteTransport::Mosh),
-            PayloadBudget::MOSH,
-            "a picture under mosh must fit the store that mosh keeps"
+            ProtocolBudgets::uniform(PayloadBudget::MOSH),
+            "a picture under mosh must fit the store that mosh keeps, whichever protocol carries it"
         );
         assert_eq!(
             payload_budget_for(RemoteTransport::None),
-            PayloadBudget::UNLIMITED,
+            ProtocolBudgets::UNLIMITED,
             "a local terminal states no cap, so a picture keeps every pixel"
         );
         assert_eq!(
             payload_budget_for(RemoteTransport::EternalTerminal),
-            PayloadBudget::UNLIMITED,
+            ProtocolBudgets::UNLIMITED,
             "Eternal Terminal carries the bytes through and states no cap of its own"
         );
     }

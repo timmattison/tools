@@ -533,17 +533,6 @@ impl ProtocolBudgets {
     /// # Returns
     /// The payload budget of the protocol that the routine writes.
     #[must_use]
-    // The tests below read this answer, and no other caller does yet. A later
-    // step gives the budgets to `Request`, and the expectation then fails and
-    // takes this line out with it.
-    // <https://github.com/timmattison/tools/issues/480>
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the callers of the three protocol budgets arrive in a later step of issue 480"
-        )
-    )]
     pub(crate) const fn of_routine(self, routine: DisplayRoutine) -> PayloadBudget {
         match routine {
             DisplayRoutine::Kitty => self.kitty,
@@ -647,8 +636,21 @@ pub struct Request<'a> {
     /// carries an encoding of its own, so neither one can take a file as it
     /// stands.
     pub source: Option<&'a [u8]>,
-    /// How many characters of payload the image can spend.
-    pub payload: PayloadBudget,
+    /// How many characters of payload the image can spend, stated one time
+    /// for each of the three inline-image protocols.
+    ///
+    /// The caller cannot state one number here, because it does not know which
+    /// protocol the picture travels in. [`Capabilities::draw`] reads the
+    /// terminal and picks the protocol, and that happens after the caller
+    /// builds this request. So the caller states the budget of all three
+    /// protocols, and the draw reads the one that belongs to the protocol it
+    /// writes.
+    ///
+    /// A transport that caps the three protocols at the same number states
+    /// that number one time, with [`ProtocolBudgets::uniform`]. mosh caps them
+    /// at three different numbers, which is why this holds three.
+    /// See <https://github.com/timmattison/tools/issues/480>.
+    pub payload: ProtocolBudgets,
     /// Whether the run draws one picture or one frame of many.
     pub picture: Picture,
     /// Where the cursor stands when the image is written.
@@ -711,10 +713,18 @@ impl Capabilities {
         // the one read of the terminal happened before this call and no writer
         // reads the terminal a second time.
         let answered = self.answered_cell();
-        match self.display_routine() {
-            DisplayRoutine::Sixel => write_sixel(out, image, request, answered),
-            DisplayRoutine::Kitty => write_kitty(out, image, request, answered),
-            DisplayRoutine::Iterm2 => write_iterm2(out, image, request, answered),
+        let routine = self.display_routine();
+
+        // Each of the three protocols carries a cap of its own, and the
+        // routine is what names the protocol. The caller states all three
+        // budgets, because it builds the request before this call picks one of
+        // them. <https://github.com/timmattison/tools/issues/480>
+        let budget = request.payload.of_routine(DisplayRoutine::Kitty);
+
+        match routine {
+            DisplayRoutine::Sixel => write_sixel(out, image, request, budget, answered),
+            DisplayRoutine::Kitty => write_kitty(out, image, request, budget, answered),
+            DisplayRoutine::Iterm2 => write_iterm2(out, image, request, budget, answered),
         }?;
 
         out.flush()?;
@@ -1714,6 +1724,11 @@ fn shrink_towards(
 /// * `out` - The stream that takes the bytes.
 /// * `image` - The image to draw.
 /// * `request` - The budget, the cursor and the aspect ratio.
+/// * `budget` - The characters of payload that this picture can spend. It is
+///   the budget of this protocol alone, which [`Capabilities::draw`] reads out
+///   of [`Request::payload`] once it has picked the protocol.
+/// * `answered` - The cell size that the terminal reported, when it reported
+///   one.
 ///
 /// # Errors
 /// Gives the error of the first write to `out` that fails.
@@ -1721,6 +1736,7 @@ fn write_kitty<W: Write>(
     out: &mut W,
     image: &DynamicImage,
     request: &Request<'_>,
+    budget: PayloadBudget,
     answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and every size of this image comes off it.
@@ -1767,7 +1783,7 @@ fn write_kitty<W: Write>(
     // window of more than about 51 columns by 23 makes a frame above that cap.
     // `c=` and `r=` below still state the cell span that the screen gave, so
     // the picture keeps its size there and loses resolution alone.
-    let (image, shape, base64_data) = fit_to_payload_budget(image, request.payload, shape)?;
+    let (image, shape, base64_data) = fit_to_payload_budget(image, budget, shape)?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -1850,6 +1866,11 @@ fn write_kitty<W: Write>(
 /// * `out` - The stream that takes the bytes.
 /// * `image` - The image to draw.
 /// * `request` - The budget, the cursor and the aspect ratio.
+/// * `budget` - The characters of payload that this picture can spend. It is
+///   the budget of this protocol alone, which [`Capabilities::draw`] reads out
+///   of [`Request::payload`] once it has picked the protocol.
+/// * `answered` - The cell size that the terminal reported, when it reported
+///   one.
 ///
 /// # Errors
 /// Gives [`DrawError::Encode`] when the encoder refuses the image, and the
@@ -1858,6 +1879,7 @@ fn write_sixel<W: Write>(
     out: &mut W,
     image: &DynamicImage,
     request: &Request<'_>,
+    budget: PayloadBudget,
     answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and both bounds of this image come off it.
@@ -1893,7 +1915,7 @@ fn write_sixel<W: Write>(
     // picture that spends fewer pixels is smaller on the screen as well. That
     // is the whole of what the protocol allows, and a smaller picture beats the
     // empty screen that a refused transmission leaves.
-    let (resized, _shape, payload) = fit_to_payload_budget(resized, request.payload, SixelPayload)?;
+    let (resized, _shape, payload) = fit_to_payload_budget(resized, budget, SixelPayload)?;
 
     let (_, term_rows) = cells_of(window);
     let contract = cursor_contract(request, term_rows, || {
@@ -1920,8 +1942,9 @@ fn write_sixel<W: Write>(
 /// through the encoder.
 ///
 /// # Arguments
-/// * `request` - The request that the caller made, which states the file and
-///   the characters that the picture can spend.
+/// * `request` - The request that the caller made, which states the file.
+/// * `budget` - The characters of payload that the picture can spend, which is
+///   the budget of the iTerm2 protocol.
 /// * `resized` - True when the display bounds took pixels off the picture.
 ///
 /// # Returns
@@ -1934,7 +1957,11 @@ fn write_sixel<W: Write>(
 /// iTerm2 protocol alone. [`Capabilities::travels_as_it_stands`] is the
 /// entrance that reads the protocol as well, and a caller asks that one before
 /// it holds a file at all.
-fn source_payload_of(request: &Request<'_>, resized: bool) -> Option<String> {
+fn source_payload_of(
+    request: &Request<'_>,
+    budget: PayloadBudget,
+    resized: bool,
+) -> Option<String> {
     if resized {
         return None;
     }
@@ -1948,7 +1975,7 @@ fn source_payload_of(request: &Request<'_>, resized: bool) -> Option<String> {
     // The length of base64 comes off the length of the input alone, so the
     // arithmetic stands in for the encode. The budget refuses the file before
     // the allocation of four thirds of that file happens.
-    if !request.payload.holds(base64_characters_of(source.len())) {
+    if !budget.holds(base64_characters_of(source.len())) {
         return None;
     }
 
@@ -2097,6 +2124,11 @@ fn file_travels_as_it_stands(source: &[u8]) -> bool {
 /// * `out` - The stream that takes the bytes.
 /// * `image` - The image to draw.
 /// * `request` - The budget, the cursor and the aspect ratio.
+/// * `budget` - The characters of payload that this picture can spend. It is
+///   the budget of this protocol alone, which [`Capabilities::draw`] reads out
+///   of [`Request::payload`] once it has picked the protocol.
+/// * `answered` - The cell size that the terminal reported, when it reported
+///   one.
 ///
 /// # Errors
 /// Gives the error of the first write to `out` that fails.
@@ -2104,6 +2136,7 @@ fn write_iterm2<W: Write>(
     out: &mut W,
     image: &DynamicImage,
     request: &Request<'_>,
+    budget: PayloadBudget,
     answered: Option<CellPixels>,
 ) -> Result<(), DrawError> {
     // The window arrives one time, and every size of this image comes off it.
@@ -2156,10 +2189,10 @@ fn write_iterm2<W: Write>(
     // cell span either way, so a picture that does spend pixels keeps the size
     // it takes on the screen. The terminal reads the format out of the file, so
     // no argument of the command names the shape that the picture travelled in.
-    let (image, base64_data) = match source_payload_of(request, resized) {
+    let (image, base64_data) = match source_payload_of(request, budget, resized) {
         Some(payload) => (image, payload),
         None => {
-            let (fitted, _shape, payload) = fit_to_payload_budget(image, request.payload, shape)?;
+            let (fitted, _shape, payload) = fit_to_payload_budget(image, budget, shape)?;
 
             (fitted, payload)
         }
@@ -2213,7 +2246,7 @@ mod tests {
                 rows: Some(5),
             },
             source: None,
-            payload: PayloadBudget::UNLIMITED,
+            payload: ProtocolBudgets::UNLIMITED,
             picture: Picture::Still,
             cursor: Cursor::BelowImage,
             preserve_aspect: true,
@@ -2458,7 +2491,7 @@ mod tests {
     /// * `budget` - The characters of payload that the picture can spend.
     fn kitty_payload_of(image: &DynamicImage, picture: Picture, budget: PayloadBudget) -> usize {
         let request = Request {
-            payload: budget,
+            payload: ProtocolBudgets::uniform(budget),
             picture,
             cursor: Cursor::Held,
             ..test_request()
@@ -2482,7 +2515,7 @@ mod tests {
     /// * `budget` - The characters of payload that the picture can spend.
     fn kitty_keys_of(image: &DynamicImage, picture: Picture, budget: PayloadBudget) -> String {
         let request = Request {
-            payload: budget,
+            payload: ProtocolBudgets::uniform(budget),
             picture,
             cursor: Cursor::Held,
             ..test_request()
@@ -2515,7 +2548,7 @@ mod tests {
     /// * `budget` - The characters of payload that the picture can spend.
     fn sixel_payload_of(image: &DynamicImage, budget: PayloadBudget) -> usize {
         let request = Request {
-            payload: budget,
+            payload: ProtocolBudgets::uniform(budget),
             cursor: Cursor::Held,
             ..test_request()
         };
@@ -2546,7 +2579,7 @@ mod tests {
         budget: PayloadBudget,
     ) -> String {
         let request = Request {
-            payload: budget,
+            payload: ProtocolBudgets::uniform(budget),
             source,
             cursor: Cursor::Held,
             ..test_request()
@@ -2914,7 +2947,7 @@ mod tests {
                 rows: None,
             },
             source,
-            payload: budget,
+            payload: ProtocolBudgets::uniform(budget),
             picture: Picture::Still,
             cursor: Cursor::Held,
             preserve_aspect: true,
@@ -4500,6 +4533,155 @@ mod tests {
                 ProtocolBudgets::UNLIMITED.of_routine(routine),
                 PayloadBudget::UNLIMITED,
                 "a terminal that states no cap bounds no protocol, {routine:?} with the rest"
+            );
+        }
+    }
+
+    /// The share of an unbounded payload that the crossed-budget test states
+    /// for the two protocols it does not draw.
+    ///
+    /// The test needs a budget that the fit of every one of the three
+    /// protocols really reaches, because a budget that a writer cannot reach
+    /// leaves a payload above it and reads as the answer of a writer that
+    /// never saw the budget at all. A count of characters is not such a
+    /// number. Each writer bounds the picture by the window before the fit
+    /// runs, so the payload that the fit starts from moves with the cell size
+    /// that the terminal of the runner reports, and one count stands above
+    /// that payload on a small cell and far under it on a large one.
+    ///
+    /// A share of the payload that the protocol itself made holds on both
+    /// sides. It stands under that payload at every cell size, so the fit
+    /// always runs, and it stays near enough for the fit to reach it. A
+    /// measurement on 2026-09-11 swept the cells from 6 pixels through 48 and
+    /// drew the fixture on all three protocols. Every fit landed below this
+    /// share, with the iTerm2 protocol furthest below it, because that one
+    /// steps onto a JPEG rung.
+    const OTHER_PROTOCOL_BUDGET_SHARE: usize = 90;
+
+    /// A terminal that draws with `routine`.
+    ///
+    /// [`Capabilities::draw`] takes a terminal and picks the routine itself,
+    /// so a test that wants to drive one named routine names a terminal of it.
+    ///
+    /// # Arguments
+    /// * `routine` - The routine that the test draws with.
+    ///
+    /// # Returns
+    /// A terminal type that [`Capabilities`] answers for with that routine.
+    fn terminal_of_routine(routine: DisplayRoutine) -> TerminalType {
+        match routine {
+            DisplayRoutine::Kitty => TerminalType::Kitty,
+            DisplayRoutine::Sixel => TerminalType::Zellij,
+            DisplayRoutine::Iterm2 => TerminalType::ITerm2,
+        }
+    }
+
+    /// Draw `image` on a terminal of `routine` inside `budgets` and give back
+    /// the characters of payload that reached the stream.
+    ///
+    /// Each of the three protocols wraps its payload in a command of its own,
+    /// so the measurement reads the routine as well as the bytes. The three
+    /// answers match [`kitty_payload_characters`], [`sixel_payload_of`] and
+    /// [`iterm2_payload_of`], which measure one protocol each.
+    ///
+    /// The cursor is [`Cursor::Held`], which writes nothing around the
+    /// command, so the count does not move with the window of whoever runs the
+    /// suite.
+    ///
+    /// # Arguments
+    /// * `image` - The picture to draw.
+    /// * `routine` - The routine, and with it the protocol, that draws it.
+    /// * `budgets` - The characters of payload that each protocol can spend.
+    ///
+    /// # Returns
+    /// The characters of payload of the command, with the keys and the
+    /// arguments left out of the number.
+    fn payload_of_routine(
+        image: &DynamicImage,
+        routine: DisplayRoutine,
+        budgets: ProtocolBudgets,
+    ) -> usize {
+        let request = Request {
+            payload: budgets,
+            cursor: Cursor::Held,
+            ..test_request()
+        };
+
+        let capabilities = Capabilities::new(terminal_of_routine(routine), true, true);
+        assert_eq!(
+            capabilities.display_routine(),
+            routine,
+            "this test measures {routine:?}, so the terminal it draws on has to draw with it"
+        );
+
+        let mut out = Vec::new();
+        capabilities
+            .draw(&mut out, image, &request)
+            .expect("a write to a vector never fails");
+        let command =
+            String::from_utf8(out).expect("a command of these three protocols holds ASCII alone");
+
+        match routine {
+            DisplayRoutine::Kitty => kitty_payload_characters(&command),
+            // The Sixel writer writes the device control string of the encoder
+            // and nothing else, so the bytes of the stream are the payload.
+            DisplayRoutine::Sixel => command.len(),
+            DisplayRoutine::Iterm2 => command
+                .rsplit_once(':')
+                .expect("an iTerm2 command holds a colon between the arguments and the payload")
+                .1
+                .trim_end_matches('\x07')
+                .len(),
+        }
+    }
+
+    /// A writer reads the budget of the protocol it writes, and no other one.
+    ///
+    /// mosh states a cap for each of the three protocols, and the three caps
+    /// differ. The request carries all three, because the caller builds it
+    /// before [`Capabilities::draw`] picks the protocol. So the draw has to
+    /// hand each writer the budget of the protocol that writer sends, and a
+    /// draw that hands out one number for all three bounds two protocols out
+    /// of three by the cap of a protocol they do not use. That is the defect
+    /// of <https://github.com/timmattison/tools/issues/480>.
+    ///
+    /// The test draws each protocol in turn with a budget that bounds it at
+    /// nothing, and with a budget under its own payload on the other two. A
+    /// writer that read one of those other budgets would take characters off
+    /// the picture, and the payload then falls to that budget. A writer that
+    /// reads its own takes nothing off, and the payload stands above it.
+    ///
+    /// Every routine is measured, so a draw that hands the wrong budget to any
+    /// one of the three fails here. Two arms of the match with their budgets
+    /// crossed over fail as well, because the routine of each arm is the one
+    /// budget that stands unbounded for that draw.
+    #[test]
+    fn a_writer_reads_the_budget_of_the_protocol_it_writes() {
+        let fixture = photograph_fixture();
+
+        for routine in [
+            DisplayRoutine::Kitty,
+            DisplayRoutine::Sixel,
+            DisplayRoutine::Iterm2,
+        ] {
+            let whole = payload_of_routine(&fixture, routine, ProtocolBudgets::UNLIMITED);
+            let others = whole * OTHER_PROTOCOL_BUDGET_SHARE / 100;
+            let tight = ProtocolBudgets::uniform(PayloadBudget::of(others));
+            let budgets = match routine {
+                DisplayRoutine::Kitty => tight.with_kitty(PayloadBudget::UNLIMITED),
+                DisplayRoutine::Sixel => tight.with_sixel(PayloadBudget::UNLIMITED),
+                DisplayRoutine::Iterm2 => tight.with_iterm2(PayloadBudget::UNLIMITED),
+            };
+
+            assert!(
+                others < whole,
+                "the budget of the other two protocols has to stand under the payload of {routine:?}, or a writer that read it would take nothing off the picture and this test would measure nothing"
+            );
+
+            let spent = payload_of_routine(&fixture, routine, budgets);
+            assert!(
+                spent > others,
+                "nothing bounds {routine:?} here, so its picture has to spend the {whole} characters it spends unbounded, but it spent {spent}, which the {others} characters of the other two protocols hold"
             );
         }
     }
