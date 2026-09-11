@@ -66,8 +66,11 @@ impl SshEnvironment {
 
     /// Decide from `is_set`, which answers for one variable name.
     pub(crate) fn of(is_set: impl Fn(&str) -> bool) -> Self {
-        let _ = is_set;
-        Self::Absent
+        if SSH_VARIABLES.iter().copied().any(is_set) {
+            Self::Present
+        } else {
+            Self::Absent
+        }
     }
 }
 
@@ -84,14 +87,21 @@ impl Session {
     /// Decide from the environment and a process table.
     ///
     /// Everything arrives as an argument, so every rule is testable.
+    ///
+    /// Each half answers alone. `sshd` states a remote session in the
+    /// environment, and `mosh-server` states one in the process ancestry. A
+    /// session that either half names is a remote session.
     pub(crate) fn classify(
         ssh: SshEnvironment,
         tree: &ProcessTree,
         pid: Pid,
         scan: &ZellijScan,
     ) -> Self {
-        let _ = (ssh, tree, pid, scan);
-        Self::Local
+        if ssh == SshEnvironment::Present || tree.has_ancestor(pid, scan, MOSH_SERVER) {
+            Self::Remote
+        } else {
+            Self::Local
+        }
     }
 
     /// Read the machine.
