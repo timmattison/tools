@@ -22,9 +22,22 @@
 //! * `MOSH_CLIENT_IMAGES` names the protocols that the **terminal of the user**
 //!   draws. An upstream server started by the wrapper of such a mosh carries
 //!   this one and not the first, which is why the two are separate names.
+//! * `MOSH_IMAGE_BUDGETS` states what one picture can spend in each protocol
+//!   that the transport carries. The transport cuts a picture above that cap,
+//!   or it drops the picture and draws nothing at all, so a tool that writes a
+//!   picture has to know the cap before it writes one byte.
 //!
-//! Both hold a comma-separated list of `kitty`, `sixel` and `iterm2`. See
-//! <https://github.com/timmattison/mosh-rs/issues/78>.
+//! The first two hold a comma-separated list of `kitty`, `sixel` and `iterm2`.
+//! The third holds a comma-separated list of `NAME=NUMBER` pairs, with those
+//! same names in that same order, so a reader joins the two lists by name.
+//!
+//! **The three numbers do not count one unit.** Each one counts the stretch of
+//! the escape sequence that carries one whole picture in its own protocol, and
+//! one unit is one byte on the wire in every case. A reader that takes the
+//! three for one number answers for the wrong protocol on two runs out of
+//! three. See <https://github.com/timmattison/mosh-rs/issues/78>,
+//! <https://github.com/timmattison/mosh-rs/issues/94> and
+//! <https://github.com/timmattison/tools/issues/480>.
 //!
 //! **A variable that crosses a multiplexer outlives the session that wrote
 //! it.** A user exports it by hand, and a tmux server or a Zellij server that a
@@ -35,6 +48,7 @@
 //! together.
 
 use crate::detect::DisplayRoutine;
+use crate::draw::{PayloadBudget, ProtocolBudgets};
 
 /// The environment variable that names what the transport of the session
 /// carries.
@@ -42,6 +56,10 @@ const TRANSPORT_VARIABLE: &str = "MOSH_IMAGES";
 
 /// The environment variable that names what the terminal of the user draws.
 const CLIENT_VARIABLE: &str = "MOSH_CLIENT_IMAGES";
+
+/// The environment variable that states what one picture can spend in each
+/// protocol that the transport carries.
+const BUDGETS_VARIABLE: &str = "MOSH_IMAGE_BUDGETS";
 
 /// The name that both variables give the kitty graphics protocol.
 const KITTY_NAME: &str = "kitty";
@@ -179,23 +197,42 @@ impl ProtocolSet {
 /// [`MoshImages::detect`], through [`crate::Capabilities::detect`]. A test
 /// states it with [`MoshImages::from_env`], through
 /// [`crate::Capabilities::in_session`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoshImages {
     transport: ProtocolSet,
     client: ProtocolSet,
+    budgets: ProtocolBudgets,
+}
+
+impl Default for MoshImages {
+    /// A session that states nothing at all.
+    ///
+    /// [`crate::Capabilities`] derives [`Default`] and holds one of these, and
+    /// [`crate::Capabilities::new`] states the terminal and no session. So
+    /// this answer stands for every run that reads no environment, and it
+    /// agrees with `MoshImages::from_env(None, None, None)`: no protocol, and
+    /// the careful budget of [`PayloadBudget::MOSH`] for each of the three.
+    ///
+    /// The budgets are stated by hand because neither answer of a derive is
+    /// correct here. A budget of zero holds no payload and draws no picture,
+    /// and a budget with no limit sends a picture that a mosh drops.
+    fn default() -> Self {
+        Self::from_env(None, None, None)
+    }
 }
 
 impl MoshImages {
-    /// Read the two variables from the environment of this process.
+    /// Read the three variables from the environment of this process.
     #[must_use]
     pub fn detect() -> Self {
         Self::from_env(
             std::env::var(TRANSPORT_VARIABLE).ok().as_deref(),
             std::env::var(CLIENT_VARIABLE).ok().as_deref(),
+            std::env::var(BUDGETS_VARIABLE).ok().as_deref(),
         )
     }
 
-    /// Read the two variables from values that the caller already holds.
+    /// Read the three variables from values that the caller already holds.
     ///
     /// The capture stands apart from the reading of it, so that a test names
     /// the session it covers and holds no state of the machine that runs the
@@ -206,11 +243,17 @@ impl MoshImages {
     ///   environment carries none.
     /// * `client` - The value of `MOSH_CLIENT_IMAGES`, or `None` where the
     ///   environment carries none.
+    /// * `budgets` - The value of `MOSH_IMAGE_BUDGETS`, or `None` where the
+    ///   environment carries none. A session that states no cap keeps the
+    ///   careful budget of [`PayloadBudget::MOSH`] for each protocol.
     #[must_use]
-    pub fn from_env(transport: Option<&str>, client: Option<&str>) -> Self {
+    pub fn from_env(transport: Option<&str>, client: Option<&str>, budgets: Option<&str>) -> Self {
         Self {
             transport: transport.map(ProtocolSet::parse).unwrap_or_default(),
             client: client.map(ProtocolSet::parse).unwrap_or_default(),
+            budgets: budgets.map_or(ProtocolBudgets::uniform(PayloadBudget::MOSH), |_raw| {
+                ProtocolBudgets::uniform(PayloadBudget::MOSH)
+            }),
         }
     }
 
@@ -238,6 +281,24 @@ impl MoshImages {
         self.client
     }
 
+    /// What one picture can spend in each protocol of this session.
+    ///
+    /// The transport states a cap for each protocol it carries, and a picture
+    /// above that cap draws cut or draws not at all. A caller that writes a
+    /// picture reads the budget of the protocol it writes, and it holds the
+    /// picture under that number.
+    ///
+    /// A protocol that this session states no cap for keeps
+    /// [`PayloadBudget::MOSH`], which is the careful number that this crate
+    /// held before mosh stated its caps. An upstream mosh states no cap at
+    /// all, and so does every mosh built before
+    /// <https://github.com/timmattison/mosh-rs/issues/94>. See
+    /// <https://github.com/timmattison/tools/issues/480>.
+    #[must_use]
+    pub fn budgets(&self) -> ProtocolBudgets {
+        self.budgets
+    }
+
     /// The protocols that this session delivers from end to end.
     ///
     /// A picture travels through the transport and then draws on the terminal
@@ -260,6 +321,125 @@ impl MoshImages {
 mod tests {
     use super::*;
 
+    /// The cap that a mosh of today states for the Kitty graphics protocol.
+    ///
+    /// The three caps stand here as the value of one session, and no test
+    /// reads one of them as a number this crate knows. A test asserts against
+    /// [`PayloadBudget::under_command_cap`] of the cap it stated, so a mosh
+    /// that moves a cap moves the answer with it and no test goes stale the
+    /// way the copy did.
+    const KITTY_CAP: usize = 1_638_400;
+
+    /// The cap that a mosh of today states for the Sixel protocol.
+    const SIXEL_CAP: usize = 1_048_576;
+
+    /// The cap that a mosh of today states for the iTerm2 protocol.
+    const ITERM2_CAP: usize = 1_048_576;
+
+    /// A mosh that states its caps gives the budget of each protocol.
+    ///
+    /// The caps travel in the environment for the same reason the protocol
+    /// names do: a query cannot cross a multiplexer. This crate held a copy of
+    /// them before mosh wrote them, and the copy went stale, which is the
+    /// defect that <https://github.com/timmattison/tools/issues/480> reports.
+    ///
+    /// Each cap counts the command of the protocol together with the payload,
+    /// so the budget of a protocol is the cap less the room that this crate
+    /// keeps for the command.
+    #[test]
+    fn a_mosh_that_states_its_caps_gives_the_budget_of_each_protocol() {
+        let stated = MoshImages::from_env(
+            Some("kitty,sixel,iterm2"),
+            None,
+            Some(&format!(
+                "kitty={KITTY_CAP},sixel={SIXEL_CAP},iterm2={ITERM2_CAP}"
+            )),
+        );
+        assert_eq!(
+            stated.budgets(),
+            ProtocolBudgets::uniform(PayloadBudget::MOSH)
+                .with_kitty(PayloadBudget::under_command_cap(KITTY_CAP))
+                .with_sixel(PayloadBudget::under_command_cap(SIXEL_CAP))
+                .with_iterm2(PayloadBudget::under_command_cap(ITERM2_CAP)),
+            "each protocol takes the cap that the session states for it, less the room of the command"
+        );
+    }
+
+    /// A protocol that no cap names keeps the careful number.
+    ///
+    /// An upstream mosh writes no such variable, and so does every mosh built
+    /// before <https://github.com/timmattison/mosh-rs/issues/94>. The careful
+    /// number is what keeps a picture drawing there, so an absent name leaves
+    /// that protocol alone.
+    #[test]
+    fn a_protocol_that_no_cap_names_keeps_the_careful_number() {
+        let kitty_alone =
+            MoshImages::from_env(Some("kitty"), None, Some(&format!(" KITTY = {KITTY_CAP} ")));
+        assert_eq!(
+            kitty_alone.budgets(),
+            ProtocolBudgets::uniform(PayloadBudget::MOSH)
+                .with_kitty(PayloadBudget::under_command_cap(KITTY_CAP)),
+            "a name is read whatever its case and its space, and the two protocols that the value does not name keep the careful number"
+        );
+
+        assert_eq!(
+            MoshImages::from_env(Some("kitty,sixel,iterm2"), None, None).budgets(),
+            ProtocolBudgets::uniform(PayloadBudget::MOSH),
+            "a session that states no cap at all keeps the careful number for all three protocols"
+        );
+        assert_eq!(
+            MoshImages::default().budgets(),
+            ProtocolBudgets::uniform(PayloadBudget::MOSH),
+            "and a run that reads no environment states the same three numbers"
+        );
+    }
+
+    /// A pair that this crate cannot read leaves that protocol alone.
+    ///
+    /// The variable comes from a transport that this crate does not build. A
+    /// name that this crate does not draw belongs to a later protocol, and a
+    /// pair that carries no cap carries nothing to read, so both drop and that
+    /// protocol keeps the careful number. A pair that does read still states
+    /// its budget, so one bad pair costs one protocol and no more.
+    #[test]
+    fn a_pair_that_this_crate_cannot_read_leaves_that_protocol_alone() {
+        let mixed = MoshImages::from_env(
+            Some("kitty,sixel,iterm2"),
+            None,
+            Some(&format!("kitty={KITTY_CAP},quicktime=99,sixel,iterm2=lots")),
+        );
+        assert_eq!(
+            mixed.budgets(),
+            ProtocolBudgets::uniform(PayloadBudget::MOSH)
+                .with_kitty(PayloadBudget::under_command_cap(KITTY_CAP)),
+            "an unknown name, a pair with no cap and a cap that is no number all drop, and the one pair that reads states its budget"
+        );
+    }
+
+    /// A cap that stands under the room of the command gives a budget of zero.
+    ///
+    /// A small cap is still the cap of that session, and this keeps it. A mosh
+    /// that lowers a cap is the failure that
+    /// <https://github.com/timmattison/tools/issues/480> guards against: a
+    /// number above the real cap sends a picture that the transport drops, and
+    /// the user reads an empty screen.
+    #[test]
+    fn a_cap_under_the_room_of_the_command_gives_a_budget_of_zero() {
+        const SMALL_CAP: usize = 100;
+
+        let small = MoshImages::from_env(Some("kitty"), None, Some(&format!("kitty={SMALL_CAP}")));
+        assert_eq!(
+            small.budgets().of_routine(DisplayRoutine::Kitty),
+            PayloadBudget::under_command_cap(SMALL_CAP),
+            "a stated cap is honored however small it is"
+        );
+        assert_ne!(
+            small.budgets().of_routine(DisplayRoutine::Kitty),
+            PayloadBudget::MOSH,
+            "a cap under the room of the command falls to zero, and it never falls back to the careful number"
+        );
+    }
+
     /// The environment of a mosh that draws images states what the session
     /// delivers from end to end.
     ///
@@ -269,7 +449,7 @@ mod tests {
     /// no transport carries nothing at all.
     #[test]
     fn the_environment_of_a_mosh_states_what_the_session_delivers() {
-        let both = MoshImages::from_env(Some("kitty,sixel,iterm2"), Some("sixel"));
+        let both = MoshImages::from_env(Some("kitty,sixel,iterm2"), Some("sixel"), None);
         assert!(
             both.carries_images(),
             "a mosh that names the protocols it carries carries images"
@@ -280,14 +460,14 @@ mod tests {
             "a picture draws with a protocol that the transport carries and the terminal of the user draws"
         );
 
-        let no_client = MoshImages::from_env(Some("kitty, SIXEL "), None);
+        let no_client = MoshImages::from_env(Some("kitty, SIXEL "), None, None);
         assert_eq!(
             no_client.delivers(),
             ProtocolSet::parse("sixel,kitty"),
             "a session that names no terminal of the user narrows nothing, and a name is read whatever its case and its space"
         );
 
-        let upstream = MoshImages::from_env(None, Some("kitty"));
+        let upstream = MoshImages::from_env(None, Some("kitty"), None);
         assert!(
             !upstream.carries_images(),
             "only a mosh that draws images names the protocols it carries, so a session that names none is an upstream mosh"
@@ -298,7 +478,7 @@ mod tests {
         );
 
         assert!(
-            !MoshImages::from_env(Some(""), None).carries_images(),
+            !MoshImages::from_env(Some(""), None, None).carries_images(),
             "an empty value names an empty set, and an empty set is no promise that this session carries an image"
         );
     }
