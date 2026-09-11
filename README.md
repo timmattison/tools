@@ -607,9 +607,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       the last line the command wrote under the frame, where it waits for a key the way git's
       error text does — `ggs` refuses on a branch that names no issue, and that refusal is the
       whole reason no page opened. `G` works while a push runs, and a message that arrives then
-      waits for the row rather than taking it from the push. The child gets no terminal and no
-      inherited `GIT_DIR`, so it cannot read the keyboard gsw is reading and it cannot be aimed
-      at another repository.
+      waits for the row rather than taking it from the push. The child gets no terminal, so it
+      cannot read the keyboard gsw reads, and it gets no `GIT_` variable out of gsw's own
+      environment, so it cannot be aimed at another repository. The rule there is the `GIT_`
+      prefix and never a list of names: `GIT_DIR` aims git elsewhere, and so do `GIT_COMMON_DIR`
+      and `GIT_CEILING_DIRECTORIES`, while `GIT_CONFIG_PARAMETERS` sets any key at all. Your own
+      rc file loads inside that shell after the sweep, so a `GIT_` variable you export on purpose
+      is set again there — the sweep takes away what gsw carried in, which is what a pre-commit
+      hook hands it.
     - A run gets a minute. One run at a time is the rule, so a run that never ends would hold `G`
       for the rest of the session — and a key that does nothing and says nothing is exactly what
       an unbound key looks like. So after 60 seconds gsw stops waiting, says

@@ -3777,6 +3777,7 @@ dependencies = [
  "clap",
  "colored",
  "crossterm",
+ "gitscratch",
  "gix",
  "ignore",
  "libc",

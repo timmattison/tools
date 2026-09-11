@@ -132,14 +132,6 @@ pub(crate) fn user_shell() -> OsString {
     std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"))
 }
 
-/// The variables that aim a git command at a repository.
-///
-/// The command the user supplies asks `gh` about the issue, and `gh` reads the
-/// origin remote of the current directory. An inherited `GIT_DIR` aims that
-/// question at another repository. A pre-commit hook exports all three, so a
-/// `gsw` started from inside one would carry them into the child.
-const GIT_LOCATION_VARS: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
-
 /// A child that runs `script` in an interactive `shell`.
 ///
 /// Interactive is the load-bearing half. The command is a shell function, and
@@ -149,13 +141,38 @@ const GIT_LOCATION_VARS: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FIL
 /// Two rules apply to every child this module starts. It is detached from the
 /// terminal, because an interactive shell opens `/dev/tty` and takes the
 /// keyboard that `gsw` is reading. Denied a terminal, both zsh and bash turn
-/// job control off and start anyway. And it carries no [`GIT_LOCATION_VARS`].
+/// job control off and start anyway. And it carries no `GIT_` variable out of
+/// the environment of `gsw`.
+///
+/// **The rule is the `GIT_` prefix, and never a list of names.** The command
+/// the user supplies asks `gh` about the issue, and `gh` reads the origin
+/// remote of the directory it runs in. Many variables move that answer, and
+/// they are not one family: `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` aim
+/// git at another repository, `GIT_COMMON_DIR` moves the files git reads
+/// outside a worktree — config and refs among them — `GIT_CEILING_DIRECTORIES`
+/// stops the walk that finds a repository at all, and `GIT_CONFIG_PARAMETERS`,
+/// `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` set any key they like. A list
+/// that named all of those today would still be a list, and it strips nothing
+/// new the day git adds a variable. So this calls
+/// [`gitscratch::shed_inherited_git_environment`], which enumerates
+/// [`std::env::vars_os`] and removes every name that starts with `GIT_`. That
+/// rule is written once, in the crate that states it, and it is tested there.
+///
+/// **A sweep is right here, where an allowlist is right for a tool that spawns
+/// git itself.** The sweep takes the variables off the environment of `gsw`,
+/// and this child is an interactive shell: `-i` makes it read the rc file of
+/// the user, so a `GIT_` variable that the user exports on purpose is set again
+/// inside the child, after the sweep. What the sweep removes is therefore only
+/// what reaches the child from `gsw` itself, and that is exactly the hazard — a
+/// `gsw` started from inside a pre-commit hook holds `GIT_DIR`,
+/// `GIT_INDEX_FILE`, `GIT_PREFIX` and `GIT_CONFIG_PARAMETERS`, and the user
+/// asked for none of them. `nwt` spawns `git` and not an interactive shell, so
+/// nothing re-states what it strips, and it needs an allowlist for the
+/// variables a user means to keep. This child has the rc file for that.
 fn shell_child(shell: &OsStr, script: String) -> Command {
     let mut command = Command::new(shell);
     command.arg("-ic").arg(script);
-    for name in GIT_LOCATION_VARS {
-        command.env_remove(name);
-    }
+    gitscratch::shed_inherited_git_environment(&mut command);
     detach_from_terminal(&mut command);
     command
 }
@@ -751,19 +768,6 @@ mod run_tests {
         let workdir = tempfile::tempdir().expect("tempdir");
         let _ = run(stub.as_shell(), &default_command(), workdir.path());
         assert_eq!(resolved(&stub.cwd()), resolved(workdir.path()));
-    }
-
-    #[test]
-    fn the_run_child_carries_no_git_location() {
-        let child = run_command(OsStr::new("/bin/sh"), &default_command(), Path::new("/"));
-        for name in GIT_LOCATION_VARS {
-            assert!(
-                child
-                    .get_envs()
-                    .any(|(key, value)| key == OsStr::new(name) && value.is_none()),
-                "the run child must carry no {name}",
-            );
-        }
     }
 
     #[test]
@@ -1404,39 +1408,5 @@ mod probe_tests {
             runs.contains("command -v 'myfunc'"),
             "the probe must ask about the name the variable holds: {runs:?}",
         );
-    }
-
-    #[test]
-    fn the_probe_child_carries_no_git_location() {
-        // The one guarantee that matters, read off the command itself: a
-        // removal holds whatever the parent's environment says, which a test
-        // that writes the process-global environment could not prove without
-        // racing every other test in this binary.
-        let command = probe_command(OsStr::new("/bin/sh"), &default_command());
-        for name in GIT_LOCATION_VARS {
-            assert!(
-                command
-                    .get_envs()
-                    .any(|(key, value)| key == OsStr::new(name) && value.is_none()),
-                "the probe child must carry no {name}",
-            );
-        }
-    }
-
-    #[test]
-    fn the_probe_child_runs_with_no_git_location_in_its_environment() {
-        let stub = StubShell::answering(0);
-        assert!(probe_with_deadline(
-            stub.as_shell(),
-            &default_command(),
-            ANSWER_DEADLINE
-        ));
-        let environment = stub.environment();
-        for name in GIT_LOCATION_VARS {
-            assert!(
-                !environment.contains(&format!("{name}=")),
-                "the child of the probe must not see {name}: {environment:?}",
-            );
-        }
     }
 }
