@@ -97,4 +97,3 @@ pub(crate) fn detach_from_terminal(command: &mut Command) {
 /// and the closed stdin are the whole defense.
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn detach_from_terminal(_command: &mut Command) {}
-

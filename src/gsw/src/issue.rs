@@ -171,7 +171,10 @@ fn shell_child(shell: &OsStr, script: String) -> Command {
 /// what makes this the right question: the thing being looked for is usually
 /// neither a file nor a builtin.
 fn probe_command(shell: &OsStr, command: &IssueCommand) -> Command {
-    let mut child = shell_child(shell, format!("command -v {}", shell_escape(command.name())));
+    let mut child = shell_child(
+        shell,
+        format!("command -v {}", shell_escape(command.name())),
+    );
     // Nothing the probe says belongs on the screen. An rc file that prints a
     // banner would otherwise paint over the frame.
     child
@@ -626,7 +629,6 @@ mod stub_shell {
                 .expect("the recorded process id must be a number")
         }
     }
-
 }
 
 #[cfg(all(test, unix))]
@@ -707,7 +709,11 @@ mod probe_tests {
     fn the_probe_asks_about_the_command_the_variable_names() {
         let stub = StubShell::answering(0);
         let command = IssueCommand::new(Some("myfunc")).expect("a name");
-        assert!(probe_with_deadline(stub.as_shell(), &command, ANSWER_DEADLINE));
+        assert!(probe_with_deadline(
+            stub.as_shell(),
+            &command,
+            ANSWER_DEADLINE
+        ));
         let runs = stub.runs();
         assert!(
             runs.contains("-ic"),

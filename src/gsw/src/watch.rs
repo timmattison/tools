@@ -2662,11 +2662,7 @@ mod tests {
     const BOTH_AVAILABILITIES: [IssueKey; 2] = [IssueKey::Bound, IssueKey::Unbound];
 
     /// Every mode a key can arrive in.
-    const EVERY_MODE: [InputMode; 3] = [
-        InputMode::Normal,
-        InputMode::Confirm,
-        InputMode::Pushing,
-    ];
+    const EVERY_MODE: [InputMode; 3] = [InputMode::Normal, InputMode::Confirm, InputMode::Pushing];
 
     #[test]
     fn classify_input_maps_the_r_key_to_force_refresh() {
@@ -2773,7 +2769,11 @@ mod tests {
         // That mode owns the answer to a question. No new key may trap the
         // user in it.
         assert!(matches!(
-            classify_input(press(KeyCode::Char('G')), InputMode::Confirm, IssueKey::Bound),
+            classify_input(
+                press(KeyCode::Char('G')),
+                InputMode::Confirm,
+                IssueKey::Bound
+            ),
             Some(Event::Dismiss),
         ));
     }
@@ -4673,12 +4673,7 @@ mod push_loop_tests {
     #[test]
     fn a_second_g_while_a_run_is_in_flight_starts_nothing() {
         // A browser opening twice is two tabs nobody asked for.
-        let (_screen, seen) = run_loop(vec![
-            probe_answered(),
-            press_g(),
-            press_g(),
-            Event::Quit,
-        ]);
+        let (_screen, seen) = run_loop(vec![probe_answered(), press_g(), press_g(), Event::Quit]);
         assert_eq!(
             seen.issue_runs.len(),
             1,
@@ -5215,9 +5210,9 @@ mod push_loop_tests {
                     clock: move || base,
                     next_tick: timer_off,
                     start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
-                start_issue: |command: crate::issue::IssueCommand| {
-                    seen.borrow_mut().issue_runs.push(command);
-                },
+                    start_issue: |command: crate::issue::IssueCommand| {
+                        seen.borrow_mut().issue_runs.push(command);
+                    },
                 },
             )
             .expect("loop");
