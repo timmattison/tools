@@ -3782,6 +3782,7 @@ dependencies = [
  "ignore",
  "libc",
  "notify",
+ "proctree",
  "shellquote",
  "tempfile",
  "termsize",

@@ -18,6 +18,7 @@ gitscratch.workspace = true
 gix.workspace = true
 ignore.workspace = true
 notify.workspace = true
+proctree.workspace = true
 shellquote.workspace = true
 tempfile.workspace = true
 termsize.workspace = true

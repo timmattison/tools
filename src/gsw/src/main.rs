@@ -25,6 +25,12 @@ mod issue;
 /// Cutting a child process's byte chunks into lines that are safe to paint.
 mod lines;
 mod push;
+/// Deciding whether the person who reads this screen sits at this machine.
+#[allow(
+    dead_code,
+    reason = "the G key reads this in the next slice of issue #478, and that slice removes this attribute"
+)]
+mod remote;
 mod render;
 mod repo;
 mod snapshot;
