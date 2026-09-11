@@ -364,6 +364,38 @@ impl PayloadBudget {
         Self(characters)
     }
 
+    /// The payload that a picture can spend under a cap that counts the
+    /// command as well.
+    ///
+    /// A transport states a cap for each protocol, and each of those caps
+    /// counts the command of the protocol together with the payload. The keys
+    /// of a Kitty control block, the arguments of an iTerm2 operating system
+    /// command and the introducer of a Sixel device-control string all come
+    /// out of the same number that the payload spends.
+    /// [`PayloadBudget::CONTROL_BLOCK_ROOM`] is the room that this module
+    /// keeps for them, and it stands above all three. This function takes that
+    /// room off the cap, so a caller turns a cap of the transport into a
+    /// budget of the payload and learns nothing about the room.
+    ///
+    /// A cap at or below the room gives a budget of zero, and that answer is
+    /// correct. Such a transport carries no picture that this crate can draw,
+    /// and a budget of zero holds no payload.
+    ///
+    /// mosh is the transport that states such caps, and it now states one for
+    /// each protocol. See
+    /// <https://github.com/timmattison/tools/issues/480>.
+    ///
+    /// # Arguments
+    /// * `characters` - The cap, in characters, which counts the command and
+    ///   the payload together.
+    ///
+    /// # Returns
+    /// The characters of payload that one image can spend under that cap.
+    #[must_use]
+    pub const fn under_command_cap(characters: usize) -> Self {
+        Self(characters)
+    }
+
     /// Whether a payload of `characters` fits inside this budget.
     ///
     /// # Arguments
@@ -4214,6 +4246,47 @@ mod tests {
             out.is_empty(),
             "the refusal must leave the stream untouched, but it holds {} bytes",
             out.len()
+        );
+    }
+
+    /// The cap of a transport that counts the command as well.
+    ///
+    /// The number is the cap that mosh states for one Kitty transmission, and
+    /// the test reads it as a cap of the transport and not as a budget of the
+    /// payload.
+    const COMMAND_AND_PAYLOAD_CAP: usize = 1024 * 1024;
+
+    /// A cap that counts the command leaves room for the command.
+    ///
+    /// mosh counts the command of the protocol together with the payload, so a
+    /// budget that took such a cap as it stands would let a picture spend
+    /// every character of it. The keys of the command then carry the
+    /// transmission above the cap, and mosh draws nothing at all. So the
+    /// budget has to stand below the cap by the room that this module keeps
+    /// for the command.
+    ///
+    /// The two small caps hold the other half of the rule. A cap at or below
+    /// the room carries no picture that this crate can draw, so the budget of
+    /// such a transport is zero. An answer that wrapped around would give a
+    /// picture the whole address space to spend.
+    #[test]
+    fn a_cap_that_counts_the_command_leaves_room_for_the_command() {
+        assert_eq!(
+            PayloadBudget::under_command_cap(COMMAND_AND_PAYLOAD_CAP).characters(),
+            COMMAND_AND_PAYLOAD_CAP - PayloadBudget::CONTROL_BLOCK_ROOM,
+            "the room for the command has to come off the cap of the transport"
+        );
+
+        assert_eq!(
+            PayloadBudget::under_command_cap(PayloadBudget::CONTROL_BLOCK_ROOM).characters(),
+            0,
+            "a cap that the command alone fills leaves no payload"
+        );
+
+        assert_eq!(
+            PayloadBudget::under_command_cap(0).characters(),
+            0,
+            "a cap below the room has to saturate at zero and never wrap around"
         );
     }
 }
