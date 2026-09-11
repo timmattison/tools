@@ -861,6 +861,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "dirs",
+ "shellquote",
  "thiserror 2.0.20",
 ]
 
@@ -3780,6 +3781,7 @@ dependencies = [
  "ignore",
  "libc",
  "notify",
+ "shellquote",
  "tempfile",
  "termsize",
  "termwindow",
@@ -5554,6 +5556,7 @@ dependencies = [
  "repowalker",
  "serde",
  "serde_json",
+ "shellquote",
  "shellsetup",
  "tempfile",
  "toml",
@@ -7673,6 +7676,7 @@ dependencies = [
  "libc",
  "regex",
  "serde_json",
+ "shellquote",
  "signal-hook 0.3.18",
  "tempfile",
  "testcolor",

@@ -17,6 +17,7 @@ crossterm.workspace = true
 gix.workspace = true
 ignore.workspace = true
 notify.workspace = true
+shellquote.workspace = true
 termsize.workspace = true
 termwindow.workspace = true
 textfit.workspace = true

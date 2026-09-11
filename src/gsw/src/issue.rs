@@ -9,6 +9,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use shellquote::shell_quote;
+
 use crate::child::detach_from_terminal;
 use crate::lines::LineSplitter;
 
@@ -136,15 +138,6 @@ pub(crate) fn user_shell() -> OsString {
 /// `gsw` started from inside one would carry them into the child.
 const GIT_LOCATION_VARS: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
 
-/// `value` as one word of a shell script.
-///
-/// Single quotes stop the shell from reading anything inside them, and an
-/// embedded single quote ends the quoting, adds an escaped quote, and starts
-/// the quoting again.
-fn shell_escape(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 /// A child that runs `script` in an interactive `shell`.
 ///
 /// Interactive is the load-bearing half. The command is a shell function, and
@@ -171,10 +164,7 @@ fn shell_child(shell: &OsStr, script: String) -> Command {
 /// what makes this the right question: the thing being looked for is usually
 /// neither a file nor a builtin.
 fn probe_command(shell: &OsStr, command: &IssueCommand) -> Command {
-    let mut child = shell_child(
-        shell,
-        format!("command -v {}", shell_escape(command.name())),
-    );
+    let mut child = shell_child(shell, format!("command -v {}", shell_quote(command.name())));
     // Nothing the probe says belongs on the screen. An rc file that prints a
     // banner would otherwise paint over the frame.
     child
@@ -523,7 +513,7 @@ mod stub_shell {
             let environment = dir.path().join("environment");
             let pid = dir.path().join("pid");
             let cwd = dir.path().join("cwd");
-            let tail = tail.replace(PID_FILE, &shell_escape(&pid.display().to_string()));
+            let tail = tail.replace(PID_FILE, &shell_quote(&pid.display().to_string()));
             let script = format!(
                 "#!/bin/sh\n\
                  [ -n \"${{{WARMUP_VAR}:-}}\" ] && exit 0\n\
@@ -531,9 +521,9 @@ mod stub_shell {
                  env >> {}\n\
                  pwd >> {}\n\
                  {tail}\n",
-                shell_escape(&runs.display().to_string()),
-                shell_escape(&environment.display().to_string()),
-                shell_escape(&cwd.display().to_string()),
+                shell_quote(&runs.display().to_string()),
+                shell_quote(&environment.display().to_string()),
+                shell_quote(&cwd.display().to_string()),
             );
             std::fs::write(&path, script).expect("write the stub");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))

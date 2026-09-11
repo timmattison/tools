@@ -192,6 +192,7 @@ gitscratch = { path = "src/gitscratch" }
 httpfile = { path = "src/httpfile" }
 portplz-core = { path = "src/portplz-core" }
 repowalker = { path = "src/repowalker" }
+shellquote = { path = "src/shellquote" }
 shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }
 termgfx = { path = "src/termgfx" }

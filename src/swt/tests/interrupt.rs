@@ -30,8 +30,8 @@ use std::process::{Child, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use shellquote::shell_quote;
 use support::{git, swt_command, unique, write_swt_check, TestRepo};
-use swt::green_check::shell_quote;
 use tempfile::TempDir;
 
 /// Ceiling on every wait for a child `swt`, so a wedged run fails the test

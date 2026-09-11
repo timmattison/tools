@@ -20,6 +20,7 @@ names.workspace = true
 repowalker.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+shellquote.workspace = true
 shellsetup.workspace = true
 toml.workspace = true
 walkdir.workspace = true

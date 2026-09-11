@@ -57,7 +57,7 @@
 /// line as it is, and add no quotes of your own.
 #[must_use]
 pub fn shell_quote(value: &str) -> String {
-    value.to_string()
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]
