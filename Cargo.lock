@@ -861,6 +861,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "dirs",
+ "shellquote",
  "thiserror 2.0.20",
 ]
 
@@ -3776,10 +3777,12 @@ dependencies = [
  "clap",
  "colored",
  "crossterm",
+ "gitscratch",
  "gix",
  "ignore",
  "libc",
  "notify",
+ "shellquote",
  "tempfile",
  "termsize",
  "termwindow",
@@ -5554,6 +5557,7 @@ dependencies = [
  "repowalker",
  "serde",
  "serde_json",
+ "shellquote",
  "shellsetup",
  "tempfile",
  "toml",
@@ -7385,6 +7389,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
+name = "shellquote"
+version = "0.1.0"
+
+[[package]]
 name = "shellsetup"
 version = "0.1.0"
 dependencies = [
@@ -7669,6 +7677,7 @@ dependencies = [
  "libc",
  "regex",
  "serde_json",
+ "shellquote",
  "signal-hook 0.3.18",
  "tempfile",
  "testcolor",

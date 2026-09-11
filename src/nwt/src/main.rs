@@ -371,22 +371,6 @@ fn get_exit_code(status: ExitStatus) -> i32 {
     1
 }
 
-/// Escapes a string for safe use as a Unix shell argument.
-///
-/// Wraps the string in single quotes and escapes any embedded single quotes
-/// using the `'\''` technique (end quote, escaped quote, start quote).
-///
-/// # Platform Note
-///
-/// This function uses Unix single-quote escaping conventions and is only
-/// compiled on Unix platforms. It is used by the `--tmux` code path, which
-/// is itself Unix-only (tmux is not typically available on Windows).
-#[cfg(unix)]
-fn shell_escape(s: &str) -> String {
-    // Wrap in single quotes and escape any embedded single quotes
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 /// Checks if a string contains any ASCII control characters.
 ///
 /// Control characters (0x00-0x1F and 0x7F) can cause unexpected behavior
@@ -1877,11 +1861,14 @@ fn main() {
                             // flags, which is true for bash, zsh, fish, and most POSIX shells.
                             // Exotic shells that don't support these flags will fail with a clear
                             // error message from the shell itself.
-                            // Both the shell path and command are escaped for safety.
+                            // Both the shell path and command are quoted for
+                            // safety, by the one quoter the workspace shares.
+                            // The full path keeps a non-Unix build free of an
+                            // unused import, because this arm is Unix-only.
                             tmux_args.push(format!(
                                 "{} -ic {}",
-                                shell_escape(&shell),
-                                shell_escape(cmd)
+                                shellquote::shell_quote(&shell),
+                                shellquote::shell_quote(cmd)
                             ));
                         }
 
@@ -2836,46 +2823,6 @@ mod tests {
         let cli = Cli::parse_from(["nwt", "-b", "42"]);
         let merged = merge_config(&cli, None);
         assert_eq!(merged.branch, Some("issue-42".to_string()));
-    }
-
-    // shell_escape tests are Unix-only since the function is Unix-only
-    #[cfg(unix)]
-    #[test]
-    fn test_shell_escape_simple() {
-        assert_eq!(shell_escape("hello"), "'hello'");
-        assert_eq!(shell_escape("npm install"), "'npm install'");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_shell_escape_with_single_quotes() {
-        // Single quotes are escaped using the '\'' technique
-        assert_eq!(shell_escape("it's"), "'it'\\''s'");
-        assert_eq!(shell_escape("echo 'hello'"), "'echo '\\''hello'\\'''");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_shell_escape_with_special_chars() {
-        // These should be safely wrapped in single quotes
-        assert_eq!(shell_escape("$HOME"), "'$HOME'");
-        assert_eq!(shell_escape("foo && bar"), "'foo && bar'");
-        assert_eq!(shell_escape("a;b"), "'a;b'");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_shell_escape_empty_string() {
-        // Empty string should still be safely quoted
-        assert_eq!(shell_escape(""), "''");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_shell_escape_shell_path() {
-        // Verify that typical shell paths are properly escaped
-        assert_eq!(shell_escape("/bin/bash"), "'/bin/bash'");
-        assert_eq!(shell_escape("/usr/local/bin/zsh"), "'/usr/local/bin/zsh'");
     }
 
     #[test]

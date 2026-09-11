@@ -14,9 +14,12 @@ buildinfo.workspace = true
 clap.workspace = true
 colored.workspace = true
 crossterm.workspace = true
+gitscratch.workspace = true
 gix.workspace = true
 ignore.workspace = true
 notify.workspace = true
+shellquote.workspace = true
+tempfile.workspace = true
 termsize.workspace = true
 termwindow.workspace = true
 textfit.workspace = true
@@ -26,7 +29,6 @@ unicode-width.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 testcolor.workspace = true
 
 [lints]

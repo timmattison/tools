@@ -527,8 +527,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     gsw purely event-driven. On a repository where a status walk is expensive, the 1% duty-cycle
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
-  - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, and `p` pushes the
-    current branch. Ctrl-C quits from anywhere, including while a push is in flight.
+  - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, `p` pushes the
+    current branch, and `G` opens the issue the branch names. Ctrl-C quits from anywhere,
+    including while a push is in flight.
   - `p` always asks first, and the question names the branch, the remote, and how much is going —
     so what you confirm is what runs. If the checkout moves in another pane between the question
     and your answer, the push is refused rather than redirected at the branch that is there now:
@@ -583,6 +584,62 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       the way it always has. The fade is the 24-bit gradient the commit log uses, under the same
       `--truecolor`/`--no-truecolor` control; without truecolor the message simply dims halfway
       through its life instead.
+  - `G` opens the issue of the branch. A worktree branch usually names one — `issue-475` — and
+    the command that turns that name into a page is yours, not gsw's: `G` runs one command in
+    your own interactive shell, with the work tree as its current directory.
+    - `GSW_ISSUE_COMMAND` holds the command, and it defaults to `ggs`. Set it to an empty string
+      to turn the key off, which is also what to do if you have no such command: this repository
+      ships none, and the default is simply the name these plans are written with.
+    - **The value is a whole command line, so it can carry arguments.**
+      `GSW_ISSUE_COMMAND='gh issue view --web'` works, the way `WN_START_COMMAND` takes
+      `gh issue develop`. gsw asks your shell about the first word and runs the whole line, so
+      the first word is the part that has to exist and everything after it is yours: the shell
+      reads those arguments the way it reads arguments at an interactive prompt.
+    - The command is usually a shell function, and a function lives only inside a shell. So gsw
+      asks your shell once, at startup, with `$SHELL -ic 'command -v <first word>'` —
+      `command -v` reports a function and an alias in both bash and zsh, and `-i` is what makes
+      the rc file load. The answer arrives on the watch loop's own channel, so nothing waits for
+      it: until it comes, `G` does nothing. An rc file that never returns is given five seconds,
+      after which the command is treated as absent and the whole process group of that shell is
+      killed — the shell itself and anything it started, because an rc file that hangs hangs
+      inside some command it ran, not inside a builtin. So a slow rc file cannot leave a process
+      behind for the life of the session.
+    - **Where the command does not exist, `G` does nothing and says nothing** — the way an
+      unbound key does. That is the one silent case the key has: every other outcome speaks.
+      Because the question is asked once, a function you add to your rc file after gsw started
+      needs a restart.
+    - A run that works costs the frame no row: the browser is the answer. A run that fails puts
+      the last line the command wrote under the frame, where it waits for a key the way git's
+      error text does — `ggs` refuses on a branch that names no issue, and that refusal is the
+      whole reason no page opened. `G` works while a push runs, and a message that arrives then
+      waits for the row rather than taking it from the push. A push takes minutes, so a second
+      `G` can refuse while the first refusal is still waiting: the messages queue up, and each
+      one takes the row in the order it arrived and waits for a key of its own. Four wait at
+      most. Past that the message that arrives is the one dropped, because the first refusal
+      says what went wrong and the ones after it repeat it. The child gets no terminal, so it
+      cannot read the keyboard gsw reads, and it gets no `GIT_` variable out of gsw's own
+      environment, so it cannot be aimed at another repository. The rule there is the `GIT_`
+      prefix and never a list of names: `GIT_DIR` aims git elsewhere, and so do `GIT_COMMON_DIR`
+      and `GIT_CEILING_DIRECTORIES`, while `GIT_CONFIG_PARAMETERS` sets any key at all. Your own
+      rc file loads inside that shell after the sweep, so a `GIT_` variable you export on purpose
+      is set again there — the sweep takes away what gsw carried in, which is what a pre-commit
+      hook hands it.
+    - A run gets a minute. One run at a time is the rule, so a run that never ends would hold `G`
+      for the rest of the session — and a key that does nothing and says nothing is exactly what
+      an unbound key looks like. So after 60 seconds gsw stops waiting, says
+      `ggs has not finished after 60s` under the frame (with the last line the command wrote
+      after it, where there is one), and gives the key back.
+    - **gsw stops waiting; it does not stop the command.** Your rc file is gsw's own question and
+      gsw ends it — that shell and its whole process group — which is the five seconds above.
+      The run is *your* command: a command that
+      hands the page to `xdg-open` holds a browser in the foreground, and to end that process
+      group is to close the page you asked for. So the command keeps running, and gsw only collects it
+      when it ends. Your rc file cannot be what hangs a run, because the question above loaded the
+      same rc file under its own five seconds.
+    - The two output streams go to files rather than pipes. A pipe is read to its end, and the end
+      arrives only when the last writer lets go — so a background child your command leaves behind
+      would hold the run open long after your shell exited, which is the same held key by another
+      road. A file has no such end to wait for.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —

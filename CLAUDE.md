@@ -233,6 +233,46 @@ allowlist.
 - `wn` - row, plan, and graph render tests, and the end-to-end tests that read
   the rows through a wrapper and the progress line on a terminal
 
+## Shell Quoting
+
+Every tool in this repository that puts a value into a shell command line
+**must** quote that value with the `shellquote` library crate at
+`src/shellquote/`.
+
+### Why
+
+Four tools built the same single-quoted string, and only one of them had
+tests. A rule that lives in four places drifts apart, and the copy that drifts
+is the copy nobody tested.
+
+`shellquote::shell_quote` holds the rule once. It puts single quotes around
+every value, and it rewrites an embedded single quote as `'\''` — close the
+quotation, escaped quote, open the quotation again. The empty string becomes
+`''`, which is one empty word. Its tests hand each result to `/bin/sh` and
+check that the shell gives the value back as exactly one argument.
+
+### Usage
+
+```rust
+use shellquote::shell_quote;
+
+let script = format!("command -v {}", shell_quote(name));
+```
+
+Take the crate with `shellquote.workspace = true`. Call the function by its
+full path, `shellquote::shell_quote(...)`, where the call site sits behind a
+`#[cfg(...)]`, so a build for another platform has no unused import.
+
+### Tools Currently Using shellquote
+
+- `aws2env` - the value of each credential it prints, when the value needs
+  quotes. A value that holds only letters, digits, `_`, `-`, `.` and `/`
+  prints bare, because a person reads that output before they paste it
+- `gsw` - the command it asks an interactive shell to run
+- `nwt` - the shell and the command it hands to tmux
+- `swt` - the path of a `.swt-check` override, and the command lines it prints
+  for a person to paste
+
 ## Version Information
 
 All tools in this repository **must** display version information including git hash and dirty status when `--version` or `-V` is used.

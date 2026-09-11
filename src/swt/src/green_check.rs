@@ -5,9 +5,8 @@
 //! plan, and running it. Callers see only [`is_green`]; the detection stays
 //! hidden behind it — they never ask "is this a cargo repo?" themselves, they
 //! ask whether the worktree is green. ([`build_check_plan`] and [`pkg_scripts`]
-//! are exported for inspection and tests, [`run_plan`] so an already-built plan
-//! can be run — and asserted about — on its own, and [`shell_quote`] because
-//! `swt` prints shell command lines for humans to paste too.)
+//! are exported for inspection and tests, and [`run_plan`] so an already-built
+//! plan can be run — and asserted about — on its own.)
 //!
 //! The plan always runs inside the worktree being checked, never the parent:
 //!
@@ -32,6 +31,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+
+use shellquote::shell_quote;
 
 /// The per-developer green-check override script, looked up at the config root.
 const OVERRIDE_FILE: &str = ".swt-check";
@@ -134,25 +135,6 @@ impl Outcome {
             out: out.into(),
         }
     }
-}
-
-/// Wraps a string so `sh -c` sees exactly one literal argument.
-///
-/// Check commands are shell strings by design, so the one piece `swt` splices
-/// into them — the absolute path of the `.swt-check` override — has to be
-/// quoted: a repo root containing a space, a quote or a `$` would otherwise
-/// word-split or expand. Single quotes suppress every expansion; the
-/// embedded-quote case is handled by closing, escaping, and reopening
-/// (`'` → `'\''`).
-///
-/// The same applies to a command line `swt` *prints* for a human to paste back
-/// into their shell, which is why this is public.
-///
-/// `s` is the raw string to embed. Returns the single-quoted form, safe to
-/// concatenate into a command line.
-#[must_use]
-pub fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Reads the script names declared in a directory's `package.json`.
@@ -327,7 +309,7 @@ pub fn is_green(target: &Path, config_root: Option<&Path>) -> Outcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_check_plan, is_green, pkg_scripts, run_plan, shell_quote, OVERRIDE_FILE};
+    use super::{build_check_plan, is_green, pkg_scripts, run_plan, OVERRIDE_FILE};
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
@@ -426,8 +408,8 @@ mod tests {
     }
 
     /// Single-quotes a path the way a shell needs it, built independently of
-    /// [`shell_quote`] so the override tests are not tautological. This is the
-    /// original TypeScript test's `'${p.replaceAll("'", "'\\''")}'`.
+    /// [`shellquote::shell_quote`] so the override tests are not tautological.
+    /// This is the original TypeScript test's `'${p.replaceAll("'", "'\\''")}'`.
     fn quoted(path: &Path) -> String {
         format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
     }
@@ -475,45 +457,6 @@ mod tests {
     /// Concatenates plan fragments into one expected command list.
     fn joined<'a>(parts: &[&[&'a str]]) -> Vec<&'a str> {
         parts.iter().flat_map(|part| part.iter().copied()).collect()
-    }
-
-    #[test]
-    fn shell_quote_wraps_a_plain_string_in_single_quotes() {
-        assert_eq!(shell_quote("check"), "'check'");
-    }
-
-    #[test]
-    fn shell_quote_protects_spaces_and_expansions() {
-        assert_eq!(
-            shell_quote("/repos/my repo/.swt-check"),
-            "'/repos/my repo/.swt-check'",
-            "a space must not word-split into two arguments"
-        );
-        assert_eq!(
-            shell_quote("$HOME/.swt-check"),
-            "'$HOME/.swt-check'",
-            "single quotes must suppress expansion, not perform it"
-        );
-        assert_eq!(
-            shell_quote("a `touch pwned` b"),
-            "'a `touch pwned` b'",
-            "command substitution must stay literal"
-        );
-    }
-
-    #[test]
-    fn shell_quote_closes_escapes_and_reopens_around_an_embedded_quote() {
-        assert_eq!(shell_quote("wei'rd"), r"'wei'\''rd'");
-        assert_eq!(
-            shell_quote("/a/wei'rd $root/.swt-check"),
-            r"'/a/wei'\''rd $root/.swt-check'",
-            "a path with both a quote and a `$` must survive intact"
-        );
-        assert_eq!(
-            shell_quote("''"),
-            r"''\'''\'''",
-            "consecutive quotes each escape"
-        );
     }
 
     #[test]

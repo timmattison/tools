@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use colored::{ColoredString, Colorize};
 
 use crate::age::{format_age_detailed, scale_rgb};
+use crate::child::detach_from_terminal;
 use crate::lines::LineSplitter;
 use crate::render::{Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
@@ -46,6 +47,24 @@ const MAX_STATUS_ROWS: usize = 3;
 /// A ceiling, not a promise: [`PushUi::overlay`] shows fewer in a pane that
 /// cannot spare six, and drops the oldest rather than the newest when it does.
 const MAX_PUSH_OUTPUT_ROWS: usize = 6;
+
+/// Most messages from another feature the row holds while a push or a question
+/// owns it.
+///
+/// `G` acts while a push runs, and a push with a pre-push hook takes minutes.
+/// Each `G` in those minutes can refuse, and each refusal costs the user one
+/// key to clear it. A queue with no bound thus turns one long push into a row
+/// the user must press through. Four covers the times a user reaches for the
+/// key during a single push, and four is small enough that the clearance is
+/// not a job of its own.
+///
+/// **A full queue drops the newest message and keeps the oldest.** That is the
+/// opposite of what [`failure_lines`] does, and the difference is deliberate.
+/// There the lines are the output of one command, and git's verdict comes
+/// last. Here the messages are separate runs of the same command: the first
+/// refusal tells the user what went wrong, and each refusal after it is
+/// usually that same refusal again.
+const MAX_HELD_MESSAGES: usize = 4;
 
 /// Git's prefix for advice lines. They follow the real error and explain
 /// general remedies, so they are the first thing to drop when the message has
@@ -509,96 +528,6 @@ fn drain(stream: Option<impl std::io::Read>, report: &(dyn Fn(String) + Sync)) {
     }
 }
 
-/// Arrange for `command`'s child to run detached from the terminal, so nothing
-/// in its process tree can reach the keyboard gsw is reading.
-///
-/// Each platform names the terminal differently, so each gets its own arm: a
-/// session of its own on Unix, no inherited console on Windows. Both deny the
-/// same thing — the direct path to the terminal device, the one a closed stdin
-/// and captured output streams do not cover, because it bypasses the inherited
-/// descriptors entirely.
-///
-/// The Unix half asks for a new session before the exec. A session leader has
-/// no controlling terminal until it deliberately acquires one, and no program
-/// git runs does that — so `open("/dev/tty")` returns `ENXIO` for the child,
-/// for ssh, and for every credential helper below them. Refused it, OpenSSH
-/// sets `use_askpass` and either runs `SSH_ASKPASS` (a GUI prompt, which is
-/// fine — it does not touch the pane gsw is drawing on) or gives up at once
-/// with a message that reaches the status rows.
-#[cfg(unix)]
-fn detach_from_terminal(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-
-    // SAFETY: the closure runs in the forked child, between `fork` and `exec`,
-    // where only async-signal-safe functions may be called. `setsid` is one
-    // (POSIX.1-2017, "Signal Concepts"); it is a bare syscall that allocates
-    // nothing and takes no lock the parent's other threads could be holding.
-    unsafe {
-        command.pre_exec(|| {
-            // The return value is deliberately dropped. `setsid` fails with
-            // EPERM when the caller is already a process group leader, which
-            // means a new session was not available — harmless, and not worth
-            // failing a push over: the terminal defenses below it still stand,
-            // and returning an error here would abort the exec and report a
-            // push failure to a user who has done nothing wrong. There is no
-            // other failure mode.
-            let _ = libc::setsid();
-            Ok(())
-        });
-    }
-}
-
-/// `CreateProcess`'s `DETACHED_PROCESS`: the new process does not inherit the
-/// console of the process that started it, and Windows will not give it one of
-/// its own. Deliberately not combined with `CREATE_NEW_CONSOLE`, which is its
-/// opposite and which `CreateProcess` rejects alongside it, and not written as
-/// `CREATE_NO_WINDOW`, which only hides a console the child still has and can
-/// still read from.
-///
-/// Spelled out here rather than pulled in from `windows-sys` or `winapi`: it is
-/// one integer fixed by the Win32 ABI, and a dependency the whole crate would
-/// carry for it is a worse trade than a constant with its value written down.
-#[cfg(windows)]
-const DETACHED_PROCESS: u32 = 0x0000_0008;
-
-/// See the Unix half above. Windows has no `/dev/tty`, but it has the same
-/// hazard by a different door: a console. OpenSSH for Windows asks for a key
-/// passphrase or an unknown-host-key answer by opening `CONIN$` itself, which
-/// reaches the console the child inherited no matter what was done to its
-/// standard handles — so a closed stdin and captured output streams leave the
-/// push free to paint a prompt over gsw's alternate screen and race the event
-/// thread for the user's keystrokes, with no timeout to end it.
-///
-/// [`DETACHED_PROCESS`] closes that door the way `setsid` closes the Unix one.
-/// The child inherits no console and cannot be assigned one, so `CONIN$` and
-/// `CONOUT$` fail to open for it, for ssh, and for every credential helper
-/// below them. Denied the console, OpenSSH does what it does on Unix: it falls
-/// back to `SSH_ASKPASS` (a GUI prompt, which does not touch the pane gsw is
-/// drawing on) or fails immediately with a message that arrives on the captured
-/// stderr and lands in the status rows like any other error. The pipes are
-/// unaffected — the flag governs the console, not the standard handles, which
-/// the caller has already set.
-///
-/// **Not covered by any test in this repository.** The Unix half has a runtime
-/// test, `the_push_child_cannot_open_the_controlling_terminal`, which plants a
-/// fake ssh and asserts the child was refused the terminal. There is no Windows
-/// equivalent: no Windows host runs these tests and this repository has no CI,
-/// so such a test would be one nobody has ever seen pass or fail. This arm is
-/// verified by compiling for `x86_64-pc-windows-msvc` and by nothing else.
-#[cfg(windows)]
-fn detach_from_terminal(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-
-    command.creation_flags(DETACHED_PROCESS);
-}
-
-/// Neither Unix nor Windows, so there is no terminal this code knows how to
-/// take away. The arm exists so the crate still builds for such a target rather
-/// than failing to find `detach_from_terminal`; on one, `GIT_TERMINAL_PROMPT=0`
-/// and the closed stdin are the whole defense.
-#[cfg(not(any(unix, windows)))]
-fn detach_from_terminal(_command: &mut Command) {}
-
 /// The branch checked out in `workdir` right now, or [`DETACHED_HEAD`] when
 /// there is none. `None` only when `git` could not be run at all.
 ///
@@ -651,8 +580,15 @@ pub(crate) struct PushOutcome {
     pub output: String,
 }
 
-/// Everything the push feature puts on screen, and the input mode that goes
+/// Everything watch mode puts under the frame, and the input mode that goes
 /// with it.
+///
+/// The name says `Push` because the push is what owns the row and what every
+/// state below describes: a question, a push in flight, and the outcome of
+/// one. It is **not** the push's alone. The `G` key runs a command of the
+/// user's own, and a command that refuses says why — so
+/// [`PushUi::post_error`] is the door another feature posts through, and
+/// [`PushUi::post_error`] is what keeps the two from painting over each other.
 ///
 /// Watch mode holds one of these and asks it two questions — what mode are we
 /// in, and what does the pane show. It never learns whether a prompt or an
@@ -660,6 +596,26 @@ pub(crate) struct PushOutcome {
 /// branch for each one.
 pub(crate) struct PushUi {
     state: State,
+    /// Messages from another feature that arrived while the push or a question
+    /// owned the row, oldest first, each one waiting for the row to be free.
+    ///
+    /// A push is the one thing here that takes minutes, and its own outcome is
+    /// what the user is waiting to read. So a message that arrives mid-push is
+    /// held rather than posted, and [`PushUi::overlay`] posts the oldest one on
+    /// the first frame that finds nothing else on the row. Dropping it instead
+    /// would make a failure silent, and silence belongs to one case only: a
+    /// command that does not exist.
+    ///
+    /// **A queue rather than one slot, because minutes hold more than one
+    /// message.** `G` acts during a push, and the run it starts frees the key
+    /// again the moment it ends, so a second `G` refuses with the first
+    /// refusal still waiting. One slot made the second message overwrite the
+    /// first, which is the silence the rule above forbids. Each message here
+    /// reaches the user in turn, and each waits for a key of its own.
+    ///
+    /// The queue holds [`MAX_HELD_MESSAGES`] messages. A full one drops the
+    /// newest and keeps the oldest — see that constant for why that end.
+    held: VecDeque<String>,
     /// Whether the terminal takes 24-bit color, as [`crate::RenderConfig`]
     /// resolved it from the CLI flags and `COLORTERM`. Carried here because the
     /// status message fades, and a fade
@@ -763,6 +719,7 @@ impl PushUi {
     pub(crate) fn new(truecolor: bool) -> Self {
         Self {
             state: State::Idle,
+            held: VecDeque::new(),
             truecolor,
         }
     }
@@ -927,6 +884,31 @@ impl PushUi {
         }
     }
 
+    /// Put the oldest held message on the row, if there is one and the row is
+    /// free.
+    ///
+    /// Called from [`PushUi::overlay`], beside [`PushUi::expire`], because a
+    /// render is the one moment that happens often enough and reliably enough
+    /// to act on: the row is freed by a key, by a clock, and by a push that
+    /// ended, and a render follows each of them.
+    ///
+    /// **One message per frame, and no more.** The message it posts waits for
+    /// a key, so the next frame finds the row busy and leaves the rest of the
+    /// queue alone. A queue of two thus reaches the user as two messages in
+    /// order, and each one gets the key the first one gets. To post them all
+    /// at once would put the second message where the user reads the first.
+    fn post_held(&mut self) {
+        if !matches!(self.state, State::Idle) {
+            return;
+        }
+        if let Some(line) = self.held.pop_front() {
+            self.state = State::Status {
+                lines: vec![line],
+                life: Life::UntilDismissed,
+            };
+        }
+    }
+
     /// Handle `n`: drop the confirmation. The prompt disappearing is the whole
     /// feedback — a "cancelled" notice would itself need dismissing.
     pub(crate) fn cancel(&mut self) {
@@ -964,6 +946,42 @@ impl PushUi {
             (failure_lines(&outcome.output), Life::UntilDismissed)
         };
         self.state = State::Status { lines, life };
+    }
+
+    /// Put a message from a feature other than the push under the frame.
+    ///
+    /// The text is another program's words, so it waits for a key the way
+    /// git's error text does.
+    ///
+    /// A question and a push in flight both own the row, and neither may be
+    /// painted over: the question goes with the keys that answer it, and the
+    /// notice goes with the outcome the push is about to report. A message
+    /// that arrives then joins the back of [`PushUi::held`], and
+    /// [`PushUi::overlay`] posts the front of that queue on each frame that
+    /// finds the row free.
+    ///
+    /// **A queue, because a second message must not erase the first.** A push
+    /// takes minutes and `G` acts throughout them, so two refusals in one push
+    /// is an ordinary sequence rather than a corner. Both are failures the user
+    /// asked for, and both reach the screen in the order they arrived.
+    ///
+    /// A queue at [`MAX_HELD_MESSAGES`] drops the message that arrives, not
+    /// the ones already in it. That constant says why the oldest is the one
+    /// worth the row.
+    pub(crate) fn post_error(&mut self, line: String) {
+        match self.state {
+            State::Asking { .. } | State::Running { .. } => {
+                if self.held.len() < MAX_HELD_MESSAGES {
+                    self.held.push_back(line);
+                }
+            }
+            State::Idle | State::Status { .. } => {
+                self.state = State::Status {
+                    lines: vec![line],
+                    life: Life::UntilDismissed,
+                };
+            }
+        }
     }
 
     /// Handle a key with no other meaning: clear a status message if one is up.
@@ -1033,6 +1051,7 @@ impl PushUi {
     /// frame drawn.
     pub(crate) fn overlay(&mut self, dims: Dimensions, now: Instant) -> Overlay {
         self.expire(now);
+        self.post_held();
         let width = dims.width;
         let lines: Vec<String> = match &self.state {
             State::Idle => Vec::new(),
@@ -1760,6 +1779,211 @@ mod ui_tests {
         testcolor::strip_ansi(&testcolor::with_forced_ansi(|| {
             ui.overlay(dims, now).text()
         }))
+    }
+
+    #[test]
+    fn a_message_from_another_feature_goes_under_the_frame_and_waits_for_a_key() {
+        // The `G` key runs somebody else's command, and a command that refuses
+        // says why. That refusal is the whole reason the key did nothing.
+        let now = t0();
+        let mut ui = PushUi::new(false);
+        ui.post_error("branch main names no issue".to_string());
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains("branch main names no issue"),
+            "the message must reach the screen, got {text:?}",
+        );
+        assert_eq!(
+            ui.next_tick(),
+            None,
+            "a message that waits for a key does not age",
+        );
+
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(text, "", "a key must take it off the screen");
+    }
+
+    #[test]
+    fn a_message_from_another_feature_leaves_a_running_push_on_the_screen() {
+        // `G` acts while a push runs, so the two features can reach the one
+        // row at once. The push owns it: taking its notice away would lose the
+        // outcome the push is about to report.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("branch main names no issue".to_string());
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert!(
+            text.contains(RUNNING_NOTICE),
+            "the push must keep the rows it is using, got {text:?}",
+        );
+        assert!(
+            !text.contains("names no issue"),
+            "the held message must wait its turn, got {text:?}",
+        );
+        assert_eq!(ui.mode(), InputMode::Pushing, "the push is still running");
+    }
+
+    #[test]
+    fn a_message_from_another_feature_arrives_once_the_push_is_done_with_the_row() {
+        // Held is not dropped. Silence belongs to one case only, and this is
+        // not it.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("branch main names no issue".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        // The push's own message ages off the screen first, and the held one
+        // takes the row it leaves.
+        let later = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("branch main names no issue"),
+            "the held message must reach the screen, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_message_from_another_feature_leaves_the_question_on_the_screen() {
+        // A question and the keys that answer it go together. A message that
+        // took the question away would leave the mode answering nothing.
+        let now = t0();
+        let mut ui = asking();
+        ui.post_error("branch main names no issue".to_string());
+
+        let text = painted(&mut ui, tall_pane(80), now);
+        assert_eq!(
+            ui.mode(),
+            InputMode::Confirm,
+            "the question must still be on screen",
+        );
+        assert!(
+            !text.contains("names no issue"),
+            "the held message must wait its turn, got {text:?}",
+        );
+    }
+
+    /// Every message `ui` puts on the row from `now` on, in the order a user
+    /// reads them.
+    ///
+    /// Each pass paints one frame, records what the row carries, and presses a
+    /// key — which is what a user does with a message that waits for one. The
+    /// pass stops at the first blank frame. The count above it is a backstop:
+    /// a queue that never empties must fail a test rather than hold the run
+    /// open.
+    fn drained(ui: &mut PushUi, now: Instant) -> Vec<String> {
+        let mut seen = Vec::new();
+        for _ in 0..MAX_HELD_MESSAGES + 4 {
+            let text = painted(ui, tall_pane(80), now);
+            if text.is_empty() {
+                break;
+            }
+            seen.push(text);
+            ui.dismiss();
+        }
+        seen
+    }
+
+    #[test]
+    fn two_messages_held_during_a_push_both_reach_the_screen_in_order() {
+        // A run started by `G` can end while the push is still going, and the
+        // key is free again the moment it does. So a second `G` refuses with
+        // the first refusal still waiting. The user asked for both runs, and
+        // both owe an answer.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("the first refusal".to_string());
+        ui.post_error("the second refusal".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        // The push's own message ages off the screen first, and the oldest
+        // held message takes the row it leaves.
+        let later = now + STATUS_LIFETIME;
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("the first refusal"),
+            "the first message must come first, got {text:?}",
+        );
+        assert!(
+            !text.contains("the second refusal"),
+            "the second message must wait its turn, got {text:?}",
+        );
+
+        // A key is the user's word that the first message was read. The second
+        // takes the row it leaves, and waits for a key of its own.
+        ui.dismiss();
+        let text = painted(&mut ui, tall_pane(80), later);
+        assert!(
+            text.contains("the second refusal"),
+            "the second message must follow the first, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_held_message_is_not_lost_to_a_second_one() {
+        // The narrow statement of the defect: one slot held one message, so a
+        // second refusal wrote over the first and the user never saw it.
+        let now = t0();
+        let mut ui = pushing(now);
+        ui.post_error("the first refusal".to_string());
+        ui.post_error("the second refusal".to_string());
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        let seen = drained(&mut ui, now + STATUS_LIFETIME);
+        assert!(
+            seen.iter().any(|text| text.contains("the first refusal")),
+            "the first message must reach the screen, got {seen:?}",
+        );
+    }
+
+    #[test]
+    fn a_full_queue_of_held_messages_drops_the_newest() {
+        // The bound is what stops a push of several minutes from filling the
+        // row with keys to press. Which end it drops is the point: the first
+        // refusal says what went wrong, and the ones after it repeat it.
+        let now = t0();
+        let mut ui = pushing(now);
+        for index in 0..MAX_HELD_MESSAGES + 1 {
+            ui.post_error(format!("refusal number {index}"));
+        }
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            now,
+        );
+
+        let seen = drained(&mut ui, now + STATUS_LIFETIME);
+        assert!(
+            seen.iter().any(|text| text.contains("refusal number 0")),
+            "the oldest message must survive a full queue, got {seen:?}",
+        );
+        let newest = format!("refusal number {MAX_HELD_MESSAGES}");
+        assert!(
+            !seen.iter().any(|text| text.contains(&newest)),
+            "the newest message is the one a full queue drops, got {seen:?}",
+        );
     }
 
     #[test]

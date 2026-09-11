@@ -33,8 +33,9 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::git::{git_must, validate_worktree_name, WorktreeName, WORKTREE_NAME_RULE};
-use crate::green_check::{is_green, shell_quote};
+use crate::green_check::is_green;
 use crate::teardown::{hold_unverified_worktree, remove_unverified_worktree};
+use shellquote::shell_quote;
 
 /// The git query that names the root of the worktree `swt` was invoked in.
 const TOPLEVEL_ARGS: [&str; 2] = ["rev-parse", "--show-toplevel"];
