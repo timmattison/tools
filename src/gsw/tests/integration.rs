@@ -72,11 +72,18 @@ fn run_gsw_args(dir: &Path, extra: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
+/// The address every fixture commit carries.
+///
+/// Spelled once, because [`setup_repo`] writes it into the repository and a
+/// test reads it back off a commit. Two spellings that drifted apart would
+/// leave a test that asserts an address nothing sets.
+const FIXTURE_EMAIL: &str = "test@example.com";
+
 fn setup_repo() -> TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let p = dir.path();
     run_git(p, &["init", "-q", "-b", "main"]);
-    run_git(p, &["config", "user.email", "test@example.com"]);
+    run_git(p, &["config", "user.email", FIXTURE_EMAIL]);
     run_git(p, &["config", "user.name", "Test"]);
     run_git(p, &["config", "commit.gpgsign", "false"]);
     fs::write(p.join("a.txt"), "initial\n").unwrap();
@@ -917,4 +924,271 @@ fn a_future_dated_commit_renders_an_unknown_log_age_not_zero_seconds() {
         !row.contains("0s"),
         "an unresolvable commit age must not be misrepresented as 0s: {row:?}",
     );
+}
+
+/// The one test that proves [`scrub_git_env`] sheds the whole git environment,
+/// and not the three names it once listed.
+mod hostile_environment {
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use tempfile::NamedTempFile;
+
+    use super::{scrub_git_env, setup_repo, FIXTURE_EMAIL};
+
+    /// The variable that tells this test binary it is the child, and that the
+    /// child must do the work rather than start a child of its own.
+    ///
+    /// The name carries no `GIT_` prefix, so the sweep under test leaves it in
+    /// place and the child reads it.
+    const HOSTILE_MARKER: &str = "GSW_INTEGRATION_HOSTILE_GIT_ENVIRONMENT";
+
+    /// The line the child prints after its last assertion holds.
+    ///
+    /// libtest exits 0 when a filter names no test, so a child that ran no
+    /// test reads exactly like a child that passed. The parent looks for this
+    /// line as well as for the exit status.
+    const CHILD_RAN: &str = "gsw-integration-hostile-environment-child-ran";
+
+    /// How long the parent waits for the child.
+    ///
+    /// The child builds one small repository, so a healthy child takes well
+    /// under a second. The bound is here for the child that hangs: a test that
+    /// waits for such a child holds the run for the life of the session.
+    const CHILD_DEADLINE: Duration = Duration::from_secs(60);
+
+    /// How often the parent asks whether the child is done.
+    const CHILD_POLL: Duration = Duration::from_millis(25);
+
+    /// The variable that moves the objects git writes into another store.
+    ///
+    /// It is not a location variable in the sense the old list understood, so
+    /// no amount of names beside `GIT_DIR` catches it. Issue #415 aimed it at
+    /// a decoy and watched `git hash-object -w` write the object there.
+    const OBJECT_DIRECTORY: &str = "GIT_OBJECT_DIRECTORY";
+
+    /// The variable that injects configuration into every git command.
+    ///
+    /// Git exports it to every `pre-commit` hook, and it outranks each
+    /// configuration file. The two `/dev/null` pins therefore do nothing about
+    /// it.
+    const CONFIG_PARAMETERS: &str = "GIT_CONFIG_PARAMETERS";
+
+    /// The address the hostile configuration puts on every commit it reaches.
+    const INJECTED_EMAIL: &str = "injected@example.invalid";
+
+    /// The hostile value of [`CONFIG_PARAMETERS`], in the form git reads: one
+    /// pair, inside single quotes.
+    fn injected_config() -> String {
+        format!("'user.email={INJECTED_EMAIL}'")
+    }
+
+    /// The name of a test, the way libtest spells it.
+    ///
+    /// `module_path!` starts with the name of the crate and a test name does
+    /// not, so the first part goes. The rest of the path comes from the
+    /// compiler, so a module that moves needs no edit here.
+    fn test_name(function: &str) -> String {
+        let module = module_path!();
+        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+        format!("{module}::{function}")
+    }
+
+    /// How many loose objects sit in the object store at `store`.
+    ///
+    /// A loose object lives in a directory named for the first two hex digits
+    /// of its id, so the count is the files under every such directory. A
+    /// store that does not exist holds none.
+    ///
+    /// The count is the measure rather than the presence of the directory,
+    /// because `git init` creates `info` and `pack` in whatever store it is
+    /// pointed at. Those two say where git wrote its administrative files. The
+    /// loose objects say where git wrote the content of the fixture.
+    fn loose_objects(store: &Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(store) else {
+            return 0;
+        };
+
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.chars().count() == 2 && name.chars().all(|digit| digit.is_ascii_hexdigit())
+            })
+            .map(|entry| {
+                std::fs::read_dir(entry.path())
+                    .map_or(0, |objects| objects.filter_map(Result::ok).count())
+            })
+            .sum()
+    }
+
+    /// Run git in `dir` through [`scrub_git_env`] and hand back what it said.
+    ///
+    /// The read goes through the helper under test on purpose. A read through
+    /// a git invocation of its own would answer about a repository this test
+    /// never asked about.
+    fn read(dir: &Path, args: &[&str]) -> String {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(dir);
+        let output = scrub_git_env(&mut command).output().expect("invoke git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Start this test binary again, with `test` named and the hostile
+    /// environment on it, and fail where that child fails.
+    ///
+    /// The hostile values go on the child and never on this process. A `GIT_`
+    /// variable is process-global state, and this binary runs many real git
+    /// commands at once, so a variable set here changes what an unrelated test
+    /// reads. A child holds an environment of its own, so the hostile values
+    /// reach the code under test and reach nothing else. That is also what
+    /// makes the answer the same under a shell and under the pre-commit hook
+    /// of this repository, which exports `GIT_` variables into `cargo test`.
+    ///
+    /// The decoy object store is a temporary directory of this process, and
+    /// the child learns where it is from the variable itself. This process
+    /// holds it until the child is done, so the child has a real directory to
+    /// write into. A decoy that git cannot write to fails the fixture for the
+    /// wrong reason.
+    ///
+    /// The child writes to two files rather than to two pipes, so the parent
+    /// never waits for an end of file a grandchild holds open.
+    ///
+    /// The wait is bounded. A child that hangs is killed and reaped, and the
+    /// test then fails, because a test that waits for such a child holds the
+    /// run for the life of the session.
+    fn a_child_of_this_test_passes(test: &str) {
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let decoy = tempfile::tempdir().expect("tempdir");
+        let stdout = NamedTempFile::new().expect("a file for what the child says");
+        let stderr = NamedTempFile::new().expect("a file for why the child stopped");
+        let mut child_command =
+            Command::new(std::env::current_exe().expect("the path of this binary"));
+        child_command
+            .args(["--exact", "--nocapture", test])
+            .current_dir(workdir.path())
+            .env(HOSTILE_MARKER, "1")
+            .env(OBJECT_DIRECTORY, decoy.path())
+            .env(CONFIG_PARAMETERS, injected_config())
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(
+                stdout.as_file().try_clone().expect("clone the file"),
+            ))
+            .stderr(Stdio::from(
+                stderr.as_file().try_clone().expect("clone the file"),
+            ));
+        let mut child = child_command.spawn().expect("start this test binary again");
+
+        let give_up_at = Instant::now() + CHILD_DEADLINE;
+        let status = loop {
+            match child.try_wait().expect("ask about the child") {
+                Some(status) => break status,
+                None => {
+                    if Instant::now() >= give_up_at {
+                        // The kill comes before the panic. A panic ends the
+                        // test where it stands, and the process this test
+                        // started is the one thing that must not outlive it.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!(
+                            "the child did not finish within {}s",
+                            CHILD_DEADLINE.as_secs(),
+                        );
+                    }
+                    std::thread::sleep(CHILD_POLL);
+                }
+            }
+        };
+
+        let said = format!(
+            "{}{}",
+            std::fs::read_to_string(stdout.path()).unwrap_or_default(),
+            std::fs::read_to_string(stderr.path()).unwrap_or_default(),
+        );
+        assert!(status.success(), "the child failed ({status}):\n{said}");
+        assert!(
+            said.contains(CHILD_RAN),
+            "the child ran no test, so it passed for the wrong reason. libtest exits 0 when a \
+             filter names no test, and the filter was {test:?}:\n{said}",
+        );
+    }
+
+    /// A fixture obeys no git variable out of a hostile environment.
+    ///
+    /// **The rule is the `GIT_` prefix, and never a list of names.** A list
+    /// strips nothing new the day git adds a variable, and from then on it
+    /// gives the same clean-looking answer as a list that works. The two
+    /// variables below walked straight through the three-name list this helper
+    /// carried, and neither one is a location variable, so no number of
+    /// location names catches them.
+    ///
+    /// **The two assertions are the two failures, not two guesses.**
+    /// [`OBJECT_DIRECTORY`] moves the content of the fixture into another
+    /// store, so the fixture ends with an empty store of its own and a decoy
+    /// full of its objects. [`CONFIG_PARAMETERS`] puts another address on the
+    /// commit, over the address the fixture writes into the repository,
+    /// because git reads the environment ahead of every configuration file.
+    ///
+    /// **The armed control comes first.** The child asserts that it really
+    /// holds both variables. An assertion that a variable did nothing passes
+    /// just as readily where there was nothing to do.
+    ///
+    /// **A test that reads the removals off the [`Command`] proves less.** A
+    /// sweep of the `GIT_` prefix records a removal only for a variable this
+    /// process holds, so such a test is empty under a shell and full under the
+    /// pre-commit hook of this repository. This test measures the repository
+    /// the fixture built instead, which is the same answer in both.
+    #[test]
+    fn a_fixture_obeys_no_git_variable_out_of_a_hostile_environment() {
+        if std::env::var_os(HOSTILE_MARKER).is_none() {
+            a_child_of_this_test_passes(&test_name(
+                "a_fixture_obeys_no_git_variable_out_of_a_hostile_environment",
+            ));
+            return;
+        }
+
+        let decoy = PathBuf::from(std::env::var_os(OBJECT_DIRECTORY).unwrap_or_else(|| {
+            panic!(
+                "the child must really hold {OBJECT_DIRECTORY}, or there is nothing here to \
+                 remove and the assertions below are measured against nothing",
+            )
+        }));
+        assert_eq!(
+            std::env::var(CONFIG_PARAMETERS).ok().as_deref(),
+            Some(injected_config().as_str()),
+            "the child must really hold {CONFIG_PARAMETERS}, or there is nothing here to remove \
+             and the assertion below is measured against nothing",
+        );
+
+        let fixture = setup_repo();
+        let store = fixture.path().join(".git").join("objects");
+
+        assert!(
+            loose_objects(&store) > 0,
+            "the fixture wrote no object of its own. {OBJECT_DIRECTORY} reached git, so the \
+             content of the fixture went to the store that variable names, and every later read \
+             of the fixture answers about another repository",
+        );
+        assert_eq!(
+            loose_objects(&decoy),
+            0,
+            "the fixture wrote its objects into the decoy store at {}. {OBJECT_DIRECTORY} \
+             reached git, and a run under the pre-commit hook of this repository aims that \
+             variable at the real repository",
+            decoy.display(),
+        );
+
+        assert_eq!(
+            read(fixture.path(), &["log", "-1", "--format=%ae"]),
+            FIXTURE_EMAIL,
+            "the fixture commit carries the injected address. {CONFIG_PARAMETERS} reached git, \
+             and git reads it ahead of every configuration file, so the two `/dev/null` pins do \
+             nothing about it",
+        );
+
+        println!("{CHILD_RAN}");
+    }
 }
