@@ -191,6 +191,7 @@ filewalker = { path = "src/filewalker" }
 gitscratch = { path = "src/gitscratch" }
 httpfile = { path = "src/httpfile" }
 portplz-core = { path = "src/portplz-core" }
+proctree = { path = "src/proctree" }
 repowalker = { path = "src/repowalker" }
 shellquote = { path = "src/shellquote" }
 shellsetup = { path = "src/shellsetup" }
